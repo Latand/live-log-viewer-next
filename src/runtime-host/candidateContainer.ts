@@ -17,6 +17,7 @@ export interface ViewerComposeService {
   command: string[] | null;
   entrypoint: null;
   environment: Record<string, string>;
+  group_add: string[];
   image: string;
   labels: Record<string, string>;
   network_mode: string;
@@ -47,7 +48,7 @@ export function viewerRegistryBackendMode(service: Pick<ViewerComposeService, "e
 }
 
 const SERVICE_KEYS = new Set([
-  "build", "command", "entrypoint", "environment", "image", "labels", "network_mode",
+  "build", "command", "entrypoint", "environment", "group_add", "image", "labels", "network_mode",
   "pid", "privileged", "profiles", "restart", "user", "volumes", "working_dir",
 ]);
 const VOLUME_KEYS = new Set(["bind", "read_only", "source", "target", "type"]);
@@ -121,6 +122,7 @@ export function viewerComposeServiceFromConfig(configJson: string): ViewerCompos
     command: viewer.command === null ? null : stringArray(viewer.command, "Viewer Compose command"),
     entrypoint: null,
     environment: stringRecord(viewer.environment, "Viewer Compose environment"),
+    group_add: viewer.group_add === undefined ? [] : stringArray(viewer.group_add, "Viewer Compose group_add"),
     image: stringValue(viewer.image, "Viewer Compose image"),
     labels: viewer.labels === undefined ? {} : stringRecord(viewer.labels, "Viewer Compose labels"),
     network_mode: stringValue(viewer.network_mode, "Viewer Compose network_mode"),
@@ -215,6 +217,7 @@ export function viewerCandidateDockerArgs(
     "--network", service.network_mode,
     "--pid", service.pid,
     ...(service.privileged ? ["--privileged"] : []),
+    ...service.group_add.flatMap((group) => ["--group-add", group]),
     "--user", service.user,
     "--workdir", service.working_dir,
     ...Object.entries(environment).sort(([left], [right]) => left.localeCompare(right)).flatMap(([key, value]) => ["-e", `${key}=${value}`]),

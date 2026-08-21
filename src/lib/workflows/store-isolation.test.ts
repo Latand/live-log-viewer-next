@@ -21,7 +21,7 @@ afterAll(() => {
 test("workflow persistence follows the active state directory after module import", () => {
   saveWorkflows([]);
 
-  expect(fs.existsSync(path.join(importedUnder, "workflows.json"))).toBe(false);
-  expect(fs.existsSync(path.join(activeState, "workflows.json"))).toBe(true);
+  expect(fs.existsSync(path.join(importedUnder, "state.sqlite"))).toBe(false);
+  expect(fs.existsSync(path.join(activeState, "state.sqlite"))).toBe(true);
   expect(loadWorkflows()).toEqual([]);
 });

@@ -23,7 +23,6 @@ function sources(overrides: Partial<ManagerAuthoritySources>): ManagerAuthorityS
   return {
     activeSeats: () => [],
     revocations: () => [],
-    legacyManagerConversationId: () => null,
     conversationFacts: () => LIVE,
     resolveAlias: (id) => id,
     ...overrides,
@@ -35,6 +34,10 @@ const ids = (sourcesValue: ManagerAuthoritySources) => authorizedManagerSeats(so
 test("an active seat with live registry facts is authorized", () => {
   const value = sources({ activeSeats: () => [seat({ conversationId: "conversation_a", project: "proj-a", seatEpoch: 1 })] });
   expect(ids(value)).toEqual(["conversation_a"]);
+});
+
+test("no active seat grants no manager authority", () => {
+  expect(ids(sources({}))).toEqual([]);
 });
 
 test("fails closed when the registry does not know the conversation at all", () => {
@@ -83,31 +86,6 @@ test("revocation kills the seat it names; re-designation at a newer epoch surviv
     activeSeats: () => [seat({ conversationId: "conversation_a", project: "proj-a", seatEpoch: 4 })],
     revocations: () => [revocation],
   }))).toEqual(["conversation_a"]);
-});
-
-test("the legacy record keeps authority under the same registry checks", () => {
-  expect(ids(sources({ legacyManagerConversationId: () => "conversation_legacy" }))).toEqual(["conversation_legacy"]);
-  expect(ids(sources({
-    legacyManagerConversationId: () => "conversation_legacy",
-    conversationFacts: () => ({ ...LIVE, superseded: true }),
-  }))).toEqual([]);
-});
-
-test("a durable revocation wins over the legacy pointer", () => {
-  const value = sources({
-    legacyManagerConversationId: () => "conversation_old",
-    revocations: () => [{ project: "proj-a", conversationId: "conversation_old", seatEpoch: 1, revokedAt: "2026-07-29T00:00:00.000Z" }],
-  });
-  expect(ids(value)).toEqual([]);
-});
-
-test("seat evidence about the legacy conversation wins over the pointer, even when it denies", () => {
-  const value = sources({
-    activeSeats: () => [seat({ conversationId: "conversation_a", project: "proj-a", seatEpoch: 1 })],
-    legacyManagerConversationId: () => "conversation_a",
-    conversationFacts: () => ({ ...LIVE, project: "proj-b" }),
-  });
-  expect(ids(value)).toEqual([]);
 });
 
 test("identity survives migration: seats and revocations compare by canonical alias", () => {

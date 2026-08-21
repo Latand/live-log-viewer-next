@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 
+import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 
@@ -83,6 +84,16 @@ function entryForHost(registry: AgentRegistry, adopted: StructuredDeliveryHost):
 
 function conversationIdForEntry(registry: AgentRegistry, entry: AgentRegistryEntry): string | null {
   return registry.conversationForPath(entry.artifactPath)?.id ?? null;
+}
+
+/** Migration phases that still have work left for an executor to do. Mirrors
+    the coordinator's own in-flight set; a terminal phase wakes nothing. */
+const IN_FLIGHT_MIGRATION_PHASES = new Set(["waiting-turn", "requested", "preparing", "successor-starting", "verifying"]);
+
+function pendingAccountSwitch(registry: AgentRegistry, conversationId: string): boolean {
+  if (!conversationId.startsWith("conversation_")) return false;
+  const phase = registry.conversation(conversationId as `conversation_${string}`)?.migration?.phase;
+  return phase !== undefined && IN_FLIGHT_MIGRATION_PHASES.has(phase);
 }
 
 function deliveryStateKey(state: HostState): string {
@@ -186,6 +197,14 @@ async function publishHostState(
   if (!conversationId) return;
   const host = state.status === "dead" ? "dead" : state.status === "unhosted" ? "unhosted" : "hosted";
   const turn = state.activeTurnRef ? "running" : "idle";
+  /* A host with no active turn is the turn-end evidence a pending account
+     switch has been promised (issue #1028), and for a pane-less structured
+     session nothing else will ever produce it. The queue's own drain already
+     re-fires the reconfigure that owns a card-requested switch on this same
+     transition; this wakes the coordinator for the switches nobody owns — an
+     engine drain, an active-account reseat — which otherwise wait on a 60s
+     poll. */
+  if (turn === "idle" && pendingAccountSwitch(registry, conversationId)) requestAccountMigrationTick();
   await publishStructuredHostProjection(client, {
     scope: { type: "session", id: conversationId },
     kind: "session-status",

@@ -34,6 +34,7 @@ const composeService = {
     LLV_DOCKER_NSENTER_SHIMS: "1",
     GIT_SSH_COMMAND: "ssh compose-config",
   },
+  group_add: ["957"],
   image: "agent-log-viewer:node22",
   labels: { "compose.viewer": "production" },
   network_mode: "host",
@@ -101,6 +102,15 @@ test("staging containers are never labelled as prod-managed releases", () => {
     expect(labels).toContain(`${STAGING_LABEL}=1`);
     expect(labels).toContain(`dev.live-log-viewer.revision=${revision}`);
     expect(labels.some((label) => label.startsWith("dev.live-log-viewer.managed="))).toBe(false);
+  }
+});
+
+test("staging containers retain the configured supplementary groups", () => {
+  for (const args of [
+    stagingViewerDockerArgs({ revision, image: stagingImageName(revision), service: composeService, paths, tmux }),
+    stagingRuntimeHostDockerArgs({ revision, image: stagingImageName(revision), service: composeService, paths, tmux }),
+  ]) {
+    expect(valuesAfter(args, "--group-add")).toEqual(["957"]);
   }
 });
 

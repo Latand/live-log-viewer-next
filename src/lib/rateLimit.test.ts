@@ -1,12 +1,130 @@
 import { expect, test } from "bun:test";
 
 import type { Flow } from "@/lib/flows/types";
-import type { FileEntry } from "@/lib/types";
+import type { EngineLimits, FileEntry } from "@/lib/types";
 
-import { projectRateLimitReadModel, rateLimitFromQuotaObservation } from "./rateLimit";
+import { projectRateLimitReadModel, quotaAsEngineLimits, quotaReadingFromAccountLimits, quotaReadingFromEngineLimits, rateLimitFromQuotaObservation, reconcileQuotaReadings } from "./rateLimit";
 
 const NOW = new Date("2026-07-10T16:00:00.000Z").getTime();
 const RESET = Math.floor(NOW / 1000) + 7_200;
+
+function quota(usedPercent: number, capturedAt: number): EngineLimits {
+  return {
+    session: null,
+    weekly: { usedPercent, resetsAt: RESET + 86_400, windowMinutes: 10_080 },
+    plan: "pro-lite",
+    capturedAt,
+  };
+}
+
+test("same-account quota conflicts resolve each window to the fresher source", () => {
+  const reconciled = reconcileQuotaReadings(
+    { limits: quota(21, 1_000), observedAt: 1_000, stale: false, source: "transcript" },
+    { limits: quota(64, 2_000), observedAt: 2_000, stale: false, source: "account" },
+    2_100,
+  );
+
+  expect(reconciled.weekly).toMatchObject({
+    value: { usedPercent: 64 },
+    observedAt: 2_000,
+    source: "account",
+  });
+  expect(quotaAsEngineLimits(reconciled)?.weekly).toMatchObject({ observedAt: 2_000 });
+});
+
+test("mixed window provenance survives the EngineLimits serialization seam", () => {
+  const reconciled = reconcileQuotaReadings(
+    {
+      limits: {
+        session: { usedPercent: 10, resetsAt: RESET, windowMinutes: 300 },
+        weekly: null,
+        plan: "pro-lite",
+        capturedAt: 2_000,
+      },
+      observedAt: 2_000,
+      stale: false,
+      source: "live",
+    },
+    {
+      limits: {
+        session: null,
+        weekly: { usedPercent: 100, resetsAt: RESET + 86_400, windowMinutes: 10_080 },
+        plan: "pro-lite",
+        capturedAt: 1_000,
+      },
+      observedAt: 1_000,
+      stale: false,
+      source: "transcript",
+    },
+    2_100,
+  );
+  const serialized = quotaAsEngineLimits(reconciled);
+
+  expect(serialized?.session).toMatchObject({ source: "live" });
+  expect(serialized?.weekly).toMatchObject({ source: "transcript" });
+  const roundTrip = reconcileQuotaReadings(
+    quotaReadingFromEngineLimits(serialized, { source: "transcript", reason: "mixed", staleSince: null }, 2_100),
+    null,
+    2_100,
+  );
+  expect(roundTrip.session?.source).toBe("live");
+  expect(roundTrip.weekly?.source).toBe("transcript");
+});
+
+test("an account window uses its own observation time ahead of snapshot checkedAt", () => {
+  const account = quotaReadingFromAccountLimits({
+    freshness: "fresh",
+    session: null,
+    weekly: { usedPercent: 64, resetsAt: RESET + 86_400, windowMinutes: 10_080, observedAt: 1_000 },
+    checkedAt: "1970-01-01T00:33:20.000Z",
+  });
+  const reconciled = reconcileQuotaReadings(
+    { limits: quota(21, 1_500), observedAt: 1_500, stale: false, source: "transcript" },
+    account,
+    2_100,
+  );
+
+  expect(reconciled.weekly).toMatchObject({ value: { usedPercent: 21 }, observedAt: 1_500, source: "transcript" });
+});
+
+test("an active provider exhaustion overrides a newer non-exhausted probe", () => {
+  const reconciled = reconcileQuotaReadings(
+    { limits: quota(100, 1_000), observedAt: 1_000, stale: false, source: "transcript" },
+    { limits: quota(21, 2_000), observedAt: 2_000, stale: false, source: "account" },
+    2_100,
+  );
+
+  expect(reconciled.weekly).toMatchObject({
+    value: { usedPercent: 100 },
+    observedAt: 1_000,
+    source: "transcript",
+  });
+});
+
+test("an exhausted observation stops governing after its reset", () => {
+  const expired = quota(100, 1_000);
+  expired.weekly = { ...expired.weekly!, resetsAt: 2_000 };
+  const reconciled = reconcileQuotaReadings(
+    { limits: expired, observedAt: 1_000, stale: false, source: "transcript" },
+    { limits: quota(21, 2_100), observedAt: 2_100, stale: false, source: "account" },
+    2_100,
+  );
+
+  expect(reconciled.weekly?.value.usedPercent).toBe(21);
+});
+
+test("a cached payload keeps its original stale-since observation time", () => {
+  const limits = quota(40, 0);
+  limits.capturedAt = null;
+  const reading = quotaReadingFromEngineLimits(limits, {
+    source: "cache",
+    reason: "provider unavailable",
+    staleSince: "1970-01-01T00:16:40.000Z",
+  }, 3_000);
+  const reconciled = reconcileQuotaReadings(reading, null, 3_000);
+
+  expect(reconciled.weekly).toMatchObject({ observedAt: 1_000, stale: true });
+});
 
 function entry(overrides: Partial<FileEntry> = {}): FileEntry {
   return {

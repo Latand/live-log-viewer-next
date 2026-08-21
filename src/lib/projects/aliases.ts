@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { readStateCollectionRows } from "@/lib/state/sqliteStateStore";
 import {
   projectIdentityFromRepositoryRoot,
   repositoryRootForPath,
@@ -121,7 +122,10 @@ function storedWorktreeRepositories(): ReadonlyMap<string, string> {
 }
 
 function projectPathPairs(filename: string, collection: string, pathField: string): Array<[string, string]> {
-  const stored = readObject(filename)?.[collection];
+  const sqlite = ["flows", "pipelines", "workflows"].includes(collection)
+    ? readStateCollectionRows(statePath("state.sqlite"), collection)
+    : null;
+  const stored = sqlite ?? readObject(filename)?.[collection];
   if (!Array.isArray(stored)) return [];
   const pairs: Array<[string, string]> = [];
   for (const value of stored) {
@@ -136,7 +140,10 @@ function projectPathPairs(filename: string, collection: string, pathField: strin
 }
 
 function collectionRecords(filename: string, collection: string): Record<string, unknown>[] {
-  const stored = readObject(filename)?.[collection];
+  const sqlite = ["flows", "pipelines", "workflows"].includes(collection)
+    ? readStateCollectionRows(statePath("state.sqlite"), collection)
+    : null;
+  const stored = sqlite ?? readObject(filename)?.[collection];
   return Array.isArray(stored)
     ? stored.filter((value): value is Record<string, unknown> => (
         Boolean(value) && typeof value === "object" && !Array.isArray(value)

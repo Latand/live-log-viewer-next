@@ -3,6 +3,7 @@ import fs from "node:fs";
 
 import { agentRegistry } from "@/lib/agent/registry";
 import { statePath } from "@/lib/configDir";
+import { readStateCollectionRevision } from "@/lib/state/sqliteStateStore";
 import { buildFilesResponse } from "./response";
 import { cachedFileScan } from "@/lib/scanner/scanCache";
 import { buildFilesResponseInWorker, filesResponseWorkerEnabled } from "@/lib/scanner/filesResponseWorker";
@@ -43,10 +44,7 @@ const PERSISTED_PROJECTION_META_FILE = "files-response-cache.json";
 const PERSISTED_PROJECTION_BODY_PREFIX = "files-response-cache-";
 const PERSISTED_PROJECTION_KEY_PREFIX = "persisted:";
 const PROJECTION_STATE_FILES = [
-  "flows.json",
-  "pipelines.json",
   "tasks.json",
-  "workflows.json",
   "project-aliases.json",
   "project-curation.json",
   "worktree-map.json",
@@ -80,6 +78,11 @@ function stateFileSignature(filename: string): string {
   }
 }
 
+function hotStateSignature(collection: string, legacyFilename: string): string {
+  const revision = readStateCollectionRevision(statePath("state.sqlite"), collection);
+  return revision === null ? stateFileSignature(legacyFilename) : `${collection}:sqlite:${revision}`;
+}
+
 function projectionBaseKey(
   scan: CachedScan,
   pinnedPath: string | undefined,
@@ -91,7 +94,12 @@ function projectionBaseKey(
        precisely while a new scan is being published. */
     generation: scan.generation,
     pinOverlayPaths: scan.pinOverlayPaths ?? [],
-    stores: PROJECTION_STATE_FILES.map(stateFileSignature),
+    stores: [
+      ...PROJECTION_STATE_FILES.map(stateFileSignature),
+      hotStateSignature("flows", "flows.json"),
+      hotStateSignature("pipelines", "pipelines.json"),
+      hotStateSignature("workflows", "workflows.json"),
+    ],
   })).digest("hex");
 }
 

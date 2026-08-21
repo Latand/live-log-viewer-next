@@ -13,10 +13,11 @@ import {
 } from "@/hooks/useEngineAccounts";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import { handleOverlayEscape } from "@/lib/overlay";
+import { effectiveQuota, quotaReadingFromAccountLimits, reconcileQuotaReadings, type ReconciledQuota } from "@/lib/rateLimit";
 
 import { Loader2, SquareTerminal, Trash2, X } from "./icons";
 import { Badge } from "./ui/Badge";
-import { formatCheckedClock, formatResetClock, formatResetEta, windowLabel } from "./rateLimit";
+import { formatCheckedClock, formatQuotaAsOf, formatResetClock, formatResetEta, windowLabel } from "./rateLimit";
 import { engineTintOf } from "./utils";
 
 /** Amber that clears contrast on the panel background — state legibility never
@@ -41,13 +42,17 @@ function capacityColor(percent: number, engineColor: string): string {
   return engineColor;
 }
 
-function CapacityChip({ account, engine }: { account: AccountOption; engine: "claude" | "codex" }) {
+function accountQuota(account: AccountOption, now: number) {
+  return reconcileQuotaReadings(null, quotaReadingFromAccountLimits(account.limits), now);
+}
+
+function CapacityChip({ quota, engine }: { quota: ReconciledQuota; engine: "claude" | "codex" }) {
   const { t } = useLocale();
-  const effective = account.effective;
-  if (!effective || effective.freshness === "unavailable") return null;
+  const effective = effectiveQuota(quota);
+  if (!effective) return null;
   const tint = engineTintOf(engine);
   const window = t(effective.window === "weekly" ? "limits.windowWeekly" : "limits.windowSession");
-  const stale = effective.freshness === "stale";
+  const stale = effective.stale;
   const color = capacityColor(effective.percent, tint.color);
   return (
     <span
@@ -67,19 +72,23 @@ function CapacityChip({ account, engine }: { account: AccountOption; engine: "cl
     min-window summary of this. Renders nothing when no live/stale read exists;
     a stale read is dimmed and labeled. Time formatting is shared with the
     limits footer so both read identically. */
-function AccountLimitsDetail({ account, engine }: { account: AccountOption; engine: "claude" | "codex" }) {
+function AccountLimitsDetail({ account, engine, quota, now }: { account: AccountOption; engine: "claude" | "codex"; quota: ReconciledQuota; now: number }) {
   const { t } = useLocale();
-  // A single reference `now` for the open panel keeps the two windows' reset
-  // ETAs consistent and stable across re-renders (they don't tick live here).
-  const [now] = useState(() => Math.floor(Date.now() / 1000));
-  const limits = account.limits;
-  if (!limits) return null;
   const windows = [
-    { key: "session", label: windowLabel(t, "session", limits.session?.windowMinutes), window: limits.session },
-    { key: "weekly", label: windowLabel(t, "weekly", limits.weekly?.windowMinutes), window: limits.weekly },
+    { key: "session", label: windowLabel(t, "session", quota.session?.value.windowMinutes), window: quota.session },
+    { key: "weekly", label: windowLabel(t, "weekly", quota.weekly?.value.windowMinutes), window: quota.weekly },
   ].filter((row): row is { key: string; label: string; window: NonNullable<typeof row.window> } => row.window != null);
   if (windows.length === 0) return null;
-  const stale = limits.freshness === "stale";
+  const stale = windows.some((row) => row.window.stale);
+  const observed = windows.map((row) => row.window.observedAt).filter((value): value is number => value !== null);
+  const observedAt = observed.length ? Math.min(...observed) : null;
+  const staleObserved = windows
+    .filter((row) => row.window.stale)
+    .map((row) => row.window.observedAt)
+    .filter((value): value is number => value !== null);
+  const sharedStaleAt = staleObserved.length > 1 && staleObserved.every((value) => value === staleObserved[0])
+    ? staleObserved[0]
+    : null;
   const tint = engineTintOf(engine);
   return (
     <dl
@@ -92,15 +101,21 @@ function AccountLimitsDetail({ account, engine }: { account: AccountOption; engi
           spotty), so historical numbers never read as current. The check time
           renders for fresh reads too — the panel always says when the numbers
           were last observed. */}
-      {stale || limits.checkedAt ? (
+      {sharedStaleAt !== null || (!stale && observedAt !== null) ? (
         <div className="text-[9.5px] font-semibold text-secondary">
-          {stale ? t("accounts.limitsStale") : t("accounts.limitsChecked")}
-          {limits.checkedAt ? ` · ${formatCheckedClock(limits.checkedAt)}` : null}
+          {sharedStaleAt !== null
+            ? formatQuotaAsOf(sharedStaleAt) ?? t("accounts.limitsStale")
+            : `${t("accounts.limitsChecked")} · ${formatCheckedClock(new Date(observedAt! * 1000).toISOString())}`}
         </div>
       ) : null}
-      {windows.map(({ key, label, window: w }) => {
+      {windows.map(({ key, label, window }) => {
+        const w = window.value;
         const left = Math.max(0, Math.min(100, 100 - w.usedPercent));
         const color = capacityColor(left, tint.color);
+        const groupedStaleHint = sharedStaleAt !== null && window.observedAt === sharedStaleAt;
+        const staleHint = window.stale && !groupedStaleHint
+          ? formatQuotaAsOf(window.observedAt) ?? t("accounts.limitsStale")
+          : null;
         return (
           <div key={key} className="flex items-center gap-2 text-[10px] leading-snug text-muted">
             <dt className="w-8 shrink-0 font-semibold">{label}</dt>
@@ -113,6 +128,7 @@ function AccountLimitsDetail({ account, engine }: { account: AccountOption; engi
               {w.resetsAt ? (
                 <span className="truncate">· {t("limits.reset", { eta: formatResetEta(w.resetsAt, now), at: formatResetClock(w.resetsAt, now) })}</span>
               ) : null}
+              {staleHint ? <span className="truncate">{w.resetsAt ? "· " : ""}{staleHint}</span> : null}
             </dd>
           </div>
         );
@@ -161,7 +177,7 @@ function AuthIdentity({ account }: { account: AccountOption }) {
   );
 }
 
-function AccountRow({ account, engine, activeId, onSelect, onRemove, onCopyCommand, disabled, focused = false, children }: { account: AccountOption; engine: "claude" | "codex"; activeId: string; onSelect: () => void; onRemove: () => void; onCopyCommand: () => void; disabled: boolean; focused?: boolean; children?: React.ReactNode }) {
+function AccountRow({ account, engine, quota, activeId, onSelect, onRemove, onCopyCommand, disabled, focused = false, children }: { account: AccountOption; engine: "claude" | "codex"; quota: ReconciledQuota; activeId: string; onSelect: () => void; onRemove: () => void; onCopyCommand: () => void; disabled: boolean; focused?: boolean; children?: React.ReactNode }) {
   const { t } = useLocale();
   const state = rowState(account, activeId);
   const isActive = account.id === activeId;
@@ -203,7 +219,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, onCopyComma
           <span className={`block truncate text-[13px] leading-tight ${isActive ? "font-bold text-primary" : "font-semibold"}`}>{account.label}</span>
           <AuthIdentity account={account} />
         </span>
-        <CapacityChip account={account} engine={engine} />
+        <CapacityChip quota={quota} engine={engine} />
         <StateChip state={state} />
       </button>
       {children}
@@ -480,6 +496,7 @@ export function AccountsPanel({
   onClose,
   placement = "footer",
   focusAccountId = null,
+  quotaOverride,
 }: {
   state: EngineAccountsState;
   onClose: () => void;
@@ -487,10 +504,18 @@ export function AccountsPanel({
   /** When set, the panel opens scrolled to and highlighting this account
       (issue #229 — a header account badge steers here). */
   focusAccountId?: string | null;
+  quotaOverride?: { accountId: string; quota: ReconciledQuota; now: number };
 }) {
   const { t } = useLocale();
   const { accounts, active, status, notice, mutation, engine } = state;
   const [label, setLabel] = useState("");
+  const [presentationNow, setPresentationNow] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    if (quotaOverride) return;
+    const id = setInterval(() => setPresentationNow(Math.floor(Date.now() / 1000)), 30_000);
+    return () => clearInterval(id);
+  }, [quotaOverride]);
+  const quotaNow = quotaOverride?.now ?? presentationNow;
   // While any Claude account has a live login op, the add/sign-in/retry starters
   // stand down so a second login can't race the supervisor (C10).
   const loginBusy = engine === "claude" && accounts.some((account) => account.login != null && NONTERMINAL_CLAUDE_LOGIN_PHASES.has(account.login.phase));
@@ -573,12 +598,17 @@ export function AccountsPanel({
             <div className="max-h-[min(420px,60vh)] divide-y divide-border/40 overflow-y-auto">
               {status === "loading" ? <div className="px-3.5 py-2 text-[11px] text-muted">{t("accounts.loading")}</div> : null}
               {status === "error" && accounts.length === 0 ? <div className="px-3.5 py-2 text-[11px] text-muted">{t("accounts.noAccounts")}</div> : null}
-              {accounts.map((account) => (
-                <AccountRow key={account.id} account={account} engine={engine} activeId={active} disabled={mutation !== null} focused={account.id === focusAccountId} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} onCopyCommand={() => void state.copyTerminalCommand(account.id)}>
-                  <AccountLimitsDetail account={account} engine={engine} />
-                  {engine === "claude" ? <ClaudeLoginRow key={account.login?.operationId ?? account.id} account={account} state={state} loginBusy={loginBusy} /> : null}
-                </AccountRow>
-              ))}
+              {accounts.map((account) => {
+                const quota = quotaOverride?.accountId === active && account.id === active
+                  ? quotaOverride.quota
+                  : accountQuota(account, quotaNow);
+                return (
+                  <AccountRow key={account.id} account={account} engine={engine} quota={quota} activeId={active} disabled={mutation !== null} focused={account.id === focusAccountId} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} onCopyCommand={() => void state.copyTerminalCommand(account.id)}>
+                    <AccountLimitsDetail account={account} engine={engine} quota={quota} now={quotaNow} />
+                    {engine === "claude" ? <ClaudeLoginRow key={account.login?.operationId ?? account.id} account={account} state={state} loginBusy={loginBusy} /> : null}
+                  </AccountRow>
+                );
+              })}
             </div>
             <form onSubmit={onAdd} className="flex items-center gap-2 border-t border-border px-3 py-2">
               <input

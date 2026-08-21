@@ -62,7 +62,7 @@ export type RuntimeEvent =
   | { kind: "voice-chunk"; turnId: string; delivery: RuntimeVoiceDelivery; seq: number }
   | { kind: "turn-ended"; turnId: string; status: "completed" | "interrupted" | "error"; seq: number }
   | { kind: "attention"; id: string; method: string; attention: unknown; seq: number }
-  | { kind: "attention-resolved"; id: string; resolution: "answered" | "host-restarted" | "server-resolved"; seq: number }
+  | { kind: "attention-resolved"; id: string; resolution: "answered" | "host-restarted" | "server-resolved" | "turn-ended"; seq: number }
   | { kind: "limits"; snapshot: unknown; seq: number }
   | { kind: "realtime-delivery-progress"; deliveryId: string; digest: string; responseIndex: number; offset: number; seq: number }
   | { kind: "realtime-delivery-acknowledged"; deliveryId: string; digest: string; seq: number }

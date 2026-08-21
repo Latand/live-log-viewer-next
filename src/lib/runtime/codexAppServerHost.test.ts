@@ -8,6 +8,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { saveTelegramSession, TELEGRAM_CONNECTOR_TOKEN_ENV } from "@/lib/telegram/sessionStore";
 
 import { CodexAppServerHost, redactCodexHostDiagnostic } from "./codexAppServerHost";
 import { encodeCodexStructuredUserText } from "./codexStructuredUserText";
@@ -317,6 +318,46 @@ async function nextEvent(iterable: AsyncIterable<unknown>): Promise<unknown> {
 }
 
 describe("CodexAppServerHost", () => {
+  test("structured Codex loads Telegram auth only for the granted root host", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-codex-telegram-grant-"));
+    const previousState = process.env.LLV_STATE_DIR;
+    process.env.LLV_STATE_DIR = path.join(directory, "state");
+    try {
+      const stored = saveTelegramSession("1ApWapzMBu4placeholder-not-a-real-session");
+      const rootServer = new FakeAppServer("telegram-root");
+      rootServer.mcpServers = {
+        viewer: { command: "viewer-mcp", enabled: true },
+        telegram: { url: "http://127.0.0.1:8809/mcp", enabled: true },
+      };
+      const rootCapture: { options?: SpawnOptionsWithoutStdio } = {};
+      const root = await CodexAppServerHost.start({
+        cwd: "/repo",
+        mcpServers: ["viewer", "telegram"],
+        env: { NODE_ENV: "test", [TELEGRAM_CONNECTOR_TOKEN_ENV]: "B".repeat(43) },
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(rootServer, rootCapture),
+      });
+      expect(rootCapture.options?.env?.[TELEGRAM_CONNECTOR_TOKEN_ENV]).toBe(stored.connectorToken);
+      await root.release();
+
+      const delegatedServer = new FakeAppServer("telegram-delegated");
+      const delegatedCapture: { options?: SpawnOptionsWithoutStdio } = {};
+      const delegated = await CodexAppServerHost.start({
+        cwd: "/repo",
+        mcpServers: ["viewer"],
+        env: { NODE_ENV: "test", [TELEGRAM_CONNECTOR_TOKEN_ENV]: stored.connectorToken },
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(delegatedServer, delegatedCapture),
+      });
+      expect(delegatedCapture.options?.env?.[TELEGRAM_CONNECTOR_TOKEN_ENV]).toBeUndefined();
+      await delegated.release();
+    } finally {
+      if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+      else process.env.LLV_STATE_DIR = previousState;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("fresh structured threads discover account MCP configuration and allow only Viewer", async () => {
     const server = new FakeAppServer("viewer-thread");
     server.mcpServers = {

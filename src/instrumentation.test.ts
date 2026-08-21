@@ -3,11 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { Database } from "bun:sqlite";
 
 import {
   accountControllerDelayMs,
   activateViewerRuntimeWhenCurrent,
+  completeViewerRuntimeActivation,
   completeViewerReleaseDemotion,
+  establishHotStateCutoverBoundary,
+  initializeHotStateStoresAtStartup,
   initializeOperatorSpawnCapabilityAtStartup,
   runStructuredHostStartup,
   scheduleAccountMigrationController,
@@ -15,6 +19,7 @@ import {
   startWakatimeIntegrationIfEnabled,
   viewerReleaseOwnsTraffic,
 } from "@/lib/viewerInstrumentation";
+import { HOT_STATE_BACKEND, readHotStateAuthority } from "@/lib/state/hotStateAuthority";
 import { operatorSpawnCapabilityPath } from "@/lib/agent/operatorCapability";
 import {
   FLOW_PIPELINE_WATCHDOG_MS,
@@ -166,6 +171,183 @@ test("a promoted release continuously relinquishes background ownership after de
   expect(demotions).toBe(1);
 });
 
+test("a rollback fence checkpoints before demotion and suppresses the later mirror overwrite", async () => {
+  let current = true;
+  let fenceChecks = 0;
+  const demotions: boolean[] = [];
+  const scheduled: Array<() => void> = [];
+  const fence = {
+    schemaVersion: 1 as const,
+    epoch: 4,
+    mode: "fencing" as const,
+    releaseRevision: "a".repeat(40),
+    updatedAt: "2026-08-06T00:00:00.000Z",
+  };
+  await activateViewerRuntimeWhenCurrent(
+    async () => undefined,
+    () => current,
+    {
+      pollMs: 1,
+      schedule: (callback) => { scheduled.push(callback); return { unref() {} }; },
+      fenceRequest: () => fence,
+      onFenceRequested: async () => { fenceChecks += 1; },
+      onDemoted: (context) => { demotions.push(context.fenced); },
+    },
+  );
+  scheduled.shift()!();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(fenceChecks).toBe(1);
+  current = false;
+  scheduled.shift()!();
+  expect(demotions).toEqual([true]);
+});
+
+test("a current release monitors rollback fences while activation is still pending", async () => {
+  const scheduled: Array<() => void> = [];
+  let rejectActivation!: (error: Error) => void;
+  const activation = activateViewerRuntimeWhenCurrent(
+    () => new Promise<void>((_resolve, reject) => { rejectActivation = reject; }),
+    () => true,
+    {
+      pollMs: 1,
+      schedule: (callback) => { scheduled.push(callback); return { unref() {} }; },
+      fenceRequest: () => ({
+        schemaVersion: 1,
+        epoch: 7,
+        mode: "fencing",
+        releaseRevision: "7".repeat(40),
+        updatedAt: "2026-08-06T00:00:00.000Z",
+      }),
+      onFenceRequested: () => { checkpoints += 1; },
+    },
+  );
+  let checkpoints = 0;
+  expect(scheduled).toHaveLength(1);
+  scheduled.shift()!();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(checkpoints).toBe(1);
+  rejectActivation(new Error("injected activation failure"));
+  await expect(activation).rejects.toThrow("injected activation failure");
+});
+
+test("hot-state activation beats a slow structured-host startup and the promote deadline", async () => {
+  let finishStructuredStartup!: () => void;
+  let publishActivation!: () => void;
+  const structuredStartup = new Promise<void>((resolve) => { finishStructuredStartup = resolve; });
+  const published = new Promise<void>((resolve) => { publishActivation = resolve; });
+  const activation = completeViewerRuntimeActivation({
+    initializeOperatorCapability: async () => undefined,
+    startWakatime: async () => undefined,
+    startStructuredHosts: () => structuredStartup,
+    startControllers: async () => undefined,
+    publishHotStateActivation: publishActivation,
+    publishViewerReleaseReady: () => undefined,
+  });
+
+  const outcome = await Promise.race([
+    published.then(() => "activated"),
+    Bun.sleep(25).then(() => "deployment adapter promote timed out while waiting for hot-state activation"),
+  ]);
+  finishStructuredStartup();
+  await activation;
+
+  expect(outcome).toBe("activated");
+});
+
+test("promoted serving readiness beats a legitimately slow structured-host adoption window", async () => {
+  let finishStructuredStartup!: () => void;
+  let publishReleaseReady!: () => void;
+  let structuredStartupFinished = false;
+  const structuredStartup = new Promise<void>((resolve) => {
+    finishStructuredStartup = () => {
+      structuredStartupFinished = true;
+      resolve();
+    };
+  });
+  const releaseReady = new Promise<void>((resolve) => { publishReleaseReady = resolve; });
+  const activation = completeViewerRuntimeActivation({
+    initializeOperatorCapability: async () => undefined,
+    startWakatime: async () => undefined,
+    startStructuredHosts: () => structuredStartup,
+    startControllers: async () => undefined,
+    publishHotStateActivation: () => undefined,
+    publishViewerReleaseReady: publishReleaseReady,
+  });
+
+  const outcome = await Promise.race([
+    releaseReady.then(() => "release-ready"),
+    Bun.sleep(25).then(() => "verify-promoted-timeout"),
+  ]);
+  expect({ outcome, structuredStartupFinished }).toEqual({
+    outcome: "release-ready",
+    structuredStartupFinished: false,
+  });
+
+  finishStructuredStartup();
+  await activation;
+});
+
+test("cutover import faults roll back all four collection markers and retry cleanly", async () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const previousPort = process.env.PORT;
+  try {
+    for (let failAfter = 1; failAfter <= 4; failAfter += 1) {
+      const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), `llv-hot-state-atomic-cutover-${failAfter}-`));
+      const revision = String(failAfter).repeat(40);
+      process.env.LLV_STATE_DIR = sandbox;
+      process.env.PORT = "19007";
+      try {
+        fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({ schemaVersion: 3, flows: [] }));
+        fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({ schemaVersion: 4, pipelines: [] }));
+        fs.writeFileSync(path.join(sandbox, "pipelines-archive.json"), JSON.stringify({ schemaVersion: 4, pipelines: [] }));
+        fs.writeFileSync(path.join(sandbox, "workflows.json"), JSON.stringify({ workflows: [] }));
+        fs.writeFileSync(path.join(sandbox, "viewer-release.json"), JSON.stringify({
+          endpoint: "http://127.0.0.1:19007",
+          revision,
+          hotStateBackend: HOT_STATE_BACKEND,
+        }));
+        const boundary = await establishHotStateCutoverBoundary(() => true, {
+          pollMs: 0,
+          stablePolls: 1,
+          maxPolls: 2,
+          schedule: (callback) => { callback(); return { unref() {} }; },
+        });
+        let imported = 0;
+        await expect(initializeHotStateStoresAtStartup(boundary, {
+          afterCollectionImport: () => {
+            imported += 1;
+            if (imported === failAfter) throw new Error(`injected import failure ${failAfter}`);
+          },
+        })).rejects.toThrow(`injected import failure ${failAfter}`);
+
+        const database = new Database(path.join(sandbox, "state.sqlite"), { strict: true });
+        expect(database.query<{ count: number }, []>(
+          "SELECT COUNT(*) AS count FROM state_collections",
+        ).get()!.count).toBe(0);
+        database.close();
+        expect(readHotStateAuthority(sandbox)).toMatchObject({ mode: "preparing", releaseRevision: revision });
+
+        await initializeHotStateStoresAtStartup(boundary);
+        const retried = new Database(path.join(sandbox, "state.sqlite"), { strict: true });
+        expect(retried.query<{ count: number }, []>(
+          "SELECT COUNT(*) AS count FROM state_collections",
+        ).get()!.count).toBe(4);
+        retried.close();
+        expect(readHotStateAuthority(sandbox)).toMatchObject({ mode: "sqlite", releaseRevision: revision });
+      } finally {
+        fs.rmSync(sandbox, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    if (previousPort === undefined) delete process.env.PORT;
+    else process.env.PORT = previousPort;
+  }
+});
+
 test("release demotion reports checkpoint failure before exiting with failure status", async () => {
   const events: Array<[string, unknown?]> = [];
   await completeViewerReleaseDemotion(
@@ -315,6 +497,35 @@ test("structured-host startup retries an arbitrary recoverable adoption error", 
       ["[structured hosts] startup adoption failed; retry scheduled", failure],
       ["[structured hosts] startup adoption recovered", { attempts: 2 }],
     ]);
+  } finally {
+    markStructuredHostStartupReady();
+  }
+});
+
+test("release activation can wait until structured-host adoption recovers", async () => {
+  const scheduled: Array<() => void> = [];
+  let attempts = 0;
+  let settled = false;
+  try {
+    const startup = runStructuredHostStartup(
+      async () => {
+        attempts += 1;
+        if (attempts === 1) throw new RuntimeHostUnavailableError("runtime host is unavailable");
+      },
+      () => undefined,
+      {
+        waitUntilReady: true,
+        random: () => 0.5,
+        schedule: (callback) => { scheduled.push(callback); return { unref() {} }; },
+      },
+    ).then(() => { settled = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(scheduled).toHaveLength(1);
+    scheduled.shift()!();
+    await startup;
+    expect({ attempts, settled }).toEqual({ attempts: 2, settled: true });
   } finally {
     markStructuredHostStartupReady();
   }

@@ -2,7 +2,7 @@
  * Recurring conversation monitor — CLI entry (issue #741).
  *
  * This is what the half-hourly schedule runs. It resolves the current
- * orchestrator through the Viewer's durable record, reads operator-authored
+ * orchestrator through the selected project's durable seat, reads operator-authored
  * messages over a bounded window, correlates each concrete request against the
  * board, pipelines, flows and (when `gh` can answer) pull requests and issues,
  * materializes the gaps as board cards, delivers one report to the
@@ -11,8 +11,8 @@
  * Read-only with respect to conversations and worktrees. It spawns nothing,
  * resumes nothing, kills nothing, and never opens a GitHub issue.
  *
- *   bun scripts/conversation-monitor.ts --window-hours 6
- *   bun scripts/conversation-monitor.ts --dry-run --json
+ *   bun scripts/conversation-monitor.ts --project viewer --window-hours 6
+ *   bun scripts/conversation-monitor.ts --project viewer --dry-run --json
  *   bun scripts/conversation-monitor.ts --status 5
  *
  * Exit status: 0 for a clean or skipped run, 1 for a failed one — so the

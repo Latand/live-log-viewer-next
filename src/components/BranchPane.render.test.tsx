@@ -72,3 +72,31 @@ test("the full-window overlay (expanded) mounts the strip the same way", () => {
   expect(strip(html)).toBe(true);
   expect(surface(html)).toBe("live-root");
 });
+
+test("the pending migration ribbon clears once the card already runs under the hold's target account", () => {
+  // The live P1: "Account switch pending — after current turn" stayed up while
+  // the switch had ALREADY completed and the card ran under the target account.
+  // The banner must obey the level, not wait for a clearing event.
+  const migration = {
+    intentId: "i1", trigger: "manual", phase: "waiting-turn",
+    targetAccountId: "account-b", targetLabel: "account-b", failure: null,
+  } as FileEntry["migration"];
+  const staleHtml = renderToStaticMarkup(
+    <BranchPane
+      file={file({ path: "/data/accounts/claude/account-b/root.jsonl", migration })}
+      tasks={[]}
+      isRoot
+    />,
+  );
+  expect(staleHtml).not.toContain("Account switch pending");
+
+  // A genuinely live hold (card still on the source account) keeps the ribbon.
+  const liveHtml = renderToStaticMarkup(
+    <BranchPane
+      file={file({ path: "/data/accounts/claude/account-a/root.jsonl", migration })}
+      tasks={[]}
+      isRoot
+    />,
+  );
+  expect(liveHtml).toContain("Account switch pending");
+});

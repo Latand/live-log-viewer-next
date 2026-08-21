@@ -7,8 +7,9 @@ parent→child tree, and tails the selected one in real time.
 
 ![From the overview board into a session and its live tail](docs/media/board-to-live-tail.gif)
 
-The default setup runs locally against files already on disk. The app uses no
-database; it reads `~/.claude` and `~/.codex` and renders what it finds.
+The default setup runs locally against transcripts already on disk. It reads
+`~/.claude` and `~/.codex` directly, while operational Viewer state is kept in
+a local SQLite database under its private configuration directory.
 Optional outbound integrations stay disabled until you configure them:
 
 ```bash
@@ -94,38 +95,27 @@ bunx agent-log-viewer
 npx agent-log-viewer
 ```
 
-This starts the server on `127.0.0.1:8898` and opens your browser.
+This starts the server on `127.0.0.1:8898` and opens your browser. Both launch
+paths require Bun to be installed because the authoritative state stores use
+Bun SQLite.
 
 ### From a local clone
-
-With bun:
 
 ```bash
 bun install
 bun run build
-bun --bun node_modules/.bin/next start --port 8898 --hostname 127.0.0.1
+bun run start -- --port 8898 --hostname 127.0.0.1
 # open http://127.0.0.1:8898/
-```
-
-With npm (note the `--` that forwards flags to the start script):
-
-```bash
-npm install
-npm run build
-npm start -- --port 8898 --hostname 127.0.0.1
 ```
 
 `start` serves the output of the last `build`, so run `build` first. For
 development, `bun dev` runs the app with hot reload (it needs a high OS
 file-watch limit for large home directories).
 
-The gated SQLite registry modes require the Viewer server to run on Bun.
-Structured host mode requires Bun too — the runtime journal runs on `bun:sqlite`,
-and on macOS process ownership uses the kernel's microsecond start token. Since
-structured hosting is on by default, the Docker runtime and `agent-log-viewer`
-CLI select Bun unless `LLV_STRUCTURED_HOSTS=0` rolls it back and
-`LLV_AGENT_REGISTRY_SQLITE` is off. Local source checkouts should use the
-explicit `bun --bun` command above.
+The Viewer server runs on Bun. The runtime journal and hot state collections
+use `bun:sqlite`, and macOS process ownership uses the kernel's microsecond
+start token. The Docker runtime and `agent-log-viewer` CLI select Bun for every
+feature-flag configuration.
 
 ### Spawn transport
 
@@ -418,6 +408,7 @@ All optional. Transcription variables are documented in full in
 | `LLV_REAPER_ENABLED` | `1` enables verified pane and detached-reviewer process cleanup by the deterministic agent reaper. Unset keeps dry-run mode and exposes its latest report at `GET /api/lifecycle/reaper`. |
 | `LLV_SCHEME_PROJECT_CAP` | Number of most-recent projects rendered by the scheme feed (default `10`). List and search remain complete. |
 | `LLV_SCHEME_CARDS_PER_PROJECT` | Maximum scanner entries rendered per scheme project (default `80`). List and search remain complete. |
+| `NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS` | Age horizon in hours for automatic card placement on the project scheme (default `48`). A root conversation with activity inside the horizon keeps an automatic card even while idle; older roots leave the canvas for quiet history and «All conversations». Live or running conversations and manually placed cards are never removed by the horizon. Inlined at build time (`NEXT_PUBLIC_*`). |
 | `LLV_HEADLESS_REAPER_THRESHOLD_MS` | Minimum age in milliseconds for the always-active leaked Codex/MCP safety reaper (default `7200000`, two hours; minimum accepted value `60000`). |
 | `LLV_DOCKER_NSENTER_SHIMS` | `1` makes the agent CLI resolver prefer the container's `/usr/local/bin` nsenter shims for host CLIs. Set automatically by the Docker image; leave unset on a host runtime. See [docs/docker.md](docs/docker.md). |
 

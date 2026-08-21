@@ -16,7 +16,9 @@ import {
   projectDraftWorkingDirectory,
   residualItems,
   resolveProjectView,
+  schemeAgeHorizonSeconds,
   subtree,
+  withinPlacementHorizon,
 } from "./projectModel";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
@@ -251,6 +253,26 @@ describe("buildBranchGroups", () => {
     expect(isConversation(entry({ path: "/root", parent: "/older" }))).toBe(false);
   });
 
+  test("a standalone viewer-spawned conversation stays a root despite its spawner parent", () => {
+    const lineage = {
+      kind: "spawn" as const,
+      role: "builder",
+      depth: 1,
+      parentConversationId: "conversation_parent",
+      reviewsConversationId: null,
+      memberships: [],
+    };
+    expect(isConversation(entry({ path: "/spawned", parent: "/other-project/orchestrator", durableLineage: lineage }))).toBe(true);
+    /* Pipeline/flow members keep their container placement. */
+    const member = {
+      ...lineage,
+      memberships: [{ kind: "pipeline" as const, containerId: "p1", role: "builder", slot: "s", stageId: null, stageOrder: null, round: null, parentConversationId: null }],
+    };
+    expect(isConversation(entry({ path: "/member", parent: "/other", durableLineage: member }))).toBe(false);
+    /* A handoff branch keeps rendering under its source. */
+    expect(isConversation(entry({ path: "/handoff", parent: "/source", handoff: true, durableLineage: lineage }))).toBe(false);
+  });
+
   test("idle roots with active descendants are marked for quiet history", () => {
     const files = [
       entry({ path: "/idle-root", activity: "idle", mtime: 10 }),
@@ -348,6 +370,228 @@ describe("buildBranchGroups", () => {
     expect(groups.map((group) => group.key)).toContain("/parent");
     const group = groups.find((candidate) => candidate.key === "/parent")!;
     expect(group.columns.map((column) => column.file.path)).toContain("/parent/attn");
+  });
+});
+
+describe("automatic placement age horizon", () => {
+  const HOUR = 3_600;
+  const NOW = 1_754_500_000;
+
+  test("an idle root active earlier today keeps an automatic card", () => {
+    const root = entry({ path: "/idle-today", activity: "idle", mtime: NOW - 2 * HOUR });
+    expect(buildBranchGroups([root], "demo", { now: NOW }).map((group) => group.key)).toEqual(["/idle-today"]);
+  });
+
+  test("a stalled root from yesterday keeps an automatic card", () => {
+    const root = entry({ path: "/stalled-yesterday", activity: "stalled", mtime: NOW - 13 * HOUR });
+    expect(buildBranchGroups([root], "demo", { now: NOW }).map((group) => group.key)).toEqual(["/stalled-yesterday"]);
+  });
+
+  test("a root beyond the horizon loses its automatic card yet stays in quiet history", () => {
+    const stale = entry({ path: "/stale", activity: "stalled", mtime: NOW - 120 * HOUR });
+    const fresh = entry({ path: "/fresh", activity: "idle", mtime: NOW - HOUR });
+    const files = [stale, fresh];
+    expect(buildBranchGroups(files, "demo", { now: NOW }).map((group) => group.key)).toEqual(["/fresh"]);
+    expect(quietHistoryRows(files, "demo").map((file) => file.path)).toContain("/stale");
+  });
+
+  test("a live or running conversation keeps its card whatever its age", () => {
+    const live = entry({ path: "/live-old", activity: "live", mtime: NOW - 400 * HOUR });
+    const running = entry({ path: "/running-old", activity: "idle", proc: "running", mtime: NOW - 400 * HOUR });
+    expect(buildBranchGroups([live, running], "demo", { now: NOW }).map((group) => group.key).sort())
+      .toEqual(["/live-old", "/running-old"]);
+  });
+
+  test("an explicitly expanded root beyond the horizon still renders", () => {
+    const stale = entry({ path: "/stale-expanded", activity: "idle", mtime: NOW - 200 * HOUR });
+    const groups = buildBranchGroups([stale], "demo", {
+      now: NOW,
+      expandedConversationPaths: new Set(["/stale-expanded"]),
+    });
+    expect(groups.map((group) => group.key)).toEqual(["/stale-expanded"]);
+  });
+
+  test("a recently active child never resurrects its stale root's card", () => {
+    const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 200 * HOUR });
+    const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "idle", mtime: NOW - 13 * HOUR });
+    const groups = buildBranchGroups([root, child], "demo", { now: NOW });
+    // The fresh child opens its own group; the root it hangs under stays in
+    // quiet history instead of returning to the canvas after weeks of silence.
+    expect(groups.map((group) => group.key)).toEqual(["/old-root/agent"]);
+    expect(quietHistoryRows([root, child], "demo").map((file) => file.path)).toContain("/old-root");
+  });
+
+  test("two fresh children of one stale root share a single group", () => {
+    const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 200 * HOUR });
+    const mid = entry({ path: "/old-root/mid", parent: "/old-root", kind: "subagent", activity: "idle", mtime: NOW - 13 * HOUR });
+    const leaf = entry({ path: "/old-root/mid/leaf", parent: "/old-root/mid", kind: "subagent", activity: "idle", mtime: NOW - 12 * HOUR });
+    const groups = buildBranchGroups([root, mid, leaf], "demo", { now: NOW });
+    // One group, not two: the deeper placed descendant joins the topmost
+    // placeable ancestor's group (as a settled chip, per the quiet-child rule)
+    // instead of opening a duplicate node for the same tree.
+    expect(groups.map((group) => group.key)).toEqual(["/old-root/mid"]);
+    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/old-root/mid"]);
+    expect(groups[0]!.finished.map((file) => file.path)).toContain("/old-root/mid/leaf");
+  });
+
+  test("an aged root placed by another rule owns its live descendant instead of doubling it", () => {
+    /* Two rules meet on one tree: the operator expanded the aged root, and the
+       child is live. The root is on the canvas, so lifting the child to the
+       "topmost PLACEABLE ancestor" stopped at the child itself and opened a
+       second group for a card the root's group already renders as a column. */
+    const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 200 * HOUR });
+    const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "live", mtime: NOW - 200 * HOUR });
+    const groups = buildBranchGroups([root, child], "demo", { now: NOW, expandedConversationPaths: new Set(["/old-root"]) });
+    expect(groups.map((group) => group.key)).toEqual(["/old-root"]);
+    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/old-root", "/old-root/agent"]);
+    // Every path the groups render, exactly once.
+    const rendered = groups.flatMap((group) => group.columns.map((column) => column.file.path));
+    expect(rendered).toEqual([...new Set(rendered)]);
+  });
+
+  test("a promoted engine child of an aged root is not emitted twice", () => {
+    const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 200 * HOUR });
+    const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "idle", mtime: NOW - 200 * HOUR });
+    const groups = buildBranchGroups([root, child], "demo", {
+      now: NOW,
+      expandedConversationPaths: new Set(["/old-root"]),
+      enginePlacement: { promotedEnginePaths: new Set(["/old-root/agent"]) },
+    });
+    const rendered = groups.flatMap((group) => group.columns.map((column) => column.file.path));
+    expect(rendered).toEqual([...new Set(rendered)]);
+    expect(rendered).toContain("/old-root/agent");
+  });
+
+  test("a card below two group roots hangs under the nearer one, once", () => {
+    /* A `recent` conversation mid-chain becomes a root with no lift at all, so
+       it and the tree root above it both assembled over the same subtree and
+       emitted the leaf twice under one key (React: "two children with the same
+       key"). Nearest drawn ancestor wins, matching how the arrows already read. */
+    const spawned = { kind: "spawn", role: null, depth: 0, parentConversationId: "c", reviewsConversationId: null, memberships: [] } as FileEntry["durableLineage"];
+    const top = entry({ path: "/top", root: "codex-sessions", engine: "codex", activity: "live", mtime: NOW - HOUR });
+    const mid = entry({ path: "/mid", parent: "/top", durableLineage: spawned, activity: "recent", mtime: NOW - HOUR });
+    const leaf = entry({ path: "/leaf", parent: "/mid", durableLineage: spawned, activity: "live", mtime: NOW - HOUR });
+    const groups = buildBranchGroups([top, mid, leaf], "demo", { now: NOW });
+    const rendered = groups.flatMap((group) => group.columns.map((column) => column.file.path));
+    expect(rendered).toEqual([...new Set(rendered)]);
+    expect(rendered).toContain("/leaf");
+    const owner = groups.find((group) => group.columns.some((column) => column.file.path === "/leaf"))!;
+    expect(owner.key).toBe("/mid");
+  });
+
+  test("a stale child under a live root rests as a chip instead of taking a column", () => {
+    const root = entry({ path: "/live-root", activity: "live", mtime: NOW - HOUR });
+    const stale = entry({ path: "/live-root/ancient", parent: "/live-root", kind: "subagent", activity: "idle", mtime: NOW - 400 * HOUR });
+    const fresh = entry({ path: "/live-root/today", parent: "/live-root", kind: "subagent", activity: "idle", mtime: NOW - 3 * HOUR });
+    const group = buildBranchGroups([root, stale, fresh], "demo", { now: NOW })[0]!;
+    expect(group.columns.map((column) => column.file.path)).toEqual(["/live-root", "/live-root/today"]);
+    // Bounded off the canvas, never lost: it stays a chip in the under-deck.
+    expect(group.finished.map((file) => file.path)).toContain("/live-root/ancient");
+  });
+
+  test("a stale child that is live or running keeps its column under a live root", () => {
+    const root = entry({ path: "/live-root", activity: "live", mtime: NOW - HOUR });
+    const running = entry({ path: "/live-root/long", parent: "/live-root", kind: "subagent", activity: "idle", proc: "running", mtime: NOW - 400 * HOUR });
+    const group = buildBranchGroups([root, running], "demo", { now: NOW })[0]!;
+    expect(group.columns.map((column) => column.file.path)).toEqual(["/live-root", "/live-root/long"]);
+  });
+
+  test("an explicitly expanded stale child places without its stale root", () => {
+    const root = entry({ path: "/old-root", activity: "idle", mtime: NOW - 300 * HOUR });
+    const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "idle", mtime: NOW - 300 * HOUR });
+    const groups = buildBranchGroups([root, child], "demo", {
+      now: NOW,
+      expandedConversationPaths: new Set(["/old-root/agent"]),
+    });
+    expect(groups.map((group) => group.key)).toEqual(["/old-root/agent"]);
+    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/old-root/agent"]);
+  });
+
+  test("without a clock a stale child still opens its root's group", () => {
+    const root = entry({ path: "/old-root", activity: "idle", mtime: 1_000 });
+    const child = entry({ path: "/old-root/agent", parent: "/old-root", kind: "subagent", activity: "recent", mtime: 1_000 });
+    expect(buildBranchGroups([root, child], "demo").map((group) => group.key)).toEqual(["/old-root"]);
+  });
+
+  test("the placement horizon exempts live and running work and bounds the rest", () => {
+    const live = entry({ path: "/live", activity: "live", mtime: NOW - 400 * HOUR });
+    const running = entry({ path: "/running", activity: "idle", proc: "running", mtime: NOW - 400 * HOUR });
+    const recent = entry({ path: "/recent", activity: "recent", mtime: NOW - 400 * HOUR });
+    const stale = entry({ path: "/stale", activity: "idle", mtime: NOW - 400 * HOUR });
+    const fresh = entry({ path: "/fresh", activity: "idle", mtime: NOW - HOUR });
+    for (const file of [live, running, recent, fresh]) {
+      expect(withinPlacementHorizon(file, NOW, 48 * HOUR)).toBe(true);
+    }
+    expect(withinPlacementHorizon(stale, NOW, 48 * HOUR)).toBe(false);
+    // No clock: age is unknowable, so nothing is bounded.
+    expect(withinPlacementHorizon(stale, 0, 48 * HOUR)).toBe(true);
+  });
+
+  test("a cross-project segment follows the horizon once its child is quiet", () => {
+    const projectRoot = entry({ path: "/seg-root", project: "viewer", activity: "idle", mtime: NOW - HOUR });
+    const foreignParent = entry({
+      path: "/foreign",
+      project: "latand",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: "/seg-root",
+      activity: "idle",
+      mtime: NOW - 200 * HOUR,
+    });
+    const freshSegment = entry({
+      path: "/seg-fresh",
+      project: "viewer",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: "/foreign",
+      activity: "idle",
+      mtime: NOW - 13 * HOUR,
+    });
+    const staleSegment = entry({
+      path: "/seg-stale",
+      project: "viewer",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: "/foreign",
+      activity: "stalled",
+      mtime: NOW - 200 * HOUR,
+    });
+    const groups = buildBranchGroups([projectRoot, foreignParent, freshSegment, staleSegment], "viewer", { now: NOW });
+    expect(groups.map((group) => group.key).sort()).toEqual(["/seg-fresh", "/seg-root"]);
+  });
+
+  test("a narrowed horizon governs placement", () => {
+    const groups = buildBranchGroups([
+      entry({ path: "/two-hours", activity: "idle", mtime: NOW - 2 * HOUR }),
+      entry({ path: "/thirteen-hours", activity: "idle", mtime: NOW - 13 * HOUR }),
+    ], "demo", { now: NOW, ageHorizonSeconds: 6 * HOUR });
+    expect(groups.map((group) => group.key)).toEqual(["/two-hours"]);
+  });
+
+  test("without a clock (hydration) placement follows the activity rule unchanged", () => {
+    const idleOld = entry({ path: "/idle", activity: "idle", mtime: 1_000 });
+    const recent = entry({ path: "/recent", activity: "recent", mtime: 1_000 });
+    expect(buildBranchGroups([idleOld, recent], "demo").map((group) => group.key)).toEqual(["/recent"]);
+  });
+
+  test("the horizon reads its hours from the environment and falls back to two days", () => {
+    const previous = process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS;
+    try {
+      delete process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS;
+      expect(schemeAgeHorizonSeconds()).toBe(48 * HOUR);
+      process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS = "6";
+      expect(schemeAgeHorizonSeconds()).toBe(6 * HOUR);
+      process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS = "nonsense";
+      expect(schemeAgeHorizonSeconds()).toBe(48 * HOUR);
+      process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS = "0";
+      expect(schemeAgeHorizonSeconds()).toBe(48 * HOUR);
+    } finally {
+      if (previous === undefined) delete process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS;
+      else process.env.NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS = previous;
+    }
   });
 });
 

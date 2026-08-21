@@ -106,6 +106,28 @@ body {
   }
 }
 
+/* The status vocabulary's ONE motion treatment (issue #961): a card whose word
+   is "needs you" breathes a soft warning halo. Every other word is static, and
+   reduced-motion stills this one too — the word plus colour already carry the
+   full meaning. The cadence is the board's own: it beats in the 3.4s period of
+   the pane-attention orbit above, so the two attention treatments share one
+   pulse instead of introducing a second rhythm. */
+@keyframes card-status-breathe {
+  50% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-warning) 22%, transparent);
+  }
+}
+
+.card-status-attention {
+  animation: card-status-breathe 3.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-status-attention {
+    animation: none;
+  }
+}
+
 /* Syntax highlighting palette (issue #9 §7): highlight.js emits .hljs-* class
    names. The app's light-theme tokens supply their colors and keep every color
    in a single source of truth. */
@@ -412,4 +434,22 @@ body {
   box-shadow:
     0 0 0 3px color-mix(in srgb, var(--color-info) 25%, transparent),
     var(--shadow-1) !important;
+}
+
+/* Karaoke follow-along while an answer is read aloud (issue #1022). The word
+   under the voice is painted with the CSS Custom Highlight API: it colours the
+   text nodes React already rendered, so the markdown is never re-parsed, no
+   wrapper element is injected into the message, and text selection still works
+   over the top of it. Highlight pseudo-elements accept colour only — they
+   cannot animate or transition — so the follow-along carries no motion for
+   reduced-motion mode to still. */
+::highlight(tts-karaoke) {
+  background-color: color-mix(in srgb, var(--color-accent) 26%, transparent);
+  color: var(--color-primary);
+}
+
+/* While that message is speaking, its text is also the transport: a click
+   inside it seeks the audio to that word. */
+[data-tts-seekable] {
+  cursor: pointer;
 }

@@ -15,7 +15,7 @@ import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructur
 import { createFakeDeliveryLedger, FakeEngineHost } from "./fixtures/fakeEngineHost";
 import { demoteSkippedStructuredRegistryHosts, type StructuredHostAdoptionFilter } from "./registry";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
-import { didStructuredHostStartupFail } from "./startupStatus";
+import { didStructuredHostStartupFail, structuredStartupStatus } from "./startupStatus";
 import { adoptStructuredHostsAtStartup, structuredStartupHosts, type StructuredStartupDependencies } from "./startup";
 
 function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
@@ -1044,7 +1044,9 @@ async function startupAdoptionAttempts(
     shouldAdopt: StructuredHostAdoptionFilter,
   ) => {
     for (const entry of Object.values(received.snapshot().entries)) {
-      if (entry.key.engine === engine && shouldAdopt(entry)) attempts.push(`${entry.key.engine}:${entry.key.sessionId}`);
+      if (entry.key.engine === engine
+        && entry.structuredHost
+        && shouldAdopt(entry)) attempts.push(`${entry.key.engine}:${entry.key.sessionId}`);
     }
   };
   await adoptStructuredHostsAtStartup({
@@ -1061,6 +1063,116 @@ async function startupAdoptionAttempts(
   });
   return attempts;
 }
+
+test("SQLite startup releases a completed stage host claim with pending delivery after its recorded process dies", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-dead-stage-owner-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, {
+    sqliteMode: "sqlite",
+  });
+  const sessionId = "aaaaaaaa-2222-0222-0222-aaaaaaaaaaaa";
+  const { conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "idle",
+    turn: "terminal",
+  });
+  const stored = registry.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+  registry.upsert({
+    key: stored.key,
+    artifactPath: stored.artifactPath,
+    cwd: stored.cwd,
+    accountId: stored.accountId,
+    launchProfile: stored.launchProfile,
+    status: stored.status,
+    host: stored.host,
+    structuredHost: {
+      ...stored.structuredHost!,
+      endpoint: "stdio:dead-stage-host",
+      process: { pid: 2_000_000_000, startIdentity: "dead-stage-host" },
+    },
+    claimEpoch: stored.claimEpoch,
+    claimOwner: `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: null })}`,
+    pendingAction: stored.pendingAction,
+  });
+  const delivery = registry.holdDelivery(conversation.id, "deliver after dead stage recovery", "dead-stage-pending");
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([]);
+  expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    structuredHost: null,
+    claimOwner: null,
+  });
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ id: delivery.id, state: "assigned" }]);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup publishes per-host progress across the serial provider adoption loops", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-progress-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  addStructuredRestartConversation(registry, directory, {
+    engine: "codex",
+    sessionId: crypto.randomUUID(),
+    status: "live",
+    turn: "busy",
+  });
+  addStructuredRestartConversation(registry, directory, {
+    engine: "claude",
+    sessionId: crypto.randomUUID(),
+    status: "live",
+    turn: "busy",
+  });
+  const progress: unknown[] = [];
+  const capture = () => {
+    progress.push(structuredStartupStatus({ LLV_STRUCTURED_HOSTS: "1" }));
+  };
+  try {
+    await adoptStructuredHostsAtStartup({
+      registry,
+      client: null,
+      refreshTranscriptState: async () => undefined,
+      adopt: async (received, _optionsFor, _env, shouldAdopt = () => true, processed) => {
+        for (const entry of Object.values(received.snapshot().entries)) {
+          if (entry.key.engine !== "codex" || !shouldAdopt(entry)) continue;
+          processed?.(entry);
+          capture();
+        }
+        return [];
+      },
+      adoptClaude: async (received, _optionsFor, _env, shouldAdopt = () => true, processed) => {
+        for (const entry of Object.values(received.snapshot().entries)) {
+          if (entry.key.engine !== "claude" || !shouldAdopt(entry)) continue;
+          processed?.(entry);
+          capture();
+        }
+        return [];
+      },
+    });
+
+    expect(progress).toEqual([
+      expect.objectContaining({
+        state: "pending",
+        phase: "adopting Codex hosts",
+        completedHosts: 1,
+        totalHosts: 2,
+      }),
+      expect.objectContaining({
+        state: "pending",
+        phase: "adopting Claude hosts",
+        completedHosts: 2,
+        totalHosts: 2,
+      }),
+    ]);
+    expect(structuredStartupStatus({ LLV_STRUCTURED_HOSTS: "1" })).toMatchObject({
+      phase: "finalizing structured delivery",
+      completedHosts: 2,
+      totalHosts: 2,
+    });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function claudeTerminalRecord() {
   return {

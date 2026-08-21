@@ -19,7 +19,36 @@ import { cancelOutbox, retryOutbox, type OutboxEntry } from "./outbox";
  * never shows the message twice.
  */
 
-function stateChip(t: TFunction, entry: OutboxEntry): { label: string; icon: React.ReactNode; className: string } {
+/**
+ * The account switch holding this queue, when one is: `label` is the target's
+ * name, or `null` while the annotation has not published one yet (the whole
+ * pending window). Display-only — the entry's own `state` is untouched.
+ */
+export interface SwitchHold {
+  label: string | null;
+}
+
+function stateChip(
+  t: TFunction,
+  entry: OutboxEntry,
+  switchHold: SwitchHold | null,
+): { label: string; icon: React.ReactNode; className: string } {
+  /* An unsettled message on a switching card is held for the successor, and its
+     bubble is the ONE place that says so. A bare "Delivering" left the operator
+     with a spinner and no reason during the exact window the card is hardest to
+     follow — while a second statement elsewhere would put this message back on
+     the card twice. A settled entry keeps its own word: a failure must stay a
+     failure, with its retry. */
+  const held = switchHold && (entry.state === "delivering" || entry.state === "queued");
+  if (held) {
+    return {
+      label: switchHold.label
+        ? t("outbox.heldForSwitch", { label: switchHold.label })
+        : t("outbox.heldForSwitchUnnamed"),
+      icon: <Clock3 className="h-3 w-3" aria-hidden />,
+      className: "text-warning",
+    };
+  }
   switch (entry.state) {
     case "delivering":
       return {
@@ -45,11 +74,13 @@ export function OutboxBubblesView({
   t,
   onCancel,
   onRetry,
+  switchHold = null,
 }: {
   entries: readonly OutboxEntry[];
   t: TFunction;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
+  switchHold?: SwitchHold | null;
 }) {
   if (!entries.length) return null;
   return (
@@ -62,7 +93,7 @@ export function OutboxBubblesView({
       aria-live="polite"
     >
       {entries.map((entry) => {
-        const chip = stateChip(t, entry);
+        const chip = stateChip(t, entry, switchHold);
         return (
           <div
             key={entry.id}
@@ -123,7 +154,15 @@ export function OutboxBubblesView({
   );
 }
 
-export function OutboxBubbles({ cardId, entries }: { cardId: string; entries: readonly OutboxEntry[] }) {
+export function OutboxBubbles({
+  cardId,
+  entries,
+  switchHold = null,
+}: {
+  cardId: string;
+  entries: readonly OutboxEntry[];
+  switchHold?: SwitchHold | null;
+}) {
   const { t } = useLocale();
   return (
     <OutboxBubblesView
@@ -131,6 +170,7 @@ export function OutboxBubbles({ cardId, entries }: { cardId: string; entries: re
       t={t}
       onCancel={(id) => cancelOutbox(cardId, id)}
       onRetry={(id) => retryOutbox(cardId, id)}
+      switchHold={switchHold}
     />
   );
 }

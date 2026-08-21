@@ -1044,6 +1044,86 @@ function provenanceFor(path: string, inspectionRoot = repositoryRoot, trustedBas
   }
 }
 
+/**
+ * Hashes a complete vendor directory as an ordered stream of relative paths,
+ * portable executable-bit state, byte lengths, and file bytes. The directory
+ * is rejected when any entry is a symlink or a non-file/non-directory node,
+ * so a trusted digest authenticates the complete tree shape and contents.
+ */
+export function trustedVendorRootDigest(root: string): string | null {
+  const rootResult = safePath(root);
+  if (rootResult.status !== "safe" || !rootResult.metadata?.isDirectory()) return null;
+  const files: Array<{ executable: boolean; relativePath: string }> = [];
+  const pending = [""];
+  try {
+    while (pending.length > 0) {
+      const relativeDirectory = pending.pop()!;
+      const directory = join(root, relativeDirectory);
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const relativeEntry = join(relativeDirectory, entry.name);
+        const absoluteEntry = join(root, relativeEntry);
+        const entryResult = safePath(absoluteEntry);
+        if (entryResult.status !== "safe") return null;
+        if (entry.isDirectory() && entryResult.metadata?.isDirectory()) {
+          pending.push(relativeEntry);
+        } else if (entry.isFile() && entryResult.metadata?.isFile()) {
+          files.push({ executable: (Number(entryResult.metadata.mode) & 0o111) !== 0, relativePath: relativeEntry });
+        } else {
+          return null;
+        }
+      }
+    }
+    if (files.length === 0) return null;
+    const digest = createHash("sha256");
+    files.sort((left, right) => left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0);
+    for (const file of files) {
+      const bytes = readFileSync(join(root, file.relativePath));
+      const portablePath = file.relativePath.split(sep).join("/");
+      digest.update("file\0");
+      digest.update(portablePath);
+      digest.update("\0");
+      digest.update(file.executable ? "x" : "-");
+      digest.update("\0");
+      digest.update(String(bytes.length));
+      digest.update("\0");
+      digest.update(bytes);
+      digest.update("\0");
+    }
+    return digest.digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+export function trustedVendorRootMatches(root: string, expectedDigest: string): boolean {
+  if (!/^[a-f0-9]{64}$/.test(expectedDigest)) return false;
+  return trustedVendorRootDigest(root) === expectedDigest;
+}
+
+/**
+ * The reviewed chigwell/telegram-mcp v3.2.22 tree plus the issue #1059 patches
+ * that remove invite-link mutation tools from the read-only registry and cap
+ * dialog pagination. This digest is trusted scanner policy: candidate content
+ * cannot update it.
+ */
+export const TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST = "8f3238a84139bff7ef88f522c60affc5880183f9f23048a39e124191c5e6619d";
+export const TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES: ReadonlySet<FindingClass> = new Set(["credential", "home_path"]);
+
+const trustedTelegramVendor = {
+  digest: TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST,
+  exemptFindingClasses: TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES,
+  relativeRoot: "vendor/telegram-mcp",
+};
+
+function trustedVendorExemptions(path: string, inspectionRoot: string | undefined): ReadonlySet<FindingClass> {
+  if (!inspectionRoot) return new Set();
+  const vendorRoot = join(inspectionRoot, ...trustedTelegramVendor.relativeRoot.split("/"));
+  if (!canonicalPathIsWithin(vendorRoot, path)) return new Set();
+  return trustedVendorRootMatches(vendorRoot, trustedTelegramVendor.digest)
+    ? trustedTelegramVendor.exemptFindingClasses
+    : new Set();
+}
+
 export function inspectPaths(
   paths: string[],
   configurationError = false,
@@ -1090,6 +1170,8 @@ export function inspectPaths(
         }
       }
     }
+    const vendorExemptions = trustedVendorExemptions(path, inspectionRoot);
+    for (const finding of vendorExemptions) pathFindings.delete(finding);
     for (const finding of pathFindings) addFinding(findings, finding);
   }
   return findings;

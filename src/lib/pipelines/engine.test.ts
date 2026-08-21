@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Database } from "bun:sqlite";
 
 import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -195,8 +196,9 @@ function harness() {
   let residentHosts = false;
   let monotonic: () => number = () => Date.now();
   const ports: PipelinePorts = {
-    exec: (command, args) => {
-      calls.push(`${command} ${args.join(" ")}`);
+    exec: (rawCommand, rawArgs) => {
+      calls.push(`${rawCommand} ${rawArgs.join(" ")}`);
+      const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
       if (args[0] === "rev-parse" && args[1] === "--git-dir") return { code: 0, stdout: ".git\n", stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--verify") return { code: 0, stdout: `${ORIGIN_MAIN_SHA}\n`, stderr: "" };
       if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") return { code: 0, stdout: "main\n", stderr: "" };
@@ -360,9 +362,10 @@ test("new pipelines require an allowed creator transcript with an existing conve
     autoStart: false,
     stages: [],
   }, h.ports);
-  expect(missing).toEqual({
+  expect(missing).toMatchObject({
     error: "pipeline creator lineage is required; pass src",
     status: 400,
+    violations: [{ field: "src", message: "pipeline creator lineage is required; pass src" }],
   });
 
   const invalidPath = await createPipelineFromRequest({
@@ -372,7 +375,13 @@ test("new pipelines require an allowed creator transcript with an existing conve
     autoStart: false,
     stages: [],
   }, h.ports);
-  expect(invalidPath).toEqual({ error: "src path is not an allowed conversation transcript", status: 400 });
+  /* #1026: the rejection names the roots that ARE accepted, so a caller holding
+     a native Claude path is not left guessing which address the viewer records. */
+  expect(invalidPath.status).toBe(400);
+  expect(invalidPath.error).toStartWith("src path is not an allowed conversation transcript.");
+  expect(invalidPath.error).toContain("shared/claude/projects");
+  expect(invalidPath.error).toContain("~/.codex/sessions");
+  expect(invalidPath.violations).toEqual([expect.objectContaining({ field: "src" })]);
 
   const unknownConversation = await createPipelineFromRequest({
     task: "Unknown creator",
@@ -381,7 +390,9 @@ test("new pipelines require an allowed creator transcript with an existing conve
     autoStart: false,
     stages: [],
   }, h.ports);
-  expect(unknownConversation).toEqual({ error: "src conversation does not exist", status: 400 });
+  expect(unknownConversation.status).toBe(400);
+  expect(unknownConversation.error).toStartWith("src conversation does not exist.");
+  expect(unknownConversation.error).toContain("~/.claude/projects");
 
   const created = await createPipelineFromRequest({
     task: "Known creator",
@@ -394,6 +405,113 @@ test("new pipelines require an allowed creator transcript with an existing conve
     srcPath: "/codex/creator.jsonl",
     srcConversationId: "conversation_creator",
   });
+});
+
+/* #1026 — a Claude-engine caller knows its own native ~/.claude/projects path;
+   every viewer record addresses the shared transcript store the home's projects
+   dir links into. The two name one file, so the native address resolves — but
+   only when that file really is mirrored, since inventing a shared path would
+   mint a phantom conversation identity. */
+test("a native Claude src path resolves through its shared-store mirror, and says so when there is none", async () => {
+  const h = harness();
+  savePipelines([]);
+  const claudeHome = path.join(process.env.LLV_STATE_DIR!, "native-claude-home");
+  const encoded = "-home-agent-repo";
+  const mirrored = path.join(path.dirname(process.env.LLV_STATE_DIR!), "shared", "claude", "projects", encoded, "creator.jsonl");
+  fs.mkdirSync(path.dirname(mirrored), { recursive: true });
+  fs.writeFileSync(mirrored, "{}\n");
+  const native = path.join(claudeHome, "projects", encoded, "creator.jsonl");
+  const unmirrored = path.join(claudeHome, "projects", encoded, "stranger.jsonl");
+  const ports: PipelinePorts = {
+    ...h.ports,
+    sourcePathAllowed: (pathname) => pathname === mirrored,
+    conversationIdForPath: (pathname) => (pathname === mirrored ? "conversation_creator" : null),
+  };
+  const previousHome = process.env.LLV_CLAUDE_HOME;
+  process.env.LLV_CLAUDE_HOME = claudeHome;
+  try {
+    const normalizedSrc = await rawCreatePipelineFromRequest({
+      task: "Native creator path",
+      repoDir: "/repo",
+      autoStart: false,
+      stages: [],
+      src: native,
+    }, ports);
+    expect(normalizedSrc.pipeline).toMatchObject({ srcPath: mirrored, srcConversationId: "conversation_creator" });
+
+    const nothingMirrored = await rawCreatePipelineFromRequest({
+      task: "Native creator path without a mirror",
+      repoDir: "/repo",
+      autoStart: false,
+      stages: [],
+      src: unmirrored,
+    }, ports);
+    expect(nothingMirrored.pipeline).toBeUndefined();
+    expect(nothingMirrored.status).toBe(400);
+    expect(nothingMirrored.error).toContain("shared/claude/projects");
+    expect(nothingMirrored.error).toContain("~/.codex/sessions");
+  } finally {
+    if (previousHome === undefined) delete process.env.LLV_CLAUDE_HOME; else process.env.LLV_CLAUDE_HOME = previousHome;
+  }
+});
+
+/* #1026 — the reported walk cost seven calls because each answer carried one
+   constraint. Every constraint the request violates is now collected in one
+   response, each naming its field and the shape that field expects. */
+test("an invalid create answers with every violated constraint at once", async () => {
+  const h = harness();
+  savePipelines([]);
+  const rejected = await createPipelineFromRequest({
+    task: "Batched validation",
+    repoDir: "/repo",
+    autoStart: false,
+    baseBranch: "main",
+    stages: [
+      { id: "not a url safe id", kind: "implement", prompt: "build", role: "builder" },
+      { id: "review", kind: "review-loop", prompt: "", role: { roleId: "reviewer", engine: "codex" } },
+    ],
+  } as never, h.ports);
+
+  expect(rejected.pipeline).toBeUndefined();
+  expect(rejected.status).toBe(400);
+  expect(rejected.violations?.map((violation) => violation.field)).toEqual([
+    "stages[0].id",
+    "stages[0].kind",
+    "stages[0].role",
+    "stages[1].prompt",
+    "stages[1].role",
+    "baseRef",
+  ]);
+  for (const violation of rejected.violations ?? []) expect(violation.expected).not.toBe("");
+  /* One response, and it reads as one: the count, then field, message and
+     expected shape for each violated constraint. */
+  expect(rejected.error).toStartWith("6 validation errors — ");
+  expect(rejected.error).toContain('stages[0].kind: stage kind must be run or review-loop (expected "run" | "review-loop")');
+  expect(rejected.error).toContain("place runtime overrides on the stage");
+  expect(rejected.error).toContain("baseRef: a draft baseBranch requires an explicit baseRef");
+  expect(loadPipelines()).toEqual([]);
+});
+
+/* #1026 ask 3 — "review-loop stage requires a preceding run stage" read as an
+   ordering rule and sent the caller reordering an array that was already in the
+   right order. The defect is the missing pass edge. */
+test("an unreachable review-loop names the stage and the next edge that would reach it", async () => {
+  const h = harness();
+  savePipelines([]);
+  const rejected = await createPipelineFromRequest({
+    task: "Unwired review loop",
+    repoDir: "/repo",
+    autoStart: false,
+    stages: [
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "build", next: null },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+    ],
+  }, h.ports);
+
+  expect(rejected.pipeline).toBeUndefined();
+  expect(rejected.error).toBe('review-loop stage review is unreachable: no run stage\'s next chain reaches it — set next: "review" on run stage build');
+  expect(rejected.violations).toEqual([expect.objectContaining({ field: "stages[].next" })]);
+  expect(rejected.error).not.toContain("requires a preceding run stage");
 });
 
 test("set-src repairs closed history and requires overwrite for existing lineage", async () => {
@@ -410,7 +528,8 @@ test("set-src repairs closed history and requires overwrite for existing lineage
     action: "set-src",
     srcPath: "/outside/creator.jsonl",
   } as never, h.ports);
-  expect(invalid).toEqual({ error: "src path is not an allowed conversation transcript", status: 400 });
+  expect(invalid.status).toBe(400);
+  expect(invalid.error).toStartWith("src path is not an allowed conversation transcript.");
 
   const repaired = await patchPipeline(pipeline.id, {
     action: "set-src",
@@ -1038,9 +1157,10 @@ test("review-loop onFail edges are rejected during creation and graph editing", 
     ],
   }, h.ports);
 
-  expect(invalid).toEqual({
+  expect(invalid).toMatchObject({
     error: "review-loop stage review does not support onFail",
     status: 400,
+    violations: [{ field: "stages[].next", message: "review-loop stage review does not support onFail" }],
   });
   expect(loadPipelines()).toEqual([]);
 
@@ -1603,7 +1723,8 @@ function countDurableReads(h: ReturnType<typeof harness>): () => number {
 
 function pinStageHead(h: ReturnType<typeof harness>) {
   const baseExec = h.ports.exec;
-  h.ports.exec = (command, args, cwd) => {
+  h.ports.exec = (rawCommand, rawArgs, cwd) => {
+    const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
     if (args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${STAGE_HEAD}\n`, stderr: "" };
     /* The remote carries the same stage commit: these tests are about durable
        turn evidence, not publication, so origin is modelled as already current
@@ -1611,7 +1732,7 @@ function pinStageHead(h: ReturnType<typeof harness>) {
     if (args[0] === "ls-remote") {
       return { code: 0, stdout: `${STAGE_HEAD}\trefs/heads/${loadPipelines()[0]?.branch ?? "pipeline/test"}\n`, stderr: "" };
     }
-    return baseExec(command, args, cwd);
+    return baseExec(rawCommand, rawArgs, cwd);
   };
 }
 
@@ -2403,7 +2524,9 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
   let remoteHead = ORIGIN_MAIN_SHA;
   let fastForwarded = false;
   const baseExec = h.ports.exec;
-  h.ports.exec = (command, args, cwd) => {
+  h.ports.exec = (rawCommand, rawArgs, cwd) => {
+    const command = rawCommand === "timeout" ? "git" : rawCommand;
+    const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
     if (command === "git" && args[0] === "status") return { code: 0, stdout: "", stderr: "" };
     if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: `${loadPipelines()[0]!.branch}\n`, stderr: "" };
     if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${remoteHead}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
@@ -2416,7 +2539,7 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
       fastForwarded = true;
       return { code: 0, stdout: "", stderr: "" };
     }
-    return baseExec(command, args, cwd);
+    return baseExec(rawCommand, rawArgs, cwd);
   };
 
   const pipeline = await create(h.ports, stages as never);
@@ -2471,10 +2594,12 @@ test("issue 533: an in-loop repair advances expectedReviewHeadSha with reviewHea
      review ingress publishes the exact accepted head, so a fixture whose
      worktree disagreed with its own accepted commit would park instead. */
   const baseExec = h.ports.exec;
-  h.ports.exec = (command, args, cwd) => {
+  h.ports.exec = (rawCommand, rawArgs, cwd) => {
+    const command = rawCommand === "timeout" ? "git" : rawCommand;
+    const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
     if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: `${beforeRepair}\n`, stderr: "" };
     if (command === "git" && args[0] === "ls-remote") return { code: 0, stdout: `${beforeRepair}\trefs/heads/${loadPipelines()[0]!.branch}\n`, stderr: "" };
-    return baseExec(command, args, cwd);
+    return baseExec(rawCommand, rawArgs, cwd);
   };
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
@@ -3657,13 +3782,25 @@ test("skip-stage cleans failed work before advancing", async () => {
   expect(h.calls.some((call) => call.includes("clean -fd"))).toBe(true);
 });
 
-test("a corrupt pipelines registry skips the tick without escalating", async () => {
+test("a corrupt SQLite pipeline row skips the tick without escalating", async () => {
   const h = harness();
   await create(h.ports);
-  const file = path.join(process.env.LLV_STATE_DIR!, "pipelines.json");
-  fs.writeFileSync(file, "{", "utf8");
+  const database = new Database(path.join(process.env.LLV_STATE_DIR!, "state.sqlite"), { strict: true });
+  database.exec("BEGIN IMMEDIATE");
+  const revision = database.query<{ revision: number }, []>(
+    "SELECT revision FROM state_collections WHERE collection = 'pipelines'",
+  ).get()!.revision + 1;
+  const key = database.query<{ row_key: string }, []>(
+    "SELECT row_key FROM state_rows WHERE collection = 'pipelines' LIMIT 1",
+  ).get()!.row_key;
+  database.query("UPDATE state_rows SET value_json = '{}', row_revision = ? WHERE collection = 'pipelines' AND row_key = ?")
+    .run(revision, key);
+  database.query("UPDATE state_collections SET revision = ? WHERE collection = 'pipelines'").run(revision);
+  database.query("INSERT INTO state_changes(collection, revision, row_key, operation) VALUES ('pipelines', ?, ?, 'upsert')")
+    .run(revision, key);
+  database.exec("COMMIT");
+  database.close();
   expect(await tickPipelines([], h.ports)).toEqual({ pipelines: [], changed: false });
-  expect(fs.readFileSync(file, "utf8")).toBe("{");
   savePipelines([]);
 });
 
@@ -4616,6 +4753,11 @@ test("override-stage rejects an unknown/disallowed role and an incompatible role
   /* architect resolves to claude; a codex-only model must fail canonical bounds. */
   const bad = await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "architect" }, model: "gpt-5.6-sol" }, ports);
   expect(bad.status).toBe(400);
+  const unknown = await patchPipeline(created.id, { action: "override-stage", stageId: "build", engine: "codex", model: "gpt-5.6-codex" }, ports);
+  expect(unknown).toMatchObject({
+    status: 400,
+    error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
+  });
 });
 
 test("override-stage rejects non-string model/effort instead of silently ignoring them (issue #118 review F3)", async () => {
@@ -5113,7 +5255,7 @@ test("closing a fail-edge target with an older terminal attempt records a fresh 
 
 /* --- #729: the orchestrator publishes the head the review layer fences on --- */
 
-function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boolean; pushFails?: boolean } = {}) {
+function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boolean; pushFails?: boolean; remoteReadFails?: boolean } = {}) {
   const passedSha = "7".repeat(40);
   const order: string[] = [];
   /* Oldest first. `merge-base --is-ancestor` is answered from this, so the
@@ -5123,8 +5265,12 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
   let remoteBranch: string | null = null;
   let dirty = true;
   let pushFails = false;
+  let remoteReadFails = options.remoteReadFails ?? false;
+  let remoteReadAttempts = 0;
   const baseExec = h.ports.exec;
-  h.ports.exec = (command, args, cwd) => {
+  h.ports.exec = (rawCommand, rawArgs, cwd) => {
+    const command = rawCommand === "timeout" ? "git" : rawCommand;
+    const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
     if (command !== "git") return baseExec(command, args, cwd);
     const branch = loadPipelines()[0]?.branch ?? "pipeline/test";
     if (args[0] === "status") return { code: 0, stdout: dirty ? " M src/lib/thing.ts\n" : "", stderr: "" };
@@ -5142,6 +5288,10 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
         : { code: 0, stdout: "git@example.invalid:owner/repo.git\n", stderr: "" };
     }
     if (args[0] === "ls-remote") {
+      remoteReadAttempts += 1;
+      if (remoteReadFails) {
+        return { code: 128, stdout: "", stderr: "fatal: remote authentication unavailable" };
+      }
       return { code: 0, stdout: remoteBranch ? `${remoteBranch}\trefs/heads/${branch}\n` : "", stderr: "" };
     }
     if (args[0] === "push") {
@@ -5188,6 +5338,8 @@ function publishHarness(h: ReturnType<typeof harness>, options: { origin?: boole
     setRemote: (sha: string | null) => { remoteBranch = sha; },
     setDirty: (value: boolean) => { dirty = value; },
     setPushFails: (value: boolean) => { pushFails = value; },
+    setRemoteReadFails: (value: boolean) => { remoteReadFails = value; },
+    remoteReadAttempts: () => remoteReadAttempts,
     setLocalHead: (sha: string) => { localHead = sha; if (!history.includes(sha)) history.push(sha); },
     /* Records a revision nobody's local checkout contains — a repair pushed
        from another clone, which must never be fast-forwarded away. */
@@ -5219,6 +5371,93 @@ test("a passed run stage publishes its committed head before the review stage cr
   expect(box.order).toEqual(["commit", `push:${box.passedSha}`, "createFlow"]);
   expect(h.flows.get("flow-1")).toMatchObject({ headRef: loadPipelines()[0]!.branch, targetSha: box.passedSha });
   expect(loadPipelines()[0]!.state).toBe("running");
+});
+
+test("an unreachable remote leaves the stage passed and records it as unpublished (#999)", async () => {
+  const h = harness();
+  const box = publishHarness(h, { remoteReadFails: true });
+  await create(h.ports, PUBLISH_STAGES as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+
+  const current = loadPipelines()[0]!;
+  const attempt = current.runs.find((run) => run.stageId === "build")!.attempts[0]!;
+  expect(current).toMatchObject({
+    state: "running",
+    lastPassedCommit: box.passedSha,
+    publishedCommit: null,
+    stateDetail: expect.stringContaining("passed but unpublished"),
+  });
+  expect(attempt).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass" },
+    error: expect.stringContaining("passed but unpublished"),
+  });
+  expect(box.remoteReadAttempts()).toBe(1);
+  expect(box.order).toEqual(["commit"]);
+  expect(h.flows.size).toBe(0);
+
+  /* Review ingress still cannot fence a flow while GitHub is unreachable. It
+     keeps the lane retryable in place instead of turning infrastructure into
+     a second operator decision. */
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  const waiting = loadPipelines()[0]!;
+  expect(waiting.state).toBe("running");
+  expect(waiting.cursor?.stageId).toBe("review");
+  expect(waiting.stateDetail).toContain("passed but unpublished");
+  expect(waiting.runs.find((run) => run.stageId === "build")!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass" },
+  });
+  expect(box.remoteReadAttempts()).toBe(2);
+  expect(h.flows.size).toBe(0);
+});
+
+test("a final passing stage stays open until its accepted head is published (#999)", async () => {
+  const h = harness();
+  const box = publishHarness(h, { remoteReadFails: true });
+  await create(h.ports, [
+    { id: "build", kind: "run", role: { roleId: "builder" }, ["prompt"]: "build", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+
+  const waiting = loadPipelines()[0]!;
+  expect(waiting).toMatchObject({
+    state: "running",
+    closedAt: null,
+    lastPassedCommit: box.passedSha,
+    publishedCommit: null,
+    stateDetail: expect.stringContaining("passed but unpublished"),
+  });
+  expect(waiting.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass" },
+    error: expect.stringContaining("passed but unpublished"),
+  });
+  expect(box.remoteReadAttempts()).toBe(1);
+
+  box.setRemoteReadFails(false);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const completed = loadPipelines()[0]!;
+  expect(completed).toMatchObject({
+    state: "completed",
+    cursor: null,
+    lastPassedCommit: box.passedSha,
+    publishedCommit: box.passedSha,
+    stateDetail: null,
+  });
+  expect(completed.closedAt).not.toBeNull();
+  expect(completed.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass" },
+    error: null,
+  });
+  expect(box.order).toEqual(["commit", `push:${box.passedSha}`]);
+  expect(box.remoteReadAttempts()).toBe(3);
 });
 
 test("a publication that cannot land parks the pass without losing the commit", async () => {

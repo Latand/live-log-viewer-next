@@ -667,3 +667,30 @@ test("runtime callbacks advance while a large lineage projection is linking", as
   expect(runtimeCallbackAdvanced).toBe(true);
   await callback;
 });
+
+/* The chain-head window bounds how many bytes of a successor are read looking
+   for its compact_boundary marker. A transcript whose head outgrew that window
+   must degrade to «parent unknown» — it must never lose its entry, because the
+   entry is the conversation's only route onto the board (#950). */
+test("a compact marker beyond the chain-head window leaves the parent unknown, never the conversation absent", async () => {
+  const slug = "-repo-chain-head-window";
+  const predecessorPath = path.join(SANDBOX, "beyond-window-predecessor.jsonl");
+  const successorPath = path.join(SANDBOX, "beyond-window-successor.jsonl");
+  const logicalParentUuid = "99999999-8888-0777-0666-555555555555";
+  fs.writeFileSync(predecessorPath, `${JSON.stringify({ type: "assistant", uuid: logicalParentUuid })}\n`);
+  /* CHAIN_HEAD_BYTES is 512 KiB; the marker sits a megabyte in. */
+  fs.writeFileSync(successorPath, Buffer.concat([
+    Buffer.from(`${JSON.stringify({ type: "user", uuid: "head" })}\n`),
+    Buffer.alloc(1024 * 1024, 0x20),
+    Buffer.from(`\n${JSON.stringify({ type: "system", subtype: "compact_boundary", logicalParentUuid })}\n`),
+  ]));
+  const predecessor = entry(predecessorPath, `${slug}/predecessor.jsonl`, 1);
+  const successor = entry(successorPath, `${slug}/successor.jsonl`, 2);
+  const entries = [predecessor, successor];
+
+  await linkEntries(entries, { persist: false });
+
+  expect(entries).toHaveLength(2);
+  expect(entries.map((item) => item.path)).toContain(successorPath);
+  expect(predecessor.parent).toBeNull();
+});

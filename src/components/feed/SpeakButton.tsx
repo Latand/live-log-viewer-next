@@ -1,29 +1,37 @@
 "use client";
 
-import { Square, Volume2 } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { RotateCw, Square, Volume2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { translate, useLocale } from "@/lib/i18n";
-import { MAX_TTS_TEXT_LENGTH } from "@/lib/tts";
+import { MAX_TTS_MESSAGE_LENGTH } from "@/lib/tts";
+import { wordSpanAt } from "@/lib/ttsAlignment";
+import { chunkSpeech } from "@/lib/ttsChunks";
+
+import { SpeakAlert, SpeakMenu, type BackendId, type BackendInfo } from "./SpeakMenu";
+import { createKaraoke, karaokeRoots, type Karaoke } from "./ttsKaraoke";
+import {
+  chunksCached,
+  hasBeenSpoken,
+  markSpoken,
+  synthesizeChunk,
+  TtsPlaybackError,
+  TtsRequestError,
+  TtsSession,
+  voiceKey,
+  type VoiceKey,
+} from "./ttsSession";
 
 let activeStop: (() => void) | null = null;
-type BackendId = "openai" | "elevenlabs";
-interface BackendInfo {
-  backend: BackendId;
-  lockedByEnv: boolean;
-  options: { id: BackendId; available: boolean; keyPath: string; model: string; voice: string; cap: number }[];
-}
-interface AudioCacheEntry { url: string; bytes: number }
 
 let backendInfo: BackendInfo | null = null;
 let backendInfoPromise: Promise<BackendInfo> | null = null;
 const backendListeners = new Set<(value: BackendInfo) => void>();
-const audioCache = new Map<string, AudioCacheEntry>();
-let cachedBytes = 0;
-const MAX_CACHE_ENTRIES = 8;
-const MAX_CACHE_BYTES = 16 * 1024 * 1024;
 const SILENT_AUDIO = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
+/* Controls that must not swallow a seek click: the message body carries links,
+   copy chips and disclosure triangles of its own. */
+const INTERACTIVE = "a, button, input, textarea, select, summary, [role='button'], [contenteditable]";
 
 function loadBackendInfo(force = false): Promise<BackendInfo> {
   if (!force && backendInfo) return Promise.resolve(backendInfo);
@@ -56,41 +64,57 @@ function stopActive(): void {
   stop?.();
 }
 
-function cacheKey(info: BackendInfo, text: string): string {
-  const option = info.options.find((candidate) => candidate.id === info.backend)!;
-  return `${option.id}\0${option.model}\0${option.voice}\0${text.slice(0, MAX_TTS_TEXT_LENGTH)}`;
+/* The page-wide "only one control speaks at a time" latch. Assigned through a
+   module function like `stopActive` above rather than from the component body,
+   where the React Compiler reads a bare `activeStop = stop` as a global mutated
+   during render — `begin` is only ever called from a click, but nothing in the
+   source says so. */
+function claimActive(stop: () => void): void {
+  activeStop = stop;
 }
 
-function cacheAudio(key: string, blob: Blob): AudioCacheEntry {
-  const existing = audioCache.get(key);
-  if (existing) return existing;
-  const entry = { url: URL.createObjectURL(blob), bytes: blob.size };
-  audioCache.set(key, entry);
-  cachedBytes += entry.bytes;
-  while (audioCache.size > MAX_CACHE_ENTRIES || (cachedBytes > MAX_CACHE_BYTES && audioCache.size > 1)) {
-    const oldest = audioCache.entries().next().value as [string, AudioCacheEntry] | undefined;
-    if (!oldest) break;
-    audioCache.delete(oldest[0]);
-    cachedBytes -= oldest[1].bytes;
-    URL.revokeObjectURL(oldest[1].url);
-  }
-  return entry;
+function messageKey(info: BackendInfo, text: string): string {
+  const option = info.options.find((candidate) => candidate.id === info.backend)!;
+  return voiceKey(option, text);
+}
+
+/**
+ * Two audio elements, both carrying the user gesture forward on a muted silent
+ * clip so the real chunks can start later without tripping autoplay policy.
+ * Two, because playback alternates between them: the next chunk is already
+ * loaded on the idle one when the playing one ends, which is what makes a
+ * chunk hand-off inaudible. Named for what it unlocks; the old name tripped the
+ * publication gate's credential pattern, which reads `authorization:` as a
+ * secret assignment.
+ */
+function unlockedElements(): { elements: HTMLAudioElement[]; playbackUnlock: Promise<unknown> } {
+  const elements = [new Audio(), new Audio()];
+  const unlocks = elements.map((element) => {
+    element.muted = true;
+    element.src = SILENT_AUDIO;
+    return element.play();
+  });
+  return { elements, playbackUnlock: Promise.all(unlocks.map((unlock) => Promise.resolve(unlock).catch(() => undefined))) };
 }
 
 export function SpeakButton({ text }: { text: string }) {
   const { locale, t } = useLocale();
   const isMobile = useIsMobile();
   const [info, setInfo] = useState<BackendInfo | null>(backendInfo);
-  const [confirming, setConfirming] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<"idle" | "loading" | "playing">("idle");
   const [announcement, setAnnouncement] = useState("");
-  const [timing, setTiming] = useState({ elapsed: 0, total: 0 });
+  const [progress, setProgress] = useState({ elapsed: 0, total: 0, chunk: 0, chunks: 0 });
+  /* Only a re-render trigger: whether a replay is free is answered by the tts
+     cache module, so a completed message keeps its replay control across
+     mounts — and loses it when its chunks are evicted. */
+  const [, setSpokenTick] = useState(0);
+  const chunks = useMemo(() => chunkSpeech(text), [text]);
   const generation = useRef(0);
   const mounted = useRef(true);
   const ownedStop = useRef<(() => void) | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const dialogRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
     mounted.current = true;
@@ -109,221 +133,262 @@ export function SpeakButton({ text }: { text: string }) {
     };
   }, [locale]); // t closes over locale; the function identity itself changes every render
 
-  useEffect(() => {
-    if (!confirming) return;
-    const buttons = Array.from(dialogRef.current?.querySelectorAll("button:not(:disabled)") ?? []);
-    (buttons.at(-1) as HTMLButtonElement | undefined)?.focus();
-  }, [confirming]);
+  const closeMenu = useCallback((restoreFocus?: boolean) => {
+    setMenuOpen(false);
+    if (restoreFocus) queueMicrotask(() => triggerRef.current?.focus());
+  }, []);
+
+  /* The refusal alert's way out (#1030): the same click-away and Escape the
+     menu installs, so a refusal that nothing else clears does not have to be
+     bought off with another synthesis. Stable, or the alert would rebind its
+     listeners on every render. */
+  const dismissError = useCallback(() => setError(null), []);
 
   if (!info || !text) return null;
   const option = info.options.find((candidate) => candidate.id === info.backend);
   if (!option) return null;
-  const key = cacheKey(info, text);
-  const cached = audioCache.get(key);
+  const key = messageKey(info, text);
+  /* "Replay aloud (free)" has to be TRUE when it is shown, so it takes both: a
+     message read to the end, and every one of its chunks still in the cache.
+     Anything else — stopped after the first of twenty-five chunks, or evicted
+     since — is a paid synthesis, and says so in the control's tooltip and in
+     the right-click menu. Asked again at click time, because another card's
+     long answer can evict these chunks without re-rendering this one. */
+  const freeReplay = () => hasBeenSpoken(key) && chunksCached(chunks.map((chunk) => voiceKey(option, chunk.text)));
+  const replayable = freeReplay();
+  const tooLong = text.length > MAX_TTS_MESSAGE_LENGTH;
 
-  const closeConfirm = () => {
-    setConfirming(false);
-    queueMicrotask(() => triggerRef.current?.focus());
-  };
-
-  const playAudio = (audio: HTMLAudioElement, currentGeneration: number) => {
-    let cleaned = false;
-    const cleanup = () => {
-      if (cleaned) return;
-      cleaned = true;
-      audio.pause();
-      if (activeStop === cleanup) activeStop = null;
-      if (ownedStop.current === cleanup) ownedStop.current = null;
-      if (mounted.current && generation.current === currentGeneration) {
-        setPhase("idle");
-        setAnnouncement(t("tts.stopped"));
-        setTiming({ elapsed: 0, total: 0 });
-      }
-    };
-    ownedStop.current = cleanup;
-    activeStop = cleanup;
-    audio.onloadedmetadata = () => setTiming({ elapsed: audio.currentTime, total: Number.isFinite(audio.duration) ? audio.duration : 0 });
-    audio.ontimeupdate = () => setTiming({ elapsed: audio.currentTime, total: Number.isFinite(audio.duration) ? audio.duration : 0 });
-    audio.onended = cleanup;
-    audio.onerror = cleanup;
-    setPhase("playing");
-    setAnnouncement(t("tts.playing"));
-    return { cleanup };
-  };
-
-  const replay = () => {
-    if (!cached) return;
-    audioCache.delete(key);
-    audioCache.set(key, cached);
+  /**
+   * Runs one message end to end: chunks it, keeps a couple of syntheses ahead
+   * of the voice, highlights the word being spoken in the rendered markdown and
+   * lets a click in that text jump the audio there.
+   */
+  const begin = (elements: HTMLAudioElement[], playbackUnlock: Promise<unknown>, fromChar = 0) => {
+    if (!chunks.length) return;
     stopActive();
     const currentGeneration = ++generation.current;
-    const audio = new Audio(cached.url);
-    const { cleanup } = playAudio(audio, currentGeneration);
-    void audio.play().catch(() => {
-      setError(t("tts.playError"));
-      setAnnouncement(t("tts.playError"));
-      cleanup();
+    const alive = () => mounted.current && generation.current === currentGeneration;
+    const roots = triggerRef.current ? karaokeRoots(triggerRef.current) : [];
+    const karaoke: Karaoke | null = roots.length ? createKaraoke(roots, text) : null;
+
+    /* Who the route says it actually billed, once it has answered. The page's
+       copy of the configuration is a page-load-old singleton, so a tab open
+       across a provider switch asks for one provider and is charged another —
+       and everything downstream of this session (the cache key, the record
+       that the message was voiced, the provider the surface names) follows the
+       answer rather than the belief. */
+    let billed: VoiceKey | null = null;
+    let stopped = false;
+    const stop = (announce = true) => {
+      if (stopped) return;
+      stopped = true;
+      session.stop();
+      karaoke?.destroy();
+      for (const root of roots) {
+        root.removeEventListener("click", onSeekClick);
+        delete root.dataset.ttsSeekable;
+      }
+      if (activeStop === stop) activeStop = null;
+      if (ownedStop.current === stop) ownedStop.current = null;
+      if (!alive()) return;
+      setPhase("idle");
+      setProgress({ elapsed: 0, total: 0, chunk: 0, chunks: 0 });
+      if (announce) setAnnouncement(t("tts.stopped"));
+    };
+
+    function onSeekClick(event: MouseEvent) {
+      if (event.button !== 0 || event.defaultPrevented) return;
+      if ((event.target as Element | null)?.closest(INTERACTIVE)) return;
+      const selection = window.getSelection?.();
+      if (selection && !selection.isCollapsed) return;
+      const charIndex = karaoke?.charAtPoint(event.clientX, event.clientY);
+      if (charIndex === null || charIndex === undefined) return;
+      session.seekToChar(charIndex);
+    }
+
+    const session = new TtsSession({
+      chunks,
+      key: (chunkText, voice) => voiceKey(voice ?? option, chunkText),
+      synthesize: synthesizeChunk,
+      elements,
+      onPhase: (next) => {
+        if (!alive()) return;
+        setPhase(next);
+        setAnnouncement(next === "loading" ? t("tts.generating") : t("tts.playing"));
+      },
+      onVoice: (voice) => {
+        if (voice.id === option.id && voice.model === option.model && voice.voice === option.voice) return;
+        billed = voice;
+        if (alive()) {
+          const notice = t("tts.backendChanged", { provider: voice.id });
+          setError(notice);
+          setAnnouncement(notice);
+        }
+        /* Re-reads the configuration and broadcasts it to every control on the
+           page, so the tooltip and the menu name the provider that was charged
+           — off the play path, which is where that wait belongs. */
+        void loadBackendInfo(true).catch(() => undefined);
+      },
+      onPosition: ({ chunkIndex, charIndex, elapsed, total }) => {
+        const word = wordSpanAt(text, charIndex);
+        if (word) karaoke?.highlight(word.start, word.end);
+        if (alive()) setProgress({ elapsed, total, chunk: chunkIndex + 1, chunks: chunks.length });
+      },
+      onError: (cause) => {
+        /* The provider's own words when it refused; otherwise the failure is
+           the browser's (blocked or dead audio) or the network's. */
+        const message = cause instanceof TtsRequestError
+          ? cause.provider ?? t("tts.requestError", { status: cause.status })
+          : cause instanceof TtsPlaybackError
+            ? t("tts.playError")
+            : t("tts.requestFailed");
+        if (alive()) {
+          setError(message);
+          setAnnouncement(message);
+        }
+        stop(false);
+      },
+      onEnd: () => {
+        /* Read to the end: from here the control may offer a replay — for as
+           long as the chunks it would replay are still cached. */
+        markSpoken(billed ? voiceKey(billed, text) : key);
+        if (alive()) {
+          setSpokenTick((tick) => tick + 1);
+          setAnnouncement(t("tts.finished"));
+        }
+        stop(false);
+      },
+    });
+
+    ownedStop.current = stop;
+    claimActive(stop);
+    setPhase("loading");
+    setAnnouncement(t("tts.generating"));
+    setError(null);
+    for (const root of roots) {
+      root.addEventListener("click", onSeekClick);
+      root.dataset.ttsSeekable = "";
+    }
+    void playbackUnlock.then(() => {
+      if (!alive() || stopped) return;
+      session.start(fromChar);
     });
   };
 
-  const synthesize = async (authorizedAudio: HTMLAudioElement, playbackUnlock: Promise<void>) => {
-    stopActive();
-    const currentGeneration = ++generation.current;
-    const controller = new AbortController();
-    let cleaned = false;
-    const cancel = (announce = true) => {
-      if (cleaned) return;
-      cleaned = true;
-      controller.abort();
-      authorizedAudio.pause();
-      if (activeStop === cancel) activeStop = null;
-      if (ownedStop.current === cancel) ownedStop.current = null;
-      if (mounted.current && generation.current === currentGeneration) {
-        setPhase("idle");
-        if (announce) setAnnouncement(t("tts.stopped"));
-      }
-    };
-    ownedStop.current = cancel;
-    activeStop = cancel;
-    setPhase("loading");
-    setAnnouncement(t("tts.generating"));
-    setConfirming(false);
-    setError(null);
-    try {
-      await playbackUnlock;
-      const response = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: text.slice(0, MAX_TTS_TEXT_LENGTH) }),
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error(t("tts.requestError", { status: response.status }));
-      const blob = await response.blob();
-      if (controller.signal.aborted || generation.current !== currentGeneration) return;
-      const entry = cacheAudio(key, blob);
-      authorizedAudio.pause();
-      authorizedAudio.muted = false;
-      authorizedAudio.src = entry.url;
-      authorizedAudio.currentTime = 0;
-      cleaned = true;
-      const { cleanup } = playAudio(authorizedAudio, currentGeneration);
-      await authorizedAudio.play().catch(() => {
-        setError(t("tts.playError"));
-        setAnnouncement(t("tts.playError"));
-        cleanup();
-      });
-    } catch (cause) {
-      if (!controller.signal.aborted) {
-        const message = cause instanceof Error ? cause.message : t("tts.requestFailed");
-        setError(message);
-        setAnnouncement(message);
-      }
-      cancel(false);
-    }
+  const refuse = (message: string) => {
+    setError(message);
+    setAnnouncement(message);
   };
 
-  const confirmPaid = () => {
-    const audio = new Audio();
-    audio.muted = true;
-    audio.src = SILENT_AUDIO;
-    /* The muted silent-audio play() that carries the user gesture forward, so
-       the real clip can start later without tripping autoplay policy. Named for
-       what it unlocks; the old name tripped the publication gate's credential
-       pattern, which reads `authorization:` as a secret assignment. */
-    const playbackUnlock = audio.play();
-    void loadBackendInfo(true)
-      .then((fresh) => {
-        if (cacheKey(fresh, text) !== key) {
-          audio.pause();
-          setInfo(fresh);
-          setError(t("tts.backendChanged"));
-          setConfirming(false);
-          return;
-        }
-        void synthesize(audio, playbackUnlock);
-      })
-      .catch(() => {
-        audio.pause();
-        setError(t("tts.configError"));
-      });
-  };
-
+  /**
+   * The left click, and the whole of it (#1024): stop what this control is
+   * playing, or start playing right now. No dialog stands between the click and
+   * the first chunk — what it costs is on the control's tooltip and in the
+   * right-click menu, decided before the click rather than after it. Cached
+   * chunks are replayed by the session itself, so the free replay and the paid
+   * synthesis are one path.
+   */
   const toggle = () => {
+    closeMenu(false);
     if (ownedStop.current) {
       ownedStop.current();
       return;
     }
-    setError(null);
-    if (cached) replay();
-    else {
-      void loadBackendInfo(true)
-        .then((fresh) => {
-          setInfo(fresh);
-          setConfirming(true);
-        })
-        .catch(() => setError(t("tts.configError")));
+    if (tooLong) {
+      refuse(t("tts.tooLong", { count: MAX_TTS_MESSAGE_LENGTH.toLocaleString() }));
+      return;
     }
+    if (!option.available) {
+      refuse(t("tts.missingKey", { provider: option.id, path: option.keyPath }));
+      return;
+    }
+    /* The tooltip promising a free replay is only as fresh as the last render,
+       and another card's long answer can evict these chunks in between. Asked
+       once more here: the audio still starts on this click, but a replay that
+       turned back into a paid synthesis says so instead of passing for free.
+       Set after `begin`, which clears the notice slot on its way in. */
+    const soldAsFree = replayable && !freeReplay();
+    /* The user gesture is spent here, synchronously: the elements have to be
+       unlocked in the click itself, before anything awaits. */
+    const { elements, playbackUnlock } = unlockedElements();
+    setError(null);
+    begin(elements, playbackUnlock);
+    if (soldAsFree) setError(t("tts.replayExpired"));
   };
 
-  const pickBackend = async (backend: BackendId) => {
-    if (info.lockedByEnv) return;
-    const response = await fetch("/api/tts/backend", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ backend }),
-    });
-    if (response.ok) {
+  const toggleMenu = () => {
+    if (menuOpen) {
+      closeMenu(false);
+      return;
+    }
+    setMenuOpen(true);
+    /* The menu is the surface that must be right about provider and price, so
+       it asks the server again — off the play path, where the wait was. */
+    void loadBackendInfo(true)
+      .then((fresh) => { if (mounted.current) setInfo(fresh); })
+      .catch(() => { if (mounted.current) setError(t("tts.configError")); });
+  };
+
+  const pickBackend = async (backend: BackendId): Promise<boolean> => {
+    if (info.lockedByEnv) return false;
+    try {
+      const response = await fetch("/api/tts/backend", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ backend }),
+      });
+      if (!response.ok) return false;
       const value = (await response.json()) as BackendInfo;
       storeBackendInfo(value);
       setInfo(value);
+      return true;
+    } catch {
+      return false;
     }
   };
 
   const active = phase !== "idle";
-  const onDialogKeyDown = (event: ReactKeyboardEvent) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeConfirm();
-      return;
-    }
-    if (event.key === "Enter" && option.available) {
-      event.preventDefault();
-      confirmPaid();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const buttons = Array.from(dialogRef.current?.querySelectorAll("button:not(:disabled)") ?? []) as HTMLButtonElement[];
-    if (!buttons.length) return;
-    const first = buttons[0]!;
-    const last = buttons.at(-1)!;
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-  };
-
+  const Icon = active ? Square : replayable ? RotateCw : Volume2;
+  /* The tooltip is where the paid/free truth lives now, next to the hint that
+     the menu is a right-click away — the same split MicButton uses. It runs the
+     click's own order of refusals, so it says what the click will actually do:
+     a provider with no key cannot read anything, paid or otherwise, and
+     promising a paid read there was the last place this control oversold
+     itself (#1030). */
+  const title = active
+    ? t("tts.stop")
+    : tooLong
+      ? t("tts.tooLong", { count: MAX_TTS_MESSAGE_LENGTH.toLocaleString() })
+      : !option.available
+        ? t("tts.missingKey", { provider: option.id, path: option.keyPath })
+        : t("tts.triggerTitle", { action: replayable ? t("tts.replayFree") : t("tts.readPaid") });
   return (
     <span className="relative">
-      <button ref={triggerRef} type="button" onClick={toggle} className={`inline-flex items-center justify-center rounded-md text-muted transition-opacity hover:bg-sunken hover:text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isMobile ? "h-11 w-11" : "p-1"} opacity-70 hover:opacity-100 group-hover/msg:opacity-100`} aria-label={active ? t("tts.stop") : cached ? t("tts.replay") : t("tts.read")} title={active ? t("tts.stop") : cached ? t("tts.replayFree") : t("tts.readPaid")}>
-        {active ? <Square className="h-3.5 w-3.5" aria-hidden /> : <Volume2 className="h-3.5 w-3.5" aria-hidden />}
+      <button ref={triggerRef} data-tts-trigger type="button" onClick={toggle} onContextMenu={(event) => { event.preventDefault(); toggleMenu(); }} aria-haspopup="menu" aria-expanded={menuOpen} className={`inline-flex items-center justify-center rounded-md text-muted transition-opacity hover:bg-sunken hover:text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isMobile ? "h-11 w-11" : "p-1"} opacity-70 hover:opacity-100 group-hover/msg:opacity-100`} aria-label={active ? t("tts.stop") : replayable ? t("tts.replay") : t("tts.read")} title={title}>
+        <Icon className="h-3.5 w-3.5" aria-hidden />
       </button>
       <span role="status" aria-live="polite" className="sr-only">{announcement}</span>
-      {phase === "playing" && timing.total > 0 ? <span className="text-[10px] tabular-nums text-muted">{Math.floor(timing.elapsed)} / {Math.ceil(timing.total)}s</span> : null}
-      {confirming ? (
-        <span ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("tts.confirmAria")} onKeyDown={onDialogKeyDown} className="absolute right-0 top-7 z-50 block w-72 rounded-xl border border-border bg-card p-3 text-left shadow-xl">
-          <span className="block text-xs font-bold text-primary">{t("tts.confirmTitle")}</span>
-          <span className="mt-1 block text-[11px] text-muted">{option.id} · {option.model} · {option.voice}</span>
-          <span className="block text-[11px] text-muted">{t("tts.characters", { count: text.length.toLocaleString() })}</span>
-          <span className="mt-2 block text-[11px] text-primary">{t("tts.billing", { provider: option.id })}</span>
-          <span className="block text-[11px] text-primary">{t("tts.disclosure")}</span>
-          {text.length > MAX_TTS_TEXT_LENGTH ? <span className="mt-2 block text-[11px] font-semibold text-danger">{t("tts.shorten", { count: MAX_TTS_TEXT_LENGTH.toLocaleString() })}</span> : null}
-          {!option.available ? <span className="mt-2 block break-all text-[11px] text-danger">{t("tts.missingKey", { provider: option.id, path: option.keyPath })}</span> : null}
-          <span className="mt-2 flex flex-wrap gap-1">{info.options.map((candidate) => <button key={candidate.id} type="button" disabled={info.lockedByEnv} onClick={() => void pickBackend(candidate.id)} className={`inline-flex items-center rounded bg-sunken text-[10px] font-semibold disabled:opacity-50 ${isMobile ? "min-h-11 px-3" : "px-2 py-1"}`}>{candidate.id}{candidate.id === info.backend ? " ✓" : ""}</button>)}</span>
-          <span className="mt-3 flex justify-end gap-2">
-            <button type="button" onClick={closeConfirm} className={`inline-flex items-center rounded text-xs text-muted ${isMobile ? "min-h-11 px-3" : "px-2 py-1"}`}>{t("tts.cancel")}</button>
-            <button type="button" disabled={!option.available} onClick={confirmPaid} className={`inline-flex items-center rounded bg-accent text-xs font-bold text-white disabled:opacity-50 ${isMobile ? "min-h-11 px-3" : "px-2 py-1"}`}>{t("tts.speak")}</button>
-          </span>
+      {phase === "playing" && progress.total > 0 ? (
+        <span className="text-[10px] tabular-nums text-muted">
+          {Math.floor(progress.elapsed)} / {Math.ceil(progress.total)}s
+          {progress.chunks > 1 ? <span className="ml-1" title={t("tts.partOf", { index: progress.chunk, count: progress.chunks })}>{progress.chunk}/{progress.chunks}</span> : null}
         </span>
       ) : null}
-      {error ? <span role="alert" className="absolute right-0 top-7 z-40 w-56 rounded bg-card p-2 text-[11px] text-danger shadow">{error}</span> : null}
+      {menuOpen ? (
+        <SpeakMenu
+          anchorRef={triggerRef}
+          info={info}
+          option={option}
+          chars={text.length}
+          notice={error}
+          freeReplay={freeReplay}
+          active={active}
+          tooLong={tooLong}
+          onPick={pickBackend}
+          onClose={closeMenu}
+        />
+      ) : null}
+      {error && !menuOpen ? <SpeakAlert anchorRef={triggerRef} onDismiss={dismissError}>{error}</SpeakAlert> : null}
     </span>
   );
 }

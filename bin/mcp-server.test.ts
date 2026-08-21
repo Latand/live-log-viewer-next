@@ -76,6 +76,7 @@ test("fresh Claude and Codex hosts load the exact MCP runtime named by the promo
       revision: "${candidateRevision}",
       tools: ["deployment_status", "board_snapshot"],
       host: process.env.LLV_TEST_HOST,
+      hotStateRevision: process.env.LLV_HOT_STATE_RELEASE_REVISION,
     }) + "\\n");
     process.stdin.pipe(process.stdout);
   `;
@@ -109,6 +110,7 @@ test("fresh Claude and Codex hosts load the exact MCP runtime named by the promo
       revision: candidateRevision,
       tools: ["deployment_status", "board_snapshot"],
       host,
+      hotStateRevision: candidateRevision,
     });
     expect(handshake).toBe(`${host}-initialize`);
   }

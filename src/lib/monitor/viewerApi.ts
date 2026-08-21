@@ -5,7 +5,7 @@ import type { MonitorRunRecord } from "./types";
  * The monitor's only door into the machine (issue #741).
  *
  * Every fact it reads and every write it makes goes through the Viewer's HTTP
- * API — the orchestrator record, the conversation catalog, transcripts, board
+ * API — the orchestrator seat, the conversation catalog, transcripts, board
  * cards, pipelines and flows alike. The mechanism this replaces read
  * `state/pipelines.json` off disk, which is how it kept "working" against a
  * shape the viewer had long since stopped being the only writer of.
@@ -17,7 +17,6 @@ import type { MonitorRunRecord } from "./types";
 export interface OrchestratorStatusResponse {
   record: { conversationId: string; path: string | null; createdAt: string } | null;
   exists: boolean;
-  defaultCwd: string;
 }
 
 export interface ConversationSummary {
@@ -94,7 +93,7 @@ export type RunLockClaim =
   | { claimed: false; detail: string };
 
 export interface ViewerApi {
-  orchestrator(): Promise<OrchestratorStatusResponse>;
+  orchestrator(project: string): Promise<OrchestratorStatusResponse>;
   /** The host currently owning a transcript, or null when nothing does. A
       read-only liveness probe: delivering into a conversation with no host
       would RESUME it, and waking sessions is not the monitor's business. */
@@ -184,15 +183,21 @@ export function httpViewerApi(options: HttpViewerApiOptions): ViewerApi {
   }
 
   return {
-    async orchestrator() {
-      const payload = object(await call("api/orchestrator"));
-      const record = payload.record === null || payload.record === undefined ? null : object(payload.record);
+    async orchestrator(project) {
+      const scopedProject = project.trim();
+      if (!scopedProject) throw new ViewerApiError("a project is required to resolve the orchestrator seat", null);
+      const params = new URLSearchParams({ project: scopedProject });
+      const payload = object(await call(`api/orchestrator/seat?${params.toString()}`));
+      const record = payload.seat === null || payload.seat === undefined ? null : object(payload.seat);
       return {
         record: record && str(record.conversationId)
-          ? { conversationId: str(record.conversationId), path: typeof record.path === "string" ? record.path : null, createdAt: str(record.createdAt) }
+          ? {
+            conversationId: str(record.conversationId),
+            path: typeof record.path === "string" ? record.path : null,
+            createdAt: str(record.activatedAt, str(record.designatedAt)),
+          }
           : null,
         exists: payload.exists === true,
-        defaultCwd: str(payload.defaultCwd),
       };
     },
 

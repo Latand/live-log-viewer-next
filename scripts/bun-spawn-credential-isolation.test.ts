@@ -51,7 +51,7 @@ test("production Bun child paths use the credential-isolated environment seam", 
   expect(uncovered).toEqual([]);
   expect(inventory).toEqual([
     { file: "scripts/deploy-staging.ts", method: "spawn" },
-    ...Array.from({ length: 8 }, () => ({ file: "scripts/privacy-publication-gate.ts", method: "spawnSync" })),
+    ...Array.from({ length: 9 }, () => ({ file: "scripts/privacy-publication-gate.ts", method: "spawnSync" })),
     { file: "scripts/runtime-host-viewer-adapter.ts", method: "spawn" },
   ]);
 });

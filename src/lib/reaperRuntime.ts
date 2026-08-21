@@ -28,6 +28,7 @@ import {
 } from "@/lib/accounts/migration/intentLiveness";
 import { procBackend } from "@/lib/proc";
 import { runtimeHostClient } from "@/lib/runtime/client";
+import { reconcileDeadStructuredRegistryHosts } from "@/lib/runtime/registry";
 import { reconcileStaleSpawnsHeldByLiveOwners } from "@/lib/runtime/staleSpawnOwner";
 import { terminalizeStaleStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { listFiles } from "@/lib/scanner";
@@ -957,6 +958,15 @@ export async function runReaperCycle(options: {
     registry.terminalizeFailedSpawnDeliveries();
   } catch (error) {
     console.error("[reaper] failed-spawn held-delivery convergence failed", error);
+  }
+  /* Completed structured conversations can retain a live Viewer writer claim
+     after their recorded engine child exits without cleanup. Revalidate only
+     those recorded PIDs and available start identities, then clear dead rows
+     without signalling any process so ordinary recovery can claim them again. */
+  try {
+    reconcileDeadStructuredRegistryHosts(registry);
+  } catch (error) {
+    console.error("[reaper] dead structured-host ownership convergence failed", error);
   }
   /* Stale structured launch convergence (#334): the reaper cycle is the
      while-running seam that turns dead-evidence pending receipts terminal, so

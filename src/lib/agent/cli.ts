@@ -5,7 +5,10 @@ import os from "node:os";
 import path from "node:path";
 
 import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from "@/lib/accounts/codex";
-import { claudeHomeOwningTranscript, claudeSettingsPath, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
+import { claudeSettingsPath, claudeTranscriptOwnership, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
+import { isUnderClaudeSubagentsDir } from "@/lib/scanner/claudeNative";
+import { telegramSessionReaderPath } from "@/lib/telegram/packaging";
+import { TELEGRAM_CONNECTOR_TOKEN_ENV, telegramSessionPath } from "@/lib/telegram/sessionStore";
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
 import { grantedMcpServers } from "./mcpAllowlist";
@@ -110,7 +113,7 @@ export function withSpawnCapability(spec: ResumeSpec, capability: string): Resum
   if (!/^[A-Za-z0-9_-]{43}$/.test(capability)) throw new Error("Viewer spawn capability is invalid");
   return {
     ...spec,
-    command: `env ${VIEWER_SPAWN_CAPABILITY_ENV}=${shellQuote(capability)} ${spec.command}`,
+    command: `( ${VIEWER_SPAWN_CAPABILITY_ENV}=${shellQuote(capability)}; export ${VIEWER_SPAWN_CAPABILITY_ENV}; ${spec.command} )`,
   };
 }
 
@@ -136,7 +139,32 @@ export interface FreshSpecOptions {
 }
 
 const CLAUDE_SHADOWED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "VERTEXAI_PROJECT", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "LLV_TOKEN"];
-export function claudeEnvPrefix(home: string): string { return `env ${CLAUDE_SHADOWED_ENV.map((key) => `-u ${key}`).join(" ")} CLAUDE_CONFIG_DIR=${shellQuote(home)}`; }
+
+function telegramTokenAssignment(mcpServers: readonly string[]): string {
+  if (!mcpServers.includes("telegram")) return "";
+  const command = [process.execPath, telegramSessionReaderPath(), path.dirname(telegramSessionPath())].map(shellQuote).join(" ");
+  return `unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `
+    + `if ${TELEGRAM_CONNECTOR_TOKEN_ENV}="$(${command} 2>/dev/null)" `
+    + `&& [ "\${#${TELEGRAM_CONNECTOR_TOKEN_ENV}}" -eq 43 ]; then export ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `
+    + `else unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; fi; `;
+}
+
+function telegramScopedCommand(command: string, mcpServers: readonly string[]): string {
+  const tokenPrelude = mcpServers.includes("telegram")
+    ? telegramTokenAssignment(mcpServers)
+    : `unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `;
+  return `( ${tokenPrelude}${command} )`;
+}
+
+export function claudeEnvPrefix(home: string, mcpServers: readonly string[] = []): string {
+  const unsets = mcpServers.includes("telegram") ? CLAUDE_SHADOWED_ENV : [...CLAUDE_SHADOWED_ENV, TELEGRAM_CONNECTOR_TOKEN_ENV];
+  return `env ${unsets.map((key) => `-u ${key}`).join(" ")} CLAUDE_CONFIG_DIR=${shellQuote(home)}`;
+}
+
+function codexEnvPrefix(home: string, mcpServers: readonly string[]): string {
+  const tokenUnset = mcpServers.includes("telegram") ? "" : ` -u ${TELEGRAM_CONNECTOR_TOKEN_ENV}`;
+  return `env -u LLV_TOKEN${tokenUnset} CODEX_HOME=${shellQuote(home)}`;
+}
 
 export interface ResumeSpecOptions {
   model?: string | null;
@@ -162,6 +190,11 @@ export interface ResumeSpecOptions {
   /** The command is destined for the operator's own terminal: resolve the CLI
       binary as the HOST sees it, never the in-container nsenter shim. */
   hostTerminal?: boolean;
+  /** Account recorded for this conversation (issue #935). Under the shared
+      transcript store (#891) the path names no owner — every account resolves
+      to the same root — so this durable provenance is what picks the home the
+      resume runs under. Absent ⇒ path layout, then the routed account. */
+  accountId?: string | null;
 }
 
 /* Re-validation on the way out of the durable launch profile (issue #739): a
@@ -263,7 +296,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     else args.push("--strict-mcp-config");
     const command = args.map(shellQuote).join(" ");
     return {
-      command: managed ? `${claudeEnvPrefix(options.claudeConfigDir!)} ${command}` : command,
+      command: telegramScopedCommand(managed ? `${claudeEnvPrefix(options.claudeConfigDir!, mcpServers)} ${command}` : command, mcpServers),
       cwd,
       windowName: "claude-new",
       engine: "claude",
@@ -301,7 +334,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
   if (!options.allowSubagents) args.push("--disable", "multi_agent");
   const command = args.map(shellQuote).join(" ");
   return {
-    command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
+    command: telegramScopedCommand(`${codexEnvPrefix(home, mcpServers)} ${command}`, mcpServers),
     cwd,
     windowName: "codex-new",
     engine: "codex",
@@ -369,7 +402,7 @@ export function claudeSuccessorSpecFor(input: {
   });
   pushClaudePolicyArgs(args, policy);
   return {
-    command: `${claudeEnvPrefix(input.targetHome)} ${args.map(shellQuote).join(" ")}`,
+    command: telegramScopedCommand(`${claudeEnvPrefix(input.targetHome, input.profile.mcpServers)} ${args.map(shellQuote).join(" ")}`, input.profile.mcpServers),
     cwd,
     windowName: "claude-migration-successor",
     engine: "claude",
@@ -379,32 +412,59 @@ export function claudeSuccessorSpecFor(input: {
   };
 }
 
+/** Whether a transcript can be reopened, and — when it cannot — which single
+    condition refused it. A caller that only needs the command uses
+    {@link resumeSpecFor}; a caller that has to tell the operator why nothing
+    happened reads {@link ResumeEligibility.reason}, so diagnosing a refusal
+    never again means reading three files. */
+export type ResumeEligibility =
+  | { ok: true; engine: Extract<AgentEngine, "claude" | "codex">; sessionId: string; home: string; cwd: string }
+  | { ok: false; reason: string };
+
+/**
+ * The gate {@link resumeSpecFor} applies, with its refusal named. Claude
+ * account ownership resolves through {@link claudeTranscriptOwnership}, where
+ * the recorded account (`options.accountId`) is what answers inside the shared
+ * transcript store — every account resolves to the same root there, so the
+ * path names no owner (issue #935).
+ */
+export function resumeEligibility(root: string, pathname: string, options: ResumeSpecOptions = {}): ResumeEligibility {
+  const base = path.basename(pathname);
+  /* One effective cwd, chosen before the spec (and its MCP policy enumeration)
+     is generated: the caller's recorded cwd is authoritative; only when it is
+     absent do we sniff the transcript head (finding 1). */
+  const recordedCwd = options.cwd && options.cwd.trim() ? options.cwd : null;
+  const cwd = () => recordedCwd ?? resumeCwd(pathname);
+  if (root === "claude-projects" && base.endsWith(".jsonl")) {
+    if (isUnderClaudeSubagentsDir(pathname)) {
+      return { ok: false, reason: "a Claude subagent transcript has no session of its own to resume" };
+    }
+    const sid = base.slice(0, -".jsonl".length);
+    if (!/^[0-9a-f-]{36}$/.test(sid)) return { ok: false, reason: "the transcript filename carries no Claude session id" };
+    const ownership = claudeTranscriptOwnership(pathname, options.accountId);
+    if (ownership.kind === "unreadable") return { ok: false, reason: "the conversation transcript cannot be read from disk" };
+    if (ownership.kind === "foreign") return { ok: false, reason: "the transcript is outside every Claude account transcript root the viewer knows" };
+    return { ok: true, engine: "claude", sessionId: sid, home: ownership.home, cwd: cwd() };
+  }
+  if (root === "codex-sessions" && base.endsWith(".jsonl")) {
+    const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
+    if (!id) return { ok: false, reason: "the transcript filename carries no Codex session id" };
+    const home = codexHomeOwningSessionPath(pathname);
+    if (!home) return { ok: false, reason: "the transcript is outside every Codex account session root the viewer knows" };
+    return { ok: true, engine: "codex", sessionId: id, home, cwd: cwd() };
+  }
+  return { ok: false, reason: "this transcript belongs to no resumable agent session" };
+}
+
 /**
  * Shell command that reopens a finished conversation interactively so a new
  * prompt can be typed into it. Claude subagent transcripts have no resumable
  * session of their own, so only root session files qualify.
  */
 export function resumeSpecFor(root: string, pathname: string, options: ResumeSpecOptions = {}): ResumeSpec | null {
-  const base = path.basename(pathname);
-  /* One effective cwd, chosen before the spec (and its MCP policy enumeration)
-     is generated: the caller's recorded cwd is authoritative; only when it is
-     absent do we sniff the transcript head (finding 1). */
-  const recordedCwd = options.cwd && options.cwd.trim() ? options.cwd : null;
-  if (root === "claude-projects" && base.endsWith(".jsonl") && !pathname.includes(path.sep + "subagents" + path.sep)) {
-    const sid = base.slice(0, -".jsonl".length);
-    if (!/^[0-9a-f-]{36}$/.test(sid)) return null;
-    const home = claudeHomeOwningTranscript(pathname);
-    if (!home) return null;
-    return resumeSpecForSession("claude", sid, recordedCwd ?? resumeCwd(pathname), home, options);
-  }
-  if (root === "codex-sessions" && base.endsWith(".jsonl")) {
-    const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
-    if (!id) return null;
-    const home = codexHomeOwningSessionPath(pathname);
-    if (!home) return null;
-    return resumeSpecForSession("codex", id, recordedCwd ?? resumeCwd(pathname), home, options);
-  }
-  return null;
+  const eligibility = resumeEligibility(root, pathname, options);
+  if (!eligibility.ok) return null;
+  return resumeSpecForSession(eligibility.engine, eligibility.sessionId, eligibility.cwd, eligibility.home, options);
 }
 
 /**
@@ -452,7 +512,7 @@ export function resumeSpecForSession(
     args.push("--resume", sessionId);
     const command = args.map(shellQuote).join(" ");
     return {
-      command: managed ? `${claudeEnvPrefix(home)} ${command}` : command,
+      command: telegramScopedCommand(managed ? `${claudeEnvPrefix(home, mcpServers)} ${command}` : command, mcpServers),
       cwd,
       windowName: "claude-resume",
       engine: "claude",
@@ -472,7 +532,7 @@ export function resumeSpecForSession(
   if (!options.allowSubagents) command += " --disable multi_agent";
   command += ` resume ${sessionId}`;
   return {
-    command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
+    command: telegramScopedCommand(`${codexEnvPrefix(home, mcpServers)} ${command}`, mcpServers),
     cwd,
     windowName: "codex-resume",
     engine: "codex",

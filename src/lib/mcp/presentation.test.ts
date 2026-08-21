@@ -36,6 +36,7 @@ describe("describeMcpCall", () => {
       ["pipeline_action", { pipelineId: "pipe-a", action: "resume" }, "pipeline", "Resuming pipeline"],
       ["link_task_to_pipeline", { taskId: "task-a", pipelineId: "pipe-a" }, "link", "Linking task to pipeline"],
       ["list_conversations", { project: "viewer" }, "conversation", "Listing conversations"],
+      ["search_transcripts", { query: "report" }, "conversation", "Searching transcripts"],
       ["get_conversation", { conversationId: "conversation_a" }, "conversation", "Opening conversation"],
       ["deploy_exact_sha", { revision: "abcdef1234567890", confirm: "deploy" }, "deploy", "Deploying release"],
       ["get_pipeline", { pipelineId: "pipe-a" }, "pipeline", "Opening pipeline"],

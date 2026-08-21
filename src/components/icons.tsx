@@ -80,6 +80,7 @@ export {
   Play,
   Power,
   RotateCw,
+  Search,
   Sparkle,
   Square,
   SquareTerminal,

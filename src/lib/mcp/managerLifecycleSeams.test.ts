@@ -82,7 +82,6 @@ function managerSources(overrides: Partial<ManagerAuthoritySources> = {}): Manag
   return {
     activeSeats: () => [activeSeat(MANAGER_ID)],
     revocations: () => [],
-    legacyManagerConversationId: () => null,
     conversationFacts: () => ({ superseded: false, hasGeneration: true, project: "proj-a" }),
     resolveAlias: (id) => id,
     ...overrides,

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { validateLaunchModel } from "@/lib/agent/models";
 import { statePath } from "@/lib/configDir";
 import { canonicalProject } from "@/lib/projects/aliases";
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
@@ -10,11 +11,13 @@ import { atomicWriteText } from "@/lib/flows/store";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
 import { resolveRole } from "@/lib/roles/registry";
 import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
+import { initializeStateCollections, SqliteStateCollection, type StateCollectionSeed } from "@/lib/state/sqliteStateStore";
 import type { RoleConfig as RegistryRoleConfig, RoleDefinition } from "@/lib/roles/types";
 
 import type { FinishAction, ImplementStage, ReviewStage, Workflow, WorkflowStage, WorkflowStageRun, WorkflowTemplate } from "./types";
 
 const workflowsFile = () => statePath("workflows.json");
+const stateDatabaseFile = () => statePath("state.sqlite");
 const templatesFile = () => statePath("workflow-templates.json");
 const artifactDir = () => statePath("workflows");
 
@@ -176,6 +179,21 @@ function readJson(filePath: string): unknown {
   }
 }
 
+function readWorkflowStateJson(): unknown | null {
+  let source: string;
+  try {
+    source = fs.readFileSync(workflowsFile(), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error("could not read legacy workflow state", { cause: error });
+  }
+  try {
+    return JSON.parse(source) as unknown;
+  } catch (error) {
+    throw new Error("legacy workflow state contains malformed JSON", { cause: error });
+  }
+}
+
 function roleOf(value: unknown): RoleConfig | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const role = value as Partial<RoleConfig>;
@@ -263,6 +281,24 @@ export function normalizeStages(value: unknown): { stages: WorkflowStage[] } | {
   return { stages };
 }
 
+/** Validate only a workflow being admitted for a new run. Persisted workflow
+    snapshots keep bypassing this helper so restart/replay can retain historical
+    provider model ids. */
+export function validateWorkflowLaunchModels(stages: WorkflowStage[]): { stages: WorkflowStage[] } | { error: string } {
+  for (const stage of stages) {
+    const roles = stage.kind === "implement"
+      ? [stage.agent]
+      : [stage.reviewer, stage.fixer];
+    for (const role of roles) {
+      if (!role.model) continue;
+      const validation = validateLaunchModel(role.engine, role.model);
+      if ("error" in validation) return validation;
+      role.model = validation.model;
+    }
+  }
+  return { stages };
+}
+
 export function normalizeTemplate(value: unknown): WorkflowTemplate | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Partial<WorkflowTemplate>;
@@ -295,10 +331,38 @@ function isWorkflow(value: unknown): value is Workflow {
   );
 }
 
+const workflowSnapshots = new WeakMap<Workflow[], Map<string, string>>();
+
+function rememberWorkflowSnapshot(workflows: Workflow[]): Workflow[] {
+  workflowSnapshots.set(workflows, new Map(workflows.map((workflow) => [workflow.id, JSON.stringify(workflow)])));
+  return workflows;
+}
+
 export function loadWorkflows(): Workflow[] {
-  const raw = readJson(workflowsFile()) as WorkflowFile | null;
-  const workflows = Array.isArray(raw?.workflows) ? raw.workflows.filter(isWorkflow) : [];
-  return workflows.map((wf) => ({
+  return rememberWorkflowSnapshot(workflowStore().snapshot());
+}
+
+function parseWorkflowsFromDisk(): Workflow[] {
+  const raw = readWorkflowStateJson();
+  if (raw === null) return [];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("legacy workflow state must be an object");
+  }
+  const file = raw as WorkflowFile;
+  if (!Array.isArray(file.workflows) || !file.workflows.every(isWorkflow)) {
+    throw new Error("legacy workflow state contains malformed records");
+  }
+  const workflows = file.workflows;
+  return workflows.map(reviveWorkflow);
+}
+
+export function planWorkflowStateMigration(): { records: number; keys: string[] } {
+  const records = parseWorkflowsFromDisk();
+  return { records: records.length, keys: records.map((workflow) => workflow.id) };
+}
+
+function reviveWorkflow(wf: Workflow): Workflow {
+  return {
     ...wf,
     project: canonicalProject(wf.project ?? ""),
     pausedState: wf.pausedState ?? null,
@@ -310,7 +374,47 @@ export function loadWorkflows(): Workflow[] {
     fixerConversationId: wf.fixerConversationId ?? null,
     stageRuns: wf.stageRuns.map((run) => ({ ...run, agentConversationId: run.agentConversationId ?? null })),
     prUrl: wf.prUrl ?? null,
-  }));
+  };
+}
+
+const workflowStores = new Map<string, SqliteStateCollection<Workflow>>();
+
+export function workflowStateCollectionSeed(): StateCollectionSeed<Workflow> {
+  return {
+    collection: "workflows",
+    schemaVersion: 1,
+    migrationId: "workflows-json-v1",
+    loadRecords: parseWorkflowsFromDisk,
+    key: (workflow: Workflow) => workflow.id,
+  };
+}
+
+function workflowStore(): SqliteStateCollection<Workflow> {
+  const filename = stateDatabaseFile();
+  const held = workflowStores.get(filename);
+  if (held) return held;
+  initializeStateCollections(filename, [workflowStateCollectionSeed()]);
+  const store = new SqliteStateCollection<Workflow>(filename, {
+    collection: "workflows",
+    schemaVersion: 1,
+    busyMessage: "workflow state is busy",
+    key: (workflow) => workflow.id,
+    decode: (value) => isWorkflow(value) ? reviveWorkflow(value) : null,
+    clone: (workflow) => reviveWorkflow(structuredClone(workflow)),
+    strictDecode: true,
+    decodeError: (error) => new Error("workflow SQLite state contains a malformed row", { cause: error }),
+    validate: (workflow) => {
+      if (!isWorkflow(workflow)) throw new Error("refusing to persist a malformed workflow record");
+    },
+  });
+  workflowStores.set(filename, store);
+  return store;
+}
+
+export function checkpointWorkflowRollbackMirrorForDemotion(): number {
+  return workflowStore().checkpointMirrorForDemotion((workflows, revision) => {
+    atomicWriteJson(workflowsFile(), { _sqliteRevision: revision, workflows });
+  });
 }
 
 function reconcileWorkflowPath(
@@ -434,8 +538,77 @@ export async function reconcileWorkflowConversationOwnershipCooperatively(regist
   mergeWorkflowOwnershipPatches(patches);
 }
 
+function sameJson(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Three-way merge for detached controller snapshots. Durable concurrent
+ * changes win direct conflicts; disjoint local fields, including the ownership
+ * fields returned after an external spawn, remain eligible for persistence. */
+function mergeDetachedValue(baseline: unknown, local: unknown, durable: unknown): unknown {
+  if (sameJson(local, baseline)) return structuredClone(durable);
+  if (sameJson(durable, baseline)) return structuredClone(local);
+  if (plainRecord(baseline) && plainRecord(local) && plainRecord(durable)) {
+    const merged: Record<string, unknown> = {};
+    const keys = new Set([...Object.keys(baseline), ...Object.keys(local), ...Object.keys(durable)]);
+    for (const key of keys) merged[key] = mergeDetachedValue(baseline[key], local[key], durable[key]);
+    return merged;
+  }
+  if (Array.isArray(baseline) && Array.isArray(local) && Array.isArray(durable)) {
+    const length = Math.max(baseline.length, local.length, durable.length);
+    return Array.from({ length }, (_, index) => mergeDetachedValue(baseline[index], local[index], durable[index]));
+  }
+  return structuredClone(durable);
+}
+
+function mergeDetachedWorkflow(baselineJson: string, local: Workflow, durable: Workflow): Workflow {
+  const baseline = JSON.parse(baselineJson) as Workflow;
+  return reviveWorkflow(mergeDetachedValue(baseline, local, durable) as Workflow);
+}
+
 export function saveWorkflows(workflows: Workflow[]): void {
-  atomicWriteJson(workflowsFile(), { workflows });
+  const baseline = workflowSnapshots.get(workflows);
+  if (!baseline) {
+    workflowStore().replaceSync(workflows);
+    rememberWorkflowSnapshot(workflows);
+    return;
+  }
+  const localIds = new Set(workflows.map((workflow) => workflow.id));
+  const changed = workflows.filter((workflow) => baseline.get(workflow.id) !== JSON.stringify(workflow));
+  const removed = [...baseline.keys()].filter((id) => !localIds.has(id));
+  workflowStore().patchSync(() => {
+    const accepted: Workflow[] = [];
+    const acceptedDeletes: string[] = [];
+    for (const workflow of changed) {
+      const before = baseline.get(workflow.id);
+      const current = workflowStore().get(workflow.id);
+      if (before !== undefined && current && JSON.stringify(current) !== before) {
+        const merged = mergeDetachedWorkflow(before, workflow, current);
+        for (const key of Object.keys(workflow)) delete (workflow as unknown as Record<string, unknown>)[key];
+        Object.assign(workflow, merged);
+        if (JSON.stringify(merged) !== JSON.stringify(current)) accepted.push(merged);
+      } else {
+        accepted.push(workflow);
+      }
+    }
+    for (const id of removed) {
+      const current = workflowStore().get(id);
+      if (current && JSON.stringify(current) === baseline.get(id)) acceptedDeletes.push(id);
+    }
+    return { records: accepted, deleteKeys: acceptedDeletes };
+  });
+  rememberWorkflowSnapshot(workflows);
+}
+
+/** Serialize one workflow read-modify-write across Viewer and runtime processes. */
+export async function withWorkflowMutation<T>(
+  mutate: (workflows: Workflow[], persist: () => void) => Promise<T> | T,
+): Promise<T> {
+  return workflowStore().mutate(mutate);
 }
 
 export function loadTemplates(): WorkflowTemplate[] {

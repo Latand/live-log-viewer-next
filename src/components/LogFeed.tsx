@@ -7,7 +7,9 @@ import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
 import { useLogTail } from "@/hooks/useLogTail";
 import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
 import { useToolActivityCues } from "@/hooks/useToolActivityCues";
+import { accountIdFromPath } from "@/lib/accounts/badge";
 import { conversationIdentity } from "@/lib/accounts/identity";
+import { activeCardMigration, cardMigrationState, migrationHoldsDelivery, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -748,7 +750,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
               delta: visibleLiveTurnItems.length > 0,
             }).map((section) => {
               if (section === "launch") return <LaunchChips key="launch" launch={launch!} onRetry={onLaunchRetry} />;
-              if (section === "outbox") return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} />;
+              if (section === "outbox") {
+                /* While this card is switching accounts the server holds every
+                   delivery it admits, so the bubble — the message's ONE delivery
+                   state — is what says the message waits for the switch. A hold
+                   annotation the card has already satisfied (its target IS the
+                   active account) says nothing: the switch is over. */
+                const liveMigration = activeCardMigration(file.migration, accountIdFromPath(file.path));
+                const switchHold = migrationHoldsDelivery(cardMigrationState(liveMigration))
+                  ? { label: migrationTargetName(liveMigration) }
+                  : null;
+                return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} switchHold={switchHold} />;
+              }
               return <LiveTurnRows key="delta" items={visibleLiveTurnItems} />;
             })}
             <ConversationAttention file={file} />

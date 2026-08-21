@@ -24,20 +24,19 @@ Everything below is shaped by closing those two holes.
 
 ## Resolving the orchestrator
 
-`GET /api/orchestrator` returns the durable single-instance record
-(`state/orchestrator.json`, issue #182): the orchestrator's **stable viewer
-conversation id**, the transcript path it had settled on, and whether that
-transcript still exists.
+`GET /api/orchestrator/seat?project=…` returns the project's active seat: the
+orchestrator's **stable viewer conversation id**, its settled transcript path,
+and whether that transcript still exists.
 
-The monitor resolves through that record and addresses the orchestrator **by
+The monitor resolves through that seat and addresses the orchestrator **by
 conversation id**, never by path. That is what makes a rollover, a restart or a
 model swap survivable: the conversation id is the identity that follows the
 orchestrator across generations, while a path is a fact about one generation
 that stops being true the moment anything moves.
 
-Resolving the address is not enough — somebody has to be listening. The record
-is followed by a read-only host probe (`GET /api/tmux?path=…`, using the path
-the record itself names, not a path anyone typed). Two reasons this is not
+Resolving the address is not enough — somebody has to be listening. The seat is
+followed by a read-only host probe (`GET /api/tmux?path=…`, using the path
+the seat itself names, not a path anyone typed). Two reasons this is not
 optional: the watchdog this replaces spent a day nudging a conversation with no
 live host, and a send into a hostless conversation would **resume** it, which is
 not the monitor's business.
@@ -48,13 +47,13 @@ audience reports the condition instead of assuming one:
 
 | Resolution | Meaning | Run outcome |
 | --- | --- | --- |
-| `resolved` | record present, transcript on disk, a host demonstrably owns it | `clean`, report delivered |
-| `missing-record` | no orchestrator has ever been adopted | `failed` |
-| `stale-record` | recorded conversation's transcript is gone | `failed` |
-| `unavailable` | the record is unreadable, has no settled path to probe, the probe errored, or nothing hosts the conversation | `failed` |
+| `resolved` | active seat present, transcript on disk, a host demonstrably owns it | `clean`, report delivered |
+| `missing-record` | the project has no active orchestrator seat | `failed` |
+| `stale-record` | the seated conversation's transcript is gone | `failed` |
+| `unavailable` | the seat is unreadable, has no settled path to probe, the probe errored, or nothing hosts the conversation | `failed` |
 
 That includes the two cases an earlier draft waved through: a **path-pending**
-record (a spawn still adopting — nothing to probe, so nothing proven) and a
+seat (a spawn still adopting — nothing to probe, so nothing proven) and a
 probe that **errored** (an unprovable host is not a live one, and delivering
 anyway risks the resume this probe exists to avoid).
 
@@ -213,8 +212,8 @@ never reach the journal or stdout.
 ## Running it
 
 ```sh
-bun scripts/conversation-monitor.ts --window-hours 6          # a live run
-bun scripts/conversation-monitor.ts --dry-run --json          # classify only
+bun scripts/conversation-monitor.ts --project <project> --window-hours 6  # a live run
+bun scripts/conversation-monitor.ts --project <project> --dry-run --json  # classify only
 bun scripts/conversation-monitor.ts --status 5                # last five runs
 ```
 
@@ -224,12 +223,16 @@ schedule's own log distinguishes the three without reading the journal.
 Scheduled from the viewer checkout, half-hourly:
 
 ```cron
-*/30 * * * * cd <viewer-checkout> && bun scripts/conversation-monitor.ts --window-hours 6 >> <log-path> 2>&1
+*/30 * * * * cd <viewer-checkout> && bun scripts/conversation-monitor.ts --project <project> --window-hours 6 >> <log-path> 2>&1
 ```
 
 Flags: `--base-url` (defaults to `LLV_VIEWER_CONTROL_URL`, else the loopback
 viewer), `--project`, `--max-conversations`, `--max-cards`, `--stall-hours`,
 `--no-github`, `--deliver-when-empty`.
+
+`--project` is required for live and dry runs. The legacy global designation
+could supply one manager without a scope; project seats require the scope before
+the monitor can resolve an orchestrator.
 
 Without `--deliver-when-empty` a window that produced nothing delivers nothing —
 a quiet half hour should not put a heartbeat in the operator's conversation. The

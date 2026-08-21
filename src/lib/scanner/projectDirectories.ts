@@ -2,15 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { stateDir } from "@/lib/configDir";
+import { readStateCollectionRevision, readStateCollectionRows } from "@/lib/state/sqliteStateStore";
 
 import { globalCache } from "./caches";
 import { projectForCwd, projectRootForCwd } from "./describe";
 
 const PROJECT_STATE_FILES = [
   "project-catalog.json",
-  "flows.json",
-  "pipelines.json",
-  "workflows.json",
   "worktree-map.json",
 ] as const;
 const PROJECT_DIRECTORY_CACHE_MS = 10_000;
@@ -25,7 +23,7 @@ type ProjectDirectoryCacheEntry = {
 const projectDirectoryCache = globalCache<ProjectDirectoryCacheEntry>("project-directories-v2");
 
 function projectStateIdentity(directory: string): string {
-  return PROJECT_STATE_FILES.map((name) => {
+  const files = PROJECT_STATE_FILES.map((name) => {
     const filename = path.join(directory, name);
     try {
       const stat = fs.statSync(filename);
@@ -33,7 +31,22 @@ function projectStateIdentity(directory: string): string {
     } catch {
       return `${name}:missing`;
     }
-  }).join("|");
+  });
+  const database = path.join(directory, "state.sqlite");
+  for (const [collection, legacy] of [["flows", "flows.json"], ["pipelines", "pipelines.json"], ["workflows", "workflows.json"]] as const) {
+    const revision = readStateCollectionRevision(database, collection);
+    if (revision !== null) files.push(`${collection}:sqlite:${revision}`);
+    else {
+      const filename = path.join(directory, legacy);
+      try {
+        const stat = fs.statSync(filename);
+        files.push(`${legacy}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`);
+      } catch {
+        files.push(`${legacy}:missing`);
+      }
+    }
+  }
+  return files.join("|");
 }
 
 function readObject(filename: string): Record<string, unknown> | null {
@@ -66,12 +79,14 @@ function projectPathsFromState(directory: string): string[] {
   if (catalog && typeof catalog === "object" && !Array.isArray(catalog)) {
     for (const value of Object.values(catalog)) recordPaths(value, ["cwd", "projectRoot"], paths);
   }
+  const database = path.join(directory, "state.sqlite");
   for (const [filename, collection, fields] of [
     ["flows.json", "flows", ["cwd"]],
     ["pipelines.json", "pipelines", ["repoDir", "worktreeDir"]],
     ["workflows.json", "workflows", ["repoDir", "worktreeDir"]],
   ] as const) {
-    const values = readObject(path.join(directory, filename))?.[collection];
+    const authoritative = readStateCollectionRows(database, collection);
+    const values = authoritative ?? readObject(path.join(directory, filename))?.[collection];
     if (!Array.isArray(values)) continue;
     for (const value of values) recordPaths(value, fields, paths);
   }
@@ -102,7 +117,9 @@ function localProjectDirectories(): ProjectDirectory[] {
       continue;
     }
     const project = projectForCwd(cwd);
-    const projectRoot = projectRootForCwd(cwd);
+    /* A directory identity is minted from this cwd, which is also its launch
+       root when no repository contains it. */
+    const projectRoot = projectRootForCwd(cwd) ?? (project?.startsWith("dir-") ? cwd : undefined);
     const key = project ? `${project}\0${cwd}` : "";
     if (!project || !projectRoot || seen.has(key)) continue;
     seen.add(key);

@@ -624,14 +624,18 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
       break;
     }
     case "attention-resolved": {
-      const p = env.payload as { attentionId: string; conversationId?: string; state?: AttentionState };
-      const existing = store.attentions[p.attentionId];
+      const p = env.payload as { attentionId?: string; id?: string; conversationId?: string; state?: AttentionState };
+      /* Engine-host projections carried the attention id only as `id` before
+         #765; accept both so replayed ledger events still retire the card. */
+      const attentionId = p.attentionId ?? p.id;
+      if (!attentionId) break;
+      const existing = store.attentions[attentionId];
       if (existing) {
-        store.attentions = { ...store.attentions, [p.attentionId]: { ...existing, state: p.state ?? "resolved", unowned: false } };
+        store.attentions = { ...store.attentions, [attentionId]: { ...existing, state: p.state ?? "resolved", unowned: false } };
       }
       const convId = p.conversationId ?? existing?.conversationId;
       if (convId) {
-        updateSession(store, convId, revision, (s) => ({ ...s, attentionIds: s.attentionIds.filter((id) => id !== p.attentionId) }));
+        updateSession(store, convId, revision, (s) => ({ ...s, attentionIds: s.attentionIds.filter((id) => id !== attentionId) }));
       }
       break;
     }

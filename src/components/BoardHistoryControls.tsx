@@ -20,20 +20,18 @@ interface BoardHistoryControlsProps {
   redoEntry: BoardHistoryEntry | null;
   onUndo: () => void;
   onRedo: () => void;
-  /** Coarse-pointer sizing: 44px hit targets on phones, compact on desktop. */
-  isMobile: boolean;
 }
 
 /**
  * The board undo/redo island (issue #184): steps through the user's recent
  * board actions. Undo reopens the last closed card; redo closes it again.
  *
- * Presence is deliberate resting-chrome hygiene (findings 1, 2): on desktop the
- * island stays hidden until the log has something to act on (it appears on the
- * first close — the teachable moment), and on mobile only a single undo button
- * shows, and only while an undo is possible, so it never spends the 390px
- * toolbar budget on a disabled control. Redo on mobile lives on Ctrl+Shift+Z
- * and in the «⋯» menu. The keyboard shortcuts stay active regardless.
+ * Desktop chrome. Presence is deliberate resting-chrome hygiene (findings 1, 2):
+ * the island stays hidden until the log has something to act on — it appears on
+ * the first close, the teachable moment. The phone has no island at all: both
+ * directions are items in the header's «⋯» menu, because the 390px row's five
+ * 44px slots are spoken for and global search took the one undo used to hold
+ * (issue #1054 review). The keyboard shortcuts stay active regardless.
  */
 export function BoardHistoryControls({
   canUndo,
@@ -42,7 +40,6 @@ export function BoardHistoryControls({
   redoEntry,
   onUndo,
   onRedo,
-  isMobile,
 }: BoardHistoryControlsProps) {
   const { t } = useLocale();
 
@@ -55,26 +52,9 @@ export function BoardHistoryControls({
     ? withShortcut(redoTitle ? t("board.redoReclose", { title: redoTitle }) : t("board.redo"), REDO_SHORTCUT)
     : t("board.redoNothing");
 
-  const icon = isMobile ? "h-5 w-5" : "h-4 w-4";
+  const icon = "h-4 w-4";
   const base =
     "flex items-center justify-center text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 hover:text-accent disabled:cursor-default disabled:text-muted disabled:opacity-40 disabled:hover:text-muted";
-
-  if (isMobile) {
-    /* One undo button, present only while an undo is possible (finding 1). */
-    if (!canUndo) return null;
-    return (
-      <Hint label={undoLabel}>
-        <button
-          type="button"
-          className={`${base} h-11 w-11 shrink-0 rounded-control border border-border bg-card`}
-          onClick={onUndo}
-          aria-label={undoLabel}
-        >
-          <Undo2 className={icon} aria-hidden />
-        </button>
-      </Hint>
-    );
-  }
 
   /* Desktop: the segmented pair, hidden until the log is non-empty (finding 2).
      No overflow-hidden clip so the Hint bubbles can escape; the transparent

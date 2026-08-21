@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { isTtsBackend, ttsBackendInfo, writeTtsBackend, type TtsBackendInfo } from "@/lib/ttsBackend";
+import { isTtsBackend, TTS_BACKENDS, ttsBackendInfo, writeTtsBackend, type TtsBackendInfo } from "@/lib/ttsBackend";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -20,7 +20,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<TtsBackendInf
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
-  if (!isTtsBackend(body.backend)) return NextResponse.json({ error: "backend must be openai or elevenlabs" }, { status: 400 });
+  if (!isTtsBackend(body.backend)) return NextResponse.json({ error: `backend must be one of ${TTS_BACKENDS.join(", ")}` }, { status: 400 });
   if (ttsBackendInfo().lockedByEnv) return NextResponse.json({ error: "selection is locked by LLV_TTS_BACKEND" }, { status: 409 });
   writeTtsBackend(body.backend);
   return NextResponse.json(ttsBackendInfo());

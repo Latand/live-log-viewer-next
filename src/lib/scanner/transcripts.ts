@@ -221,6 +221,38 @@ export function transcriptProcessMayBeRunning(
   return processes.some((proc) => transcriptProcessOwnsEntry(entry, proc));
 }
 
+/**
+ * Which evidence tied a live process to this transcript.
+ *
+ * `session` names the transcript itself: the process carries its session id in
+ * argv, or holds the file open for writing. `cwd` is the conservative fallback
+ * — a tty-attached agent sitting in the same project directory — and it is
+ * every sibling transcript's neighbour as much as this one's owner, since one
+ * plain `claude` in a repo matches every transcript of that repo.
+ *
+ * A caller that only ever gets more conservative from a match (the delete
+ * routes) keeps asking `transcriptProcessMayBeRunning`, which is unchanged. A
+ * caller that refuses the operator's request on the strength of a match needs
+ * the difference, so it can keep the hard refusal for the evidence that names
+ * the session (issue #935).
+ */
+export type TranscriptLiveOwnership = "session" | "cwd";
+
+export function transcriptLiveOwnership(
+  entry: FileEntry,
+  processes: readonly AgentProcess[] = agentProcesses(true),
+): TranscriptLiveOwnership | null {
+  const entryProjectKey = projectKey(entry);
+  const sid = sessionIdFromPath(entry.path);
+  let weakest: TranscriptLiveOwnership | null = null;
+  for (const proc of processes) {
+    if (!transcriptProcessOwnsEntry(entry, proc, entryProjectKey)) continue;
+    if ((sid !== null && argvSessionId(proc.argv) === sid) || pidWritesPath(proc.pid, entry.path)) return "session";
+    weakest = "cwd";
+  }
+  return weakest;
+}
+
 export function transcriptProcessOwnsEntry(
   entry: FileEntry,
   proc: AgentProcess,

@@ -197,6 +197,25 @@ export function transcriptTurnResult(
   return { turn, complete: tail.complete, composerReleased: false, recoveryReleased };
 }
 
+/** Turn evidence already held for this exact file identity, or null. Reads no
+    bytes: the scheme window asks it for every discovered transcript so an open
+    turn keeps its card whatever the caps say (issue #942), and a cold cache
+    must never turn selection into a full-corpus tail read. */
+export function cachedTranscriptTurn(
+  pathname: string,
+  size: number,
+  mtimeMs: number,
+  codex: boolean,
+): TurnState | null {
+  for (const key of [`activity:${pathname}`, `authoritative:${pathname}`]) {
+    const cached = turnEvidenceCache.get(key);
+    if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.codex === codex) {
+      return { ...cached.turn };
+    }
+  }
+  return null;
+}
+
 /** A persisted scan snapshot carries the projected turn but not the records
     behind it, so it cannot carry `recoveryReleased`. A terminal authoritative
     Claude turn is exactly the shape whose release may hinge on that flag, and

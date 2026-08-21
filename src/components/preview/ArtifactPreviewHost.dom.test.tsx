@@ -7,7 +7,8 @@ import { installActEnv } from "@/test-helpers/actEnv";
 import { formatArtifactFragment } from "@/lib/artifact/fragment";
 import { setLocale } from "@/lib/i18n";
 
-import { ArtifactPreviewHost } from "./ArtifactPreviewHost";
+import { setLeftShellInset } from "../shellLayout";
+import { ArtifactPreviewHost, roomForSheet } from "./ArtifactPreviewHost";
 import { artifactMetaUrl } from "./artifactResource";
 import { openArtifactPreview } from "./previewBus";
 
@@ -451,6 +452,48 @@ test("closing a click-opened preview leaves a foreign hash untouched", async () 
   });
   expect(surface()).toBeNull();
   expect(dom.location.hash).toBe("#p=board");
+});
+
+test("the desktop sheet yields to the orchestrator dock so the board keeps its 320px (#977)", async () => {
+  textRoutes();
+  await render();
+  await act(async () => openArtifactPreview(TEXT_PATH));
+  await flush();
+  await flush();
+
+  /* Nothing docked: the sheet budgets only the board's floor, as before —
+     560 of a 1440px viewport, and the board gets the rest. */
+  expect(surface()!.getAttribute("data-artifact-preview-inset")).toBe("0");
+  expect(roomForSheet(1_440, 0)).toBe(1_120);
+
+  /* The dock opens beside the rail (248 + 440 at its default). The sheet is
+     fixed to the right edge and cannot see it in layout, so it reads the
+     published inset — the one number its own clamp was missing. */
+  await act(async () => setLeftShellInset(248 + 440));
+  expect(surface()!.getAttribute("data-artifact-preview-inset")).toBe("688");
+  /* At 1440 its remembered 560 yields to 432, and the board lands exactly on
+     its 320px floor instead of the 192 it used to get. */
+  expect(roomForSheet(1_440, 688)).toBe(432);
+  expect(1_440 - 688 - Math.min(560, roomForSheet(1_440, 688))).toBe(320);
+  /* Wider screens need no yielding: the remembered width survives. */
+  expect(roomForSheet(1_920, 688)).toBeGreaterThan(560);
+  /* And never below the sheet's own minimum, whatever the inset claims. */
+  expect(roomForSheet(1_280, 900)).toBe(380);
+
+  await act(async () => setLeftShellInset(0));
+  expect(surface()!.getAttribute("data-artifact-preview-inset")).toBe("0");
+});
+
+test("the mobile sheet ignores the dock — it is fullscreen and nothing is docked beside it", async () => {
+  textRoutes();
+  await render(true);
+  await act(async () => setLeftShellInset(248 + 440));
+  await act(async () => openArtifactPreview(TEXT_PATH));
+  await flush();
+  await flush();
+  expect(surface()!.style.width).toBe("");
+  expect(surface()!.getAttribute("data-artifact-preview-inset")).toBeNull();
+  await act(async () => setLeftShellInset(0));
 });
 
 test("the mobile sheet is a labelled full-height dialog", async () => {

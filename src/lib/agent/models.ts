@@ -41,6 +41,19 @@ export const ENGINE_MODELS: Record<"claude" | "codex", readonly AgentModelOption
   ],
 };
 
+export type LaunchModelValidation = { model: string } | { error: string };
+
+/** Validate a fresh-launch model against the catalog rendered by the Viewer.
+    Resume and migration paths deliberately do not call this helper. */
+export function validateLaunchModel(engine: "claude" | "codex", model: string): LaunchModelValidation {
+  const requested = model.trim();
+  const validIds = ENGINE_MODELS[engine].map((option) => option.id);
+  if (validIds.includes(requested)) return { model: requested };
+  return {
+    error: `invalid ${engine} model id ${JSON.stringify(requested)}; valid ${engine} model ids: ${validIds.join(", ")}`,
+  };
+}
+
 /** A fresh Codex conversation starts on the architecture/review profile. */
 export function defaultModelFor(engine: "claude" | "codex"): string {
   return engine === "codex" ? CODEX_SOL_MODEL : "opus";

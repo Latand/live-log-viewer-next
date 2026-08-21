@@ -3,7 +3,8 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
-import { activityBand, isChildConversation, kidsIndex, projectKey, subtree } from "@/components/projectModel";
+import { activityBand, isChildConversation, kidsIndex, projectKey, schemeAgeHorizonSeconds, subtree, withinPlacementHorizon } from "@/components/projectModel";
+import { IDENTITY_CLAIM_RESOLVER, transcriptClaimResolver, type TranscriptClaimResolver } from "@/components/transcriptClaims";
 
 /*
  * Worker-class auto-collapse (issue #112).
@@ -41,13 +42,19 @@ export function workerCollapseIdleMs(): number {
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : DEFAULT_WORKER_COLLAPSE_IDLE_MS;
 }
 
-/** Transcript paths owned by a pipeline stage attempt — pipeline-stage workers. */
-export function pipelineStageAgentPaths(pipelines: readonly Pipeline[]): Set<string> {
+/** Transcript paths owned by a pipeline stage attempt — pipeline-stage workers.
+    An attempt records whatever spelling was current when it ran, so `resolve`
+    rewrites it onto the projected corpus before the set is compared against
+    `file.path` (#943 follow-up); the default leaves recorded paths untouched. */
+export function pipelineStageAgentPaths(
+  pipelines: readonly Pipeline[],
+  resolve: TranscriptClaimResolver = IDENTITY_CLAIM_RESOLVER,
+): Set<string> {
   const set = new Set<string>();
   for (const pipeline of pipelines) {
     for (const run of pipeline.runs) {
       for (const attempt of run.attempts) {
-        if (attempt.agentPath) set.add(attempt.agentPath);
+        if (attempt.agentPath) set.add(resolve(attempt.agentPath));
       }
     }
   }
@@ -58,6 +65,11 @@ export interface WorkerLineage {
   flows: readonly Flow[];
   /** Output of {@link pipelineStageAgentPaths} — computed once per render. */
   pipelineStagePaths: ReadonlySet<string>;
+  /** Resolves a flow's recorded member paths onto the projected spelling before
+      they are matched (#943 follow-up). Built once per render from the file set
+      by {@link transcriptClaimResolver}; absent means compare recorded paths raw,
+      which is only correct when records and corpus share one spelling. */
+  resolveClaimPath?: TranscriptClaimResolver;
 }
 
 interface FlowMembership {
@@ -74,8 +86,18 @@ interface FlowMembership {
  * matching `flow.implementerPath` / `round.reviewerPath` is the same resolution
  * the rest of the board already uses (flowByImplementer, claimedReviewerPaths).
  * A reviewer match wins over an implementer match.
+ *
+ * Both sides of that match are canonical (#943 follow-up): a durable record
+ * holds the spelling that was current when the round ran, and the projection
+ * publishes the root discovery walked, so `resolve` rewrites the recorded path
+ * onto the corpus before the comparison. Without it every round of a flow that
+ * predates its account's cut-over misses and renders as a free node.
  */
-function flowMembership(file: FileEntry, flows: readonly Flow[]): FlowMembership | null {
+function flowMembership(
+  file: FileEntry,
+  flows: readonly Flow[],
+  resolve: TranscriptClaimResolver = IDENTITY_CLAIM_RESOLVER,
+): FlowMembership | null {
   const durable = file.durableLineage?.memberships.find((membership) => membership.kind === "flow");
   if (durable) {
     const flow = flows.find((candidate) => candidate.id === durable.containerId);
@@ -87,11 +109,11 @@ function flowMembership(file: FileEntry, flows: readonly Flow[]): FlowMembership
   }
   for (const flow of flows) {
     for (const round of flow.rounds) {
-      if (round.reviewerPath === file.path) return { role: "reviewer", flow, round };
+      if (round.reviewerPath && resolve(round.reviewerPath) === file.path) return { role: "reviewer", flow, round };
     }
   }
   for (const flow of flows) {
-    if (flow.implementerPath === file.path) return { role: "implementer", flow, round: null };
+    if (resolve(flow.implementerPath) === file.path) return { role: "implementer", flow, round: null };
   }
   return null;
 }
@@ -127,7 +149,7 @@ function flowMembership(file: FileEntry, flows: readonly Flow[]): FlowMembership
  */
 export function classifyWorker(file: FileEntry, lineage: WorkerLineage): WorkerClass | null {
   if (file.handoff) return null;
-  const membership = flowMembership(file, lineage.flows);
+  const membership = flowMembership(file, lineage.flows, lineage.resolveClaimPath);
   if (membership?.role === "reviewer") return "flow-reviewer";
   if (membership?.role === "implementer") return file.parent ? "flow-implementer" : null;
   if (lineage.pipelineStagePaths.has(file.path)) return "pipeline-stage";
@@ -194,7 +216,7 @@ export function shouldCollapseWorker(file: FileEntry, context: CollapseContext):
   const klass = classifyWorker(file, context);
   if (!klass) return false;
   if (isCollapseExempt(file, context)) return false;
-  const membership = flowMembership(file, context.flows);
+  const membership = flowMembership(file, context.flows, context.resolveClaimPath);
   if (klass === "flow-reviewer") {
     /* Reviewers collapse exactly on verdict, never on the idle window: a
        still-reviewing round stays put (it is the live loop), and a finished
@@ -227,8 +249,12 @@ export interface WorkerStack {
 /** Flow id owning a transcript, derived from the flows list by path (a flow
     member groups per flow, everything else per worktree). Uses the same
     path-matching as classification — never the absent `file.flow`. */
-export function flowIdForPath(file: FileEntry, flows: readonly Flow[]): string | null {
-  return flowMembership(file, flows)?.flow.id ?? null;
+export function flowIdForPath(
+  file: FileEntry,
+  flows: readonly Flow[],
+  resolve: TranscriptClaimResolver = IDENTITY_CLAIM_RESOLVER,
+): string | null {
+  return flowMembership(file, flows, resolve)?.flow.id ?? null;
 }
 
 /** Transcript path → the id of the pipeline that owns it, so a pipeline's stage
@@ -312,6 +338,11 @@ export interface ProtectedReviewerNodesInput {
   /** Durable manual placements/expansions — a reviewer the owner opened out of a
       worker stack must render even though it carries no authorship protection. */
   pinnedPaths: ReadonlySet<string>;
+  /** Board clock in epoch seconds for the automatic-placement age horizon.
+      `0` (the default, and the server render) bounds nothing. */
+  now?: number;
+  /** Placement age horizon in seconds; defaults to the env-tunable board value. */
+  ageHorizonSeconds?: number;
 }
 
 /**
@@ -358,7 +389,15 @@ export function protectedReviewerNodes(input: ProtectedReviewerNodesInput): File
       if (!path || seen.has(path) || decked.has(path)) continue;
       if (input.renderedNodePaths.has(path) || input.hiddenPaths.has(path)) continue;
       const file = byPath.get(path);
-      if (file && (file.userAuthored || file.authorshipUnverified || input.pinnedPaths.has(path))) {
+      if (!file) continue;
+      /* Authorship protection never expires, so past the placement age horizon
+         it would keep a reviewer of a long-closed flow on the canvas forever.
+         An owner PIN is explicit intent and stays unbounded; live and running
+         work is exempt through the horizon itself. A bounded reviewer keeps its
+         row in «All conversations» and quiet history. */
+      const owned = input.pinnedPaths.has(path);
+      if (!owned && !withinPlacementHorizon(file, input.now ?? 0, input.ageHorizonSeconds ?? schemeAgeHorizonSeconds())) continue;
+      if (owned || file.userAuthored || file.authorshipUnverified) {
         out.push(file);
         seen.add(path);
       }
@@ -371,6 +410,7 @@ function stackKeyFor(
   file: FileEntry,
   flows: readonly Flow[],
   resolvers: StackOriginResolvers = {},
+  resolveClaimPath: TranscriptClaimResolver = IDENTITY_CLAIM_RESOLVER,
 ): { key: string; kind: WorkerStack["kind"]; id: string } {
   /* Pipeline ownership wins over the flow bucket (issue #136): a pipeline that
      embeds a review-loop owns that flow's implementer + reviewers, so a whole
@@ -379,7 +419,7 @@ function stackKeyFor(
      resolver covers pipeline-owned paths AND their ancestors. */
   const pipelineId = resolvers.pipelineIdOf?.(file.path) ?? null;
   if (pipelineId) return { key: "wstack::pipeline::" + pipelineId, kind: "pipeline", id: pipelineId };
-  const flowId = flowIdForPath(file, flows);
+  const flowId = flowIdForPath(file, flows, resolveClaimPath);
   if (flowId) return { key: "wstack::flow::" + flowId, kind: "flow", id: flowId };
   const origin = resolvers.originOf?.(file) ?? null;
   if (origin) return { key: "wstack::origin::" + origin, kind: "origin", id: origin };
@@ -409,9 +449,13 @@ export interface CollapsibleInput {
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 function collapseContext(input: CollapsibleInput): CollapseContext {
+  /* One resolver per pass: durable flow/pipeline records are matched against the
+     projected corpus, whatever spelling each side happens to carry (#943). */
+  const resolveClaimPath = transcriptClaimResolver(input.files);
   return {
     flows: input.flows,
-    pipelineStagePaths: pipelineStageAgentPaths(input.pipelines ?? []),
+    resolveClaimPath,
+    pipelineStagePaths: pipelineStageAgentPaths(input.pipelines ?? [], resolveClaimPath),
     nowMs: input.nowMs,
     idleMs: input.idleMs ?? workerCollapseIdleMs(),
     pinnedPaths: input.pinnedPaths,
@@ -459,9 +503,13 @@ export function groupWorkerStacks(
   resolvers: StackOriginResolvers = {},
 ): WorkerStack[] {
   const byKey = new Map<string, WorkerStack>();
+  /* Anchored on the stacked files themselves: a recorded member path resolves to
+     the projected spelling of the very card being placed, so a pre-cut-over flow
+     record still buckets its worker under that flow (#943 follow-up). */
+  const resolveClaimPath = transcriptClaimResolver(files);
   for (const file of files) {
     if (exclude.has(file.path)) continue;
-    const { key, kind, id } = stackKeyFor(file, flows, resolvers);
+    const { key, kind, id } = stackKeyFor(file, flows, resolvers, resolveClaimPath);
     const stack = byKey.get(key) ?? { key, kind, id, items: [] };
     stack.items.push(file);
     byKey.set(key, stack);

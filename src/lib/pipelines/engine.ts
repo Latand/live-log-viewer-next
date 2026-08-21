@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { accountManager } from "@/lib/accounts/manager";
+import { mirroredClaudeTranscriptPath } from "@/lib/accounts/claude";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
@@ -40,8 +41,9 @@ import {
 } from "./limits";
 import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipelineRepo } from "./preflight";
 import { renderStagePrompt } from "./prompts";
-import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
-import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineMutation } from "./store";
+import { PIPELINE_ROLE_IDS, pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
+import { pipelineValidationError, type PipelineValidationViolation } from "./validation";
+import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
 import type {
   CreatePipelineRequest,
@@ -1219,6 +1221,43 @@ function advancePipeline(pipeline: Pipeline, stage: PipelineStage, ports: Pipeli
   pipeline.pausedState = null;
 }
 
+function keepPassedStageUnpublished(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  detail: string,
+): void {
+  const message = `passed but unpublished: ${detail}`;
+  attempt.error = message;
+  pipeline.state = "running";
+  pipeline.stateDetail = message;
+}
+
+/** A terminal pass cannot close until its accepted revision is remotely
+    durable. The pass receipt stays terminal and the committing cursor becomes
+    a publication retry seam, so later ticks never rerun or reset stage work. */
+function retryTerminalStagePublication(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt,
+  ports: PipelinePorts,
+): void {
+  const published = publishPipelineBranch(pipeline, ports.exec, {
+    acceptedSha: pipeline.lastPassedCommit,
+    publishedSha: pipeline.publishedCommit ?? null,
+  });
+  if (!published.ok) {
+    park(pipeline, `publishing the passed stage: ${published.error}`, attempt);
+    return;
+  }
+  if (published.remote === "unreachable") {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+    return;
+  }
+  pipeline.publishedCommit = published.remote === "published" ? published.sha : null;
+  attempt.error = null;
+  advancePipeline(pipeline, stage, ports, attempt);
+}
+
 /** Attempts of the fail edge's target that this stage's fail edge activated —
     the derived (never stored) loop budget, so counts cannot drift from the
     durable evidence. */
@@ -1279,7 +1318,14 @@ function commitPassedStage(
   pipeline.publishedCommit = published.remote === "published" ? published.sha : null;
   attempt.state = "passed";
   attempt.completedAt = ports.now();
+  if (published.remote === "unreachable" && stage.next === null) {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+    return;
+  }
   advancePipeline(pipeline, stage, ports, attempt);
+  if (published.remote === "unreachable") {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+  }
 }
 
 /** One-shot settlement of a completed stage turn. Semantic contradictions park
@@ -1385,6 +1431,11 @@ async function tickRunStage(
     ? newAttempt(pipeline, stage)
     : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
+
+  if (attempt.state === "passed" && pipeline.cursor?.state === "committing") {
+    retryTerminalStagePublication(pipeline, stage, attempt, ports);
+    return;
+  }
 
   if (attempt.state === "committing") {
     commitPassedStage(pipeline, stage, attempt, ports);
@@ -1646,25 +1697,44 @@ export function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: Effec
  * null so the remote is genuinely probed, which is what makes a stale or
  * migrated record safe. Publication itself stays fast-forward-only.
  */
-function publishReviewIngressHead(pipeline: Pipeline, attempt: PipelineStageAttempt, ports: PipelinePorts): string | null {
+function publishReviewIngressHead(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  ports: PipelinePorts,
+): { ok: true } | { ok: false; retryable: boolean; detail: string } {
   const expected = attempt.expectedReviewHeadSha;
-  if (!expected) return "review-loop stage requires a verified pipeline commit";
+  if (!expected) return { ok: false, retryable: false, detail: "review-loop stage requires a verified pipeline commit" };
 
   const local = currentPipelineBranchHead(pipeline, ports.exec);
-  if (!local.ok) return `review stage could not verify the pipeline head before publishing: ${local.error}`;
+  if (!local.ok) {
+    return { ok: false, retryable: false, detail: `review stage could not verify the pipeline head before publishing: ${local.error}` };
+  }
   if (local.sha !== expected) {
-    return `review stage head mismatch: the accepted review head is ${expected}, but the pipeline worktree is at ${local.sha}; nothing was published`;
+    return {
+      ok: false,
+      retryable: false,
+      detail: `review stage head mismatch: the accepted review head is ${expected}, but the pipeline worktree is at ${local.sha}; nothing was published`,
+    };
   }
 
   /* `publishedSha` is deliberately omitted: ingress probes the remote for real
      rather than trusting a durable record that may be stale or migrated. */
   const published = publishPipelineBranch(pipeline, ports.exec, { acceptedSha: expected });
-  if (!published.ok) return `review stage could not publish the accepted head ${expected}: ${published.error}`;
+  if (!published.ok) {
+    return { ok: false, retryable: false, detail: `review stage could not publish the accepted head ${expected}: ${published.error}` };
+  }
+  if (published.remote === "unreachable") {
+    return { ok: false, retryable: true, detail: `passed but unpublished: ${published.detail}` };
+  }
   if (published.remote === "unavailable") {
-    return `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${expected} to`;
+    return {
+      ok: false,
+      retryable: false,
+      detail: `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${expected} to`,
+    };
   }
   pipeline.publishedCommit = published.sha;
-  return null;
+  return { ok: true };
 }
 
 async function tickReviewStage(
@@ -1679,6 +1749,10 @@ async function tickReviewStage(
     ? newAttempt(pipeline, stage)
     : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
+  if (attempt.state === "passed" && pipeline.cursor?.state === "committing") {
+    retryTerminalStagePublication(pipeline, stage, attempt, ports);
+    return;
+  }
   if (attempt.state === "committing") {
     const fenceError = reviewHeadFenceError(pipeline, attempt, ports);
     if (fenceError) {
@@ -1707,11 +1781,19 @@ async function tickReviewStage(
   }
 
   if (!attempt.flowId) {
-    const ingressError = publishReviewIngressHead(pipeline, attempt, ports);
-    if (ingressError) {
-      park(pipeline, ingressError, attempt);
+    const ingress = publishReviewIngressHead(pipeline, attempt, ports);
+    if (!ingress.ok) {
+      if (ingress.retryable) {
+        attempt.error = ingress.detail;
+        pipeline.state = "running";
+        pipeline.stateDetail = ingress.detail;
+        return;
+      }
+      park(pipeline, ingress.detail, attempt);
       return;
     }
+    attempt.error = null;
+    pipeline.stateDetail = null;
     persist();
     const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, pipeline.baseRef, attempt.expectedReviewHeadSha);
     if (existing) {
@@ -2160,28 +2242,28 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
   tickStore.__llvPipelineTick = true;
   let followUp = false;
   try {
-    const result = await withPipelineMutation(async (pipelines, persist) => {
+    const result = await withPipelineControllerMutation(async (pipelines, persist) => {
       let changed = false;
       await forEachCooperatively(pipelines, async (pipeline) => {
+        const persistPipeline = () => persist([pipeline]);
         let pipelineChanged = reconcilePipelineEmbeddedFlows(pipeline, ports);
         pipelineChanged = reconcilePendingPipelineAdoptions(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileHistoricalAttempts(pipeline, entries, ports) || pipelineChanged;
         pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports) || pipelineChanged;
-        pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persist) || pipelineChanged;
+        pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persistPipeline) || pipelineChanged;
         pipelineChanged = reconcileParkedVerdictMiss(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileTerminalStageHosts(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
-          pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
+          pipelineChanged = await tickPipeline(pipeline, entries, ports, persistPipeline) || pipelineChanged;
         }
         if (pipelineChanged) {
           changed = true;
-          persist();
+          persistPipeline();
         }
       }, { batchSize: 4, timeBudgetMs: 16 });
-      if (changed) persist();
       return { pipelines, changed };
     });
     /* A pass that ends on a pending cursor (a stage just passed and advanced,
@@ -2204,6 +2286,23 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
   }
 }
 
+/* #1026: the expected shape each stage constraint names, shared by the batched
+   error response and the MCP tool schema's field descriptions so a caller reads
+   the same contract whether it asks the schema or trips the validator. */
+const STAGE_OBJECT_SHAPE = "{id, kind, prompt, next, onFail?, role?, engine?/model?/effort?/access? overrides}";
+const STAGE_PROMPT_SHAPE = `non-empty string up to ${MAX_STAGE_PROMPT_LENGTH} characters`;
+const STAGE_ROLE_SHAPE = `{roleId: one of ${PIPELINE_ROLE_IDS.join(" | ")}, params?: {<key>: string | number}} — runtime overrides belong on the stage, not in role`;
+const STAGE_ROLE_ID_SHAPE = `one of ${PIPELINE_ROLE_IDS.join(" | ")}`;
+const STAGE_ROLE_PARAMS_SHAPE = "object of the role's declared parameters, values string or number";
+const STAGE_RUNTIME_SHAPE = "a role and stage-level engine/model/effort/access the role registry can resolve";
+const STAGE_NEXT_SHAPE = "id of another stage, or null to terminate the pass chain";
+const STAGE_ON_FAIL_SHAPE = `null, or {to: <existing stage id>, maxRounds?: 1–${MAX_FAIL_EDGE_ROUNDS}} — run stages only`;
+const STAGE_GRAPH_SHAPE = "acyclic next chains over existing stage ids, with every review-loop reachable from a run stage";
+
+function stageViolations(violations: PipelineValidationViolation[]): { error: string; violations: PipelineValidationViolation[] } {
+  return { error: pipelineValidationError(violations), violations };
+}
+
 function normalizeStages(
   value: unknown,
   lookup?: PipelineRoleLookup | null,
@@ -2214,64 +2313,142 @@ function normalizeStages(
      acyclic pass edges, valid fail edges, review-loop reachability — apply
      either way. */
   minStages: number = MIN_STARTED_PIPELINE_STAGES,
-): { stages?: PipelineStage[]; error?: string } {
+): { stages?: PipelineStage[]; error?: string; violations?: PipelineValidationViolation[] } {
   if (!Array.isArray(value) || value.length < minStages || value.length > MAX_PIPELINE_STAGES) {
-    return {
-      error: minStages === 0
+    return stageViolations([{
+      field: "stages",
+      message: minStages === 0
         ? `pipelines require at most ${MAX_PIPELINE_STAGES} stages`
         : `pipelines require ${MIN_STARTED_PIPELINE_STAGES}–${MAX_PIPELINE_STAGES} stages`,
-    };
+      expected: `array of ${minStages}–${MAX_PIPELINE_STAGES} stage objects`,
+    }]);
   }
   const stages: PipelineStage[] = [];
   const ids = new Set<string>();
-  for (const raw of value) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "invalid pipeline stage" };
+  /* #1026: every stage is checked, and every violation it holds is collected,
+     before the request is answered. A stage that failed contributes no
+     normalized record, so the loop keeps going with the next one instead of
+     handing the caller one constraint per round trip. */
+  const violations: PipelineValidationViolation[] = [];
+  /* The graph rules read only id/kind/next/onFail. When those four are
+     well-formed on every stage the graph is validated in the same pass, even if
+     other fields failed — so a missing pass edge is reported beside the field
+     errors rather than one call later. */
+  const graphView: Array<Pick<PipelineStage, "id" | "kind" | "next"> & { onFail?: Pipeline["stages"][number]["onFail"] }> = [];
+  let graphViewComplete = true;
+  for (const [index, raw] of (value as unknown[]).entries()) {
+    const at = (field: string) => `stages[${index}]${field ? `.${field}` : ""}`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      violations.push({ field: at(""), message: "invalid pipeline stage", expected: STAGE_OBJECT_SHAPE });
+      graphViewComplete = false;
+      continue;
+    }
+    const before = violations.length;
     const stage = raw as Partial<PipelineStageInput>;
     const id = typeof stage.id === "string" ? stage.id.trim() : "";
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || ids.has(id)) return { error: "stage ids must be unique URL-safe names" };
+    const idValid = /^[A-Za-z0-9_-]{1,64}$/.test(id) && !ids.has(id);
+    if (!idValid) {
+      violations.push({ field: at("id"), message: "stage ids must be unique URL-safe names", expected: "1–64 characters of A–Z a–z 0–9 _ -, unique across stages" });
+    }
     const preservedStage = preservedStages?.get(id);
-    if (stage.kind !== "run" && stage.kind !== "review-loop") return { error: "stage kind must be run or review-loop" };
+    const kindValid = stage.kind === "run" || stage.kind === "review-loop";
+    if (!kindValid) violations.push({ field: at("kind"), message: "stage kind must be run or review-loop", expected: `"run" | "review-loop"` });
     const rawOnFail = (raw as { onFail?: unknown }).onFail;
+    let onFailValid = true;
     if (rawOnFail !== undefined && rawOnFail !== null) {
-      if (!rawOnFail || typeof rawOnFail !== "object" || Array.isArray(rawOnFail)) return { error: `stage ${id} onFail must be an object or null` };
-      const edge = rawOnFail as { to?: unknown; maxRounds?: unknown };
-      if (typeof edge.to !== "string" || !edge.to.trim()) return { error: `stage ${id} onFail requires a target stage id` };
-      const maxRounds = edge.maxRounds === undefined ? DEFAULT_FAIL_EDGE_ROUNDS : edge.maxRounds;
-      if (!Number.isInteger(maxRounds) || (maxRounds as number) < 1 || (maxRounds as number) > MAX_FAIL_EDGE_ROUNDS) {
-        return { error: `stage ${id} onFail maxRounds must be an integer between 1 and ${MAX_FAIL_EDGE_ROUNDS}` };
+      if (!rawOnFail || typeof rawOnFail !== "object" || Array.isArray(rawOnFail)) {
+        violations.push({ field: at("onFail"), message: `stage ${id} onFail must be an object or null`, expected: STAGE_ON_FAIL_SHAPE });
+        onFailValid = false;
+      } else {
+        const edge = rawOnFail as { to?: unknown; maxRounds?: unknown };
+        if (typeof edge.to !== "string" || !edge.to.trim()) {
+          violations.push({ field: at("onFail.to"), message: `stage ${id} onFail requires a target stage id`, expected: "id of an existing stage" });
+          onFailValid = false;
+        }
+        const maxRounds = edge.maxRounds === undefined ? DEFAULT_FAIL_EDGE_ROUNDS : edge.maxRounds;
+        if (!Number.isInteger(maxRounds) || (maxRounds as number) < 1 || (maxRounds as number) > MAX_FAIL_EDGE_ROUNDS) {
+          violations.push({
+            field: at("onFail.maxRounds"),
+            message: `stage ${id} onFail maxRounds must be an integer between 1 and ${MAX_FAIL_EDGE_ROUNDS}`,
+            expected: `integer 1–${MAX_FAIL_EDGE_ROUNDS} (default ${DEFAULT_FAIL_EDGE_ROUNDS})`,
+          });
+          onFailValid = false;
+        }
       }
     }
     const prompt = typeof stage.prompt === "string" ? stage.prompt.trim() : "";
-    if (!prompt) return { error: `stage ${id} prompt is required` };
-    if (prompt.length > MAX_STAGE_PROMPT_LENGTH) return { error: `stage ${id} prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters` };
+    if (!prompt) violations.push({ field: at("prompt"), message: `stage ${id} prompt is required`, expected: STAGE_PROMPT_SHAPE });
+    else if (prompt.length > MAX_STAGE_PROMPT_LENGTH) {
+      violations.push({ field: at("prompt"), message: `stage ${id} prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters`, expected: STAGE_PROMPT_SHAPE });
+    }
     const roleValue = (raw as { role?: unknown }).role;
+    let roleShapeValid = true;
     if (roleValue !== undefined && (!roleValue || typeof roleValue !== "object" || Array.isArray(roleValue))) {
-      return { error: `stage ${id} role must be an object` };
+      violations.push({ field: at("role"), message: `stage ${id} role must be an object`, expected: STAGE_ROLE_SHAPE });
+      roleShapeValid = false;
     }
-    if (roleValue && Object.keys(roleValue).some((key) => key !== "roleId" && key !== "params")) {
-      return { error: `stage ${id} role only accepts roleId and params; place runtime overrides on the stage` };
+    if (roleShapeValid && roleValue && Object.keys(roleValue).some((key) => key !== "roleId" && key !== "params")) {
+      violations.push({
+        field: at("role"),
+        message: `stage ${id} role only accepts roleId and params; place runtime overrides on the stage`,
+        expected: STAGE_ROLE_SHAPE,
+      });
+      roleShapeValid = false;
     }
-    const roleId = roleValue && typeof (roleValue as { roleId?: unknown }).roleId === "string"
+    const roleId = roleShapeValid && roleValue && typeof (roleValue as { roleId?: unknown }).roleId === "string"
       ? (roleValue as { roleId: string }).roleId.trim()
       : "";
-    if (roleValue && !roleId) return { error: `stage ${id} roleId is required when role is present` };
-    const rawParams = (roleValue as { params?: unknown } | undefined)?.params;
+    if (roleShapeValid && roleValue && !roleId) {
+      violations.push({ field: at("role.roleId"), message: `stage ${id} roleId is required when role is present`, expected: STAGE_ROLE_ID_SHAPE });
+      roleShapeValid = false;
+    }
+    const rawParams = roleShapeValid ? (roleValue as { params?: unknown } | undefined)?.params : undefined;
     if (rawParams !== undefined && (!rawParams || typeof rawParams !== "object" || Array.isArray(rawParams))) {
-      return { error: `stage ${id} role params must be an object` };
+      violations.push({ field: at("role.params"), message: `stage ${id} role params must be an object`, expected: STAGE_ROLE_PARAMS_SHAPE });
+      roleShapeValid = false;
     }
-    const roleParams = rawParams as Record<string, unknown> | undefined;
+    const roleParams = roleShapeValid ? rawParams as Record<string, unknown> | undefined : undefined;
     if (roleParams && Object.values(roleParams).some((value) => typeof value !== "string" && typeof value !== "number")) {
-      return { error: `stage ${id} role params must be strings or numbers` };
+      violations.push({ field: at("role.params"), message: `stage ${id} role params must be strings or numbers`, expected: STAGE_ROLE_PARAMS_SHAPE });
+      roleShapeValid = false;
     }
-    if (roleParams && !roleId) return { error: `stage ${id} role params require a roleId` };
-    if (roleId && roleParams && !preservedStage) {
+    if (roleShapeValid && roleParams && !roleId) {
+      violations.push({ field: at("role.roleId"), message: `stage ${id} role params require a roleId`, expected: STAGE_ROLE_ID_SHAPE });
+      roleShapeValid = false;
+    }
+    if (roleShapeValid && roleId && roleParams && !preservedStage) {
       /* Canonical value checks (options, integer bounds, text length, unknown
          keys) so an invalid param can't freeze into the stored scaffold. */
       const paramError = validatePipelineRoleParams(roleId, roleParams as Record<string, string | number>);
-      if (paramError) return { error: `stage ${id} ${paramError}` };
+      if (paramError) {
+        violations.push({ field: at("role.params"), message: `stage ${id} ${paramError}`, expected: STAGE_ROLE_PARAMS_SHAPE });
+        roleShapeValid = false;
+      }
     }
-    if (stage.model !== undefined && stage.model !== null && typeof stage.model !== "string") return { error: `stage ${id} model must be a string or null` };
-    if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") return { error: `stage ${id} effort must be a string or null` };
+    if (stage.model !== undefined && stage.model !== null && typeof stage.model !== "string") {
+      violations.push({ field: at("model"), message: `stage ${id} model must be a string or null`, expected: "model id string, or null to inherit the role default" });
+    }
+    if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") {
+      violations.push({ field: at("effort"), message: `stage ${id} effort must be a string or null`, expected: "effort string supported by the stage engine, or null to inherit the role default" });
+    }
+    const nextValid = stage.next === undefined || stage.next === null || typeof stage.next === "string";
+    if (!nextValid) {
+      violations.push({ field: at("next"), message: `stage ${id} next must be a stage id or null`, expected: STAGE_NEXT_SHAPE });
+    }
+    if (idValid && kindValid && onFailValid && nextValid) {
+      graphView.push({
+        id,
+        kind: stage.kind as PipelineStage["kind"],
+        next: stage.next ?? null,
+        onFail: rawOnFail
+          ? { to: (rawOnFail as { to: string }).to.trim(), maxRounds: ((rawOnFail as { maxRounds?: number }).maxRounds ?? DEFAULT_FAIL_EDGE_ROUNDS) }
+          : null,
+      });
+    } else {
+      graphViewComplete = false;
+    }
+    if (idValid) ids.add(id);
+    if (violations.length > before) continue;
     const onFailEdge = rawOnFail
       ? {
           to: (rawOnFail as { to: string }).to.trim(),
@@ -2280,7 +2457,7 @@ function normalizeStages(
       : null;
     const input: PipelineStageInput = {
       id,
-      kind: stage.kind,
+      kind: stage.kind as PipelineStage["kind"],
       ...(roleId ? { role: { roleId: roleId as PipelineRoleId, ...(roleParams && Object.keys(roleParams).length ? { params: roleParams as Record<string, string | number> } : {}) } } : {}),
       ...(stage.engine !== undefined ? { engine: stage.engine } : {}),
       ...(stage.model !== undefined ? { model: typeof stage.model === "string" ? stage.model.trim() || null : null } : {}),
@@ -2290,16 +2467,24 @@ function normalizeStages(
       next: stage.next ?? null,
       onFail: onFailEdge,
     };
-    const resolved = preservedStage ? { role: preservedStage.effectiveRole } : resolvePipelineRole(input, stage.kind, lookup);
-    if (!resolved.role) return { error: "error" in resolved ? resolved.error : "invalid stage role" };
+    const resolved = preservedStage ? { role: preservedStage.effectiveRole } : resolvePipelineRole(input, stage.kind as PipelineStage["kind"], lookup);
+    if (!resolved.role) {
+      const field = "field" in resolved && resolved.field === "model" ? "model" : "role";
+      violations.push({
+        field: at(field),
+        message: "error" in resolved && resolved.error ? resolved.error : "invalid stage role",
+        expected: field === "model" ? "model id from the selected engine's curated catalog" : STAGE_RUNTIME_SHAPE,
+      });
+      continue;
+    }
     const normalizedStage: PipelineStage = { ...input, effectiveRole: structuredClone(resolved.role) };
-    ids.add(id);
     stages.push(normalizedStage);
   }
   /* v3 graph contract: acyclic pass edges over valid targets, bounded fail
      edges, review-loop pass-reachability — shared with the store validator. */
-  const graphError = pipelineGraphError(stages);
-  if (graphError) return { error: graphError };
+  const graphError = graphViewComplete ? pipelineGraphError(graphView) : null;
+  if (graphError) violations.push({ field: "stages[].next", message: graphError, expected: STAGE_GRAPH_SHAPE });
+  if (violations.length) return stageViolations(violations);
   return { stages };
 }
 
@@ -2326,7 +2511,7 @@ function replaceDraftStages(
   pipeline: Pipeline,
   inputs: PipelineStageInput[],
   lookup?: PipelineRoleLookup | null,
-): { error?: string } {
+): { error?: string; violations?: PipelineValidationViolation[] } {
   /* Custom edges survive structural edits (#353): each kept stage's intentional
      pass and fail edge is preserved as-is, and the add/remove handlers rewire
      only the edit's own seam. This safety net clears an edge whose target left
@@ -2342,14 +2527,16 @@ function replaceDraftStages(
   /* Draft edits may empty the plan entirely (remove down to zero); the 1-stage
      floor is enforced only at Start (#136, #353). */
   const normalized = normalizeStages(relinked, lookup, preserved, 0);
-  if (!normalized.stages) return { error: normalized.error ?? "invalid stages" };
+  if (!normalized.stages) return { error: normalized.error ?? "invalid stages", ...(normalized.violations ? { violations: normalized.violations } : {}) };
   /* The entry stage (the draft cursor rests on stages[0]) must be a run: a
      review-loop entry has no preceding run to review and would park on Start.
      Preserved edges let a fronted review stay graph-reachable from a later run,
      so the array-position guard runs explicitly here (matching the client's
      reviewLoopChainValid). */
   if (normalized.stages[0] && normalized.stages[0].kind !== "run") {
-    return { error: "review-loop stage requires a preceding run stage" };
+    /* #1026: name the stage and the rule it breaks, not an ordering the caller
+       is left to guess at. */
+    return { error: `review-loop stage ${normalized.stages[0].id} may not be the entry stage: the plan starts on its first stage, which must be a run stage whose session a review-loop then reviews` };
   }
   pipeline.stages = normalized.stages;
   pipeline.runs = normalized.stages.map((stage) => ({ stageId: stage.id, attempts: [] }));
@@ -2366,6 +2553,10 @@ export type PipelineMutationResult = {
   code?: PipelineRepoPreflightErrorCode;
   field?: "repoDir";
   path?: string;
+  /** #1026: every request-shape constraint the call violated, each naming its
+      field and the shape that field expects. Present on a batched validation
+      rejection; `error` renders the same list. */
+  violations?: PipelineValidationViolation[];
   /** Set by the close action: what its host teardown stopped and preserved. */
   close?: PipelineCloseReport;
 };
@@ -2375,16 +2566,31 @@ type PipelineCreatorLineage = {
   srcConversationId: string | null;
 };
 
+/** #1026: the roots a creator transcript may live under, named in every `src`
+    rejection. A Claude-engine caller knows only its native path, so the message
+    has to say which address the viewer records — and that the native one is
+    accepted whenever the shared mirror holds the same file. */
+export const PIPELINE_SRC_ROOT_GUIDANCE =
+  "src must be a .jsonl transcript under an accepted root: the shared Claude transcript store (<viewer config dir>/shared/claude/projects), a Claude account's own projects root, or a Codex sessions root (~/.codex/sessions). A native ~/.claude/projects path is accepted and normalized to the shared store when the mirrored file exists there.";
+
 function resolvePipelineCreatorLineage(
   value: unknown,
   ports: Pick<PipelinePorts, "sourcePathAllowed" | "conversationIdForPath">,
 ): { lineage?: PipelineCreatorLineage; error?: string; status?: number } {
-  const srcPath = typeof value === "string" ? value.trim() : "";
-  if (!srcPath) return { error: "pipeline creator lineage is required; pass src", status: 400 };
-  if (!ports.sourcePathAllowed(srcPath)) return { error: "src path is not an allowed conversation transcript", status: 400 };
-  const srcConversationId = ports.conversationIdForPath(srcPath);
-  if (!srcConversationId) return { error: "src conversation does not exist", status: 400 };
-  return { lineage: { srcPath, srcConversationId } };
+  const requested = typeof value === "string" ? value.trim() : "";
+  if (!requested) return { error: "pipeline creator lineage is required; pass src", status: 400 };
+  /* The native `<claude home>/projects/...` path and its shared-store mirror
+     name the same file; viewer records address the shared one. Try what the
+     caller passed first, so nothing about an already-canonical path changes. */
+  for (const srcPath of [requested, mirroredClaudeTranscriptPath(requested)]) {
+    if (!srcPath || !ports.sourcePathAllowed(srcPath)) continue;
+    const srcConversationId = ports.conversationIdForPath(srcPath);
+    if (srcConversationId) return { lineage: { srcPath, srcConversationId } };
+  }
+  if (!ports.sourcePathAllowed(requested)) {
+    return { error: `src path is not an allowed conversation transcript. ${PIPELINE_SRC_ROOT_GUIDANCE}`, status: 400 };
+  }
+  return { error: `src conversation does not exist. ${PIPELINE_SRC_ROOT_GUIDANCE}`, status: 400 };
 }
 
 type CreatePipelineOptions = {
@@ -2462,17 +2668,23 @@ export async function createPipelineFromRequest(
   ports: PipelinePorts = defaultPipelinePorts(),
   options: CreatePipelineOptions = {},
 ): Promise<PipelineMutationResult> {
+  /* #1026: every request-shape constraint is evaluated before the request is
+     answered, and the response carries all of them. The checks and their
+     verdicts are the ones that were here before, only their reporting is
+     batched; the repo preflight and base resolution below still answer alone,
+     because each carries its own code, field and status. */
+  const violations: PipelineValidationViolation[] = [];
   const task = typeof req.task === "string" ? req.task.trim() : "";
-  if (!task) return { error: "task is required", status: 400 };
-  if (task.length > MAX_TASK_LENGTH) return { error: `task exceeds ${MAX_TASK_LENGTH} characters`, status: 400 };
+  if (!task) violations.push({ field: "task", message: "task is required", expected: `non-empty string up to ${MAX_TASK_LENGTH} characters` });
+  else if (task.length > MAX_TASK_LENGTH) violations.push({ field: "task", message: `task exceeds ${MAX_TASK_LENGTH} characters`, expected: `non-empty string up to ${MAX_TASK_LENGTH} characters` });
   const spec = typeof req.spec === "string" && req.spec.trim() ? req.spec.trim() : undefined;
-  if (req.spec !== undefined && typeof req.spec !== "string") return { error: "spec must be a string", status: 400 };
-  if (spec && spec.length > MAX_SPEC_LENGTH) return { error: `spec exceeds ${MAX_SPEC_LENGTH} characters`, status: 400 };
-  if (req.autoStart !== undefined && typeof req.autoStart !== "boolean") return { error: "autoStart must be a boolean", status: 400 };
-  if (req.baseBranch !== undefined && typeof req.baseBranch !== "string") return { error: "baseBranch must be a string", status: 400 };
-  if (req.baseRef !== undefined && typeof req.baseRef !== "string") return { error: "baseRef must be a string", status: 400 };
+  if (req.spec !== undefined && typeof req.spec !== "string") violations.push({ field: "spec", message: "spec must be a string", expected: `string up to ${MAX_SPEC_LENGTH} characters` });
+  if (spec && spec.length > MAX_SPEC_LENGTH) violations.push({ field: "spec", message: `spec exceeds ${MAX_SPEC_LENGTH} characters`, expected: `string up to ${MAX_SPEC_LENGTH} characters` });
+  if (req.autoStart !== undefined && typeof req.autoStart !== "boolean") violations.push({ field: "autoStart", message: "autoStart must be a boolean", expected: "boolean (false creates a draft the operator starts)" });
+  if (req.baseBranch !== undefined && typeof req.baseBranch !== "string") violations.push({ field: "baseBranch", message: "baseBranch must be a string", expected: "branch name string" });
+  if (req.baseRef !== undefined && typeof req.baseRef !== "string") violations.push({ field: "baseRef", message: "baseRef must be a string", expected: "commit-ish string resolved against repoDir" });
   if (req.taskIds !== undefined && (!Array.isArray(req.taskIds) || req.taskIds.some((taskId) => typeof taskId !== "string" || !taskId.trim()))) {
-    return { error: "taskIds must be an array of non-empty strings", status: 400 };
+    violations.push({ field: "taskIds", message: "taskIds must be an array of non-empty strings", expected: "array of board task ids" });
   }
   const taskSpawn = options.ensureTask && options.spawnParams && isTaskSpawnPipelineParams(options.spawnParams)
     ? { task: options.ensureTask, params: options.spawnParams }
@@ -2485,22 +2697,37 @@ export async function createPipelineFromRequest(
     : operatorDraftWithoutLineage
       ? { lineage: { srcPath: null, srcConversationId: null } }
     : resolvePipelineCreatorLineage(req.src, ports);
-  if (!creator.lineage) return { error: creator.error, status: creator.status };
+  /* A task-spawn lineage failure is a launch-identity conflict, not a request
+     the caller can fix by editing fields, so it answers alone as it always did. */
+  if (!creator.lineage && taskSpawn) return { error: creator.error, status: creator.status };
+  if (!creator.lineage) violations.push({ field: "src", message: creator.error ?? "pipeline creator lineage is required; pass src", expected: PIPELINE_SRC_ROOT_GUIDANCE });
   const taskIds = [...new Set((req.taskIds ?? []).map((taskId) => taskId.trim()))];
   const requestedRepoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
-  if (!requestedRepoDir) return { error: "repoDir is required", status: 400 };
-  const admission = ports.preflightRepo(requestedRepoDir);
-  if (!admission.ok) return preflightFailure(admission);
-  const repoDir = admission.repoDir;
+  if (!requestedRepoDir) violations.push({ field: "repoDir", message: "repoDir is required", expected: "absolute path of an existing git repository" });
   /* A draft (autoStart:false) may be created empty and assembled on the canvas
      (#136); an immediately-started pipeline needs at least its one implement
      conversation (#353). */
   const normalized = normalizeStages(req.stages, ports.roleLookup, undefined, req.autoStart === false ? 0 : MIN_STARTED_PIPELINE_STAGES);
-  if (!normalized.stages) return { error: normalized.error ?? "invalid stages", status: 400 };
-  const explicitBaseRef = req.baseRef?.trim();
-  if (req.autoStart === false && req.baseBranch?.trim() && !explicitBaseRef) {
-    return { error: "a draft baseBranch requires an explicit baseRef", status: 400 };
+  if (!normalized.stages) {
+    violations.push(...(normalized.violations ?? [{ field: "stages", message: normalized.error ?? "invalid stages", expected: STAGE_OBJECT_SHAPE }]));
   }
+  /* Read after the type checks above recorded their verdicts: with batching a
+     non-string baseRef reaches here, so the trims must not assume a string. */
+  const explicitBaseRef = typeof req.baseRef === "string" ? req.baseRef.trim() : undefined;
+  const requestedBaseBranch = typeof req.baseBranch === "string" ? req.baseBranch.trim() : "";
+  if (req.autoStart === false && requestedBaseBranch && !explicitBaseRef) {
+    violations.push({
+      field: "baseRef",
+      message: "a draft baseBranch requires an explicit baseRef",
+      expected: "commit SHA the draft is pinned to, resolved by the caller (a draft is not provisioned, so the viewer cannot resolve the branch itself)",
+    });
+  }
+  if (violations.length || !normalized.stages || !creator.lineage) {
+    return { error: pipelineValidationError(violations), violations, status: 400 };
+  }
+  const admission = ports.preflightRepo(requestedRepoDir);
+  if (!admission.ok) return preflightFailure(admission);
+  const repoDir = admission.repoDir;
   const base = req.autoStart === false && !explicitBaseRef
     ? null
     : resolvePipelineBase(repoDir, { baseBranch: req.baseBranch, baseRef: explicitBaseRef }, ports.exec);
@@ -2813,7 +3040,7 @@ export async function patchPipeline(
       inputs.splice(index, 0, inserted);
       if (predecessor) predecessor.next = inserted.id;
       const replaced = replaceDraftStages(pipeline, inputs, ports.roleLookup);
-      if (replaced.error) return { error: replaced.error, status: 400 };
+      if (replaced.error) return { error: replaced.error, status: 400, ...(replaced.violations ? { violations: replaced.violations } : {}) };
     } else if (req.action === "remove-stage") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       /* A draft can be emptied entirely on the canvas (#136); the 2-stage floor is
@@ -2838,7 +3065,7 @@ export async function patchPipeline(
         if (input.onFail?.to === removed.id) input.onFail = null;
       }
       const replaced = replaceDraftStages(pipeline, inputs, ports.roleLookup);
-      if (replaced.error) return { error: replaced.error, status: 400 };
+      if (replaced.error) return { error: replaced.error, status: 400, ...(replaced.violations ? { violations: replaced.violations } : {}) };
     } else if (req.action === "reorder-stage") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       const inputs = draftStageInputs(pipeline.stages);
@@ -2860,7 +3087,7 @@ export async function patchPipeline(
         ordered.splice(toIndex!, 0, moved!);
       }
       const replaced = replaceDraftStages(pipeline, ordered, ports.roleLookup);
-      if (replaced.error) return { error: replaced.error, status: 400 };
+      if (replaced.error) return { error: replaced.error, status: 400, ...(replaced.violations ? { violations: replaced.violations } : {}) };
     } else if (req.action === "set-edge") {
       /* Conversation-graph editing (#353): rewires a stage's pass or fail edge.
          Edits always shape the future, never rewrite evidence: a stage that has

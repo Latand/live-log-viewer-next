@@ -1216,6 +1216,8 @@ test("a tmux resume rebuilds the command with the conversation's stored MCP gran
     },
     recover: async () => null,
     listFiles: async () => [{ root: "codex-sessions", path: pathname, project: "p", mtime: 0, size: 0 } as unknown as FileEntry],
+    // Liveness is injected so the case never reads this machine's processes.
+    liveOwnership: () => null,
     resumeSpecFor: (_root: string, _path: string, given: { mcpServers?: readonly string[] }) => {
       options.push(given);
       return { command: "resume", transcript: pathname, launchProfile: profile };
@@ -1228,6 +1230,63 @@ test("a tmux resume rebuilds the command with the conversation's stored MCP gran
      the Viewer baseline while the durable profile still claimed it (#739). */
   expect(options).toHaveLength(1);
   expect(options[0]!.mcpServers).toEqual(["viewer", "granted-connector"]);
+});
+
+test("a resume that cannot build a command names the failing condition (issue #935)", async () => {
+  const pathname = path.join(SANDBOX, "unresumable-fixture.jsonl");
+  fs.writeFileSync(pathname, "");
+  const entry = { root: "claude-projects", path: pathname, project: "p", mtime: 0, size: 0, engine: "claude" } as unknown as FileEntry;
+
+  const outcome = await resumeConversation(pathname, {
+    pathAllowed: () => true,
+    registry: {
+      conversationForPath: () => ({ id: "conversation_named", supersededBy: null }),
+      launchProfileForPath: () => null,
+      transcriptAccountId: () => "account-b",
+    },
+    recover: async () => null,
+    listFiles: async () => [entry],
+    resumeSpecFor: () => null,
+    resumeEligibility: () => ({ ok: false, reason: "the conversation transcript cannot be read from disk" }),
+    deliver: async () => ({ ok: true, outcome: "resumed", target: "%7" }),
+  } as never);
+
+  /* The generic "this conversation cannot be resumed" hid an account-ownership
+     failure, a missing session id, and an unreadable file behind one string. */
+  expect(outcome).toMatchObject({
+    ok: false,
+    status: 409,
+    error: "the conversation transcript cannot be read from disk",
+  });
+});
+
+test("a resume passes the conversation's recorded account to the resume spec (issue #935)", async () => {
+  const pathname = path.join(SANDBOX, "recorded-account-fixture.jsonl");
+  fs.writeFileSync(pathname, "");
+  const entry = { root: "claude-projects", path: pathname, project: "p", mtime: 0, size: 0, engine: "claude" } as unknown as FileEntry;
+  const options: { accountId?: string | null }[] = [];
+
+  const outcome = await resumeConversation(pathname, {
+    pathAllowed: () => true,
+    registry: {
+      conversationForPath: () => ({ id: "conversation_recorded", supersededBy: null }),
+      launchProfileForPath: () => null,
+      transcriptAccountId: () => "account-b",
+    },
+    recover: async () => null,
+    listFiles: async () => [entry],
+    resumeSpecFor: (_root: string, _path: string, given: { accountId?: string | null }) => {
+      options.push(given);
+      return { command: "resume", launchProfile: null };
+    },
+    deliver: async () => ({ ok: true, outcome: "resumed", target: "%7" }),
+  } as never);
+
+  expect(outcome).toMatchObject({ ok: true });
+  /* Under the shared transcript store the path names no owner, so the recorded
+     account is the only thing that picks the home the resume runs under. */
+  expect(options).toHaveLength(1);
+  expect(options[0]!.accountId).toBe("account-b");
 });
 
 test("message-triggered relaunches carry the stored MCP grant on both the direct and root-relay paths", async () => {

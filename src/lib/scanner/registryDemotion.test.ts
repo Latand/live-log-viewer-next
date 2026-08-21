@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,9 +6,120 @@ import path from "node:path";
 import { afterEach, expect, test } from "bun:test";
 
 import { AgentRegistry, setAgentRegistryForTests } from "../agent/registry";
-import { archivedTranscriptPaths, pinnedPathsFor } from "./index";
+import { archivedTranscriptPaths, hostedTranscriptPaths, pinnedPathsFor } from "./index";
 
 afterEach(() => setAgentRegistryForTests(null));
+
+async function withEnvironment(values: Record<string, string>, body: () => Promise<void>): Promise<void> {
+  const previous = Object.keys(values).map((key) => [key, process.env[key]] as const);
+  Object.assign(process.env, values);
+  try {
+    await body();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/** A state dir holding a registry whose account home symlinks into the shared
+    transcript store, so one physical transcript has two absolute forms. */
+async function sharedStoreFixture(prefix: string): Promise<{
+  base: string;
+  registryFile: string;
+  environment: Record<string, string>;
+  accountForm: (name: string) => string;
+  sharedForm: (name: string) => string;
+}> {
+  const base = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const shared = path.join(base, "shared", "claude", "projects", "-repo");
+  const accountHome = path.join(base, "account-home");
+  await mkdir(shared, { recursive: true });
+  await mkdir(accountHome, { recursive: true });
+  fs.symlinkSync(path.join(base, "shared", "claude", "projects"), path.join(accountHome, "projects"));
+  await mkdir(path.join(base, "state"), { recursive: true });
+  return {
+    base,
+    registryFile: path.join(base, "state", "agent-registry.json"),
+    environment: { LLV_STATE_DIR: path.join(base, "state"), LLV_CLAUDE_HOME: accountHome },
+    accountForm: (name) => path.join(accountHome, "projects", "-repo", name),
+    sharedForm: (name) => path.join(shared, name),
+  };
+}
+
+test("a live transcript reached through a symlinked account home is not its own archived predecessor", async () => {
+  const fixture = await sharedStoreFixture("llv-registry-demotion-shared-");
+  try {
+    await writeFile(fixture.sharedForm("live.jsonl"), "{}\n");
+    await writeFile(fixture.sharedForm("predecessor.jsonl"), "{}\n");
+    await withEnvironment(fixture.environment, async (): Promise<void> => {
+      const store = new AgentRegistry(fixture.registryFile);
+      const conversation = store.ensureConversation("claude", fixture.accountForm("live.jsonl"), "default");
+      const snapshot = store.snapshot();
+      /* The registry recorded the current generation through the account home
+         while discovery walks the shared store, and the same physical file is
+         also listed as a continuity path in the shared form. */
+      snapshot.conversations[conversation.id]!.continuityPaths = [
+        fixture.sharedForm("live.jsonl"),
+        fixture.sharedForm("predecessor.jsonl"),
+      ];
+      await writeFile(fixture.registryFile, JSON.stringify(snapshot));
+      setAgentRegistryForTests(new AgentRegistry(fixture.registryFile));
+
+      const archived = archivedTranscriptPaths();
+      /* The live transcript keeps its cap slot; a genuinely different
+         predecessor still demotes below current transcripts. */
+      expect(archived.has(fixture.sharedForm("live.jsonl"))).toBe(false);
+      expect(archived.has(fixture.sharedForm("predecessor.jsonl"))).toBe(true);
+    });
+  } finally {
+    await rm(fixture.base, { recursive: true, force: true });
+  }
+});
+
+test("hosted transcripts report the paths a running host owns", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-hosted-transcripts-"));
+  try {
+    const file = path.join(base, "agent-registry.json");
+    const snapshot = new AgentRegistry(file).snapshot();
+    for (const [sessionId, status] of [["live-session", "live"], ["dead-session", "dead"]] as const) {
+      snapshot.entries[`codex:${sessionId}`] = {
+        key: { engine: "codex", sessionId },
+        artifactPath: `/repo/${status}.jsonl`,
+        cwd: "/repo",
+        accountId: null,
+        status,
+        host: null,
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: null,
+        updatedAt: new Date(0).toISOString(),
+        structuredHost: null,
+      };
+    }
+    await writeFile(file, JSON.stringify(snapshot));
+    setAgentRegistryForTests(new AgentRegistry(file));
+
+    const hosted = hostedTranscriptPaths();
+    expect(hosted.has("/repo/live.jsonl")).toBe(true);
+    expect(hosted.has("/repo/dead.jsonl")).toBe(false);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable registry reports no hosted transcripts", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-hosted-corrupt-"));
+  try {
+    const file = path.join(base, "agent-registry.json");
+    await writeFile(file, "{ this is not json");
+    setAgentRegistryForTests(new AgentRegistry(file));
+    expect(hostedTranscriptPaths()).toEqual(new Set());
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
 
 test("a corrupt agent registry yields an empty demotion set and discovery stays available", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-registry-demotion-"));

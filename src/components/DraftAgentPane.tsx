@@ -3,13 +3,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { roleDescription, roleName, roleParamDescription, roleParamLabel, roleParamOptionLabel } from "@/components/builderCopy";
+import {
+  EngineRadioGroup,
+  LaunchAccountSelect,
+  useAgentLaunchDraft,
+} from "@/components/draft/AgentLaunchControls";
 import { Play, X } from "@/components/icons";
 import { Select } from "@/components/ui/Select";
 import { useComposer } from "@/hooks/useComposer";
 import { seedLaunchOutbox } from "@/components/conversation/outbox";
-import { isEngineEffort } from "@/lib/agent/efforts";
 import { playCue } from "@/lib/audio/app";
-import { codexModelSupportsImages, defaultModelFor } from "@/lib/agent/models";
+import { codexModelSupportsImages } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
 import { requestFilesRefresh } from "@/lib/filesEvents";
 import { STREAM_RECONNECTED_EVENT } from "@/hooks/runtimeBus";
@@ -41,30 +45,17 @@ import {
   provisionalSpawnFile,
   spawnRequestBody,
 } from "./draftSpawn";
-import { ReasoningControls, type SpeedChoice } from "./ReasoningControls";
+import { ReasoningControls } from "./ReasoningControls";
 import { cleanTitle, engineTintOf } from "./utils";
 import { draftWorkingDirectory } from "./projectModel";
 
 type Engine = "claude" | "codex";
 
-/** Secret-free slice of one stored account that the launch selector needs. */
-type SpawnAccountOption = { id: string; label: string; authPresent: boolean };
-type SpawnAccountCatalog = Record<Engine, { active: string; accounts: SpawnAccountOption[] }>;
-
-/** Crash-safe read of one engine section of `/api/accounts`: a malformed body
-    yields an empty section, which simply hides that engine's selector. */
-function spawnAccountSection(raw: unknown): SpawnAccountCatalog[Engine] {
-  const section = raw as { active?: unknown; accounts?: unknown } | null;
-  const accounts = Array.isArray(section?.accounts)
-    ? section.accounts.flatMap((entry): SpawnAccountOption[] => {
-        const account = entry as { id?: unknown; label?: unknown; authPresent?: unknown };
-        return typeof account.id === "string" && typeof account.label === "string"
-          ? [{ id: account.id, label: account.label, authPresent: account.authPresent !== false }]
-          : [];
-      })
-    : [];
-  return { active: typeof section?.active === "string" ? section.active : "", accounts };
-}
+/* Engine/model/effort/account state and the engine chips are SHARED with the
+   orchestrator panel and the mobile create sheet (PRD #976 slice A) — they live
+   in `@/components/draft/AgentLaunchControls` now. Re-exported here because the
+   pipeline stage placeholder has always imported the chips from this module. */
+export { EngineRadioGroup };
 
 const STRUCTURED_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 type SpawnImageNegotiation = {
@@ -101,55 +92,9 @@ function spawnImageNegotiationValue(value: unknown): SpawnImageNegotiation | nul
   return { spawnTransport: candidate.spawnTransport, imageInput: { claude, codex } };
 }
 
-const ENGINES: { key: Engine; label: string }[] = [
-  { key: "claude", label: "Claude" },
-  { key: "codex", label: "Codex" },
-];
-
 const field = (id: string, name: string) => `llvDraftPane:${id}:${name}`;
 
 export type RoleCatalogItem = RoleDefinition & { promptPreview: string };
-
-/**
- * The engine picker chips every draft-style window shares — the agent draft
- * pane and the pipeline stage placeholders render the exact same control
- * (issue #196: one window recipe, no lookalikes).
- */
-export function EngineRadioGroup({
-  engine,
-  disabled,
-  onChange,
-}: {
-  engine: Engine;
-  disabled?: boolean;
-  onChange: (engine: Engine) => void;
-}) {
-  const { t } = useLocale();
-  return (
-    <div className="flex shrink-0 items-center gap-1" role="radiogroup" aria-label={t("draft.engineAria")}>
-      {ENGINES.map(({ key, label }) => {
-        const active = engine === key;
-        const chip = engineTintOf(key);
-        return (
-          <button
-            key={key}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            disabled={disabled}
-            onClick={() => onChange(key)}
-            style={active ? { backgroundColor: "var(--color-card)", color: chip.color, borderColor: chip.color } : undefined}
-            className={`rounded-full border px-2 py-0.5 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
-              active ? "" : "border-transparent bg-transparent text-muted hover:text-primary"
-            }`}
-          >
-            {label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 
 /* One /api/roles fetch per session, shared by every draft pane and stage
    placeholder — a draft pipeline mounts one placeholder per stage, and each
@@ -423,31 +368,34 @@ export function DraftAgentPane({
      answers with the source transcript's own cwd, which replaces the guess as
      long as the operator has not picked a directory of their own. */
   const awaitingInheritedCwdRef = useRef(Boolean(src && draftCwdIsUntouched(draftId)));
-  const [engine, setEngineState] = useState<Engine>(() => {
-    const stored = readField(draftId, "engine");
-    if (stored === "codex" || stored === "claude") return stored;
-    return srcFile?.engine === "codex" ? "codex" : "claude";
-  });
   const [cwd, setCwdState] = useState(() => initialCwd || draftWorkingDirectory(files, project, src));
-  const [model, setModelState] = useState(() => readField(draftId, "model") || defaultModelFor(engine));
-  const [effort, setEffortState] = useState(() => readField(draftId, "effort"));
-  const [speed, setSpeedState] = useState<SpeedChoice>(() => {
-    const stored = readField(draftId, "speed");
-    return stored === "fast" || stored === "standard" ? stored : "";
-  });
-  const [accountId, setAccountIdState] = useState(() => readField(draftId, "accountId"));
   const roles = useRoleCatalog();
   const [roleId, setRoleIdState] = useState(() => readField(draftId, "role"));
   const [roleParams, setRoleParamsState] = useState(() => readRoleParams(draftId));
   const [reviews, setReviewsState] = useState(() => readField(draftId, "reviews"));
   const [deployConfirm, setDeployConfirmState] = useState(() => readField(draftId, "confirm"));
-  const [accountCatalog, setAccountCatalog] = useState<SpawnAccountCatalog | null>(null);
   const [dirs, setDirs] = useState<string[]>([]);
-  const spawnImageNegotiationKey = `${project}\n${src ?? ""}\n${engine}`;
+  /* The stored key is "" before the first negotiation and after an engine flip;
+     the derived value below reads any mismatch as «loading», which is exactly
+     what a not-yet-negotiated engine is. */
   const [storedSpawnImageNegotiation, setSpawnImageNegotiation] = useState<SpawnImageNegotiationState>({
     status: "loading",
-    requestKey: spawnImageNegotiationKey,
+    requestKey: "",
   });
+  /* Engine, model, effort, codex speed and the stored account are the SHARED
+     launch parameters (PRD #976 slice A) — the orchestrator panel offers the
+     operator the very same set, so the state and its invariants live in one
+     module and this pane keeps only its own persistence. */
+  const launch = useAgentLaunchDraft({
+    storage: {
+      read: (name) => readField(draftId, name),
+      write: (name, value) => writeField(draftId, name, value),
+    },
+    initialEngine: srcFile?.engine === "codex" ? "codex" : "claude",
+    onEngineChange: (value) => setSpawnImageNegotiation({ status: "loading", requestKey: `${project}\n${src ?? ""}\n${value}` }),
+  });
+  const { engine, model, effort, speed } = launch;
+  const spawnImageNegotiationKey = `${project}\n${src ?? ""}\n${engine}`;
   const [spawnNegotiationAttempt, setSpawnNegotiationAttempt] = useState(0);
   const spawnImageNegotiation: SpawnImageNegotiationState = storedSpawnImageNegotiation.requestKey === spawnImageNegotiationKey
     ? storedSpawnImageNegotiation
@@ -474,31 +422,7 @@ export function DraftAgentPane({
     return () => window.removeEventListener(DRAFT_CWD_RESOLVED_EVENT, applyResolvedCwd);
   }, [draftId]);
 
-  const setModel = (value: string) => {
-    setModelState(value);
-    writeField(draftId, "model", value);
-  };
-  const setEffort = (value: string) => {
-    setEffortState(value);
-    writeField(draftId, "effort", value);
-  };
-  const setSpeed = (value: SpeedChoice) => {
-    setSpeedState(value);
-    writeField(draftId, "speed", value);
-  };
-  const setEngine = (value: Engine) => {
-    setSpawnImageNegotiation({ status: "loading", requestKey: `${project}\n${src ?? ""}\n${value}` });
-    setEngineState(value);
-    writeField(draftId, "engine", value);
-    /* An account id belongs to one engine's catalog; flipping engines drops the
-       explicit choice so the new engine launches on its own active account. */
-    setAccountIdState("");
-    writeField(draftId, "accountId", "");
-    setModel(defaultModelFor(value));
-    /* Tier lists differ per engine (claude has "max", codex does not) — a
-       carried-over invalid tier falls back to the CLI default. */
-    if (effort && !isEngineEffort(value, effort)) setEffort("");
-  };
+  const { setEngine, setModel, setEffort, setSpeed } = launch;
   /* The operator's own pick: it outranks every system answer from here on, so
      the seed is deliberately left behind rather than moved onto the new value. */
   const setCwd = (value: string) => {
@@ -619,14 +543,6 @@ export function DraftAgentPane({
       cancelled = true;
     };
   }, [project, draftId, src, engine, spawnImageNegotiationKey, spawnNegotiationAttempt]);
-
-  useEffect(() => {
-    void fetch("/api/accounts").then(async (res) => {
-      if (!res.ok) return;
-      const body = await res.json() as { claude?: unknown; codex?: unknown };
-      setAccountCatalog({ claude: spawnAccountSection(body.claude), codex: spawnAccountSection(body.codex) });
-    }).catch(() => {});
-  }, []);
 
   /* The handover uses the exact receipt path, conversation id, or — when the
      accepted POST's response was lost — the durable projection's exact
@@ -787,14 +703,6 @@ export function DraftAgentPane({
   }, [attempt, submitAttempt]);
 
   const selectedRole = roles.find((role) => role.id === roleId) ?? null;
-  /* Per-launch account choice (issue #40): the selector always shows which
-     stored profile this draft will spawn on. A stored id from another engine
-     (or a removed account) falls back to the engine's active account, so the
-     value shown is always the value sent. */
-  const engineAccounts = accountCatalog?.[engine] ?? null;
-  const spawnAccountId = engineAccounts?.accounts.some((account) => account.id === accountId)
-    ? accountId
-    : (engineAccounts?.active ?? "");
   const spawnImagesDisabled = spawnImageNegotiation.status !== "ready"
     || (readySpawnImageNegotiation?.spawnTransport === "structured" && !structuredSpawnImageCapability?.supported);
   const spawnImagesReason = spawnImageNegotiation.status === "loading"
@@ -845,7 +753,7 @@ export function DraftAgentPane({
       cwd: cwd.trim(),
       effort,
       fast: engine === "codex" && speed ? speed === "fast" : null,
-      accountId: spawnAccountId,
+      accountId: launch.launchAccountId,
       "prompt": payloadText,
       images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
       src,
@@ -887,28 +795,7 @@ export function DraftAgentPane({
     >
       <span aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tint.color }} />
       <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5" style={{ backgroundColor: tint.soft }}>
-        {engineAccounts && engineAccounts.accounts.length ? (
-          <Select
-            value={spawnAccountId}
-            disabled={fieldsDisabled}
-            onChange={(event) => { setAccountIdState(event.target.value); writeField(draftId, "accountId", event.target.value); }}
-            className="max-w-28"
-            aria-label={t("draft.accountAria", { engine: engine === "codex" ? "Codex" : "Claude" })}
-          >
-            {engineAccounts.accounts.map((account) => (
-              /* The engine's active account is the default for future launches;
-                 a signed-out profile stays listed (history preserved) but can't
-                 be picked until it signs back in via Accounts. */
-              <option key={account.id} value={account.id} disabled={!account.authPresent}>
-                {account.id === engineAccounts.active
-                  ? t("draft.accountDefault", { label: account.label })
-                  : account.authPresent
-                    ? account.label
-                    : t("draft.accountNeedsLogin", { label: account.label })}
-              </option>
-            ))}
-          </Select>
-        ) : null}
+        <LaunchAccountSelect draft={launch} disabled={fieldsDisabled} className="max-w-28" />
         <span className="h-2 w-2 shrink-0 rounded-full bg-strong" title={t("draft.notStarted")} />
         <EngineRadioGroup engine={engine} disabled={fieldsDisabled} onChange={setEngine} />
         <span

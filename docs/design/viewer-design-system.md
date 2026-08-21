@@ -138,6 +138,19 @@ Four surface levels; the shadow belongs to the level, never applied à la carte.
 | `--surface-sunken` | `#f7f7fa` | `#121216` | code blocks, raw output, collapsed strips, canvas-docked bands |
 | `--surface-raised` | `#ffffff` | `#1d1d24` | menus, popovers, sheets, toasts |
 
+The scheme board adds a three-level depth ladder (issue #962): board canvas →
+container well → card. Dark mode dips the board below the app canvas so wells
+and cards climb from it; light mode keeps the board at the canvas value and
+recesses wells slightly instead. Quiet is the surface of an inactive card with
+no attention state. All three carry the same 4.5:1 small-text floor as the
+surfaces above (pinned by `tokens.contrast.test.ts`).
+
+| token | light | dark | use |
+| --- | --- | --- | --- |
+| `--surface-board` | `#f3f3f6` | `#0d0d11` | scheme canvas behind the dot grid |
+| `--surface-well` | `#f0f0f4` | `#131318` | faint filled interior of a pipeline/branch container |
+| `--surface-quiet` | `#fafafb` | `#141419` | inactive card, no attention: recedes from the card white |
+
 ```css
 --shadow-1: 0 1px 2px rgb(20 20 30 / 0.05);                      /* card   */
 --shadow-2: 0 8px 32px rgb(20 20 30 / 0.16), 0 1px 2px rgb(20 20 30 / 0.06);  /* raised */

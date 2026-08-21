@@ -5,17 +5,21 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { HostCommandViewerDeploymentAdapter } from "./deploymentAdapter";
+import { promotedViewerReadinessPhase } from "./deploymentHealth";
 
 const sandboxes: string[] = [];
 afterEach(() => {
   for (const dir of sandboxes.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function sleepingAdapter(): { executable: string; stateFile: string } {
+function sleepingAdapter(phase?: string): { executable: string; stateFile: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-adapter-process-"));
   sandboxes.push(dir);
   const executable = path.join(dir, "adapter.sh");
-  fs.writeFileSync(executable, "#!/bin/sh\nsleep 60\nprintf '{\"revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\\n'\n", { mode: 0o700 });
+  const phaseWrite = phase
+    ? `printf '{"action":"%s","phase":"${phase}"}' "$1" > "$LLV_DEPLOYMENT_ADAPTER_PHASE_FILE"\n`
+    : "";
+  fs.writeFileSync(executable, `#!/bin/sh\n${phaseWrite}sleep 60\nprintf '{"revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\\n'\n`, { mode: 0o700 });
   return { executable, stateFile: path.join(dir, "adapter-process.json") };
 }
 
@@ -196,4 +200,49 @@ test("adapter action deadline terminates the process tree and clears durable own
   await expect(pending).rejects.toThrow("timed out");
   expect(processGroupAlive(timedOutPid)).toBe(false);
   expect(fs.existsSync(fixture.stateFile)).toBe(false);
+});
+
+test("promotion deadline reports the active handoff phase", async () => {
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:18001",
+    revision: "a".repeat(40),
+  };
+
+  for (const phase of ["fencing the current SQLite release", "publishing the Viewer release target"]) {
+    const fixture = sleepingAdapter(phase);
+    const adapter = HostCommandViewerDeploymentAdapter.fromExecutable(fixture.executable, {
+      stateFile: fixture.stateFile,
+      timeouts: { promote: 20 },
+    });
+    await expect(adapter.promote(candidate)).rejects.toThrow(
+      `deployment adapter promote timed out while ${phase}`,
+    );
+    expect(fs.existsSync(`${fixture.stateFile}.phase`)).toBe(false);
+  }
+});
+
+test("post-promotion deadline reports serving readiness and host adoption progress", async () => {
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:18001",
+    revision: "a".repeat(40),
+  };
+  const phase = promotedViewerReadinessPhase({
+    state: "pending",
+    phase: "adopting Claude hosts",
+    completedHosts: 7,
+    totalHosts: 19,
+  });
+  const fixture = sleepingAdapter(phase);
+  const adapter = HostCommandViewerDeploymentAdapter.fromExecutable(fixture.executable, {
+    stateFile: fixture.stateFile,
+    timeouts: { "verify-promoted": 20 },
+  });
+
+  await expect(adapter.verifyPromoted(candidate)).rejects.toThrow(
+    "deployment adapter verify-promoted timed out while waiting for promoted Viewer serving readiness - adoption 7 of 19 - adopting Claude hosts",
+  );
 });

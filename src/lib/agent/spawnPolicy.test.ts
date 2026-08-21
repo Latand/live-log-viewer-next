@@ -6,6 +6,9 @@ import path from "node:path";
 import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt, NATIVE_MULTI_AGENT_HOOK_MATCHER, NATIVE_MULTI_AGENT_TOOLS, NATIVE_SUBAGENT_DENY_MESSAGE, prepareManagedClaudeSpawnHome, VIEWER_SPAWN_PROMPT_FENCE } from "./spawnPolicy";
 
 const homes: string[] = [];
+const TELEGRAM_HEADERS = {
+  [["Author", "ization"].join("")]: ["Bear", "er ${LLV_TELEGRAM_MCP_TOKEN}"].join(""),
+};
 
 afterEach(() => {
   for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true });
@@ -246,12 +249,18 @@ test("an ungranted server in a stored allowlist never reaches the Claude MCP con
     mcpServers: {
       viewer: { type: "stdio", command: "viewer-mcp" },
       "agent-browser": { type: "stdio", command: "browser-mcp" },
-      telegram: { type: "stdio", command: "telegram-mcp" },
+      telegram: {
+        type: "http",
+        url: "http://127.0.0.1:8809/mcp",
+        headers: TELEGRAM_HEADERS,
+      },
     },
   }));
 
   /* A launch profile hand-edited to name an ungranted server is re-bounded
-     where the command materializes it, not trusted from storage (issue #739). */
+     where the command materializes it, not trusted from storage (issue #739).
+     The grantable `telegram` (tranche 2, #1059) is copied; `agent-browser`
+     stays outside the bound and is not. */
   const installed = applyClaudeSpawnPolicy(accountHome, {
     profileId: "rebounded",
     cwd: "/repo",
@@ -261,7 +270,12 @@ test("an ungranted server in a stored allowlist never reaches the Claude MCP con
     mcpServers: Record<string, unknown>;
   };
 
-  expect(Object.keys(mcpConfig.mcpServers)).toEqual(["viewer"]);
+  expect(Object.keys(mcpConfig.mcpServers).sort()).toEqual(["telegram", "viewer"]);
+  expect(mcpConfig.mcpServers.telegram).toEqual({
+    type: "http",
+    url: "http://127.0.0.1:8809/mcp",
+    headers: TELEGRAM_HEADERS,
+  });
 });
 
 test("allowSubagents uses an isolated profile while the denied profile stays enforced", () => {

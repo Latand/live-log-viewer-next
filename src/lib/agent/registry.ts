@@ -4511,9 +4511,13 @@ export class AgentRegistry {
     });
   }
 
+  /** Clears an inactive structured row. Reconciliation callers supply their
+      observed process and claim epoch so replacement rows fail the comparison
+      inside the same registry mutation. */
   terminateInactiveStructuredHost(
     conversationId: ViewerConversationId,
     key: SessionKey,
+    expected?: Readonly<{ process: ProcessIdentity; claimEpoch: number }>,
   ): false | "current" | "predecessor" {
     return this.mutate((file) => {
       const conversation = file.conversations[conversationId];
@@ -4525,6 +4529,11 @@ export class AgentRegistry {
         || conversation.engine !== key.engine
         || !conversation.generations.some((generation) => generation.id === key.sessionId)
         || !entry
+        || (expected && (!structuredProcess
+          || structuredProcess.pid !== expected.process.pid
+          || structuredProcess.startIdentity !== expected.process.startIdentity
+          || entry.claimEpoch !== expected.claimEpoch
+          || entry.structuredHost?.writerClaimEpoch !== expected.claimEpoch))
         || entry.host
         || (structuredProcess !== null && !staleStructuredWrapper)
         || (entry.claimOwner && !staleStructuredWrapper)

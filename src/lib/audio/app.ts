@@ -4,7 +4,7 @@ import { primeAudio, sharedAudioContext } from "@/lib/chime";
 
 import { createAmbientLoop, type AmbientLoop, type LoopTransport, type Speaker } from "./ambientLoop";
 import { createCuePlayer, type CueOutcome, type CuePlayer } from "./cuePlayer";
-import { cueAsset, CUES, type AudioCue, type CueRequest } from "./cues";
+import { cueAssetAll, CUES, type AudioCue, type CueRequest } from "./cues";
 import { AMBIENT_LOOP_ASSET, ambientLoopConfigured } from "./loopAsset";
 import { audioPrefs, subscribeAudioPrefs } from "./prefs";
 import { createWebAudioTransports, type AudioContextLike } from "./webAudioTransport";
@@ -210,7 +210,7 @@ export function unlockAudioOnGesture(): () => void {
   const stopPriming = primeAudio();
   if (typeof window === "undefined") return stopPriming;
   const unlock = () => {
-    transports.warm(Object.keys(CUES).map((cue) => cueAsset(cue as AudioCue)));
+    transports.warm(Object.keys(CUES).flatMap((cue) => cueAssetAll(cue as AudioCue)));
     /* A device that has already opted in gets its bed the moment it is allowed
        one — the gesture is the last thing standing between the two. Music in the
        Viewer is wanted from the first paint, so the retry budget may well have

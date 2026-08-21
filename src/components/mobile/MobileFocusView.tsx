@@ -7,6 +7,7 @@ import { Loader2, X } from "@/components/icons";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { taskRelationsByPath } from "@/components/tasks/taskRelations";
 import { useBoardState } from "@/hooks/useBoardState";
+import { useKeyboardInset } from "@/hooks/useComposer";
 import { selectionInOrder, viewBus } from "@/hooks/viewPresenceBus";
 import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
@@ -30,6 +31,7 @@ import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 
 import { STAGE_GLYPH, STAGE_TONES, compactPipelineLayoutFlows, compactStageOpenTarget, latestAttempt, partitionPipelineSurfaces, pipelineLinkedTasks, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageHasNavigableHistory } from "@/components/pipelines/pipelineModel";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
+import { MobileOrchestratorRow } from "./MobileOrchestratorRow";
 import { MobilePipelineDock } from "./MobilePipelineDock";
 import { MobilePipelineDockSheet, MobilePipelineSummaryButton, MobilePipelineSummaryRow } from "./MobilePipelineDockSheet";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -139,6 +141,17 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
      (#771). Same store the desktop board and the dashboard bind — stores are
      refcounted per project, so this is the same instance, never a copy. */
   const board = useBoardState(project);
+  /* The on-screen keyboard's overlap with this full-height root (#983). iOS
+     Safari ignores interactive-widget=resizes-content, so with the keyboard up
+     this 100dvh column kept its full height and the keyboard covered its
+     bottom — the composer's picker/send controls included. The browser then
+     scrolled the WINDOW to reach the focused field, hiding the header, and
+     re-asserted that scroll against every manual gesture (the snap-back:
+     an overflow-hidden root gives a gesture nothing else to move). Padding
+     the overlap away keeps the whole column inside the visible area, so the
+     browser has no reason to touch the window scroll at all. Zero whenever
+     the layout viewport already matches the visible one. */
+  const kbInset = useKeyboardInset();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
   const [pipelineSheetOpen, setPipelineSheetOpen] = useState(false);
@@ -392,6 +405,22 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     },
   };
 
+  /* The orchestrator seat's own conversation, opened from the pinned row (PRD
+     #976 slice C): a laid-out pane pins directly, and a seat whose conversation
+     is not on the board yet takes the same round trip a map pick does — it
+     becomes a node and arrives back through the highlight. */
+  const openSeatConversation = useCallback(
+    (file: FileEntry) => {
+      setMapOpen(false);
+      if (byKey.has(file.path)) {
+        setFocusPath(file.path);
+        return;
+      }
+      onSelect(file);
+    },
+    [byKey, onSelect],
+  );
+
   /* A map tap on a scheme node pins it; a quiet branch or deck round is not a
      node yet — route it through onSelect so it becomes one and focuses via
      the highlight round-trip. */
@@ -427,6 +456,7 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
          least this share of the usable viewport before the keyboard opens. */
       data-chat-min-share={MIN_TRANSCRIPT_SHARE}
       className="relative flex h-full max-h-[100dvh] min-h-0 min-w-0 max-w-[100dvw] flex-1 flex-col overflow-hidden overflow-x-clip"
+      style={kbInset > 0 ? { paddingBottom: kbInset } : undefined}
     >
       {/* Same runtime connection pill as desktop, compact, one thumb away.
           Renders nothing while slice-one is disabled. */}
@@ -437,6 +467,17 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
           5); the map + tasks controls dock on the right so they never float over
           the transcript (findings 2, 3). No separate third pipeline row. */}
       <div className="flex shrink-0 items-stretch border-b border-border bg-card">
+        {/* The project's orchestrator, PINNED first (PRD #976 slice C): its own
+            slot outside the scrolling chips, so no amount of board order,
+            favourites or scrolling can move it or take it off screen. It rides
+            this same strip row, which `./chatBudget` already counts, so the
+            chat-first budget gains no new persistent chrome. */}
+        <MobileOrchestratorRow
+          project={project}
+          projectName={projectDisplayName(project, projectName)}
+          files={files}
+          onOpenConversation={openSeatConversation}
+        />
         {entries.length > 1 || pipelineFocus ? (
           <div className="relative min-w-0 flex-1">
             <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1">

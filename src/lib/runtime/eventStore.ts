@@ -163,7 +163,7 @@ function validEvent(value: unknown): value is RuntimeEvent {
       return nonEmptyString(event.id) && nonEmptyString(event.method) && Object.hasOwn(event, "attention");
     case "attention-resolved":
       return nonEmptyString(event.id)
-        && (event.resolution === "answered" || event.resolution === "host-restarted" || event.resolution === "server-resolved");
+        && (event.resolution === "answered" || event.resolution === "host-restarted" || event.resolution === "server-resolved" || event.resolution === "turn-ended");
     case "limits":
       return Object.hasOwn(event, "snapshot");
     case "realtime-delivery-progress":

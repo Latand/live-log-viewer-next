@@ -105,13 +105,6 @@ export interface AutoBalance {
   lastOutcome: AutoBalanceOutcome | null;
 }
 
-/** Per-account effective remaining capacity (the min across quota windows). */
-export interface AccountEffective {
-  percent: number;
-  window: QuotaWindow;
-  freshness: "fresh" | "stale" | "unavailable";
-}
-
 /** Preview returned by POST …/active with `mode:"preview"` before any mutation. */
 export interface MigrationPreview {
   targetId: string;
@@ -141,6 +134,52 @@ export function cardMigrationState(migration: ConversationMigration | null | und
   return PHASE_TO_CARD[migration.phase as SessionMigrationPhase] ?? null;
 }
 
+/**
+ * The display name of a session's migration target, or `null` when the
+ * annotation does not carry one yet.
+ *
+ * Both `targetLabel` and `targetAccountId` can be missing (or blank) through the
+ * whole pending window — the annotation is published before the target identity
+ * reaches the card, and it is dropped entirely once the migration commits. Every
+ * surface that would interpolate the name must ask HERE and fall back to its own
+ * nameless copy: interpolating the blank string told the operator their message
+ * was held for «» (an account with no name), which is the one thing the card may
+ * never say. `??` alone is not enough — an empty string is not nullish.
+ */
+export function migrationTargetName(migration: ConversationMigration | null | undefined): string | null {
+  const label = migration?.targetLabel?.trim();
+  if (label) return label;
+  const accountId = migration?.targetAccountId?.trim();
+  return accountId ? accountId : null;
+}
+
+/**
+ * The migration annotation that is still LIVE for a card, or `null` when the
+ * annotation describes a switch the card has already completed.
+ *
+ * A hold annotation (`pending`/`switching`) whose target IS the account the
+ * card currently runs under is a dead record: the switch committed, the
+ * transcript already rotated onto the target account, and the annotation
+ * simply outlived it. Every surface that keys a hold or a banner on the
+ * annotation must ask HERE first, level-wise, instead of trusting a clearing
+ * event that may never re-fire — the live incident kept a card reading
+ * "Account switch pending" and its messages "Held for «B»" forever while the
+ * registry already said the switch was done. A `failed` annotation always
+ * stays live (its retry/keep affordances are real), and `done`/`rolled-back`
+ * render nothing anyway.
+ */
+export function activeCardMigration(
+  migration: ConversationMigration | null | undefined,
+  activeAccountId: string | null | undefined,
+): ConversationMigration | null {
+  if (!migration) return null;
+  const state = cardMigrationState(migration);
+  if (state !== "pending" && state !== "switching") return migration;
+  const target = migration.targetAccountId?.trim();
+  if (!target || !activeAccountId || target !== activeAccountId) return migration;
+  return null;
+}
+
 /** A card in `pending` still delivers to the live predecessor pane, but its
     interrupt/kill controls must survive; `switching` freezes them (a signal
     would race the coordinator). Held-send only applies during `switching`. */
@@ -151,6 +190,22 @@ export function migrationFreezesControls(state: CardMigrationState | null): bool
 /** True while the composer's next send should be held for the successor. */
 export function migrationHoldsSends(state: CardMigrationState | null): boolean {
   return state === "switching";
+}
+
+/**
+ * Whether a delivery this card admits is being held FOR THE SWITCH — the
+ * card-state mirror of the server's `deliveryFence`, which holds every delivery
+ * from `waiting-turn` (card `pending`) onwards, not just the phases that freeze
+ * the controls.
+ *
+ * Two surfaces need it, and both are display-only. A `held` delivery outcome on
+ * its own proves nothing about a migration: the registry fence returns the same
+ * word when a generation claim does not land. So nothing may say "delivers after
+ * the account switch" without asking here first, and the operator's queued
+ * message may only be labelled as waiting on the switch while one is running.
+ */
+export function migrationHoldsDelivery(state: CardMigrationState | null): boolean {
+  return state === "pending" || state === "switching";
 }
 
 /** What selecting an account should do, given the preview result. Every switch
@@ -354,16 +409,6 @@ export function parseAutoBalance(raw: unknown): AutoBalance | null {
     lastCheckAt: str(record.lastCheckAt),
     lastOutcome: parseOutcome(record.lastOutcome),
   };
-}
-
-/** Parses a per-account `effective` capacity block; `null` when unknown. */
-export function parseEffective(raw: unknown): AccountEffective | null {
-  const record = asRecord(raw);
-  if (!record) return null;
-  if (typeof record.percent !== "number" || !Number.isFinite(record.percent)) return null;
-  const window = record.window === "weekly" ? "weekly" : "session";
-  const freshness = record.freshness === "fresh" ? "fresh" : record.freshness === "stale" ? "stale" : "unavailable";
-  return { percent: record.percent, window, freshness };
 }
 
 /** The canonical result of a per-card recovery call: whether the coordinator

@@ -9,14 +9,17 @@ import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/ag
 import { createManualProject, setProjectCrown } from "@/lib/projects/curation";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
+import { readStateCollectionRows } from "@/lib/state/sqliteStateStore";
 import { writeSessionTitle } from "@/lib/session/titleStore";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import { createFilesClientCache } from "@/hooks/useFiles";
 
 let scans = 0;
 let scanOptions: unknown;
 let scanProjects: Array<string | undefined> = [];
 let scannedFiles: FileEntry[] = [];
+let scannedProjectCatalog: ProjectCatalogEntry[] = [];
 let scanFileResults: FileEntry[][] = [];
 let scanPinOverlayResults: Array<string[] | undefined> = [];
 let scanCompleteResults: Array<boolean | undefined> = [];
@@ -53,6 +56,7 @@ beforeEach(() => {
   scans = 0;
   scanProjects = [];
   scannedFiles = [];
+  scannedProjectCatalog = [];
   scanFileResults = [];
   scanPinOverlayResults = [];
   scanCompleteResults = [];
@@ -61,6 +65,8 @@ beforeEach(() => {
   hydrateScannedFiles = (files) => files;
   tmuxHealth = { status: "healthy" };
   flowsStore = () => [];
+  pipelinesStore = () => [];
+  pipelineVisibility = () => [];
   pipelineMutationCalls = 0;
   replaceConversationCatalog([]);
   resetPresenceForTest();
@@ -100,7 +106,7 @@ mock.module("@/lib/scanner", () => ({
     scanProjects.push(project);
     scanOptions = options;
     const files = hydrateScannedFiles(scanFileResults.shift() ?? scannedFiles, options);
-    const resourceSnapshot = { files, projectCatalog: [], complete: true };
+    const resourceSnapshot = { files, projectCatalog: scannedProjectCatalog, complete: true };
     (options as { onResourceSnapshot?: (snapshot: typeof resourceSnapshot) => void }).onResourceSnapshot?.(resourceSnapshot);
     const gate = scanGates.shift();
     const signal = (options as { signal?: AbortSignal }).signal;
@@ -119,22 +125,24 @@ mock.module("@/lib/scanner", () => ({
     }
     const pinOverlayPaths = scanPinOverlayResults.shift();
     const complete = scanCompleteResults.shift();
-    return { files, projectCatalog: [], ...(pinOverlayPaths ? { pinOverlayPaths } : {}), complete: complete ?? true };
+    return { files, projectCatalog: scannedProjectCatalog, ...(pinOverlayPaths ? { pinOverlayPaths } : {}), complete: complete ?? true };
   },
 }));
 let pipelinesStore: () => unknown[] = () => [];
 let flowsStore: () => unknown[] = () => [];
+let pipelineVisibility: (pipelines: unknown[]) => unknown[] = () => [];
 let pipelineMutationCalls = 0;
 mock.module("@/lib/flows/store", () => ({ loadFlows: () => flowsStore() }));
 mock.module("@/lib/pipelines/store", () => ({
   loadPipelines: () => pipelinesStore(),
+  loadPipelinesForProjection: () => pipelinesStore(),
   withPipelineMutation: (...args: unknown[]) => {
     pipelineMutationCalls += 1;
     const real = realModules.get("@/lib/pipelines/store") as { withPipelineMutation: (...call: unknown[]) => unknown };
     return real.withPipelineMutation(...args);
   },
 }));
-mock.module("@/lib/pipelines/visibility", () => ({ filterPipelinesForFileScan: () => [] }));
+mock.module("@/lib/pipelines/visibility", () => ({ filterPipelinesForFileScan: (pipelines: unknown[]) => pipelineVisibility(pipelines) }));
 let boardTasksStore: () => unknown[] = () => [];
 mock.module("@/lib/tasks/store", () => ({
   loadTasks: () => boardTasksStore(),
@@ -244,6 +252,59 @@ test("a repository checkout recorded as a folder group's projectRoot never renam
   expect(result.projectRemap.get("dir-33333333333333333333333333333333")).toBe("dir-33333333333333333333333333333333");
   const folder = result.projectCatalog.find((entry) => entry.project.startsWith("dir-"))!;
   expect(folder.displayName).toBe("home-operator");
+});
+
+test("project cwd projection rejects repository evidence poisoned into a directory project", async () => {
+  const directoryCwd = path.join(stateDir, "plain-workspace");
+  const repositoryCwd = process.cwd();
+  fs.mkdirSync(directoryCwd, { recursive: true });
+  const directory = projectInfoFromCwd(directoryCwd)!;
+  const repository = projectInfoFromCwd(repositoryCwd)!;
+
+  scannedProjectCatalog = [
+    {
+      project: directory.project,
+      displayName: directory.displayName,
+      projectRoot: repositoryCwd,
+      smt: 20,
+      conversations: 1,
+    },
+    {
+      project: repository.project,
+      displayName: repository.displayName,
+      projectRoot: repositoryCwd,
+      smt: 10,
+      conversations: 1,
+    },
+  ];
+  replaceConversationCatalog(scannedProjectCatalog.map((entry, index) => ({
+    path: path.join(stateDir, `project-cwd-${index}.jsonl`),
+    root: "codex-sessions",
+    name: `project-cwd-${index}.jsonl`,
+    project: entry.project,
+    projectName: entry.displayName,
+    title: "Project cwd fixture",
+    firstPrompt: "",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    mtime: entry.smt,
+    size: 1,
+  })));
+  fs.writeFileSync(path.join(stateDir, "project-catalog.json"), JSON.stringify({
+    version: 2,
+    files: {
+      directory: { cwd: directoryCwd, projectRoot: repositoryCwd },
+      repository: { cwd: repositoryCwd, projectRoot: repositoryCwd },
+    },
+  }));
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { projectCwds?: Record<string, string> };
+
+  expect(body.projectCwds?.[directory.project]).toBe(directoryCwd);
+  expect(body.projectCwds?.[repository.project]).toBe(repositoryCwd);
+  expect(body.projectCwds?.[directory.project]).not.toBe(body.projectCwds?.[repository.project]);
 });
 
 test("catalog aliases collapse a legacy dashed-path variant before grouping", () => {
@@ -374,6 +435,40 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(first.headers.get("server-timing")).toMatch(/files-flow-restore;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-task-store;dur=\d+(?:\.\d+)?/);
   expect(first.headers.get("server-timing")).toMatch(/files-role-titles;dur=\d+(?:\.\d+)?/);
+});
+
+test("a cross-process SQLite pipeline commit invalidates a warm files projection", async () => {
+  scannedFiles = [];
+  const real = realModules.get("@/lib/pipelines/store") as {
+    savePipelines: (pipelines: Pipeline[]) => void;
+  };
+  real.savePipelines([]);
+  pipelinesStore = () => readStateCollectionRows(path.join(stateDir, "state.sqlite"), "pipelines") ?? [];
+  pipelineVisibility = (pipelines) => pipelines;
+  const first = await GET(new Request("http://127.0.0.1/api/files"));
+  const second = await GET(new Request("http://127.0.0.1/api/files"));
+  expect((await first.json() as { pipelines: Pipeline[] }).pipelines).toEqual([]);
+  expect(second.headers.get("x-llv-files-projection-cache")).toBe("hit");
+
+  const ready = path.join(stateDir, "pipeline-writer-ready");
+  const release = path.join(stateDir, "pipeline-writer-release");
+  const child = Bun.spawn({
+    cmd: [process.execPath, path.join(process.cwd(), "src/lib/state/hotStateStores.sqliteChild.ts"), "pipelines", "external", ready, release],
+    cwd: process.cwd(),
+    env: { ...process.env, LLV_STATE_DIR: stateDir },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  for (let attempt = 0; attempt < 2_000 && !fs.existsSync(ready); attempt += 1) await Bun.sleep(5);
+  expect(fs.existsSync(ready)).toBe(true);
+  fs.writeFileSync(release, "release");
+  const exit = await child.exited;
+  if (exit !== 0) throw new Error(`pipeline writer failed: ${await new Response(child.stderr).text()}`);
+
+  const refreshed = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await refreshed.json() as { pipelines: Pipeline[] };
+  expect(refreshed.headers.get("x-llv-files-projection-cache")).toBe("miss");
+  expect(body.pipelines.map((pipeline) => pipeline.id)).toEqual(["pipe-external"]);
 });
 
 test("a process restart serves the persisted global projection while refreshing it", async () => {
@@ -2255,7 +2350,15 @@ test("a staged structured card stays binding until its initial message is admitt
   expect(bindingBody.files.find((entry) => entry.conversationId === begun.receipt.conversationId)?.spawn)
     .toMatchObject({ state: "binding", initialMessage: "pending" });
 
-  registry.holdDelivery(begun.receipt.conversationId, "Own issue #282", `spawn_${begun.receipt.launchId}`);
+  registry.holdDelivery(
+    begun.receipt.conversationId,
+    "Own issue #282",
+    `spawn_${begun.receipt.launchId}`,
+    "text",
+    [],
+    null,
+    { operationId: `spawn_message_${begun.receipt.launchId}`, kind: "send", policy: "queue" },
+  );
   const queuedResponse = await GET(new Request("http://127.0.0.1/api/files"));
   const queuedBody = await queuedResponse.json() as { files: FileEntry[] };
   expect(queuedBody.files.find((entry) => entry.conversationId === begun.receipt.conversationId)?.spawn)

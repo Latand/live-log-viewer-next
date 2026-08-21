@@ -104,7 +104,7 @@ export interface ClassifiedRequest {
 
 /** How the current orchestrator was resolved, or why it could not be. */
 export type OrchestratorResolution =
-  | { kind: "resolved"; conversationId: string; source: "durable-record" }
+  | { kind: "resolved"; conversationId: string; source: "project-seat" }
   | { kind: "missing-record" }
   | { kind: "stale-record"; conversationId: string }
   | { kind: "unavailable"; detail: string };

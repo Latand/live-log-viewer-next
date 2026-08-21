@@ -6,7 +6,6 @@ import path from "node:path";
 import { setRetireManagerForTests } from "./retire";
 import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
 import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor } from "./seats";
-import { readOrchestratorRecord } from "./store";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
@@ -41,11 +40,10 @@ const OLD_ID = "conversation_44444444-4444-4444-8444-444444444444";
 interface Recorded {
   spawns: Record<string, unknown>[];
   deliveries: { conversationId: string; clientMessageId: string; text: string }[];
-  legacySyncs: { conversationId: string }[];
 }
 
 function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps: SeatCommandDependencies; recorded: Recorded } {
-  const recorded: Recorded = { spawns: [], deliveries: [], legacySyncs: [] };
+  const recorded: Recorded = { spawns: [], deliveries: [] };
   const deps: SeatCommandDependencies = {
     spawn: async (body) => {
       recorded.spawns.push(body);
@@ -62,7 +60,6 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
       cwd: "/workspace",
       project: "proj-a",
     }),
-    syncLegacyRecord: (input) => { recorded.legacySyncs.push({ conversationId: input.conversationId }); },
     projectTasks: () => [],
     launchSettlement: () => ({ kind: "unknown" }),
     now: () => AT,
@@ -122,7 +119,6 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(active?.conversationId).toBe(NEW_ID);
   expect(active?.mandate).toBe("own the board");
   expect(pending).toBeNull();
-  expect(recorded.legacySyncs).toEqual([{ conversationId: NEW_ID }]);
 });
 
 test("an admitted asynchronous spawn activates the seat from its durable conversation id", async () => {
@@ -176,8 +172,8 @@ test("a restarted caller replays the accepted launch from the durable seat recei
   expect(recorded.spawns).toEqual([]);
 });
 
-test("a failed spawn leaves NEITHER half: no active seat, no legacy record, a recoverable pending intent", async () => {
-  const { deps, recorded } = dependencies({
+test("a failed spawn leaves no active seat and keeps a recoverable pending intent", async () => {
+  const { deps } = dependencies({
     spawn: async () => ({ status: 400, body: { error: "directory does not exist" } }),
   });
   const result = await executeOrchestratorSeatRequest(spawnRequest(), deps);
@@ -185,8 +181,6 @@ test("a failed spawn leaves NEITHER half: no active seat, no legacy record, a re
   const { active, pending } = orchestratorSeatFor("proj-a");
   expect(active).toBeNull();
   expect(pending?.intent.error).toBe("directory does not exist");
-  expect(recorded.legacySyncs).toEqual([]);
-  expect(readOrchestratorRecord()).toBeNull();
 });
 
 test("a retry after a failed spawn replays the SAME clientAttemptId and completes exactly once", async () => {
@@ -274,7 +268,7 @@ test("a replayed adoption keeps its original target during an ABA-shaped retry",
 test("a failed delivery keeps the incumbent seated and reports a recoverable state", async () => {
   const { deps } = dependencies();
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
-  const { deps: failing, recorded } = dependencies({
+  const { deps: failing } = dependencies({
     deliver: async () => ({ ok: false, error: "host is dead" }),
   });
   const result = await executeOrchestratorSeatRequest({
@@ -287,7 +281,6 @@ test("a failed delivery keeps the incumbent seated and reports a recoverable sta
   expect(result.body.code).toBe("mandate_delivery_failed");
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
   expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe("host is dead");
-  expect(recorded.legacySyncs).toEqual([]);
 });
 
 test("AXIS 1/2 SEPARATION: replacement revokes MANAGER-LEVEL authority only — the predecessor's session is never touched", async () => {
@@ -487,6 +480,35 @@ test("rotation preserves the requested effort end to end into the successor spaw
   expect(recorded.spawns[1]).toMatchObject({ effort: "medium" });
 });
 
+test("rotation preserves the requested Codex speed end to end into the successor spawn body", async () => {
+  const { deps, recorded } = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000031",
+    fast: true,
+  }, deps);
+
+  expect(rotated.status).toBe(200);
+  expect(recorded.spawns).toHaveLength(2);
+  expect(recorded.spawns[1]).toMatchObject({ fast: true });
+});
+
+test("rotation leaves the successor speed unset when the caller does not request one", async () => {
+  const { deps, recorded } = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000032",
+  }, deps);
+
+  expect(rotated.status).toBe(200);
+  expect(recorded.spawns).toHaveLength(2);
+  expect(recorded.spawns[1]).not.toHaveProperty("fast");
+});
+
 test("the stuck shape from #878: an errored pending intent no longer blocks rotation and stays readable in history", async () => {
   const { deps } = dependencies();
   await executeOrchestratorSeatRequest(spawnRequest("req_00000041"), deps);
@@ -602,6 +624,22 @@ test("validation refuses a missing project, empty mandate, and malformed request
   expect((await executeOrchestratorSeatRequest({ project: "proj-a", mandate: "m", clientRequestId: "no" }, deps)).status).toBe(400);
 });
 
+test("spawn-mode seat creation rejects an explicit model outside the engine catalog before intent or spawn", async () => {
+  const { deps, recorded } = dependencies();
+  const result = await executeOrchestratorSeatRequest({
+    ...spawnRequest(),
+    engine: "codex",
+    model: "gpt-5.6-codex",
+  }, deps);
+
+  expect(result).toEqual({
+    status: 400,
+    body: { error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna" },
+  });
+  expect(recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a")).toMatchObject({ active: null, pending: null });
+});
+
 /* Issue #903: a spawn falling back to the server's own working directory
    minted seats in /app — outside every scanner root — that held authority
    while permanently inert. */
@@ -657,4 +695,21 @@ test("rotation without a cwd continues in the predecessor's checkout", async () 
     if (previous === undefined) delete process.env.LLV_ORCHESTRATOR_CWD;
     else process.env.LLV_ORCHESTRATOR_CWD = previous;
   }
+});
+
+test("rotation rejects an explicit successor model outside the engine catalog before spawning", async () => {
+  const { deps, recorded } = dependencies();
+  expect((await executeOrchestratorSeatRequest(spawnRequest("req_00000205"), deps)).status).toBe(200);
+
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000206",
+    engine: "claude",
+    model: "claude-fable-5",
+  }, deps);
+
+  expect(rotated.status).toBe(400);
+  expect(rotated.body.error).toBe("invalid claude model id \"claude-fable-5\"; valid claude model ids: opus, fable, sonnet, haiku");
+  expect(recorded.spawns).toHaveLength(1);
+  expect(orchestratorSeatFor("proj-a")).toMatchObject({ active: { conversationId: NEW_ID }, pending: null });
 });

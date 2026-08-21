@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { stateDir } from "@/lib/configDir";
 import { canonicalProject, projectAliasSnapshot } from "@/lib/projects/aliases";
+import { readStateCollectionsRows } from "@/lib/state/sqliteStateStore";
 import {
   displayNameFromProjectIdentity,
   isCanonicalProjectId,
@@ -450,6 +451,12 @@ function readStateJson(name: string): unknown {
   }
 }
 
+function readStateRecords(name: "flows" | "workflows", rows: unknown[] | null): unknown[] {
+  if (rows !== null) return rows;
+  const legacy = readStateJson(`${name}.json`) as Record<string, unknown> | null;
+  return Array.isArray(legacy?.[name]) ? legacy[name] : [];
+}
+
 function projectOverride(
   project: unknown,
   cwd: unknown,
@@ -462,13 +469,12 @@ function projectOverride(
   return { project, worktree, ...(repo ? { repo } : {}) };
 }
 
-function persistedProjects(): {
+function persistedProjects(stateKey = projectResolutionStateKey()): {
   byCwd: Map<string, { project: string; worktree?: string; repo?: string }>;
   byPath: Map<string, { project: string; worktree?: string; repo?: string }>;
   bySlug: Map<string, { project: string; worktree?: string; repo?: string }>;
 } {
   const dir = stateDir();
-  const stateKey = projectResolutionStateKey();
   const cached = persistedProjectCache.get("state");
   if (cached && cached[0] > Date.now() && cached[1] === dir && cached[2] === stateKey) return cached[3];
   const byCwd = new Map<string, { project: string; worktree?: string; repo?: string }>();
@@ -483,8 +489,8 @@ function persistedProjects(): {
     if (info && typeof value === "string" && value.trim()) byPath.set(value, info);
     rememberSlug(value, info);
   };
-  const flowsFile = readStateJson("flows.json") as { flows?: unknown } | null;
-  const flows = Array.isArray(flowsFile?.flows) ? flowsFile.flows : [];
+  const sqliteRows = readStateCollectionsRows(path.join(dir, "state.sqlite"), ["flows", "workflows"]);
+  const flows = readStateRecords("flows", sqliteRows.get("flows") ?? null);
   for (const value of flows) {
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const flow = value as Record<string, unknown>;
@@ -498,8 +504,7 @@ function persistedProjects(): {
       rememberPath((round as Record<string, unknown>).reviewerPath, info);
     }
   }
-  const workflowsFile = readStateJson("workflows.json") as { workflows?: unknown } | null;
-  const workflows = Array.isArray(workflowsFile?.workflows) ? workflowsFile.workflows : [];
+  const workflows = readStateRecords("workflows", sqliteRows.get("workflows") ?? null);
   for (const value of workflows) {
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const workflow = value as Record<string, unknown>;
@@ -522,9 +527,9 @@ function persistedProjects(): {
 /** Project identity for a real cwd, shared by both engines: resolve a
     worktree checkout to its main repository, then derive the stable key and
     human label from that repository's canonical remote. */
-export function projectInfoFromCwd(cwd: string): ProjectInfo | null {
+export function projectInfoFromCwd(cwd: string, requestedState?: string): ProjectInfo | null {
   if (!cwd.trim()) return null;
-  const resolutionState = projectResolutionStateKey();
+  const resolutionState = requestedState ?? projectResolutionStateKey();
   const cached = projectInfoCwdCache.get(cwd);
   if (cached && cached[0] > Date.now() && cached[1] === resolutionState) return cached[2];
   const scratchpad = projectInfoFromClaudeTaskCwd(cwd);
@@ -543,7 +548,7 @@ export function projectInfoFromCwd(cwd: string): ProjectInfo | null {
        while it was alive still names the parent repo. */
     worktree = worktreeFromMemory(cwd);
     if (!worktree) {
-      const persisted = persistedProjects().byCwd.get(cwd);
+      const persisted = persistedProjects(resolutionState).byCwd.get(cwd);
       if (persisted) {
         const resolved = aliasedProjectInfo(persisted.project, persisted.worktree, persisted.repo);
         projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolutionState, resolved]);
@@ -845,13 +850,13 @@ function transcriptStartedAt(pathname: string, st: fs.Stats): MetadataReadResult
   return { value: startedAt, complete: true, headPreserved: false };
 }
 
-function projectInfoFromTranscript(pathname: string): ProjectInfo | null {
-  const persisted = persistedProjects().byPath.get(pathname);
+function projectInfoFromTranscript(pathname: string, stateKey?: string): ProjectInfo | null {
+  const persisted = persistedProjects(stateKey).byPath.get(pathname);
   return persisted ? aliasedProjectInfo(persisted.project, persisted.worktree, persisted.repo) : null;
 }
 
-function projectInfoFromSlug(slug: string): ProjectInfo | null {
-  const persisted = persistedProjects().bySlug.get(slug);
+function projectInfoFromSlug(slug: string, stateKey?: string): ProjectInfo | null {
+  const persisted = persistedProjects(stateKey).bySlug.get(slug);
   return persisted ? aliasedProjectInfo(persisted.project, persisted.worktree, persisted.repo) : null;
 }
 
@@ -1013,20 +1018,20 @@ function resolveProjectOverlay(
   }
   let info: ProjectInfo | null = null;
   if (rootName === "codex-sessions") {
-    info = (cwd ? projectInfoFromCwd(cwd) : null) ?? projectInfoFromTranscript(pathname);
+    info = (cwd ? projectInfoFromCwd(cwd, stateKey) : null) ?? projectInfoFromTranscript(pathname, stateKey);
   } else if (rootName === "claude-projects") {
     const rel = path.relative(root, pathname);
     const slug = rel.split(path.sep)[0] ?? "";
     const worktreeInfo = worktreeFromSlug(slug);
-    info = (cwd ? projectInfoFromCwd(cwd) : null)
-      ?? projectInfoFromTranscript(pathname)
+    info = (cwd ? projectInfoFromCwd(cwd, stateKey) : null)
+      ?? projectInfoFromTranscript(pathname, stateKey)
       ?? (worktreeInfo
         ? aliasedProjectInfo(worktreeInfo.project, worktreeInfo.worktree, worktreeInfo.repo)
         : aliasedProjectInfo(projectFromSlug(slug)));
   } else if (rootName === "claude-tasks") {
     const rel = path.relative(root, pathname);
     const slug = rel.split(path.sep)[0] ?? "";
-    info = projectInfoFromSlug(slug) ?? aliasedProjectInfo(projectFromSlug(slug));
+    info = projectInfoFromSlug(slug, stateKey) ?? aliasedProjectInfo(projectFromSlug(slug));
   }
   info ??= unresolvedProjectInfo();
   const overlay: ProjectOverlay = {

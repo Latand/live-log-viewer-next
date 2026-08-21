@@ -3,13 +3,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { redactSecrets } from "@/lib/review";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { MAX_TTS_TEXT_LENGTH } from "@/lib/tts";
-import { activeTtsOption, readOpenAiApiKey, resolveTtsBackend, ttsBackendInfo } from "@/lib/ttsBackend";
-import { readElevenLabsApiKey } from "@/lib/transcribeBackend";
+import { activeTtsOption, readOpenAiApiKey, resolveTtsBackend, ttsBackendInfo, type TtsBackend, type TtsBackendOption } from "@/lib/ttsBackend";
+import { readElevenLabsApiKey, readSonioxApiKey } from "@/lib/transcribeBackend";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech";
+const SONIOX_SPEECH_URL = "https://tts-rt.soniox.com/tts";
 const MAX_AUDIO_BYTES = 32 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 60_000;
 const MAX_CONCURRENT_SYNTHESES = 3;
@@ -60,6 +61,115 @@ function boundedAudioStream(body: ReadableStream<Uint8Array>, release: () => voi
     },
   });
 }
+
+/**
+ * The upstream synthesis call per provider.
+ *
+ * OpenAI and Soniox answer with audio bytes on the response body, so the route
+ * streams those straight through (Soniox's realtime socket delivers base64 JSON
+ * frames, which the audio-element playback in SpeakButton would have to
+ * reassemble anyway). ElevenLabs is asked for `/with-timestamps` instead: the
+ * same mp3, base64-encoded inside a JSON envelope that also carries a start and
+ * an end second for every character. That alignment is what turns the karaoke
+ * follow-along and click-to-seek of issue #1022 from proportional guessing into
+ * word-exact positions, so the route passes it through beside the audio.
+ */
+function synthesisRequest(
+  backend: TtsBackend,
+  option: TtsBackendOption,
+  apiKey: string,
+  text: string,
+): { url: string; headers: Record<string, string>; body: string; timestamped: boolean } {
+  if (backend === "openai") {
+    return {
+      url: OPENAI_SPEECH_URL,
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: option.model, voice: option.voice, input: text, response_format: "mp3" }),
+      timestamped: false,
+    };
+  }
+  if (backend === "soniox") {
+    return {
+      url: SONIOX_SPEECH_URL,
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: option.model,
+        voice: option.voice,
+        language: option.language ?? "en",
+        audio_format: "mp3",
+        text,
+      }),
+      timestamped: false,
+    };
+  }
+  return {
+    url: `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(option.voice)}/with-timestamps`,
+    headers: { "xi-api-key": apiKey, "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ model_id: option.model, text }),
+    timestamped: true,
+  };
+}
+
+/**
+ * What the route ACTUALLY billed, on every synthesis it answers.
+ *
+ * The client's copy of the configuration is fetched once per page load, so a
+ * tab left open across a provider switch (another tab, or a restart under a new
+ * `LLV_TTS_BACKEND`) believes a backend the server no longer uses — and would
+ * cache the returned audio under a voice identity that never spoke it (#1024).
+ * The response says who spoke, and the client keys the cache and names the
+ * provider from that. Percent-encoded, because a configured voice name is
+ * arbitrary text and a header value is not.
+ */
+function billedBy(backend: TtsBackend, option: TtsBackendOption): Record<string, string> {
+  return {
+    "x-tts-backend": backend,
+    "x-tts-model": encodeURIComponent(option.model),
+    "x-tts-voice": encodeURIComponent(option.voice),
+  };
+}
+
+/** Reads a whole upstream body under the same ceiling the audio stream keeps. */
+async function readBounded(body: ReadableStream<Uint8Array>, limit: number): Promise<string | null> {
+  const reader = body.getReader();
+  const parts: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    for (let result = await reader.read(); !result.done; result = await reader.read()) {
+      bytes += result.value.byteLength;
+      if (bytes > limit) {
+        await reader.cancel("TTS response exceeded the size limit");
+        return null;
+      }
+      parts.push(result.value);
+    }
+  } catch {
+    return null;
+  }
+  const joined = new Uint8Array(bytes);
+  let offset = 0;
+  for (const part of parts) { joined.set(part, offset); offset += part.byteLength; }
+  return new TextDecoder().decode(joined);
+}
+
+/** The character alignment of a `/with-timestamps` payload, or null when absent. */
+function alignmentOf(value: unknown): { characters: string[]; starts: number[]; ends: number[] } | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as {
+    characters?: unknown;
+    character_start_times_seconds?: unknown;
+    character_end_times_seconds?: unknown;
+  };
+  const characters = candidate.characters;
+  const starts = candidate.character_start_times_seconds;
+  const ends = candidate.character_end_times_seconds;
+  if (!Array.isArray(characters) || !Array.isArray(starts) || !Array.isArray(ends)) return null;
+  if (characters.length !== starts.length || starts.length !== ends.length || characters.length === 0) return null;
+  if (!characters.every((entry) => typeof entry === "string")) return null;
+  if (!starts.every((entry) => typeof entry === "number") || !ends.every((entry) => typeof entry === "number")) return null;
+  return { characters: characters as string[], starts: starts as number[], ends: ends as number[] };
+}
+
 export async function GET(): Promise<NextResponse<{ available: boolean }>> {
   const info = ttsBackendInfo();
   return NextResponse.json({ available: info.options.find((option) => option.id === info.backend)?.available === true });
@@ -71,7 +181,8 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const backend = resolveTtsBackend();
   const option = activeTtsOption();
-  const apiKey = backend === "openai" ? readOpenAiApiKey() : readElevenLabsApiKey();
+  const apiKey =
+    backend === "openai" ? readOpenAiApiKey() : backend === "soniox" ? readSonioxApiKey() : readElevenLabsApiKey();
   if (!apiKey) {
     return NextResponse.json({ error: "text-to-speech is unavailable", keyPath: option.keyPath }, { status: 503 });
   }
@@ -96,20 +207,14 @@ export async function POST(req: NextRequest): Promise<Response> {
   const release = admitSynthesis();
   if (!release) return NextResponse.json({ error: "another read-aloud is in progress" }, { status: 429 });
 
+  const request = synthesisRequest(backend, option, apiKey, text);
   let upstream: Response;
   try {
     const signal = AbortSignal.any([req.signal, AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)]);
-    const openAi = backend === "openai";
-    upstream = await fetch(openAi ? OPENAI_SPEECH_URL : `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(option.voice)}`, {
+    upstream = await fetch(request.url, {
       method: "POST",
-      headers: openAi
-        ? { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }
-        : { "xi-api-key": apiKey, "content-type": "application/json", accept: "audio/mpeg" },
-      body: JSON.stringify(
-        openAi
-          ? { model: option.model, voice: option.voice, input: text, response_format: "mp3" }
-          : { model_id: option.model, text },
-      ),
+      headers: request.headers,
+      body: request.body,
       signal,
     });
   } catch {
@@ -127,6 +232,30 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   const contentType = upstream.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() ?? "";
+  if (request.timestamped) {
+    const payload = await readBounded(upstream.body, MAX_AUDIO_BYTES);
+    release();
+    let envelope: unknown;
+    try {
+      envelope = payload === null ? null : JSON.parse(payload);
+    } catch {
+      envelope = null;
+    }
+    const audio = (envelope as { audio_base64?: unknown } | null)?.audio_base64;
+    if (typeof audio !== "string" || !audio) {
+      return NextResponse.json({ error: `${backend} TTS returned invalid audio` }, { status: 502 });
+    }
+    /* `alignment` indexes the text as it was sent, which is the text the client
+       chunked — `normalized_alignment` would index the provider's own rewrite. */
+    return NextResponse.json(
+      {
+        audio,
+        contentType: "audio/mpeg",
+        alignment: alignmentOf((envelope as { alignment?: unknown }).alignment),
+      },
+      { headers: { "cache-control": "no-store", ...billedBy(backend, option) } },
+    );
+  }
   if (!contentType.startsWith("audio/")) {
     void upstream.body.cancel();
     release();
@@ -144,6 +273,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     headers: {
       "content-type": contentType,
       "cache-control": "no-store",
+      ...billedBy(backend, option),
     },
   });
 }

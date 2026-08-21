@@ -35,9 +35,15 @@ import path from "node:path";
 
 import { chromium, type Page } from "playwright-core";
 
+import { createCaptureDirectory } from "./capture-directory";
 import { demoPort } from "./demo-capture";
 
-const BASE = process.env.PICKER_CAPTURE_DIR ?? "/tmp/llv-issue-887";
+const BASE = createCaptureDirectory({
+  envName: "PICKER_CAPTURE_DIR",
+  prefix: "llv-issue-887",
+  raw: process.env.PICKER_CAPTURE_DIR,
+  repoRoot: path.resolve(import.meta.dir, ".."),
+});
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
@@ -86,7 +92,6 @@ const git = (cwd: string, ...args: string[]): void => {
 };
 
 function seedHome(): void {
-  fs.rmSync(BASE, { recursive: true, force: true });
   fs.mkdirSync(REPO_DIR, { recursive: true });
   fs.mkdirSync(FREE_TEXT_DIR, { recursive: true });
   fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -245,6 +250,7 @@ async function main(): Promise<void> {
   const port = demoPort(process.env.PICKER_CAPTURE_PORT, 3047, "PICKER_CAPTURE_PORT");
   const baseUrl = `http://127.0.0.1:${port}`;
   seedHome();
+  console.log(`screenshots: ${OUT_DIR}`);
 
   const server = spawn("bunx", ["next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
     cwd: repoRoot,

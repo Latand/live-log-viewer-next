@@ -4,13 +4,14 @@ import type { ConversationMigration } from "@/lib/types";
 
 import {
   accountSelectOutcome,
+  activeCardMigration,
   autoBalanceLine,
   bannerModel,
   cardMigrationState,
   migrationFreezesControls,
+  migrationHoldsDelivery,
   migrationHoldsSends,
   parseAutoBalance,
-  parseEffective,
   parseEngineMigration,
   parseMigrationPreview,
   postConversationMigration,
@@ -51,6 +52,50 @@ describe("cardMigrationState", () => {
     expect(migrationHoldsSends("switching")).toBeTrue();
     expect(migrationHoldsSends("failed")).toBeFalse();
     expect(migrationHoldsSends(null)).toBeFalse();
+  });
+
+  test("a delivery is held from pending onwards, mirroring the server fence", () => {
+    /* `deliveryFence` holds every delivery from `waiting-turn` on, so the card
+       may say a queued message waits for the switch from `pending` too — while
+       `pending` still keeps its controls, which is why this is a SEPARATE
+       predicate from the freeze. */
+    expect(migrationHoldsDelivery("pending")).toBeTrue();
+    expect(migrationHoldsDelivery("switching")).toBeTrue();
+    expect(migrationHoldsDelivery("failed")).toBeFalse();
+    expect(migrationHoldsDelivery("done")).toBeFalse();
+    expect(migrationHoldsDelivery("rolled-back")).toBeFalse();
+    expect(migrationHoldsDelivery(null)).toBeFalse();
+  });
+});
+
+describe("activeCardMigration (level rule: a completed switch's leftover annotation is dead)", () => {
+  test("a hold annotation whose target IS the active account collapses to null", () => {
+    expect(activeCardMigration(migration("waiting-turn"), "work")).toBeNull();
+    expect(activeCardMigration(migration("preparing"), "work")).toBeNull();
+    expect(activeCardMigration(migration("verifying"), "work")).toBeNull();
+  });
+
+  test("a hold toward a DIFFERENT account stays live", () => {
+    const pending = migration("waiting-turn");
+    expect(activeCardMigration(pending, "personal")).toBe(pending);
+  });
+
+  test("a failed annotation keeps its ribbon even under the target account (retry/keep are real)", () => {
+    const failed = migration("failed-recoverable");
+    expect(activeCardMigration(failed, "work")).toBe(failed);
+  });
+
+  test("an unknown active account or a target-less annotation changes nothing", () => {
+    const pending = migration("waiting-turn");
+    expect(activeCardMigration(pending, null)).toBe(pending);
+    expect(activeCardMigration(pending, "")).toBe(pending);
+    const nameless = { ...pending, targetAccountId: "" };
+    expect(activeCardMigration(nameless, "work")).toBe(nameless);
+  });
+
+  test("no annotation is simply null", () => {
+    expect(activeCardMigration(null, "work")).toBeNull();
+    expect(activeCardMigration(undefined, "work")).toBeNull();
   });
 });
 
@@ -146,12 +191,6 @@ describe("tolerant parsers", () => {
     expect(parseAutoBalance({ enabled: false })).toMatchObject({ enabled: false, state: "disabled", thresholdPercent: 25 });
     expect(parseAutoBalance({ enabled: true, state: "cooldown", cooldownUntil: "2026-07-10T15:00:00.000Z" })).toMatchObject({ enabled: true, state: "cooldown" });
     expect(parseAutoBalance({ enabled: true, state: "bogus" })?.state).toBe("idle");
-  });
-
-  test("parseEffective validates the percent and window", () => {
-    expect(parseEffective({ window: "session" })).toBeNull();
-    expect(parseEffective({ percent: 42, window: "weekly", freshness: "fresh" })).toEqual({ percent: 42, window: "weekly", freshness: "fresh" });
-    expect(parseEffective({ percent: 42, window: "nonsense", freshness: "nonsense" })).toEqual({ percent: 42, window: "session", freshness: "unavailable" });
   });
 
   test("parseMigrationPreview reads targetId from top level or nested intent", () => {

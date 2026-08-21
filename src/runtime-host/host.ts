@@ -173,6 +173,7 @@ export class RuntimeHost {
         if (!this.deployments) throw new Error("viewer deployments are disabled");
         result = await this.deployments.requestViewerDeployment({
           revision: typeof request.params?.revision === "string" ? request.params.revision : undefined,
+          ref: typeof request.params?.ref === "string" ? request.params.ref : undefined,
           idempotencyKey: String(request.params?.idempotencyKey ?? ""),
         });
       } else if (request.method === "viewer-deployment-read") {

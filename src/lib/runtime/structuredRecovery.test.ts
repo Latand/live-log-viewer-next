@@ -11,11 +11,78 @@ import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
+import { reconcileDeadStructuredRegistryHost } from "./registry";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { structuredResumeSessionId } from "./structuredSpawn";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-recovery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+test("dead-host reconciliation preserves a replacement spawn staged after observation", () => {
+  const sessionId = crypto.randomUUID();
+  const directory = path.join(sandbox, `dead-host-reconciliation-race-${sessionId}`);
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(directory, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "default");
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:dead-wrapper",
+      process: { pid: 2_000_000_000, startIdentity: "dead-wrapper" },
+      eventCursor: 17,
+      protocolVersion: "v2",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: "structured-host:stale-viewer",
+    pendingAction: null,
+  });
+
+  const terminate = registry.terminateInactiveStructuredHost.bind(registry);
+  registry.terminateInactiveStructuredHost = ((...args: Parameters<AgentRegistry["terminateInactiveStructuredHost"]>) => {
+    const observed = registry.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+    registry.upsert({
+      ...observed,
+      status: "unhosted",
+      structuredHost: {
+        ...observed.structuredHost!,
+        endpoint: "stdio:replacement-staging",
+        process: null,
+        writerClaimEpoch: 5,
+      },
+      claimEpoch: 5,
+      claimOwner: null,
+      pendingAction: "spawn",
+    });
+    return terminate(...args);
+  }) as AgentRegistry["terminateInactiveStructuredHost"];
+
+  expect(reconcileDeadStructuredRegistryHost(registry, conversation.id, key)).toBeFalse();
+  expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "unhosted",
+    claimEpoch: 5,
+    claimOwner: null,
+    pendingAction: "spawn",
+    structuredHost: {
+      endpoint: "stdio:replacement-staging",
+      process: null,
+      writerClaimEpoch: 5,
+    },
+  });
+});
 
 test("the recovery reservation converges repeated calls onto one successor spawn", async () => {
   const sessionId = crypto.randomUUID();

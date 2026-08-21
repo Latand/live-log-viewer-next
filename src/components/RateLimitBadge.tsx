@@ -20,7 +20,17 @@ import { rateLimitText } from "./rateLimit";
  * successor; when it reports the successor already exists, the card renders
  * that as the terminal truth instead of pretending a new reseat started.
  */
-export function RateLimitBadge({ rateLimit, file }: { rateLimit?: RateLimitState | null; file?: FileEntry }) {
+export function RateLimitBadge({
+  rateLimit,
+  file,
+  shrinkable = false,
+}: {
+  rateLimit?: RateLimitState | null;
+  file?: FileEntry;
+  /** Clipped ops rows (#964): the chip truncates its label under pressure so
+      the facts after it stay on the row; the full text keeps riding `title`. */
+  shrinkable?: boolean;
+}) {
   const { locale, t } = useLocale();
   const [reseat, setReseat] = useState<"idle" | "pending" | "requested" | "already-reseated" | "failed">("idle");
   const [reseatPhase, setReseatPhase] = useState<string | null>(null);
@@ -36,8 +46,8 @@ export function RateLimitBadge({ rateLimit, file }: { rateLimit?: RateLimitState
     : reseatError ?? (reseat === "requested" && reseatPhase === "waiting-turn" ? t("rateLimit.reseatWaitingTurn") : t("rateLimit.reseatTitle"));
   return (
     <>
-      <Badge tone="danger" data-rate-limited="" title={label}>
-        {label}
+      <Badge tone="danger" data-rate-limited="" title={label} shrinkable={shrinkable}>
+        <span className="min-w-0 truncate">{label}</span>
       </Badge>
       {canReseat ? (
         <button

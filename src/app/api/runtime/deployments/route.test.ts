@@ -24,7 +24,7 @@ const originalStateDir = process.env.LLV_STATE_DIR;
 const originalSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
 const originalRollback = process.env.LLV_RUNTIME_EVENTS;
 
-let requested: { revision?: string; idempotencyKey: string }[] = [];
+let requested: { revision?: string; ref?: string; idempotencyKey: string }[] = [];
 
 beforeEach(() => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-deployments-route-"));
@@ -37,7 +37,7 @@ beforeEach(() => {
   requested = [];
   setDeploymentRuntimeForTests(async (request) => {
     requested.push(request);
-    return { deploymentId: "deployment_1", revision: request.revision!, state: "accepted", replayed: false };
+    return { deploymentId: "deployment_1", revision: request.revision ?? "a".repeat(40), state: "accepted", replayed: false };
   });
 });
 
@@ -72,6 +72,35 @@ test("an uppercase revision is normalized to the lowercase exact SHA", async () 
   const response = await POST(deployRequest({ revision: SHA.toUpperCase(), idempotencyKey: "k1" }));
   expect(response.status).toBe(202);
   expect(requested).toEqual([{ revision: SHA, idempotencyKey: "k1" }]);
+});
+
+test("a canonical branch ref is forwarded for server-side resolution (#1033)", async () => {
+  const response = await POST(deployRequest({ ref: "refs/heads/main", idempotencyKey: "k1" }));
+  expect(response.status).toBe(202);
+  expect(requested).toEqual([{ ref: "refs/heads/main", idempotencyKey: "k1" }]);
+});
+
+for (const [name, ref] of [
+  ["a tag", "refs/tags/v1"],
+  ["a remote-tracking ref", "refs/remotes/origin/main"],
+  ["a bare branch name", "main"],
+  ["parent traversal", "refs/heads/../../tags/v1"],
+  ["an option-looking branch", "refs/heads/-upload-pack=touch"],
+  ["a revision expression", "refs/heads/main~1"],
+] as const) {
+  test(`a ref outside the canonical repository's branches is refused: ${name}`, async () => {
+    const response = await POST(deployRequest({ ref, idempotencyKey: "k1" }));
+    expect(response.status).toBe(400);
+    expect((await response.json()).reason).toBe("ref_invalid");
+    expect(requested).toEqual([]);
+  });
+}
+
+test("a request naming both a revision and a ref is refused rather than silently preferring one", async () => {
+  const response = await POST(deployRequest({ revision: SHA, ref: "refs/heads/main", idempotencyKey: "k1" }));
+  expect(response.status).toBe(400);
+  expect((await response.json()).reason).toBe("target_ambiguous");
+  expect(requested).toEqual([]);
 });
 
 test("a revision-less or abbreviated deploy is refused: exact-SHA means one immutable commit", async () => {

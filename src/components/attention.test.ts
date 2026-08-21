@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { FileEntry, PendingQuestion, WaitingInput } from "@/lib/types";
 
-import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL } from "./attention";
+import { advanceAttentionCycle, attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL } from "./attention";
 
 const NOW = 1_800_000_000;
 
@@ -202,5 +202,55 @@ describe("nextAttention", () => {
   test("empty queue yields null", () => {
     expect(nextAttention([], null, 1)).toBeNull();
     expect(nextAttention([], "toolu_x", -1)).toBeNull();
+  });
+});
+
+describe("advanceAttentionCycle", () => {
+  const files = [
+    entry({ path: "/alpha-old", project: "alpha", waitingInput: waiting(NOW - 400) }),
+    entry({ path: "/beta-mid", project: "beta", waitingInput: waiting(NOW - 300) }),
+    entry({ path: "/alpha-new", project: "alpha", waitingInput: waiting(NOW - 200) }),
+  ];
+  const global = buildAttentionQueue(files, NOW);
+  const alpha = buildAttentionQueue(files, NOW, "alpha");
+
+  test("one pointer serves both the project-scoped keys and the global Next", () => {
+    const pointer = { current: null as string | null };
+    /* N inside project alpha lands on its oldest item… */
+    expect(advanceAttentionCycle(pointer, alpha, 1)?.file.path).toBe("/alpha-old");
+    /* …and the global Next continues FROM that id instead of restarting:
+       the next-oldest global item is beta's. */
+    expect(advanceAttentionCycle(pointer, global, 1)?.file.path).toBe("/beta-mid");
+    /* Back on the project queue, the pointer id (beta) is absent, so the
+       id-anchored fallback serves the project head — never a stale echo. */
+    expect(advanceAttentionCycle(pointer, alpha, 1)?.file.path).toBe("/alpha-old");
+    expect(pointer.current).toBe(alpha[0]!.id);
+  });
+
+  test("queue mutation during cycling: an answered item drops out and the pointer follows ids", () => {
+    const pointer = { current: null as string | null };
+    expect(advanceAttentionCycle(pointer, global, 1)?.file.path).toBe("/alpha-old");
+    expect(advanceAttentionCycle(pointer, global, 1)?.file.path).toBe("/beta-mid");
+    /* The item under the pointer is answered elsewhere: the rebuilt queue no
+       longer holds its id, so the next advance serves the queue head. */
+    const rebuilt = buildAttentionQueue([files[0]!, files[2]!], NOW);
+    expect(advanceAttentionCycle(pointer, rebuilt, 1)?.file.path).toBe("/alpha-old");
+    /* A neighbor vanishing does NOT move the pointer off a surviving id:
+       cycling continues from it. */
+    expect(advanceAttentionCycle(pointer, rebuilt, 1)?.file.path).toBe("/alpha-new");
+  });
+
+  test("reverse direction walks the same pointer backward", () => {
+    const pointer = { current: null as string | null };
+    expect(advanceAttentionCycle(pointer, global, -1)?.file.path).toBe("/alpha-new");
+    expect(advanceAttentionCycle(pointer, global, -1)?.file.path).toBe("/beta-mid");
+    expect(advanceAttentionCycle(pointer, global, 1)?.file.path).toBe("/alpha-new");
+  });
+
+  test("an empty queue serves nothing and leaves the pointer untouched", () => {
+    const pointer = { current: global[0]!.id };
+    expect(advanceAttentionCycle(pointer, [], 1)).toBeNull();
+    expect(advanceAttentionCycle(pointer, [], -1)).toBeNull();
+    expect(pointer.current).toBe(global[0]!.id);
   });
 });

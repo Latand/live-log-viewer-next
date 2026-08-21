@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/agent/registry";
+import { ENGINE_MODELS, validateLaunchModel } from "@/lib/agent/models";
 import { procBackend } from "@/lib/proc";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
@@ -17,7 +18,14 @@ import {
   resolveDirectedAttentionView,
 } from "@/lib/attention/service";
 import { readAttentionFile } from "@/lib/attention/store";
-import { geometricFrameRect, isFocusTarget, isGeometricTarget } from "@/lib/attention/targets";
+import {
+  CONVERSATION_PATH_EXAMPLE,
+  describeFocusTargetRejection,
+  focusTargetExample,
+  geometricFrameRect,
+  isFocusTarget,
+  isGeometricTarget,
+} from "@/lib/attention/targets";
 import type { AttentionRequestV1, FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
 import { boardFor } from "@/lib/board/store";
 import { applyConversationAction } from "@/lib/conversation/actions";
@@ -33,7 +41,6 @@ import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
 import { recordManagerReport } from "@/lib/bridge/service";
 import { bridgeDirectiveBody, bridgeDirectiveId, type BridgeTrailer } from "@/lib/bridge/directive";
 import { isBridgeReportClass } from "@/lib/bridge/types";
-import { readOrchestratorRecord } from "@/lib/orchestrator/store";
 import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orchestrator/authority";
 import { activeOrchestratorSeats, canonicalOrchestratorProject, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "@/lib/orchestrator/seats";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
@@ -52,7 +59,7 @@ import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
 import { completedFileScan } from "@/lib/scanner/scanCache";
 import { readResources } from "@/lib/resources";
 import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessionSource } from "@/lib/root/adopt";
-import { listRoles } from "@/lib/roles/registry";
+import { listRoles, resolveSpawnRole } from "@/lib/roles/registry";
 import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
@@ -442,6 +449,31 @@ function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function validateExplicitMcpLaunchModel(args: McpToolArgs, fallbackRole?: string): void {
+  const model = text(args.model);
+  if (!model) return;
+  if (args.engine !== undefined && args.engine !== "claude" && args.engine !== "codex") return;
+  const roleId = text(args.role) || fallbackRole;
+  const role = roleId ? resolveSpawnRole({ role: roleId, roleParams: args.roleParams }) : null;
+  let engine: "claude" | "codex" | null = null;
+  if (args.engine === "claude" || args.engine === "codex") engine = args.engine;
+  else if (role?.ok && role.value) engine = role.value.config.engine;
+  if (!engine) return;
+  const validation = validateLaunchModel(engine, model);
+  if (!("error" in validation)) return;
+  throw new McpToolRefusal(validation.error, {
+    violations: [{
+      field: "model",
+      message: validation.error,
+      expected: `one of: ${ENGINE_MODELS[engine].map((option) => option.id).join(", ")}`,
+    }],
+  });
+}
+
+function objectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function integer(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isInteger(value) ? value : fallback;
 }
@@ -547,6 +579,7 @@ export function requestAttentionOperationKey(clientRequestId: string): string {
 }
 
 async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
+  validateExplicitMcpLaunchModel(args);
   const clientAttemptId = spawnAttemptId(requestId(args));
   const body = withoutKeys(args, ["clientRequestId"]);
   const roleParams = defaultMcpSpawnRoleParams(args);
@@ -632,7 +665,13 @@ async function updateBoardTask(args: McpToolArgs): Promise<McpToolPayload> {
 async function createPipeline(args: McpToolArgs): Promise<McpToolPayload> {
   const request = withoutKeys(args, ["clientRequestId"]);
   const result = await createPipelineFromRequest(request as CreatePipelineRequest);
-  if (!result.pipeline) throw new Error(result.error ?? "could not create pipeline");
+  if (!result.pipeline) {
+    const message = result.error ?? "could not create pipeline";
+    /* #1026: a rejected create carries every violated constraint with its field
+       and expected shape, so an agent composing its first pipeline reads the
+       whole contract from one answer — the same list an HTTP caller receives. */
+    throw result.violations?.length ? new McpToolRefusal(message, { violations: result.violations }) : new Error(message);
+  }
   if (result.pipeline.state !== "draft") requestPipelineTick();
   return { pipelineId: result.pipeline.id, pipeline: result.pipeline };
 }
@@ -987,20 +1026,47 @@ async function entryForPath(
 
 async function listConversations(
   args: McpToolArgs,
-  dependencies: Pick<ViewerMcpDomainDependencies, "completedFileScan">,
+  control: ViewerControlDependencies,
 ): Promise<McpToolPayload> {
   const project = text(args.project);
-  const query = text(args.query).toLocaleLowerCase();
+  const query = text(args.query).trim();
   const limit = Math.max(1, Math.min(100, integer(args.limit, 50)));
-  /* The COMPLETED generation, not a private fresh scan (#845). This is a listing:
-     it reads what the process already knows, the same corpus `board_snapshot`
-     reads. Forcing a full fresh scan per call meant every agent asking "what is
-     running" started another full-corpus walk beside the coordinator's own. */
-  const files = (await dependencies.completedFileScan()).snapshot.files;
-  const conversations = files
+  const params = new URLSearchParams();
+  if (project) params.set("project", project);
+  if (query) params.set("q", query);
+  params.set("limit", String(limit));
+  /* The Viewer's conversation endpoint projects the uncapped catalog published
+     by the scanner worker. Its scheme feed can omit projects beyond the board's
+     recent-project window even while their catalog rows remain current. */
+  const source = await readViewerControl(control, `/api/conversations?${params}`);
+  if (!Array.isArray(source.items) || typeof source.total !== "number") {
+    throw new ViewerControlResponseError("Viewer control returned a malformed conversation catalog page");
+  }
+  if (project && source.total === 0) {
+    let knownProject = false;
+    if (query) {
+      const validation = await readViewerControl(
+        control,
+        `/api/conversations?project=${encodeURIComponent(project)}&limit=1`,
+      );
+      if (!Array.isArray(validation.items) || typeof validation.total !== "number") {
+        throw new ViewerControlResponseError("Viewer control returned a malformed conversation catalog page");
+      }
+      knownProject = validation.total > 0;
+    }
+    if (!knownProject) {
+      return redactPayload({
+        count: 0,
+        conversations: [],
+        code: "UNKNOWN_PROJECT",
+        hint: "The requested project does not match a canonical project key in the conversation catalog.",
+      });
+    }
+  }
+  const conversations = source.items
+    .filter(objectRecord) as unknown as FileEntry[];
+  const rows = conversations
     .filter((entry) => entry.engine === "claude" || entry.engine === "codex")
-    .filter((entry) => !project || entry.project === project)
-    .filter((entry) => !query || `${entry.title}\n${entry.project}\n${entry.path}`.toLocaleLowerCase().includes(query))
     .slice(0, limit)
     .map((entry) => ({
       conversationId: entry.conversationId ?? null,
@@ -1010,7 +1076,35 @@ async function listConversations(
       engine: entry.engine,
       activity: entry.activity,
     }));
-  return redactPayload({ count: conversations.length, conversations });
+  return redactPayload({ count: rows.length, conversations: rows });
+}
+
+async function searchTranscripts(
+  args: McpToolArgs,
+  control: ViewerControlDependencies,
+): Promise<McpToolPayload> {
+  const query = text(args.query).trim();
+  if (!query) throw new Error("query is required");
+  const project = text(args.project).trim();
+  const cursor = text(args.cursor).trim();
+  const limit = Math.max(1, Math.min(100, integer(args.limit, 20)));
+  const params = new URLSearchParams({ q: query });
+  if (project) params.set("project", project);
+  if (cursor) params.set("cursor", cursor);
+  params.set("limit", String(limit));
+  const source = await readViewerControl(control, `/api/search/transcripts?${params}`);
+  const stats = objectRecord(source.stats) ? source.stats : null;
+  if (!Array.isArray(source.items)
+    || typeof source.total !== "number"
+    || (source.nextCursor !== null && typeof source.nextCursor !== "string")
+    || !stats
+    || typeof stats.conversationsIndexed !== "number"
+    || typeof stats.messagesIndexed !== "number"
+    || !Array.isArray(stats.fieldsSearched)
+    || typeof stats.tokenizer !== "string") {
+    throw new ViewerControlResponseError("Viewer control returned a malformed transcript search page");
+  }
+  return redactPayload(source);
 }
 
 async function getConversation(
@@ -1358,16 +1452,20 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
     return redactPayload({ ...base, designated: false, seat: null, health: null, rotation: null });
   }
 
-  const conversation = agentRegistry().conversation(active.conversationId as `conversation_${string}`);
+  const registry = agentRegistry();
+  const conversation = registry.conversation(active.conversationId as `conversation_${string}`);
   const generation = conversation?.generations.at(-1);
   const transcriptPath = generation?.path ?? active.path;
-  /* Engine/model resolve from the registry, falling back to the legacy manager
-     record activation keeps in sync — the boot window in which the registry has
-     not yet settled a generation must not read as "unknown model". */
-  const legacyRecord = readOrchestratorRecord();
-  const legacyMatches = legacyRecord?.conversationId === active.conversationId;
-  const engine = conversation?.engine ?? (legacyMatches ? legacyRecord!.engine : null);
-  const model = generation?.launchProfile?.model ?? (legacyMatches ? legacyRecord!.model : null);
+  /* During the boot window the spawn receipt already exists while the registry
+     conversation still has no settled generation. The seat intent carries the
+     receipt's client key, so the same registry source supplies the launch
+     profile until generation facts take over. */
+  const launchReceipt = active.intent.mode === "spawn"
+    ? registry.spawnReceiptForClientAttempt(active.intent.clientRequestId)
+    : null;
+  const receiptMatches = launchReceipt?.conversationId === active.conversationId;
+  const engine = conversation?.engine ?? (receiptMatches ? launchReceipt.engine : null);
+  const model = generation?.launchProfile?.model ?? (receiptMatches ? launchReceipt.launchProfile.model : null);
   let session: { messages: number; tools: number; compactions: number } | null = null;
   if (transcriptPath && (engine === "claude" || engine === "codex")) {
     try {
@@ -1439,6 +1537,7 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
     approved versioned default mandate (or the caller's edited text based on
     it). The seat route owns the durable intent, so a retry replays. */
 async function createOrchestrator(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
+  if (!text(args.conversationId)) validateExplicitMcpLaunchModel(args, "orchestrator");
   const project = canonicalOrchestratorProject(required(args, "project"));
   const result = await control.post("/api/orchestrator/seat", {
     project,
@@ -1980,6 +2079,44 @@ async function lifecycleEvents(
 }
 
 /**
+ * The caller's target, read into the ONE shape the record stores (#1016).
+ *
+ * Two things happen here and nothing else does. A conversation named by its
+ * durable `conversationId` — the name the rest of this MCP surface speaks, and
+ * the only one that survives a resume or a migration — is resolved to that
+ * conversation's CURRENT generation transcript, which is exactly what a caller
+ * who already knew the path would have sent. And a value that is no target at
+ * all is refused in words that name the discriminator, the fields its kind
+ * expects and an example that works, instead of the bare "target must be a
+ * typed focus target" that cost the reported caller five guesses.
+ *
+ * A usable `path` is honoured untouched, so every call that works today writes
+ * byte-identical records: the id is the way in for callers that have no path,
+ * never a second interpretation of calls that have one.
+ */
+function focusTargetFromArgs(value: unknown, dependencies: ViewerMcpDomainDependencies): FocusTarget {
+  const named = value && typeof value === "object" && !Array.isArray(value)
+    ? value as { kind?: unknown; path?: unknown; conversationId?: unknown }
+    : null;
+  const conversationId = named?.kind === "conversation" && !text(named.path) ? text(named.conversationId) : "";
+  if (conversationId) {
+    /* The registry's own keyed lookup, alias walk included, so an id that was
+       chained through a rollover still names its newest transcript. */
+    const lookup = readOnlyConversationLookupFromSnapshot(dependencies.registrySnapshot());
+    const path = lookup.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path;
+    if (!path) {
+      throw new Error(
+        `no registered conversation has id "${conversationId}" — a conversation target accepts `
+        + `${focusTargetExample("conversation")} or ${CONVERSATION_PATH_EXAMPLE}`,
+      );
+    }
+    return { kind: "conversation", path };
+  }
+  if (!isFocusTarget(value)) throw new Error(describeFocusTargetRejection(value));
+  return value;
+}
+
+/**
  * Which project a target lives in, so the request can record one.
  *
  * Only the project is derived here — never a rect. The server has no board
@@ -2065,8 +2202,7 @@ async function requestAttention(
   }
   const raisedBy = attributionOf(dependencies);
 
-  const target = args.target;
-  if (!isFocusTarget(target)) throw new Error("target must be a typed focus target");
+  const target = focusTargetFromArgs(args.target, dependencies);
   const intent = (text(args.intent) || "show") as FocusIntent;
   if (intent !== "show" && intent !== "open") throw new Error("intent must be show or open");
   const zoom = text(args.zoom) as ZoomIntent | "";
@@ -2210,7 +2346,6 @@ function productionManagerAuthoritySources(): ManagerAuthoritySources {
   return {
     activeSeats: activeOrchestratorSeats,
     revocations: orchestratorRevocations,
-    legacyManagerConversationId: () => readOrchestratorRecord()?.conversationId ?? null,
     conversationFacts: (conversationId) => {
       const conversation = registry.conversation(conversationId as `conversation_${string}`);
       if (!conversation) return null;
@@ -2259,7 +2394,8 @@ export function viewerMcpBindings(
     create_pipeline: createPipeline,
     pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
-    list_conversations: (args) => listConversations(args, domainDependencies),
+    list_conversations: (args) => listConversations(args, controlDependencies),
+    search_transcripts: (args) => searchTranscripts(args, controlDependencies),
     get_conversation: (args, context) => getConversation(args, domainDependencies, context),
     deploy_exact_sha: (args) => deployExactSha(args, controlDependencies, domainDependencies),
     get_pipeline: getPipeline,

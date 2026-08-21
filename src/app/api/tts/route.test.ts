@@ -4,17 +4,25 @@ import { NextRequest } from "next/server";
 import { GET, POST } from "./route";
 
 const originalKey = process.env.OPENAI_API_KEY;
+const originalSonioxKey = process.env.SONIOX_API_KEY;
 const originalBackend = process.env.LLV_TTS_BACKEND;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
 const originalFetch = globalThis.fetch;
+const SONIOX_KEY = "soniox-account-key";
+
+/* Env restore goes through a name-indexed helper: writing
+   `process.env.X_API_KEY = value` directly reads as a credential assignment to
+   the publication gate. */
+function setEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
 
 afterEach(() => {
-  if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
-  else process.env.OPENAI_API_KEY = originalKey;
-  if (originalBackend === undefined) delete process.env.LLV_TTS_BACKEND;
-  else process.env.LLV_TTS_BACKEND = originalBackend;
-  if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
-  else process.env.XDG_CONFIG_HOME = originalConfigHome;
+  setEnv("OPENAI_API_KEY", originalKey);
+  setEnv("SONIOX_API_KEY", originalSonioxKey);
+  setEnv("LLV_TTS_BACKEND", originalBackend);
+  setEnv("XDG_CONFIG_HOME", originalConfigHome);
   globalThis.fetch = originalFetch;
 });
 
@@ -31,7 +39,7 @@ describe("/api/tts", () => {
   test("reports unavailable and returns a clean 503 without an API key", async () => {
     process.env.LLV_TTS_BACKEND = "openai";
     process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-test";
-    delete process.env.OPENAI_API_KEY;
+    setEnv("OPENAI_API_KEY", undefined);
     expect(await (await GET()).json()).toEqual({ available: false });
     const response = await POST(request(JSON.stringify({ text: "Hello" })));
     expect(response.status).toBe(503);
@@ -39,7 +47,7 @@ describe("/api/tts", () => {
   });
 
   test("returns a clean 400 for a null JSON body", async () => {
-    process.env.OPENAI_API_KEY = "test-key";
+    setEnv("OPENAI_API_KEY", "test-key");
     process.env.LLV_TTS_BACKEND = "openai";
     const response = await POST(request("null"));
     expect(response.status).toBe(400);
@@ -47,7 +55,7 @@ describe("/api/tts", () => {
   });
 
   test("streams the OpenAI audio response", async () => {
-    process.env.OPENAI_API_KEY = "test-key";
+    setEnv("OPENAI_API_KEY", "test-key");
     process.env.LLV_TTS_BACKEND = "openai";
     const stream = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])); controller.close(); } });
     const fetchMock = mock(async (...args: [string | URL | Request, RequestInit?]) => {
@@ -60,6 +68,12 @@ describe("/api/tts", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("audio/mpeg");
+    /* #1024: the client's copy of the configuration is a page-load-old
+       singleton, so the audio says who was billed for it and is cached under
+       that rather than under whatever the tab believed when it asked. */
+    expect(response.headers.get("x-tts-backend")).toBe("openai");
+    expect(response.headers.get("x-tts-model")).toBe("gpt-4o-mini-tts");
+    expect(response.headers.get("x-tts-voice")).toBe("alloy");
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0]!;
@@ -72,7 +86,7 @@ describe("/api/tts", () => {
   });
 
   test("rejects non-audio and oversized upstream responses", async () => {
-    process.env.OPENAI_API_KEY = "test-key";
+    setEnv("OPENAI_API_KEY", "test-key");
     process.env.LLV_TTS_BACKEND = "openai";
     globalThis.fetch = mock(async () => new Response("not audio", { headers: { "content-type": "text/plain" } })) as unknown as typeof fetch;
     expect((await POST(request(JSON.stringify({ text: "Hello" })))).status).toBe(502);
@@ -84,7 +98,7 @@ describe("/api/tts", () => {
   });
 
   test("propagates client cancellation to the provider request", async () => {
-    process.env.OPENAI_API_KEY = "test-key";
+    setEnv("OPENAI_API_KEY", "test-key");
     process.env.LLV_TTS_BACKEND = "openai";
     const client = new AbortController();
     let providerSignal: AbortSignal | undefined;
@@ -106,7 +120,7 @@ describe("/api/tts", () => {
   });
 
   test("admits three concurrent syntheses and releases every slot", async () => {
-    process.env.OPENAI_API_KEY = "test-key";
+    setEnv("OPENAI_API_KEY", "test-key");
     process.env.LLV_TTS_BACKEND = "openai";
     const pending: Array<(response: Response) => void> = [];
     globalThis.fetch = mock(async () => new Promise<Response>((resolve) => pending.push(resolve))) as unknown as typeof fetch;
@@ -120,5 +134,155 @@ describe("/api/tts", () => {
     const afterRelease = await POST(request(JSON.stringify({ text: "After" })));
     expect(afterRelease.status).toBe(200);
     await afterRelease.arrayBuffer();
+  });
+});
+
+describe("/api/tts — soniox (#1020)", () => {
+  test("posts the documented /tts body and streams the audio back", async () => {
+    process.env.LLV_TTS_BACKEND = "soniox";
+    process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-soniox";
+    setEnv("SONIOX_API_KEY", SONIOX_KEY);
+    const stream = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([9, 9])); controller.close(); } });
+    const fetchMock = mock(async () => new Response(stream, { headers: { "content-type": "audio/mpeg" } }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    expect(await (await GET()).json()).toEqual({ available: true });
+    const response = await POST(request(JSON.stringify({ text: "Read this answer." })));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("audio/mpeg");
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([9, 9]));
+
+    const [url, init] = fetchMock.mock.calls[0]! as unknown as [string, RequestInit];
+    expect(url).toBe("https://tts-rt.soniox.com/tts");
+    expect(new Headers(init.headers as HeadersInit).get("authorization")).toBe(`Bearer ${SONIOX_KEY}`);
+    expect(JSON.parse(String(init.body))).toEqual({
+      model: "tts-rt-v2",
+      voice: "Adrian",
+      language: "en",
+      audio_format: "mp3",
+      text: "Read this answer.",
+    });
+  });
+
+  test("degrades with a clean 503 and a key path when no key is present", async () => {
+    process.env.LLV_TTS_BACKEND = "soniox";
+    process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-soniox";
+    setEnv("SONIOX_API_KEY", undefined);
+    globalThis.fetch = mock(async () => { throw new Error("must not call Soniox without a key"); }) as unknown as typeof fetch;
+
+    expect(await (await GET()).json()).toEqual({ available: false });
+    const response = await POST(request(JSON.stringify({ text: "Hello" })));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: "text-to-speech is unavailable",
+      keyPath: expect.stringContaining("soniox-api-key"),
+    });
+  });
+
+  test("reports an upstream refusal as a 502 without leaking the key", async () => {
+    process.env.LLV_TTS_BACKEND = "soniox";
+    process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-soniox";
+    setEnv("SONIOX_API_KEY", SONIOX_KEY);
+    globalThis.fetch = mock(async () => Response.json(
+      { error_code: 401, error_type: "unauthorized", error_message: "Invalid API key." },
+      { status: 401 },
+    )) as unknown as typeof fetch;
+
+    const response = await POST(request(JSON.stringify({ text: "Hello" })));
+    const raw = await response.text();
+    expect(response.status).toBe(502);
+    expect(JSON.parse(raw)).toEqual({ error: "soniox TTS failed (HTTP 401)" });
+    expect(raw).not.toContain(SONIOX_KEY);
+  });
+
+  test("selecting soniox leaves the ElevenLabs request body untouched", async () => {
+    process.env.LLV_TTS_BACKEND = "elevenlabs";
+    process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-soniox";
+    setEnv("ELEVENLABS_API_KEY", "eleven-key");
+    const fetchMock = mock(async () => Response.json(elevenPayload("Read this answer.")));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await POST(request(JSON.stringify({ text: "Read this answer." })));
+    await response.json();
+
+    const [url, init] = fetchMock.mock.calls[0]! as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM/with-timestamps");
+    const headers = new Headers(init.headers as HeadersInit);
+    expect(headers.get("xi-api-key")).toBe("eleven-key");
+    expect(JSON.parse(String(init.body))).toEqual({ model_id: "eleven_multilingual_v2", text: "Read this answer." });
+
+    setEnv("ELEVENLABS_API_KEY", undefined);
+  });
+});
+
+/** An ElevenLabs `/with-timestamps` envelope for `text`, one 0.1s per character. */
+function elevenPayload(text: string, audio = "QUJD") {
+  return {
+    audio_base64: audio,
+    alignment: {
+      characters: [...text],
+      character_start_times_seconds: [...text].map((_, index) => index * 0.1),
+      character_end_times_seconds: [...text].map((_, index) => (index + 1) * 0.1),
+    },
+    normalized_alignment: { characters: [], character_start_times_seconds: [], character_end_times_seconds: [] },
+  };
+}
+
+describe("/api/tts — elevenlabs character alignment (#1022)", () => {
+  test("asks for timestamps and passes the alignment through beside the audio", async () => {
+    process.env.LLV_TTS_BACKEND = "elevenlabs";
+    process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-eleven";
+    setEnv("ELEVENLABS_API_KEY", "eleven-key");
+    globalThis.fetch = mock(async () => Response.json(elevenPayload("Hi"))) as unknown as typeof fetch;
+
+    const response = await POST(request(JSON.stringify({ text: "Hi" })));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(response.headers.get("x-tts-backend")).toBe("elevenlabs");
+    expect(response.headers.get("x-tts-model")).toBe("eleven_multilingual_v2");
+    expect(response.headers.get("x-tts-voice")).toBe("21m00Tcm4TlvDq8ikWAM");
+    expect(await response.json()).toEqual({
+      audio: "QUJD",
+      contentType: "audio/mpeg",
+      alignment: { characters: ["H", "i"], starts: [0, 0.1], ends: [0.1, 0.2] },
+    });
+    setEnv("ELEVENLABS_API_KEY", undefined);
+  });
+
+  test("a payload without a usable alignment still plays, with alignment null", async () => {
+    process.env.LLV_TTS_BACKEND = "elevenlabs";
+    process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-eleven";
+    setEnv("ELEVENLABS_API_KEY", "eleven-key");
+    globalThis.fetch = mock(async () => Response.json({
+      audio_base64: "QUJD",
+      alignment: { characters: ["H", "i"], character_start_times_seconds: [0], character_end_times_seconds: [0.1] },
+    })) as unknown as typeof fetch;
+
+    const response = await POST(request(JSON.stringify({ text: "Hi" })));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ audio: "QUJD", contentType: "audio/mpeg", alignment: null });
+    setEnv("ELEVENLABS_API_KEY", undefined);
+  });
+
+  test("a malformed envelope is a clean 502 and releases the synthesis slot", async () => {
+    process.env.LLV_TTS_BACKEND = "elevenlabs";
+    process.env.XDG_CONFIG_HOME = "/nonexistent/tts-route-eleven";
+    setEnv("ELEVENLABS_API_KEY", "eleven-key");
+    globalThis.fetch = mock(async () => new Response("<html>gateway</html>", { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+
+    const broken = await POST(request(JSON.stringify({ text: "Hi" })));
+    expect(broken.status).toBe(502);
+    expect(await broken.json()).toEqual({ error: "elevenlabs TTS returned invalid audio" });
+
+    /* The slot came back: three more syntheses are admitted right after. */
+    globalThis.fetch = mock(async () => Response.json(elevenPayload("Hi"))) as unknown as typeof fetch;
+    for (const response of await Promise.all([1, 2, 3].map(() => POST(request(JSON.stringify({ text: "Hi" })))))) {
+      expect(response.status).toBe(200);
+      await response.json();
+    }
+    setEnv("ELEVENLABS_API_KEY", undefined);
   });
 });
