@@ -61,9 +61,11 @@ test("#1069: trouble states, the resynced note, and compact placement keep the r
     expect(html).toContain(`data-connection="${connection}"`);
     expect(html).toContain(translate("en", `runtime.${connection}`));
   }
+  /* #1069 follow-up: even the transient resynced note stays off the floating
+     overlay — the footer belongs to its own rows in every healthy state. */
   const resynced = renderToStaticMarkup(<ConnectionPillBody connection="live" resynced announce="x" t={t} />);
-  expect(resynced).toContain('data-connection="live"');
-  expect(resynced).toContain(translate("en", "runtime.resynced"));
+  expect(resynced).not.toContain("fixed bottom-3 left-3");
+  expect(resynced).not.toContain("data-connection");
   // Compact placements live inside their own header, never over the footer.
   const compact = renderToStaticMarkup(<ConnectionPillBody connection="live" resynced={false} compact announce="x" t={t} />);
   expect(compact).toContain('data-connection="live"');

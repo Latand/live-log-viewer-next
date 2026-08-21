@@ -82,13 +82,13 @@ export interface ConnectionPillProps {
  * The positioned pill, decided entirely from props so tests exercise the real
  * render. #1069: the floating pill sits over the left-rail footer (Telegram
  * row, account controls). A healthy connection is the steady state and needs
- * no visual — only the trouble states and the transient resynced note earn
- * the overlay, and the polite announcer stays mounted so recovery back to
- * live is still spoken. Compact placements are inside their own header and
+ * no visual — only the trouble states earn the overlay (the transient
+ * resynced note stays a compact-only detail), and the polite announcer stays
+ * mounted so recovery back to live is still spoken. Compact placements are inside their own header and
  * never overlap the footer, so they keep the steady badge.
  */
 export function ConnectionPillBody({ connection, resynced, legacy, compact, announce, t }: ConnectionPillViewProps) {
-  if (!compact && connection === "live" && !resynced) {
+  if (!compact && connection === "live") {
     return (
       <span role="status" aria-live="polite" className="sr-only">
         {announce}
