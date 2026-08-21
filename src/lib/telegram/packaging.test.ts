@@ -199,7 +199,8 @@ test("the published tarball carries and runs the connector provisioner", async (
     "if [ \"${1:-}\" = \"--version\" ]; then exit 0; fi",
     "mkdir -p \"$UV_PROJECT_ENVIRONMENT/bin\"",
     "printf '%s\\n' \"$@\" > \"$UV_PROJECT_ENVIRONMENT/uv-args.txt\"",
-    ": > \"$UV_PROJECT_ENVIRONMENT/bin/python\"",
+    "printf '#!/bin/sh\\nexit 0\\n' > \"$UV_PROJECT_ENVIRONMENT/bin/python\"",
+    "chmod 700 \"$UV_PROJECT_ENVIRONMENT/bin/python\"",
     "",
   ].join("\n"));
   fs.chmodSync(fakeUv, 0o700);
@@ -223,15 +224,14 @@ test("the published tarball carries and runs the connector provisioner", async (
   expect(fs.existsSync(path.join(installedState, "telegram", "venv", "bin", "python"))).toBe(true);
   expect(fs.statSync(path.join(installedState, "telegram")).mode & 0o777).toBe(0o700);
   const uvArgs = fs.readFileSync(path.join(installedState, "telegram", "venv", "uv-args.txt"), "utf8").split("\n").filter(Boolean);
-  /* #1081: provisioning syncs a writable owner-only staging copy under state
-     (the packaged tree can be read-only), installs non-editable, and removes
-     the staging copy afterwards. */
-  expect(uvArgs.slice(0, 4)).toEqual(["sync", "--frozen", "--no-dev", "--no-editable"]);
-  expect(uvArgs[4]).toBe("--project");
-  const stagingPrefix = path.join(installedState, "telegram", "vendor-src-");
-  expect(uvArgs[5]?.startsWith(stagingPrefix)).toBe(true);
-  const leftovers = fs.readdirSync(path.join(installedState, "telegram")).filter((name) => name.startsWith("vendor-src-"));
-  expect(leftovers).toEqual([]);
+  /* #1081/#1084: provisioning editable-syncs a writable owner-only staged
+     copy at a stable path (the vendored runtime's supply-chain guard needs a
+     source checkout), keeps it for the connector to run from, and records
+     success only after the import probe. */
+  const stagedSource = path.join(installedState, "telegram", "vendor-src");
+  expect(uvArgs).toEqual(["sync", "--frozen", "--no-dev", "--project", stagedSource]);
+  expect(fs.existsSync(path.join(stagedSource, "pyproject.toml"))).toBe(true);
+  expect(fs.existsSync(path.join(installedState, "telegram", "venv", ".llv-provisioned"))).toBe(true);
 
   const previousState = process.env.LLV_STATE_DIR;
   process.env.LLV_STATE_DIR = installedState;

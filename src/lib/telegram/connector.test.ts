@@ -68,6 +68,10 @@ function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?:
 beforeEach(async () => {
   await stopTelegramConnector();
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+  /* #1084: the connector runs from the provisioner's staged source copy;
+     tests provide the directory the way a completed provision would. */
+  fs.mkdirSync(path.join(process.env.LLV_STATE_DIR!, "telegram"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(process.env.LLV_STATE_DIR!, "telegram", "vendor-src"), { mode: 0o700 });
 });
 afterAll(() => {
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR; else process.env.LLV_STATE_DIR = OLD_STATE;

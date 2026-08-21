@@ -19,7 +19,7 @@ fs.writeFileSync(fakeUv, [
   "set -eu",
   "if [ \"${1:-}\" = \"--version\" ]; then exit 0; fi",
   "mkdir -p \"$UV_PROJECT_ENVIRONMENT/bin\"",
-  "printf '%s\\n' '#!/bin/sh' \"printf '%s\\n' '{\\\"event\\\":\\\"qr\\\",\\\"url\\\":\\\"tg://login?token=fixture\\\",\\\"expiresAt\\\":\\\"2026-08-20T20:00:00.000Z\\\"}'\" 'sleep 30' > \"$UV_PROJECT_ENVIRONMENT/bin/python\"",
+  "printf '%s\\n' '#!/bin/sh' 'if [ \"${1:-}\" = \"-c\" ]; then exit 0; fi' \"printf '%s\\n' '{\\\"event\\\":\\\"qr\\\",\\\"url\\\":\\\"tg://login?token=fixture\\\",\\\"expiresAt\\\":\\\"2026-08-20T20:00:00.000Z\\\"}'\" 'sleep 30' > \"$UV_PROJECT_ENVIRONMENT/bin/python\"",
   "chmod 700 \"$UV_PROJECT_ENVIRONMENT/bin/python\"",
   "",
 ].join("\n"), { mode: 0o700 });

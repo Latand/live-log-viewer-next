@@ -67,6 +67,15 @@ export function telegramVenvDir(): string {
   return statePath("telegram", "venv");
 }
 
+/** The provisioner's writable staging copy of the vendored tree (#1084): the
+    packaged tree can sit on a read-only filesystem, while the runtime's
+    supply-chain guard requires a source checkout and the server writes its
+    log beside its cwd. Provisioning keeps this copy; the connector runs from
+    it. */
+export function stagedConnectorSourceDir(): string {
+  return statePath("telegram", "vendor-src");
+}
+
 export function telegramVenvPython(): string {
   return process.env.LLV_TELEGRAM_PYTHON || path.join(telegramVenvDir(), "bin", "python");
 }
@@ -174,7 +183,12 @@ export function provisionLaunchSpec(): ProcessSpec {
 }
 
 export function connectorProvisioned(): boolean {
-  return fs.existsSync(telegramVenvPython());
+  /* #1084: bare venv existence lied once (a failed sync leaves scaffolding).
+     Provisioned means: the provisioner's post-import-probe marker, the venv
+     python, and the staged source the connector runs from all exist. */
+  return fs.existsSync(path.join(telegramVenvDir(), ".llv-provisioned"))
+    && fs.existsSync(telegramVenvPython())
+    && fs.existsSync(path.join(stagedConnectorSourceDir(), "pyproject.toml"));
 }
 
 let provisioningInFlight: Promise<boolean> | null = null;
@@ -219,7 +233,7 @@ export function ensureConnectorProvisioned(): Promise<boolean> {
     contract) — never as an argument, so it cannot surface in process listings,
     transcripts, or the activity journal. */
 export function connectorLaunchSpec(input: { sessionString: string; connectorToken: string; credentials: TelegramApiCredentials }): ProcessSpec {
-  const vendor = vendoredConnectorDir();
+  const vendor = stagedConnectorSourceDir();
   return {
     command: telegramVenvPython(),
     args: [telegramMcpServerPath()],
