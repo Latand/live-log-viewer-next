@@ -13,6 +13,7 @@ function stateFor(status: Partial<TelegramStatusPayload>, failure: { code: strin
       login: null,
       identity: null,
       credentialRef: null,
+      credentialsConfigured: true,
       lastHealthCheckAt: null,
       error: null,
       ...status,
@@ -25,6 +26,7 @@ function stateFor(status: Partial<TelegramStatusPayload>, failure: { code: strin
     cancel: async () => {},
     logout: async () => {},
     deleteLocal: async () => {},
+    saveCredentials: async () => {},
   };
 }
 
@@ -36,6 +38,26 @@ test("disconnected offers Connect and explains local-only storage", () => {
   expect(html).toContain("Not connected");
   expect(html).toContain("Connect Telegram");
   expect(html).toContain("Read-only · operator sessions only");
+});
+
+test("#1070: missing host credentials render the inline api_id/api_hash form instead of a dead end", () => {
+  const html = render({ phase: "disconnected", credentialsConfigured: false });
+  expect(html).toContain("API ID");
+  expect(html).toContain("API hash");
+  expect(html).toContain("Save credentials");
+  expect(html).toContain("my.telegram.org");
+  expect(html).not.toContain("Connect Telegram");
+});
+
+test("#1070: the credentials_missing error also gets the form, and configured hosts keep plain Connect", () => {
+  const errorHtml = render({ phase: "error", error: { code: "credentials_missing" }, credentialsConfigured: false });
+  expect(errorHtml).toContain("Save credentials");
+  /* The error card's Retry would restart enrollment without credentials;
+     while the form is up it stays hidden. */
+  expect(errorHtml).not.toContain(">Retry<");
+  const configured = render({ phase: "disconnected", credentialsConfigured: true });
+  expect(configured).toContain("Connect Telegram");
+  expect(configured).not.toContain("Save credentials");
 });
 
 test("the panel reuses the accounts flyout anchoring and the mobile sheet", () => {

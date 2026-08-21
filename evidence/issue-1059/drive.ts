@@ -133,6 +133,7 @@ function payload(over: Partial<TelegramStatusPayload>): TelegramStatusPayload {
     login: null,
     identity: null,
     credentialRef: null,
+      credentialsConfigured: true,
     lastHealthCheckAt: null,
     error: null,
     ...over,

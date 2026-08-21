@@ -62,6 +62,7 @@ function harness() {
     registerHosts: () => { calls.register += 1; calls.order.push("register"); return HOSTS_REGISTERED; },
     unregisterHosts: () => { calls.unregister += 1; },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   };
   return { adapter, calls, service: new TelegramConnectionService(ports) };
 }
@@ -222,6 +223,7 @@ test("health recovery registers hosts after a prior connector failure", async ()
     registerHosts: () => { registrations += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
 
   expect((await recovering.checkHealth()).phase).toBe("error");
@@ -245,6 +247,7 @@ test("health releases the shared connector before the session bridge connects", 
     registerHosts: () => { order.push("register"); return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
 
   expect((await service.checkHealth()).phase).toBe("connected");
@@ -295,6 +298,7 @@ test("remote logout releases the shared connector before the session bridge conn
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => { order.push("unregister"); },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
 
   expect((await service.logout()).phase).toBe("disconnected");
@@ -339,6 +343,7 @@ test("successful logout serializes health behind its terminal connector stop", a
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
   saveTelegramSession(PLACEHOLDER_SESSION);
 
@@ -398,6 +403,7 @@ test("local deletion waits for confirmed connector exit before publishing discon
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
 
   const deletion = service.deleteLocalSession().then((status) => { completed = true; return status; });
@@ -420,6 +426,7 @@ test("a connector stop failure still deletes credentials and refuses a disconnec
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => { unregistered += 1; },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
 
   const status = await service.deleteLocalSession();
@@ -439,6 +446,7 @@ test("host cleanup failure cannot preserve credentials during local deletion", a
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => { throw new Error("host config unavailable"); },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
 
   expect((await service.deleteLocalSession()).phase).toBe("disconnected");
@@ -457,6 +465,7 @@ test("host cleanup failure cannot preserve an authorized canceled credential", a
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => { throw new Error("host config unavailable"); },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
   const started = await service.startLogin();
   adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
@@ -478,6 +487,7 @@ test("a connector refusing the read-only bound blocks connected and never regist
     registerHosts: () => { registered += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
   await refusing.startLogin();
   adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
@@ -500,6 +510,7 @@ test("a connector bring-up that THROWS surfaces too, instead of leaving connecte
     registerHosts: () => { registered += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
   await throwing.startLogin();
   adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
@@ -525,6 +536,7 @@ test("host registration failure blocks connected after connector verification", 
     }),
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
   await service.startLogin();
   adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
@@ -545,6 +557,7 @@ test("health over a healthy account still refuses connected when the connector f
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
   const status = await failing.checkHealth();
   expect(status.phase).toBe("error");
@@ -569,6 +582,7 @@ test("health recovery reports host registration failure instead of connected", a
     }),
     unregisterHosts: () => { unregistered += 1; },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
 
   const status = await service.checkHealth();
@@ -633,6 +647,7 @@ test("cancel during connector verification cannot publish the authorized session
     registerHosts: () => { calls.register += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => { calls.unregister += 1; },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
   });
   const started = await service.startLogin();
   adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
