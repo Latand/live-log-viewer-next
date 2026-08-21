@@ -122,7 +122,10 @@ export function ensureTelegramStateDir(create = true): string | null {
   return dir;
 }
 
-function atomicSecretWrite(pathname: string, contents: string): void {
+/* Exported for the Daily Report store (#1086), which persists settings,
+   history and report text in the same directory under the same fence — one
+   owner-only write path for everything the connector owns. */
+export function atomicSecretWrite(pathname: string, contents: string): void {
   ensureTelegramStateDir(true);
   try {
     assertSafeSecretFile(pathname);
@@ -141,7 +144,7 @@ function atomicSecretWrite(pathname: string, contents: string): void {
   }
 }
 
-function readSafeJson(pathname: string, corruptIsUnsafe = false): unknown | null {
+export function readSafeJson(pathname: string, corruptIsUnsafe = false): unknown | null {
   if (ensureTelegramStateDir(false) === null) return null;
   try {
     assertSafeSecretFile(pathname);
@@ -158,6 +161,20 @@ function readSafeJson(pathname: string, corruptIsUnsafe = false): unknown | null
   }
 }
 
+/** The same fence for a text payload — the Daily Report body (#1086), which
+    is not JSON and must still be proven owner-only before it is read back. */
+export function readSafeText(pathname: string): string | null {
+  if (ensureTelegramStateDir(false) === null) return null;
+  try {
+    assertSafeSecretFile(pathname);
+  } catch (error) {
+    if (error instanceof UnsafeTelegramSessionError) throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  return fs.readFileSync(pathname, "utf8");
+}
+
 function safeFileExists(pathname: string): boolean {
   try {
     assertSafeSecretFile(pathname);
@@ -169,7 +186,7 @@ function safeFileExists(pathname: string): boolean {
   }
 }
 
-function removeSafeFile(pathname: string): void {
+export function removeSafeFile(pathname: string): void {
   if (ensureTelegramStateDir(false) === null || !safeFileExists(pathname)) return;
   fs.rmSync(pathname);
 }

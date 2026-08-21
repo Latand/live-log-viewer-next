@@ -52,6 +52,46 @@ export const OPERATOR_ROOT_MCP_SERVERS: readonly string[] = Object.freeze([...GR
 export const DELEGATED_MCP_SERVERS: readonly string[] = Object.freeze([...DEFAULT_SPAWN_MCP_SERVERS]);
 
 /**
+ * The Daily Report session class (issue #1086).
+ *
+ * A scheduled report run is operator-CONFIGURED but Viewer-LAUNCHED: nobody is
+ * at the keyboard when 10:00 comes round, so it cannot be admitted as "the
+ * operator asked for this right now", and it plainly is not a delegated worker
+ * either. It is its own class, and {@link mcpServersForScheduledReport} is the
+ * only way to obtain it — the launcher in `src/lib/telegram/reportRunner.ts`
+ * names it, and nothing that arrives over `/api/spawn` can, because the
+ * request-side classifier (`sessionOriginFor`) knows only root and delegated.
+ * Builders, reviewers, pipeline stages and delegated children are therefore
+ * exactly as far from `telegram` as they were before this class existed.
+ *
+ * The class is a CAP APPLIED AT LAUNCH rather than a third durable origin, and
+ * the distinction is deliberate. A durable origin has to be re-decidable from
+ * the stored row on every registry read, which means a marker on that row — and
+ * every field a launch profile carries is writable by the session it describes,
+ * so a durable report marker would be a grant a delegated worker could hand
+ * itself by editing three lines of JSON. The run settles onto an operator-root
+ * row that ALREADY carries `["viewer","telegram"]` by policy, so re-deciding it
+ * as a root grants nothing this class was withholding, and the cap still binds
+ * where it can be enforced honestly: at the launch the Viewer itself makes.
+ *
+ * Two properties follow, and both are tested:
+ *
+ *  - the class yields at most `["viewer","telegram"]`, whatever the
+ *    operator-root default grows to later;
+ *  - it yields the baseline alone whenever the grant is not live — reports
+ *    disabled, or Telegram logged out / locally deleted — so revocation bites
+ *    on the next run without a second revocation path.
+ */
+export const SCHEDULED_REPORT_SESSION_CLASS = "operator-scheduled-report" as const;
+
+/** The exact surface a report run may hold: the Viewer baseline plus the
+    connector it exists to read. */
+export const SCHEDULED_REPORT_MCP_SERVERS: readonly string[] = Object.freeze(["viewer", "telegram"]);
+
+/** Every session class the MCP grant recognises. */
+export type McpSessionClass = SessionOrigin | typeof SCHEDULED_REPORT_SESSION_CLASS;
+
+/**
  * The bound plus its per-origin defaults, as one value.
  *
  * Every function here takes it as an optional last argument that defaults to
@@ -129,6 +169,23 @@ export function mcpServersForSession(input: {
     ? allowed
     : allowed.filter((name) => input.requested!.includes(name));
   return withViewer(granted.filter((name) => policy.grantable.includes(name)));
+}
+
+/**
+ * The allowlist a Viewer-launched Daily Report run receives.
+ *
+ * `grantActive` is the feature's own condition — reports enabled AND a
+ * connected Telegram account — resolved by the caller from durable state at
+ * launch time. It is not a hint: a false value returns the baseline, so a run
+ * launched into a revoked account cannot reach the connector even if the rest
+ * of the launcher were wrong.
+ */
+export function mcpServersForScheduledReport(
+  input: { grantActive: boolean },
+  policy: McpGrantPolicy = MCP_GRANT_POLICY,
+): string[] {
+  if (!input.grantActive) return [...DEFAULT_SPAWN_MCP_SERVERS];
+  return withViewer(SCHEDULED_REPORT_MCP_SERVERS.filter((name) => policy.grantable.includes(name)));
 }
 
 /**

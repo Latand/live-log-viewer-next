@@ -5,11 +5,13 @@ import { useEffect, useRef, useState } from "react";
 import { Send } from "lucide-react";
 
 import { useTelegramConnection, type TelegramConnectionState } from "@/hooks/useTelegramConnection";
+import { useTelegramReports, type TelegramReportsState } from "@/hooks/useTelegramReports";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import { handleOverlayEscape } from "@/lib/overlay";
 import type { TelegramErrorCode, TelegramPhase, TelegramStatusPayload } from "@/lib/telegram/contracts";
 
 import { Loader2, Trash2, X } from "./icons";
+import { TelegramReportsSection } from "./TelegramReports";
 
 /**
  * The Telegram row in the left-rail footer and its flyout panel (issue #1059).
@@ -194,7 +196,7 @@ function ConfirmingAction({ label, prompt, onConfirm, disabled, icon }: { label:
   );
 }
 
-export function TelegramPanel({ state, onClose }: { state: TelegramConnectionState; onClose: () => void }) {
+export function TelegramPanel({ state, reports, onClose }: { state: TelegramConnectionState; reports?: TelegramReportsState; onClose: () => void }) {
   const { t } = useLocale();
   const { status, busy, failure } = state;
   const phase = status?.phase ?? "disconnected";
@@ -245,7 +247,7 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
         aria-label={t("telegram.title")}
         aria-busy={busy}
         onKeyDown={(event) => handleOverlayEscape(event, onClose)}
-        className="fixed bottom-3 left-1/2 z-50 flex w-[min(320px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[14px] border border-border bg-card shadow-2 sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0"
+        className="fixed bottom-3 left-1/2 z-50 flex max-h-[min(560px,calc(100vh-24px))] w-[min(320px,calc(100vw-16px))] -translate-x-1/2 flex-col overflow-y-auto overscroll-contain rounded-[14px] border border-border bg-card shadow-2 sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0"
       >
         <header className="flex items-center gap-2 border-b border-border px-3 py-2">
           <Send className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--color-accent)" }} aria-hidden />
@@ -417,6 +419,12 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
             </>
           ) : null}
 
+          {/* #1086: the Daily Report lives in this same panel — settings,
+              history and one rendered report — and only once an account is
+              actually connected, which is also the condition its telegram
+              grant is tied to. */}
+          {phase === "connected" && reports ? <TelegramReportsSection state={reports} /> : null}
+
           {(phase === "connected" || phase === "expired"
             || (phase === "error" && (status?.credentialRef || status?.error?.code === "session_unsafe"))) ? (
             <div className="flex flex-col gap-1 border-t border-border pt-1.5">
@@ -452,6 +460,9 @@ export function TelegramFooterRow() {
   const { t } = useLocale();
   const state = useTelegramConnection();
   const [open, setOpen] = useState(false);
+  /* Report state polls only while the panel is open — the footer row itself
+     shows the connection, not the schedule. */
+  const reports = useTelegramReports(open && state.status?.phase === "connected");
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const phase = state.status?.phase ?? "disconnected";
@@ -501,7 +512,7 @@ export function TelegramFooterRow() {
           />
         </span>
       </button>
-      {open ? <TelegramPanel state={state} onClose={close} /> : null}
+      {open ? <TelegramPanel state={state} reports={reports} onClose={close} /> : null}
     </div>
   );
 }
