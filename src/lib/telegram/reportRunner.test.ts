@@ -9,7 +9,10 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
 const { TelegramReportRunner, RUN_TIMEOUT_MS } = await import("./reportRunner");
 const { readTelegramReports, readReportText, reportInboxPath, updateTelegramReports } = await import("./reportStore");
-const { DAILY_REPORT_TAG } = await import("./reportPrompt");
+const { DEFAULT_DAILY_REPORT_PROMPT } = await import("./reportPrompt");
+/* The tag lives in the operator's editable brief; fixtures use a synthetic
+   one, exactly as a real operator's own tag never appears in this repo. */
+const DAILY_REPORT_TAG = "#report_tag";
 
 import type { ReportRunnerPorts } from "./reportRunner";
 import type { StoredTelegramConnection } from "./sessionStore";
@@ -109,10 +112,12 @@ test("Run now launches a board-visible Codex conversation holding exactly viewer
   expect(String(body.cwd)).toContain("report-workspace");
 
   const prompt = String(body.prompt);
+  /* The Viewer's fixed preamble, then the operator's brief. */
   expect(prompt).toContain("get_me");
   expect(prompt).toContain("@account_a");
   expect(prompt).toContain(`run-${launched.ok ? launched.runId : ""}.sources.json`);
   expect(prompt).toContain(reportInboxPath(activeRunId()));
+  expect(prompt).toContain(DEFAULT_DAILY_REPORT_PROMPT.split("\n")[0]);
   /* The private dialogs to read travel in the owner-only plan file, never in
      the prompt the transcript and the registry keep. */
   expect(prompt).not.toContain("Dialog A");
@@ -382,4 +387,37 @@ test("a second Run now while one is live is refused rather than doubling the rea
   release();
   await runner.settled();
   expect(ports.spawns.length).toBe(1);
+});
+
+test("the run is launched with the operator's edited brief behind the fixed preamble", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  const edited = "Report in Ukrainian. First line: #report_tag. Only mention what needs an answer.";
+  updateTelegramReports((state) => { state.prompt = edited; });
+
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+  const prompt = String(ports.spawns[0].prompt);
+
+  expect(prompt).toContain(edited);
+  /* The operator's text cannot edit away the rules that keep a run correct. */
+  expect(prompt).toContain("get_me");
+  expect(prompt).toContain("Read SEQUENTIALLY");
+  expect(prompt).toContain("is NOT recency");
+  expect(prompt.indexOf("get_me")).toBeLessThan(prompt.indexOf(edited));
+  /* And the default brief is not smuggled in beside it. */
+  expect(prompt).not.toContain(DEFAULT_DAILY_REPORT_PROMPT.split("\n")[0]);
+});
+
+test("a report is recognised by its markers whatever tag the operator chose", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  updateTelegramReports((state) => { state.prompt = "Report in Ukrainian, first line #inbox_daily."; });
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+  agentWrites("#inbox_daily\nQUIET\n");
+  await runner.tick();
+  expect(readTelegramReports().history[0].status).toBe("quiet");
 });

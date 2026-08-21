@@ -29,6 +29,7 @@ import {
   clearTelegramReports,
   deleteReportArtifacts,
   deleteRunScratch,
+  effectiveReportPrompt,
   ingestReportInbox,
   readTelegramReports,
   reportInboxPath,
@@ -142,7 +143,9 @@ export class TelegramReportRunner {
       : file.history;
     const next = nextScheduledRunAt({ now: this.ports.now(), settings: file.settings, cursor: file.cursor });
     return {
-      settings: file.settings,
+      /* The prompt itself is never part of this payload — the panel polls it
+         every twenty seconds, and the brief may name private chats. */
+      settings: { ...file.settings, promptIsDefault: file.prompt === null },
       history,
       nextRunAt: next === null ? null : new Date(next).toISOString(),
     };
@@ -292,12 +295,16 @@ export class TelegramReportRunner {
       deleteRunScratch(runId);
       return;
     }
+    /* The operator's own brief, with the Viewer's non-negotiable preamble in
+       front of it. Their text may name private chats, which is why it reaches
+       nothing but the run it was written for. */
     const prompt = renderDailyReportPrompt({
       windowStart: window.startAt,
       windowEnd: window.endAt,
       sourcesPath,
       outputPath: reportInboxPath(runId),
       identity: connection.identity,
+      instructions: effectiveReportPrompt(readTelegramReports()),
     });
     /* The grant is decided here, by the session class, from durable state —
        never copied from the request or from a previous run. */

@@ -26,7 +26,7 @@ function row(over: Partial<TelegramReportRow> = {}): TelegramReportRow {
 function stateFor(reports: Partial<TelegramReportsPayload> | null, over: Partial<TelegramReportsState> = {}): TelegramReportsState {
   return {
     reports: reports === null ? null : {
-      settings: { enabled: false, time: "10:00", days: "daily", groups: [] },
+      settings: { enabled: false, time: "10:00", days: "daily", groups: [], promptIsDefault: true },
       history: [],
       nextRunAt: null,
       ...reports,
@@ -35,12 +35,16 @@ function stateFor(reports: Partial<TelegramReportsPayload> | null, over: Partial
     failure: null,
     openReport: null,
     groups: null,
+    ["prompt"]: null,
     refresh: async () => {},
     saveSettings: async () => {},
     runNow: async () => {},
     openReportById: async () => {},
     closeReport: () => {},
     loadGroups: async () => {},
+    loadPrompt: async () => {},
+    savePrompt: async () => {},
+    closePrompt: () => {},
     ...over,
   };
 }
@@ -57,7 +61,7 @@ test("disabled explains the feature and offers a single Enable", () => {
 
 test("enabled shows the schedule, the sources summary, Run now and the next run", () => {
   const html = render(stateFor({
-    settings: { enabled: true, time: "10:00", days: "daily", groups: [{ id: "-1001", title: "Team room", mode: "light" }] },
+    settings: { enabled: true, time: "10:00", days: "daily", groups: [{ id: "-1001", title: "Team room", mode: "light" }], promptIsDefault: true },
     nextRunAt: "2026-08-22T07:00:00.000Z",
   }));
   expect(html).toContain('value="10:00"');
@@ -72,7 +76,7 @@ test("enabled shows the schedule, the sources summary, Run now and the next run"
 
 test("history rows carry date, window and status, and only a stored report offers Open", () => {
   const html = render(stateFor({
-    settings: { enabled: true, time: "10:00", days: "daily", groups: [] },
+    settings: { enabled: true, time: "10:00", days: "daily", groups: [], promptIsDefault: true },
     history: [row(), row({ id: "2", status: "quiet", hasReport: false })],
   }));
   expect(html).toContain("24 h");
@@ -83,7 +87,7 @@ test("history rows carry date, window and status, and only a stored report offer
 
 test("a failed row states what went wrong in a sentence, never silence", () => {
   const html = render(stateFor({
-    settings: { enabled: true, time: "10:00", days: "daily", groups: [] },
+    settings: { enabled: true, time: "10:00", days: "daily", groups: [], promptIsDefault: true },
     history: [row({ status: "failed", errorCode: "run_ended_without_report", hasReport: false })],
   }));
   expect(html).toContain("failed");
@@ -93,7 +97,7 @@ test("a failed row states what went wrong in a sentence, never silence", () => {
 
 test("a wrong-account row says the account did not match and nothing was read", () => {
   const html = render(stateFor({
-    settings: { enabled: true, time: "10:00", days: "daily", groups: [] },
+    settings: { enabled: true, time: "10:00", days: "daily", groups: [], promptIsDefault: true },
     history: [row({ status: "account-mismatch", errorCode: null, hasReport: false })],
   }));
   expect(html).toContain("wrong account");
@@ -102,7 +106,7 @@ test("a wrong-account row says the account did not match and nothing was read", 
 
 test("a running row shows the run in progress and blocks a second Run now", () => {
   const html = render(stateFor({
-    settings: { enabled: true, time: "10:00", days: "daily", groups: [] },
+    settings: { enabled: true, time: "10:00", days: "daily", groups: [], promptIsDefault: true },
     history: [row({ status: "running", finishedAt: null, hasReport: false })],
   }));
   expect(html).toContain("running");
@@ -112,7 +116,7 @@ test("a running row shows the run in progress and blocks a second Run now", () =
 
 test("an open report renders its text with a way back to the list", () => {
   const html = render(stateFor(
-    { settings: { enabled: true, time: "10:00", days: "daily", groups: [] }, history: [row()] },
+    { settings: { enabled: true, time: "10:00", days: "daily", groups: [], promptIsDefault: true }, history: [row()] },
     { openReport: { id: row().id, text: "#daily_report\n⏳ Awaiting your reply\n[1] Contact A asked about the schedule." } },
   ));
   expect(html).toContain("#daily_report");
@@ -124,7 +128,7 @@ test("the source picker lists groups with a light and a full pass", () => {
   /* The picker opens from the settings view; with groups loaded it offers the
      two passes per group and nothing else. */
   const state = stateFor(
-    { settings: { enabled: true, time: "10:00", days: "daily", groups: [{ id: "-1001", title: "Team room", mode: "full" }] } },
+    { settings: { enabled: true, time: "10:00", days: "daily", groups: [{ id: "-1001", title: "Team room", mode: "full" }], promptIsDefault: true } },
     { groups: [{ id: "-1001", title: "Team room" }, { id: "-1002", title: "Project room" }] },
   );
   const html = renderToStaticMarkup(<TelegramReportsSection state={state} />);
@@ -134,7 +138,7 @@ test("the source picker lists groups with a light and a full pass", () => {
 });
 
 test("an action failure is announced instead of leaving the panel silent", () => {
-  const html = render(stateFor({ settings: { enabled: true, time: "10:00", days: "daily", groups: [] } }, { failure: { code: "sources_failed" } }));
+  const html = render(stateFor({ settings: { enabled: true, time: "10:00", days: "daily", groups: [], promptIsDefault: true } }, { failure: { code: "sources_failed" } }));
   expect(html).toContain("role=\"alert\"");
   expect(html).toContain("The chats to read could not be listed.");
 });
@@ -142,5 +146,27 @@ test("an action failure is announced instead of leaving the panel silent", () =>
 test("state that has not loaded yet says so instead of rendering an empty schedule", () => {
   const html = render(stateFor(null));
   expect(html).toContain("Loading…");
+  expect(html).not.toContain("Run now");
+});
+
+test("the prompt row says whether the brief is the default, and opens the editor", () => {
+  const html = render(stateFor({ settings: { enabled: true, time: "10:00", days: "daily", groups: [], promptIsDefault: true } }));
+  expect(html).toContain("Prompt: default template");
+  expect(html).toContain(">Prompt<");
+  const edited = render(stateFor({ settings: { enabled: true, time: "10:00", days: "daily", groups: [], promptIsDefault: false } }));
+  expect(edited).toContain("Prompt: edited by you");
+});
+
+test("the prompt editor is a plain textarea with save and reset, and states the fixed preamble", () => {
+  const html = render(stateFor(
+    { settings: { enabled: true, time: "10:00", days: "daily", groups: [], promptIsDefault: false } },
+    { prompt: { prompt: "Write the report in Ukrainian.\n#report_tag", defaultPrompt: "Write one report on the operator's Telegram for this window." } },
+  ));
+  expect(html).toContain("<textarea");
+  expect(html).toContain("Write the report in Ukrainian.");
+  expect(html).toContain("Save prompt");
+  expect(html).toContain("Reset to default");
+  expect(html).toContain("The Viewer always adds the window");
+  /* The editor replaces the settings view rather than opening a second one. */
   expect(html).not.toContain("Run now");
 });

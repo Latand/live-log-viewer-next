@@ -20,6 +20,8 @@ const {
   writeReportSources,
 } = await import("./reportStore");
 const { TELEGRAM_REPORT_HISTORY_LIMIT } = await import("./reportContracts");
+const { effectiveReportPrompt, sanitizeReportPrompt } = await import("./reportStore");
+const { DEFAULT_DAILY_REPORT_PROMPT } = await import("./reportPrompt");
 
 import type { TelegramReportRow } from "./reportContracts";
 
@@ -134,4 +136,22 @@ test("logging out clears the whole report corpus", () => {
   expect(after.settings.enabled).toBe(false);
   expect(after.history).toEqual([]);
   expect(readReportText(id)).toBeNull();
+});
+
+test("the analyst prompt is stored, survives a restart, and resets to the shipped default", () => {
+  /* Untouched settings follow the template as it improves: nothing is stored
+     until the operator actually edits the brief. */
+  expect(readTelegramReports().prompt).toBeNull();
+  expect(effectiveReportPrompt(readTelegramReports())).toBe(DEFAULT_DAILY_REPORT_PROMPT);
+
+  const edited = "Report in Ukrainian. First line: #report_tag";
+  updateTelegramReports((state) => { state.prompt = sanitizeReportPrompt(edited) ?? null; });
+  expect(effectiveReportPrompt(readTelegramReports())).toBe(edited);
+
+  /* Saving the default back is a reset, not a stored copy of it. */
+  updateTelegramReports((state) => { state.prompt = sanitizeReportPrompt(DEFAULT_DAILY_REPORT_PROMPT) ?? null; });
+  expect(readTelegramReports().prompt).toBeNull();
+  /* A non-string is refused rather than blanking the brief. */
+  expect(sanitizeReportPrompt(undefined)).toBeUndefined();
+  expect(sanitizeReportPrompt(42)).toBeUndefined();
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import type { TelegramReportsState } from "@/hooks/useTelegramReports";
 import { type TFunction, useLocale } from "@/lib/i18n";
@@ -17,9 +17,14 @@ import {
  *
  * It lives INSIDE the existing flyout/sheet — no new navigation, no second
  * surface — and reuses that panel's primitives: the same button shape, the
- * same section rule, the same 44px mobile tap targets. Four views share the
- * section: settings (off / on), the source picker, the history list, and one
- * rendered report.
+ * same section rule, the same 44px mobile tap targets. Five views share the
+ * section: settings (off / on), the source picker, the analyst-prompt editor,
+ * the history list, and one rendered report.
+ *
+ * The prompt is the operator's own brief — language, tag line, sections,
+ * target repository, tone — so it is a plain textarea with a reset, not a
+ * form of Viewer-owned fields. It is loaded only when the editor opens,
+ * because it may name their private chats.
  */
 
 function reportButtonClass(tone: "neutral" | "accent" = "neutral"): string {
@@ -158,6 +163,52 @@ function SourcePicker({ state, settings }: { state: TelegramReportsState; settin
   );
 }
 
+function PromptEditor({ state }: { state: TelegramReportsState }) {
+  const { t } = useLocale();
+  const field = useRef<HTMLTextAreaElement>(null);
+  const loaded = state.prompt;
+  if (!loaded) return null;
+  return (
+    <div className="flex flex-col gap-1.5 border-t border-border pt-1.5">
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] font-bold text-primary">{t("telegram.report.promptTitle")}</span>
+        <span className="ml-auto">
+          <ReportButton label={t("telegram.report.back")} onClick={state.closePrompt} disabled={state.busy} />
+        </span>
+      </div>
+      <p className="text-[10.5px] leading-snug text-muted">{t("telegram.report.promptHint")}</p>
+      <textarea
+        ref={field}
+        defaultValue={loaded.prompt}
+        aria-label={t("telegram.report.promptTitle")}
+        spellCheck={false}
+        className="h-[220px] w-full resize-none rounded-[8px] border border-border bg-canvas p-2 font-mono text-[10.5px] leading-snug outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      />
+      <div className="flex items-center gap-1.5">
+        <ReportButton
+          label={t("telegram.report.promptSave")}
+          tone="accent"
+          disabled={state.busy}
+          onClick={() => {
+            const next = field.current?.value ?? "";
+            void state.savePrompt(next);
+          }}
+        />
+        <ReportButton
+          label={t("telegram.report.promptReset")}
+          disabled={state.busy}
+          onClick={() => {
+            if (field.current) field.current.value = loaded.defaultPrompt;
+          }}
+        />
+      </div>
+      {/* The Viewer's own half is stated, so the operator knows what their
+          text is added to rather than discovering it in a transcript. */}
+      <p className="text-[10px] leading-snug text-secondary">{t("telegram.report.promptPreamble")}</p>
+    </div>
+  );
+}
+
 export function TelegramReportsSection({ state }: { state: TelegramReportsState }) {
   const { t } = useLocale();
   const [picking, setPicking] = useState(false);
@@ -172,6 +223,10 @@ export function TelegramReportsSection({ state }: { state: TelegramReportsState 
         <p className="text-[10.5px] text-muted">{t("telegram.report.loading")}</p>
       </div>
     );
+  }
+
+  if (state.prompt) {
+    return <PromptEditor state={state} />;
   }
 
   if (state.openReport) {
@@ -254,6 +309,13 @@ export function TelegramReportsSection({ state }: { state: TelegramReportsState 
             />
           </div>
           {picking ? <SourcePicker state={state} settings={settings} /> : null}
+
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="min-w-0 flex-1 truncate text-[10.5px] text-muted">
+              {t(settings.promptIsDefault ? "telegram.report.promptDefault" : "telegram.report.promptEdited")}
+            </span>
+            <ReportButton label={t("telegram.report.promptEdit")} onClick={() => void state.loadPrompt()} disabled={state.busy} />
+          </div>
 
           <div className="flex items-center gap-1.5">
             <ReportButton

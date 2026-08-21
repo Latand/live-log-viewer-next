@@ -22,6 +22,10 @@ import {
   type TelegramReportSettings,
 } from "./reportContracts";
 
+/** Only the three fields a schedule is made of — so both the stored settings
+    and the payload's satisfy it. */
+export type ReportScheduleSettings = Pick<TelegramReportSettings, "enabled" | "time" | "days">;
+
 export const REPORT_WINDOW_CAP_MS = 72 * 60 * 60 * 1000;
 export const REPORT_FIRST_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -96,7 +100,7 @@ export function slotInstant(dayKey: string, time: string, timeZone: string = REP
   return second;
 }
 
-function allowedDay(instant: number, settings: TelegramReportSettings, timeZone: string): boolean {
+function allowedDay(instant: number, settings: ReportScheduleSettings, timeZone: string): boolean {
   if (settings.days === "daily") return true;
   const weekday = localWeekday(instant, timeZone);
   return weekday >= 1 && weekday <= 5;
@@ -113,7 +117,7 @@ export interface ReportScheduleCursor {
 /** Whether the scheduled run for the operator's current day is owed. */
 export function scheduledRunDue(input: {
   now: number;
-  settings: TelegramReportSettings;
+  settings: ReportScheduleSettings;
   cursor: ReportScheduleCursor;
   timeZone?: string;
 }): boolean {
@@ -128,7 +132,7 @@ export function scheduledRunDue(input: {
 /** The next instant a scheduled run will fire, or `null` when disabled. */
 export function nextScheduledRunAt(input: {
   now: number;
-  settings: TelegramReportSettings;
+  settings: ReportScheduleSettings;
   cursor: ReportScheduleCursor;
   timeZone?: string;
 }): number | null {

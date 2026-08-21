@@ -14,8 +14,9 @@
  * What the checks prove (issue #1086 acceptance):
  *  - the report section renders inside the EXISTING Telegram flyout/sheet, with
  *    no new navigation: disabled, enabled with schedule + Run now, the group
- *    source picker, the history list, one rendered report, and a failed row
- *    that states its reason in a sentence;
+ *    source picker, the operator-editable analyst prompt, the history list,
+ *    one rendered report, and a failed row that states its reason in a
+ *    sentence;
  *  - a live run shows as `running` and Run now is disabled while it runs;
  *  - no report body is present in the page until the operator opens one;
  *  - the phone never grows a horizontal scrollbar with the sheet open, and the
@@ -46,10 +47,11 @@ const BASE = createCaptureDirectory({
 });
 const HOME = path.join(BASE, "home");
 const OUT_DIR = path.join(BASE, "out");
-/* The panel crops are the committed acceptance images (the repo's
-   docs/acceptance convention); the full-page shots stay in the ephemeral
-   capture dir, which the evidence PNG ignore rule keeps out of the repo. */
-const PANEL_DIR = path.join(REPO_ROOT, "docs", "acceptance", "issue-1086");
+/* Panel crops beside the full-page shots. Both stay in the ephemeral capture
+   dir: this repository is public and its publication gate admits raster only
+   with deterministic-generator provenance, so a browser capture is never
+   committed — the booleans below are the committed evidence. */
+const PANEL_DIR = path.join(BASE, "panels");
 const REPO_DIR = path.join(HOME, "Projects", "atlas");
 const CAPTURE_MS = Date.parse("2100-01-02T12:00:00.000Z");
 const DESKTOP = { width: 1440, height: 900 };
@@ -182,9 +184,30 @@ function row(over: Partial<TelegramReportRow>): TelegramReportRow {
 }
 
 const ENABLED = {
-  settings: { enabled: true, time: "10:00", days: "daily" as const, groups: [{ id: GROUPS[0].id, title: GROUPS[0].title, mode: "full" as const }] },
+  settings: {
+    enabled: true,
+    time: "10:00",
+    days: "daily" as const,
+    groups: [{ id: GROUPS[0].id, title: GROUPS[0].title, mode: "full" as const }],
+    promptIsDefault: true,
+  },
   nextRunAt: "2100-01-03T08:00:00.000Z",
 };
+
+/* A synthetic brief for the editor capture — the shape an operator's own
+   prompt takes, with placeholder names and a placeholder tag. */
+const PROMPT_FIXTURE = [
+  "Write one report on my Telegram for this window, in English.",
+  "",
+  "First line of the file is exactly:",
+  "",
+  "#report_tag",
+  "",
+  "Then, only the sections that have content:",
+  "⏳ Awaiting your reply · 📌 You promised · 🐙 Proposed issues · 📅 Proposed calendar items · 👀 Worth attention",
+  "",
+  "Number the proposals [1], [2], [3] so I can answer \"do 2\". Full sentences, no jargon.",
+].join("\n");
 
 const HISTORY: TelegramReportRow[] = [
   row({ id: "report-fixture-0001" }),
@@ -203,7 +226,7 @@ interface StateSpec {
   id: string;
   reports: TelegramReportsPayload;
   /** Panel interaction to perform after opening. */
-  act?: "sources" | "open-report";
+  act?: "sources" | "open-report" | "prompt";
   expectText: string[];
   absentText?: string[];
 }
@@ -211,7 +234,7 @@ interface StateSpec {
 const STATES: StateSpec[] = [
   {
     id: "settings-disabled",
-    reports: { settings: { enabled: false, time: "10:00", days: "daily", groups: [] }, history: [], nextRunAt: null },
+    reports: { settings: { enabled: false, time: "10:00", days: "daily", groups: [], promptIsDefault: true }, history: [], nextRunAt: null },
     expectText: ["Daily report", "Enable daily report"],
     absentText: ["Run now"],
   },
@@ -225,6 +248,12 @@ const STATES: StateSpec[] = [
     reports: { ...ENABLED, history: [] },
     act: "sources",
     expectText: ["Load my groups", "Light", "Full", GROUPS[1].title],
+  },
+  {
+    id: "prompt-editor",
+    reports: { ...ENABLED, settings: { ...ENABLED.settings, promptIsDefault: false }, history: [] },
+    act: "prompt",
+    expectText: ["Report prompt", "Save prompt", "Reset to default", "The Viewer always adds the window"],
   },
   {
     id: "history",
@@ -285,6 +314,13 @@ async function captureState(
       }
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ reports: state.reports }) });
     }
+    if (url.searchParams.get("prompt") === "1") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ prompt: PROMPT_FIXTURE, defaultPrompt: PROMPT_FIXTURE }),
+      });
+    }
     if (url.searchParams.get("report")) {
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ report: REPORT_TEXT }) });
     }
@@ -299,6 +335,13 @@ async function captureState(
     await page.waitForTimeout(200);
     await page.click('div[role="dialog"][aria-label="Telegram"] >> text=Load my groups');
     await page.waitForTimeout(400);
+  }
+  if (state.act === "prompt") {
+    /* Exact text: the summary line beside the button also starts with
+       "Prompt", and a substring match would grab that span. */
+    await page.click('div[role="dialog"][aria-label="Telegram"] >> button >> text="Prompt"');
+    await page.waitForSelector('div[role="dialog"][aria-label="Telegram"] textarea', { timeout: 10_000 });
+    await page.waitForTimeout(300);
   }
   if (state.act === "open-report") {
     await page.click('div[role="dialog"][aria-label="Telegram"] >> text=Open >> nth=0');

@@ -28,6 +28,14 @@ export type TelegramReportGroup = {
 
 export type TelegramReportDays = "daily" | "weekdays";
 
+/**
+ * The settings the panel renders and polls.
+ *
+ * The operator's analyst PROMPT is deliberately absent: it may name their
+ * private chats, so it is fetched on its own, by an explicit request, and
+ * never rides in a payload the panel polls every twenty seconds. What the list
+ * carries about it is whether it still matches the shipped default.
+ */
 export type TelegramReportSettings = {
   enabled: boolean;
   /** `HH:MM` in {@link REPORT_TIME_ZONE}. */
@@ -36,6 +44,15 @@ export type TelegramReportSettings = {
   /** Operator-picked groups. Private dialogs are discovered per run and are
       never listed here — they must not become durable Viewer state. */
   groups: TelegramReportGroup[];
+  /** Whether the analyst prompt is still the repository default. */
+  promptIsDefault: boolean;
+};
+
+/** The analyst prompt, served only by its own request. */
+export type TelegramReportPromptPayload = {
+  ["prompt"]: string;
+  /** The shipped template, so "reset to default" needs no second round trip. */
+  defaultPrompt: string;
 };
 
 /** Sanitized failure vocabulary for a run. A failed run always carries one. */
@@ -81,6 +98,7 @@ export const DEFAULT_TELEGRAM_REPORT_SETTINGS: TelegramReportSettings = {
   time: "10:00",
   days: "daily",
   groups: [],
+  promptIsDefault: true,
 };
 
 /** How many history rows survive; older rows and their texts are evicted. */

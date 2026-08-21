@@ -12,6 +12,7 @@ import {
   type TelegramReportRow,
   type TelegramReportSettings,
 } from "./reportContracts";
+import { DEFAULT_DAILY_REPORT_PROMPT, MAX_DAILY_REPORT_PROMPT_LENGTH } from "./reportPrompt";
 import type { ReportScheduleCursor } from "./reportSchedule";
 import { atomicSecretWrite, ensureTelegramStateDir, readSafeJson, readSafeText, removeSafeFile } from "./sessionStore";
 
@@ -22,9 +23,13 @@ import { atomicSecretWrite, ensureTelegramStateDir, readSafeJson, readSafeText, 
  * the same 0600 fence (`sessionStore.ts`), because it is the same class of
  * data: the operator's own Telegram life, readable by nobody else on the host.
  *
- *  - `reports.json` — settings, schedule cursor, the active run, and the
- *    history rows. Rows carry status, window and sanitized error code only;
- *    no message body and no private-dialog identifier ever enters this file.
+ *  - `reports.json` — settings, the operator's analyst prompt, the schedule
+ *    cursor, the active run, and the history rows. Rows carry status, window
+ *    and sanitized error code only; no message body and no private-dialog
+ *    identifier ever enters a row. The PROMPT may well name the operator's
+ *    private chats — it is their brief — so it lives here, owner-only, and
+ *    leaves only by the explicit request that serves it back to the panel or
+ *    into the run it was written for.
  *  - `report-<runId>.md` — one report text, written by the Viewer.
  *  - `run-<runId>.sources.json` — the source plan a run reads. Owner-only, so
  *    the private dialogs a run must visit never travel through the prompt,
@@ -53,9 +58,16 @@ export type ActiveTelegramReportRun = {
   promptVersion: string;
 };
 
+/** What is actually stored: the payload's settings minus the flag the payload
+    derives from the prompt beside them. */
+export type StoredReportSettings = Omit<TelegramReportSettings, "promptIsDefault">;
+
 export type TelegramReportsFile = {
   version: 1;
-  settings: TelegramReportSettings;
+  settings: StoredReportSettings;
+  /** The operator's analyst brief. `null` means "the shipped default", so an
+      operator who never edited it follows the template as it improves. */
+  ["prompt"]: string | null;
   cursor: ReportScheduleCursor;
   active: ActiveTelegramReportRun | null;
   history: TelegramReportRow[];
@@ -86,9 +98,17 @@ export function reportWorkspaceDir(): string {
   return dir;
 }
 
+const DEFAULT_STORED_SETTINGS: StoredReportSettings = {
+  enabled: DEFAULT_TELEGRAM_REPORT_SETTINGS.enabled,
+  time: DEFAULT_TELEGRAM_REPORT_SETTINGS.time,
+  days: DEFAULT_TELEGRAM_REPORT_SETTINGS.days,
+  groups: [],
+};
+
 const EMPTY: TelegramReportsFile = {
   version: 1,
-  settings: DEFAULT_TELEGRAM_REPORT_SETTINGS,
+  settings: DEFAULT_STORED_SETTINGS,
+  ["prompt"]: null,
   cursor: { lastSuccessfulWindowEndAt: null, lastScheduledDay: null },
   active: null,
   history: [],
@@ -113,7 +133,7 @@ function sanitizeGroups(value: unknown): TelegramReportGroup[] {
   return groups;
 }
 
-export function sanitizeReportSettings(value: unknown): TelegramReportSettings {
+export function sanitizeReportSettings(value: unknown): StoredReportSettings {
   const row = (value && typeof value === "object" ? value : {}) as Partial<TelegramReportSettings>;
   return {
     enabled: row.enabled === true,
@@ -121,6 +141,25 @@ export function sanitizeReportSettings(value: unknown): TelegramReportSettings {
     days: row.days === "weekdays" ? "weekdays" : "daily",
     groups: sanitizeGroups(row.groups),
   };
+}
+
+/**
+ * A prompt on its way into storage: bounded, trimmed, and collapsed back to
+ * `null` when it is the default — an operator who resets ends up exactly where
+ * they started, with no stale copy of a template that has since moved on.
+ * Anything that is not a usable string is refused rather than silently
+ * replacing the brief with an empty one.
+ */
+export function sanitizeReportPrompt(value: unknown): string | null | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === DEFAULT_DAILY_REPORT_PROMPT.trim()) return null;
+  return trimmed.slice(0, MAX_DAILY_REPORT_PROMPT_LENGTH);
+}
+
+/** The brief a run is launched with: the operator's, or the default. */
+export function effectiveReportPrompt(file: TelegramReportsFile): string {
+  return file.prompt ?? DEFAULT_DAILY_REPORT_PROMPT;
 }
 
 function sanitizeRow(value: unknown): TelegramReportRow | null {
@@ -179,6 +218,9 @@ export function readTelegramReports(): TelegramReportsFile {
   return {
     version: 1,
     settings: sanitizeReportSettings(row.settings),
+    ["prompt"]: typeof row.prompt === "string" && row.prompt.trim()
+      ? row.prompt.slice(0, MAX_DAILY_REPORT_PROMPT_LENGTH)
+      : null,
     cursor: {
       lastSuccessfulWindowEndAt: text(cursor.lastSuccessfulWindowEndAt),
       lastScheduledDay: text(cursor.lastScheduledDay),

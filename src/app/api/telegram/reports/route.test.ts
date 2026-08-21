@@ -12,6 +12,7 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 const { GET, POST } = await import("./route");
 const { TelegramReportRunner, setTelegramReportRunnerForTests } = await import("@/lib/telegram/reportRunner");
 const { readTelegramReports, saveReportText, updateTelegramReports } = await import("@/lib/telegram/reportStore");
+const { DEFAULT_DAILY_REPORT_PROMPT } = await import("@/lib/telegram/reportPrompt");
 
 import type { ReportRunnerPorts } from "@/lib/telegram/reportRunner";
 import type { TelegramReportsPayload } from "@/lib/telegram/reportContracts";
@@ -154,4 +155,38 @@ test("a cross-origin action is refused, and an unknown action is a 400", async (
   });
   expect((await POST(foreign)).status).toBe(403);
   expect((await POST(post({ action: "nope" }))).status).toBe(400);
+});
+
+test("the analyst prompt is served by its own request and never in the polled payload", async () => {
+  const edited = "Report in Ukrainian. First line: #report_tag. Mention what Group A decided.";
+  updateTelegramReports((state) => { state.prompt = edited; });
+
+  const list = await GET(get());
+  const raw = await list.text();
+  /* The panel polls this every twenty seconds; the brief may name private
+     chats, so it is not in it — only whether it is still the default. */
+  expect(raw).not.toContain("#report_tag");
+  expect((JSON.parse(raw) as { reports: TelegramReportsPayload }).reports.settings.promptIsDefault).toBe(false);
+
+  const fetched = await GET(get("http://127.0.0.1/api/telegram/reports?prompt=1"));
+  const body = await fetched.json() as { prompt: string; defaultPrompt: string };
+  expect(body.prompt).toBe(edited);
+  expect(body.defaultPrompt).toBe(DEFAULT_DAILY_REPORT_PROMPT);
+});
+
+test("an ordinary settings save leaves the stored prompt alone; sending one replaces it", async () => {
+  updateTelegramReports((state) => { state.prompt = "Report in Ukrainian."; });
+  const settings = { enabled: true, time: "09:00", days: "daily", groups: [] };
+  await POST(post({ action: "settings", settings }));
+  expect(readTelegramReports().prompt).toBe("Report in Ukrainian.");
+
+  await POST(post({ action: "settings", settings, prompt: "Report in English, tag #report_tag." }));
+  expect(readTelegramReports().prompt).toBe("Report in English, tag #report_tag.");
+
+  /* Saving the default back is the reset. */
+  await POST(post({ action: "settings", settings, prompt: DEFAULT_DAILY_REPORT_PROMPT }));
+  expect(readTelegramReports().prompt).toBeNull();
+
+  const rejected = await POST(post({ action: "settings", settings, prompt: 42 }));
+  expect(rejected.status).toBe(400);
 });

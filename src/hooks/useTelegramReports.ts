@@ -2,15 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { TelegramReportSettings, TelegramReportsPayload } from "@/lib/telegram/reportContracts";
+import type { TelegramReportPromptPayload, TelegramReportSettings, TelegramReportsPayload } from "@/lib/telegram/reportContracts";
 
 /**
  * Client state for the Daily Report section of the Telegram panel (#1086).
  *
  * Same shape as `useTelegramConnection`: one payload, one busy flag, thin
- * actions that re-sync from the server's returned state. A report BODY is
- * fetched on demand by id and held apart from the list, so the poll never
- * carries the operator's Telegram content.
+ * actions that re-sync from the server's returned state. The two things that
+ * can carry the operator's Telegram content — a report BODY and the analyst
+ * PROMPT — are fetched on demand and held apart from the list, so the poll
+ * never carries either.
  */
 
 const POLL_MS = 20_000;
@@ -31,6 +32,12 @@ export type TelegramReportsState = {
   /** Group titles for the source picker; loaded on demand. */
   groups: { id: string; title: string }[] | null;
   loadGroups(): Promise<void>;
+  /** The analyst prompt while its editor is open, with the shipped default
+      beside it so "reset" needs no second request. */
+  ["prompt"]: TelegramReportPromptPayload | null;
+  loadPrompt(): Promise<void>;
+  savePrompt(prompt: string): Promise<void>;
+  closePrompt(): void;
 };
 
 async function readJson(response: Response): Promise<{ ok: boolean; json: Record<string, unknown> }> {
@@ -48,6 +55,7 @@ export function useTelegramReports(active: boolean): TelegramReportsState {
   const [failure, setFailure] = useState<TelegramReportsFailure | null>(null);
   const [openReport, setOpenReport] = useState<{ id: string; text: string } | null>(null);
   const [groups, setGroups] = useState<{ id: string; title: string }[] | null>(null);
+  const [prompt, setPrompt] = useState<TelegramReportPromptPayload | null>(null);
   const sequence = useRef(0);
 
   const load = useCallback(async () => {
@@ -107,8 +115,30 @@ export function useTelegramReports(active: boolean): TelegramReportsState {
     failure,
     openReport,
     groups,
+    prompt,
     refresh: load,
     saveSettings: async (settings) => { await act({ action: "settings", settings }); },
+    loadPrompt: async () => {
+      setBusy(true);
+      setFailure(null);
+      try {
+        const { ok, json } = await readJson(await fetch("/api/telegram/reports?prompt=1"));
+        if (ok && typeof json.prompt === "string" && typeof json.defaultPrompt === "string") {
+          setPrompt({ prompt: json.prompt, defaultPrompt: json.defaultPrompt });
+        } else setFailure({ code: codeOf(json) });
+      } catch {
+        setFailure({ code: "transport" });
+      } finally {
+        setBusy(false);
+      }
+    },
+    savePrompt: async (next) => {
+      const current = reports?.settings;
+      if (!current) return;
+      await act({ action: "settings", settings: current, prompt: next });
+      setPrompt((held) => (held ? { ...held, prompt: next.trim() || held.defaultPrompt } : held));
+    },
+    closePrompt: () => setPrompt(null),
     runNow: async () => { await act({ action: "run-now" }); },
     loadGroups: async () => {
       const json = await act({ action: "groups" });
