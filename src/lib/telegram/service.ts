@@ -2,7 +2,14 @@ import crypto from "node:crypto";
 
 import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentEvent, type TelegramEnrollmentHandle } from "./adapter";
 import { ensureTelegramConnector, stopTelegramConnector, type ConnectorEnsureResult } from "./connector";
-import type { TelegramErrorCode, TelegramIdentity, TelegramStatusPayload } from "./contracts";
+import {
+  RESTART_COUNT_WINDOW_MS,
+  RESTART_GRACE_MS,
+  readConnectorRestarts,
+  restartedWithin,
+  restartsWithin,
+} from "./connectorRestarts";
+import type { TelegramConnectorErrorCode, TelegramErrorCode, TelegramIdentity, TelegramStatusPayload } from "./contracts";
 import { registerTelegramHosts, unregisterTelegramHosts, type TelegramHostRegistrationResult } from "./hostRegistration";
 import { telegramApiCredentials } from "./packaging";
 import {
@@ -49,6 +56,13 @@ const productionPorts: TelegramServicePorts = {
   now: Date.now,
   credentialsConfigured: () => telegramApiCredentials() !== null,
 };
+
+/** The browser's vocabulary is the durable one: a respawn-dropped call is
+    told through the `restarting` phase, and if it is still standing when the
+    grace window closes it reads as the connector failure it was. */
+function durableErrorCode(code: TelegramConnectorErrorCode): TelegramErrorCode {
+  return code === "connector_restarting" ? "connector_failed" : code;
+}
 
 type LiveLogin = {
   operationId: string;
@@ -138,6 +152,7 @@ export class TelegramConnectionService {
         lastHealthCheckAt: null,
         error: null,
         credentialsConfigured: this.ports.credentialsConfigured(),
+        ...this.restartView(),
       };
     }
     let connection: StoredTelegramConnection;
@@ -151,14 +166,37 @@ export class TelegramConnectionService {
   }
 
   private payloadFor(connection: StoredTelegramConnection): TelegramStatusPayload {
+    /* #1087: a call the supervisor's own respawn dropped reads as the
+       transient `restarting` phase while the grace window is open, and falls
+       back to the durable connector error once it closes — so a connector
+       that never comes back still surfaces as a real failure. */
+    const restarts = readConnectorRestarts();
+    const restarting = restartedWithin(RESTART_GRACE_MS, this.ports.now(), restarts)
+      && (connection.status === "connected" || connection.errorCode === "connector_restarting");
+    const error = connection.status === "error" && connection.errorCode && !restarting
+      ? { code: durableErrorCode(connection.errorCode) }
+      : null;
     return {
-      phase: connection.status,
+      phase: restarting ? "restarting" : connection.status,
       login: null,
       identity: connection.identity,
       credentialRef: connection.credentialRef,
       lastHealthCheckAt: connection.lastHealthCheckAt,
-      error: connection.status === "error" && connection.errorCode ? { code: connection.errorCode } : null,
+      error,
       credentialsConfigured: this.ports.credentialsConfigured(),
+      ...this.restartView(restarts),
+    };
+  }
+
+  /** The restart health row (#1087): how many respawns the Viewer observed in
+      the last 24 h and when the last one was. Counts only — the crash record
+      behind them is structured and never leaves the server. */
+  private restartView(
+    restarts = readConnectorRestarts(),
+  ): Pick<TelegramStatusPayload, "restartsLast24h" | "lastRestartAt"> {
+    return {
+      restartsLast24h: restartsWithin(RESTART_COUNT_WINDOW_MS, this.ports.now(), restarts),
+      lastRestartAt: restarts.lastRestartAt,
     };
   }
 
@@ -318,7 +356,7 @@ export class TelegramConnectionService {
     } catch { /* durable status cleanup was still attempted independently */ }
   }
 
-  private recordError(code: TelegramErrorCode): void {
+  private recordError(code: TelegramConnectorErrorCode): void {
     const connection = this.safeConnection();
     /* A failed RE-connect over a still-stored session keeps that session and
        its identity; only the status and code change. */

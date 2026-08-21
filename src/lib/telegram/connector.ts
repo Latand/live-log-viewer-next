@@ -6,7 +6,8 @@ import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { withFileTransaction } from "@/lib/state/fileTransaction";
 
-import type { TelegramErrorCode } from "./contracts";
+import { RESTART_GRACE_MS, restartedWithin, watchConnectorCrash } from "./connectorRestarts";
+import type { TelegramConnectorErrorCode } from "./contracts";
 import { connectorLaunchSpec, telegramApiCredentials, telegramMcpServerPath, telegramMcpUrl, telegramVenvPython, type ProcessSpec } from "./packaging";
 import { ensureTelegramStateDir, type StoredTelegramSession } from "./sessionStore";
 
@@ -66,9 +67,15 @@ export type ConnectorProbe =
   | { ok: true; serverName: string; tools: Array<{ name: string; readOnly: boolean }> }
   | { ok: false };
 
-export type ConnectorEnsureResult = { ok: true; url: string } | { ok: false; code: TelegramErrorCode };
+export type ConnectorEnsureResult = { ok: true; url: string } | { ok: false; code: TelegramConnectorErrorCode };
 
-type ConnectorChild = { pid?: number; kill(signal?: NodeJS.Signals): boolean };
+type ConnectorChild = {
+  pid?: number;
+  kill(signal?: NodeJS.Signals): boolean;
+  /** Present on a child THIS process spawned, so its exit code and signal can
+      be recorded as a crash (#1087). An adopted process has none. */
+  once?(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+};
 type ConnectorBinding = Pick<StoredTelegramSession, "credentialRef" | "connectorToken">;
 
 export interface TelegramConnectorPorts {
@@ -187,11 +194,16 @@ type ConnectorRecord = {
   entrypoint: string;
 };
 
-let liveConnectorChild: {
+type LiveConnectorChild = {
   child: ConnectorChild;
   pid: number;
   identity: string;
-} | null = null;
+  /** Set before the Viewer terminates it, so an operator stop, a logout or a
+      health-check restart is never counted as a crash. */
+  expectedExit: boolean;
+};
+
+let liveConnectorChild: LiveConnectorChild | null = null;
 let supervisorGeneration = 0;
 
 function beginConnectorOperation(): () => boolean {
@@ -245,7 +257,9 @@ function recordConnectorProcess(child: ConnectorChild, spec: ProcessSpec, bindin
     terminateChildImmediately(child);
     return false;
   }
-  liveConnectorChild = { child, pid, identity };
+  const live: LiveConnectorChild = { child, pid, identity, expectedExit: false };
+  liveConnectorChild = live;
+  watchConnectorCrash(child, () => live.expectedExit || liveConnectorChild !== live);
   const record: ConnectorRecord = {
     version: 1,
     pid,
@@ -305,6 +319,7 @@ async function stopRealConnectorUnlocked(): Promise<void> {
   supervisorGeneration += 1;
   const targets = new Map<number, TerminationTarget>();
   const child = liveConnectorChild;
+  if (child) child.expectedExit = true;
   if (child && targetIsAlive(child)) {
     targets.set(child.pid, {
       pid: child.pid,
@@ -390,6 +405,21 @@ async function verifiedProbe(
 export async function ensureTelegramConnector(
   session: StoredTelegramSession,
   ports: TelegramConnectorPorts = realPorts,
+): Promise<ConnectorEnsureResult> {
+  const result = await ensureVerifiedConnector(session, ports);
+  /* #1087: a connector that failed to answer right after a recorded respawn
+     was dropped BY that respawn, not by a broken configuration. Only the
+     generic `connector_failed` is re-read this way — a refused read-only
+     surface or missing credentials keeps its own diagnosis. */
+  if (!result.ok && result.code === "connector_failed" && restartedWithin(RESTART_GRACE_MS, ports.now())) {
+    return { ok: false, code: "connector_restarting" };
+  }
+  return result;
+}
+
+async function ensureVerifiedConnector(
+  session: StoredTelegramSession,
+  ports: TelegramConnectorPorts,
 ): Promise<ConnectorEnsureResult> {
   const url = telegramMcpUrl();
   const binding = { credentialRef: session.credentialRef, connectorToken: session.connectorToken };

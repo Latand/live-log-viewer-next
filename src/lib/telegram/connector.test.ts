@@ -14,6 +14,7 @@ process.env.LLV_TELEGRAM_API_HASH = "0123456789abcdef0123456789abcdef";
 
 const { TELEGRAM_READ_TOOL_ALLOWLIST, connectorServerName, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
 const { telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
+const { readConnectorRestarts, recordConnectorRestart } = await import("./connectorRestarts");
 
 import type { ConnectorProbe, TelegramConnectorPorts } from "./connector";
 
@@ -380,6 +381,9 @@ test("stop waits through SIGKILL escalation until a TERM-resistant connector exi
     await stopTelegramConnector();
     expect(() => process.kill(childPid, 0)).toThrow();
     expect(fs.existsSync(pidFile)).toBe(false);
+    /* #1087: the Viewer asked for this exit, so it is not a crash and never
+       reaches the restart count the panel shows. */
+    expect(readConnectorRestarts().restarts).toBe(0);
   } finally {
     delete process.env.LLV_TELEGRAM_PYTHON;
     delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
@@ -388,3 +392,28 @@ test("stop waits through SIGKILL escalation until a TERM-resistant connector exi
     }
   }
 }, 5_000);
+
+test("a call dropped by the supervisor's own respawn reports connector_restarting", async () => {
+  /* A restart the supervisor recorded moments ago (#1087): the connector that
+     will not answer right now is the one being replaced, so the caller gets
+     the restart code instead of an indistinguishable connector_failed. */
+  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, 0);
+  const { ports, calls } = fakePorts([], { spawnFails: true });
+  expect(await ensureTelegramConnector(CONNECTOR_SESSION, ports)).toEqual({ ok: false, code: "connector_restarting" });
+  expect(calls.spawns).toBe(1);
+});
+
+test("a refused read-only surface keeps its own diagnosis inside the restart window", async () => {
+  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, 0);
+  const { ports } = fakePorts([{
+    ok: true,
+    serverName: connectorServerName(CONNECTOR_SESSION.connectorToken),
+    tools: [{ name: "send_message", readOnly: false }],
+  }], { owned: true });
+  expect(await ensureTelegramConnector(CONNECTOR_SESSION, ports)).toEqual({ ok: false, code: "not_read_only" });
+});
+
+test("without a recorded restart a failure stays connector_failed", async () => {
+  const { ports } = fakePorts([], { spawnFails: true });
+  expect(await ensureTelegramConnector(CONNECTOR_SESSION, ports)).toEqual({ ok: false, code: "connector_failed" });
+});

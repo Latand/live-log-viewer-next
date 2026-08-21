@@ -687,6 +687,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "telegram.status.awaiting_password": "Потрібен пароль",
   "telegram.status.verifying": "Перевірка…",
   "telegram.status.connected": "Підключено",
+  "telegram.status.restarting": "Перезапуск…",
   "telegram.status.expired": "Сесія завершилась",
   "telegram.status.error": "Помилка",
   "telegram.connect": "Підключити Telegram",

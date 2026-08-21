@@ -136,6 +136,8 @@ function payload(over: Partial<TelegramStatusPayload>): TelegramStatusPayload {
       credentialsConfigured: true,
     lastHealthCheckAt: null,
     error: null,
+    restartsLast24h: 0,
+    lastRestartAt: null,
     ...over,
   };
 }

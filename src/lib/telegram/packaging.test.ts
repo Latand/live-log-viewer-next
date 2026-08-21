@@ -312,6 +312,98 @@ test("the packaged MCP entrypoint enforces bearer auth and token-bound identity"
   expect(output.name).toMatch(/^telegram-[a-f0-9]{64}$/);
 });
 
+test("the packaged MCP entrypoint caps concurrent tool calls and refuses a call that waits out the bound", () => {
+  /* #1087: agents reach the connector's loopback port directly, so this
+     Viewer-owned ASGI wrapper is the only chokepoint on their path. Three
+     concurrent large reads used to take the shared process down. */
+  const python = Bun.which("python3");
+  expect(python).not.toBeNull();
+  const fakeVendor = path.join(SANDBOX, "gate-wrapper-vendor");
+  for (const directory of ["mcp/server", "telegram_mcp"]) {
+    fs.mkdirSync(path.join(fakeVendor, directory), { recursive: true });
+    fs.writeFileSync(path.join(fakeVendor, directory, "__init__.py"), "");
+  }
+  fs.writeFileSync(path.join(fakeVendor, "mcp", "__init__.py"), "");
+  fs.writeFileSync(path.join(fakeVendor, "mcp", "server", "fastmcp.py"), [
+    "import asyncio",
+    "STATE = {'active': 0, 'peak': 0}",
+    "class _Server:",
+    "    name = 'telegram'",
+    "class FastMCP:",
+    "    def __init__(self): self._mcp_server = _Server()",
+    "    def streamable_http_app(self):",
+    "        async def app(scope, receive, send):",
+    "            await receive()",
+    "            STATE['active'] += 1",
+    "            STATE['peak'] = max(STATE['peak'], STATE['active'])",
+    "            await asyncio.sleep(0.02)",
+    "            STATE['active'] -= 1",
+    "            await send({'type': 'http.response.start', 'status': 200, 'headers': []})",
+    "            await send({'type': 'http.response.body', 'body': b''})",
+    "        return app",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(fakeVendor, "telegram_mcp", "runtime.py"), [
+    "from mcp.server.fastmcp import FastMCP",
+    "mcp = FastMCP()",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(fakeVendor, "telegram_mcp", "runner.py"), [
+    "import asyncio, json, os",
+    "from mcp.server.fastmcp import STATE",
+    "from telegram_mcp.runtime import mcp",
+    "TOOL_CALL = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call'}).encode()",
+    "TOOL_LIST = json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'}).encode()",
+    "async def request(app, body, headers):",
+    "    statuses = []",
+    "    async def receive(): return {'type': 'http.request', 'body': body, 'more_body': False}",
+    "    async def send(message):",
+    "        if message['type'] == 'http.response.start': statuses.append(message['status'])",
+    "    await app({'type': 'http', 'headers': headers, 'path': '/mcp', 'method': 'POST'}, receive, send)",
+    "    return statuses[0]",
+    "async def run_all(token):",
+    "    import __main__ as entry",
+    "    headers = [(b'authorization', b'Bearer ' + token)]",
+    "    app = mcp.streamable_http_app()",
+    "    STATE['peak'] = 0",
+    "    calls = await asyncio.gather(*(request(app, TOOL_CALL, headers) for _ in range(4)))",
+    "    gated_peak = STATE['peak']",
+    "    STATE['peak'] = 0",
+    "    lists = await asyncio.gather(*(request(app, TOOL_LIST, headers) for _ in range(4)))",
+    "    list_peak = STATE['peak']",
+    "    tight = entry.ToolCallGate(entry._original_streamable_http_app(mcp), limit=1, wait_seconds=0.001)",
+    "    bounded = await asyncio.gather(*(request(tight, TOOL_CALL, headers) for _ in range(2)))",
+    "    after = [await request(tight, TOOL_CALL, headers), await request(tight, TOOL_CALL, headers)]",
+    "    return {'calls': sorted(calls), 'gated_peak': gated_peak, 'lists': sorted(lists),",
+    "            'list_peak': list_peak, 'bounded': sorted(bounded), 'after': after}",
+    "def main():",
+    "    print(json.dumps(asyncio.run(run_all(os.environ['LLV_TELEGRAM_MCP_TOKEN'].encode()))))",
+    "",
+  ].join("\n"));
+  const result = Bun.spawnSync({
+    cmd: [python!, path.resolve(import.meta.dir, "..", "..", "..", "bin", "telegram-mcp-server.py")],
+    env: { ...process.env, LLV_TELEGRAM_VENDOR_DIR: fakeVendor, LLV_TELEGRAM_MCP_TOKEN: "C".repeat(43) },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.stderr.toString()).toBe("");
+  expect(result.exitCode).toBe(0);
+  const output = JSON.parse(result.stdout.toString()) as {
+    calls: number[]; gated_peak: number; lists: number[]; list_peak: number; bounded: number[]; after: number[];
+  };
+  /* Four concurrent tool calls all succeed — at most two of them at a time. */
+  expect(output.calls).toEqual([200, 200, 200, 200]);
+  expect(output.gated_peak).toBe(2);
+  /* The handshake surface stays ungated, so the Viewer's readiness probe can
+     never queue behind agent reads and be mistaken for a dead connector. */
+  expect(output.lists).toEqual([200, 200, 200, 200]);
+  expect(output.list_peak).toBe(4);
+  /* Waiting out the bound is refused, not dropped silently. */
+  expect(output.bounded).toEqual([200, 503]);
+  /* And a refused wait gives its slot back: the cap survives the timeout. */
+  expect(output.after).toEqual([200, 200]);
+});
+
 test("health and logout bridges acquire the vendored session lock before connecting", () => {
   const python = Bun.which("python3");
   expect(python).not.toBeNull();

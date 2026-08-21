@@ -16,6 +16,11 @@ export type TelegramPhase =
   | "awaiting_password"
   | "verifying"
   | "connected"
+  /** Transient (#1087): the connector was respawned moments ago, so calls in
+      that window can be dropped. Never persisted — the durable record keeps
+      the connection status, and this phase is projected from the restart
+      state while the grace window is open. */
+  | "restarting"
   | "expired"
   | "error";
 
@@ -34,6 +39,12 @@ export type TelegramErrorCode =
   | "not_read_only"
   | "logout_failed"
   | "health_failed";
+
+/** The connector seam adds one code the browser never receives verbatim: a
+    call the supervisor's own respawn dropped (#1087). The status payload
+    projects it as the `restarting` phase, so the panel's durable error
+    vocabulary above stays exactly the set it already renders. */
+export type TelegramConnectorErrorCode = TelegramErrorCode | "connector_restarting";
 
 /** Sanitized account identity: display name and public username only. */
 export type TelegramIdentity = {
@@ -64,6 +75,10 @@ export type TelegramStatusPayload = {
   /** Whether host API credentials (env or telegram.json) exist. A boolean
       only — the values themselves never cross this boundary (#1070). */
   credentialsConfigured: boolean;
+  /** Connector respawns the Viewer observed in the last 24 h, and when the
+      last one happened (#1087). Structured counts only — no crash output. */
+  restartsLast24h: number;
+  lastRestartAt: string | null;
 };
 
 export const NONTERMINAL_TELEGRAM_LOGIN_PHASES: ReadonlySet<TelegramPhase> = new Set([

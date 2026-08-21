@@ -9,6 +9,7 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
 const { TelegramConnectionService } = await import("./service");
 const { readTelegramSession, saveTelegramSession, telegramSessionPath, writeTelegramConnection } = await import("./sessionStore");
+const { recordConnectorRestart } = await import("./connectorRestarts");
 
 import type { TelegramAdapter, TelegramEnrollmentEvent, TelegramHealthResult } from "./adapter";
 import type { TelegramErrorCode } from "./contracts";
@@ -700,4 +701,64 @@ test("retry authorization cannot overwrite a preserved unsafe session", async ()
   expect(service.status().error?.code).toBe("session_unsafe");
   expect(fs.readFileSync(telegramSessionPath())).toEqual(before);
   expect(fs.existsSync(path.join(path.dirname(telegramSessionPath()), "connector-token"))).toBe(false);
+});
+
+const NOW = Date.parse("2026-08-20T12:00:00.000Z");
+const HOUR = 60 * 60 * 1000;
+
+function connectedConnection(errorCode: "connector_restarting" | null = null) {
+  writeTelegramConnection({
+    version: 1,
+    status: errorCode ? "error" : "connected",
+    credentialRef: "credential-generation-a",
+    identity: { name: "Account A", username: "account_a" },
+    lastHealthCheckAt: new Date(NOW).toISOString(),
+    errorCode,
+  });
+}
+
+test("a fresh connector respawn shows as the transient restarting phase", async () => {
+  /* #1087: the supervisor used to replace a crashed connector silently while
+     the status surface kept saying connected. */
+  const { service } = harness();
+  connectedConnection();
+  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 5_000);
+  const status = service.status();
+  expect(status.phase).toBe("restarting");
+  expect(status.lastRestartAt).toBe(new Date(NOW - 5_000).toISOString());
+  expect(status.error).toBeNull();
+});
+
+test("the restart count the panel reads covers the last 24 h only", async () => {
+  const { service } = harness();
+  connectedConnection();
+  recordConnectorRestart({ exitCode: 1, signal: null }, NOW - 30 * HOUR);
+  recordConnectorRestart({ exitCode: 1, signal: null }, NOW - 20 * HOUR);
+  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 5_000);
+  expect(service.status().restartsLast24h).toBe(2);
+});
+
+test("a respawn-dropped call reads as restarting, then as the connector failure it is", async () => {
+  const { service } = harness();
+  connectedConnection("connector_restarting");
+  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 10_000);
+  expect(service.status().phase).toBe("restarting");
+  expect(service.status().error).toBeNull();
+
+  /* Once the grace window closes, a connector that never came back is a real
+     failure again — in the vocabulary the panel already renders. */
+  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 5 * HOUR);
+  const stale = service.status();
+  expect(stale.phase).toBe("error");
+  expect(stale.error).toEqual({ code: "connector_failed" });
+  expect(stale.restartsLast24h).toBe(2);
+});
+
+test("a status with no restarts at all reports a zeroed restart row", async () => {
+  const { service } = harness();
+  connectedConnection();
+  const status = service.status();
+  expect(status.phase).toBe("connected");
+  expect(status.restartsLast24h).toBe(0);
+  expect(status.lastRestartAt).toBeNull();
 });

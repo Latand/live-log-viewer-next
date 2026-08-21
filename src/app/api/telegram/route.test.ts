@@ -22,7 +22,8 @@ delete process.env.LLV_TELEGRAM_API_HASH;
 
 const { GET, POST } = await import("./route");
 const { TelegramConnectionService, setTelegramServiceForTests } = await import("@/lib/telegram/service");
-const { readTelegramSession } = await import("@/lib/telegram/sessionStore");
+const { readTelegramSession, writeTelegramConnection } = await import("@/lib/telegram/sessionStore");
+const { recordConnectorRestart } = await import("@/lib/telegram/connectorRestarts");
 const { telegramApiCredentials } = await import("@/lib/telegram/packaging");
 
 import type { TelegramAdapter, TelegramEnrollmentEvent, TelegramHealthResult } from "@/lib/telegram/adapter";
@@ -259,4 +260,26 @@ test("cross-origin fresh health is rejected before Telegram state changes", asyn
   const response = await GET(getRequest("?fresh=1", { origin: "https://example.test" }));
   expect(response.status).toBe(403);
   expect(adapter.healthCalls).toBe(0);
+});
+
+test("#1087: the status payload carries the restart row and the transient restarting phase", async () => {
+  const now = Date.parse("2026-08-20T12:00:00.000Z");
+  writeTelegramConnection({
+    version: 1,
+    status: "connected",
+    credentialRef: "credential-generation-a",
+    identity: { name: "Account A", username: "account_a" },
+    lastHealthCheckAt: new Date(now).toISOString(),
+    errorCode: null,
+  });
+  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, now - 5_000);
+  const { telegram } = await payload(await GET(getRequest())) as {
+    telegram: { phase: string; restartsLast24h: number; lastRestartAt: string };
+  };
+  expect(telegram.phase).toBe("restarting");
+  expect(telegram.restartsLast24h).toBe(1);
+  expect(telegram.lastRestartAt).toBe(new Date(now - 5_000).toISOString());
+  /* Counts and a timestamp only: the crash record itself stays server-side. */
+  expect(JSON.stringify(telegram)).not.toContain("exitCode");
+  expect(JSON.stringify(telegram)).not.toContain("signal");
 });

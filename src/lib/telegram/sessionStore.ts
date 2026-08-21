@@ -6,7 +6,7 @@ import { readValidatedTelegramSessionFiles } from "../../../bin/telegram-session
 
 import { statePath } from "@/lib/configDir";
 
-import type { TelegramErrorCode, TelegramIdentity } from "./contracts";
+import type { TelegramConnectorErrorCode, TelegramIdentity } from "./contracts";
 
 /**
  * Owner-only persistence for the Telegram credential (issue #1059).
@@ -52,7 +52,10 @@ export type StoredTelegramConnection = {
   credentialRef: string | null;
   identity: TelegramIdentity | null;
   lastHealthCheckAt: string | null;
-  errorCode: TelegramErrorCode | null;
+  /** The connector seam's vocabulary (#1087): a respawn-dropped call is
+      recorded as `connector_restarting`, which the status projection turns
+      into the transient `restarting` phase. */
+  errorCode: TelegramConnectorErrorCode | null;
 };
 
 export class UnsafeTelegramSessionError extends Error {
@@ -275,7 +278,7 @@ export function readTelegramConnection(): StoredTelegramConnection {
       ? { name: (row.identity as TelegramIdentity).name, username: (row.identity as TelegramIdentity).username ?? null }
       : null,
     lastHealthCheckAt: typeof row.lastHealthCheckAt === "string" ? row.lastHealthCheckAt : null,
-    errorCode: typeof row.errorCode === "string" ? row.errorCode as TelegramErrorCode : null,
+    errorCode: typeof row.errorCode === "string" ? row.errorCode as TelegramConnectorErrorCode : null,
   };
 }
 
