@@ -31,6 +31,21 @@ export const OPERATOR_ROOT_PLUGINS: readonly string[] = Object.freeze(["computer
     later means changing this list — no branch elsewhere assumes it is empty. */
 export const DELEGATED_PLUGINS: readonly string[] = Object.freeze([]);
 
+/**
+ * What the Viewer-internal Daily Report class receives (issue #1086): nothing.
+ *
+ * That class names an EXACT capability surface — `["viewer","telegram"]` — and
+ * a Codex plugin is a second capability channel beside the MCP allowlist, not
+ * part of it. A report run classifies as an operator root at
+ * {@link sessionOriginFor} (no agent caller, no lineage parent, no role), so
+ * without this it would inherit {@link OPERATOR_ROOT_PLUGINS} and an unattended
+ * timer-fired run would hold Computer Use it has no use for. The grant is
+ * decided at admission and stored on the durable launch profile, so a resumed
+ * run inherits the empty list too — {@link grantedPlugins} only ever narrows
+ * what storage carries.
+ */
+export const SCHEDULED_REPORT_PLUGINS: readonly string[] = Object.freeze([]);
+
 /** MCP server names each grantable plugin contributes to a thread. Used to
     verify the realized tool surface of a granted thread against the grant. */
 export const PLUGIN_MCP_SERVER_NAMES: Readonly<Record<string, readonly string[]>> = Object.freeze({

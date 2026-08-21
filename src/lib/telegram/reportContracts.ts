@@ -58,6 +58,7 @@ export type TelegramReportErrorCode =
   | "not_connected"
   | "reports_disabled"
   | "run_in_progress"
+  | "account_check_failed"
   | "sources_failed"
   | "launch_failed"
   | "run_ended_without_report"

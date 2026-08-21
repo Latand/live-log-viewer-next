@@ -1,5 +1,6 @@
 import { readTelegramSession } from "./sessionStore";
 import { telegramMcpUrl } from "./packaging";
+import type { TelegramIdentity } from "./contracts";
 import type { TelegramReportGroup } from "./reportContracts";
 
 /**
@@ -23,9 +24,12 @@ import type { TelegramReportGroup } from "./reportContracts";
  * The probing is deliberately dull: one single-message read per candidate,
  * sequentially. The connector died once under three concurrent 120-message
  * reads, so nothing here runs in parallel and nothing asks for more than one
- * message at a time. Two bounds keep that honest on a large account: the walk
- * stops after {@link STALE_STREAK} consecutive candidates whose last message
- * predates the window, and never exceeds {@link MAX_PROBES} probes in total.
+ * message at a time. ONE bound keeps that honest on a large account —
+ * {@link MAX_PROBES} probes for the whole run — and every candidate inside it
+ * is probed. An earlier revision also stopped after a run of consecutive stale
+ * candidates, which was a recency assumption about a list this module opens by
+ * saying is not ordered by recency: a dialog answered an hour ago, sitting
+ * below a block of dormant ones, was silently dropped from the report.
  *
  * The resulting plan is written to owner-only state and READ by the run from
  * there — it never travels through the prompt — because it names the
@@ -44,6 +48,10 @@ export type TelegramChatSummary = {
 };
 
 export interface TelegramReadPort {
+  /** The account the connector is actually logged in as, sanitized to the
+      same two fields Connect records. `null` when the connector answered
+      something that is not an account. */
+  getMe(): Promise<TelegramIdentity | null>;
   /** One bounded page of chats of a kind, in whatever order the connector
       returns them — the caller must not treat it as recency. */
   listChats(input: { kind: TelegramChatKind; limit: number }): Promise<TelegramChatSummary[]>;
@@ -60,11 +68,9 @@ export const CHAT_PAGE_LIMIT = 100;
     ceiling reach 300 dialogs, well past where an account's active private
     conversations live, and the connector refuses a page above 10 anyway. */
 export const MAX_CHAT_PAGES = 3;
-/** Consecutive out-of-window candidates that end the walk. The dialog list is
-    not exact recency, so the walk tolerates a run of stale entries before it
-    accepts that the rest of the list is colder still. */
-export const STALE_STREAK = 25;
-/** Hard ceiling on single-message probes for one run. */
+/** Hard ceiling on single-message probes for one run, and the ONLY bound on
+    the walk: every candidate up to it is probed, whatever the ones before it
+    said, because the list order is not recency. */
 export const MAX_PROBES = 150;
 /** Private dialogs carried into one report, newest activity first. */
 export const MAX_PRIVATE_DIALOGS = 25;
@@ -86,6 +92,9 @@ export type ReportSourcePlan = {
   probes: number;
   /** Whether more active dialogs existed than the plan carries. */
   truncated: boolean;
+  /** Whether the walk ran out of probe budget before it ran out of
+      candidates, so the plan is a bounded view rather than a complete one. */
+  probeBudgetExhausted: boolean;
 };
 
 /** Telegram requires every bot username to end in `bot`, so the listing alone
@@ -141,9 +150,12 @@ async function candidateDialogs(port: TelegramReadPort): Promise<Array<{ id: str
  * Builds the source plan for one window.
  *
  * Private dialogs: every candidate whose last message falls inside the window,
- * newest first, capped. Groups: exactly what the operator picked, with their
- * full/light flag — a group is a source because the operator said so, never
- * because it was busy.
+ * newest first, capped. The walk probes candidates in list order and stops
+ * only at the probe budget, so a dialog's POSITION in the list never decides
+ * whether it is looked at — only its last-message date decides whether it is
+ * carried. Groups: exactly what the operator picked, with their full/light
+ * flag — a group is a source because the operator said so, never because it
+ * was busy.
  */
 export async function planReportSources(
   port: TelegramReadPort,
@@ -153,18 +165,13 @@ export async function planReportSources(
   const candidates = await candidateDialogs(port);
   const active: ReportSourceDialog[] = [];
   let probes = 0;
-  let stale = 0;
   for (const chat of candidates) {
-    if (probes >= MAX_PROBES || stale >= STALE_STREAK) break;
+    if (probes >= MAX_PROBES) break;
     /* Sequential on purpose: see the module comment. */
     const at = await port.lastMessageAt(chat.id);
     probes += 1;
     const instant = at ? Date.parse(at) : Number.NaN;
-    if (!Number.isFinite(instant) || instant < windowStart) {
-      stale += 1;
-      continue;
-    }
-    stale = 0;
+    if (!Number.isFinite(instant) || instant < windowStart) continue;
     active.push({ id: chat.id, title: chat.title, lastMessageAt: new Date(instant).toISOString() });
   }
   active.sort((left, right) => Date.parse(right.lastMessageAt) - Date.parse(left.lastMessageAt));
@@ -177,6 +184,7 @@ export async function planReportSources(
     groups: input.groups.map((group) => ({ ...group })),
     probes,
     truncated: active.length > MAX_PRIVATE_DIALOGS,
+    probeBudgetExhausted: probes >= MAX_PROBES && candidates.length > probes,
   };
 }
 
@@ -236,6 +244,14 @@ export function connectorReadPort(): TelegramReadPort {
     }
   };
   return {
+    async getMe() {
+      /* `get_me` answers with the entity object itself rather than the
+         `{"results": []}` envelope the listings use. */
+      const parsed = JSON.parse(toolText(await call("get_me", {}))) as { name?: unknown; username?: unknown };
+      const name = typeof parsed?.name === "string" ? parsed.name.trim() : "";
+      if (!name) return null;
+      return { name, username: typeof parsed.username === "string" && parsed.username ? parsed.username : null };
+    },
     async listChats(input) {
       const result = await call("list_chats", { chat_type: input.kind, limit: Math.min(input.limit, CHAT_PAGE_LIMIT) });
       return toolRecords(result)

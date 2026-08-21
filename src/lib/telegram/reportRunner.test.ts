@@ -36,11 +36,17 @@ const CONNECTED: StoredTelegramConnection = {
 class FakePorts implements ReportRunnerPorts {
   clock = NOW;
   connectionState: StoredTelegramConnection = { ...CONNECTED };
+  /** What the connector's own `get_me` answers, which is what the Viewer
+      verifies the recorded identity against. */
+  liveIdentity: { name: string; username: string | null } | null = { ...IDENTITY };
+  getMeError: Error | null = null;
   chats: TelegramChatSummary[] = [{ id: "101", kind: "user", title: "Dialog A", username: null, unread: 2 }];
   lastMessage: string | null = "2026-08-21T05:00:00.000Z";
   listChatsError: Error | null = null;
   /** Holds the source pass open, to model a run still being planned. */
   listChatsGate: Promise<void> | null = null;
+  /** Every read the Viewer itself made, in order. */
+  reads: string[] = [];
   spawns: Record<string, unknown>[] = [];
   /** The grant each launch was admitted with — resolved the way admission
       resolves it, by CALLING the launcher's callback. */
@@ -55,7 +61,13 @@ class FakePorts implements ReportRunnerPorts {
   connection() { return this.connectionState; }
   readPort(): TelegramReadPort {
     return {
+      getMe: async () => {
+        this.reads.push("getMe");
+        if (this.getMeError) throw this.getMeError;
+        return this.liveIdentity;
+      },
       listChats: async () => {
+        this.reads.push("listChats");
         if (this.listChatsGate) await this.listChatsGate;
         if (this.listChatsError) throw this.listChatsError;
         return this.chats;
@@ -126,12 +138,11 @@ test("Run now launches a board-visible Codex conversation holding exactly viewer
   expect(String(body.cwd)).toContain("report-workspace");
 
   const prompt = String(body.prompt);
-  /* The Viewer's fixed preamble, then the operator's brief. */
-  expect(prompt).toContain("get_me");
-  /* The recorded NAME is the account check; the handle is a second copy of
-     the operator's identity in a durable launch record and is not written. */
-  expect(prompt).toContain("Account A");
-  expect(prompt).not.toContain("@account_a");
+  /* The account was verified by the Viewer before this launch, so the recorded
+     identity is in no prompt, no transcript and no registry row. */
+  expect(ports.reads[0]).toBe("getMe");
+  expect(prompt).not.toContain("Account A");
+  expect(prompt).not.toContain("account_a");
   expect(prompt).toContain(`run-${launched.ok ? launched.runId : ""}.sources.json`);
   expect(prompt).toContain(reportInboxPath(activeRunId()));
   expect(prompt).toContain(DEFAULT_DAILY_REPORT_PROMPT.split("\n")[0]);
@@ -182,20 +193,97 @@ test("an empty window reads QUIET and keeps no report body", async () => {
   expect(file.cursor.lastSuccessfulWindowEndAt).toBe(file.history[0].windowEnd);
 });
 
-test("a get_me mismatch ends the run with no report and no window advance", async () => {
+test("a get_me mismatch ends the run before any chat is read, with no report and no window advance", async () => {
   const ports = new FakePorts();
   enableReports();
+  /* The connector is logged into somebody else — a re-login to a second
+     account, a session swapped underneath the Viewer. */
+  ports.liveIdentity = { name: "Account B", username: "account_b" };
   const runner = new TelegramReportRunner(ports);
   await runner.runNow();
   await runner.settled();
-  const runId = activeRunId();
-  agentWrites(`${DAILY_REPORT_TAG}\nACCOUNT-MISMATCH\n`);
-  await runner.tick();
 
   const file = readTelegramReports();
-  expect(file.history[0]).toMatchObject({ status: "account-mismatch", hasReport: false });
-  expect(readReportText(runId)).toBeNull();
+  expect(file.history[0]).toMatchObject({ status: "account-mismatch", errorCode: null, hasReport: false, conversationId: null });
+  /* The Viewer performs the verification itself, so nothing was launched: no
+     conversation ever held the connector, and the only read that happened was
+     the account check. */
+  expect(ports.spawns.length).toBe(0);
+  expect(ports.reads).toEqual(["getMe"]);
   expect(file.cursor.lastSuccessfulWindowEndAt).toBeNull();
+  /* The window it did not cover is still owed. */
+  expect(file.cursor.unreportedSinceAt).toBe(new Date(NOW - 24 * 3_600_000).toISOString());
+});
+
+test("an operator who renamed themselves or took a new handle still gets their report", async () => {
+  /* Both recorded fields are the operator's to change at any moment, and the
+     recorded copy only refreshes on a health check. Demanding that both agree
+     would end every report `account-mismatch` the day they picked a new
+     @handle — a silently dead feature. Agreement on either field is the same
+     account. */
+  const renamed = new FakePorts();
+  enableReports();
+  renamed.liveIdentity = { name: IDENTITY.name, username: "account_a_backup" };
+  const afterHandleChange = new TelegramReportRunner(renamed);
+  await afterHandleChange.runNow();
+  await afterHandleChange.settled();
+  expect(afterHandleChange.payload().history[0].status).toBe("running");
+  expect(renamed.spawns.length).toBe(1);
+
+  fs.rmSync(path.join(SANDBOX, "state"), { recursive: true, force: true });
+  enableReports();
+  const displayName = new FakePorts();
+  displayName.liveIdentity = { name: "Account A (away until Monday)", username: IDENTITY.username };
+  const afterNameChange = new TelegramReportRunner(displayName);
+  await afterNameChange.runNow();
+  await afterNameChange.settled();
+  expect(displayName.spawns.length).toBe(1);
+});
+
+test("the connector's sanitized spelling of a name is the same account", async () => {
+  /* The identity recorded at Connect comes off the login bridge unsanitized,
+     while every name the connector returns has been through its `sanitize_name`
+     — Cc/Cf stripped, whitespace collapsed. An operator whose display name
+     carries an invisible character would otherwise fail every single report
+     with `account-mismatch` and have nothing to go on. */
+  const ports = new FakePorts();
+  enableReports();
+  ports.connectionState = {
+    ...CONNECTED,
+    identity: { name: "Account\u200b A ", username: null },
+  };
+  ports.liveIdentity = { name: "Account A", username: null };
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+  expect(ports.spawns.length).toBe(1);
+});
+
+test("a connection with no comparable identity fails closed", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  ports.connectionState = { ...CONNECTED, identity: null };
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+  expect(readTelegramReports().history[0].status).toBe("account-mismatch");
+  expect(ports.spawns.length).toBe(0);
+});
+
+test("a connector that cannot answer get_me fails the run rather than reading on", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  ports.getMeError = new Error("get_me failed for 'Account A' (@account_a) token=connector-token-value");
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+
+  const file = readTelegramReports();
+  expect(file.history[0]).toMatchObject({ status: "failed", errorCode: "account_check_failed" });
+  expect(ports.spawns.length).toBe(0);
+  expect(ports.reads).toEqual(["getMe"]);
+  expect(ports.logs).toEqual(["account_check_failed"]);
+  expect(file.cursor.unreportedSinceAt).toBe(new Date(NOW - 24 * 3_600_000).toISOString());
 });
 
 test("a run whose conversation dies mid-read fails retryably, and the next run covers the missed window", async () => {
@@ -507,12 +595,75 @@ test("the run is launched with the operator's edited brief behind the fixed prea
 
   expect(prompt).toContain(edited);
   /* The operator's text cannot edit away the rules that keep a run correct. */
-  expect(prompt).toContain("get_me");
+  expect(prompt).toContain("RUN RULES");
   expect(prompt).toContain("Read SEQUENTIALLY");
   expect(prompt).toContain("is NOT recency");
-  expect(prompt.indexOf("get_me")).toBeLessThan(prompt.indexOf(edited));
+  expect(prompt.indexOf("RUN RULES")).toBeLessThan(prompt.indexOf(edited));
   /* And the default brief is not smuggled in beside it. */
   expect(prompt).not.toContain(DEFAULT_DAILY_REPORT_PROMPT.split("\n")[0]);
+});
+
+test("a scheduled run refused before it started still leaves its day owed", async () => {
+  /* The defect this covers: `tick` stamps the day BEFORE `beginRun`, so a
+     scheduled run refused at the preflight — Telegram disconnected overnight —
+     consumed the slot. If the refusal also left the cursor alone, the day was
+     simply gone and the next successful run started 24 h before ITSELF. */
+  const ports = new FakePorts();
+  enableReports();
+  ports.connectionState = { ...CONNECTED, status: "expired" };
+  const runner = new TelegramReportRunner(ports);
+  await runner.tick();
+
+  const refused = readTelegramReports();
+  expect(refused.history[0]).toMatchObject({ status: "failed", errorCode: "not_connected", trigger: "scheduled" });
+  expect(ports.spawns.length).toBe(0);
+  /* The day is consumed — no retry loop every minute — but the WINDOW is not. */
+  expect(refused.cursor.lastScheduledDay).toBe("2026-08-21");
+  expect(refused.cursor.unreportedSinceAt).toBe(new Date(NOW - 24 * 3_600_000).toISOString());
+
+  /* Tomorrow's run, with the account back: its window reaches back to the day
+     the refused run was meant to cover. */
+  ports.connectionState = { ...CONNECTED };
+  ports.clock = NOW + 24 * 3_600_000;
+  await runner.tick();
+  await runner.settled();
+  const retry = readTelegramReports().active!;
+  expect(Date.parse(retry.windowStart)).toBe(NOW - 24 * 3_600_000);
+});
+
+test("a report whose items skip a number is refused instead of filed", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+  const runId = activeRunId();
+  /* The operator answers "do 2" against these numbers, so a gap is not a
+     cosmetic slip: it makes the report's own references ambiguous. */
+  agentWrites(`${DAILY_REPORT_TAG}\n🐙 Proposed issues\n[1] Ship the export button.\n[3] Fix the timezone label.\n`);
+  await runner.tick();
+
+  const file = readTelegramReports();
+  expect(file.history[0]).toMatchObject({ status: "failed", errorCode: "invalid_report", hasReport: false });
+  expect(readReportText(runId)).toBeNull();
+  expect(file.cursor.lastSuccessfulWindowEndAt).toBeNull();
+});
+
+test("a report with no numbered items at all is filed as it is", async () => {
+  /* Numbering constrains a report that HAS proposals; a window that produced
+     only attention items has nothing to number, and refusing it would drop a
+     perfectly good report. */
+  const ports = new FakePorts();
+  enableReports();
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+  const runId = activeRunId();
+  agentWrites(`${DAILY_REPORT_TAG}\n👀 Worth attention\nContact A moved the review to Friday.\n`);
+  await runner.tick();
+
+  expect(readTelegramReports().history[0]).toMatchObject({ status: "ok", hasReport: true });
+  expect(readReportText(runId)).toContain("Contact A moved the review");
 });
 
 test("a report is recognised by its markers whatever tag the operator chose", async () => {

@@ -70,13 +70,35 @@ export function reportSpawnOverrides(grantActive: () => boolean): {
   };
 }
 
+/** The loopback origin a Viewer-internal launch presents. */
+const VIEWER_INTERNAL_HOST = "127.0.0.1";
+
+/**
+ * The request headers a Viewer-internal launch carries.
+ *
+ * They say what this launch IS: the Viewer's own UI lane, same-origin, acting
+ * for the operator. `sec-fetch-site` and `origin` are not decoration —
+ * `isAgentInitiatedSpawn` reads the ABSENCE of a same-origin marker as "an
+ * agent is asking", and an agent-lane request without a role preset is refused
+ * at admission, so a launch missing them settles every report run
+ * `launch_failed` before a conversation exists. The operator capability header
+ * rides along for the same reason the UI lane sends it.
+ */
+export function reportSpawnHeaders(capability: string, capabilityHeader: string): Headers {
+  return new Headers({
+    host: VIEWER_INTERNAL_HOST,
+    origin: `http://${VIEWER_INTERNAL_HOST}`,
+    ["sec-fetch-site"]: "same-origin",
+    [capabilityHeader]: capability,
+  });
+}
+
 /**
  * Runs one spawn request in process, outside any HTTP request scope.
  *
- * The request object is the minimum `executeSpawnRequest` reads: a same-origin
- * host and the operator capability header, which is the Viewer acting for the
- * operator rather than an agent asking. Everything else — admission, lineage,
- * grants, the durable receipt — is the ordinary path.
+ * The request object is the minimum `executeSpawnRequest` reads: the
+ * same-origin headers above and the body. Everything else — admission,
+ * lineage, grants, the durable receipt — is the ordinary path.
  */
 export async function launchReportConversation(input: ReportSpawnInput): Promise<ReportSpawnResult> {
   const [{ executeSpawnRequest, productionSpawnCommandDependencies }, { ensureOperatorSpawnCapability }, { VIEWER_SPAWN_CAPABILITY_HEADER }] = await Promise.all([
@@ -85,7 +107,7 @@ export async function launchReportConversation(input: ReportSpawnInput): Promise
     import("@/lib/agent/spawnPolicy"),
   ]);
   const request = {
-    headers: new Headers({ host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability() }),
+    headers: reportSpawnHeaders(ensureOperatorSpawnCapability(), VIEWER_SPAWN_CAPABILITY_HEADER),
     json: async () => input.body,
   } as unknown as NextRequest;
   const response = await executeSpawnRequest(request, {

@@ -32,6 +32,7 @@ const ports: ReportRunnerPorts = {
   now: () => NOW,
   connection: () => CONNECTED,
   readPort: () => ({
+    async getMe() { return CONNECTED.identity; },
     async listChats() { return [{ id: "101", kind: "user" as const, title: "Dialog A", username: null, unread: 0 }]; },
     async pageChats() { return []; },
     async lastMessageAt() { return "2026-08-21T09:00:00.000Z"; },

@@ -50,8 +50,15 @@ import { readTelegramConnection, type StoredTelegramConnection } from "./session
  *
  * Lifecycle, all of it durable so a Viewer restart resumes mid-run:
  *
- *   plan sources → launch → (tick) ingest output OR observe the conversation
- *   ended OR time out → finalize the history row.
+ *   verify get_me → plan sources → launch → (tick) ingest output OR observe
+ *   the conversation ended OR time out → finalize the history row.
+ *
+ * The account check is the FIRST thing that happens and the Viewer does it
+ * itself, through the connector's own `get_me`, against the identity recorded
+ * at Connect. A mismatch settles `account-mismatch` before a single chat is
+ * listed and before any conversation exists, so "no report and no further
+ * reads" is a property of the code rather than an instruction an agent is
+ * trusted to follow — and the recorded identity never has to enter a prompt.
  *
  * Only `ok` and `quiet` advance the window cursor, and a failed run records the
  * boundary it did not reach, so the day it missed is covered by the next run's
@@ -71,6 +78,8 @@ const TICK_MS = 60_000;
 /** Everything this module will ever write to the host log. */
 export type ReportRunnerLogCode =
   | "tick_failed"
+  | "account_check_failed"
+  | "account_mismatch"
   | "sources_failed"
   | "launch_failed"
   | "launch_rejected"
@@ -79,6 +88,7 @@ export type ReportRunnerLogCode =
 export interface ReportRunnerPorts {
   now(): number;
   connection(): StoredTelegramConnection;
+  /** The Viewer's own bounded reads: the account check and the source pass. */
   readPort(): TelegramReadPort;
   /** The operator's own spawn lane, in process and outside any request scope. */
   spawn(input: ReportSpawnInput): Promise<ReportSpawnResult>;
@@ -272,9 +282,29 @@ export class TelegramReportRunner {
     const active = file.active;
     if (!active || active.runId !== runId) return;
     const window = { startAt: active.windowStart, endAt: active.windowEnd };
+    const port = this.ports.readPort();
+
+    /* The account check, before anything reads a chat. A mismatch is the
+       issue's `account-mismatch` outcome: no report, no window advance, and —
+       because this runs before the source pass — no read of the wrong
+       account's dialogs either. */
+    let live: Awaited<ReturnType<TelegramReadPort["getMe"]>>;
+    try {
+      live = await port.getMe();
+    } catch {
+      this.ports.log("account_check_failed");
+      this.settle(runId, "failed", "account_check_failed", false);
+      return;
+    }
+    if (!sameTelegramAccount(live, connection.identity)) {
+      this.ports.log("account_mismatch");
+      this.settle(runId, "account-mismatch", null, false);
+      return;
+    }
+
     let sourcesPath: string;
     try {
-      const plan = await planReportSources(this.ports.readPort(), {
+      const plan = await planReportSources(port, {
         windowStart: window.startAt,
         windowEnd: window.endAt,
         groups: file.settings.groups,
@@ -302,7 +332,6 @@ export class TelegramReportRunner {
       windowEnd: window.endAt,
       sourcesPath,
       outputPath: reportInboxPath(runId),
-      identity: connection.identity,
       instructions: effectiveReportPrompt(readTelegramReports()),
     });
     let spawned: ReportSpawnResult;
@@ -361,16 +390,11 @@ export class TelegramReportRunner {
       this.settle(active.runId, "quiet", null, false);
       return;
     }
-    if (outcome.kind === "account-mismatch") {
-      /* The window is NOT advanced: nothing was read, so the next run with the
-         right account still covers this period. */
-      this.settle(active.runId, "account-mismatch", null, false);
-      return;
-    }
     if (outcome.kind === "invalid" && ingested !== null) {
       /* The run wrote a file that is not a report: prose, a refusal, a half
-         format. Filing it as the day's report would advance the window over a
-         day nobody has actually read, so it fails and the window stays owed. */
+         format, items numbered [1] [2] [4]. Filing it as the day's report
+         would advance the window over a day nobody has actually read, so it
+         fails and the window stays owed. */
       this.settle(active.runId, "failed", "invalid_report", false);
       return;
     }
@@ -445,7 +469,16 @@ export class TelegramReportRunner {
     else deleteReportArtifacts(runId);
   }
 
-  /** A launch that never started still owes the operator a visible row. */
+  /**
+   * A launch that never started still owes the operator a visible row — and it
+   * owes the WINDOW too. A scheduled run refused at the preflight (Telegram
+   * disconnected, reports switched off between the tick and the check) has had
+   * its day stamped by `tick`, so without recording the boundary here the day
+   * it was meant to cover would simply be gone and the next successful run
+   * would start 24 h before ITSELF. Same rule as {@link settle}: the earliest
+   * unreported boundary wins, and the 72 h cap is applied when the window is
+   * built.
+   */
   private recordFailure(
     trigger: TelegramReportTrigger,
     code: TelegramReportErrorCode,
@@ -466,9 +499,67 @@ export class TelegramReportRunner {
         hasReport: false,
         promptVersion: DAILY_REPORT_PROMPT_VERSION,
       }, ...state.history];
+      /* `reports_disabled` is the one code that means no run was OWED — the
+         feature is off, so there is no window anybody expected covered. Every
+         other refusal is a run that should have happened. */
+      if (code === "reports_disabled") return;
+      const owed = state.cursor.unreportedSinceAt;
+      if (!owed || Date.parse(window.startAt) < Date.parse(owed)) {
+        state.cursor.unreportedSinceAt = window.startAt;
+      }
     });
     return { ok: false, code };
   }
+}
+
+/**
+ * Characters the connector strips from every name it returns.
+ *
+ * Its `sanitize_name` removes Unicode Cc/Cf (which covers the zero-width and
+ * bidi block) and collapses whitespace, while the identity recorded at Connect
+ * comes off the login bridge UNSANITIZED. Two spellings of one name therefore
+ * have to be normalized to the same thing before they are compared, or an
+ * operator whose display name carries an invisible character would fail every
+ * report with `account-mismatch` and never learn why.
+ */
+const STRIPPED_BY_CONNECTOR = /[\p{Cc}\p{Cf}]/gu;
+
+/** Both sides spell "this account has no name" with their own placeholder, and
+    neither is evidence of anything. */
+const NAME_PLACEHOLDERS = new Set(["[empty]", "telegram account"]);
+
+function comparableName(value: string): string {
+  const normalized = value.replace(STRIPPED_BY_CONNECTOR, "").replace(/\s+/g, " ").trim().toLowerCase();
+  return NAME_PLACEHOLDERS.has(normalized) ? "" : normalized;
+}
+
+/**
+ * Whether the connector is logged into the account this report belongs to.
+ *
+ * The evidence is the identity Connect recorded — display name and public
+ * handle — because that is what the operator's connection carries; the
+ * connector's `get_me` is asked for the same two fields.
+ *
+ * AGREEMENT ON EITHER field is enough, and that is deliberate. Both fields are
+ * the operator's to change at any moment, and the recorded copy is only
+ * refreshed by a health check, so demanding that both agree would end every
+ * report with `account-mismatch` the day the operator renamed themselves or
+ * took a new @handle — a silently dead feature, which is a worse failure than
+ * the one this check exists to catch. A genuinely different account agrees on
+ * neither. A connection with NO comparable field cannot be verified against
+ * anything, so it fails closed.
+ */
+export function sameTelegramAccount(
+  live: { name: string; username: string | null } | null,
+  recorded: { name: string; username: string | null } | null,
+): boolean {
+  if (!live || !recorded) return false;
+  const liveName = comparableName(live.name);
+  const recordedName = comparableName(recorded.name);
+  if (liveName && recordedName && liveName === recordedName) return true;
+  const liveHandle = (live.username ?? "").trim().toLowerCase();
+  const recordedHandle = (recorded.username ?? "").trim().toLowerCase();
+  return Boolean(liveHandle) && liveHandle === recordedHandle;
 }
 
 /**
@@ -522,11 +613,13 @@ export function telegramReportRunner(): TelegramReportRunner {
 /**
  * Starts (once) the scheduler that fires the day's run.
  *
- * It is ensured from the Telegram API route, which the always-mounted footer
- * row polls: with a Viewer open the timer runs, and with no Viewer running at
- * all there is nothing to run a report in anyway — the first tick after start
- * catches up a slot that passed while the process was down, because
- * `scheduledRunDue` compares the stamped day, not a timer that was ticking.
+ * It is started by the release that owns traffic (`startCurrentReleaseControllers`),
+ * like every other Viewer controller, so a standalone Viewer nobody has opened
+ * in a browser still runs its report. The Telegram API route ensures it too,
+ * which is harmless: this is one globalThis singleton per process. The first
+ * tick after a start catches up a slot that passed while the process was down,
+ * because `scheduledRunDue` compares the stamped day against the clock instead
+ * of counting on a timer that was ticking.
  */
 export function ensureTelegramReportScheduler(): void {
   if (host.__llvTelegramReportTimer) return;

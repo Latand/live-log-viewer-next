@@ -4,7 +4,6 @@ import {
   CHAT_PAGE_LIMIT,
   MAX_PRIVATE_DIALOGS,
   MAX_PROBES,
-  STALE_STREAK,
   planReportSources,
   type TelegramChatSummary,
   type TelegramReadPort,
@@ -29,6 +28,10 @@ class FakeTelegram implements TelegramReadPort {
     private readonly chats: TelegramChatSummary[],
     private readonly dates: Record<string, string | null>,
   ) {}
+  async getMe(): Promise<{ name: string; username: string | null }> {
+    this.calls.push("getMe");
+    return { name: "Account A", username: "account_a" };
+  }
   async listChats(input: { kind: "user" | "group"; limit: number }): Promise<TelegramChatSummary[]> {
     this.calls.push(`listChats:${input.kind}:${input.limit}`);
     return this.chats.slice(0, input.limit).filter((chat) => chat.kind === input.kind);
@@ -124,19 +127,36 @@ test("an active dialog below the connector's pre-filter ceiling is still found",
   expect(port.calls.filter((call) => call.startsWith("lastMessageAt"))).toEqual(["lastMessageAt:777"]);
 });
 
-test("a very long dialog list stops at the stale streak instead of probing forever", async () => {
+test("a dialog active after a long run of cold ones is still a source", async () => {
+  /* The defect this covers: an earlier revision stopped the walk after a run
+     of consecutive stale candidates, which is a recency assumption about a
+     list that is ordered by pins and folders. An operator whose pinned block
+     is dormant would silently lose the conversation they answered an hour
+     ago. */
+  const many: TelegramChatSummary[] = Array.from({ length: 60 }, (_, index) => dialog(String(5000 + index), `Dialog ${index}`));
+  const dates: Record<string, string> = {};
+  for (const chat of many) dates[chat.id] = "2026-01-01T00:00:00.000Z";
+  dates["5040"] = "2026-08-20T15:00:00.000Z";
+  const port = new FakeTelegram(many, dates);
+
+  const plan = await planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" });
+  expect(plan.privateDialogs.map((row) => row.id)).toEqual(["5040"]);
+  expect(plan.probes).toBe(60);
+  expect(plan.probeBudgetExhausted).toBe(false);
+});
+
+test("a very long dialog list stops at the probe ceiling and says so", async () => {
   const many: TelegramChatSummary[] = Array.from({ length: 400 }, (_, index) => dialog(String(5000 + index), `Dialog ${index}`));
-  /* Only the first dialog is inside the window; everything after it is cold. */
   const dates: Record<string, string> = { "5000": "2026-08-20T15:00:00.000Z" };
   for (let index = 1; index < many.length; index += 1) dates[String(5000 + index)] = "2026-01-01T00:00:00.000Z";
   const port = new FakeTelegram(many, dates);
 
   const plan = await planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" });
   expect(plan.privateDialogs.map((row) => row.id)).toEqual(["5000"]);
-  /* The streak ends the walk long before the probe ceiling, and the ceiling is
-     never crossed either. */
-  expect(plan.probes).toBe(STALE_STREAK + 1);
-  expect(plan.probes).toBeLessThanOrEqual(MAX_PROBES);
+  /* One bound, and it is the only one: the walk probes every candidate it can
+     afford, then reports that it ran out rather than pretending completeness. */
+  expect(plan.probes).toBe(MAX_PROBES);
+  expect(plan.probeBudgetExhausted).toBe(true);
 });
 
 test("the operator's groups ride along with their pass, and dialogs stay bounded", async () => {
