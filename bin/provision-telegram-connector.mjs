@@ -135,28 +135,53 @@ export async function provisionTelegramConnector(env = process.env) {
   ownerOnlyDirectory(telegramStateDir);
 
   const uvCommand = await installPinnedUv(join(telegramStateDir, "tools"));
-  /* The packaged vendor tree can live on a read-only filesystem (the deploy
-     image, #1081), while setuptools writes build metadata into the project
-     directory. Sync from a writable owner-only staging copy under state, and
-     install non-editable so the venv is self-contained — nothing references
-     the staging copy or the packaged tree afterwards. */
-  const stagingDir = join(telegramStateDir, `vendor-src-${process.pid}-${randomUUID()}`);
-  let result;
+  /* The packaged tree can sit on a read-only filesystem (#1081), while the
+     vendored runtime's supply-chain guard requires running from a source
+     checkout and setuptools writes build metadata into the project dir. So:
+     stage a writable owner-only copy at a STABLE path, editable-install from
+     it, and keep it — the connector runs from this copy (#1084). */
+  const sourceDir = join(telegramStateDir, "vendor-src");
+  const incoming = join(telegramStateDir, `.vendor-src-${process.pid}-${randomUUID()}`);
   try {
-    cpSync(vendorDir, stagingDir, { recursive: true });
-    chmodSync(stagingDir, 0o700);
-    result = spawnSync(uvCommand, ["sync", "--frozen", "--no-dev", "--no-editable", "--project", stagingDir], {
-      cwd: stagingDir,
-      env: { ...env, UV_PROJECT_ENVIRONMENT: venvDir },
-      stdio: "inherit",
-      timeout: CONNECTOR_PROVISION_TIMEOUT_MS,
-      killSignal: "SIGKILL",
-    });
+    cpSync(vendorDir, incoming, { recursive: true });
+    chmodSync(incoming, 0o700);
+    rmSync(sourceDir, { recursive: true, force: true });
+    renameSync(incoming, sourceDir);
   } finally {
-    rmSync(stagingDir, { recursive: true, force: true });
+    rmSync(incoming, { recursive: true, force: true });
   }
-  if (result.error || result.status !== 0) throw new Error("connector dependency provisioning failed");
-  if (!existsSync(venvPython)) throw new Error("provisioning completed without a Python executable");
+
+  const result = spawnSync(uvCommand, ["sync", "--frozen", "--no-dev", "--project", sourceDir], {
+    cwd: sourceDir,
+    env: { ...env, UV_PROJECT_ENVIRONMENT: venvDir },
+    stdio: "inherit",
+    timeout: CONNECTOR_PROVISION_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+  });
+  const failed = () => {
+    /* A partial venv must never pass a later provisioned check (#1084). */
+    rmSync(venvDir, { recursive: true, force: true });
+    rmSync(sourceDir, { recursive: true, force: true });
+  };
+  if (result.error || result.status !== 0) {
+    failed();
+    throw new Error("connector dependency provisioning failed");
+  }
+  if (!existsSync(venvPython)) {
+    failed();
+    throw new Error("provisioning completed without a Python executable");
+  }
+  /* Success is a verified import, recorded durably — bare venv existence has
+     already lied once (#1084). */
+  const probe = spawnSync(venvPython, ["-c", "import telethon, telegram_mcp"], {
+    stdio: "ignore",
+    timeout: UV_SELF_CHECK_TIMEOUT_MS * 6,
+  });
+  if (probe.error || probe.status !== 0) {
+    failed();
+    throw new Error("provisioned environment failed its import probe");
+  }
+  writeFileSync(join(venvDir, ".llv-provisioned"), "ok\n", { mode: 0o600 });
 }
 
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
