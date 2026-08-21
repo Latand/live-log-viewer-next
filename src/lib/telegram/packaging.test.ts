@@ -530,3 +530,169 @@ test("a held call is answered with the restart error when the supervisor drains,
   expect(output.later.restart_header).toBe(true);
   expect(JSON.parse(output.later.body).error.code).toBe(-32001);
 });
+
+/* ------------------------------------------------------------------ #1087
+   The connector's crash monitor. The Viewer cannot learn how a process it did
+   not parent died — and after a Viewer restart it has parented none of them.
+   So the connector's own parent is a monitor that outlives the Viewer: it owns
+   the server child's stderr (redacting every line on the way to the sink) and
+   waits for it, writing the exit code — or the killing signal, which is the
+   whole story for an OOM kill — where the next Viewer generation can read it.
+   ------------------------------------------------------------------------ */
+
+/** A fake vendored tree whose `runner.main()` runs the given Python body. */
+function monitoredConnectorVendor(name: string, body: string[]): string {
+  const vendor = path.join(SANDBOX, name);
+  for (const directory of ["mcp/server", "telegram_mcp"]) {
+    fs.mkdirSync(path.join(vendor, directory), { recursive: true });
+    fs.writeFileSync(path.join(vendor, directory, "__init__.py"), "");
+  }
+  fs.writeFileSync(path.join(vendor, "mcp", "__init__.py"), "");
+  fs.writeFileSync(path.join(vendor, "mcp", "server", "fastmcp.py"), [
+    "class _Server:",
+    "    name = 'telegram'",
+    "class FastMCP:",
+    "    def __init__(self): self._mcp_server = _Server()",
+    "    def streamable_http_app(self):",
+    "        async def app(scope, receive, send): pass",
+    "        return app",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(vendor, "telegram_mcp", "runtime.py"), [
+    "from mcp.server.fastmcp import FastMCP",
+    "mcp = FastMCP()",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(vendor, "telegram_mcp", "runner.py"), ["def main():", ...body.map((line) => `    ${line}`), ""].join("\n"));
+  return vendor;
+}
+
+function runMonitoredConnector(vendor: string, stateDir: string, token: string) {
+  const python = Bun.which("python3");
+  expect(python).not.toBeNull();
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  return Bun.spawnSync({
+    cmd: [python!, path.resolve(import.meta.dir, "..", "..", "..", "bin", "telegram-mcp-server.py")],
+    env: {
+      ...process.env,
+      LLV_TELEGRAM_VENDOR_DIR: vendor,
+      LLV_TELEGRAM_MCP_TOKEN: token,
+      LLV_TELEGRAM_STATE_DIR: stateDir,
+      TELEGRAM_SESSION_STRING: "1ApWapzMBu4placeholder-not-a-real-session",
+    },
+    stdout: "pipe",
+    /* In production this fd is the Viewer's owner-only stderr sink; the
+       monitor writes the redacted stream to whatever it was given. */
+    stderr: "pipe",
+  });
+}
+
+test("the crash monitor records the server's exit code, and redacts its stderr before it is written (#1087)", () => {
+  const stateDir = path.join(SANDBOX, "monitor-exit-state");
+  const vendor = monitoredConnectorVendor("monitor-exit-vendor", [
+    "import sys",
+    "print('ERROR Error in get_messages (chat_id=-1001234567890, query=quarterly plan) - Code: MSG-ERR-042', file=sys.stderr)",
+    "print('session=' + __import__('os').environ['TELEGRAM_SESSION_STRING'] + ' refused', file=sys.stderr)",
+    "raise SystemExit(7)",
+  ]);
+  const result = runMonitoredConnector(vendor, stateDir, "E".repeat(43));
+
+  /* The monitor mirrors the child's fate, so a Viewer still listening reads
+     the same verdict the record carries. */
+  expect(result.exitCode).toBe(7);
+  const record = JSON.parse(fs.readFileSync(path.join(stateDir, "connector-exit.json"), "utf8")) as
+    { version: number; monitorPid: number; pid: number; exitCode: number | null; signal: string | null };
+  expect(record.version).toBe(1);
+  expect(record.exitCode).toBe(7);
+  expect(record.signal).toBeNull();
+  /* The monitor is the process the supervisor spawned and signals; the server
+     it waited on is a different pid. */
+  expect(record.pid).not.toBe(record.monitorPid);
+  expect(fs.lstatSync(path.join(stateDir, "connector-exit.json")).mode & 0o077).toBe(0);
+
+  /* Nothing raw was ever written: the identifiers and the credential are gone
+     before the line reaches the sink, and the error code survives. */
+  const written = result.stderr.toString();
+  expect(written).toContain("MSG-ERR-042");
+  expect(written).not.toContain("1001234567890");
+  expect(written).not.toContain("quarterly plan");
+  expect(written).not.toContain("1ApWapzMBu4placeholder-not-a-real-session");
+});
+
+test("a connector killed outright is recorded as the signal that killed it (#1087)", () => {
+  const stateDir = path.join(SANDBOX, "monitor-signal-state");
+  const vendor = monitoredConnectorVendor("monitor-signal-vendor", [
+    "import os, signal",
+    "os.kill(os.getpid(), signal.SIGKILL)",
+  ]);
+  const result = runMonitoredConnector(vendor, stateDir, "F".repeat(43));
+
+  /* The death an OOM kill produces: no traceback, no exit code, and before
+     the monitor nothing at all for the operator to read. */
+  const record = JSON.parse(fs.readFileSync(path.join(stateDir, "connector-exit.json"), "utf8")) as
+    { exitCode: number | null; signal: string | null };
+  expect(record.signal).toBe("SIGKILL");
+  expect(record.exitCode).toBeNull();
+  expect(result.exitCode).toBe(128 + 9);
+});
+
+test("the Python and TypeScript redactors cannot drift apart (#1087)", async () => {
+  const python = Bun.which("python3");
+  expect(python).not.toBeNull();
+  const { redactConnectorStderrLine } = await import("./connector");
+  const secrets = ["1ApWapzMBu4placeholder-not-a-real-session", "G".repeat(43)];
+  const samples = [
+    "ERROR Error in get_messages (chat_id=-1001234567890, query=quarterly plan) - Code: MSG-ERR-042",
+    "resolved @a_real_handle for +380501234567",
+    `  File "${path.join(os.homedir(), "telethon", "client.py")}", line 5`,
+    `  File "/${"home"}/another-account/telethon/client.py", line 5`,
+    `session=${secrets[0]} refused`,
+    "Traceback (most recent call last):",
+    "MemoryError",
+  ];
+  const result = Bun.spawnSync({
+    cmd: [python!, "-c", [
+      "import json, sys",
+      `sys.path.insert(0, ${JSON.stringify(path.resolve(import.meta.dir, "..", "..", "..", "bin"))})`,
+      "from telegram_connector_monitor import redact_stderr_line",
+      "samples, secrets = json.load(sys.stdin)",
+      "print(json.dumps([redact_stderr_line(line, secrets) for line in samples]))",
+    ].join("\n")],
+    stdin: Buffer.from(JSON.stringify([samples, secrets])),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.stderr.toString()).toBe("");
+  expect(JSON.parse(result.stdout.toString())).toEqual(samples.map((line) => redactConnectorStderrLine(line, secrets)));
+});
+
+test("the supervisor's SIGTERM reaches the server through its monitor (#1087)", async () => {
+  const python = Bun.which("python3");
+  expect(python).not.toBeNull();
+  const stateDir = path.join(SANDBOX, "monitor-term-state");
+  const readyFile = path.join(SANDBOX, "monitor-term-ready");
+  fs.rmSync(readyFile, { force: true });
+  const vendor = monitoredConnectorVendor("monitor-term-vendor", [
+    "import os, time",
+    `open(${JSON.stringify(readyFile)}, 'w').write('ready')`,
+    "while True: time.sleep(0.05)",
+  ]);
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  /* The supervisor signals the pid it recorded, which is the monitor's: the
+     monitor and the server it forked share an argv, so nothing else in the
+     supervisor had to learn about the fork. */
+  const proc = Bun.spawn({
+    cmd: [python!, path.resolve(import.meta.dir, "..", "..", "..", "bin", "telegram-mcp-server.py")],
+    env: { ...process.env, LLV_TELEGRAM_VENDOR_DIR: vendor, LLV_TELEGRAM_MCP_TOKEN: "H".repeat(43), LLV_TELEGRAM_STATE_DIR: stateDir },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const deadline = Date.now() + 5_000;
+  while (!fs.existsSync(readyFile) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(fs.existsSync(readyFile)).toBe(true);
+
+  proc.kill("SIGTERM");
+  await proc.exited;
+  const record = JSON.parse(fs.readFileSync(path.join(stateDir, "connector-exit.json"), "utf8")) as { signal: string | null };
+  expect(record.signal).toBe("SIGTERM");
+}, 15_000);

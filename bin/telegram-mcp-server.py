@@ -15,6 +15,22 @@ VENDOR_DIR = os.environ.get("LLV_TELEGRAM_VENDOR_DIR", "")
 if len(TOKEN) < 32 or not VENDOR_DIR:
     raise SystemExit("authenticated Telegram MCP configuration is missing")
 
+# Issue #1087: fork the crash monitor BEFORE anything heavy is imported, so the
+# process that outlives this one stays a few kilobytes of standard library. It
+# returns only here, in the child that goes on to be the server; the parent
+# never comes back from `supervise`. Without a state dir (a bare invocation, a
+# test driving the app object directly) the server simply runs unmonitored.
+_STATE_DIR = os.environ.get("LLV_TELEGRAM_STATE_DIR", "")
+if _STATE_DIR:
+    _BIN_DIR = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, _BIN_DIR)
+    try:
+        from telegram_connector_monitor import supervise  # noqa: E402
+    finally:
+        if sys.path and sys.path[0] == _BIN_DIR:
+            sys.path.pop(0)
+    supervise(_STATE_DIR)
+
 sys.path.insert(0, VENDOR_DIR)
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402

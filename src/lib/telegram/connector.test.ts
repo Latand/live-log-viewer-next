@@ -28,6 +28,7 @@ const {
   connectorServerName,
   ensureTelegramConnector,
   readTelegramConnectorCrashes,
+  reapTelegramConnectorCrash,
   redactConnectorStderrLine,
   stopTelegramConnector,
   telegramConnectorActivity,
@@ -924,3 +925,158 @@ test("a stop asks the connector to drain BEFORE it signals it", async () => {
     for (const pid of spawns) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
   }
 }, 15_000);
+
+test("an adopted connector's crash carries the exit status its monitor recorded (#1087)", async () => {
+  const readyFile = path.join(SANDBOX, "monitored-ready");
+  const diedOnce = path.join(SANDBOX, "monitored-died-once");
+  fs.rmSync(readyFile, { force: true });
+  fs.rmSync(diedOnce, { force: true });
+  const exitFile = path.join(process.env.LLV_STATE_DIR!, "telegram", "connector-exit.json");
+  /* Stands in for `bin/telegram_connector_monitor.py`, whose own fork, wait,
+     and redaction are driven for real in packaging.test.ts. What is under test
+     here is the supervisor side: an exit NOBODY in this Viewer generation
+     could have heard is still recorded with the code or signal the monitor
+     wrote down, instead of two nulls. */
+  const script = connectorScript("monitored-connector", [
+    "import fs from 'node:fs';",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    `if (!fs.existsSync(${JSON.stringify(diedOnce)})) {`,
+    `  fs.writeFileSync(${JSON.stringify(diedOnce)}, '1');`,
+    "  console.error('killed while serving a fan-out of large reads');",
+    "  setTimeout(() => {",
+    `    fs.writeFileSync(${JSON.stringify(exitFile)}, JSON.stringify({`,
+    "      version: 1, monitorPid: process.pid, pid: process.pid + 1, exitCode: null,",
+    "      signal: 'SIGKILL', at: new Date().toISOString(),",
+    "    }), { mode: 0o600 });",
+    "    process.exit(0);",
+    "  }, 40);",
+    "} else {",
+    "  setInterval(() => undefined, 1000);",
+    "}",
+  ]);
+  const { ports, spawns } = realChildPorts(script, readyFile, {}, { adopted: true });
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const stored = readTelegramSession()!;
+  try {
+    expect((await ensureTelegramConnector(stored, ports)).ok).toBe(true);
+    await until(() => { try { process.kill(spawns[0]!, 0); return false; } catch { return true; } });
+    expect((await ensureTelegramConnector(stored, ports)).ok).toBe(true);
+    const crashes = readTelegramConnectorCrashes();
+    expect(crashes).toHaveLength(1);
+    expect(crashes[0]!.pid).toBe(spawns[0]!);
+    /* The OOM-kill signature the issue's repro would produce: no traceback,
+       no exit code, and now a named signal instead of silence. */
+    expect(crashes[0]!.signal).toBe("SIGKILL");
+    expect(crashes[0]!.exitCode).toBeNull();
+    expect(crashes[0]!.observed).toBe("exit");
+    expect(telegramConnectorActivity().last24h).toBe(1);
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+    await stopTelegramConnector();
+    for (const pid of spawns) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  }
+}, 20_000);
+
+test("a crash reaped before the health path deletes the pid record is still counted as a restart (#1087)", async () => {
+  const readyFile = path.join(SANDBOX, "reap-first-ready");
+  const diedOnce = path.join(SANDBOX, "reap-first-died-once");
+  fs.rmSync(readyFile, { force: true });
+  fs.rmSync(diedOnce, { force: true });
+  const script = connectorScript("reap-first-connector", [
+    "import fs from 'node:fs';",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    `if (!fs.existsSync(${JSON.stringify(diedOnce)})) {`,
+    `  fs.writeFileSync(${JSON.stringify(diedOnce)}, '1');`,
+    "  console.error('gone before anyone asked');",
+    "  setTimeout(() => process.exit(5), 40);",
+    "} else {",
+    "  setInterval(() => undefined, 1000);",
+    "}",
+  ]);
+  const { ports, spawns } = realChildPorts(script, readyFile, {}, { adopted: true });
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const stored = readTelegramSession()!;
+  try {
+    expect((await ensureTelegramConnector(stored, ports)).ok).toBe(true);
+    await until(() => { try { process.kill(spawns[0]!, 0); return false; } catch { return true; } });
+
+    /* The health path in miniature: it reaps, and then its teardown removes
+       the pid record — the only pointer to the process that died. Before the
+       reap ran first, the crash was erased with it and the restart that
+       followed was counted as an ordinary start (#1087). */
+    expect(reapTelegramConnectorCrash(stored, ports)).toBe(true);
+    await stopTelegramConnector();
+    expect(fs.existsSync(path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json"))).toBe(false);
+    expect(readTelegramConnectorCrashes()).toHaveLength(1);
+    expect(readTelegramConnectorCrashes()[0]!.stderr.join("\n")).toContain("gone before anyone asked");
+
+    /* The pointer is gone, but the crash on the record still makes this the
+       restart it is: counted once, and only because the replacement verified. */
+    expect((await ensureTelegramConnector(stored, ports)).ok).toBe(true);
+    expect(spawns).toHaveLength(2);
+    expect(telegramConnectorActivity().last24h).toBe(1);
+    expect(telegramConnectorActivity().restarting).toBe(false);
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+    await stopTelegramConnector();
+    for (const pid of spawns) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  }
+}, 20_000);
+
+test("a real process serving concurrent bounded reads survives a fresh health check (#1087)", async () => {
+  const readyFile = path.join(SANDBOX, "concurrent-ready");
+  fs.rmSync(readyFile, { force: true });
+  /* A connector that takes its time over a read, exactly like a 120-message
+     page against a large supergroup. Three of them are held open across the
+     health check the panel issues when it opens — the burst from the issue's
+     repro, which used to be answered with SIGTERM. */
+  const script = connectorScript("concurrent-connector", [
+    "import fs from 'node:fs';",
+    "import http from 'node:http';",
+    "let served = 0;",
+    "const server = http.createServer((req, res) => {",
+    "  setTimeout(() => {",
+    "    served += 1;",
+    "    res.writeHead(200, { 'content-type': 'text/plain' });",
+    "    res.end(`read ${served} done`);",
+    "  }, 250);",
+    "});",
+    "server.listen(Number(process.env.MCP_PORT), '127.0.0.1', () => {",
+    `  fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    "});",
+  ]);
+  const { ports, spawns } = realChildPorts(script, readyFile);
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const stored = readTelegramSession()!;
+  try {
+    expect((await ensureTelegramConnector(stored, ports)).ok).toBe(true);
+    const url = telegramMcpUrl();
+    const reads = [1, 2, 3].map(() => fetch(url).then((response) => response.text()));
+
+    /* `get_me` queues behind the burst and never lands inside the budget. */
+    const health = await telegramConnectorHealth(stored, {
+      ...ports,
+      ownsProcess: () => true,
+      probeTimeoutMs: 60,
+      callTool: () => new Promise<string | null>(() => {}),
+    });
+    expect(health).toBe("busy");
+
+    /* The process the reads belong to is still there, and every one of them
+       comes back — the outage this issue reports cannot happen from here. */
+    expect(() => process.kill(spawns[0]!, 0)).not.toThrow();
+    const answers = await Promise.all(reads);
+    expect(answers).toHaveLength(3);
+    for (const answer of answers) expect(answer).toContain("done");
+    expect(spawns).toHaveLength(1);
+    expect(readTelegramConnectorCrashes()).toHaveLength(0);
+    expect(telegramConnectorActivity().last24h).toBe(0);
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+    await stopTelegramConnector();
+    for (const pid of spawns) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  }
+}, 20_000);

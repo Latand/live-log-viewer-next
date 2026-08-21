@@ -246,6 +246,11 @@ export function connectorLaunchSpec(input: { sessionString: string; connectorTok
       TELEGRAM_EXPOSED_TOOLS: "read-only",
       LLV_TELEGRAM_MCP_TOKEN: input.connectorToken,
       LLV_TELEGRAM_VENDOR_DIR: vendor,
+      /* Where the crash monitor writes the exit status of a connector this
+         Viewer generation may not live to see die (#1087). The connector's
+         own state dir, which it already reads and writes through the vendored
+         tree — no wider Viewer state reaches the child. */
+      LLV_TELEGRAM_STATE_DIR: statePath("telegram"),
       MCP_TRANSPORT: "http",
       MCP_HOST: TELEGRAM_MCP_HOST,
       MCP_PORT: String(telegramMcpPort()),

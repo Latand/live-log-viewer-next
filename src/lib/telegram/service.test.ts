@@ -869,3 +869,58 @@ test("restart counts never mask a real phase: an errored connection stays an err
   expect(status.error?.code).toBe("connector_failed");
   expect(status.connectorRestarts.last24h).toBe(1);
 });
+
+test("a dead connector's crash is recorded before the health teardown erases the pid record (#1087)", async () => {
+  /* The real crash bookkeeping over this file's isolated state dir: what is
+     under test is the ORDER the service does things in, so the parts that
+     write and read the record are the production ones. */
+  const { readTelegramConnectorCrashes, reapTelegramConnectorCrash } = await import("./connector");
+  const adapter = new FakeAdapter();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const stored = readTelegramSession()!;
+  const telegramDir = path.dirname(telegramSessionPath());
+  const pidFile = path.join(telegramDir, "connector.json");
+
+  /* A connector that is already gone: a pid nothing answers for, recorded the
+     way a previous Viewer generation left it, with the stderr it printed on
+     the way out still in the sink. */
+  const gone = Bun.spawn({ cmd: ["/bin/sh", "-c", "exit 0"], stdout: "ignore", stderr: "ignore" });
+  const deadPid = gone.pid;
+  await gone.exited;
+  fs.writeFileSync(pidFile, JSON.stringify({
+    version: 1,
+    pid: deadPid,
+    identity: "a-process-that-is-no-longer-there",
+    credentialRef: stored.credentialRef,
+    connectorTokenSha256: "0".repeat(64),
+    command: "/nonexistent/python",
+    entrypoint: "/nonexistent/telegram-mcp-server.py",
+  }), { mode: 0o600 });
+  fs.writeFileSync(path.join(telegramDir, "connector-stderr.log"), "MemoryError\n", { mode: 0o600 });
+  fs.writeFileSync(path.join(telegramDir, "connector-exit.json"), JSON.stringify({
+    version: 1, monitorPid: deadPid, pid: deadPid + 1, exitCode: null, signal: "SIGKILL",
+    at: "2026-08-20T11:59:00.000Z",
+  }), { mode: 0o600 });
+
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    /* Exactly what the production teardown does to the record — the erasure
+       that used to take the crash with it. */
+    stopConnector: () => { fs.rmSync(pidFile, { force: true }); },
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
+    connectorHealth: async () => null,
+    reapConnectorCrash: (session) => { reapTelegramConnectorCrash(session); },
+  });
+
+  expect((await service.checkHealth()).phase).toBe("connected");
+  expect(fs.existsSync(pidFile)).toBe(false);
+  const crashes = readTelegramConnectorCrashes();
+  expect(crashes).toHaveLength(1);
+  expect(crashes[0]!.pid).toBe(deadPid);
+  expect(crashes[0]!.signal).toBe("SIGKILL");
+  expect(crashes[0]!.stderr).toContain("MemoryError");
+});

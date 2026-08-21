@@ -115,6 +115,11 @@ const PID_FILE = "connector.json";
 const STDERR_FILE = "connector-stderr.log";
 const CRASH_LOG_FILE = "connector-crashes.log";
 const RESTART_STATE_FILE = "connector-restarts.json";
+/* Written by the connector's own crash monitor (bin/telegram_connector_monitor.py)
+   at the moment the server child dies, so the exit code — or the signal, which
+   is the whole story for an OOM kill — outlives the Viewer generation that
+   spawned it. */
+const EXIT_FILE = "connector-exit.json";
 const STDERR_TAIL_LINES = 20;
 const STDERR_TAIL_BYTES = 8_192;
 const STDERR_LINE_CHARS = 400;
@@ -280,8 +285,40 @@ function telegramStateFile(name: string): string {
   return statePath("telegram", name);
 }
 
+/**
+ * How the connector's server child actually went, as its monitor recorded it
+ * (#1087).
+ *
+ * The Viewer spawns the monitor, and the monitor forks the server; the pid the
+ * supervisor records and signals is the monitor's, so a record is only this
+ * connector's when it names that pid. The monitor removes the file when it
+ * starts, so nothing here can be a previous generation's verdict.
+ */
+type ConnectorExitRecord = { monitorPid: number; pid: number; exitCode: number | null; signal: string | null };
+
+function readConnectorExitRecord(monitorPid: number): ConnectorExitRecord | null {
+  try {
+    const path = telegramStateFile(EXIT_FILE);
+    const stat = fs.lstatSync(path);
+    if (stat.isSymbolicLink() || !stat.isFile()
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid())) return null;
+    const row = JSON.parse(fs.readFileSync(path, "utf8")) as Partial<ConnectorExitRecord> & { version?: unknown };
+    if (row.version !== 1 || row.monitorPid !== monitorPid || typeof row.pid !== "number") return null;
+    return {
+      monitorPid,
+      pid: row.pid,
+      exitCode: typeof row.exitCode === "number" ? row.exitCode : null,
+      signal: typeof row.signal === "string" ? row.signal : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Append-only owner-only sink for the connector's stderr, truncated at every
-    spawn so the tail a crash record quotes is that process's own output. */
+    spawn so the tail a crash record quotes is that process's own output. The
+    monitor writes REDACTED lines here — it owns the server child's stderr and
+    filters every line on the way to disk, so nothing raw is ever persisted. */
 function openConnectorStderrSink(): number | null {
   try {
     if (ensureTelegramStateDir(true) === null) return null;
@@ -478,11 +515,12 @@ type ConnectorCrashRecord = {
   pid: number;
   exitCode: number | null;
   signal: string | null;
-  /** How the exit was noticed. `exit` is this Viewer's own child, so the
-      kernel handed us the code and signal. `vanished` is a connector this
-      Viewer only adopted (spawned by an earlier generation, so there is no
-      exit event to listen to): the disappearance is observed, the code and
-      signal are not knowable, and both stay null. */
+  /** How the exit was noticed. `exit` is an exit somebody waited for — this
+      Viewer's own child, or (for a connector spawned by an earlier generation)
+      the crash monitor that stayed its parent and wrote the status down.
+      `vanished` is the residue: the process is gone and no verdict was
+      recorded for it, so the code and signal are genuinely unknowable and
+      both stay null. */
   observed: "exit" | "vanished";
   stderr: string[];
 };
@@ -676,11 +714,15 @@ function watchConnectorExit(child: ConnectorChild, binding: ConnectorBinding, po
     if (deliberateStops.delete(pid)) return;
     if (liveConnectorChild?.pid === pid) liveConnectorChild = null;
     const at = ports.now();
+    /* The monitor waited on the SERVER child; what the kernel handed us is the
+       monitor's own mirrored status. Prefer the recorded verdict, and fall
+       back to ours when the connector ran unmonitored. */
+    const monitored = readConnectorExitRecord(pid);
     const recorded = recordConnectorCrash({
       at: new Date(at).toISOString(),
       pid,
-      exitCode: code,
-      signal: signal ?? null,
+      exitCode: monitored ? monitored.exitCode : code,
+      signal: monitored ? monitored.signal : signal ?? null,
       observed: "exit",
       stderr: connectorStderrTail(connectorSecrets(binding)),
     }, at);
@@ -689,19 +731,23 @@ function watchConnectorExit(child: ConnectorChild, binding: ConnectorBinding, po
 }
 
 /**
- * The crash record for an exit NOBODY was listening to (#1087).
+ * The crash record for an exit THIS Viewer was not listening to (#1087).
  *
  * A connector spawned by an earlier Viewer generation is adopted, not
- * re-parented: there is no exit event, so {@link watchConnectorExit} can
- * never fire for it — and after a Viewer restart that is EVERY connector the
- * operator has. Instead of a wrapper process to keep a handle alive, the
- * disappearance is noticed on the path that already runs on every status
- * read: the recorded pid is gone, this Viewer did not stop it, and the crash
- * is written with its stderr tail before the replacement spawn truncates the
- * sink. The exit code and signal are genuinely unknowable here and stay null.
+ * re-parented: there is no exit event, so {@link watchConnectorExit} can never
+ * fire for it — and after a Viewer restart that is EVERY connector the
+ * operator has. Two things cover that gap. The connector's own crash monitor
+ * stayed its parent across the Viewer restart and wrote the exit code or the
+ * killing signal down, so the record is complete. And the disappearance itself
+ * is noticed on the paths that already run on every status read, before the
+ * replacement spawn truncates the stderr sink.
  *
- * Returns true when a crash was recorded, so the caller can count the
- * restart it is about to perform.
+ * A process that died with no monitor at all (an older connector still running
+ * from before this change, a platform that could not fork) is still recorded —
+ * as `vanished`, with a null code and signal, because nothing observed them.
+ *
+ * Returns true when a crash was recorded, so the caller can count the restart
+ * it is about to perform.
  */
 function reapVanishedConnector(binding: ConnectorBinding, ports: TelegramConnectorPorts): boolean {
   const record = readConnectorRecord();
@@ -710,14 +756,43 @@ function reapVanishedConnector(binding: ConnectorBinding, ports: TelegramConnect
   if (procBackend.processIdentity(record.pid) === record.identity) return false;
   if (deliberateStops.delete(record.pid)) return false;
   const at = ports.now();
+  const monitored = readConnectorExitRecord(record.pid);
   return recordConnectorCrash({
     at: new Date(at).toISOString(),
     pid: record.pid,
-    exitCode: null,
-    signal: null,
-    observed: "vanished",
+    exitCode: monitored?.exitCode ?? null,
+    signal: monitored?.signal ?? null,
+    observed: monitored ? "exit" : "vanished",
     stderr: connectorStderrTail(connectorSecrets(binding)),
   }, at);
+}
+
+/**
+ * Records the crash of a connector that is already gone, BEFORE a caller tears
+ * the bookkeeping down (#1087).
+ *
+ * The health path stops the connector and deletes its record whenever the
+ * process cannot answer — including when it cannot answer because it is dead.
+ * Deleting the record first erases the only pointer to the crashed pid, and
+ * the crash then goes unrecorded, uncounted, and invisible. So the reap runs
+ * first, and the crash it writes is what the following
+ * {@link ensureTelegramConnector} recognises as the restart it is performing.
+ */
+export function reapTelegramConnectorCrash(
+  session: StoredTelegramSession,
+  ports: TelegramConnectorPorts = realPorts,
+): boolean {
+  return reapVanishedConnector(
+    { credentialRef: session.credentialRef, connectorToken: session.connectorToken },
+    ports,
+  );
+}
+
+/** A crash was recorded and no verified restart has followed it. The pid stamp
+    is cleared by {@link noteVerifiedRestart}, so this is exactly "the operator
+    is still missing the connector that died". */
+function crashAwaitingRestart(): boolean {
+  return readRestartState().lastCrashPid !== null;
 }
 
 async function restartAfterCrash(binding: ConnectorBinding, ports: TelegramConnectorPorts, at: number): Promise<void> {
@@ -904,7 +979,14 @@ export async function ensureTelegramConnector(
   ports: TelegramConnectorPorts = realPorts,
 ): Promise<ConnectorEnsureResult> {
   const binding = { credentialRef: session.credentialRef, connectorToken: session.connectorToken };
-  if (!reapVanishedConnector(binding, ports)) return await ensureConnectorNow(session, ports);
+  /* This call IS a restart when it follows a crash: one this pass just reaped,
+     or one already on the record that nothing has brought a connector back
+     from. The second case is the health path, which reaps and then tears the
+     pid record down before getting here (#1087). `restartsInFlight` keeps a
+     crash the exit watcher is already restarting from being counted twice. */
+  const isRestart = reapVanishedConnector(binding, ports)
+    || (restartsInFlight === 0 && crashAwaitingRestart());
+  if (!isRestart) return await ensureConnectorNow(session, ports);
   if (restartBurstExhausted(ports.now())) {
     markConnectorRestartFailed("connector_failed", binding.credentialRef);
     return { ok: false, code: "connector_failed" };

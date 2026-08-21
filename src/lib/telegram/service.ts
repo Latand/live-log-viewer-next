@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentEvent, type TelegramEnrollmentHandle, type TelegramHealthResult } from "./adapter";
-import { ensureTelegramConnector, stopTelegramConnector, telegramConnectorActivity, telegramConnectorHealth, type ConnectorEnsureResult } from "./connector";
+import { ensureTelegramConnector, reapTelegramConnectorCrash, stopTelegramConnector, telegramConnectorActivity, telegramConnectorHealth, type ConnectorEnsureResult } from "./connector";
 import type { TelegramConnectorRestarts, TelegramErrorCode, TelegramIdentity, TelegramStatusPayload } from "./contracts";
 import { registerTelegramHosts, unregisterTelegramHosts, type TelegramHostRegistrationResult } from "./hostRegistration";
 import { telegramApiCredentials } from "./packaging";
@@ -46,6 +46,11 @@ export interface TelegramServicePorts {
   connectorHealth?(session: StoredTelegramSession): Promise<TelegramHealthResult | "busy" | null>;
   /** Crash restarts of the shared connector, for the status payload (#1087). */
   connectorRestarts?(): TelegramConnectorRestarts & { restarting: boolean };
+  /** Records the crash of a connector that is already gone, BEFORE this
+      service tears its pid record down (#1087). The teardown deletes the only
+      pointer to the crashed process, so a crash not written here is never
+      written at all. */
+  reapConnectorCrash?(session: StoredTelegramSession): void;
 }
 
 const productionPorts: TelegramServicePorts = {
@@ -58,6 +63,7 @@ const productionPorts: TelegramServicePorts = {
   credentialsConfigured: () => telegramApiCredentials() !== null,
   connectorHealth: (session) => telegramConnectorHealth(session),
   connectorRestarts: () => telegramConnectorActivity(),
+  reapConnectorCrash: (session) => { reapTelegramConnectorCrash(session); },
 };
 
 type LiveLogin = {
@@ -457,6 +463,12 @@ export class TelegramConnectionService {
        reports. */
     if (result === "busy") return;
     if (result === null) {
+      /* One reason a connector cannot answer is that it is dead. Write that
+         crash down FIRST: the teardown below removes the pid record, and with
+         it the only pointer to the process whose exit, stderr tail, and
+         restart nobody would otherwise ever see (#1087). */
+      try { this.ports.reapConnectorCrash?.(session); }
+      catch { /* bookkeeping never blocks the health path */ }
       /* The connector cannot answer, so it is not serving anyone either: the
          bridge check may now take the session. The bridge uses the same
          StringSession as the shared connector — release the long-lived owner
