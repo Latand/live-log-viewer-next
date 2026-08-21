@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { translate } from "@/lib/i18n";
 
-import { ConnectionPillView, connectionPillSilent } from "@/components/ConnectionPill";
+import { ConnectionPillBody, ConnectionPillView } from "@/components/ConnectionPill";
 import { AttentionCard } from "./AttentionCard";
 import { ReceiptChip } from "./ReceiptChip";
 import type { RuntimeAttention, RuntimeReceipt } from "./runtimeModel";
@@ -39,16 +39,35 @@ test("live pill pulses but honors reduced motion", () => {
   expect(html).toContain("motion-reduce:animate-none");
 });
 
-test("#1069: the floating pill is silent while healthy and visible in every trouble state", () => {
-  // Steady live state: no overlay covering the footer's Telegram row.
-  expect(connectionPillSilent("live", { resynced: false })).toBe(true);
-  // Trouble states and the transient resynced note still earn the pill.
+test("#1069: the healthy floating pill renders no overlay, only the polite announcer", () => {
+  const html = renderToStaticMarkup(
+    <ConnectionPillBody connection="live" resynced={false} announce="announce-live" t={t} />,
+  );
+  // No fixed overlay covering the footer's Telegram row, no visible badge.
+  expect(html).not.toContain("fixed bottom-3 left-3");
+  expect(html).not.toContain("data-connection");
+  // Recovery back to live is still spoken.
+  expect(html).toContain('role="status"');
+  expect(html).toContain('aria-live="polite"');
+  expect(html).toContain("announce-live");
+});
+
+test("#1069: trouble states, the resynced note, and compact placement keep the real pill", () => {
   for (const connection of ["reconnecting", "degraded", "offline"] as const) {
-    expect(connectionPillSilent(connection, { resynced: false })).toBe(false);
+    const html = renderToStaticMarkup(
+      <ConnectionPillBody connection={connection} resynced={false} announce="x" t={t} />,
+    );
+    expect(html).toContain("fixed bottom-3 left-3");
+    expect(html).toContain(`data-connection="${connection}"`);
+    expect(html).toContain(translate("en", `runtime.${connection}`));
   }
-  expect(connectionPillSilent("live", { resynced: true })).toBe(false);
+  const resynced = renderToStaticMarkup(<ConnectionPillBody connection="live" resynced announce="x" t={t} />);
+  expect(resynced).toContain('data-connection="live"');
+  expect(resynced).toContain(translate("en", "runtime.resynced"));
   // Compact placements live inside their own header, never over the footer.
-  expect(connectionPillSilent("live", { compact: true, resynced: false })).toBe(false);
+  const compact = renderToStaticMarkup(<ConnectionPillBody connection="live" resynced={false} compact announce="x" t={t} />);
+  expect(compact).toContain('data-connection="live"');
+  expect(compact).toContain("absolute right-2 top-1.5");
 });
 
 /* ------------------------------ ReceiptChip ------------------------------ */
