@@ -850,15 +850,16 @@ test("a connector busy with a burst of reads is BUSY, never torn down", async ()
     probeTimeoutMs: 30,
   };
   const calls = { stops: 0 };
-  /* Several bounded reads are still in flight, so `get_me` waits behind them
-     and the health budget runs out. That is a busy connector, not a dead one:
-     a missed deadline says nothing about the account and nothing about the
-     reads, so no verdict is reached and nothing is stopped (#1087). */
-  const inFlight = [0, 1, 2].map(() => new Promise<string | null>(() => {}));
+  /* The three classifications, at the unit level. `get_me` waiting behind
+     reads that are still in flight is a busy connector, not a dead one: a
+     missed deadline says nothing about the account and nothing about the
+     reads, so no verdict is reached and nothing is stopped (#1087). The same
+     guarantee against a real process holding real concurrent reads open is
+     asserted further down. */
   const busy = await telegramConnectorHealth(CONNECTOR_SESSION, {
     ...base,
     stop: () => { calls.stops += 1; },
-    callTool: () => inFlight[0]!,
+    callTool: () => new Promise<string | null>(() => {}),
   });
   expect(busy).toBe("busy");
   expect(calls.stops).toBe(0);
@@ -878,7 +879,6 @@ test("a connector busy with a burst of reads is BUSY, never torn down", async ()
     probe: async () => ({ ok: false }),
     callTool: async () => null,
   })).toBeNull();
-  expect(inFlight).toHaveLength(3);
 }, 5_000);
 
 test("a stop asks the connector to drain BEFORE it signals it", async () => {
