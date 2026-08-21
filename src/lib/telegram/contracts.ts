@@ -8,7 +8,10 @@
  * and sanitized codes.
  */
 
-/** The connection lifecycle, in the exact phases issue #1059 names. */
+/** The connection lifecycle, in the exact phases issue #1059 names, plus the
+    transient `restarting` (#1087): the credential is fine and the account is
+    connected, but the shared connector process is being brought back after an
+    unexpected exit, so calls through it fail until it is verified ready. */
 export type TelegramPhase =
   | "disconnected"
   | "starting"
@@ -16,6 +19,7 @@ export type TelegramPhase =
   | "awaiting_password"
   | "verifying"
   | "connected"
+  | "restarting"
   | "expired"
   | "error";
 
@@ -53,6 +57,15 @@ export type TelegramLoginView = {
   passwordError: boolean;
 };
 
+/** Connector supervision as the browser sees it (#1087): how often the shared
+    process had to be restarted after an unexpected exit, and when the last one
+    happened. Deliberate stops (logout, local deletion, a refused read-only
+    surface) are NOT restarts — this counter only moves for crashes. */
+export type TelegramConnectorRestarts = {
+  last24h: number;
+  lastAt: string | null;
+};
+
 export type TelegramStatusPayload = {
   phase: TelegramPhase;
   login: TelegramLoginView | null;
@@ -64,6 +77,8 @@ export type TelegramStatusPayload = {
   /** Whether host API credentials (env or telegram.json) exist. A boolean
       only — the values themselves never cross this boundary (#1070). */
   credentialsConfigured: boolean;
+  /** Crash-restart history of the shared connector (#1087). */
+  connectorRestarts: TelegramConnectorRestarts;
 };
 
 export const NONTERMINAL_TELEGRAM_LOGIN_PHASES: ReadonlySet<TelegramPhase> = new Set([

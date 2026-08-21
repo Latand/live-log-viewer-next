@@ -14,6 +14,7 @@ function stateFor(status: Partial<TelegramStatusPayload>, failure: { code: strin
       identity: null,
       credentialRef: null,
       credentialsConfigured: true,
+      connectorRestarts: { last24h: 0, lastAt: null },
       lastHealthCheckAt: null,
       error: null,
       ...status,

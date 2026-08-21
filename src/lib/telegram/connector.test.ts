@@ -12,8 +12,18 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_TELEGRAM_API_ID = "12345";
 process.env.LLV_TELEGRAM_API_HASH = "0123456789abcdef0123456789abcdef";
 
-const { TELEGRAM_READ_TOOL_ALLOWLIST, connectorServerName, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
+const {
+  TELEGRAM_READ_TOOL_ALLOWLIST,
+  connectorServerName,
+  ensureTelegramConnector,
+  readTelegramConnectorCrashes,
+  stopTelegramConnector,
+  telegramConnectorActivity,
+  telegramConnectorHealth,
+  verifyReadOnlyTools,
+} = await import("./connector");
 const { telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
+const { readTelegramSession, saveTelegramSession } = await import("./sessionStore");
 
 import type { ConnectorProbe, TelegramConnectorPorts } from "./connector";
 
@@ -388,3 +398,254 @@ test("stop waits through SIGKILL escalation until a TERM-resistant connector exi
     }
   }
 }, 5_000);
+
+/* ----------------------------------------------------------------- #1087
+   Crash visibility. Before this, the connector's stderr went to /dev/null and
+   an exit left no record at all: the operator saw "connected" throughout a
+   ~20 s outage. These tests use a REAL child process (a node script standing
+   in for the packaged python server) so the exit code, the signal and the
+   stderr tail are the ones the kernel actually delivered.
+   --------------------------------------------------------------------- */
+
+function connectorScript(name: string, body: string[]): string {
+  const script = path.join(SANDBOX, `${name}.mjs`);
+  fs.writeFileSync(script, [...body, ""].join("\n"));
+  return script;
+}
+
+/** Ports that spawn the given script for real and report readiness from a
+    marker file, so the supervisor's own process bookkeeping runs unchanged. */
+function realChildPorts(script: string, readyFile: string, overrides: Partial<TelegramConnectorPorts> = {}) {
+  const spawns: number[] = [];
+  const ports: TelegramConnectorPorts = {
+    spawn: (spec) => {
+      const child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ["ignore", "ignore", "pipe"] });
+      /* The real port writes stderr into the owner-only sink; here the test
+         owns the pipe and forwards it to the same file the supervisor reads. */
+      const sink = fs.openSync(path.join(process.env.LLV_STATE_DIR!, "telegram", "connector-stderr.log"), "w", 0o600);
+      child.stderr?.on("data", (chunk: Buffer) => { try { fs.writeSync(sink, chunk); } catch { /* closed */ } });
+      if (child.pid) spawns.push(child.pid);
+      return {
+        pid: child.pid,
+        kill: (signal) => child.kill(signal),
+        onExit: (handler) => { child.once("exit", (code, signal) => handler(code, signal)); },
+      };
+    },
+    probe: async (_url, connectorToken) => {
+      const deadline = Date.now() + 3_000;
+      while (!fs.existsSync(readyFile) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+      return fs.existsSync(readyFile) ? { ...READ_ONLY, serverName: connectorServerName(connectorToken) } : { ok: false };
+    },
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    now: () => Date.now(),
+    ownsProcess: () => false,
+    restartDelayMs: 10,
+    ...overrides,
+  };
+  process.env.LLV_TELEGRAM_PYTHON = process.execPath;
+  process.env.LLV_TELEGRAM_SERVER_BRIDGE = script;
+  return { ports, spawns };
+}
+
+async function until(condition: () => boolean, timeoutMs = 4_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+test("a connector that dies on its own is recorded: exit code, and the stderr nobody could read before", async () => {
+  const readyFile = path.join(SANDBOX, "crash-ready");
+  fs.rmSync(readyFile, { force: true });
+  const script = connectorScript("crashing-connector", [
+    "import fs from 'node:fs';",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    "console.error('Telegram client(s) started (default). Running MCP server (http)...');",
+    "console.error('Error starting client: session lock refused');",
+    "setTimeout(() => process.exit(7), 40);",
+  ]);
+  const { ports, spawns } = realChildPorts(script, readyFile);
+  try {
+    expect((await ensureTelegramConnector(CONNECTOR_SESSION, ports)).ok).toBe(true);
+    await until(() => readTelegramConnectorCrashes().length > 0);
+    const crashes = readTelegramConnectorCrashes();
+    expect(crashes).toHaveLength(1);
+    expect(crashes[0]!.pid).toBe(spawns[0]!);
+    expect(crashes[0]!.exitCode).toBe(7);
+    expect(crashes[0]!.signal).toBeNull();
+    expect(crashes[0]!.stderr).toContain("Error starting client: session lock refused");
+    expect(Date.parse(crashes[0]!.at)).toBeGreaterThan(0);
+    /* No stored session to restart for: the crash is still recorded, and a
+       restart that never happened is not counted. */
+    expect(telegramConnectorActivity().last24h).toBe(0);
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+  }
+}, 10_000);
+
+test("the crash log and the restart counter are owner-only files under the telegram state dir", async () => {
+  const readyFile = path.join(SANDBOX, "modes-ready");
+  fs.rmSync(readyFile, { force: true });
+  const script = connectorScript("mode-connector", [
+    "import fs from 'node:fs';",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    "console.error('boom');",
+    "setTimeout(() => process.exit(3), 30);",
+  ]);
+  const { ports } = realChildPorts(script, readyFile);
+  try {
+    await ensureTelegramConnector(CONNECTOR_SESSION, ports);
+    await until(() => readTelegramConnectorCrashes().length > 0);
+    for (const file of ["connector-crashes.log", "connector-stderr.log"]) {
+      const stat = fs.lstatSync(path.join(process.env.LLV_STATE_DIR!, "telegram", file));
+      expect(stat.isFile()).toBe(true);
+      expect(stat.mode & 0o077).toBe(0);
+    }
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+  }
+}, 10_000);
+
+test("a crash restarts the connector for the SAME stored credential, and the restart is counted", async () => {
+  const readyFile = path.join(SANDBOX, "restart-ready");
+  const crashOnce = path.join(SANDBOX, "restart-crashed-once");
+  fs.rmSync(readyFile, { force: true });
+  fs.rmSync(crashOnce, { force: true });
+  const script = connectorScript("restarting-connector", [
+    "import fs from 'node:fs';",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    `if (!fs.existsSync(${JSON.stringify(crashOnce)})) {`,
+    `  fs.writeFileSync(${JSON.stringify(crashOnce)}, '1');`,
+    "  console.error('first process dies');",
+    "  setTimeout(() => process.exit(1), 30);",
+    "} else {",
+    "  setInterval(() => undefined, 1000);",
+    "}",
+  ]);
+  const { ports, spawns } = realChildPorts(script, readyFile);
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const stored = readTelegramSession()!;
+  try {
+    expect((await ensureTelegramConnector(stored, ports)).ok).toBe(true);
+    await until(() => spawns.length === 2);
+    expect(spawns).toHaveLength(2);
+    expect(spawns[1]).not.toBe(spawns[0]);
+    await until(() => telegramConnectorActivity().restarting === false);
+    const activity = telegramConnectorActivity();
+    expect(activity.last24h).toBe(1);
+    expect(Date.parse(activity.lastAt!)).toBeGreaterThan(0);
+    expect(readTelegramConnectorCrashes()).toHaveLength(1);
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+    await stopTelegramConnector();
+    for (const pid of spawns) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  }
+}, 15_000);
+
+test("a connector this Viewer stopped on purpose is not a crash and is not restarted", async () => {
+  const readyFile = path.join(SANDBOX, "stopped-ready");
+  fs.rmSync(readyFile, { force: true });
+  const script = connectorScript("stopped-connector", [
+    "import fs from 'node:fs';",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    "setInterval(() => undefined, 1000);",
+  ]);
+  const { ports, spawns } = realChildPorts(script, readyFile);
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  try {
+    expect((await ensureTelegramConnector(readTelegramSession()!, ports)).ok).toBe(true);
+    await stopTelegramConnector();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(readTelegramConnectorCrashes()).toHaveLength(0);
+    expect(telegramConnectorActivity().last24h).toBe(0);
+    expect(spawns).toHaveLength(1);
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+    for (const pid of spawns) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  }
+}, 10_000);
+
+test("a connector that cannot stay up stops being restarted after the burst limit", async () => {
+  const readyFile = path.join(SANDBOX, "burst-ready");
+  fs.rmSync(readyFile, { force: true });
+  /* Five restarts already inside the burst window: the sixth crash records
+     but must not spawn again. */
+  const now = Date.now();
+  fs.writeFileSync(
+    path.join(process.env.LLV_STATE_DIR!, "telegram", "connector-restarts.json"),
+    JSON.stringify({
+      version: 1,
+      restarts: Array.from({ length: 5 }, (_, index) => new Date(now - index * 1_000).toISOString()),
+      lastCrashAt: new Date(now).toISOString(),
+    }),
+    { mode: 0o600 },
+  );
+  const script = connectorScript("burst-connector", [
+    "import fs from 'node:fs';",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    "console.error('crash loop');",
+    "setTimeout(() => process.exit(1), 30);",
+  ]);
+  const { ports, spawns } = realChildPorts(script, readyFile);
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  try {
+    await ensureTelegramConnector(readTelegramSession()!, ports);
+    await until(() => readTelegramConnectorCrashes().length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(spawns).toHaveLength(1);
+    expect(telegramConnectorActivity().last24h).toBe(5);
+    expect(telegramConnectorActivity().restarting).toBe(false);
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+  }
+}, 10_000);
+
+test("health comes from the RUNNING connector, so a healthy account costs no teardown", async () => {
+  const calls = { stops: 0, tools: [] as string[] };
+  const health = await telegramConnectorHealth(CONNECTOR_SESSION, {
+    spawn: () => null,
+    probe: async () => READ_ONLY,
+    sleep: async () => {},
+    now: () => 0,
+    ownsProcess: () => true,
+    stop: () => { calls.stops += 1; },
+    callTool: async (_url, _token, tool) => {
+      calls.tools.push(tool);
+      /* The vendored get_me shape; the phone field it can carry must not
+         travel any further than this parse. */
+      return JSON.stringify({ id: 777, name: "Account A", type: "user", username: "account_a", phone: "0000000000" });
+    },
+  });
+  expect(health).toEqual({ status: "connected", identity: { name: "Account A", username: "account_a" } });
+  expect(JSON.stringify(health)).not.toContain("0000000000");
+  expect(calls.tools).toEqual(["get_me"]);
+  expect(calls.stops).toBe(0);
+});
+
+test("a connector that cannot prove the account is no health verdict at all", async () => {
+  const base: TelegramConnectorPorts = {
+    spawn: () => null,
+    probe: async () => READ_ONLY,
+    sleep: async () => {},
+    now: () => 0,
+    ownsProcess: () => true,
+    callTool: async () => "An error occurred (code: GEN-ERR-001). Check mcp_errors.log for details.",
+  };
+  /* A tool error, a dead call, and a connector that is not ours all mean the
+     same thing: fall back to the bridge check, never guess. */
+  expect(await telegramConnectorHealth(CONNECTOR_SESSION, base)).toBeNull();
+  expect(await telegramConnectorHealth(CONNECTOR_SESSION, { ...base, callTool: async () => null })).toBeNull();
+  expect(await telegramConnectorHealth(CONNECTOR_SESSION, { ...base, ownsProcess: () => false })).toBeNull();
+  expect(await telegramConnectorHealth(CONNECTOR_SESSION, { ...base, probe: async () => ({ ok: false }) })).toBeNull();
+  /* A connector that accepts the call and then answers nothing must not hold
+     the lifecycle queue open: the health call is bounded like the probe. */
+  const hung = await telegramConnectorHealth(CONNECTOR_SESSION, {
+    ...base,
+    probeTimeoutMs: 20,
+    callTool: () => new Promise<string | null>(() => {}),
+  });
+  expect(hung).toBeNull();
+}, 2_000);

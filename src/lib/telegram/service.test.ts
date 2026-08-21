@@ -701,3 +701,121 @@ test("retry authorization cannot overwrite a preserved unsafe session", async ()
   expect(fs.readFileSync(telegramSessionPath())).toEqual(before);
   expect(fs.existsSync(path.join(path.dirname(telegramSessionPath()), "connector-token"))).toBe(false);
 });
+
+/* ----------------------------------------------------------------- #1087 */
+
+test("health from the running connector never stops it — the read burst survives", async () => {
+  const adapter = new FakeAdapter();
+  const calls = { stop: 0, connectorHealth: 0, ensure: 0, bridge: 0 };
+  adapter.checkSession = async () => {
+    calls.bridge += 1;
+    return { status: "connected", identity: { name: "Account A", username: "account_a" } };
+  };
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => { calls.ensure += 1; return { ok: true, url: "http://127.0.0.1:8809/mcp" }; },
+    stopConnector: () => { calls.stop += 1; },
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
+    connectorHealth: async () => {
+      calls.connectorHealth += 1;
+      return { status: "connected", identity: { name: "Account A", username: "account_a" } };
+    },
+  });
+
+  const status = await service.checkHealth();
+  expect(status.phase).toBe("connected");
+  expect(status.identity?.username).toBe("account_a");
+  expect(calls.connectorHealth).toBe(1);
+  /* The teardown that used to kill every in-flight agent call never happens,
+     and the bridge is not spawned at all. */
+  expect(calls.stop).toBe(0);
+  expect(calls.bridge).toBe(0);
+  expect(calls.ensure).toBe(1);
+});
+
+test("a connector that cannot answer falls back to the destructive bridge check", async () => {
+  const adapter = new FakeAdapter();
+  const order: string[] = [];
+  adapter.checkSession = async () => {
+    order.push("bridge");
+    return { status: "connected", identity: { name: "Account A", username: null } };
+  };
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => { order.push("ensure"); return { ok: true, url: "http://127.0.0.1:8809/mcp" }; },
+    stopConnector: () => { order.push("stop"); },
+    registerHosts: () => { order.push("register"); return HOSTS_REGISTERED; },
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
+    connectorHealth: async () => { order.push("connector"); return null; },
+  });
+
+  expect((await service.checkHealth()).phase).toBe("connected");
+  expect(order).toEqual(["connector", "stop", "bridge", "ensure", "register"]);
+});
+
+test("a connected account whose connector is coming back reads as restarting, with the 24 h count", () => {
+  const adapter = new FakeAdapter();
+  let restarting = true;
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    stopConnector: () => {},
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
+    connectorRestarts: () => ({ restarting, last24h: 3, lastAt: "2026-08-20T11:59:00.000Z" }),
+  });
+  writeTelegramConnection({
+    version: 1,
+    status: "connected",
+    credentialRef: "credential-generation-a",
+    identity: { name: "Account A", username: "account_a" },
+    lastHealthCheckAt: "2026-08-20T11:58:00.000Z",
+    errorCode: null,
+  });
+
+  const restartingStatus = service.status();
+  expect(restartingStatus.phase).toBe("restarting");
+  expect(restartingStatus.identity?.username).toBe("account_a");
+  expect(restartingStatus.connectorRestarts).toEqual({ last24h: 3, lastAt: "2026-08-20T11:59:00.000Z" });
+  /* Transient: once the replacement is verified, the phase is connected again
+     while the counter keeps the history. */
+  restarting = false;
+  const settled = service.status();
+  expect(settled.phase).toBe("connected");
+  expect(settled.connectorRestarts.last24h).toBe(3);
+});
+
+test("restart counts never mask a real phase: an errored connection stays an error", () => {
+  const adapter = new FakeAdapter();
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    stopConnector: () => {},
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
+    connectorRestarts: () => ({ restarting: true, last24h: 1, lastAt: "2026-08-20T11:59:00.000Z" }),
+  });
+  writeTelegramConnection({
+    version: 1,
+    status: "error",
+    credentialRef: "credential-generation-a",
+    identity: null,
+    lastHealthCheckAt: null,
+    errorCode: "connector_failed",
+  });
+  const status = service.status();
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("connector_failed");
+  expect(status.connectorRestarts.last24h).toBe(1);
+});

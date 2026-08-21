@@ -427,3 +427,91 @@ test("API credentials come from host configuration, not hardcoded values", () =>
     if (oldConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = oldConfig;
   }
 });
+
+test("a stop names itself: requests during the drain, and a response the stop cut short, carry the restart error (#1087)", () => {
+  const python = Bun.which("python3");
+  expect(python).not.toBeNull();
+  const fakeVendor = path.join(SANDBOX, "drain-wrapper-vendor");
+  for (const directory of ["mcp/server", "telegram_mcp"]) {
+    fs.mkdirSync(path.join(fakeVendor, directory), { recursive: true });
+    fs.writeFileSync(path.join(fakeVendor, directory, "__init__.py"), "");
+  }
+  fs.writeFileSync(path.join(fakeVendor, "mcp", "__init__.py"), "");
+  /* A stand-in MCP app that starts an event-stream response and then returns
+     without finishing it — exactly what the vendored server does when the
+     supervisor's SIGTERM cancels the session task mid tool call. */
+  fs.writeFileSync(path.join(fakeVendor, "mcp", "server", "fastmcp.py"), [
+    "class _Server:",
+    "    name = 'telegram'",
+    "class FastMCP:",
+    "    def __init__(self): self._mcp_server = _Server()",
+    "    def streamable_http_app(self):",
+    "        async def app(scope, receive, send):",
+    "            await receive()",
+    "            await send({'type': 'http.response.start', 'status': 200,",
+    "                        'headers': [(b'content-type', b'text/event-stream')]})",
+    "            await send({'type': 'http.response.body', 'body': b'', 'more_body': True})",
+    "        return app",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(fakeVendor, "telegram_mcp", "runtime.py"), [
+    "from mcp.server.fastmcp import FastMCP",
+    "mcp = FastMCP()",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(fakeVendor, "telegram_mcp", "runner.py"), [
+    "import asyncio, json, os",
+    "import __main__",
+    "from telegram_mcp.runtime import mcp",
+    "async def request(body):",
+    "    statuses, headers, chunks = [], [], []",
+    "    sent = {'done': False}",
+    "    async def receive(): return {'type': 'http.request', 'body': body, 'more_body': False}",
+    "    async def send(message):",
+    "        if message['type'] == 'http.response.start':",
+    "            statuses.append(message['status'])",
+    "            headers.extend(message.get('headers', []))",
+    "        if message['type'] == 'http.response.body': chunks.append(message.get('body', b''))",
+    "    token = os.environ['LLV_TELEGRAM_MCP_TOKEN'].encode()",
+    "    scope = {'type': 'http', 'path': '/mcp', 'method': 'POST',",
+    "             'headers': [(b'authorization', b'Bearer ' + token)]}",
+    "    await mcp.streamable_http_app()(scope, receive, send)",
+    "    return {'status': statuses[0], 'restart_header': any(k == b'x-llv-telegram-restarting' for k, _ in headers),",
+    "            'body': b''.join(chunks).decode()}",
+    "def main():",
+    "    call = json.dumps({'jsonrpc': '2.0', 'id': 42, 'method': 'tools/call'}).encode()",
+    "    cut_short = asyncio.run(request(call))",
+    "    __main__._begin_drain()",
+    "    draining = asyncio.run(request(call))",
+    "    print(json.dumps({'cut_short': cut_short, 'draining': draining}))",
+    "",
+  ].join("\n"));
+
+  const connectorToken = "D".repeat(43);
+  const result = Bun.spawnSync({
+    cmd: [python!, path.resolve(import.meta.dir, "..", "..", "..", "bin", "telegram-mcp-server.py")],
+    env: { ...process.env, LLV_TELEGRAM_VENDOR_DIR: fakeVendor, LLV_TELEGRAM_MCP_TOKEN: connectorToken },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+  const output = JSON.parse(result.stdout.toString()) as {
+    cut_short: { status: number; body: string };
+    draining: { status: number; restart_header: boolean; body: string };
+  };
+
+  /* The dropped in-flight call gets a JSON-RPC error addressed to its own
+     request id, instead of a stream that just stops. */
+  expect(output.cut_short.status).toBe(200);
+  expect(output.cut_short.body).toContain("event: message");
+  const frame = JSON.parse(output.cut_short.body.split("data: ")[1]!) as { id: number; error: { code: number; message: string } };
+  expect(frame.id).toBe(42);
+  expect(frame.error.code).toBe(-32001);
+  expect(frame.error.message).toContain("restarting");
+
+  /* A call that arrives after the signal is refused with the same named
+     reason, not a bare connection reset. */
+  expect(output.draining.status).toBe(503);
+  expect(output.draining.restart_header).toBe(true);
+  expect(JSON.parse(output.draining.body).error.code).toBe(-32001);
+});

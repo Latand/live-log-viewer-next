@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 
-import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentEvent, type TelegramEnrollmentHandle } from "./adapter";
-import { ensureTelegramConnector, stopTelegramConnector, type ConnectorEnsureResult } from "./connector";
-import type { TelegramErrorCode, TelegramIdentity, TelegramStatusPayload } from "./contracts";
+import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentEvent, type TelegramEnrollmentHandle, type TelegramHealthResult } from "./adapter";
+import { ensureTelegramConnector, stopTelegramConnector, telegramConnectorActivity, telegramConnectorHealth, type ConnectorEnsureResult } from "./connector";
+import type { TelegramConnectorRestarts, TelegramErrorCode, TelegramIdentity, TelegramStatusPayload } from "./contracts";
 import { registerTelegramHosts, unregisterTelegramHosts, type TelegramHostRegistrationResult } from "./hostRegistration";
 import { telegramApiCredentials } from "./packaging";
 import {
@@ -38,6 +38,12 @@ export interface TelegramServicePorts {
   /** Whether host API credentials exist (env or telegram.json) — surfaced to
       the browser as a boolean only (#1070). */
   credentialsConfigured(): boolean;
+  /** Health from the RUNNING connector, without stopping it (#1087). `null`
+      means it could not answer and the destructive bridge check has to run.
+      Absent in tests that only exercise the bridge path. */
+  connectorHealth?(session: StoredTelegramSession): Promise<TelegramHealthResult | null>;
+  /** Crash restarts of the shared connector, for the status payload (#1087). */
+  connectorRestarts?(): TelegramConnectorRestarts & { restarting: boolean };
 }
 
 const productionPorts: TelegramServicePorts = {
@@ -48,6 +54,8 @@ const productionPorts: TelegramServicePorts = {
   unregisterHosts: () => unregisterTelegramHosts(),
   now: Date.now,
   credentialsConfigured: () => telegramApiCredentials() !== null,
+  connectorHealth: (session) => telegramConnectorHealth(session),
+  connectorRestarts: () => telegramConnectorActivity(),
 };
 
 type LiveLogin = {
@@ -126,6 +134,7 @@ export class TelegramConnectionService {
 
   status(): TelegramStatusPayload {
     if (this.login) {
+      const restarts = this.connectorRestarts();
       return {
         phase: this.login.phase,
         login: {
@@ -138,6 +147,7 @@ export class TelegramConnectionService {
         lastHealthCheckAt: null,
         error: null,
         credentialsConfigured: this.ports.credentialsConfigured(),
+        connectorRestarts: { last24h: restarts.last24h, lastAt: restarts.lastAt },
       };
     }
     let connection: StoredTelegramConnection;
@@ -150,15 +160,28 @@ export class TelegramConnectionService {
     return this.payloadFor(connection);
   }
 
+  private connectorRestarts(): TelegramConnectorRestarts & { restarting: boolean } {
+    try {
+      return this.ports.connectorRestarts?.() ?? { restarting: false, last24h: 0, lastAt: null };
+    } catch {
+      return { restarting: false, last24h: 0, lastAt: null };
+    }
+  }
+
   private payloadFor(connection: StoredTelegramConnection): TelegramStatusPayload {
+    const restarts = this.connectorRestarts();
     return {
-      phase: connection.status,
+      /* A connected account whose connector is being brought back after an
+         unexpected exit is NOT serving calls; say so instead of reporting
+         connected throughout the outage (#1087). */
+      phase: connection.status === "connected" && restarts.restarting ? "restarting" : connection.status,
       login: null,
       identity: connection.identity,
       credentialRef: connection.credentialRef,
       lastHealthCheckAt: connection.lastHealthCheckAt,
       error: connection.status === "error" && connection.errorCode ? { code: connection.errorCode } : null,
       credentialsConfigured: this.ports.credentialsConfigured(),
+      connectorRestarts: { last24h: restarts.last24h, lastAt: restarts.lastAt },
     };
   }
 
@@ -414,15 +437,28 @@ export class TelegramConnectionService {
       }
       return;
     }
-    /* The bridge uses the same StringSession as the shared connector. Release
-       the long-lived owner before the short health client acquires the
-       vendored per-session lock and connects. */
-    try { await this.ports.stopConnector(); }
-    catch {
-      this.recordError("connector_failed");
-      return;
+    /* #1087: ask the RUNNING connector first. It answers from the live
+       Telethon client it already owns, so a healthy account no longer costs a
+       teardown — which used to kill every in-flight agent read (a panel open
+       during a fan-out of large `get_messages` calls took the connector down
+       for ~20 s and still reported connected). */
+    let result: TelegramHealthResult | null = null;
+    try { result = (await this.ports.connectorHealth?.(session)) ?? null; }
+    catch { result = null; }
+    if (!this.lifecycleIsCurrent(generation)) return;
+    if (result === null) {
+      /* The connector cannot answer, so it is not serving anyone either: the
+         bridge check may now take the session. The bridge uses the same
+         StringSession as the shared connector — release the long-lived owner
+         before the short health client acquires the vendored per-session lock
+         and connects. */
+      try { await this.ports.stopConnector(); }
+      catch {
+        this.recordError("connector_failed");
+        return;
+      }
+      result = await this.ports.adapter.checkSession(session.sessionString);
     }
-    const result = await this.ports.adapter.checkSession(session.sessionString);
     if (!this.lifecycleIsCurrent(generation)) return;
     const checkedAt = new Date(this.ports.now()).toISOString();
     if (result.status === "connected") {

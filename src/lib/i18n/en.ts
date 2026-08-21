@@ -701,6 +701,7 @@ export const en = {
   "telegram.status.awaiting_password": "Password needed",
   "telegram.status.verifying": "Verifying…",
   "telegram.status.connected": "Connected",
+  "telegram.status.restarting": "Connector restarting…",
   "telegram.status.expired": "Session expired",
   "telegram.status.error": "Error",
   "telegram.connect": "Connect Telegram",
