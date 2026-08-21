@@ -221,6 +221,10 @@ COPY --from=build /app/next.config.ts ./next.config.ts
 COPY --from=build /app/tsconfig.json ./tsconfig.json
 COPY --from=build /app/src ./src
 COPY --from=build /app/scripts/whisper_transcribe.py ./scripts/whisper_transcribe.py
+# The pinned Telegram connector (#1059) is resolved at runtime from
+# /app/vendor — without this line the image ships without it and sign-in
+# dies with start_failed (#1081).
+COPY --from=build /app/vendor ./vendor
 COPY --from=build /app/scripts/runtime-host-viewer-adapter.ts ./scripts/runtime-host-viewer-adapter.ts
 COPY --from=build /app/node_modules ./node_modules
 
