@@ -61,6 +61,9 @@ export type TelegramStatusPayload = {
   credentialRef: string | null;
   lastHealthCheckAt: string | null;
   error: { code: TelegramErrorCode } | null;
+  /** Whether host API credentials (env or telegram.json) exist. A boolean
+      only — the values themselves never cross this boundary (#1070). */
+  credentialsConfigured: boolean;
 };
 
 export const NONTERMINAL_TELEGRAM_LOGIN_PHASES: ReadonlySet<TelegramPhase> = new Set([

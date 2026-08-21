@@ -50,8 +50,18 @@ export function telegramErrKey(code: TelegramErrorCode): Parameters<TFunction>[0
     their message; everything else gets the actionable generic. */
 function failureKey(code: string): Parameters<TFunction>[0] {
   if (code === "login_busy") return "telegram.err.login_busy";
+  if (code === "invalid_credentials") return "telegram.credentialsInvalid";
   if (code === "transport") return "telegram.actionUnreachable";
   return "telegram.actionFailed";
+}
+
+/** #1070: the panel asks for api_id/api_hash inline instead of dead-ending
+    when the host has no credentials. Shown before the Connect flow, and on
+    the credentials_missing error a failed start produced. */
+export function telegramNeedsCredentials(status: TelegramStatusPayload | null): boolean {
+  if (!status || status.credentialsConfigured) return false;
+  return status.phase === "disconnected"
+    || (status.phase === "error" && status.error?.code === "credentials_missing");
 }
 
 function phaseColor(phase: TelegramPhase): string {
@@ -190,6 +200,9 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
   const phase = status?.phase ?? "disconnected";
   const closeRef = useRef<HTMLButtonElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
+  const apiIdRef = useRef<HTMLInputElement>(null);
+  const apiHashRef = useRef<HTMLInputElement>(null);
+  const needsCredentials = telegramNeedsCredentials(status);
   useEffect(() => {
     closeRef.current?.focus();
   }, []);
@@ -270,7 +283,51 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
             </p>
           ) : null}
 
-          {phase === "disconnected" ? (
+          {needsCredentials ? (
+            <>
+              <p className="text-[10.5px] leading-snug text-muted">{t("telegram.credentialsHint")}</p>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const apiId = apiIdRef.current?.value.trim() ?? "";
+                  const apiHash = apiHashRef.current?.value.trim() ?? "";
+                  if (busy || apiId === "" || apiHash === "") return;
+                  void state.saveCredentials(apiId, apiHash);
+                }}
+                className="flex flex-col gap-1.5"
+              >
+                <input
+                  ref={apiIdRef}
+                  type="text"
+                  required
+                  inputMode="numeric"
+                  autoComplete="off"
+                  aria-label={t("telegram.credentialsIdLabel")}
+                  placeholder={t("telegram.credentialsIdLabel")}
+                  className="h-11 min-w-0 rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
+                />
+                <input
+                  ref={apiHashRef}
+                  type="password"
+                  required
+                  autoComplete="off"
+                  aria-label={t("telegram.credentialsHashLabel")}
+                  placeholder={t("telegram.credentialsHashLabel")}
+                  className="h-11 min-w-0 rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
+                />
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="h-11 shrink-0 rounded-[8px] border border-border bg-canvas px-2.5 text-[11px] font-semibold hover:bg-sunken disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
+                >
+                  {t("telegram.credentialsSave")}
+                </button>
+              </form>
+              <p className="text-[10px] leading-snug text-muted">{t("telegram.credentialsSource")}</p>
+            </>
+          ) : null}
+
+          {phase === "disconnected" && !needsCredentials ? (
             <>
               <p className="text-[10.5px] leading-snug text-muted">{t("telegram.connectHint")}</p>
               <ActionButton label={t("telegram.connect")} onClick={() => void state.connect()} disabled={busy} />
@@ -344,7 +401,10 @@ export function TelegramPanel({ state, onClose }: { state: TelegramConnectionSta
             </>
           ) : null}
 
-          {phase === "error" ? (
+          {/* #1070: while the credentials form is up, the error card and its
+              Retry would restart enrollment without credentials — the form's
+              own hint already explains the state, so they stay hidden. */}
+          {phase === "error" && !needsCredentials ? (
             <>
               <p role="alert" className="text-[10.5px] font-semibold leading-snug text-danger">
                 {t(telegramErrKey(status?.error?.code ?? "bridge_failed"))}

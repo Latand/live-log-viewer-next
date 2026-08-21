@@ -27,6 +27,9 @@ export type TelegramConnectionState = {
   failure: TelegramActionFailure | null;
   refresh(fresh?: boolean): Promise<void>;
   connect(): Promise<void>;
+  /** #1070: persist operator-entered API credentials (api_id + api_hash) into
+      the host's telegram.json, then the panel proceeds to the Connect flow. */
+  saveCredentials(apiId: string, apiHash: string): Promise<void>;
   submitPassword(password: string): Promise<void>;
   cancel(): Promise<void>;
   logout(): Promise<void>;
@@ -138,6 +141,7 @@ export function useTelegramConnection(): TelegramConnectionState {
   }, [apply, load]);
 
   const connect = useCallback(() => act({ action: "start" }), [act]);
+  const saveCredentials = useCallback((apiId: string, apiHash: string) => act({ action: "credentials", apiId, apiHash }), [act]);
   const logout = useCallback(() => act({ action: "logout" }), [act]);
   const deleteLocal = useCallback(() => act({ action: "delete" }), [act]);
 
@@ -147,6 +151,7 @@ export function useTelegramConnection(): TelegramConnectionState {
     failure,
     refresh,
     connect,
+    saveCredentials,
     logout,
     deleteLocal,
     submitPassword: (entered: string) => {

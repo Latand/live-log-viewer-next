@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -105,6 +106,42 @@ export function telegramApiCredentials(): TelegramApiCredentials | null {
     }
   } catch { /* absent or unreadable config means unconfigured */ }
   return null;
+}
+
+/** Telegram api_id values are short decimal numbers; api_hash is 32 hex chars. */
+const API_ID_SHAPE = /^\d{1,12}$/;
+const API_HASH_SHAPE = /^[0-9a-f]{32}$/i;
+
+export function validTelegramApiCredentials(apiId: unknown, apiHash: unknown): apiId is string {
+  return typeof apiId === "string" && API_ID_SHAPE.test(apiId)
+    && typeof apiHash === "string" && API_HASH_SHAPE.test(apiHash);
+}
+
+/**
+ * Persist operator-entered API credentials to the same `telegram.json` the
+ * reader above resolves (#1070). The write is atomic (temp sibling + rename)
+ * and owner-only, so a concurrent status poll never sees a torn file and no
+ * other user can read the hash. Environment variables keep precedence — this
+ * only fills the file-backed fallback. Validation failures throw before any
+ * byte is written.
+ */
+export function saveTelegramApiCredentials(apiId: string, apiHash: string): void {
+  if (!validTelegramApiCredentials(apiId, apiHash)) {
+    throw new Error("Telegram API credentials are invalid");
+  }
+  const target = configFilePath("telegram.json");
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  /* Unpredictable sibling + exclusive creation ("wx"): a pre-planted file or
+     symlink at the temp path fails the write instead of receiving the hash
+     through the default truncating open (the session store's pattern). */
+  const tmp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify({ apiId, apiHash }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    fs.renameSync(tmp, target);
+    fs.chmodSync(target, 0o600);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
 }
 
 export type ProcessSpec = { command: string; args: string[]; env: NodeJS.ProcessEnv; cwd: string };
