@@ -21,6 +21,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -134,13 +135,26 @@ export async function provisionTelegramConnector(env = process.env) {
   ownerOnlyDirectory(telegramStateDir);
 
   const uvCommand = await installPinnedUv(join(telegramStateDir, "tools"));
-  const result = spawnSync(uvCommand, ["sync", "--frozen", "--no-dev", "--project", vendorDir], {
-    cwd: vendorDir,
-    env: { ...env, UV_PROJECT_ENVIRONMENT: venvDir },
-    stdio: "inherit",
-    timeout: CONNECTOR_PROVISION_TIMEOUT_MS,
-    killSignal: "SIGKILL",
-  });
+  /* The packaged vendor tree can live on a read-only filesystem (the deploy
+     image, #1081), while setuptools writes build metadata into the project
+     directory. Sync from a writable owner-only staging copy under state, and
+     install non-editable so the venv is self-contained — nothing references
+     the staging copy or the packaged tree afterwards. */
+  const stagingDir = join(telegramStateDir, `vendor-src-${process.pid}-${randomUUID()}`);
+  let result;
+  try {
+    cpSync(vendorDir, stagingDir, { recursive: true });
+    chmodSync(stagingDir, 0o700);
+    result = spawnSync(uvCommand, ["sync", "--frozen", "--no-dev", "--no-editable", "--project", stagingDir], {
+      cwd: stagingDir,
+      env: { ...env, UV_PROJECT_ENVIRONMENT: venvDir },
+      stdio: "inherit",
+      timeout: CONNECTOR_PROVISION_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    });
+  } finally {
+    rmSync(stagingDir, { recursive: true, force: true });
+  }
   if (result.error || result.status !== 0) throw new Error("connector dependency provisioning failed");
   if (!existsSync(venvPython)) throw new Error("provisioning completed without a Python executable");
 }

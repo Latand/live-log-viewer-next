@@ -223,13 +223,15 @@ test("the published tarball carries and runs the connector provisioner", async (
   expect(fs.existsSync(path.join(installedState, "telegram", "venv", "bin", "python"))).toBe(true);
   expect(fs.statSync(path.join(installedState, "telegram")).mode & 0o777).toBe(0o700);
   const uvArgs = fs.readFileSync(path.join(installedState, "telegram", "venv", "uv-args.txt"), "utf8").split("\n").filter(Boolean);
-  expect(uvArgs).toEqual([
-    "sync",
-    "--frozen",
-    "--no-dev",
-    "--project",
-    path.join(packageRoot, "vendor", "telegram-mcp"),
-  ]);
+  /* #1081: provisioning syncs a writable owner-only staging copy under state
+     (the packaged tree can be read-only), installs non-editable, and removes
+     the staging copy afterwards. */
+  expect(uvArgs.slice(0, 4)).toEqual(["sync", "--frozen", "--no-dev", "--no-editable"]);
+  expect(uvArgs[4]).toBe("--project");
+  const stagingPrefix = path.join(installedState, "telegram", "vendor-src-");
+  expect(uvArgs[5]?.startsWith(stagingPrefix)).toBe(true);
+  const leftovers = fs.readdirSync(path.join(installedState, "telegram")).filter((name) => name.startsWith("vendor-src-"));
+  expect(leftovers).toEqual([]);
 
   const previousState = process.env.LLV_STATE_DIR;
   process.env.LLV_STATE_DIR = installedState;
