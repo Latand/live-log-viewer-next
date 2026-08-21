@@ -86,7 +86,10 @@ export function useTelegramReports(active: boolean): TelegramReportsState {
     };
   }, [active, load]);
 
-  const act = useCallback(async (body: Record<string, unknown>) => {
+  /* Returns the OUTCOME, not just the body: an action that only knows the
+     payload cannot tell a rejected save from an accepted one, and would report
+     success the server never gave. */
+  const act = useCallback(async (body: Record<string, unknown>): Promise<{ ok: boolean; json: Record<string, unknown> }> => {
     sequence.current += 1;
     setBusy(true);
     setFailure(null);
@@ -99,11 +102,11 @@ export function useTelegramReports(active: boolean): TelegramReportsState {
       sequence.current += 1;
       if (json.reports) setReports(json.reports as TelegramReportsPayload);
       if (!ok) setFailure({ code: codeOf(json) });
-      return json;
+      return { ok, json };
     } catch {
       sequence.current += 1;
       setFailure({ code: "transport" });
-      return {};
+      return { ok: false, json: {} };
     } finally {
       setBusy(false);
     }
@@ -132,16 +135,23 @@ export function useTelegramReports(active: boolean): TelegramReportsState {
         setBusy(false);
       }
     },
+    /* A save the server accepted closes the editor, and that return to the
+       settings view — where the prompt row now reads "edited by you" or "default
+       template" from the payload the save just returned — is the acknowledgement.
+       A save it REJECTED keeps the editor open with the operator's text still in
+       the textarea and the failure banner above it, so the next run can never
+       quietly use the old brief. Reopening the editor re-reads the stored text,
+       which is what makes a server-side truncation visible. */
     savePrompt: async (next) => {
       const current = reports?.settings;
       if (!current) return;
-      await act({ action: "settings", settings: current, prompt: next });
-      setPrompt((held) => (held ? { ...held, prompt: next.trim() || held.defaultPrompt } : held));
+      const { ok } = await act({ action: "settings", settings: current, prompt: next });
+      if (ok) setPrompt(null);
     },
     closePrompt: () => setPrompt(null),
     runNow: async () => { await act({ action: "run-now" }); },
     loadGroups: async () => {
-      const json = await act({ action: "groups" });
+      const { json } = await act({ action: "groups" });
       if (Array.isArray(json.groups)) setGroups(json.groups as { id: string; title: string }[]);
     },
     openReportById: async (id) => {

@@ -765,6 +765,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "telegram.report.nextRun": "Далі {time}, {date}",
   "telegram.report.noRuns": "Запусків ще не було.",
   "telegram.report.open": "Відкрити",
+  "telegram.report.openRun": "Запуск",
+  "telegram.report.openRunTitle": "Відкрити цей запуск на дошці",
   "telegram.report.promptTitle": "Промпт звіту",
   "telegram.report.promptHint": "Ваше завдання для агента звіту: мова, рядок з тегом, розділи, для якого репозиторію пропонувати issues, тон. Редагуйте тут — без релізу.",
   "telegram.report.promptPreamble": "Viewer завжди додає перед вашим текстом вікно, вибрані джерела, шлях виводу та правила послідовного читання. Підключений акаунт він перевіряє сам, перед запуском.",

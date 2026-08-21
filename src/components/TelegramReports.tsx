@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 
+import { mdBlocks } from "@/components/feed/markdown";
 import type { TelegramReportsState } from "@/hooks/useTelegramReports";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import {
@@ -38,6 +39,19 @@ function ReportButton({ label, onClick, disabled, tone }: { label: string; onCli
     <button type="button" onClick={onClick} disabled={disabled} className={reportButtonClass(tone)}>
       {label}
     </button>
+  );
+}
+
+/** The section's one failure banner. Every view renders it, so an action that
+    failed is announced wherever the operator was standing when they took it —
+    a save rejected in the prompt editor used to leave that view silent. */
+function FailureNote({ state }: { state: TelegramReportsState }) {
+  const { t } = useLocale();
+  if (!state.failure) return null;
+  return (
+    <p role="alert" className="rounded-[6px] bg-danger-soft px-2 py-1 text-[10.5px] font-semibold leading-snug text-danger">
+      {t(reportErrorKey(state.failure.code))}
+    </p>
   );
 }
 
@@ -93,20 +107,35 @@ function windowLabel(row: { windowStart: string; windowEnd: string }): string {
   return `${hours} h`;
 }
 
-function HistoryRow({ row, onOpen, busy }: { row: TelegramReportRow; onOpen: (id: string) => void; busy: boolean }) {
+function HistoryRow({ row, onOpen, onLeave, busy }: { row: TelegramReportRow; onOpen: (id: string) => void; onLeave: () => void; busy: boolean }) {
   const { t } = useLocale();
   return (
-    <li className="flex flex-col gap-0.5 border-t border-border py-1.5 first:border-t-0">
+    <li data-report-row className="flex flex-col gap-0.5 border-t border-border py-1.5 first:border-t-0">
       <div className="flex min-w-0 items-center gap-1.5">
         <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: statusColor(row.status) }} />
         <span className="shrink-0 text-[11px] font-semibold text-primary">{shortDate(row.startedAt)}</span>
         <span className="shrink-0 text-[10px] text-muted">{windowLabel(row)}</span>
         <span className="truncate text-[10px] font-semibold" style={{ color: statusColor(row.status) }}>{t(statusKey(row.status))}</span>
-        {row.hasReport ? (
-          <span className="ml-auto shrink-0">
+        <span className="ml-auto flex shrink-0 items-center gap-1">
+          {/* The run is a board conversation, so every row that has one deep-links
+              to it with the durable `#c=` form — the only route into a run that
+              is still going or that failed, where the row's one sentence is all
+              the panel can say. The panel closes behind it: on the phone it is a
+              full sheet, and the board it just navigated would stay covered. */}
+          {row.conversationId ? (
+            <a
+              href={"#c=" + encodeURIComponent(row.conversationId)}
+              onClick={onLeave}
+              title={t("telegram.report.openRunTitle")}
+              className={reportButtonClass()}
+            >
+              {t("telegram.report.openRun")}
+            </a>
+          ) : null}
+          {row.hasReport ? (
             <ReportButton label={t("telegram.report.open")} onClick={() => onOpen(row.id)} disabled={busy} />
-          </span>
-        ) : null}
+          ) : null}
+        </span>
       </div>
       {row.status === "failed" || row.status === "account-mismatch" ? (
         <p className="pl-3 text-[10px] leading-snug text-danger">
@@ -178,6 +207,7 @@ function PromptEditor({ state }: { state: TelegramReportsState }) {
         </span>
       </div>
       <p className="text-[10.5px] leading-snug text-muted">{t("telegram.report.promptHint")}</p>
+      <FailureNote state={state} />
       <textarea
         ref={field}
         defaultValue={loaded.prompt}
@@ -210,7 +240,7 @@ function PromptEditor({ state }: { state: TelegramReportsState }) {
   );
 }
 
-export function TelegramReportsSection({ state }: { state: TelegramReportsState }) {
+export function TelegramReportsSection({ state, onClose }: { state: TelegramReportsState; onClose: () => void }) {
   const { t } = useLocale();
   const [picking, setPicking] = useState(false);
   const reports = state.reports;
@@ -221,6 +251,7 @@ export function TelegramReportsSection({ state }: { state: TelegramReportsState 
     return (
       <div className="flex flex-col gap-1 border-t border-border pt-1.5">
         <span className="text-[11px] font-bold text-primary">{t("telegram.report.title")}</span>
+        <FailureNote state={state} />
         <p className="text-[10.5px] text-muted">{t("telegram.report.loading")}</p>
       </div>
     );
@@ -239,9 +270,16 @@ export function TelegramReportsSection({ state }: { state: TelegramReportsState 
             <ReportButton label={t("telegram.report.back")} onClick={state.closeReport} />
           </span>
         </div>
-        <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-[8px] bg-canvas p-2 text-[11px] leading-snug text-primary">
-          {state.openReport.text}
-        </pre>
+        <FailureNote state={state} />
+        {/* The report's own format carries a t.me link per item, so it goes
+            through the Viewer's settled prose renderer rather than a <pre>:
+            those links are how an item is opened in Telegram, and as bare text
+            the phone left only a long-press selection. The renderer keeps the
+            newlines (whitespace-pre-wrap), leaves the `#tag` first line literal
+            (a heading needs a space after the #) and never touches `[1]`. */}
+        <div className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-[8px] bg-canvas p-2 text-[11px] leading-snug text-primary">
+          {mdBlocks(state.openReport.text)}
+        </div>
       </div>
     );
   }
@@ -259,11 +297,7 @@ export function TelegramReportsSection({ state }: { state: TelegramReportsState 
         ) : null}
       </div>
 
-      {state.failure ? (
-        <p role="alert" className="rounded-[6px] bg-danger-soft px-2 py-1 text-[10.5px] font-semibold leading-snug text-danger">
-          {t(reportErrorKey(state.failure.code))}
-        </p>
-      ) : null}
+      <FailureNote state={state} />
 
       {!settings.enabled ? (
         <>
@@ -320,10 +354,16 @@ export function TelegramReportsSection({ state }: { state: TelegramReportsState 
         </>
       )}
 
+      {/* Every retained run is listed: the store keeps
+          TELEGRAM_REPORT_HISTORY_LIMIT rows AND their texts, so a list that
+          showed the newest handful left weeks of stored reports with no route
+          to them. The bounded region is the source picker's — it keeps the
+          panel's own controls (log out, delete local data) where they were
+          instead of pushing them past two months of rows. */}
       {reports && reports.history.length > 0 ? (
-        <ul className="flex flex-col">
-          {reports.history.slice(0, 8).map((row) => (
-            <HistoryRow key={row.id} row={row} onOpen={(id) => void state.openReportById(id)} busy={state.busy} />
+        <ul className="flex max-h-[220px] flex-col overflow-y-auto">
+          {reports.history.map((row) => (
+            <HistoryRow key={row.id} row={row} onOpen={(id) => void state.openReportById(id)} onLeave={onClose} busy={state.busy} />
           ))}
         </ul>
       ) : settings.enabled ? (

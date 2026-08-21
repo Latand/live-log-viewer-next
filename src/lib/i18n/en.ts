@@ -777,6 +777,8 @@ export const en = {
   "telegram.report.nextRun": "Next {time}, {date}",
   "telegram.report.noRuns": "No runs yet.",
   "telegram.report.open": "Open",
+  "telegram.report.openRun": "Run",
+  "telegram.report.openRunTitle": "Open this run on the board",
   "telegram.report.promptTitle": "Report prompt",
   "telegram.report.promptHint": "Your brief for the report agent: language, the tag line, the sections, which repository issue proposals target, tone. Edit it here — no release needed.",
   "telegram.report.promptPreamble": "The Viewer always adds the window, the selected sources, the output path and the sequential-read rules in front of your text. It verifies the connected account itself, before the run starts.",

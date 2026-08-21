@@ -423,7 +423,7 @@ export function TelegramPanel({ state, reports, onClose }: { state: TelegramConn
               history and one rendered report — and only once an account is
               actually connected, which is also the condition its telegram
               grant is tied to. */}
-          {phase === "connected" && reports ? <TelegramReportsSection state={reports} /> : null}
+          {phase === "connected" && reports ? <TelegramReportsSection state={reports} onClose={onClose} /> : null}
 
           {(phase === "connected" || phase === "expired"
             || (phase === "error" && (status?.credentialRef || status?.error?.code === "session_unsafe"))) ? (

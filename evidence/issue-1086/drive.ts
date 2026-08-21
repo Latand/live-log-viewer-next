@@ -211,6 +211,8 @@ const PROMPT_FIXTURE = [
   "Number the proposals [1], [2], [3] so I can answer \"do 2\". Full sentences, no jargon.",
 ].join("\n");
 
+/* Twelve days of runs: more than the eight the list used to slice to, so the
+   captures show every retained run reachable inside the bounded region. */
 const HISTORY: TelegramReportRow[] = [
   row({ id: "report-fixture-0001" }),
   row({ id: "report-fixture-0002", startedAt: "2100-01-01T08:00:00.000Z", finishedAt: "2100-01-01T08:02:00.000Z", status: "quiet", hasReport: false }),
@@ -222,13 +224,23 @@ const HISTORY: TelegramReportRow[] = [
     errorCode: "run_ended_without_report",
     hasReport: false,
   }),
+  ...Array.from({ length: 9 }, (_, index) => {
+    const day = 30 - index;
+    return row({
+      id: `report-fixture-01${String(index).padStart(2, "0")}`,
+      startedAt: `2099-12-${day}T08:00:00.000Z`,
+      finishedAt: `2099-12-${day}T08:05:00.000Z`,
+      windowStart: `2099-12-${day - 1}T08:00:00.000Z`,
+      windowEnd: `2099-12-${day}T08:00:00.000Z`,
+    });
+  }),
 ];
 
 interface StateSpec {
   id: string;
   reports: TelegramReportsPayload;
   /** Panel interaction to perform after opening. */
-  act?: "sources" | "open-report" | "prompt";
+  act?: "sources" | "open-report" | "prompt" | "prompt-save-rejected";
   expectText: string[];
   absentText?: string[];
 }
@@ -260,7 +272,9 @@ const STATES: StateSpec[] = [
   {
     id: "history",
     reports: { ...ENABLED, history: HISTORY },
-    expectText: ["24 h", "report", "quiet", "failed", "The run ended before it wrote a report."],
+    /* `Run` is the row's deep link into the board conversation that produced
+       it — the only route into a run that failed or is still going. */
+    expectText: ["24 h", "report", "quiet", "failed", "The run ended before it wrote a report.", "Run"],
   },
   {
     id: "running",
@@ -273,6 +287,14 @@ const STATES: StateSpec[] = [
     act: "open-report",
     expectText: ["#daily_report", "⏳ Awaiting your reply", "[1] Contact A asked", "Back"],
   },
+  {
+    id: "prompt-save-rejected",
+    reports: { ...ENABLED, settings: { ...ENABLED.settings, promptIsDefault: false }, history: [] },
+    act: "prompt-save-rejected",
+    /* A save the server refuses is announced in the editor the operator is
+       standing in, with their own text still in the textarea. */
+    expectText: ["Report prompt", "That didn't go through. Try again.", "Number the proposals"],
+  },
 ];
 
 interface Check {
@@ -283,6 +305,15 @@ interface Check {
   runNowDisabledWhileRunning: boolean | null;
   rowTapTargetPx: number;
   horizontalOverflow: boolean;
+  /** Anchors the rendered report offers for its `t.me` message links. */
+  reportMessageLinks: number;
+  /** History rows listed, against the runs the payload carries. */
+  historyRowsListed: number;
+  historyRowsInPayload: number;
+  /** Rows deep-linking to the board conversation that produced them. */
+  runDeepLinks: number;
+  /** Whether a rejected action is announced in the view it happened in. */
+  failureAnnounced: boolean;
 }
 
 async function openPanel(page: Page, viewport: "desktop" | "phone"): Promise<void> {
@@ -314,6 +345,9 @@ async function captureState(
       if (body.action === "groups") {
         return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ groups: GROUPS }) });
       }
+      if (state.act === "prompt-save-rejected") {
+        return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "rejected", code: "action_failed" }) });
+      }
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ reports: state.reports }) });
     }
     if (url.searchParams.get("prompt") === "1") {
@@ -338,11 +372,16 @@ async function captureState(
     await page.click('div[role="dialog"][aria-label="Telegram"] >> text=Load my groups');
     await page.waitForTimeout(400);
   }
-  if (state.act === "prompt") {
+  if (state.act === "prompt" || state.act === "prompt-save-rejected") {
     /* Exact text: the summary line beside the button also starts with
        "Prompt", and a substring match would grab that span. */
     await page.click('div[role="dialog"][aria-label="Telegram"] >> button >> text="Prompt"');
     await page.waitForSelector('div[role="dialog"][aria-label="Telegram"] textarea', { timeout: 10_000 });
+    await page.waitForTimeout(300);
+  }
+  if (state.act === "prompt-save-rejected") {
+    await page.click('div[role="dialog"][aria-label="Telegram"] >> text=Save prompt');
+    await page.waitForSelector('div[role="dialog"][aria-label="Telegram"] [role="alert"]', { timeout: 10_000 });
     await page.waitForTimeout(300);
   }
   if (state.act === "open-report") {
@@ -361,6 +400,10 @@ async function captureState(
       rowHeight: row ? Math.round(row.getBoundingClientRect().height) : 0,
       scrollWidth: document.documentElement.scrollWidth,
       innerWidth: window.innerWidth,
+      reportMessageLinks: dialog?.querySelectorAll('a[href^="https://t.me/"]').length ?? 0,
+      historyRows: dialog?.querySelectorAll("li[data-report-row]").length ?? 0,
+      runDeepLinks: dialog?.querySelectorAll('a[href^="#c="]').length ?? 0,
+      failureAnnounced: Boolean(dialog?.querySelector('[role="alert"]')),
     };
   });
 
@@ -379,6 +422,25 @@ async function captureState(
   if (state.id === "running" && seen.runNowDisabled !== true) {
     throw new Error(`${state.id}/${viewport}: Run now must be disabled while a run is live`);
   }
+  /* The format's `t.me` links are the route from an item into Telegram; as
+     plain text a phone had only a long-press selection. */
+  const linksInFixture = REPORT_TEXT.split("https://t.me/").length - 1;
+  if (state.act === "open-report" && seen.reportMessageLinks !== linksInFixture) {
+    throw new Error(`${state.id}/${viewport}: the report renders ${seen.reportMessageLinks} of ${linksInFixture} message links as anchors`);
+  }
+  /* Every retained run is reachable: the store keeps the whole history and
+     its texts, so a list that showed the newest handful stranded the rest. */
+  if (state.act === undefined && seen.historyRows !== state.reports.history.length) {
+    throw new Error(`${state.id}/${viewport}: ${seen.historyRows} of ${state.reports.history.length} retained runs are listed`);
+  }
+  /* Every run is a board conversation, including the ones with no report. */
+  const linkable = state.reports.history.filter((entry) => entry.conversationId !== null).length;
+  if (state.act === undefined && seen.runDeepLinks !== linkable) {
+    throw new Error(`${state.id}/${viewport}: ${seen.runDeepLinks} of ${linkable} runs deep-link to their conversation`);
+  }
+  if (state.act === "prompt-save-rejected" && !seen.failureAnnounced) {
+    throw new Error(`${state.id}/${viewport}: a rejected save left the editor silent`);
+  }
 
   const shot = path.join(OUT_DIR, `1086-${state.id}-${viewport}.png`);
   await page.screenshot({ path: shot });
@@ -396,6 +458,11 @@ async function captureState(
     runNowDisabledWhileRunning: state.id === "running" ? seen.runNowDisabled : null,
     rowTapTargetPx: seen.rowHeight,
     horizontalOverflow: seen.scrollWidth > seen.innerWidth,
+    reportMessageLinks: seen.reportMessageLinks,
+    historyRowsListed: seen.historyRows,
+    historyRowsInPayload: state.reports.history.length,
+    runDeepLinks: seen.runDeepLinks,
+    failureAnnounced: seen.failureAnnounced,
   };
 }
 
