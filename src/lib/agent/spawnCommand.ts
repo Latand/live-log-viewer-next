@@ -11,8 +11,8 @@ import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migrati
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
-import { mcpServersForSession, normalizeSpawnMcpServers } from "@/lib/agent/mcpAllowlist";
-import { normalizeSpawnPlugins, pluginAllowlistForSession, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
+import { grantedMcpServers, mcpServersForSession, normalizeSpawnMcpServers, SCHEDULED_REPORT_SESSION_CLASS, type McpSessionClass } from "@/lib/agent/mcpAllowlist";
+import { normalizeSpawnPlugins, pluginAllowlistForSession, SCHEDULED_REPORT_PLUGINS, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
 import { codexModelSupportsImages, modelFromBody, validateLaunchModel } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
@@ -60,6 +60,24 @@ export interface SpawnCommandDependencies {
   storeImages(images: readonly RuntimeImageUpload[]): StructuredImageRef[];
   adoptPipelineAttemptFromSource?: typeof adoptPipelineAttemptFromSource;
   pipelineAttemptTargetForSource?: typeof pipelineAttemptTargetForSource;
+  /**
+   * A grant the VIEWER itself elects for a launch it makes on its own timer
+   * (issue #1086), rather than one derived from the request's session origin.
+   *
+   * It is a callback so it resolves here, at admission, from durable state at
+   * the instant the grant is decided. Only an in-process caller can supply
+   * one: `/api/spawn` calls {@link executeSpawnRequest} with no dependencies,
+   * so no request body, header or query reaches this seam. `sessionClass` is
+   * checked against the classes admission accepts internally, so a future
+   * caller cannot invent one, and the servers are re-bounded by the global
+   * grantable set before use — the seam can only narrow.
+   *
+   * The class decides the launch's WHOLE capability surface: the MCP list, the
+   * plugin grant, and the durable display copy of the prompt all follow from
+   * it, so a class that states an exact surface cannot then inherit a wider one
+   * through the origin classifier.
+   */
+  internalGrant?(): { sessionClass: McpSessionClass; mcpServers: readonly string[] } | null;
 }
 
 class RuntimeImageStorageError extends Error {}
@@ -348,16 +366,31 @@ export async function executeSpawnRequest(
       parentConversationId,
       agentRole: role.value?.role ?? null,
     });
+    /* A Viewer-internal session class (#1086) REPLACES the origin defaults
+       rather than adding to them: a report run whose grant has been revoked
+       gets the baseline even though its launch would otherwise classify as an
+       operator root. Only an in-process dependency can name it, and only a
+       class listed here is honoured. */
+    const internalGrant = dependencies.internalGrant?.() ?? null;
+    const reportClassGrant = internalGrant?.sessionClass === SCHEDULED_REPORT_SESSION_CLASS
+      ? internalGrant
+      : null;
     /* An operator root carries the Computer Use grant by default; every
-       delegated launch carries none, and the request can only narrow that. */
-    const plugins = pluginAllowlistForSession({
-      engine,
-      origin: sessionOrigin,
-      requested: requestedPlugins.value,
-    });
+       delegated launch carries none, and the request can only narrow that. The
+       report class carries none either: it names an exact capability surface,
+       and a plugin is a channel outside it. */
+    const plugins = reportClassGrant
+      ? [...SCHEDULED_REPORT_PLUGINS]
+      : pluginAllowlistForSession({
+        engine,
+        origin: sessionOrigin,
+        requested: requestedPlugins.value,
+      });
     /* Same shape for MCP: a delegated launch holds the Viewer baseline whatever
        it asked for, so a granted connector cannot travel down a spawn chain. */
-    const grantedServers = mcpServersForSession({ origin: sessionOrigin, requested: requestedMcpServers });
+    const grantedServers = reportClassGrant
+      ? grantedMcpServers(reportClassGrant.mcpServers)
+      : mcpServersForSession({ origin: sessionOrigin, requested: requestedMcpServers });
     const requestDigestForAccount = (accountId: string) => spawnRequestDigest({
       engine,
       cwd,
@@ -379,7 +412,12 @@ export async function executeSpawnRequest(
     const pipelineAttemptTarget = pipelineSourceConversationId && dependencies.pipelineAttemptTargetForSource
       ? dependencies.pipelineAttemptTargetForSource(pipelineSourceConversationId)
       : null;
-    const launchDisplay = (userPrompt.trim() || images.length)
+    /* The durable display copy of the prompt is skipped for a report run
+       (#1086): its prompt carries the operator's own analyst brief, which may
+       name their private chats, and the issue's fence keeps registry rows down
+       to status, window and error code. The board card still reads its title
+       from the scanned transcript, whose first line names the run. */
+    const launchDisplay = (!reportClassGrant && (userPrompt.trim() || images.length))
       ? { ["prompt"]: userPrompt, images: images.length, echo: prompt }
       : null;
     /* Both a runnable launch and an explicit-account preflight failure reserve

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { saveTelegramApiCredentials, validTelegramApiCredentials } from "@/lib/telegram/packaging";
+import { ensureTelegramReportScheduler } from "@/lib/telegram/reportRunner";
 import { telegramService } from "@/lib/telegram/service";
 
 export const runtime = "nodejs";
@@ -24,6 +25,10 @@ function failure(status: number, code: string, message: string) {
 
 export async function GET(req: NextRequest) {
   try {
+    /* The footer row polls this route from every open Viewer, which is what
+       keeps the Daily Report scheduler (#1086) alive in this process and
+       catches up a slot that passed while it was down. */
+    ensureTelegramReportScheduler();
     const fresh = new URL(req.url).searchParams.get("fresh") === "1";
     if (fresh) {
       const rejected = rejectCrossOrigin(req);
