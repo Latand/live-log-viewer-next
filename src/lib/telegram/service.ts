@@ -4,6 +4,7 @@ import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentEv
 import { ensureTelegramConnector, stopTelegramConnector, type ConnectorEnsureResult } from "./connector";
 import type { TelegramErrorCode, TelegramIdentity, TelegramStatusPayload } from "./contracts";
 import { registerTelegramHosts, unregisterTelegramHosts, type TelegramHostRegistrationResult } from "./hostRegistration";
+import { telegramApiCredentials } from "./packaging";
 import {
   deleteTelegramSession,
   readTelegramConnection,
@@ -34,6 +35,9 @@ export interface TelegramServicePorts {
   registerHosts(): TelegramHostRegistrationResult;
   unregisterHosts(): void;
   now(): number;
+  /** Whether host API credentials exist (env or telegram.json) — surfaced to
+      the browser as a boolean only (#1070). */
+  credentialsConfigured(): boolean;
 }
 
 const productionPorts: TelegramServicePorts = {
@@ -43,6 +47,7 @@ const productionPorts: TelegramServicePorts = {
   registerHosts: () => registerTelegramHosts(),
   unregisterHosts: () => unregisterTelegramHosts(),
   now: Date.now,
+  credentialsConfigured: () => telegramApiCredentials() !== null,
 };
 
 type LiveLogin = {
@@ -132,6 +137,7 @@ export class TelegramConnectionService {
         credentialRef: null,
         lastHealthCheckAt: null,
         error: null,
+        credentialsConfigured: this.ports.credentialsConfigured(),
       };
     }
     let connection: StoredTelegramConnection;
@@ -152,6 +158,7 @@ export class TelegramConnectionService {
       credentialRef: connection.credentialRef,
       lastHealthCheckAt: connection.lastHealthCheckAt,
       error: connection.status === "error" && connection.errorCode ? { code: connection.errorCode } : null,
+      credentialsConfigured: this.ports.credentialsConfigured(),
     };
   }
 

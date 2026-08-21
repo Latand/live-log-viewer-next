@@ -44,6 +44,7 @@ function stateFor(
       login: null,
       identity: null,
       credentialRef: null,
+      credentialsConfigured: true,
       lastHealthCheckAt: null,
       error: null,
       ...status,
@@ -56,6 +57,7 @@ function stateFor(
     cancel: async () => {},
     logout: async () => {},
     deleteLocal: async () => {},
+    saveCredentials: async () => {},
   };
 }
 

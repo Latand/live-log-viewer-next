@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { saveTelegramApiCredentials, validTelegramApiCredentials } from "@/lib/telegram/packaging";
 import { telegramService } from "@/lib/telegram/service";
 
 export const runtime = "nodejs";
@@ -36,7 +37,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const rejected = rejectCrossOrigin(req);
   if (rejected) return rejected;
-  let body: { action?: unknown; operationId?: unknown; password?: unknown };
+  let body: { action?: unknown; operationId?: unknown; password?: unknown; apiId?: unknown; apiHash?: unknown };
   try { body = await req.json() as typeof body; } catch { return failure(400, "invalid_json", "Invalid JSON"); }
   const service = telegramService();
   try {
@@ -52,6 +53,17 @@ export async function POST(req: NextRequest) {
       case "cancel": {
         if (typeof body.operationId !== "string") return failure(400, "invalid_request", "Operation id is required");
         return NextResponse.json({ telegram: await service.cancelLogin(body.operationId) });
+      }
+      case "credentials": {
+        /* #1070: operator-entered api_id/api_hash land in the same
+           telegram.json the connector reads. Validation happens before any
+           write, and the response is the ordinary sanitized status payload —
+           the hash never comes back. */
+        if (!validTelegramApiCredentials(body.apiId, body.apiHash)) {
+          return failure(400, "invalid_credentials", "Telegram API credentials are invalid");
+        }
+        saveTelegramApiCredentials(body.apiId as string, body.apiHash as string);
+        return NextResponse.json({ telegram: service.status() });
       }
       case "logout":
         return NextResponse.json({ telegram: await service.logout() });

@@ -8,10 +8,22 @@ import { NextRequest } from "next/server";
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-telegram-route-"));
 const OLD_STATE = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
+/* #1070: credentials writes resolve through XDG config; point them at the
+   sandbox so the test never touches (or reads) the operator's telegram.json. */
+const OLD_XDG = process.env.XDG_CONFIG_HOME;
+process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
+
+/* Env credentials would take precedence over the sandbox file; scrub them so
+   the file-backed path is the one under test. */
+const OLD_API_ID = process.env.LLV_TELEGRAM_API_ID;
+const OLD_API_HASH = process.env.LLV_TELEGRAM_API_HASH;
+delete process.env.LLV_TELEGRAM_API_ID;
+delete process.env.LLV_TELEGRAM_API_HASH;
 
 const { GET, POST } = await import("./route");
 const { TelegramConnectionService, setTelegramServiceForTests } = await import("@/lib/telegram/service");
 const { readTelegramSession } = await import("@/lib/telegram/sessionStore");
+const { telegramApiCredentials } = await import("@/lib/telegram/packaging");
 
 import type { TelegramAdapter, TelegramEnrollmentEvent, TelegramHealthResult } from "@/lib/telegram/adapter";
 import type { TelegramErrorCode } from "@/lib/telegram/contracts";
@@ -53,6 +65,9 @@ function installService() {
     }),
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    /* The sandboxed real resolver: env is scrubbed below, so this reflects the
+       sandbox telegram.json exactly — what the credentials tests assert on. */
+    credentialsConfigured: () => telegramApiCredentials() !== null,
   }));
 }
 
@@ -79,6 +94,9 @@ beforeEach(() => {
 afterAll(() => {
   setTelegramServiceForTests(null);
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR; else process.env.LLV_STATE_DIR = OLD_STATE;
+  if (OLD_XDG === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = OLD_XDG;
+  if (OLD_API_ID !== undefined) process.env.LLV_TELEGRAM_API_ID = OLD_API_ID;
+  if (OLD_API_HASH !== undefined) process.env.LLV_TELEGRAM_API_HASH = OLD_API_HASH;
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 });
 
@@ -153,6 +171,44 @@ test("the API is narrow: unknown actions and malformed bodies are rejected", asy
   const second = await POST(postRequest({ action: "start" }));
   expect(second.status).toBe(202);
   expect((await POST(postRequest({ action: "start" }))).status).toBe(409);
+});
+
+const CREDS_FILE = path.join(SANDBOX, "config", "agent-log-viewer", "telegram.json");
+/* Placeholder shapes only — a real api_hash never appears in this repo. */
+const PLACEHOLDER_API_ID = "1234567";
+const PLACEHOLDER_API_HASH = "0123456789abcdef0123456789abcdef";
+
+test("#1070: valid credentials persist owner-only into telegram.json and the payload stays hash-free", async () => {
+  fs.rmSync(CREDS_FILE, { force: true });
+  const response = await POST(postRequest({ action: "credentials", apiId: PLACEHOLDER_API_ID, apiHash: PLACEHOLDER_API_HASH }));
+  expect(response.status).toBe(200);
+  const body = await payload(response);
+  expect(JSON.stringify(body)).not.toContain(PLACEHOLDER_API_HASH);
+  const telegram = body.telegram as { credentialsConfigured: boolean };
+  expect(telegram.credentialsConfigured).toBe(true);
+  const stat = fs.statSync(CREDS_FILE);
+  expect(stat.mode & 0o777).toBe(0o600);
+  expect(JSON.parse(fs.readFileSync(CREDS_FILE, "utf8"))).toEqual({ apiId: PLACEHOLDER_API_ID, apiHash: PLACEHOLDER_API_HASH });
+  const fresh = await payload(await GET(getRequest()));
+  expect(JSON.stringify(fresh)).not.toContain(PLACEHOLDER_API_HASH);
+  expect((fresh.telegram as { credentialsConfigured: boolean }).credentialsConfigured).toBe(true);
+});
+
+test("#1070: invalid credentials are rejected before any byte is written", async () => {
+  fs.rmSync(CREDS_FILE, { force: true });
+  for (const attempt of [
+    { apiId: "not-a-number", apiHash: PLACEHOLDER_API_HASH },
+    { apiId: PLACEHOLDER_API_ID, apiHash: "too-short" },
+    { apiId: PLACEHOLDER_API_ID },
+    { apiHash: PLACEHOLDER_API_HASH },
+  ]) {
+    const response = await POST(postRequest({ action: "credentials", ...attempt }));
+    expect(response.status).toBe(400);
+    expect((await payload(response)).code).toBe("invalid_credentials");
+  }
+  expect(fs.existsSync(CREDS_FILE)).toBe(false);
+  const status = await payload(await GET(getRequest()));
+  expect((status.telegram as { credentialsConfigured: boolean }).credentialsConfigured).toBe(false);
 });
 
 test("cross-origin mutation attempts are rejected", async () => {
