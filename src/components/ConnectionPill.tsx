@@ -79,6 +79,20 @@ export interface ConnectionPillProps {
 }
 
 /**
+ * #1069: the floating pill sits over the left-rail footer (Telegram row,
+ * account controls). A healthy connection is the steady state and needs no
+ * visual — only the trouble states earn the overlay, and the transient
+ * resynced note still shows. Compact placements are inside their own header
+ * and never overlap the footer, so they keep the steady badge.
+ */
+export function connectionPillSilent(
+  connection: ConnectionState,
+  { compact, resynced }: { compact?: boolean; resynced: boolean },
+): boolean {
+  return !compact && connection === "live" && !resynced;
+}
+
+/**
  * The tab's runtime connection pill. Renders nothing while slice-one is
  * disabled (the flag is off), so it is inert on the landing page until the
  * backend routes exist and the flag flips on.
@@ -89,6 +103,13 @@ export function ConnectionPill({ legacy, compact }: ConnectionPillProps) {
   const resynced = resyncedAt !== null;
   const announce = useThrottledAnnounce(resynced ? t("runtime.announce.resynced") : t(ANNOUNCE_KEY[connection]));
   if (!enabled) return null;
+  if (connectionPillSilent(connection, { compact, resynced })) {
+    return (
+      <span role="status" aria-live="polite" className="sr-only">
+        {announce}
+      </span>
+    );
+  }
   return (
     <div className={compact ? "pointer-events-auto absolute right-2 top-1.5 z-30" : "pointer-events-auto fixed bottom-3 left-3 z-20"}>
       <ConnectionPillView connection={connection} resynced={resynced} legacy={legacy} compact={compact} announce={announce} t={t} />

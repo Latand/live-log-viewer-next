@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { translate } from "@/lib/i18n";
 
-import { ConnectionPillView } from "@/components/ConnectionPill";
+import { ConnectionPillView, connectionPillSilent } from "@/components/ConnectionPill";
 import { AttentionCard } from "./AttentionCard";
 import { ReceiptChip } from "./ReceiptChip";
 import type { RuntimeAttention, RuntimeReceipt } from "./runtimeModel";
@@ -37,6 +37,18 @@ test("live pill pulses but honors reduced motion", () => {
   const html = renderToStaticMarkup(<ConnectionPillView connection="live" resynced={false} announce="x" t={t} />);
   expect(html).toContain("animate-pulse");
   expect(html).toContain("motion-reduce:animate-none");
+});
+
+test("#1069: the floating pill is silent while healthy and visible in every trouble state", () => {
+  // Steady live state: no overlay covering the footer's Telegram row.
+  expect(connectionPillSilent("live", { resynced: false })).toBe(true);
+  // Trouble states and the transient resynced note still earn the pill.
+  for (const connection of ["reconnecting", "degraded", "offline"] as const) {
+    expect(connectionPillSilent(connection, { resynced: false })).toBe(false);
+  }
+  expect(connectionPillSilent("live", { resynced: true })).toBe(false);
+  // Compact placements live inside their own header, never over the footer.
+  expect(connectionPillSilent("live", { compact: true, resynced: false })).toBe(false);
 });
 
 /* ------------------------------ ReceiptChip ------------------------------ */
