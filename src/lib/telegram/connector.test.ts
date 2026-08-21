@@ -25,6 +25,7 @@ process.env.LLV_TELEGRAM_MCP_PORT = String(await new Promise<number>((resolve) =
 
 const {
   TELEGRAM_READ_TOOL_ALLOWLIST,
+  callTelegramConnectorTool,
   connectorServerName,
   ensureTelegramConnector,
   readTelegramConnectorCrashes,
@@ -38,7 +39,7 @@ const {
 const { telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
 const { readTelegramConnection, readTelegramSession, saveTelegramSession, writeTelegramConnection } = await import("./sessionStore");
 
-import type { ConnectorProbe, TelegramConnectorPorts } from "./connector";
+import type { ConnectorCallResult, ConnectorProbe, TelegramConnectorPorts } from "./connector";
 
 /* A placeholder with the string-session shape; never a real credential. */
 const PLACEHOLDER_SESSION = "1ApWapzMBu4placeholder-not-a-real-session";
@@ -486,7 +487,7 @@ test("a connector that dies on its own is recorded: exit code, and the stderr no
     "import fs from 'node:fs';",
     `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
     "console.error('Telegram client(s) started (default). Running MCP server (http)...');",
-    "console.error('Error starting client: session lock refused');",
+    "console.error('SessionLockError: the vendored per-session lock refused');",
     "setTimeout(() => process.exit(7), 40);",
   ]);
   const { ports, spawns } = realChildPorts(script, readyFile);
@@ -498,7 +499,7 @@ test("a connector that dies on its own is recorded: exit code, and the stderr no
     expect(crashes[0]!.pid).toBe(spawns[0]!);
     expect(crashes[0]!.exitCode).toBe(7);
     expect(crashes[0]!.signal).toBeNull();
-    expect(crashes[0]!.stderr).toContain("Error starting client: session lock refused");
+    expect(crashes[0]!.stderr.join("\n")).toContain("SessionLockError");
     expect(Date.parse(crashes[0]!.at)).toBeGreaterThan(0);
     /* No stored session to restart for: the crash is still recorded, and a
        restart that never happened is not counted. */
@@ -648,7 +649,7 @@ test("health comes from the RUNNING connector, so a healthy account costs no tea
       calls.tools.push(tool);
       /* The vendored get_me shape; the phone field it can carry must not
          travel any further than this parse. */
-      return JSON.stringify({ id: 777, name: "Account A", type: "user", username: "account_a", phone: "0000000000" });
+      return { ok: true, text: JSON.stringify({ id: 777, name: "Account A", type: "user", username: "account_a", phone: "0000000000" }) };
     },
   });
   expect(health).toEqual({ status: "connected", identity: { name: "Account A", username: "account_a" } });
@@ -664,12 +665,12 @@ test("a connector that cannot prove the account is no health verdict at all", as
     sleep: async () => {},
     now: () => 0,
     ownsProcess: () => true,
-    callTool: async () => "An error occurred (code: GEN-ERR-001). Check mcp_errors.log for details.",
+    callTool: async () => ({ ok: true, text: "An error occurred (code: GEN-ERR-001). Check mcp_errors.log for details." }),
   };
   /* A tool error, a dead call, and a connector that is not ours all mean the
      same thing: fall back to the bridge check, never guess. */
   expect(await telegramConnectorHealth(CONNECTOR_SESSION, base)).toBeNull();
-  expect(await telegramConnectorHealth(CONNECTOR_SESSION, { ...base, callTool: async () => null })).toBeNull();
+  expect(await telegramConnectorHealth(CONNECTOR_SESSION, { ...base, callTool: async () => ({ ok: false, code: "call_failed" }) })).toBeNull();
   expect(await telegramConnectorHealth(CONNECTOR_SESSION, { ...base, ownsProcess: () => false })).toBeNull();
   expect(await telegramConnectorHealth(CONNECTOR_SESSION, { ...base, probe: async () => ({ ok: false }) })).toBeNull();
   /* A connector that accepts the call and then answers nothing must not hold
@@ -678,7 +679,7 @@ test("a connector that cannot prove the account is no health verdict at all", as
   const hung = await telegramConnectorHealth(CONNECTOR_SESSION, {
     ...base,
     probeTimeoutMs: 20,
-    callTool: () => new Promise<string | null>(() => {}),
+    callTool: () => new Promise<ConnectorCallResult>(() => {}),
   });
   expect(hung).toBe("busy");
 }, 2_000);
@@ -697,7 +698,7 @@ test("a crash tail is redacted: no ids, handles, home paths, or credentials reac
   );
   expect(context).not.toContain("1001234567890");
   expect(context).not.toContain("secret project brief");
-  expect(context).toContain("Code: MSG-ERR-042");
+  expect(context).toContain("MSG-ERR-042");
 
   expect(redactConnectorStderrLine(`  File "${home}/.config/agent-log-viewer/state/telegram/x.py", line 5`, secrets))
     .not.toContain(home);
@@ -709,7 +710,7 @@ test("a crash tail is redacted: no ids, handles, home paths, or credentials reac
   expect(redactConnectorStderrLine(`  File "${foreignHome}/telethon/client.py", line 5`, secrets))
     .not.toContain("another-account");
   expect(redactConnectorStderrLine("resolved @a_real_handle for +380501234567", secrets))
-    .toBe("resolved @<user> for <id>");
+    .toBe("<redacted> @<user> <redacted> <id>");
   for (const secret of secrets) {
     expect(redactConnectorStderrLine(`session=${secret} refused`, secrets)).not.toContain(secret);
   }
@@ -745,44 +746,139 @@ test("the stderr a crash record quotes is redacted before it is written", async 
   }
 }, 10_000);
 
-test("an ADOPTED connector's crash is recorded too — the exit nobody was listening to", async () => {
-  const readyFile = path.join(SANDBOX, "adopted-ready");
-  const diedOnce = path.join(SANDBOX, "adopted-died-once");
+test("free-form crash text is not a diagnostic: no name, title or message reaches the crash log (#1087)", async () => {
+  const readyFile = path.join(SANDBOX, "identity-ready");
   fs.rmSync(readyFile, { force: true });
-  fs.rmSync(diedOnce, { force: true });
-  const script = connectorScript("adopted-connector", [
+  /* The lines a real failure leaves: the vendored runtime re-raises with
+     whatever Telethon said, and an exception message is free text. The test
+     harness forwards the child's stderr RAW — in production the crash monitor
+     has already redacted it — so what the crash log keeps here is what the
+     Viewer-side redactor alone can defend. */
+  const leaks = [
+    "ValueError: No user has Alice Example as username",
+    "RuntimeError: could not read \"Демо Проєкт\" for Олена Приклад",
+    "telegram_mcp.runtime: last message text was 'send the documents tomorrow'",
+  ];
+  const script = connectorScript("identity-leaking-connector", [
     "import fs from 'node:fs';",
     `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
-    `if (!fs.existsSync(${JSON.stringify(diedOnce)})) {`,
-    `  fs.writeFileSync(${JSON.stringify(diedOnce)}, '1');`,
-    "  console.error('adopted connector died with nobody listening');",
-    "  setTimeout(() => process.exit(9), 40);",
-    "} else {",
-    "  setInterval(() => undefined, 1000);",
-    "}",
+    "console.error('Traceback (most recent call last):');",
+    ...leaks.map((line) => `console.error(${JSON.stringify(line)});`),
+    "setTimeout(() => process.exit(6), 40);",
   ]);
-  /* No exit event, exactly like a connector inherited through the pid file. */
-  const { ports, spawns } = realChildPorts(script, readyFile, {}, { adopted: true });
-  saveTelegramSession(PLACEHOLDER_SESSION);
-  const stored = readTelegramSession()!;
+  const { ports } = realChildPorts(script, readyFile);
   try {
-    expect((await ensureTelegramConnector(stored, ports)).ok).toBe(true);
-    await until(() => { try { process.kill(spawns[0]!, 0); return false; } catch { return true; } });
-    /* Nothing could have heard this exit: before the reaper, the record and
-       the counter stayed empty forever and the status said connected. */
-    expect(readTelegramConnectorCrashes()).toHaveLength(0);
+    expect((await ensureTelegramConnector(CONNECTOR_SESSION, ports)).ok).toBe(true);
+    await until(() => readTelegramConnectorCrashes().length > 0);
+    const raw = fs.readFileSync(path.join(process.env.LLV_STATE_DIR!, "telegram", "connector-crashes.log"), "utf8");
+    const tail = readTelegramConnectorCrashes()[0]!.stderr.join("\n");
+    for (const identity of ["Alice", "Example", "Демо", "Проєкт", "Олена", "Приклад", "documents", "tomorrow"]) {
+      expect(raw).not.toContain(identity);
+      expect(tail).not.toContain(identity);
+    }
+    /* Still a crash report: the shape of the failure and the types that
+       produced it survive. */
+    expect(tail).toContain("Traceback (most recent call last):");
+    expect(tail).toContain("ValueError");
+    expect(tail).toContain("RuntimeError");
+    expect(tail).toContain("telegram_mcp.runtime");
+    expect(readTelegramConnectorCrashes()[0]!.exitCode).toBe(6);
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+  }
+}, 10_000);
 
-    /* The next supervisor pass notices the recorded process is gone. */
-    expect((await ensureTelegramConnector(stored, ports)).ok).toBe(true);
+test("a connector from before the crash monitor stays adoptable, and its crash says why it has no exit status (#1087)", async () => {
+  const readyFile = path.join(SANDBOX, "legacy-ready");
+  fs.rmSync(readyFile, { force: true });
+  const script = connectorScript("legacy-connector", [
+    "import fs from 'node:fs';",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    "setInterval(() => undefined, 1000);",
+  ]);
+  const recordPath = path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json");
+  /* Ownership follows the durable record and the process behind it, the way
+     the real check does, and there is no exit event: a connector inherited
+     through the pid file. */
+  const ownsProcess = () => {
+    if (!fs.existsSync(recordPath)) return false;
+    const { pid } = JSON.parse(fs.readFileSync(recordPath, "utf8")) as { pid: number };
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+  const { ports, spawns } = realChildPorts(script, readyFile, { ownsProcess }, { adopted: true });
+  const readRecord = () => JSON.parse(fs.readFileSync(recordPath, "utf8")) as { pid: number; supervision?: string };
+  try {
+    expect((await ensureTelegramConnector(CONNECTOR_SESSION, ports)).ok).toBe(true);
+    expect(spawns).toHaveLength(1);
+    expect(readRecord().supervision).toBe("monitored");
+
+    /* A record written before the monitor existed. The connector behind it is
+       serving reads, and replacing it to fix the bookkeeping would drop
+       exactly the calls this issue is about — so it is adopted unchanged. */
+    const legacy = readRecord() as Record<string, unknown>;
+    delete legacy.supervision;
+    fs.writeFileSync(recordPath, JSON.stringify(legacy), { mode: 0o600 });
+    expect((await ensureTelegramConnector(CONNECTOR_SESSION, ports)).ok).toBe(true);
+    expect(spawns).toHaveLength(1);
+
+    /* When it does die, the crash is still recorded — and it says why the
+       exit status is unknowable instead of leaving a silent gap. */
+    process.kill(spawns[0]!, "SIGKILL");
+    await until(() => { try { process.kill(spawns[0]!, 0); return false; } catch { return true; } });
+    expect((await ensureTelegramConnector(CONNECTOR_SESSION, ports)).ok).toBe(true);
     const crashes = readTelegramConnectorCrashes();
     expect(crashes).toHaveLength(1);
     expect(crashes[0]!.pid).toBe(spawns[0]!);
     expect(crashes[0]!.observed).toBe("vanished");
-    /* Not our child, so the kernel told us nothing about how it went. */
+    expect(crashes[0]!.supervision).toBe("legacy");
     expect(crashes[0]!.exitCode).toBeNull();
     expect(crashes[0]!.signal).toBeNull();
-    expect(crashes[0]!.stderr.join("\n")).toContain("adopted connector died with nobody listening");
+    /* And what replaced it is monitored, so the next death has a signal. */
     expect(spawns).toHaveLength(2);
+    expect(readRecord().supervision).toBe("monitored");
+  } finally {
+    delete process.env.LLV_TELEGRAM_PYTHON;
+    delete process.env.LLV_TELEGRAM_SERVER_BRIDGE;
+    await stopTelegramConnector();
+    for (const pid of spawns) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  }
+}, 20_000);
+
+test("a call dropped by a respawn fails with a code that names the restart (#1087)", async () => {
+  const readyFile = path.join(SANDBOX, "dropped-call-ready");
+  const heldFile = path.join(SANDBOX, "dropped-call-held");
+  for (const file of [readyFile, heldFile]) fs.rmSync(file, { force: true });
+  /* A connector that accepts a read on the real loopback port and then holds
+     it, exactly like a `get_messages` waiting on Telegram. */
+  const script = connectorScript("dropped-call-connector", [
+    "import fs from 'node:fs';",
+    "import net from 'node:net';",
+    `const server = net.createServer(() => { fs.writeFileSync(${JSON.stringify(heldFile)}, 'held'); });`,
+    "server.listen(Number(process.env.MCP_PORT), '127.0.0.1', () => {",
+    `  fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
+    "});",
+  ]);
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const stored = readTelegramSession()!;
+  const { ports, spawns } = realChildPorts(script, readyFile);
+  try {
+    expect((await ensureTelegramConnector(stored, ports)).ok).toBe(true);
+    const held = callTelegramConnectorTool(telegramMcpUrl(), stored.connectorToken, "get_messages");
+    await until(() => fs.existsSync(heldFile));
+
+    /* The death a fan-out of large reads invites: no process, no event loop
+       and no socket left for the connector to answer on. The caller still
+       gets a named failure rather than something it cannot tell from a
+       network blip, because the Viewer knows the process it was talking to
+       is gone. */
+    process.kill(spawns[0]!, "SIGKILL");
+    expect(await held).toEqual({ ok: false, code: "connector_restarting" });
+
+    /* And the same event is on the record and in the status the panel reads. */
+    await until(() => readTelegramConnectorCrashes().length > 0);
+    expect(readTelegramConnectorCrashes()[0]!.signal).toBe("SIGKILL");
+    await until(() => telegramConnectorActivity().last24h > 0);
     expect(telegramConnectorActivity().last24h).toBe(1);
   } finally {
     delete process.env.LLV_TELEGRAM_PYTHON;
@@ -859,7 +955,7 @@ test("a connector busy with a burst of reads is BUSY, never torn down", async ()
   const busy = await telegramConnectorHealth(CONNECTOR_SESSION, {
     ...base,
     stop: () => { calls.stops += 1; },
-    callTool: () => new Promise<string | null>(() => {}),
+    callTool: () => new Promise<ConnectorCallResult>(() => {}),
   });
   expect(busy).toBe("busy");
   expect(calls.stops).toBe(0);
@@ -869,7 +965,7 @@ test("a connector busy with a burst of reads is BUSY, never torn down", async ()
   expect(await telegramConnectorHealth(CONNECTOR_SESSION, {
     ...base,
     probe: () => new Promise<ConnectorProbe>(() => {}),
-    callTool: async () => null,
+    callTool: async () => ({ ok: false, code: "call_failed" as const }),
   })).toBe("busy");
 
   /* A refusal is still a refusal — the bridge check has to get its chance to
@@ -877,7 +973,7 @@ test("a connector busy with a burst of reads is BUSY, never torn down", async ()
   expect(await telegramConnectorHealth(CONNECTOR_SESSION, {
     ...base,
     probe: async () => ({ ok: false }),
-    callTool: async () => null,
+    callTool: async () => ({ ok: false, code: "call_failed" as const }),
   })).toBeNull();
 }, 5_000);
 
@@ -988,7 +1084,7 @@ test("a crash reaped before the health path deletes the pid record is still coun
     `fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready');`,
     `if (!fs.existsSync(${JSON.stringify(diedOnce)})) {`,
     `  fs.writeFileSync(${JSON.stringify(diedOnce)}, '1');`,
-    "  console.error('gone before anyone asked');",
+    "  console.error('ReapedConnectorError: gone before the health check asked');",
     "  setTimeout(() => process.exit(5), 40);",
     "} else {",
     "  setInterval(() => undefined, 1000);",
@@ -1009,7 +1105,7 @@ test("a crash reaped before the health path deletes the pid record is still coun
     await stopTelegramConnector();
     expect(fs.existsSync(path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json"))).toBe(false);
     expect(readTelegramConnectorCrashes()).toHaveLength(1);
-    expect(readTelegramConnectorCrashes()[0]!.stderr.join("\n")).toContain("gone before anyone asked");
+    expect(readTelegramConnectorCrashes()[0]!.stderr.join("\n")).toContain("ReapedConnectorError");
 
     /* The pointer is gone, but the crash on the record still makes this the
        restart it is: counted once, and only because the replacement verified. */
@@ -1060,7 +1156,7 @@ test("a real process serving concurrent bounded reads survives a fresh health ch
       ...ports,
       ownsProcess: () => true,
       probeTimeoutMs: 60,
-      callTool: () => new Promise<string | null>(() => {}),
+      callTool: () => new Promise<ConnectorCallResult>(() => {}),
     });
     expect(health).toBe("busy");
 

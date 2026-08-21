@@ -36,7 +36,7 @@ import sys
 import time
 
 EXIT_FILE = "connector-exit.json"
-MAX_LINE_CHARS = 400
+MAX_LINE_CHARS = 120
 READ_CHUNK = 65536
 # A stderr "line" with no newline in sight is flushed anyway at this width, so
 # a server printing a single unbounded blob can never grow the monitor's heap.
@@ -62,28 +62,103 @@ _OPAQUE_BLOB = re.compile(
     r"\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}\b"
 )
 
+REDACTED = "<redacted>"
+
+# A traceback frame is the one line whose whole value is a file path: it is
+# kept structurally (path, line number, function) instead of being summarized,
+# because a code location is exactly what a crash report is for.
+_FRAME = re.compile(r'^\s*File "(.*)", line (\d+)(?:, in (.*))?$')
+# The fixed scaffolding Python prints around a traceback: no free text in it.
+_SCAFFOLD = (
+    "Traceback (most recent call last):",
+    "During handling of the above exception, another exception occurred:",
+    "The above exception was the direct cause of the following exception:",
+)
+_FRAME_NAME = re.compile(r"^[A-Za-z0-9_.<>]+$")
+
+# Shapes that are diagnostic by construction and carry no account data: this
+# redactor's own markers, log timestamps, errno/signal names, qualified
+# exception types, the modules a connector traceback can name, the connector's
+# own read-tool names, protocol error constants, and the loopback address.
+_SAFE_SHAPE = (
+    r"<[a-z]+>"
+    r"|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,6})?"
+    r"|\[Errno \d{1,5}\]"
+    r"|\bSIG[A-Z]{2,}\d*\b"
+    r"|\b(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*"
+    r"(?:Error|Exception|Warning|Exit|Interrupt|Timeout|Cancelled|Abort|Failure)\b"
+    r"|\b(?:telegram_mcp|telethon|mcp|anyio|asyncio|uvicorn|starlette|httpx"
+    r"|httpcore|sqlite3|socket|ssl|builtins|__main__)(?:\.[A-Za-z_][A-Za-z0-9_]*)*\b"
+    r"|\b(?:get|list|search|export|resolve|incoming|wait)_[a-z][a-z_]{1,40}\b"
+    r"|\b[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+\b"
+    r"|\b127\.0\.0\.1(?::\d{1,5})?\b"
+)
+# `<` and `>` are held out of the punctuation run so a marker this redactor
+# already wrote is re-read as one shape instead of being split apart.
+_TOKEN = re.compile(
+    "(" + _SAFE_SHAPE + r")|([A-Za-z0-9_]+)|([ \t]+)|([!-/:;=?@\[-`{-~]+|[<>])|(.)"
+)
+_COLLAPSE = re.compile(r"<redacted>(?:[ \t]*<redacted>)+")
+_TRAILING_SPACE = re.compile(r"[ \t]+$")
+
+
+def _truncate(line):
+    if len(line) > MAX_LINE_CHARS:
+        return line[:MAX_LINE_CHARS] + "…"
+    return line
+
+
+def _summarize(text):
+    """Keep the structured diagnostics; drop every run of free text.
+
+    The vendored runtime puts free-form exception text on stderr, and free-form
+    text is where names, chat titles and message content live — a blacklist can
+    only remove the shapes it already knows. So the summary is built the other
+    way round: an exception class, a signal name, an errno, a protocol error
+    constant and the modules a traceback names survive, punctuation survives
+    (it carries no identity), and every other run collapses into `<redacted>`.
+    """
+    pieces = []
+    for match in _TOKEN.finditer(text):
+        shape, _word, space, punct, _other = match.groups()
+        if shape is not None or space is not None or punct is not None:
+            pieces.append(match.group(0))
+        else:
+            pieces.append(REDACTED)
+    return _TRAILING_SPACE.sub("", _COLLAPSE.sub(REDACTED, "".join(pieces)))
+
 
 def redact_stderr_line(line, secrets=()):
     """One connector stderr line, safe to persist.
 
-    Says what died, never who was being read. Error codes and exception types
-    survive; identifiers, handles, paths, and known credential values do not.
+    Says what died, never who was being read. Error codes, exception types and
+    code locations survive; identifiers, handles, paths, credential values and
+    every run of free text do not.
     """
     out = line
     for secret in secrets:
         if secret and len(secret) >= 8:
-            out = out.replace(secret, "<redacted>")
+            out = out.replace(secret, REDACTED)
     home = os.path.expanduser("~")
     if home and len(home) > 1:
         out = out.replace(home, "~")
     out = _FOREIGN_HOME.sub(r"/\1/<user>", out)
+    if out.strip() in _SCAFFOLD:
+        return out.strip()
+    frame = _FRAME.match(out)
+    if frame is not None:
+        name = frame.group(3)
+        if name is not None and _FRAME_NAME.match(name) is None:
+            name = REDACTED
+        summary = '  File "%s", line %s' % (frame.group(1), frame.group(2))
+        if name is not None:
+            summary += ", in %s" % name
+        return _truncate(summary)
     out = _CONTEXT_KEY.sub(r"\1=<redacted>", out)
     out = _HANDLE.sub("@<user>", out)
     out = _LONG_NUMBER.sub("<id>", out)
-    out = _OPAQUE_BLOB.sub("<redacted>", out)
-    if len(out) > MAX_LINE_CHARS:
-        return out[:MAX_LINE_CHARS] + "…"
-    return out
+    out = _OPAQUE_BLOB.sub(REDACTED, out)
+    return _truncate(_summarize(out))
 
 
 def _known_secrets(env=None):

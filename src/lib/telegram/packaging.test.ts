@@ -619,6 +619,35 @@ test("the crash monitor records the server's exit code, and redacts its stderr b
   expect(written).not.toContain("1ApWapzMBu4placeholder-not-a-real-session");
 });
 
+test("free-form crash text reaches the sink as a diagnostic, never as an identity (#1087)", () => {
+  const stateDir = path.join(SANDBOX, "monitor-identity-state");
+  /* The vendored runtime raises with whatever Telethon put in the message,
+     and an exception message is free text: a name, a chat title, a quoted
+     message. A redactor that only removes the shapes it knows would keep
+     every one of these. */
+  const vendor = monitoredConnectorVendor("monitor-identity-vendor", [
+    "import sys",
+    "print('Traceback (most recent call last):', file=sys.stderr)",
+    "print('ValueError: No user has Alice Example as username', file=sys.stderr)",
+    "print('RuntimeError: could not read \"Демо Проєкт\" for Олена Приклад', file=sys.stderr)",
+    "print(\"telegram_mcp.runtime: last message text was 'send the documents tomorrow'\", file=sys.stderr)",
+    "raise SystemExit(6)",
+  ]);
+  const result = runMonitoredConnector(vendor, stateDir, "I".repeat(43));
+  expect(result.exitCode).toBe(6);
+  const written = result.stderr.toString();
+
+  for (const identity of ["Alice", "Example", "Демо", "Проєкт", "Олена", "Приклад", "documents", "tomorrow"]) {
+    expect(written).not.toContain(identity);
+  }
+  /* What a crash report is for survives: the shape of the failure and the
+     types that produced it. */
+  expect(written).toContain("Traceback (most recent call last):");
+  expect(written).toContain("ValueError");
+  expect(written).toContain("RuntimeError");
+  expect(written).toContain("telegram_mcp.runtime");
+});
+
 test("a connector killed outright is recorded as the signal that killed it (#1087)", () => {
   const stateDir = path.join(SANDBOX, "monitor-signal-state");
   const vendor = monitoredConnectorVendor("monitor-signal-vendor", [
@@ -649,6 +678,12 @@ test("the Python and TypeScript redactors cannot drift apart (#1087)", async () 
     `session=${secrets[0]} refused`,
     "Traceback (most recent call last):",
     "MemoryError",
+    /* Free text, where the two redactors have the most room to disagree. */
+    "ValueError: No user has Alice Example as username",
+    "RuntimeError: could not read \"Демо Проєкт\" for Олена Приклад",
+    "telethon.errors.rpcerrorlist.FloodWaitError: A wait of 420 seconds is required (caused by GetHistoryRequest)",
+    "OSError: [Errno 111] Connection refused",
+    "  File \"<string>\", line 1, in <module>",
   ];
   const result = Bun.spawnSync({
     cmd: [python!, "-c", [

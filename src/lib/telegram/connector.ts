@@ -69,6 +69,19 @@ export type ConnectorProbe =
 
 export type ConnectorEnsureResult = { ok: true; url: string } | { ok: false; code: TelegramErrorCode };
 
+/**
+ * The outcome of one connector tool call. A call dropped by a respawn names
+ * itself, so a caller can tell it from a connector that simply failed (#1087).
+ *
+ * The code stays inside this boundary rather than joining
+ * {@link TelegramErrorCode}: it describes one call, not the connection, and
+ * the status payload already carries the same event as the `restarting`
+ * phase and the 24 h restart count.
+ */
+export type ConnectorCallResult =
+  | { ok: true; text: string }
+  | { ok: false; code: "connector_restarting" | "call_failed" };
+
 /** What the RUNNING connector can prove about the account without being torn
     down (#1087): a `get_me` through the verified surface needs a live,
     authorized Telethon client, so a successful answer is a health reading.
@@ -95,9 +108,9 @@ export interface TelegramConnectorPorts {
   stop?(): Promise<void> | void;
   beginOperation?(): () => boolean;
   probeTimeoutMs?: number;
-  /** One read-only tool call over the verified surface; `null` for any
-      failure. Used only by {@link telegramConnectorHealth}. */
-  callTool?(url: string, connectorToken: string, tool: string, signal?: AbortSignal): Promise<string | null>;
+  /** One read-only tool call over the verified surface, whose failure says
+      whether a respawn took it. Used only by {@link telegramConnectorHealth}. */
+  callTool?(url: string, connectorToken: string, tool: string, signal?: AbortSignal): Promise<ConnectorCallResult>;
   /** Backoff before a crash restart. */
   restartDelayMs?: number;
 }
@@ -122,7 +135,7 @@ const RESTART_STATE_FILE = "connector-restarts.json";
 const EXIT_FILE = "connector-exit.json";
 const STDERR_TAIL_LINES = 20;
 const STDERR_TAIL_BYTES = 8_192;
-const STDERR_LINE_CHARS = 400;
+const STDERR_LINE_CHARS = 120;
 const CRASH_LOG_KEEP_LINES = 50;
 const DAY_MS = 24 * 60 * 60 * 1_000;
 /* A crashing connector is restarted, but never in a hot loop: more than
@@ -142,6 +155,10 @@ const DRAIN_TIMEOUT_MS = 1_500;
    to protect. A connector that answers nothing inside this budget is wedged,
    and the destructive path may take over. */
 const HEALTH_TIMEOUT_MS = 15_000;
+/** How long a FAILED call waits for the supervisor to notice the exit that
+    dropped it, before it settles for "the connector could not answer". */
+const RESTART_ATTRIBUTION_MS = 250;
+const RESTART_ATTRIBUTION_POLL_MS = 25;
 
 /** The read-only gate, pure so it is directly provable: one tool that lacks
     an affirmative readOnlyHint OR falls outside the audited allowlist fails
@@ -206,15 +223,22 @@ export async function probeTelegramConnector(url: string, connectorToken: string
   }
 }
 
-/** One read-only tool call over the authenticated loopback surface. Returns
-    the tool's text output, or null for any failure — callers treat null as
-    "this connector cannot answer" and never as a verdict about the account. */
+/**
+ * One read-only tool call over the authenticated loopback surface.
+ *
+ * A failure is never a verdict about the account — but it does have two
+ * kinds. `connector_restarting` is a call the supervisor's replacement took
+ * with it: the process this call was talking to is gone or has already been
+ * replaced, which a caller can retry (#1087). Anything else is
+ * `call_failed`, the connector simply could not answer.
+ */
 export async function callTelegramConnectorTool(
   url: string,
   connectorToken: string,
   tool: string,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<ConnectorCallResult> {
+  const servedBy = readConnectorRecord()?.pid ?? null;
   try {
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
     const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
@@ -225,7 +249,7 @@ export async function callTelegramConnectorTool(
     try {
       await client.connect(transport);
       const result = await client.callTool({ name: tool, arguments: {} });
-      if (result.isError) return null;
+      if (result.isError) return { ok: false, code: "call_failed" };
       const content = Array.isArray(result.content) ? result.content : [];
       const text = content
         .filter((part): part is { type: "text"; text: string } =>
@@ -233,12 +257,38 @@ export async function callTelegramConnectorTool(
           && typeof (part as { text?: unknown }).text === "string")
         .map((part) => part.text)
         .join("\n");
-      return text.length > 0 ? text : null;
+      return text.length > 0 ? { ok: true, text } : { ok: false, code: "call_failed" };
     } finally {
       await client.close().catch(() => undefined);
     }
   } catch {
-    return null;
+    return { ok: false, code: await connectorReplacedSince(servedBy) ? "connector_restarting" : "call_failed" };
+  }
+}
+
+/**
+ * Whether the connector that was serving a call is no longer the one on the
+ * record — because the supervisor replaced it, or because it died and the
+ * replacement is on its way (#1087).
+ *
+ * This is what turns a bare transport failure into a distinguishable error.
+ * The kernel closes the sockets of a dying process before its parent hears
+ * that it died, so the answer is not available the instant the call fails:
+ * this waits a moment for the supervisor to notice, and only for a call that
+ * has already failed. Nothing else about a connector that is simply not
+ * answering is delayed.
+ */
+async function connectorReplacedSince(servedBy: number | null): Promise<boolean> {
+  if (servedBy === null) return false;
+  const deadline = Date.now() + RESTART_ATTRIBUTION_MS;
+  for (;;) {
+    const record = readConnectorRecord();
+    /* Torn down, or already replaced by a different process. */
+    if (record === null || record.pid !== servedBy) return true;
+    /* Still on the record, but the supervisor has written its crash down. */
+    if (readRestartState().lastCrashPid === servedBy) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, RESTART_ATTRIBUTION_POLL_MS));
   }
 }
 
@@ -332,6 +382,63 @@ function openConnectorStderrSink(): number | null {
   }
 }
 
+const REDACTED = "<redacted>";
+
+/* A traceback frame is the one line whose whole value is a file path: it is
+   kept structurally (path, line number, function) instead of being summarized,
+   because a code location is exactly what a crash report is for. */
+const STDERR_FRAME = /^\s*File "(.*)", line (\d+)(?:, in (.*))?$/;
+const STDERR_FRAME_NAME = /^[A-Za-z0-9_.<>]+$/;
+/* The fixed scaffolding Python prints around a traceback: no free text in it. */
+const STDERR_SCAFFOLD = new Set([
+  "Traceback (most recent call last):",
+  "During handling of the above exception, another exception occurred:",
+  "The above exception was the direct cause of the following exception:",
+]);
+
+/* Shapes that are diagnostic by construction and carry no account data: this
+   redactor's own markers, log timestamps, errno/signal names, qualified
+   exception types, the modules a connector traceback can name, the connector's
+   own read-tool names, protocol error constants, and the loopback address.
+   `<` and `>` are held out of the punctuation run so a marker this redactor
+   already wrote is re-read as one shape instead of being split apart. */
+const STDERR_TOKEN = new RegExp(
+  "(<[a-z]+>"
+  + "|\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d{1,6})?"
+  + "|\\[Errno \\d{1,5}\\]"
+  + "|\\bSIG[A-Z]{2,}\\d*\\b"
+  + "|\\b(?:[A-Za-z_][A-Za-z0-9_]*\\.)*[A-Za-z_][A-Za-z0-9_]*"
+  + "(?:Error|Exception|Warning|Exit|Interrupt|Timeout|Cancelled|Abort|Failure)\\b"
+  + "|\\b(?:telegram_mcp|telethon|mcp|anyio|asyncio|uvicorn|starlette|httpx"
+  + "|httpcore|sqlite3|socket|ssl|builtins|__main__)(?:\\.[A-Za-z_][A-Za-z0-9_]*)*\\b"
+  + "|\\b(?:get|list|search|export|resolve|incoming|wait)_[a-z][a-z_]{1,40}\\b"
+  + "|\\b[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+\\b"
+  + "|\\b127\\.0\\.0\\.1(?::\\d{1,5})?\\b"
+  + ")|([A-Za-z0-9_]+)|([ \\t]+)|([!-/:;=?@\\[-`{-~]+|[<>])|([^])",
+  "g",
+);
+const STDERR_COLLAPSE = /<redacted>(?:[ \t]*<redacted>)+/g;
+
+/**
+ * Keeps the structured diagnostics; drops every run of free text.
+ *
+ * The vendored runtime puts free-form exception text on stderr, and free-form
+ * text is where names, chat titles and message content live — a blacklist can
+ * only remove the shapes it already knows. So the summary is built the other
+ * way round: an exception class, a signal name, an errno, a protocol error
+ * constant and the modules a traceback names survive, punctuation survives (it
+ * carries no identity), and every other run collapses into `<redacted>`.
+ */
+function summarizeConnectorStderr(text: string): string {
+  const pieces: string[] = [];
+  STDERR_TOKEN.lastIndex = 0;
+  for (let match = STDERR_TOKEN.exec(text); match !== null; match = STDERR_TOKEN.exec(text)) {
+    const [whole, shape, , space, punctuation] = match;
+    pieces.push(shape !== undefined || space !== undefined || punctuation !== undefined ? whole : REDACTED);
+  }
+  return pieces.join("").replace(STDERR_COLLAPSE, REDACTED).replace(/[ \t]+$/, "");
+}
+
 /**
  * Redacts one connector stderr line before it is persisted.
  *
@@ -340,8 +447,16 @@ function openConnectorStderrSink(): number | null {
  * error helper logs the failing call's arguments verbatim
  * (`Error in <fn> (chat_id=…, query=…)`, see
  * `vendor/telegram-mcp/telegram_mcp/runtime.py`) and attaches a traceback
- * whose frames carry absolute paths under the operator's home. A crash
- * record has to say what died, never who was being read (#1087).
+ * whose frames carry absolute paths under the operator's home — and whose
+ * exception text is free-form, which is where a name, a chat title or a
+ * quoted message rides out. A crash record has to say what died, never who
+ * was being read (#1087).
+ *
+ * Known shapes are removed first, so what a crash log does keep still reads
+ * as a report: `@<user>` where a handle was, `<id>` where an id was,
+ * `key=<redacted>` where the vendored context format was. Then
+ * {@link summarizeConnectorStderr} decides the rest the other way round —
+ * nothing survives that is not a structured diagnostic or punctuation.
  *
  * `secrets` carries the values this Viewer already knows are credentials —
  * the connector bearer token and the Telegram string session — so an exact
@@ -350,13 +465,21 @@ function openConnectorStderrSink(): number | null {
 export function redactConnectorStderrLine(line: string, secrets: readonly string[] = []): string {
   let out = line;
   for (const secret of secrets) {
-    if (secret.length >= 8) out = out.split(secret).join("<redacted>");
+    if (secret.length >= 8) out = out.split(secret).join(REDACTED);
   }
   const home = os.homedir();
   if (home && home.length > 1) out = out.split(home).join("~");
+  /* Any other account's home, and the container's copy of this one. */
+  out = out.replace(/\/(home|Users)\/[^/\s:'"]+/g, "/$1/<user>");
+  if (STDERR_SCAFFOLD.has(out.trim())) return out.trim();
+  const frame = STDERR_FRAME.exec(out);
+  if (frame) {
+    const name = frame[3] === undefined
+      ? undefined
+      : (STDERR_FRAME_NAME.test(frame[3]) ? frame[3] : REDACTED);
+    return truncateStderrLine(`  File "${frame[1]}", line ${frame[2]}${name === undefined ? "" : `, in ${name}`}`);
+  }
   out = out
-    /* Any other account's home, and the container's copy of this one. */
-    .replace(/\/(home|Users)\/[^/\s:'"]+/g, "/$1/<user>")
     /* The vendored context format: `key=value` pairs lifted straight out of
        the tool arguments. Everything up to the next pair separator goes. */
     .replace(/\b([A-Za-z_]*(?:chat|user|peer|phone|contact|title|name|query|text|message|entity|alias|folder)[A-Za-z_]*)\s*=\s*[^,)]*/gi, "$1=<redacted>")
@@ -365,8 +488,12 @@ export function redactConnectorStderrLine(line: string, secrets: readonly string
     /* Chat/user/message ids and phone numbers. */
     .replace(/[+-]?\b\d{5,}\b/g, "<id>")
     /* Opaque high-entropy blobs — a session string, a token, a hash. */
-    .replace(/\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}\b/g, "<redacted>");
-  return out.length > STDERR_LINE_CHARS ? `${out.slice(0, STDERR_LINE_CHARS)}…` : out;
+    .replace(/\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}\b/g, REDACTED);
+  return truncateStderrLine(summarizeConnectorStderr(out));
+}
+
+function truncateStderrLine(line: string): string {
+  return line.length > STDERR_LINE_CHARS ? `${line.slice(0, STDERR_LINE_CHARS)}…` : line;
 }
 
 /** The last lines the connector printed before it died, redacted. Bounded
@@ -403,6 +530,12 @@ type ConnectorRecord = {
   connectorTokenSha256: string;
   command: string;
   entrypoint: string;
+  /** Whether the process runs under a crash monitor (#1087). A record written
+      before the monitor existed carries no marker and reads back as `legacy`:
+      that connector has no monitor to write an exit status down and this
+      Viewer is not its parent, so its crash can only be recorded as
+      `vanished`, with a null exit code and a null signal. */
+  supervision: "monitored" | "legacy";
 };
 
 let liveConnectorChild: {
@@ -431,7 +564,7 @@ function readConnectorRecord(): ConnectorRecord | null {
     if (row.version !== 1 || typeof row.pid !== "number" || !Number.isInteger(row.pid) || row.pid <= 1
       || typeof row.identity !== "string" || typeof row.credentialRef !== "string"
       || typeof row.connectorTokenSha256 !== "string" || typeof row.command !== "string" || typeof row.entrypoint !== "string") return null;
-    return row as ConnectorRecord;
+    return { ...(row as ConnectorRecord), supervision: row.supervision === "monitored" ? "monitored" : "legacy" };
   } catch {
     return null;
   }
@@ -472,6 +605,7 @@ function recordConnectorProcess(child: ConnectorChild, spec: ProcessSpec, bindin
     connectorTokenSha256: connectorTokenSha256(binding.connectorToken),
     command: spec.command,
     entrypoint: spec.args[0],
+    supervision: spec.env.LLV_TELEGRAM_STATE_DIR ? "monitored" : "legacy",
   };
   const tmp = `${pidFilePath()}.${process.pid}.tmp`;
   try {
@@ -522,6 +656,11 @@ type ConnectorCrashRecord = {
       recorded for it, so the code and signal are genuinely unknowable and
       both stay null. */
   observed: "exit" | "vanished";
+  /** Whether the process that died ran under a crash monitor. A `legacy`
+      connector — one still running from before the monitor existed — is the
+      one case where a null code AND a null signal are expected rather than a
+      gap: nothing was in a position to observe them (#1087). */
+  supervision: "monitored" | "legacy";
   stderr: string[];
 };
 
@@ -724,6 +863,7 @@ function watchConnectorExit(child: ConnectorChild, binding: ConnectorBinding, po
       exitCode: monitored ? monitored.exitCode : code,
       signal: monitored ? monitored.signal : signal ?? null,
       observed: "exit",
+      supervision: "monitored",
       stderr: connectorStderrTail(connectorSecrets(binding)),
     }, at);
     if (recorded) void restartAfterCrash(binding, ports, at);
@@ -763,6 +903,7 @@ function reapVanishedConnector(binding: ConnectorBinding, ports: TelegramConnect
     exitCode: monitored?.exitCode ?? null,
     signal: monitored?.signal ?? null,
     observed: monitored ? "exit" : "vanished",
+    supervision: record.supervision,
     stderr: connectorStderrTail(connectorSecrets(binding)),
   }, at);
 }
@@ -1111,7 +1252,8 @@ export async function telegramConnectorHealth(
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | null = null;
   const answer = await Promise.race([
-    callTool(url, session.connectorToken, "get_me", controller.signal).catch(() => null),
+    callTool(url, session.connectorToken, "get_me", controller.signal)
+      .catch((): ConnectorCallResult => ({ ok: false, code: "call_failed" })),
     new Promise<"busy">((resolve) => {
       timer = setTimeout(() => { controller.abort(); resolve("busy"); }, budget.probeTimeoutMs!);
       timer.unref?.();
@@ -1120,10 +1262,15 @@ export async function telegramConnectorHealth(
   if (timer) clearTimeout(timer);
   controller.abort();
   if (answer === "busy") return "busy";
+  /* A health call the supervisor's replacement took with it says nothing
+     about the account either, and the connector it would have torn down is
+     already gone — so it reads like a busy connector: no verdict, nothing
+     stopped, ask again once the replacement is up (#1087). */
+  if (!answer.ok) return answer.code === "connector_restarting" ? "busy" : null;
   /* An answer that is not the account — an upstream error string, a dead
      call — is no verdict: the bridge check must still get its chance to
      classify an expired or deauthorized session, which `get_me` cannot. */
-  const identity = parseConnectorIdentity(answer);
+  const identity = parseConnectorIdentity(answer.text);
   return identity ? { status: "connected", identity } : null;
 }
 
