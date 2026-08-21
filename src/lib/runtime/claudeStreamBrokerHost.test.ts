@@ -29,6 +29,7 @@ import {
   bindClaudeHostPersistence,
   demoteSkippedStructuredRegistryHosts,
   startClaudeStructuredHost,
+  structuredHostsEnabled,
 } from "./registry";
 
 class MemoryEventStore implements RuntimeEventStore {
@@ -1399,23 +1400,42 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(spawned).toBeFalse();
   });
 
-  test("requires the exact structured-host opt-in before start", async () => {
-    const ledger = new RecordingDeliveryLedger();
-    const child = new FakeClaude(ledger);
-    const options = {
-      cwd: "/repo",
-      deliveryLedger: ledger,
-      eventStore: new MemoryEventStore(),
-      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
-      readTranscript: () => [],
-      spawnProcess: fakeSpawn(child, {}),
+  test("keeps structured hosting enabled unless the rollback switch is explicit", async () => {
+    const freshStart = () => {
+      const ledger = new RecordingDeliveryLedger();
+      const child = new FakeClaude(ledger);
+      return {
+        child,
+        options: {
+          cwd: "/repo",
+          deliveryLedger: ledger,
+          eventStore: new MemoryEventStore(),
+          readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+          readTranscript: () => [],
+          spawnProcess: fakeSpawn(child, {}),
+        },
+      };
     };
-    await expect(startClaudeStructuredHost(options, { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "true" }))
-      .rejects.toThrow("structured hosts are disabled");
-    expect(child.sessionId).toBe("");
-    const host = await startClaudeStructuredHost(options, { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" });
-    expect(child.sessionId).toBe(host.identity.sessionId);
-    await host.release();
+
+    for (const rollback of ["0", "false", "off", "no"]) {
+      const env = { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: rollback } as const;
+      expect(structuredHostsEnabled(env)).toBeFalse();
+      const { child, options } = freshStart();
+      await expect(startClaudeStructuredHost(options, env)).rejects.toThrow("structured hosts are disabled");
+      expect(child.sessionId).toBe("");
+    }
+
+    for (const env of [
+      { NODE_ENV: "test" },
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "true" },
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
+    ] as const) {
+      expect(structuredHostsEnabled(env)).toBeTrue();
+      const { child, options } = freshStart();
+      const host = await startClaudeStructuredHost(options, env);
+      expect(child.sessionId).toBe(host.identity.sessionId);
+      await host.release();
+    }
   });
 
   test("boot adoption resumes claimed Claude rows and persists broker columns", async () => {
