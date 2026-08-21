@@ -9,7 +9,16 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
 const { TelegramConnectionService } = await import("./service");
 const { readTelegramSession, saveTelegramSession, telegramSessionPath, writeTelegramConnection } = await import("./sessionStore");
-const { recordConnectorRestart } = await import("./connectorRestarts");
+const { confirmConnectorRestart, recordConnectorCrash } = await import("./connectorRestarts");
+
+/* A completed restart: a detected death whose replacement then verified. The
+   two-step API is what the supervisor drives; tests that only need the settled
+   result say it in one line. */
+function recordCompletedRestart(crash: { exitCode: number | null; signal: string | null }, at: number): void {
+  recordConnectorCrash(crash, at);
+  confirmConnectorRestart();
+}
+
 
 import type { TelegramAdapter, TelegramEnrollmentEvent, TelegramHealthResult } from "./adapter";
 import type { TelegramErrorCode } from "./contracts";
@@ -722,7 +731,7 @@ test("a fresh connector respawn shows as the transient restarting phase", async 
      the status surface kept saying connected. */
   const { service } = harness();
   connectedConnection();
-  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 5_000);
+  recordCompletedRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 5_000);
   const status = service.status();
   expect(status.phase).toBe("restarting");
   expect(status.lastRestartAt).toBe(new Date(NOW - 5_000).toISOString());
@@ -732,22 +741,22 @@ test("a fresh connector respawn shows as the transient restarting phase", async 
 test("the restart count the panel reads covers the last 24 h only", async () => {
   const { service } = harness();
   connectedConnection();
-  recordConnectorRestart({ exitCode: 1, signal: null }, NOW - 30 * HOUR);
-  recordConnectorRestart({ exitCode: 1, signal: null }, NOW - 20 * HOUR);
-  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 5_000);
+  recordCompletedRestart({ exitCode: 1, signal: null }, NOW - 30 * HOUR);
+  recordCompletedRestart({ exitCode: 1, signal: null }, NOW - 20 * HOUR);
+  recordCompletedRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 5_000);
   expect(service.status().restartsLast24h).toBe(2);
 });
 
 test("a respawn-dropped call reads as restarting, then as the connector failure it is", async () => {
   const { service } = harness();
   connectedConnection("connector_restarting");
-  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 10_000);
+  recordCompletedRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 10_000);
   expect(service.status().phase).toBe("restarting");
   expect(service.status().error).toBeNull();
 
   /* Once the grace window closes, a connector that never came back is a real
      failure again — in the vocabulary the panel already renders. */
-  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 5 * HOUR);
+  recordCompletedRestart({ exitCode: null, signal: "SIGKILL" }, NOW - 5 * HOUR);
   const stale = service.status();
   expect(stale.phase).toBe("error");
   expect(stale.error).toEqual({ code: "connector_failed" });

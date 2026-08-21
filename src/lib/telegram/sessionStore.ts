@@ -52,9 +52,8 @@ export type StoredTelegramConnection = {
   credentialRef: string | null;
   identity: TelegramIdentity | null;
   lastHealthCheckAt: string | null;
-  /** The connector seam's vocabulary (#1087): a respawn-dropped call is
-      recorded as `connector_restarting`, which the status projection turns
-      into the transient `restarting` phase. */
+  /** The connector seam's vocabulary (#1087): a respawn-dropped call is stored
+      as `connector_restarting` and projected as the `restarting` phase. */
   errorCode: TelegramConnectorErrorCode | null;
 };
 

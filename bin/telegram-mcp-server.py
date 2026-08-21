@@ -53,32 +53,30 @@ class BearerAuthMiddleware:
         await self.app(scope, receive, send)
 
 
-# Issue #1087: three concurrent get_messages pages took the whole connector
-# down for ~20 s, and every agent session shares this one process. Agents call
-# the loopback port directly, so this wrapper — the Viewer-owned ASGI seam the
-# vendored app already runs behind — is the only chokepoint on their path.
-# Tool calls beyond the cap queue instead of piling onto the account client;
-# a request that waits out the bound is refused, never dropped silently.
+# Issue #1087: three concurrent get_messages pages took the whole connector down
+# for ~20 s, and every agent session shares this one process. Agents call the
+# loopback port directly, so this wrapper — the Viewer-owned ASGI seam the
+# vendored app already runs behind — is the only chokepoint on their path. Tool
+# calls past the cap queue; one that waits out the bound is refused, not dropped.
 GATE_LIMIT = 2
 GATE_WAIT_SECONDS = 30.0
 
 
 def _is_tool_call(body: bytes) -> bool:
-    """Only tools/call is gated: the handshake, tools/list and the session
-    stream must stay free or the Viewer's own readiness probe would queue
-    behind agent reads and be read as a dead connector."""
+    """Only tools/call is gated: the handshake, tools/list and the session stream
+    must stay free or the Viewer's own readiness probe would queue behind agent
+    reads and be read as a dead connector."""
     try:
         payload = json.loads(body)
     except (ValueError, UnicodeDecodeError):
         return False
-    if isinstance(payload, list):
-        return any(isinstance(item, dict) and item.get("method") == "tools/call" for item in payload)
-    return isinstance(payload, dict) and payload.get("method") == "tools/call"
+    items = payload if isinstance(payload, list) else [payload]
+    return any(isinstance(item, dict) and item.get("method") == "tools/call" for item in items)
 
 
 async def _buffer_request(receive):
-    """Reads the request body so the method can be inspected, and returns a
-    receive callable that replays it to the wrapped app unchanged."""
+    """Reads the body so the method can be inspected, and returns a receive
+    callable that replays it to the wrapped app unchanged."""
     messages = []
     body = b""
     while True:
@@ -94,20 +92,11 @@ async def _buffer_request(receive):
     async def replay():
         nonlocal index
         if index < len(messages):
-            message = messages[index]
             index += 1
-            return message
+            return messages[index - 1]
         return await receive()
 
     return body, replay
-
-
-def _release_late(slots):
-    """Gives back a slot granted after its waiter already gave up."""
-    def release(task):
-        if not task.cancelled() and task.exception() is None:
-            slots.release()
-    return release
 
 
 class ToolCallGate:
@@ -134,20 +123,15 @@ class ToolCallGate:
         slots = self._slots()
         waiter = asyncio.ensure_future(slots.acquire())
         try:
-            # The WAIT times out; the acquire itself is never cancelled, so a
-            # slot handed over at that exact moment cannot be lost — a lost
-            # slot would shrink the cap permanently.
+            # The WAIT times out; the acquire itself is never cancelled, so a slot
+            # handed over at that exact moment is given back rather than lost — a
+            # lost slot would shrink the cap permanently.
             await asyncio.wait_for(asyncio.shield(waiter), self.wait_seconds)
         except asyncio.TimeoutError:
-            waiter.add_done_callback(_release_late(slots))
-            await send({
-                "type": "http.response.start",
-                "status": 503,
-                "headers": [
-                    (b"content-type", b"text/plain; charset=utf-8"),
-                    (b"retry-after", b"1"),
-                ],
-            })
+            waiter.add_done_callback(
+                lambda granted: None if granted.cancelled() or granted.exception() else slots.release())
+            await send({"type": "http.response.start", "status": 503, "headers": [
+                (b"content-type", b"text/plain; charset=utf-8"), (b"retry-after", b"1")]})
             await send({"type": "http.response.body", "body": b"Telegram connector is busy"})
             return
         try:

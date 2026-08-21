@@ -6,7 +6,7 @@ import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { withFileTransaction } from "@/lib/state/fileTransaction";
 
-import { RESTART_GRACE_MS, restartedWithin, watchConnectorCrash } from "./connectorRestarts";
+import { RESTART_GRACE_MS, confirmConnectorRestart, recordConnectorCrash, restartedWithin, watchConnectorCrash } from "./connectorRestarts";
 import type { TelegramConnectorErrorCode } from "./contracts";
 import { connectorLaunchSpec, telegramApiCredentials, telegramMcpServerPath, telegramMcpUrl, telegramVenvPython, type ProcessSpec } from "./packaging";
 import { ensureTelegramStateDir, type StoredTelegramSession } from "./sessionStore";
@@ -72,8 +72,8 @@ export type ConnectorEnsureResult = { ok: true; url: string } | { ok: false; cod
 type ConnectorChild = {
   pid?: number;
   kill(signal?: NodeJS.Signals): boolean;
-  /** Present on a child THIS process spawned, so its exit code and signal can
-      be recorded as a crash (#1087). An adopted process has none. */
+  /** Present on a child THIS process spawned, so its exit code and signal are
+      recordable (#1087); an adopted process has none. */
   once?(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
 };
 type ConnectorBinding = Pick<StoredTelegramSession, "credentialRef" | "connectorToken">;
@@ -198,8 +198,8 @@ type LiveConnectorChild = {
   child: ConnectorChild;
   pid: number;
   identity: string;
-  /** Set before the Viewer terminates it, so an operator stop, a logout or a
-      health-check restart is never counted as a crash. */
+  /** Set before the Viewer terminates it: an operator stop, a logout or a
+      health-check restart is not a crash. */
   expectedExit: boolean;
 };
 
@@ -307,6 +307,14 @@ function targetIsAlive(target: Pick<TerminationTarget, "pid" | "identity">): boo
   return procBackend.processIdentity(target.pid) === target.identity;
 }
 
+/** #1087 adopted-process recovery: a stop removes the record, so a surviving
+    record with a dead pid is an uncommanded death of a connector with no exit
+    channel to watch. Detected before the replacement overwrites the record. */
+function detectRecordedConnectorDeath(): void {
+  const recorded = readConnectorRecord();
+  if (recorded && !targetIsAlive(recorded)) recordConnectorCrash({ exitCode: null, signal: null });
+}
+
 async function waitForTargetsToExit(targets: TerminationTarget[], timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (targets.some(targetIsAlive) && Date.now() < deadline) {
@@ -407,10 +415,9 @@ export async function ensureTelegramConnector(
   ports: TelegramConnectorPorts = realPorts,
 ): Promise<ConnectorEnsureResult> {
   const result = await ensureVerifiedConnector(session, ports);
-  /* #1087: a connector that failed to answer right after a recorded respawn
-     was dropped BY that respawn, not by a broken configuration. Only the
-     generic `connector_failed` is re-read this way — a refused read-only
-     surface or missing credentials keeps its own diagnosis. */
+  /* #1087: a call that failed to answer right after a counted restart was
+     dropped BY that respawn. Only the generic `connector_failed` is re-read
+     this way — a refused surface or missing credentials keeps its diagnosis. */
   if (!result.ok && result.code === "connector_failed" && restartedWithin(RESTART_GRACE_MS, ports.now())) {
     return { ok: false, code: "connector_restarting" };
   }
@@ -439,6 +446,7 @@ async function ensureVerifiedConnector(
        listener ineligible for adoption. Stop and record the replacement while
        holding the cross-process supervisor lock, so another Viewer generation
        can only adopt the one durable winner. */
+    detectRecordedConnectorDeath();
     await stop();
     isCurrent = ports.beginOperation?.() ?? (() => true);
     const credentials = telegramApiCredentials();
@@ -469,7 +477,10 @@ async function ensureVerifiedConnector(
       return { ok: false, code: "connector_failed" };
     }
     if (ready) {
+      /* The replacement answered, so a detected death is now a completed
+         restart; a respawn that never verifies is never counted as one. */
       if (!ready.ok) await stopThisGeneration();
+      else confirmConnectorRestart();
       return ready;
     }
     await ports.sleep(PROBE_INTERVAL_MS);

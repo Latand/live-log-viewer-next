@@ -14,7 +14,16 @@ process.env.LLV_TELEGRAM_API_HASH = "0123456789abcdef0123456789abcdef";
 
 const { TELEGRAM_READ_TOOL_ALLOWLIST, connectorServerName, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
 const { telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
-const { readConnectorRestarts, recordConnectorRestart } = await import("./connectorRestarts");
+const { confirmConnectorRestart, readConnectorRestarts, recordConnectorCrash } = await import("./connectorRestarts");
+
+/* A completed restart: a detected death whose replacement then verified. The
+   two-step API is what the supervisor drives; tests that only need the settled
+   result say it in one line. */
+function recordCompletedRestart(crash: { exitCode: number | null; signal: string | null }, at: number): void {
+  recordConnectorCrash(crash, at);
+  confirmConnectorRestart();
+}
+
 
 import type { ConnectorProbe, TelegramConnectorPorts } from "./connector";
 
@@ -397,14 +406,14 @@ test("a call dropped by the supervisor's own respawn reports connector_restartin
   /* A restart the supervisor recorded moments ago (#1087): the connector that
      will not answer right now is the one being replaced, so the caller gets
      the restart code instead of an indistinguishable connector_failed. */
-  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, 0);
+  recordCompletedRestart({ exitCode: null, signal: "SIGKILL" }, 0);
   const { ports, calls } = fakePorts([], { spawnFails: true });
   expect(await ensureTelegramConnector(CONNECTOR_SESSION, ports)).toEqual({ ok: false, code: "connector_restarting" });
   expect(calls.spawns).toBe(1);
 });
 
 test("a refused read-only surface keeps its own diagnosis inside the restart window", async () => {
-  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, 0);
+  recordCompletedRestart({ exitCode: null, signal: "SIGKILL" }, 0);
   const { ports } = fakePorts([{
     ok: true,
     serverName: connectorServerName(CONNECTOR_SESSION.connectorToken),
@@ -416,4 +425,54 @@ test("a refused read-only surface keeps its own diagnosis inside the restart win
 test("without a recorded restart a failure stays connector_failed", async () => {
   const { ports } = fakePorts([], { spawnFails: true });
   expect(await ensureTelegramConnector(CONNECTOR_SESSION, ports)).toEqual({ ok: false, code: "connector_failed" });
+});
+
+/** A connector recorded by an earlier Viewer generation, now dead: the record
+    survives (a stop would have removed it), but nothing here ever held its
+    exit channel. */
+function writeDeadAdoptedRecord(): void {
+  const pidFile = path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json");
+  fs.writeFileSync(pidFile, JSON.stringify({
+    version: 1,
+    pid: 2,
+    identity: "start-token-of-a-process-that-is-gone",
+    credentialRef: CONNECTOR_SESSION.credentialRef,
+    connectorTokenSha256: "a".repeat(64),
+    command: "/does/not/matter/python",
+    entrypoint: "/does/not/matter/telegram-mcp-server.py",
+  }), { mode: 0o600 });
+}
+
+test("an adopted connector that died is recovered as a restart once the replacement verifies", async () => {
+  /* #1087: an adopted process has no exit channel this Viewer can watch, so
+     its death is detected from the surviving pid file instead — with the exit
+     code and signal genuinely unknown rather than invented. */
+  writeDeadAdoptedRecord();
+  const { ports, calls } = fakePorts([READ_ONLY]);
+  expect(await ensureTelegramConnector(CONNECTOR_SESSION, ports)).toEqual({ ok: true, url: telegramMcpUrl() });
+  expect(calls.spawns).toBe(1);
+  const state = readConnectorRestarts();
+  expect(state.restarts).toBe(1);
+  expect(state.pending).toBeNull();
+  expect(state.recent[0]!.exitCode).toBeNull();
+  expect(state.recent[0]!.signal).toBeNull();
+});
+
+test("a respawn that never comes back is detected but not counted as a restart", async () => {
+  writeDeadAdoptedRecord();
+  const { ports } = fakePorts([], { spawnFails: true });
+  expect(await ensureTelegramConnector(CONNECTOR_SESSION, ports)).toEqual({ ok: false, code: "connector_failed" });
+  const state = readConnectorRestarts();
+  /* The death is on the record, but the panel must not claim a restart the
+     connector never completed — and with no counted restart there is no grace
+     window, so the caller keeps the real connector_failed above. */
+  expect(state.pending).not.toBeNull();
+  expect(state.restarts).toBe(0);
+  expect(state.lastRestartAt).toBeNull();
+});
+
+test("a first spawn with no prior connector is not counted as a restart", async () => {
+  const { ports } = fakePorts([READ_ONLY]);
+  expect(await ensureTelegramConnector(CONNECTOR_SESSION, ports)).toEqual({ ok: true, url: telegramMcpUrl() });
+  expect(readConnectorRestarts()).toMatchObject({ restarts: 0, lastRestartAt: null, pending: null });
 });

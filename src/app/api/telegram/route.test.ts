@@ -23,7 +23,16 @@ delete process.env.LLV_TELEGRAM_API_HASH;
 const { GET, POST } = await import("./route");
 const { TelegramConnectionService, setTelegramServiceForTests } = await import("@/lib/telegram/service");
 const { readTelegramSession, writeTelegramConnection } = await import("@/lib/telegram/sessionStore");
-const { recordConnectorRestart } = await import("@/lib/telegram/connectorRestarts");
+const { confirmConnectorRestart, recordConnectorCrash } = await import("@/lib/telegram/connectorRestarts");
+
+/* A completed restart: a detected death whose replacement then verified. The
+   two-step API is what the supervisor drives; tests that only need the settled
+   result say it in one line. */
+function recordCompletedRestart(crash: { exitCode: number | null; signal: string | null }, at: number): void {
+  recordConnectorCrash(crash, at);
+  confirmConnectorRestart();
+}
+
 const { telegramApiCredentials } = await import("@/lib/telegram/packaging");
 
 import type { TelegramAdapter, TelegramEnrollmentEvent, TelegramHealthResult } from "@/lib/telegram/adapter";
@@ -272,7 +281,7 @@ test("#1087: the status payload carries the restart row and the transient restar
     lastHealthCheckAt: new Date(now).toISOString(),
     errorCode: null,
   });
-  recordConnectorRestart({ exitCode: null, signal: "SIGKILL" }, now - 5_000);
+  recordCompletedRestart({ exitCode: null, signal: "SIGKILL" }, now - 5_000);
   const { telegram } = await payload(await GET(getRequest())) as {
     telegram: { phase: string; restartsLast24h: number; lastRestartAt: string };
   };

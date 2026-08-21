@@ -57,9 +57,9 @@ const productionPorts: TelegramServicePorts = {
   credentialsConfigured: () => telegramApiCredentials() !== null,
 };
 
-/** The browser's vocabulary is the durable one: a respawn-dropped call is
-    told through the `restarting` phase, and if it is still standing when the
-    grace window closes it reads as the connector failure it was. */
+/** The browser's vocabulary is the durable one: a respawn-dropped call is told
+    through the `restarting` phase, and reads as the connector failure it was
+    once the grace window closes. */
 function durableErrorCode(code: TelegramConnectorErrorCode): TelegramErrorCode {
   return code === "connector_restarting" ? "connector_failed" : code;
 }
@@ -166,10 +166,10 @@ export class TelegramConnectionService {
   }
 
   private payloadFor(connection: StoredTelegramConnection): TelegramStatusPayload {
-    /* #1087: a call the supervisor's own respawn dropped reads as the
-       transient `restarting` phase while the grace window is open, and falls
-       back to the durable connector error once it closes — so a connector
-       that never comes back still surfaces as a real failure. */
+    /* #1087: a call the supervisor's own respawn dropped reads as the transient
+       `restarting` phase while the grace window is open, and falls back to the
+       durable error once it closes — a connector that never comes back is a
+       real failure. */
     const restarts = readConnectorRestarts();
     const restarting = restartedWithin(RESTART_GRACE_MS, this.ports.now(), restarts)
       && (connection.status === "connected" || connection.errorCode === "connector_restarting");
@@ -188,9 +188,9 @@ export class TelegramConnectionService {
     };
   }
 
-  /** The restart health row (#1087): how many respawns the Viewer observed in
-      the last 24 h and when the last one was. Counts only — the crash record
-      behind them is structured and never leaves the server. */
+  /** The restart health row (#1087): counted respawns in the last 24 h and when
+      the last one was. Counts only — the structured crash record behind them
+      never leaves the server. */
   private restartView(
     restarts = readConnectorRestarts(),
   ): Pick<TelegramStatusPayload, "restartsLast24h" | "lastRestartAt"> {
