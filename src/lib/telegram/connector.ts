@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
@@ -8,7 +9,7 @@ import { withFileTransaction } from "@/lib/state/fileTransaction";
 
 import type { TelegramConnectorRestarts, TelegramErrorCode, TelegramIdentity } from "./contracts";
 import { connectorLaunchSpec, telegramApiCredentials, telegramMcpServerPath, telegramMcpUrl, telegramVenvPython, type ProcessSpec } from "./packaging";
-import { ensureTelegramStateDir, readTelegramSession, type StoredTelegramSession } from "./sessionStore";
+import { ensureTelegramStateDir, readTelegramConnection, readTelegramSession, writeTelegramConnection, type StoredTelegramSession } from "./sessionStore";
 
 /**
  * Supervisor for the ONE shared loopback connector process (issue #1059).
@@ -116,6 +117,7 @@ const CRASH_LOG_FILE = "connector-crashes.log";
 const RESTART_STATE_FILE = "connector-restarts.json";
 const STDERR_TAIL_LINES = 20;
 const STDERR_TAIL_BYTES = 8_192;
+const STDERR_LINE_CHARS = 400;
 const CRASH_LOG_KEEP_LINES = 50;
 const DAY_MS = 24 * 60 * 60 * 1_000;
 /* A crashing connector is restarted, but never in a hot loop: more than
@@ -124,6 +126,11 @@ const DAY_MS = 24 * 60 * 60 * 1_000;
 const RESTART_BURST_WINDOW_MS = 15 * 60 * 1_000;
 const RESTART_BURST_LIMIT = 5;
 const RESTART_DELAY_MS = 500;
+/* The supervisor asks the connector to drain before it signals it, so an
+   in-flight call is answered with a named error rather than cut short. A
+   connector that cannot be asked inside this budget is signaled anyway. */
+const DRAIN_PATH = "/llv-telegram-drain";
+const DRAIN_TIMEOUT_MS = 1_500;
 /* The non-destructive health check gets a longer budget than a readiness
    probe: a connector busy with a fan-out of large reads is healthy, and
    timing it out here would tear down exactly the process this change set out
@@ -288,9 +295,47 @@ function openConnectorStderrSink(): number | null {
   }
 }
 
-/** The last lines the connector printed before it died. Bounded twice (bytes
-    read, then lines kept) so a runaway log can never be loaded whole. */
-function connectorStderrTail(): string[] {
+/**
+ * Redacts one connector stderr line before it is persisted.
+ *
+ * The crash log is Viewer-owned and owner-only, but it is still a durable
+ * copy of upstream output, and that output is not innocent: the vendored
+ * error helper logs the failing call's arguments verbatim
+ * (`Error in <fn> (chat_id=…, query=…)`, see
+ * `vendor/telegram-mcp/telegram_mcp/runtime.py`) and attaches a traceback
+ * whose frames carry absolute paths under the operator's home. A crash
+ * record has to say what died, never who was being read (#1087).
+ *
+ * `secrets` carries the values this Viewer already knows are credentials —
+ * the connector bearer token and the Telegram string session — so an exact
+ * echo of either is removed by value rather than by pattern.
+ */
+export function redactConnectorStderrLine(line: string, secrets: readonly string[] = []): string {
+  let out = line;
+  for (const secret of secrets) {
+    if (secret.length >= 8) out = out.split(secret).join("<redacted>");
+  }
+  const home = os.homedir();
+  if (home && home.length > 1) out = out.split(home).join("~");
+  out = out
+    /* Any other account's home, and the container's copy of this one. */
+    .replace(/\/(home|Users)\/[^/\s:'"]+/g, "/$1/<user>")
+    /* The vendored context format: `key=value` pairs lifted straight out of
+       the tool arguments. Everything up to the next pair separator goes. */
+    .replace(/\b([A-Za-z_]*(?:chat|user|peer|phone|contact|title|name|query|text|message|entity|alias|folder)[A-Za-z_]*)\s*=\s*[^,)]*/gi, "$1=<redacted>")
+    /* Public handles. */
+    .replace(/@[A-Za-z0-9_]{4,}/g, "@<user>")
+    /* Chat/user/message ids and phone numbers. */
+    .replace(/[+-]?\b\d{5,}\b/g, "<id>")
+    /* Opaque high-entropy blobs — a session string, a token, a hash. */
+    .replace(/\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}\b/g, "<redacted>");
+  return out.length > STDERR_LINE_CHARS ? `${out.slice(0, STDERR_LINE_CHARS)}…` : out;
+}
+
+/** The last lines the connector printed before it died, redacted. Bounded
+    twice (bytes read, then lines kept) so a runaway log can never be loaded
+    whole. */
+function connectorStderrTail(secrets: readonly string[] = []): string[] {
   try {
     const path = telegramStateFile(STDERR_FILE);
     const stat = fs.statSync(path);
@@ -304,7 +349,7 @@ function connectorStderrTail(): string[] {
         .map((line) => line.replace(/\s+$/, ""))
         .filter((line) => line.length > 0)
         .slice(-STDERR_TAIL_LINES)
-        .map((line) => (line.length > 400 ? `${line.slice(0, 400)}…` : line));
+        .map((line) => redactConnectorStderrLine(line, secrets));
     } finally {
       fs.closeSync(handle);
     }
@@ -433,14 +478,30 @@ type ConnectorCrashRecord = {
   pid: number;
   exitCode: number | null;
   signal: string | null;
+  /** How the exit was noticed. `exit` is this Viewer's own child, so the
+      kernel handed us the code and signal. `vanished` is a connector this
+      Viewer only adopted (spawned by an earlier generation, so there is no
+      exit event to listen to): the disappearance is observed, the code and
+      signal are not knowable, and both stay null. */
+  observed: "exit" | "vanished";
   stderr: string[];
 };
 
 type ConnectorRestartState = {
   version: 1;
-  /** ISO timestamps of crash restarts, trimmed to the last 24 h. */
+  /** ISO timestamps of VERIFIED crash restarts — a replacement connector that
+      came back up and passed the read-only verification. A respawn that
+      failed is not a restart and is never counted here. Trimmed to 24 h. */
   restarts: string[];
+  /** ISO timestamps of the crashes themselves, whether or not the restart
+      that followed succeeded. This is what the burst limiter reads: a
+      connector that dies five times and never comes back must stop being
+      restarted just as surely as one that comes back and dies again. */
+  crashes: string[];
   lastCrashAt: string | null;
+  /** The pid of the last crash written, so an exit seen both by the child's
+      own exit event and by the reaper below is recorded exactly once. */
+  lastCrashPid: number | null;
 };
 
 /** Pids this Viewer generation is terminating on purpose, each with the time
@@ -470,19 +531,27 @@ function writeOwnerOnlyFile(path: string, contents: string): void {
 }
 
 function readRestartState(): ConnectorRestartState {
-  const empty: ConnectorRestartState = { version: 1, restarts: [], lastCrashAt: null };
+  const empty: ConnectorRestartState = { version: 1, restarts: [], crashes: [], lastCrashAt: null, lastCrashPid: null };
   try {
     if (ensureTelegramStateDir(false) === null) return empty;
     const row = JSON.parse(fs.readFileSync(telegramStateFile(RESTART_STATE_FILE), "utf8")) as Partial<ConnectorRestartState>;
     if (row.version !== 1 || !Array.isArray(row.restarts)) return empty;
+    const strings = (value: unknown): string[] =>
+      Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
     return {
       version: 1,
-      restarts: row.restarts.filter((value): value is string => typeof value === "string"),
+      restarts: strings(row.restarts),
+      crashes: strings(row.crashes),
       lastCrashAt: typeof row.lastCrashAt === "string" ? row.lastCrashAt : null,
+      lastCrashPid: typeof row.lastCrashPid === "number" ? row.lastCrashPid : null,
     };
   } catch {
     return empty;
   }
+}
+
+function writeRestartState(state: ConnectorRestartState): void {
+  writeOwnerOnlyFile(telegramStateFile(RESTART_STATE_FILE), JSON.stringify(state));
 }
 
 function withinLast(timestamps: string[], windowMs: number, now: number): string[] {
@@ -504,9 +573,15 @@ export function telegramConnectorActivity(now: number = Date.now()): TelegramCon
   };
 }
 
-function recordConnectorCrash(crash: ConnectorCrashRecord): void {
+/** Writes the crash to the owner-only ndjson log and stamps it into the
+    restart state, which is what makes the record idempotent per pid: the same
+    exit seen twice (once by the child's exit event, once by the reaper) is
+    logged once. Returns false when this pid was already recorded. */
+function recordConnectorCrash(crash: ConnectorCrashRecord, at: number): boolean {
+  const state = readRestartState();
+  if (state.lastCrashPid === crash.pid) return false;
   try {
-    if (ensureTelegramStateDir(true) === null) return;
+    if (ensureTelegramStateDir(true) === null) return false;
     const path = telegramStateFile(CRASH_LOG_FILE);
     let existing: string[] = [];
     try {
@@ -515,6 +590,14 @@ function recordConnectorCrash(crash: ConnectorCrashRecord): void {
     const lines = [...existing, JSON.stringify(crash)].slice(-CRASH_LOG_KEEP_LINES);
     writeOwnerOnlyFile(path, `${lines.join("\n")}\n`);
   } catch { /* an unrecordable crash must not break the restart */ }
+  writeRestartState({
+    ...state,
+    restarts: withinLast(state.restarts, DAY_MS, at),
+    crashes: [...withinLast(state.crashes, DAY_MS, at), crash.at],
+    lastCrashAt: crash.at,
+    lastCrashPid: crash.pid,
+  });
+  return true;
 }
 
 /** Reads the crash log newest-last; exported for the focused tests and any
@@ -530,20 +613,54 @@ export function readTelegramConnectorCrashes(): ConnectorCrashRecord[] {
   }
 }
 
-function noteCrashRestart(at: number): void {
+/** A crash restart that came back VERIFIED. Only these are counted: a respawn
+    that failed left the operator with no connector, and reporting it as a
+    completed restart would say the opposite of what happened (#1087). */
+function noteVerifiedRestart(at: number): void {
   const state = readRestartState();
-  const restarts = [...withinLast(state.restarts, DAY_MS, at), new Date(at).toISOString()];
-  writeOwnerOnlyFile(telegramStateFile(RESTART_STATE_FILE), JSON.stringify({
-    version: 1,
-    restarts,
-    lastCrashAt: new Date(at).toISOString(),
-  } satisfies ConnectorRestartState));
+  writeRestartState({
+    ...state,
+    restarts: [...withinLast(state.restarts, DAY_MS, at), new Date(at).toISOString()],
+    crashes: withinLast(state.crashes, DAY_MS, at),
+    /* A replacement is serving, so the next exit is a NEW event whatever pid
+       the kernel hands it — including a recycled one. */
+    lastCrashPid: null,
+  });
+}
+
+/**
+ * A crash whose restart did not come back leaves the durable connection
+ * saying `connected` for a process that no longer exists. Downgrade it to the
+ * error the next reader needs to see. Only a connection that still names the
+ * SAME credential is touched — a logout or a re-enrollment racing the restart
+ * owns the file, not this path.
+ */
+function markConnectorRestartFailed(code: TelegramErrorCode, credentialRef: string): void {
+  try {
+    const connection = readTelegramConnection();
+    if (connection.status !== "connected" || connection.credentialRef !== credentialRef) return;
+    writeTelegramConnection({ ...connection, status: "error", errorCode: code });
+  } catch { /* an unsafe or unreadable connection keeps its own contract */ }
 }
 
 /** True while the connector keeps crashing faster than restarting it can
-    help — the restart stops there and the crash log holds the reason. */
+    help — the restart stops there and the crash log holds the reason. Read
+    from the CRASHES, not the successful restarts: a connector that dies and
+    never comes back must stop being respawned just as surely as one that
+    comes back and dies again. */
 function restartBurstExhausted(now: number): boolean {
-  return withinLast(readRestartState().restarts, RESTART_BURST_WINDOW_MS, now).length >= RESTART_BURST_LIMIT;
+  return withinLast(readRestartState().crashes, RESTART_BURST_WINDOW_MS, now).length >= RESTART_BURST_LIMIT;
+}
+
+/** The secrets a crash tail must never echo: this generation's bearer token
+    and the Telegram string session behind it. */
+function connectorSecrets(binding: ConnectorBinding): string[] {
+  const secrets = [binding.connectorToken];
+  try {
+    const session = readTelegramSession();
+    if (session) secrets.push(session.sessionString, session.connectorToken);
+  } catch { /* an unreadable session store contributes no known value */ }
+  return secrets;
 }
 
 /**
@@ -559,19 +676,55 @@ function watchConnectorExit(child: ConnectorChild, binding: ConnectorBinding, po
     if (deliberateStops.delete(pid)) return;
     if (liveConnectorChild?.pid === pid) liveConnectorChild = null;
     const at = ports.now();
-    recordConnectorCrash({
+    const recorded = recordConnectorCrash({
       at: new Date(at).toISOString(),
       pid,
       exitCode: code,
       signal: signal ?? null,
-      stderr: connectorStderrTail(),
-    });
-    void restartAfterCrash(binding, ports, at);
+      observed: "exit",
+      stderr: connectorStderrTail(connectorSecrets(binding)),
+    }, at);
+    if (recorded) void restartAfterCrash(binding, ports, at);
   });
 }
 
+/**
+ * The crash record for an exit NOBODY was listening to (#1087).
+ *
+ * A connector spawned by an earlier Viewer generation is adopted, not
+ * re-parented: there is no exit event, so {@link watchConnectorExit} can
+ * never fire for it — and after a Viewer restart that is EVERY connector the
+ * operator has. Instead of a wrapper process to keep a handle alive, the
+ * disappearance is noticed on the path that already runs on every status
+ * read: the recorded pid is gone, this Viewer did not stop it, and the crash
+ * is written with its stderr tail before the replacement spawn truncates the
+ * sink. The exit code and signal are genuinely unknowable here and stay null.
+ *
+ * Returns true when a crash was recorded, so the caller can count the
+ * restart it is about to perform.
+ */
+function reapVanishedConnector(binding: ConnectorBinding, ports: TelegramConnectorPorts): boolean {
+  const record = readConnectorRecord();
+  if (!record) return false;
+  if (record.credentialRef !== binding.credentialRef) return false;
+  if (procBackend.processIdentity(record.pid) === record.identity) return false;
+  if (deliberateStops.delete(record.pid)) return false;
+  const at = ports.now();
+  return recordConnectorCrash({
+    at: new Date(at).toISOString(),
+    pid: record.pid,
+    exitCode: null,
+    signal: null,
+    observed: "vanished",
+    stderr: connectorStderrTail(connectorSecrets(binding)),
+  }, at);
+}
+
 async function restartAfterCrash(binding: ConnectorBinding, ports: TelegramConnectorPorts, at: number): Promise<void> {
-  if (restartBurstExhausted(at)) return;
+  if (restartBurstExhausted(at)) {
+    markConnectorRestartFailed("connector_failed", binding.credentialRef);
+    return;
+  }
   restartsInFlight += 1;
   try {
     await ports.sleep(ports.restartDelayMs ?? RESTART_DELAY_MS);
@@ -580,10 +733,15 @@ async function restartAfterCrash(binding: ConnectorBinding, ports: TelegramConne
     /* A credential the operator deleted or replaced is never resurrected, and
        a restart that does not happen is not counted. */
     if (!session || session.credentialRef !== binding.credentialRef) return;
-    noteCrashRestart(ports.now());
-    await ensureTelegramConnector(session, ports);
-  } catch { /* the crash log already carries why; the next status read retries */ }
-  finally {
+    const result = await ensureConnectorNow(session, ports);
+    /* Counted only once the replacement is verified; a respawn that failed is
+       surfaced durably instead, so the next status read says error rather
+       than connected-over-a-corpse. */
+    if (result.ok) noteVerifiedRestart(ports.now());
+    else markConnectorRestartFailed(result.code, binding.credentialRef);
+  } catch {
+    markConnectorRestartFailed("connector_failed", binding.credentialRef);
+  } finally {
     restartsInFlight -= 1;
   }
 }
@@ -605,6 +763,39 @@ async function waitForTargetsToExit(targets: TerminationTarget[], timeoutMs: num
     await new Promise<void>((resolve) => setTimeout(resolve, TERMINATION_POLL_MS));
   }
   return targets.every((target) => !targetIsAlive(target));
+}
+
+/**
+ * Tells the connector it is about to be stopped (#1087).
+ *
+ * The distinguishable error a dropped call needs cannot be produced after the
+ * process is gone, and it must not depend on the shutdown reaching a
+ * particular code path first — a SIGKILL escalation reaches none. So the
+ * supervisor asks first, over the same authenticated loopback surface it
+ * already uses: the connector completes every response it has started with a
+ * JSON-RPC error naming the restart, and answers later arrivals 503. Only
+ * then does the signal go out.
+ *
+ * Best effort by construction. A connector that is wedged, unauthenticated to
+ * us, or already dead is signaled anyway; that is the pre-existing behaviour,
+ * not a regression.
+ */
+async function requestConnectorDrain(recorded: ConnectorRecord | null): Promise<void> {
+  let token: string | null = null;
+  try { token = readTelegramSession()?.connectorToken ?? null; } catch { token = null; }
+  /* Never send this generation's bearer token to a listener that a different
+     credential generation recorded. */
+  if (!token || !recorded || recorded.connectorTokenSha256 !== connectorTokenSha256(token)) return;
+  const drainUrl = new URL(telegramMcpUrl());
+  drainUrl.pathname = DRAIN_PATH;
+  drainUrl.search = "";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DRAIN_TIMEOUT_MS);
+  timer.unref?.();
+  try {
+    await fetch(drainUrl, { method: "POST", headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
+  } catch { /* the signal below is the fallback it always was */ }
+  finally { clearTimeout(timer); }
 }
 
 async function stopRealConnectorUnlocked(): Promise<void> {
@@ -640,6 +831,11 @@ async function stopRealConnectorUnlocked(): Promise<void> {
   /* Marked BEFORE the first signal: an exit this call caused is a stop, not a
      crash, and must neither be logged nor restarted (#1087). */
   for (const target of active) markDeliberateStop(target.pid, Date.now());
+  /* Asked to drain BEFORE the first signal too, so every call in flight is
+     answered with the named restart error while the process is still alive
+     and its event loop still runs — the SIGKILL escalation below can no
+     longer be what a caller meets first (#1087). */
+  if (active.length > 0) await requestConnectorDrain(recorded);
   for (const target of active) target.term();
   if (!await waitForTargetsToExit(active, TERMINATION_GRACE_MS)) {
     for (const target of active.filter(targetIsAlive)) target.kill();
@@ -695,8 +891,36 @@ async function verifiedProbe(
  * shared port (a previous Viewer generation's connector, still recorded in
  * the pid file) is adopted, not duplicated — that keeps the process count at
  * one across Viewer restarts.
+ *
+ * This is also where an exit nobody was listening to is noticed (#1087): an
+ * adopted connector has no exit event, so its crash is reaped here, before
+ * the replacement spawn truncates the stderr sink. When that happens, this
+ * call IS the restart — it reads as `restarting` while it runs, counts only
+ * if the replacement verifies, and marks the durable connection with the
+ * failure code if it does not.
  */
 export async function ensureTelegramConnector(
+  session: StoredTelegramSession,
+  ports: TelegramConnectorPorts = realPorts,
+): Promise<ConnectorEnsureResult> {
+  const binding = { credentialRef: session.credentialRef, connectorToken: session.connectorToken };
+  if (!reapVanishedConnector(binding, ports)) return await ensureConnectorNow(session, ports);
+  if (restartBurstExhausted(ports.now())) {
+    markConnectorRestartFailed("connector_failed", binding.credentialRef);
+    return { ok: false, code: "connector_failed" };
+  }
+  restartsInFlight += 1;
+  try {
+    const result = await ensureConnectorNow(session, ports);
+    if (result.ok) noteVerifiedRestart(ports.now());
+    else markConnectorRestartFailed(result.code, binding.credentialRef);
+    return result;
+  } finally {
+    restartsInFlight -= 1;
+  }
+}
+
+async function ensureConnectorNow(
   session: StoredTelegramSession,
   ports: TelegramConnectorPorts = realPorts,
 ): Promise<ConnectorEnsureResult> {
@@ -767,10 +991,18 @@ export async function ensureTelegramConnector(
  * the verified read-only surface needs a live, authorized Telethon client, so
  * a parseable answer proves exactly what the bridge would have proved.
  *
- * `null` means this process could not answer (not ours, not verifiable, the
- * call failed). The caller then falls back to the destructive bridge check —
- * which is free at that point, because a connector that cannot answer is not
- * serving anyone either.
+ * `null` means this process could not answer at all (not ours, not
+ * verifiable, the handshake failed). The caller then falls back to the
+ * destructive bridge check — which is free at that point, because a connector
+ * that cannot even complete an MCP handshake is not serving anyone either.
+ *
+ * `"busy"` is the case that used to be conflated with `null` and cost exactly
+ * the outage this issue reports: the connector answered the handshake, so it
+ * is alive, ours, and still serving — it just did not finish `get_me` inside
+ * the budget, which is what a process in the middle of a fan-out of large
+ * reads looks like. A missed health deadline is not evidence that anything
+ * finished, so nothing may be torn down and no verdict is reached; the caller
+ * leaves the durable status alone and asks again later.
  *
  * Only the account's display name and public username are lifted out of the
  * answer; `get_me` may also carry the account's phone number, which never
@@ -779,7 +1011,7 @@ export async function ensureTelegramConnector(
 export async function telegramConnectorHealth(
   session: StoredTelegramSession,
   ports: TelegramConnectorPorts = realPorts,
-): Promise<ConnectorLiveHealth | null> {
+): Promise<ConnectorLiveHealth | "busy" | null> {
   const ownsProcess = ports.ownsProcess ?? ownsRecordedConnector;
   const binding = { credentialRef: session.credentialRef, connectorToken: session.connectorToken };
   if (!ownsProcess(binding)) return null;
@@ -788,18 +1020,27 @@ export async function telegramConnectorHealth(
   const url = telegramMcpUrl();
   const budget: TelegramConnectorPorts = { ...ports, probeTimeoutMs: ports.probeTimeoutMs ?? HEALTH_TIMEOUT_MS };
   const verified = await verifiedProbe(url, session.connectorToken, budget);
-  if (verified === null || verified === "timeout" || !verified.ok) return null;
+  /* A handshake that ran out of budget did not get refused: the listener is
+     there and the event loop is simply saturated, which is the fan-out this
+     issue is about. A handshake that failed outright (refused socket, wrong
+     proof, a surface that is no longer read-only) is a real refusal. */
+  if (verified === "timeout") return "busy";
+  if (verified === null || !verified.ok) return null;
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | null = null;
   const answer = await Promise.race([
     callTool(url, session.connectorToken, "get_me", controller.signal).catch(() => null),
-    new Promise<null>((resolve) => {
-      timer = setTimeout(() => { controller.abort(); resolve(null); }, budget.probeTimeoutMs!);
+    new Promise<"busy">((resolve) => {
+      timer = setTimeout(() => { controller.abort(); resolve("busy"); }, budget.probeTimeoutMs!);
       timer.unref?.();
     }),
   ]);
   if (timer) clearTimeout(timer);
   controller.abort();
+  if (answer === "busy") return "busy";
+  /* An answer that is not the account — an upstream error string, a dead
+     call — is no verdict: the bridge check must still get its chance to
+     classify an expired or deauthorized session, which `get_me` cannot. */
   const identity = parseConnectorIdentity(answer);
   return identity ? { status: "connected", identity } : null;
 }

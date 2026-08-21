@@ -737,6 +737,56 @@ test("health from the running connector never stops it — the read burst surviv
   expect(calls.ensure).toBe(1);
 });
 
+test("a connector busy with a burst of bounded reads is never torn down", async () => {
+  const adapter = new FakeAdapter();
+  const calls = { stop: 0, bridge: 0, ensure: 0 };
+  adapter.checkSession = async () => {
+    calls.bridge += 1;
+    return { status: "connected", identity: { name: "Account A", username: "account_a" } };
+  };
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  const stored = readTelegramSession()!;
+  const checkedAt = "2026-08-20T11:58:00.000Z";
+  writeTelegramConnection({
+    version: 1,
+    status: "connected",
+    credentialRef: stored.credentialRef,
+    identity: { name: "Account A", username: "account_a" },
+    lastHealthCheckAt: checkedAt,
+    errorCode: null,
+  });
+
+  /* Four bounded reads are still open against the connector; the health call
+     queues behind them and runs out of budget. That is the exact moment the
+     old code killed the process and took every one of them with it (#1087). */
+  let settled = 0;
+  const reads = [0, 1, 2, 3].map(() => new Promise<string>((resolve) => {
+    setTimeout(() => { settled += 1; resolve("read done"); }, 30);
+  }));
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => { calls.ensure += 1; return { ok: true, url: "http://127.0.0.1:8809/mcp" }; },
+    stopConnector: () => { calls.stop += 1; },
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
+    connectorHealth: async () => "busy",
+  });
+
+  const status = await service.checkHealth();
+  /* Nothing was signaled, the bridge never took the session, and the durable
+     verdict is the one the last COMPLETED check wrote — a missed deadline is
+     not a health reading in either direction. */
+  expect(calls.stop).toBe(0);
+  expect(calls.bridge).toBe(0);
+  expect(calls.ensure).toBe(0);
+  expect(status.phase).toBe("connected");
+  expect(status.lastHealthCheckAt).toBe(checkedAt);
+  expect(await Promise.all(reads)).toEqual(["read done", "read done", "read done", "read done"]);
+  expect(settled).toBe(4);
+});
+
 test("a connector that cannot answer falls back to the destructive bridge check", async () => {
   const adapter = new FakeAdapter();
   const order: string[] = [];

@@ -39,9 +39,11 @@ export interface TelegramServicePorts {
       the browser as a boolean only (#1070). */
   credentialsConfigured(): boolean;
   /** Health from the RUNNING connector, without stopping it (#1087). `null`
-      means it could not answer and the destructive bridge check has to run.
-      Absent in tests that only exercise the bridge path. */
-  connectorHealth?(session: StoredTelegramSession): Promise<TelegramHealthResult | null>;
+      means it could not answer and the destructive bridge check has to run;
+      `"busy"` means it is alive and serving but did not finish inside the
+      budget, which is no reason to stop anything. Absent in tests that only
+      exercise the bridge path. */
+  connectorHealth?(session: StoredTelegramSession): Promise<TelegramHealthResult | "busy" | null>;
   /** Crash restarts of the shared connector, for the status payload (#1087). */
   connectorRestarts?(): TelegramConnectorRestarts & { restarting: boolean };
 }
@@ -442,10 +444,18 @@ export class TelegramConnectionService {
        teardown — which used to kill every in-flight agent read (a panel open
        during a fan-out of large `get_messages` calls took the connector down
        for ~20 s and still reported connected). */
-    let result: TelegramHealthResult | null = null;
+    let result: TelegramHealthResult | "busy" | null = null;
     try { result = (await this.ports.connectorHealth?.(session)) ?? null; }
     catch { result = null; }
     if (!this.lifecycleIsCurrent(generation)) return;
+    /* The connector is alive and serving, it just did not finish the health
+       call inside the budget — the signature of a fan-out of large reads.
+       Missing a health deadline proves nothing about the account and nothing
+       about the in-flight reads, so nothing is torn down and nothing durable
+       is rewritten: the previous verdict stands until a check completes
+       (#1087). Killing the process here is exactly the outage this issue
+       reports. */
+    if (result === "busy") return;
     if (result === null) {
       /* The connector cannot answer, so it is not serving anyone either: the
          bridge check may now take the session. The bridge uses the same

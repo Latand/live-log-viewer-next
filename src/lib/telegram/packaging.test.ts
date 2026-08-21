@@ -428,7 +428,7 @@ test("API credentials come from host configuration, not hardcoded values", () =>
   }
 });
 
-test("a stop names itself: requests during the drain, and a response the stop cut short, carry the restart error (#1087)", () => {
+test("a held call is answered with the restart error when the supervisor drains, before any signal (#1087)", () => {
   const python = Bun.which("python3");
   expect(python).not.toBeNull();
   const fakeVendor = path.join(SANDBOX, "drain-wrapper-vendor");
@@ -437,10 +437,11 @@ test("a stop names itself: requests during the drain, and a response the stop cu
     fs.writeFileSync(path.join(fakeVendor, directory, "__init__.py"), "");
   }
   fs.writeFileSync(path.join(fakeVendor, "mcp", "__init__.py"), "");
-  /* A stand-in MCP app that starts an event-stream response and then returns
-     without finishing it — exactly what the vendored server does when the
-     supervisor's SIGTERM cancels the session task mid tool call. */
+  /* A stand-in MCP app that starts an event-stream response for a tool call
+     and then waits for Telegram forever — a call in flight, exactly what a
+     stop used to drop without a word. */
   fs.writeFileSync(path.join(fakeVendor, "mcp", "server", "fastmcp.py"), [
+    "import asyncio",
     "class _Server:",
     "    name = 'telegram'",
     "class FastMCP:",
@@ -451,6 +452,7 @@ test("a stop names itself: requests during the drain, and a response the stop cu
     "            await send({'type': 'http.response.start', 'status': 200,",
     "                        'headers': [(b'content-type', b'text/event-stream')]})",
     "            await send({'type': 'http.response.body', 'body': b'', 'more_body': True})",
+    "            await asyncio.Event().wait()",
     "        return app",
     "",
   ].join("\n"));
@@ -459,31 +461,39 @@ test("a stop names itself: requests during the drain, and a response the stop cu
     "mcp = FastMCP()",
     "",
   ].join("\n"));
+  /* One event loop, one app, three requests: a tool call held open, the
+     supervisor's pre-stop drain, and a caller that arrives afterwards. */
   fs.writeFileSync(path.join(fakeVendor, "telegram_mcp", "runner.py"), [
     "import asyncio, json, os",
-    "import __main__",
     "from telegram_mcp.runtime import mcp",
-    "async def request(body):",
-    "    statuses, headers, chunks = [], [], []",
-    "    sent = {'done': False}",
+    "TOKEN = os.environ['LLV_TELEGRAM_MCP_TOKEN'].encode()",
+    "async def request(app, path, method, body, auth=True):",
+    "    out = {'status': None, 'headers': [], 'chunks': []}",
     "    async def receive(): return {'type': 'http.request', 'body': body, 'more_body': False}",
     "    async def send(message):",
     "        if message['type'] == 'http.response.start':",
-    "            statuses.append(message['status'])",
-    "            headers.extend(message.get('headers', []))",
-    "        if message['type'] == 'http.response.body': chunks.append(message.get('body', b''))",
-    "    token = os.environ['LLV_TELEGRAM_MCP_TOKEN'].encode()",
-    "    scope = {'type': 'http', 'path': '/mcp', 'method': 'POST',",
-    "             'headers': [(b'authorization', b'Bearer ' + token)]}",
-    "    await mcp.streamable_http_app()(scope, receive, send)",
-    "    return {'status': statuses[0], 'restart_header': any(k == b'x-llv-telegram-restarting' for k, _ in headers),",
-    "            'body': b''.join(chunks).decode()}",
-    "def main():",
+    "            out['status'] = message['status']",
+    "            out['headers'].extend(message.get('headers', []))",
+    "        if message['type'] == 'http.response.body': out['chunks'].append(message.get('body', b''))",
+    "    headers = [(b'authorization', b'Bearer ' + (TOKEN if auth else b'wrong'))]",
+    "    await app({'type': 'http', 'path': path, 'method': method, 'headers': headers}, receive, send)",
+    "    out['restart_header'] = any(k == b'x-llv-telegram-restarting' for k, _ in out['headers'])",
+    "    out['body'] = b''.join(out['chunks']).decode()",
+    "    del out['headers'], out['chunks']",
+    "    return out",
+    "async def drive():",
+    "    app = mcp.streamable_http_app()",
     "    call = json.dumps({'jsonrpc': '2.0', 'id': 42, 'method': 'tools/call'}).encode()",
-    "    cut_short = asyncio.run(request(call))",
-    "    __main__._begin_drain()",
-    "    draining = asyncio.run(request(call))",
-    "    print(json.dumps({'cut_short': cut_short, 'draining': draining}))",
+    "    held = asyncio.ensure_future(request(app, '/mcp', 'POST', call))",
+    "    await asyncio.sleep(0.05)",
+    "    assert not held.done(), 'the call must still be in flight'",
+    "    unauthorized = await request(app, '/llv-telegram-drain', 'POST', b'', auth=False)",
+    "    drain = await request(app, '/llv-telegram-drain', 'POST', b'')",
+    "    later = await request(app, '/mcp', 'POST', call)",
+    "    return {'held': await asyncio.wait_for(held, 2), 'drain': drain,",
+    "            'unauthorized': unauthorized, 'later': later}",
+    "def main():",
+    "    print(json.dumps(asyncio.run(drive())))",
     "",
   ].join("\n"));
 
@@ -494,24 +504,29 @@ test("a stop names itself: requests during the drain, and a response the stop cu
     stdout: "pipe",
     stderr: "pipe",
   });
+  expect(result.stderr.toString()).toBe("");
   expect(result.exitCode).toBe(0);
-  const output = JSON.parse(result.stdout.toString()) as {
-    cut_short: { status: number; body: string };
-    draining: { status: number; restart_header: boolean; body: string };
-  };
+  type Response = { status: number; restart_header: boolean; body: string };
+  const output = JSON.parse(result.stdout.toString()) as Record<"held" | "drain" | "unauthorized" | "later", Response>;
 
-  /* The dropped in-flight call gets a JSON-RPC error addressed to its own
-     request id, instead of a stream that just stops. */
-  expect(output.cut_short.status).toBe(200);
-  expect(output.cut_short.body).toContain("event: message");
-  const frame = JSON.parse(output.cut_short.body.split("data: ")[1]!) as { id: number; error: { code: number; message: string } };
+  /* The drain is authenticated like everything else on this surface. */
+  expect(output.unauthorized.status).toBe(401);
+  expect(output.drain.status).toBe(200);
+
+  /* The call that was in flight finishes with a JSON-RPC error addressed to
+     its own request id — while the process is still alive, so nothing about
+     this depends on the shutdown reaching a particular code path, and the
+     supervisor's SIGKILL escalation can no longer be what the caller meets. */
+  expect(output.held.status).toBe(200);
+  expect(output.held.body).toContain("event: message");
+  const frame = JSON.parse(output.held.body.split("data: ")[1]!) as { id: number; error: { code: number; message: string } };
   expect(frame.id).toBe(42);
   expect(frame.error.code).toBe(-32001);
   expect(frame.error.message).toContain("restarting");
 
-  /* A call that arrives after the signal is refused with the same named
+  /* A call that arrives after the drain is refused with the same named
      reason, not a bare connection reset. */
-  expect(output.draining.status).toBe(503);
-  expect(output.draining.restart_header).toBe(true);
-  expect(JSON.parse(output.draining.body).error.code).toBe(-32001);
+  expect(output.later.status).toBe(503);
+  expect(output.later.restart_header).toBe(true);
+  expect(JSON.parse(output.later.body).error.code).toBe(-32001);
 });

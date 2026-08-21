@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Authenticated entrypoint for the packaged Telegram MCP connector."""
 
+import asyncio
 import hashlib
 import hmac
 import json
 import os
 import re
-import signal
 import sys
 
 
@@ -20,65 +20,76 @@ sys.path.insert(0, VENDOR_DIR)
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 
-# Set once the supervisor asks this process to stop (issue #1087). Between the
-# signal and the exit, every MCP request is answered with a distinguishable
-# "restarting" error instead of a bare connection reset, so a caller whose call
-# was dropped by a connector restart can tell that apart from a network blip.
-DRAINING = False
+# Issue #1087: a call dropped because the supervisor is stopping this process
+# must fail with an error that names the restart, not with a stream that simply
+# stops (which the caller cannot tell from a network blip).
+#
+# The supervisor asks BEFORE it signals: an authenticated POST to DRAIN_PATH
+# sets the event below, and every request already in flight is finished right
+# then with a JSON-RPC error addressed to its own request id. That ordering is
+# what makes the guarantee hold — it does not depend on the shutdown reaching
+# any particular code path, so the supervisor's SIGKILL escalation can no
+# longer be the first thing a caller meets.
+DRAIN_PATH = "/llv-telegram-drain"
 RESTART_HEADER = b"x-llv-telegram-restarting"
+RESTART_CODE = -32001
+RESTART_MESSAGE = (
+    "Telegram connector is restarting: the Agent Log Viewer supervisor "
+    "stopped this process. In-flight calls were dropped; retry shortly."
+)
+# A response the connector began and did not finish for any other reason is
+# also completed, with its own code — never mislabelled as a restart.
+INCOMPLETE_CODE = -32603
+INCOMPLETE_MESSAGE = (
+    "Telegram connector ended this response without completing it."
+)
+# The JSON-RPC id is echoed so the caller's pending call is the one that
+# fails; reading it back needs the request body, capped here.
 MAX_TRACKED_BODY = 64 * 1024
-RESTARTING_BODY = json.dumps(
-    {
-        "jsonrpc": "2.0",
-        "id": None,
-        "error": {
-            "code": -32001,
-            "message": (
-                "Telegram connector is restarting: the Agent Log Viewer supervisor "
-                "stopped this process. In-flight calls were dropped; retry shortly."
-            ),
-        },
-    }
-).encode("utf-8")
+
+_DRAINING = False
+_DRAIN_EVENT = None
+_DRAIN_LOOP = None
 
 
-def _begin_drain(*_args) -> None:
-    global DRAINING
-    DRAINING = True
+def _drain_event():
+    """The event in-flight requests wait on, bound to the serving loop.
 
-
-def _install_drain_marker() -> None:
-    """Mark the drain on SIGTERM/SIGINT without displacing anyone's handler.
-
-    uvicorn installs its own signal handlers when it starts serving, long after
-    this module runs, so hooking the flag in has to survive a later
-    registration: wrap ``signal.signal`` so every handler registered for these
-    two signals sets the flag first and then runs unchanged.
+    ``asyncio.Event`` refuses to be awaited from a loop other than the one it
+    first attached to, and this module is imported long before the server's
+    loop exists — so the event is created on first use, from inside the loop,
+    and re-created if it is ever reached from a different one.
     """
-    registered = signal.signal
-
-    def signal_with_drain(signum, handler):
-        if signum in (signal.SIGTERM, signal.SIGINT) and callable(handler):
-            inner = handler
-
-            def wrapped(sig, frame):
-                _begin_drain()
-                return inner(sig, frame)
-
-            return registered(signum, wrapped)
-        return registered(signum, handler)
-
-    signal.signal = signal_with_drain
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        try:
-            signal_with_drain(signum, signal.getsignal(signum))
-        except (TypeError, ValueError, OSError):
-            # A default/ignored disposition has no handler to chain; uvicorn's
-            # later registration goes through the wrapper anyway.
-            pass
+    global _DRAIN_EVENT, _DRAIN_LOOP
+    loop = asyncio.get_running_loop()
+    if _DRAIN_EVENT is None or _DRAIN_LOOP is not loop:
+        _DRAIN_EVENT = asyncio.Event()
+        _DRAIN_LOOP = loop
+        if _DRAINING:
+            _DRAIN_EVENT.set()
+    return _DRAIN_EVENT
 
 
-_install_drain_marker()
+def _begin_drain():
+    """Latch the drain and wake everything already waiting on it."""
+    global _DRAINING
+    _DRAINING = True
+    _drain_event().set()
+
+
+def jsonrpc_error(request_body: bytes, code: int, message: str, as_event_stream: bool) -> bytes:
+    """A JSON-RPC error frame addressed to the request that was cut short."""
+    notice = {"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}}
+    try:
+        parsed = json.loads(request_body or b"{}")
+        if isinstance(parsed, dict) and "id" in parsed:
+            notice["id"] = parsed["id"]
+    except (ValueError, TypeError):
+        pass
+    payload = json.dumps(notice)
+    if as_event_stream:
+        return f"event: message\ndata: {payload}\n\n".encode("utf-8")
+    return payload.encode("utf-8")
 
 
 class BearerAuthMiddleware:
@@ -87,57 +98,68 @@ class BearerAuthMiddleware:
         self.expected = f"Bearer {token}".encode("utf-8")
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") == "http":
-            headers = {key.lower(): value for key, value in scope.get("headers", [])}
-            if scope.get("path") == "/llv-telegram-proof" and scope.get("method") == "GET":
-                nonce = headers.get(b"x-llv-telegram-nonce", b"")
-                if not re.fullmatch(rb"[A-Za-z0-9_-]{43}", nonce):
-                    await send({"type": "http.response.start", "status": 400, "headers": []})
-                    await send({"type": "http.response.body", "body": b"Invalid nonce"})
-                    return
-                proof = hmac.new(TOKEN.encode("utf-8"), nonce, hashlib.sha256).hexdigest().encode("ascii")
-                await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/plain")]})
-                await send({"type": "http.response.body", "body": proof})
-                return
-            supplied = headers.get(b"authorization", b"")
-            if not hmac.compare_digest(supplied, self.expected):
-                await send({
-                    "type": "http.response.start",
-                    "status": 401,
-                    "headers": [
-                        (b"content-type", b"text/plain; charset=utf-8"),
-                        (b"www-authenticate", b"Bearer"),
-                    ],
-                })
-                await send({"type": "http.response.body", "body": b"Unauthorized"})
-                return
-            # Authenticated, but this process is on its way out: answer with
-            # the distinguishable restart error rather than letting the caller
-            # meet a closed socket (#1087).
-            if DRAINING:
-                await send({
-                    "type": "http.response.start",
-                    "status": 503,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"retry-after", b"5"),
-                        (RESTART_HEADER, b"1"),
-                    ],
-                })
-                await send({"type": "http.response.body", "body": RESTARTING_BODY})
-                return
-            await self.serve_with_restart_notice(scope, receive, send)
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
             return
-        await self.app(scope, receive, send)
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        if scope.get("path") == "/llv-telegram-proof" and scope.get("method") == "GET":
+            nonce = headers.get(b"x-llv-telegram-nonce", b"")
+            if not re.fullmatch(rb"[A-Za-z0-9_-]{43}", nonce):
+                await send({"type": "http.response.start", "status": 400, "headers": []})
+                await send({"type": "http.response.body", "body": b"Invalid nonce"})
+                return
+            proof = hmac.new(TOKEN.encode("utf-8"), nonce, hashlib.sha256).hexdigest().encode("ascii")
+            await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/plain")]})
+            await send({"type": "http.response.body", "body": proof})
+            return
+        supplied = headers.get(b"authorization", b"")
+        if not hmac.compare_digest(supplied, self.expected):
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"text/plain; charset=utf-8"),
+                    (b"www-authenticate", b"Bearer"),
+                ],
+            })
+            await send({"type": "http.response.body", "body": b"Unauthorized"})
+            return
+        # Authenticated. The supervisor's own pre-stop call comes through the
+        # same bearer check, so nothing unauthenticated can trip the drain.
+        if scope.get("path") == DRAIN_PATH and scope.get("method") == "POST":
+            _begin_drain()
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json"), (RESTART_HEADER, b"1")],
+            })
+            await send({"type": "http.response.body", "body": b'{"draining": true}'})
+            return
+        if _DRAINING:
+            # On the way out: answer with the named reason rather than letting
+            # the caller meet a closed socket.
+            await send({
+                "type": "http.response.start",
+                "status": 503,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"retry-after", b"5"),
+                    (RESTART_HEADER, b"1"),
+                ],
+            })
+            await send({"type": "http.response.body", "body": jsonrpc_error(b"", RESTART_CODE, RESTART_MESSAGE, False)})
+            return
+        await self.serve(scope, receive, send)
 
-    async def serve_with_restart_notice(self, scope, receive, send):
-        """Run the MCP app, and finish a response the shutdown cut short.
+    async def serve(self, scope, receive, send):
+        """Run the MCP app, racing it against the drain.
 
-        Stopping the connector cancels the session task that is streaming a
-        tool call, and the ASGI app then returns with the response started but
-        never completed — the caller sees a stream that just stops, which is
-        indistinguishable from a network blip (#1087). Complete it here with a
-        JSON-RPC error that names the restart.
+        A tool call can sit inside the app for as long as Telegram takes. When
+        the drain fires first the call is abandoned deliberately and answered
+        here, while this process is still alive and its loop still runs — the
+        caller gets a named error instead of a truncated stream. A response the
+        app started and left unfinished for any other reason is completed too,
+        under its own error code.
         """
         state = {"started": False, "completed": False, "sse": False}
         body = bytearray()
@@ -159,25 +181,43 @@ class BearerAuthMiddleware:
                 state["completed"] = True
             await send(message)
 
-        await self.app(scope, tracking_receive, tracking_send)
-        if state["started"] and not state["completed"]:
-            await send({"type": "http.response.body", "body": restart_notice(bytes(body), state["sse"]), "more_body": False})
-
-
-def restart_notice(request_body: bytes, as_event_stream: bool) -> bytes:
-    """A JSON-RPC error for the request that a restart cut short, addressed to
-    the request id when one can still be read out of the body."""
-    notice = json.loads(RESTARTING_BODY)
-    try:
-        parsed = json.loads(request_body or b"{}")
-        if isinstance(parsed, dict) and "id" in parsed:
-            notice["id"] = parsed["id"]
-    except (ValueError, TypeError):
-        pass
-    payload = json.dumps(notice)
-    if as_event_stream:
-        return f"event: message\ndata: {payload}\n\n".encode("utf-8")
-    return payload.encode("utf-8")
+        inner = asyncio.ensure_future(self.app(scope, tracking_receive, tracking_send))
+        drained = asyncio.ensure_future(_drain_event().wait())
+        try:
+            await asyncio.wait({inner, drained}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            drained.cancel()
+        if not inner.done():
+            inner.cancel()
+            try:
+                await inner
+            except BaseException:  # noqa: BLE001 - the call was abandoned on purpose
+                # Whatever the cancelled app raises on its way out (a bare
+                # CancelledError, or the exception group an anyio task group
+                # unwinds into) is discarded: the caller is about to be told
+                # what actually happened, by this handler.
+                pass
+        if state["completed"]:
+            return
+        draining = _DRAINING
+        if not state["started"] and not draining:
+            # Nothing was sent and this is not a shutdown: let the failure
+            # surface the way it always did.
+            inner.result()
+            return
+        code, message = (RESTART_CODE, RESTART_MESSAGE) if draining else (INCOMPLETE_CODE, INCOMPLETE_MESSAGE)
+        frame = jsonrpc_error(bytes(body), code, message, state["sse"])
+        if not state["started"]:
+            await send({
+                "type": "http.response.start",
+                "status": 503,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"retry-after", b"5"),
+                    (RESTART_HEADER, b"1"),
+                ],
+            })
+        await send({"type": "http.response.body", "body": frame, "more_body": False})
 
 
 _original_streamable_http_app = FastMCP.streamable_http_app
