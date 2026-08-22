@@ -469,18 +469,17 @@ function resumeIdentityForReceipt(
 }
 
 /** Whether the engine session behind a staged identity actually exists (#1071).
-    Evidence is the transcript the engine writes when it creates the session, or
-    a registry generation that already produced runtime events. A fresh spawn
-    that lost its first execution — a container promote drops the queued launch
-    — has a staged identity and neither. */
+    The only evidence is the transcript the engine writes when it creates the
+    session — the same file `claude --resume` reads, so nothing weaker stands in
+    for it. A registry row does not qualify: the broker opens its own row and
+    emits an idle event the moment a child is spawned, before the CLI has
+    created anything, so a promote inside that window would leave an event
+    cursor pointing at a session that never existed. */
 export function structuredSessionExists(
-  registry: AgentRegistry,
-  identity: { key: SessionKey; artifactPath: string },
+  identity: { artifactPath: string },
   exists: (candidate: string) => boolean = fs.existsSync,
 ): boolean {
-  if (identity.artifactPath && exists(identity.artifactPath)) return true;
-  const entry = registry.readOnlySnapshot().entries[sessionKeyId(identity.key)];
-  return (entry?.structuredHost?.eventCursor ?? 0) > 0;
+  return Boolean(identity.artifactPath) && exists(identity.artifactPath);
 }
 
 export type StructuredClaudeLaunchForm =
@@ -499,7 +498,7 @@ export function structuredClaudeLaunchForm(
   exists: (candidate: string) => boolean = fs.existsSync,
 ): StructuredClaudeLaunchForm {
   const identity = resumeIdentityForReceipt(input.registry, input.receipt);
-  if (identity && structuredSessionExists(input.registry, identity, exists)) {
+  if (identity && structuredSessionExists(identity, exists)) {
     return { kind: "resume", sessionId: identity.key.sessionId };
   }
   return {
@@ -544,39 +543,31 @@ export interface StructuredSpawnDependencies {
   processIdentity?(): { pid: number; startIdentity: string | null };
 }
 
-/** How long a queued launch stays replayable after admission (#1071). A spawn
-    the previous container generation accepted and never executed is stale well
-    before this; replaying it later lands a second builder in a working
-    directory whose replacement is already running. */
-export const QUEUED_SPAWN_REPLAY_MAX_AGE_MS = 10 * 60_000;
-
 /** Why a queued launch from a previous generation must not be replayed, or
-    null when it is still a legitimate replay candidate (#1071). Only launches
-    that never reached a live host qualify: a newer launch for the same working
-    directory and role has already replaced this one, or it sat unexecuted past
-    the replay bound. */
+    null when it is still a legitimate replay candidate (#1071). Only a launch
+    that never reached a live host qualifies, and only against a newer launch of
+    the SAME request identity — the digest of the public launch shape, which a
+    resubmission under a fresh idempotency key keeps and an independent launch
+    into the same working directory does not. Age alone proves nothing here, so
+    a queued launch with no replacement keeps its established recovery. */
 function supersededQueuedSpawnReason(
   snapshot: RegistryFile,
   receipt: SpawnReceipt,
-  nowMs: number,
 ): string | null {
   if (receipt.transport !== "structured" || receipt.purpose !== "launch") return null;
   if (receipt.state !== "starting" && receipt.state !== "path-pending") return null;
-  if (receipt.artifactLifecycle !== "pending") return null;
+  if (receipt.artifactLifecycle !== "pending" || !receipt.requestDigest) return null;
   const entry = receipt.key ? snapshot.entries[sessionKeyId(receipt.key)] : null;
   if (entry?.structuredHost?.process || entry?.claimOwner) return null;
   const replaced = Object.values(snapshot.receipts).some((candidate) => candidate.launchId !== receipt.launchId
     && candidate.transport === "structured"
     && candidate.purpose === "launch"
-    && candidate.cwd === receipt.cwd
-    && candidate.agentRole === receipt.agentRole
+    && candidate.requestDigest === receipt.requestDigest
     && candidate.state !== "failed"
     && candidate.state !== "conflicted"
     && candidate.createdAt > receipt.createdAt);
-  if (replaced) return "structured spawn was superseded by a newer launch for the same working directory and role";
-  const createdMs = Date.parse(receipt.createdAt);
-  return Number.isFinite(createdMs) && nowMs - createdMs >= QUEUED_SPAWN_REPLAY_MAX_AGE_MS
-    ? `structured spawn was not replayed within ${QUEUED_SPAWN_REPLAY_MAX_AGE_MS}ms of its admission`
+  return replaced
+    ? "structured spawn was superseded by a newer launch of the same request"
     : null;
 }
 
@@ -584,11 +575,9 @@ export async function recoverPendingStructuredSpawns(
   registry: AgentRegistry,
   client: RuntimeHostClient,
   options: {
-    now?: () => number;
     ownerAlive?: (owner: { pid: number; startIdentity: string | null }) => boolean;
   } = {},
 ): Promise<void> {
-  const now = options.now ?? Date.now;
   const ownerAlive = options.ownerAlive ?? admissionOwnerAlive;
   const spawnEffects = new Map<string, Record<string, unknown>>();
   let afterEventSeq = 0;
@@ -620,12 +609,12 @@ export async function recoverPendingStructuredSpawns(
     const effect = spawnEffects.get(receipt.launchId);
     /* Re-validate before replay (#1071): a queued launch the previous
        generation accepted is not replayed verbatim by its successor. One whose
-       replacement already exists — or which outlived the replay bound — settles
-       as failed here, so a stale first-generation launch can never drain into a
-       second builder beside the fresh one. A launch whose admission owner is
-       still live keeps its own deferred execution. */
+       replacement already exists settles as failed here, so a stale
+       first-generation launch can never drain into a second builder beside the
+       fresh one. A launch whose admission owner is still live keeps its own
+       deferred execution. */
     if (!(receipt.admissionOwner && ownerAlive(receipt.admissionOwner))) {
-      const supersededReason = supersededQueuedSpawnReason(snapshot, receipt, now());
+      const supersededReason = supersededQueuedSpawnReason(snapshot, receipt);
       if (supersededReason) {
         const stale = await client.operationStatus(receipt.launchId);
         const staleStatus = stale?.receipt.status;

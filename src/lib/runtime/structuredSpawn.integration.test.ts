@@ -4425,9 +4425,37 @@ test("issue 1071: a retried fresh launch keeps its pre-allocated id until the se
   const spec: ResumeSpec = { command: "claude", cwd, windowName: "resume", engine: "claude", transcript: artifactPath, launchProfile };
 
   /* The first execution was lost, so the pre-allocated id names no session:
-     no transcript on disk and no runtime events on its registry row. The
-     retry re-runs the fresh form under the SAME id instead of resuming
-     something the CLI would refuse. */
+     the CLI never wrote a transcript for it. The retry re-runs the fresh form
+     under the SAME id instead of resuming something the CLI would refuse. */
+  expect(structuredClaudeLaunchForm({ receipt: begun.receipt, registry, spec }))
+    .toEqual({ kind: "fresh", sessionId });
+
+  /* A broker that opened and died inside the promote window leaves an event
+     cursor on the registry row — its own idle emit, not proof that Claude
+     created the session. A missing transcript still means a fresh launch. */
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "claude", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "claude-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 1,
+      protocolVersion: null,
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
   expect(structuredClaudeLaunchForm({ receipt: begun.receipt, registry, spec }))
     .toEqual({ kind: "fresh", sessionId });
 
@@ -4491,6 +4519,7 @@ test("issue 1071: a terminal CLI exit fails the launch receipt instead of leavin
 
 test("issue 1071: startup fails a queued launch its replacement already superseded", async () => {
   const staleSessionId = crypto.randomUUID();
+  const independentSessionId = crypto.randomUUID();
   const freshSessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `superseded-${staleSessionId}`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -4518,6 +4547,7 @@ test("issue 1071: startup fails a queued launch its replacement already supersed
     transport: "structured",
     accountId: "claude-subscription",
     role: "builder",
+    requestDigest: "digest-build-the-stage",
     launchProfile,
   });
   if (stale.kind !== "created") throw new Error("queued spawn receipt was unavailable");
@@ -4547,13 +4577,41 @@ test("issue 1071: startup fails a queued launch its replacement already supersed
   });
   expect((await client.operationStatus(stale.receipt.launchId))?.receipt.status).toBe("queued");
 
-  /* The operator's fresh replacement for the same worktree and role, running. */
+  /* An independent launch into the same worktree under the same role: its
+     request identity differs, so it replaces nothing and must survive. */
+  const independent = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "claude-subscription",
+    role: "builder",
+    requestDigest: "digest-review-the-stage",
+    launchProfile,
+  });
+  if (independent.kind !== "created") throw new Error("independent spawn receipt was unavailable");
+  registry.stageStructuredSpawn(independent.receipt.launchId, {
+    key: { engine: "claude", sessionId: independentSessionId },
+    artifactPath: path.join(cwd, `${independentSessionId}.jsonl`),
+    cwd,
+    accountId: "claude-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: structuredHost(null),
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+
+  /* The operator's resubmission of the SAME launch under a fresh idempotency
+     key — same request digest — now running. */
   const fresh = registry.beginSpawnRequest({
     engine: "claude",
     cwd,
     transport: "structured",
     accountId: "claude-subscription",
     role: "builder",
+    requestDigest: "digest-build-the-stage",
     launchProfile,
   });
   if (fresh.kind !== "created") throw new Error("replacement spawn receipt was unavailable");
@@ -4582,6 +4640,10 @@ test("issue 1071: startup fails a queued launch its replacement already supersed
       .toMatchObject({ status: "failed", reason: expect.stringContaining("superseded by a newer launch") });
     /* The running replacement is never touched by the re-validation pass. */
     expect(registry.snapshot().receipts[fresh.receipt.launchId]!.state).toBe("completed");
+    /* Neither is the independent launch that merely shares the worktree. */
+    const survivor = registry.snapshot().receipts[independent.receipt.launchId]!;
+    expect(survivor.error ?? "").not.toContain("superseded");
+    expect(survivor.state).not.toBe("failed");
   } finally {
     journal.close();
   }
