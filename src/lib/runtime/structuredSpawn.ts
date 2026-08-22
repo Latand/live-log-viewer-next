@@ -545,27 +545,36 @@ export interface StructuredSpawnDependencies {
 
 /** Why a queued launch from a previous generation must not be replayed, or
     null when it is still a legitimate replay candidate (#1071). Only a launch
-    that never reached a live host qualifies, and only against a newer launch of
-    the SAME request identity — the digest of the public launch shape, which a
-    resubmission under a fresh idempotency key keeps and an independent launch
-    into the same working directory does not. Age alone proves nothing here, so
-    a queued launch with no replacement keeps its established recovery. */
+    that never reached a live host qualifies, and only against a newer launch
+    that demonstrably replaces THIS one. Two relations prove that: the durable
+    supersedence edge, which a stage retry and a recovery spawn write naming the
+    predecessor conversation, and an identical request digest, which a plain
+    resubmission under a fresh idempotency key keeps. The digest alone is not
+    enough — a retry that names its predecessor folds that name into its own
+    digest, so the replacement's digest differs from the launch it replaces.
+    An independent launch into the same working directory matches neither
+    relation. Age alone proves nothing here, so a queued launch with no
+    replacement keeps its established recovery. */
 function supersededQueuedSpawnReason(
   snapshot: RegistryFile,
   receipt: SpawnReceipt,
 ): string | null {
   if (receipt.transport !== "structured" || receipt.purpose !== "launch") return null;
   if (receipt.state !== "starting" && receipt.state !== "path-pending") return null;
-  if (receipt.artifactLifecycle !== "pending" || !receipt.requestDigest) return null;
+  if (receipt.artifactLifecycle !== "pending") return null;
   const entry = receipt.key ? snapshot.entries[sessionKeyId(receipt.key)] : null;
   if (entry?.structuredHost?.process || entry?.claimOwner) return null;
-  const replaced = Object.values(snapshot.receipts).some((candidate) => candidate.launchId !== receipt.launchId
-    && candidate.transport === "structured"
-    && candidate.purpose === "launch"
-    && candidate.requestDigest === receipt.requestDigest
-    && candidate.state !== "failed"
-    && candidate.state !== "conflicted"
-    && candidate.createdAt > receipt.createdAt);
+  const replaced = Object.values(snapshot.receipts).some((candidate) => {
+    if (candidate.launchId === receipt.launchId) return false;
+    if (candidate.transport !== "structured" || candidate.purpose !== "launch") return false;
+    if (candidate.state === "failed" || candidate.state === "conflicted") return false;
+    /* The explicit edge already names the launch it retires, so it carries its
+       own direction and needs no timestamp ordering to establish one. */
+    if (candidate.supersedes?.conversationId === receipt.conversationId) return true;
+    return Boolean(receipt.requestDigest)
+      && candidate.requestDigest === receipt.requestDigest
+      && candidate.createdAt > receipt.createdAt;
+  });
   return replaced
     ? "structured spawn was superseded by a newer launch of the same request"
     : null;
@@ -574,11 +583,7 @@ function supersededQueuedSpawnReason(
 export async function recoverPendingStructuredSpawns(
   registry: AgentRegistry,
   client: RuntimeHostClient,
-  options: {
-    ownerAlive?: (owner: { pid: number; startIdentity: string | null }) => boolean;
-  } = {},
 ): Promise<void> {
-  const ownerAlive = options.ownerAlive ?? admissionOwnerAlive;
   const spawnEffects = new Map<string, Record<string, unknown>>();
   let afterEventSeq = 0;
   while (true) {
@@ -611,23 +616,23 @@ export async function recoverPendingStructuredSpawns(
        generation accepted is not replayed verbatim by its successor. One whose
        replacement already exists settles as failed here, so a stale
        first-generation launch can never drain into a second builder beside the
-       fresh one. A launch whose admission owner is still live keeps its own
-       deferred execution. */
-    if (!(receipt.admissionOwner && ownerAlive(receipt.admissionOwner))) {
-      const supersededReason = supersededQueuedSpawnReason(snapshot, receipt);
-      if (supersededReason) {
-        const stale = await client.operationStatus(receipt.launchId);
-        const staleStatus = stale?.receipt.status;
-        if (staleStatus === "pending" || staleStatus === "queued" || staleStatus === "delivering") {
-          await client.transitionOperation(receipt.launchId, "failed", { reason: supersededReason });
-        }
-        const staged = receipt.key ? snapshot.entries[sessionKeyId(receipt.key)] : null;
-        if (staged) {
-          await projectDeadStructuredSpawn(client, receipt, staged, `structured-spawn-superseded:${receipt.launchId}`);
-        }
-        registry.failStructuredSpawn(receipt.launchId, supersededReason);
-        continue;
+       fresh one. A live admission owner does not exempt it: a promote overlaps
+       the generations, so the previous container is routinely still running,
+       and its deferred execution beside the replacement IS the duplicate the
+       issue reports. */
+    const supersededReason = supersededQueuedSpawnReason(snapshot, receipt);
+    if (supersededReason) {
+      const stale = await client.operationStatus(receipt.launchId);
+      const staleStatus = stale?.receipt.status;
+      if (staleStatus === "pending" || staleStatus === "queued" || staleStatus === "delivering") {
+        await client.transitionOperation(receipt.launchId, "failed", { reason: supersededReason });
       }
+      const staged = receipt.key ? snapshot.entries[sessionKeyId(receipt.key)] : null;
+      if (staged) {
+        await projectDeadStructuredSpawn(client, receipt, staged, `structured-spawn-superseded:${receipt.launchId}`);
+      }
+      registry.failStructuredSpawn(receipt.launchId, supersededReason);
+      continue;
     }
     if (receipt.state === "failed" && receipt.transport !== "tmux") {
       const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, client);
