@@ -7,7 +7,6 @@ import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type RegistryFile } from "@/lib/agent/registry";
 import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
 import { sessionKeyId } from "@/lib/agent/sessionKey";
-import { VIEWER_SPAWN_CAPABILITY_ENV } from "@/lib/agent/spawnPolicy";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { readStableTailRecords } from "@/lib/scanner/activity";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
@@ -29,7 +28,7 @@ import {
   hasStructuredDeliveryController,
 } from "./structuredDeliveryController";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
-import { recoverPendingStructuredSpawns } from "./structuredSpawn";
+import { materializeStructuredHostAccess, recoverPendingStructuredSpawns } from "./structuredSpawn";
 import { markStructuredHostStartupProgress, type StructuredHostStartupPhase } from "./startupStatus";
 
 type AdoptedStructuredHost = AdoptedCodexHost | AdoptedClaudeHost;
@@ -419,6 +418,11 @@ export async function adoptStructuredHostsAtStartup(
     (entry) => {
       const owner = resolveCodexOwner(entry);
       const capability = registry.rotateSpawnCapabilityForPath(entry.artifactPath);
+      const access = materializeStructuredHostAccess(
+        entry.launchProfile?.readOnly === true,
+        startupEnvironment,
+        capability,
+      );
       return {
         cwd: entry.cwd,
         codexHome: owner?.home,
@@ -430,10 +434,9 @@ export async function adoptStructuredHostsAtStartup(
         /* Re-adoption replays the durable grant (issue #687) — a session never
            gains or loses Computer Use by being picked up again at startup. */
         plugins: entry.launchProfile?.plugins ?? [],
-        env: {
-          ...startupEnvironment,
-          ...(capability ? { [VIEWER_SPAWN_CAPABILITY_ENV]: capability } : {}),
-        },
+        ...access.codex,
+        ...access.host,
+        env: access.env,
       };
     },
     startupEnvironment,
@@ -454,7 +457,11 @@ export async function adoptStructuredHostsAtStartup(
       const owner = resolveClaudeOwner(entry);
       const capability = registry.rotateSpawnCapabilityForPath(entry.artifactPath);
       const env = withoutWakatimeCredential(owner?.env ?? startupEnvironment);
-      if (capability) env[VIEWER_SPAWN_CAPABILITY_ENV] = capability;
+      const access = materializeStructuredHostAccess(
+        entry.launchProfile?.readOnly === true,
+        env,
+        capability,
+      );
       return {
         cwd: entry.cwd,
         claudeConfigDir: owner?.kind === "managed" ? owner.home : undefined,
@@ -466,7 +473,8 @@ export async function adoptStructuredHostsAtStartup(
           ? path.join(owner.home, ".claude.json")
           : owner ? path.join(path.dirname(owner.home), ".claude.json") : undefined,
         readOnly: entry.launchProfile?.readOnly === true,
-        env,
+        env: access.env,
+        ...access.host,
         model: entry.launchProfile?.model ?? undefined,
         effort: entry.launchProfile?.effort ?? undefined,
         permissionMode: effectiveClaudePermissionMode(entry.launchProfile ?? {}),

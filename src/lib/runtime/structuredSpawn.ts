@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { AccountContext } from "@/lib/accounts/contracts";
@@ -37,6 +38,86 @@ export const INITIAL_MESSAGE_TIMEOUT_MS = 30_000;
 const INITIAL_MESSAGE_POLL_MS = 250;
 export const ADMISSION_RETRY_ATTEMPTS = 3;
 const ADMISSION_RETRY_BACKOFF_MS = 250;
+export const READ_ONLY_STAGE_PERMISSION_PROFILE = "llv-read-only-stage";
+
+export interface StructuredHostAccessMaterialization {
+  env: NodeJS.ProcessEnv;
+  codex: {
+    sandbox?: string;
+    permissionProfile?: string;
+    permissionProfileConfig?: string;
+  };
+  host: {
+    forwardGitHubConfig?: boolean;
+    releaseCleanup?: () => void;
+  };
+  scratchDirectory: string | null;
+  cleanup(): void;
+}
+
+function githubConfigDirectory(sourceEnv: NodeJS.ProcessEnv): string {
+  if (sourceEnv.GH_CONFIG_DIR) return sourceEnv.GH_CONFIG_DIR;
+  const home = sourceEnv.HOME || os.homedir();
+  return path.join(sourceEnv.XDG_CONFIG_HOME || path.join(home, ".config"), "gh");
+}
+
+/** A read-only stage keeps the checkout under Codex's read-only profile while
+    adding one private write root for temporary and test state. */
+export function materializeStructuredHostAccess(
+  readOnly: boolean,
+  sourceEnv: NodeJS.ProcessEnv,
+  capability: string | null,
+  scratchParent = os.tmpdir(),
+): StructuredHostAccessMaterialization {
+  const baseEnv = {
+    ...sourceEnv,
+    ...(capability ? { LLV_SPAWN_CAPABILITY: capability } : {}),
+  };
+  if (!readOnly) {
+    return {
+      env: baseEnv,
+      codex: { sandbox: "danger-full-access" },
+      host: {},
+      scratchDirectory: null,
+      cleanup: () => {},
+    };
+  }
+
+  const scratchDirectory = fs.mkdtempSync(path.join(scratchParent, "llv-read-only-stage-"));
+  try {
+    fs.chmodSync(scratchDirectory, 0o700);
+    const directories = {
+      HOME: path.join(scratchDirectory, "home"),
+      XDG_CONFIG_HOME: path.join(scratchDirectory, "config"),
+      TMPDIR: path.join(scratchDirectory, "tmp"),
+    };
+    for (const directory of Object.values(directories)) {
+      fs.mkdirSync(directory, { mode: 0o700 });
+    }
+    const permissionProfileConfig = `permissions.${READ_ONLY_STAGE_PERMISSION_PROFILE}={extends=":read-only",filesystem={${JSON.stringify(scratchDirectory)}="write"}}`;
+    const cleanup = () => fs.rmSync(scratchDirectory, { recursive: true, force: true });
+    return {
+      env: {
+        ...baseEnv,
+        ...directories,
+        GH_CONFIG_DIR: githubConfigDirectory(sourceEnv),
+      },
+      codex: {
+        permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
+        permissionProfileConfig,
+      },
+      host: {
+        forwardGitHubConfig: true,
+        releaseCleanup: cleanup,
+      },
+      scratchDirectory,
+      cleanup,
+    };
+  } catch (error) {
+    fs.rmSync(scratchDirectory, { recursive: true, force: true });
+    throw error;
+  }
+}
 
 /** Runtime admission calls carry the durable launch id as their idempotency
     key, so a replay lands on the original receipt. Production #367 saw
@@ -873,7 +954,6 @@ export function structuredClaudeSpawnPolicyBaseSettingsPath(
 
 async function defaultStartHost(input: StructuredSpawnInput, capability: string): Promise<SpawnedStructuredHost> {
   const profile = input.spec.launchProfile ?? {} as LaunchProfile;
-  const env = { ...input.account.env, LLV_SPAWN_CAPABILITY: capability };
   const resumeSessionId = structuredResumeSessionId(input);
   const initialEventCursor = resumeSessionId
     ? input.registry.readOnlySnapshot().entries[sessionKeyId({ engine: input.engine, sessionId: resumeSessionId })]?.structuredHost?.eventCursor
@@ -882,6 +962,8 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     && (!Number.isSafeInteger(initialEventCursor) || initialEventCursor < 0)) {
     throw new Error("structured resume event cursor is invalid");
   }
+  const access = materializeStructuredHostAccess(profile.readOnly === true, input.account.env, capability);
+  const env = access.env;
   if (input.engine === "codex") {
     const options = {
       cwd: input.spec.cwd,
@@ -894,7 +976,8 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
       /* Plugin grant from the durable profile (issue #687): present only for
          an operator-launched root session that did not opt out. */
       plugins: profile.plugins,
-      sandbox: profile.readOnly ? "read-only" : "danger-full-access",
+      ...access.codex,
+      ...access.host,
       approvalPolicy: profile.permissionMode ?? undefined,
       initialEventCursor,
       env,
@@ -920,6 +1003,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     permissionMode: effectiveClaudePermissionMode(profile),
     initialEventCursor,
     env,
+    ...access.host,
   };
   return form.kind === "resume"
     ? await ClaudeStreamBrokerHost.adopt(form.sessionId, options)
