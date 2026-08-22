@@ -164,6 +164,10 @@ export interface PipelinePorts {
       merge is a tidy close, not an unreadable worktree. */
   worktreePresent(dir: string): boolean;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
+  /** Null means hosted, a timestamp means dead/absent since then, and undefined
+      means the registry cannot provide authoritative host evidence. */
+  conversationHostUnavailableSince?(conversationId: string): Promise<string | null | undefined>;
+  sleep?(milliseconds: number): Promise<void>;
   durableTurnEvidence(engine: EffectivePipelineRole["engine"], transcriptPath: string): Promise<StageTurnEvidence | null>;
   headCwd(transcriptPath: string): string | null;
   lastMessage(entry: FileEntry): { text: string; ts: number } | null;
@@ -622,6 +626,19 @@ export function defaultPipelinePorts(): PipelinePorts {
       if (session.turn === "running" || session.turn === "interrupt_requested" || session.attentionIds.length > 0) return true;
       return null;
     },
+    conversationHostUnavailableSince: async (conversationId) => {
+      if (!conversationId.startsWith("conversation_")) return undefined;
+      const current = snapshot();
+      const conversation = current.conversations[conversationId as ViewerConversationId];
+      const generation = conversation?.generations.at(-1);
+      if (!conversation || !generation) return undefined;
+      const key = sessionKeyFromTranscript(conversation.engine, generation.path);
+      if (!key) return undefined;
+      const entry = current.entries[sessionKeyId(key)];
+      if (!entry) return generation.createdAt;
+      return entry.status === "dead" || entry.status === "unhosted" ? entry.updatedAt : null;
+    },
+    sleep: (milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
     durableTurnEvidence: durableStageTurnEvidence,
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
@@ -669,8 +686,12 @@ export function defaultPipelinePorts(): PipelinePorts {
 const spawnsThisProcess = new Set<string>();
 const TERMINAL_STATES = new Set<Pipeline["state"]>(["completed", "closed"]);
 const MISSING_STAGE_VERDICT = "stage completed without a valid final JSON verdict";
+const HISTORICAL_MISSING_STAGE_VERDICT = "historical attempt completed without a valid final JSON verdict";
 const VERDICT_RECOVERY_MAX_CHECKS = 3;
 const VERDICT_RECOVERY_INTERVAL_MS = 30_000;
+const SPAWN_HANDSHAKE_MAX_ATTEMPTS = 3;
+const SPAWN_HANDSHAKE_RETRY_DELAY_MS = 1_000;
+const DEAD_RUNNING_ATTEMPT_GRACE_MS = 3 * 60_000;
 /** Attempt states that end a round; a pending cursor over one of these queues a
     fresh attempt on the next tick (tickRunStage/tickReviewStage). */
 const TERMINAL_ATTEMPT_STATES = new Set<PipelineStageAttempt["state"]>(["passed", "failed", "needs_decision", "skipped"]);
@@ -1053,7 +1074,7 @@ async function reconcileHistoricalAttempts(pipeline: Pipeline, entries: FileEntr
       attempt.output = null;
       if (!parsed) {
         attempt.state = "failed";
-        attempt.error = "historical attempt completed without a valid final JSON verdict";
+        attempt.error = HISTORICAL_MISSING_STAGE_VERDICT;
       } else if ("failureReason" in parsed) {
         attempt.state = "failed";
         attempt.error = parsed.failureReason;
@@ -1279,6 +1300,35 @@ function failEdgeInput(parsed: ParsedStageVerdict): string | null {
   return combined || null;
 }
 
+function routeFailedAttempt(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt,
+  input: string | null,
+  detail: string,
+): boolean {
+  if (!stage.onFail) return false;
+  const targetStage = pipeline.stages.find((candidate) => candidate.id === stage.onFail!.to);
+  const used = failEdgeRoundsUsed(pipeline, stage);
+  if (targetStage && used < stage.onFail.maxRounds) {
+    pipeline.cursor = {
+      stageId: targetStage.id,
+      state: "pending",
+      input,
+      activatedBy: { stageId: stage.id, attempt: attempt.n, edge: "fail" },
+    };
+    pipeline.state = "running";
+    pipeline.stateDetail = null;
+    pipeline.pausedState = null;
+    return true;
+  }
+  if (targetStage) {
+    park(pipeline, `fail-edge budget exhausted after ${used} round(s): ${detail}`, attempt);
+    return true;
+  }
+  return false;
+}
+
 function commitPassedStage(
   pipeline: Pipeline,
   stage: PipelineStage,
@@ -1355,25 +1405,17 @@ function settleStageVerdict(
        mutation as the verdict. No worktree reset — the target continues from
        lastPassedCommit plus its own committed passes. needs_decision always
        parks; an exhausted budget parks with an actionable detail. */
-    if (parsed.verdict.status === "fail" && stage.onFail) {
-      const targetStage = pipeline.stages.find((candidate) => candidate.id === stage.onFail!.to);
-      const used = failEdgeRoundsUsed(pipeline, stage);
-      if (targetStage && used < stage.onFail.maxRounds) {
-        pipeline.cursor = {
-          stageId: targetStage.id,
-          state: "pending",
-          input: failEdgeInput(parsed),
-          activatedBy: { stageId: stage.id, attempt: attempt.n, edge: "fail" },
-        };
-        pipeline.state = "running";
-        pipeline.stateDetail = null;
-        pipeline.pausedState = null;
-        return;
-      }
-      if (targetStage) {
-        park(pipeline, `fail-edge budget exhausted after ${used} round(s): ${parsed.verdict.findings?.[0] ?? "stage verdict: fail"}`, attempt);
-        return;
-      }
+    if (
+      parsed.verdict.status === "fail"
+      && routeFailedAttempt(
+        pipeline,
+        stage,
+        attempt,
+        failEdgeInput(parsed),
+        parsed.verdict.findings?.[0] ?? "stage verdict: fail",
+      )
+    ) {
+      return;
     }
     park(pipeline, parsed.verdict.findings?.[0] ?? `stage verdict: ${parsed.verdict.status}`, attempt);
     return;
@@ -1462,7 +1504,7 @@ async function tickRunStage(
       /* The retried attempt supersedes its predecessor's round (issue #383):
          the prior attempt of the SAME stage that carries a conversation. */
       const priorAttempt = runFor(pipeline, stage.id)?.attempts.filter((candidate) => !candidate.historical).at(-2) ?? null;
-      const spawned = await ports.spawnAgent({
+      const spawnInput: Parameters<PipelinePorts["spawnAgent"]>[0] = {
         role: attempt.effectiveRole,
         cwd: pipeline.worktreeDir,
         prompt,
@@ -1480,11 +1522,35 @@ async function tickRunStage(
           round: attempt.n,
           parentConversationId: null,
         },
-      }, (reservation) => {
-        attempt.launchId = reservation.launchId;
-        attempt.conversationId = reservation.conversationId;
-        persist();
-      });
+      };
+      let spawned: PipelineStageSpawn | null = null;
+      for (let spawnAttempt = 1; spawnAttempt <= SPAWN_HANDSHAKE_MAX_ATTEMPTS; spawnAttempt += 1) {
+        try {
+          spawned = await ports.spawnAgent({
+            ...spawnInput,
+            clientAttemptId: spawnAttempt === 1
+              ? spawnInput.clientAttemptId
+              : `handshake_retry_${spawnAttempt - 1}_${spawnInput.clientAttemptId}`.slice(0, 128),
+          }, (reservation) => {
+            attempt.launchId = reservation.launchId;
+            attempt.conversationId = reservation.conversationId;
+            persist();
+          });
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const transient = isTransientStructuredSpawnFailure(message);
+          if (!transient || spawnAttempt === SPAWN_HANDSHAKE_MAX_ATTEMPTS) {
+            if (transient) {
+              throw new Error(`stage spawn failed after ${spawnAttempt - 1} retries: ${message}`);
+            }
+            throw error;
+          }
+          const sleep = ports.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+          await sleep(SPAWN_HANDSHAKE_RETRY_DELAY_MS);
+        }
+      }
+      if (!spawned) throw new Error("stage spawn failed without a result");
       attempt.launchId = spawned.launchId;
       attempt.conversationId = spawned.conversationId;
       attempt.sessionId = spawned.sessionId;
@@ -1544,7 +1610,13 @@ async function tickRunStage(
   const scanProjectsOpenTurn = entry?.activity === "live"
     || entry?.activityReason === "jsonl_turn_open"
     || (entry?.activityReason === "jsonl_turn_stalled" && attempt.paneId !== null);
-  if (entry && structuredActive !== false && scanProjectsOpenTurn) return;
+  const unavailableSince = !attempt.paneId && attempt.conversationId
+    ? await ports.conversationHostUnavailableSince?.(attempt.conversationId)
+    : null;
+  const unavailableAt = unavailableSince ? unixMs(unavailableSince) : 0;
+  const hostUnavailablePastGrace = unavailableAt > 0
+    && unixMs(ports.now()) - unavailableAt >= DEAD_RUNNING_ATTEMPT_GRACE_MS;
+  if (entry && structuredActive !== false && scanProjectsOpenTurn && !hostUnavailablePastGrace) return;
 
   /* The transcript artifact is the completion authority (#337). A terminal turn
      whose completion evidence belongs to this attempt and ends in a valid fenced
@@ -1567,6 +1639,14 @@ async function tickRunStage(
       stageVerdictRejectionReason(durable.message!.text),
       durable.message!.ts,
     );
+    return;
+  }
+  if (hostUnavailablePastGrace) {
+    attempt.state = "failed";
+    attempt.completedAt = ports.now();
+    attempt.error = HISTORICAL_MISSING_STAGE_VERDICT;
+    if (routeFailedAttempt(pipeline, stage, attempt, HISTORICAL_MISSING_STAGE_VERDICT, HISTORICAL_MISSING_STAGE_VERDICT)) return;
+    park(pipeline, HISTORICAL_MISSING_STAGE_VERDICT, attempt);
     return;
   }
   if (!entry) {
@@ -2110,6 +2190,11 @@ function reconcileParkedVerdictMiss(pipeline: Pipeline, ports: PipelinePorts): b
 function isStructuredSpawnPark(pipeline: Pipeline, attempt: PipelineStageAttempt): boolean {
   const failure = attempt.error ?? pipeline.stateDetail ?? "";
   return failure.startsWith("stage spawn")
+    || isTransientStructuredSpawnFailure(failure);
+}
+
+function isTransientStructuredSpawnFailure(failure: string): boolean {
+  return failure.includes("structured delivery controller is unavailable")
     || failure.includes("structured initial message")
     || failure.includes("runtime host request timed out");
 }

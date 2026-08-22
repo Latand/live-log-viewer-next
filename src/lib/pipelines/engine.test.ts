@@ -1612,6 +1612,58 @@ test("restart after a bare spawn reservation parks instead of waiting forever", 
   expect(loadPipelines()[0]!.stateDetail).toContain("cannot recover from receipt state starting");
 });
 
+test("transient structured spawn handshakes retry twice before parking (#1056)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  let spawnCalls = 0;
+  const delays: number[] = [];
+  h.ports.spawnAgent = async () => {
+    spawnCalls += 1;
+    throw new Error("structured delivery controller is unavailable");
+  };
+  Object.assign(h.ports, {
+    sleep: async (milliseconds: number) => { delays.push(milliseconds); },
+  });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(spawnCalls).toBe(3);
+  expect(delays).toEqual([1_000, 1_000]);
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("structured delivery controller is unavailable");
+  expect(parked.stateDetail).toContain("2 retries");
+});
+
+test("a transient structured spawn handshake can recover on retry (#1056)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const baseSpawn = h.ports.spawnAgent;
+  let spawnCalls = 0;
+  const clientAttemptIds: string[] = [];
+  Object.assign(h.ports, { sleep: async () => {} });
+  h.ports.spawnAgent = async (input, onReserved) => {
+    spawnCalls += 1;
+    clientAttemptIds.push(input.clientAttemptId);
+    if (spawnCalls < 3) throw new Error("runtime host request timed out");
+    return baseSpawn(input, onReserved);
+  };
+
+  await tickPipelines([], h.ports);
+
+  expect(spawnCalls).toBe(3);
+  expect(new Set(clientAttemptIds).size).toBe(3);
+  const current = loadPipelines()[0]!;
+  expect(current).toMatchObject({
+    state: "running",
+    stateDetail: null,
+    cursor: { stageId: "plan", state: "running" },
+  });
+  expect(current.runs[0]!.attempts[0]!.state).toBe("running");
+});
+
 test("durable conversation identity never adopts a competing cwd session", async () => {
   const h = harness();
   await create(h.ports);
@@ -1655,6 +1707,43 @@ test("a worker that dies after transcript discovery enters bounded verdict recov
   await exhaustVerdictRecovery(h);
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
   expect(loadPipelines()[0]!.stateDetail).toContain("canonical stage transcript is not yet readable");
+});
+
+test("a dead structured host past grace fails through the stage fail edge (#973)", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build", next: null, onFail: { to: "recover", maxRounds: 1 } },
+    { id: "recover", kind: "run", role: { roleId: "builder" }, prompt: "Recover {{prev.output}}", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  const running = loadPipelines()[0]!;
+  running.runs[0]!.attempts[0]!.paneId = null;
+  savePipelines([running]);
+  const unavailableSince = h.ports.now();
+  Object.assign(h.ports, {
+    conversationHostUnavailableSince: async () => unavailableSince,
+  });
+
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.state).toBe("running");
+
+  h.advanceWallClock(5 * 60_000);
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "failed",
+    verdict: null,
+    error: "historical attempt completed without a valid final JSON verdict",
+  });
+  expect(current.cursor).toEqual({
+    stageId: "recover",
+    state: "pending",
+    input: "historical attempt completed without a valid final JSON verdict",
+    activatedBy: { stageId: "build", attempt: 1, edge: "fail" },
+  });
 });
 
 test("an inactive transcript with no verdict exhausts bounded recovery after its worker exits", async () => {
