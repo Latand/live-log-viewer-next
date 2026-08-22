@@ -2968,27 +2968,7 @@ function verdictRecoveryResetRefusal(
   const local = currentPipelineBranchHead(pipeline, ports.exec);
   if (!local.ok) return refusal(local.error);
   if (local.sha === pipeline.lastPassedCommit) return null;
-
-  const ancestor = ports.exec(
-    "git",
-    ["merge-base", "--is-ancestor", pipeline.lastPassedCommit, local.sha],
-    pipeline.worktreeDir,
-  );
-  if (ancestor.code !== 0) {
-    return refusal("the worktree HEAD is outside the accepted last-passed history");
-  }
-  const remote = currentPipelineRemoteBranchHead(pipeline, ports.exec);
-  if (!remote.ok) return refusal(remote.error);
-  if (remote.sha !== local.sha) {
-    return refusal("the worktree has unpushed commits beyond the last-passed commit");
-  }
-  return null;
-}
-
-function isHostUnavailableStopFailure(error: string): boolean {
-  const normalized = error.toLowerCase();
-  return normalized.includes("runtime host is unavailable")
-    || normalized.includes("structured host ownership is unavailable");
+  return refusal(`the worktree HEAD ${local.sha} differs from the last-passed commit ${pipeline.lastPassedCommit}`);
 }
 
 async function closeStopFailureEvidence(
@@ -3605,9 +3585,7 @@ export async function patchPipeline(
         const result = await ports.stopStageAgent(target);
         if (result.outcome === "stopped") close.stopped.push(target);
         else if (result.outcome === "failed") {
-          const evidence = isHostUnavailableStopFailure(result.error)
-            ? await closeStopFailureEvidence(candidate, ports)
-            : null;
+          const evidence = await closeStopFailureEvidence(candidate, ports);
           if (evidence) {
             const detail = `stop failed with "${result.error}"; terminalized from ${evidence}`;
             close.alreadyStopped.push(target);

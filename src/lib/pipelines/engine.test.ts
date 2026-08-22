@@ -4103,22 +4103,25 @@ test("retry and skip leave verdict-recovery exhaustion only when reset preserves
     expect(refused.error).toContain("close");
     expect(dirty.calls.some((call) => call.includes("reset --hard") || call.includes("clean -fd"))).toBe(false);
 
-    const unpushed = harness();
-    const unpushedPipeline = await exhaust(unpushed);
-    const unpushedHead = "a".repeat(40);
-    const unpushedExec = unpushed.ports.exec;
-    unpushed.ports.exec = (command, args, cwd) => {
+    const publishedAhead = harness();
+    const publishedAheadPipeline = await exhaust(publishedAhead);
+    const publishedAheadHead = "a".repeat(40);
+    const publishedAheadExec = publishedAhead.ports.exec;
+    publishedAhead.ports.exec = (command, args, cwd) => {
       if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
-        return { code: 0, stdout: `${unpushedHead}\n`, stderr: "" };
+        return { code: 0, stdout: `${publishedAheadHead}\n`, stderr: "" };
       }
-      return unpushedExec(command, args, cwd);
+      if (command === "git" && args[0] === "ls-remote") {
+        return { code: 0, stdout: `${publishedAheadHead}\trefs/heads/${publishedAheadPipeline.branch}\n`, stderr: "" };
+      }
+      return publishedAheadExec(command, args, cwd);
     };
 
-    const unpublished = await patchPipeline(unpushedPipeline.id, { action }, unpushed.ports);
+    const refusedAhead = await patchPipeline(publishedAheadPipeline.id, { action }, publishedAhead.ports);
 
-    expect(unpublished.status).toBe(409);
-    expect(unpublished.error).toContain("close");
-    expect(unpushed.calls.some((call) => call.includes("reset --hard") || call.includes("clean -fd"))).toBe(false);
+    expect(refusedAhead.status).toBe(409);
+    expect(refusedAhead.error).toContain("close");
+    expect(publishedAhead.calls.some((call) => call.includes("reset --hard") || call.includes("clean -fd"))).toBe(false);
   }
 });
 
@@ -4667,7 +4670,10 @@ test("close terminalizes host-unavailable attempts from durable evidence and rec
     stored.state = "needs_decision";
     stored.stateDetail = attempt.error;
     savePipelines([stored]);
-    h.setStageHost("conversation_stage_1", { outcome: "failed", error: "structured runtime host is unavailable" });
+    const stopError = evidence === "registry-absent"
+      ? "structured host termination is unavailable"
+      : "structured host termination target is unavailable";
+    h.setStageHost("conversation_stage_1", { outcome: "failed", error: stopError });
 
     if (evidence === "terminal-transcript") {
       h.setHostsResident(true);
@@ -4684,11 +4690,11 @@ test("close terminalizes host-unavailable attempts from durable evidence and rec
 
     expect(closed.error).toBeUndefined();
     expect(closed.close?.alreadyStopped).toMatchObject([{ stageId: "plan", attempt: 1 }]);
-    expect(closed.close?.notes).toMatchObject([{ stageId: "plan", attempt: 1, detail: expect.stringContaining("structured runtime host is unavailable") }]);
+    expect(closed.close?.notes).toMatchObject([{ stageId: "plan", attempt: 1, detail: expect.stringContaining(stopError) }]);
     const terminal = loadPipelines()[0]!;
     expect(terminal.state).toBe("closed");
     expect(terminal.runs[0]!.attempts[0]!.completedAt).toBeTruthy();
-    expect(terminal.stateDetail).toContain("structured runtime host is unavailable");
+    expect(terminal.stateDetail).toContain(stopError);
   }
 });
 
