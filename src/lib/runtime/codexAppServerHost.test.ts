@@ -37,7 +37,12 @@ class MemoryEventStore implements RuntimeEventStore {
 test("read-only structured hosts receive one writable isolated scratch root", () => {
   const scratchParent = fs.mkdtempSync(path.join(os.tmpdir(), "llv-read-only-scratch-test-"));
   try {
-    const access = materializeStructuredHostAccess(true, { NODE_ENV: "test", HOME: "/shared/home" }, "capability", scratchParent);
+    const access = materializeStructuredHostAccess(
+      true,
+      { NODE_ENV: "test", HOME: "/shared/home", XDG_CONFIG_HOME: "/shared/config" },
+      "capability",
+      scratchParent,
+    );
 
     expect(access.env).toMatchObject({
       NODE_ENV: "test",
@@ -45,6 +50,7 @@ test("read-only structured hosts receive one writable isolated scratch root", ()
       HOME: path.join(access.scratchDirectory!, "home"),
       XDG_CONFIG_HOME: path.join(access.scratchDirectory!, "config"),
       TMPDIR: path.join(access.scratchDirectory!, "tmp"),
+      GH_CONFIG_DIR: "/shared/config/gh",
     });
     expect(access.codex).toEqual({
       permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
@@ -424,11 +430,12 @@ describe("CodexAppServerHost", () => {
     const permissionProfileConfig = 'permissions.llv-read-only-stage={extends=":read-only",filesystem={"/scratch"="write"}}';
     for (const threadId of [null, "scratch-thread"] as const) {
       const server = new FakeAppServer(threadId ?? "scratch-thread");
-      const captured: { args?: string[] } = {};
+      const captured: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
       const options = {
         cwd: "/repo",
         permissionProfile,
         permissionProfileConfig,
+        env: { NODE_ENV: "test" as const, GH_CONFIG_DIR: "/shared/config/gh" },
         eventStore: new MemoryEventStore(),
         spawnProcess: fakeSpawn(server, captured),
       };
@@ -437,9 +444,11 @@ describe("CodexAppServerHost", () => {
         : await CodexAppServerHost.start(options);
 
       expect(captured.args).toEqual([
+        "-c", `default_permissions=${JSON.stringify(permissionProfile)}`,
         "-c", permissionProfileConfig,
         "app-server", "--enable", "realtime_conversation",
       ]);
+      expect(captured.options?.env?.GH_CONFIG_DIR).toBe("/shared/config/gh");
       const method = threadId ? "thread/resume" : "thread/start";
       const params = server.requests.find((request) => request.method === method)?.params as Record<string, unknown>;
       expect(params).toMatchObject({ permissions: permissionProfile });

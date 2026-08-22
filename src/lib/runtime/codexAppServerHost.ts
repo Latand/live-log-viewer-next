@@ -235,6 +235,7 @@ const CHILD_ENV_ALLOWLIST = [
   "TERM",
   "COLORTERM",
   "NO_COLOR",
+  "GH_CONFIG_DIR",
   "XDG_CONFIG_HOME",
   "XDG_CACHE_HOME",
   "XDG_DATA_HOME",
@@ -747,7 +748,12 @@ export class CodexAppServerHost implements EngineHost {
       spawn(command, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
     const args = [
       ...(options.fileAuthCredentials ? ["-c", "cli_auth_credentials_store=file"] : []),
-      ...(options.permissionProfileConfig ? ["-c", options.permissionProfileConfig] : []),
+      ...(options.permissionProfile && options.permissionProfileConfig
+        ? [
+          "-c", `default_permissions=${JSON.stringify(options.permissionProfile)}`,
+          "-c", options.permissionProfileConfig,
+        ]
+        : []),
       "app-server",
       "--enable",
       "realtime_conversation",

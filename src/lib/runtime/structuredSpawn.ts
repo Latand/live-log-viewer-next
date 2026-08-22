@@ -48,6 +48,12 @@ export interface StructuredHostAccessMaterialization {
   cleanup(): void;
 }
 
+function githubConfigDirectory(sourceEnv: NodeJS.ProcessEnv): string {
+  if (sourceEnv.GH_CONFIG_DIR) return sourceEnv.GH_CONFIG_DIR;
+  const home = sourceEnv.HOME || os.homedir();
+  return path.join(sourceEnv.XDG_CONFIG_HOME || path.join(home, ".config"), "gh");
+}
+
 /** A read-only stage keeps the checkout under Codex's read-only profile while
     adding one private write root for temporary and test state. */
 export function materializeStructuredHostAccess(
@@ -79,7 +85,11 @@ export function materializeStructuredHostAccess(
     }
     const permissionProfileConfig = `permissions.${READ_ONLY_STAGE_PERMISSION_PROFILE}={extends=":read-only",filesystem={${JSON.stringify(scratchDirectory)}="write"}}`;
     return {
-      env: { ...baseEnv, ...directories },
+      env: {
+        ...baseEnv,
+        ...directories,
+        GH_CONFIG_DIR: githubConfigDirectory(sourceEnv),
+      },
       codex: {
         permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
         permissionProfileConfig,
