@@ -6,7 +6,7 @@ import type { AccountContext } from "@/lib/accounts/contracts";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
 import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
 import { effectiveClaudePermissionMode, type AgentEngine, type ResumeSpec } from "@/lib/agent/cli";
-import type { AgentRegistry, AgentRegistryEntry, SpawnReceipt, StructuredHostColumns } from "@/lib/agent/registry";
+import type { AgentRegistry, AgentRegistryEntry, RegistryFile, SpawnReceipt, StructuredHostColumns } from "@/lib/agent/registry";
 import { sessionKey, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import type { SpawnResponse } from "@/lib/agent/spawnResponse";
 import { prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
@@ -29,6 +29,9 @@ import { parseStructuredImageRefs, structuredContent, type StructuredImageRef } 
 export type SpawnedStructuredHost = EngineHost & {
   identity: { threadId: string; path: string | null } | { sessionId: string };
   onStateChange(listener: (state: HostState) => void): () => void;
+  /** The canonical phrase of a terminal CLI exit, when the host recognized one
+      (#1071). Absent on hosts whose engine reports no such diagnostic. */
+  terminalExitReason?(): string | null;
 };
 
 export const INITIAL_MESSAGE_TIMEOUT_MS = 30_000;
@@ -546,6 +549,46 @@ function resumeIdentityForReceipt(
   return source ? { key: { engine: receipt.engine, sessionId: source.id }, artifactPath: source.path } : null;
 }
 
+/** Whether the engine session behind a staged identity actually exists (#1071).
+    The only evidence is the transcript the engine writes when it creates the
+    session — the same file `claude --resume` reads, so nothing weaker stands in
+    for it. A registry row does not qualify: the broker opens its own row and
+    emits an idle event the moment a child is spawned, before the CLI has
+    created anything, so a promote inside that window would leave an event
+    cursor pointing at a session that never existed. */
+export function structuredSessionExists(
+  identity: { artifactPath: string },
+  exists: (candidate: string) => boolean = fs.existsSync,
+): boolean {
+  return Boolean(identity.artifactPath) && exists(identity.artifactPath);
+}
+
+export type StructuredClaudeLaunchForm =
+  | { kind: "resume"; sessionId: string }
+  | { kind: "fresh"; sessionId: string | undefined };
+
+/** Which Claude CLI form a launch takes. Only a session with existence
+    evidence is resumed: rebuilding a never-created session as
+    `claude --resume <id>` makes the CLI exit with "No conversation found with
+    session ID" and the launch can never succeed, however often it is retried.
+    A retried fresh launch therefore re-runs the `--session-id` form under the
+    SAME pre-allocated id, so the retry keeps the receipt's durable identity
+    (#1071). */
+export function structuredClaudeLaunchForm(
+  input: Pick<StructuredSpawnInput, "receipt" | "registry" | "spec">,
+  exists: (candidate: string) => boolean = fs.existsSync,
+): StructuredClaudeLaunchForm {
+  const identity = resumeIdentityForReceipt(input.registry, input.receipt);
+  if (identity && structuredSessionExists(identity, exists)) {
+    return { kind: "resume", sessionId: identity.key.sessionId };
+  }
+  return {
+    kind: "fresh",
+    sessionId: identity?.key.sessionId
+      ?? (input.spec.transcript ? path.basename(input.spec.transcript, ".jsonl") : undefined),
+  };
+}
+
 function releaseAdoptionClaim(
   registry: AgentRegistry,
   claimed: AgentRegistryEntry,
@@ -581,6 +624,43 @@ export interface StructuredSpawnDependencies {
   processIdentity?(): { pid: number; startIdentity: string | null };
 }
 
+/** Why a queued launch from a previous generation must not be replayed, or
+    null when it is still a legitimate replay candidate (#1071). Only a launch
+    that never reached a live host qualifies, and only against a newer launch
+    that demonstrably replaces THIS one. Two relations prove that: the durable
+    supersedence edge, which a stage retry and a recovery spawn write naming the
+    predecessor conversation, and an identical request digest, which a plain
+    resubmission under a fresh idempotency key keeps. The digest alone is not
+    enough — a retry that names its predecessor folds that name into its own
+    digest, so the replacement's digest differs from the launch it replaces.
+    An independent launch into the same working directory matches neither
+    relation. Age alone proves nothing here, so a queued launch with no
+    replacement keeps its established recovery. */
+function supersededQueuedSpawnReason(
+  snapshot: RegistryFile,
+  receipt: SpawnReceipt,
+): string | null {
+  if (receipt.transport !== "structured" || receipt.purpose !== "launch") return null;
+  if (receipt.state !== "starting" && receipt.state !== "path-pending") return null;
+  if (receipt.artifactLifecycle !== "pending") return null;
+  const entry = receipt.key ? snapshot.entries[sessionKeyId(receipt.key)] : null;
+  if (entry?.structuredHost?.process || entry?.claimOwner) return null;
+  const replaced = Object.values(snapshot.receipts).some((candidate) => {
+    if (candidate.launchId === receipt.launchId) return false;
+    if (candidate.transport !== "structured" || candidate.purpose !== "launch") return false;
+    if (candidate.state === "failed" || candidate.state === "conflicted") return false;
+    /* The explicit edge already names the launch it retires, so it carries its
+       own direction and needs no timestamp ordering to establish one. */
+    if (candidate.supersedes?.conversationId === receipt.conversationId) return true;
+    return Boolean(receipt.requestDigest)
+      && candidate.requestDigest === receipt.requestDigest
+      && candidate.createdAt > receipt.createdAt;
+  });
+  return replaced
+    ? "structured spawn was superseded by a newer launch of the same request"
+    : null;
+}
+
 export async function recoverPendingStructuredSpawns(
   registry: AgentRegistry,
   client: RuntimeHostClient,
@@ -613,6 +693,28 @@ export async function recoverPendingStructuredSpawns(
   const snapshot = registry.readOnlySnapshot();
   for (const receipt of Object.values(snapshot.receipts)) {
     const effect = spawnEffects.get(receipt.launchId);
+    /* Re-validate before replay (#1071): a queued launch the previous
+       generation accepted is not replayed verbatim by its successor. One whose
+       replacement already exists settles as failed here, so a stale
+       first-generation launch can never drain into a second builder beside the
+       fresh one. A live admission owner does not exempt it: a promote overlaps
+       the generations, so the previous container is routinely still running,
+       and its deferred execution beside the replacement IS the duplicate the
+       issue reports. */
+    const supersededReason = supersededQueuedSpawnReason(snapshot, receipt);
+    if (supersededReason) {
+      const stale = await client.operationStatus(receipt.launchId);
+      const staleStatus = stale?.receipt.status;
+      if (staleStatus === "pending" || staleStatus === "queued" || staleStatus === "delivering") {
+        await client.transitionOperation(receipt.launchId, "failed", { reason: supersededReason });
+      }
+      const staged = receipt.key ? snapshot.entries[sessionKeyId(receipt.key)] : null;
+      if (staged) {
+        await projectDeadStructuredSpawn(client, receipt, staged, `structured-spawn-superseded:${receipt.launchId}`);
+      }
+      registry.failStructuredSpawn(receipt.launchId, supersededReason);
+      continue;
+    }
     if (receipt.state === "failed" && receipt.transport !== "tmux") {
       const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, client);
       if (reconciled.state === "completed") continue;
@@ -884,7 +986,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
       ? await CodexAppServerHost.adopt(resumeSessionId, options)
       : await CodexAppServerHost.start(options);
   }
-  const sessionId = resumeSessionId ?? (input.spec.transcript ? path.basename(input.spec.transcript, ".jsonl") : undefined);
+  const form = structuredClaudeLaunchForm(input);
   const options = {
     cwd: input.spec.cwd,
     claudeConfigDir: input.account.home,
@@ -903,9 +1005,9 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     env,
     ...access.host,
   };
-  return resumeSessionId
-    ? await ClaudeStreamBrokerHost.adopt(resumeSessionId, options)
-    : await ClaudeStreamBrokerHost.start({ ...options, ...(sessionId ? { sessionId } : {}) });
+  return form.kind === "resume"
+    ? await ClaudeStreamBrokerHost.adopt(form.sessionId, options)
+    : await ClaudeStreamBrokerHost.start({ ...options, ...(form.sessionId ? { sessionId: form.sessionId } : {}) });
 }
 
 export function structuredResumeSessionId(
@@ -951,6 +1053,18 @@ async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: st
     await waitForStructuredInitialMessage(input.client, delivered.operationId);
     settleInitialMessageReservation(input.registry, input.receipt.launchId);
   }
+}
+
+/** The terminal reason a spawned host is already dead before its first message
+    landed, or null when the host is still live (or cannot be read, which stays
+    recoverable reconciliation work exactly as before). */
+async function terminalHostExitReason(host: SpawnedStructuredHost | null): Promise<string | null> {
+  if (!host) return null;
+  let state: HostState;
+  try { state = await host.health(); }
+  catch { return null; }
+  if (state.status !== "dead") return null;
+  return host.terminalExitReason?.() ?? "structured spawn host exited before its first message";
 }
 
 async function cleanupHost(host: SpawnedStructuredHost | null, binding: HostBinding): Promise<void> {
@@ -1058,6 +1172,14 @@ export async function spawnStructuredConversation(
       /* Host identity and ownership are durable by this point. A caller
          timeout becomes reconciliation work and never enters host cleanup. */
       if (!(error instanceof StructuredInitialMessageTimeoutError)) throw error;
+      /* A CLI that could not start at all — "No conversation found with session
+         ID" and its immediate-exit siblings — leaves an already dead host and
+         a first message that will never land. That is terminal, not a slow
+         launch: it enters the failure path below so the receipt and its runtime
+         operation settle as failed and the caller can resubmit, instead of
+         reporting `queued` forever (#1071). */
+      const terminal = await terminalHostExitReason(host);
+      if (terminal) throw new Error(terminal);
       markInitialMessageTimeout(input.registry, input.receipt.launchId, error);
       initialMessage = "held";
     }
