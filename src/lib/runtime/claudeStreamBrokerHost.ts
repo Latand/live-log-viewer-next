@@ -228,6 +228,25 @@ export const NATIVE_MULTI_AGENT_DENY_FLAG = `native-multi-agent-deny:${NATIVE_MU
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
 
+/** Bounded tail kept only long enough to match a terminal exit signature. */
+const TERMINAL_EXIT_MATCH_BYTES = 512;
+
+/** CLI exits that mean this launch can never start, whatever retries it gets.
+    A resume of a session the CLI never created is the incident case (#1071):
+    the child prints this and exits before the broker delivers anything. */
+const TERMINAL_CLI_EXIT_SIGNATURES: readonly { pattern: RegExp; reason: string }[] = [
+  {
+    pattern: /no conversation found with session id/i,
+    reason: "the Claude CLI found no conversation with this session id",
+  },
+];
+
+/** The canonical phrase for a terminal CLI exit, or null when the diagnostic
+    is not one. The caller's text never reaches a durable receipt. */
+export function terminalClaudeExitReason(diagnostic: string): string | null {
+  return TERMINAL_CLI_EXIT_SIGNATURES.find((signature) => signature.pattern.test(diagnostic))?.reason ?? null;
+}
+
 function record(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
 }
@@ -469,6 +488,8 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly stdoutDecoder = new StringDecoder("utf8");
   private stdoutBuffer = "";
+  private stderrTail = "";
+  private terminalExit: string | null = null;
   private cursor: number;
   private activeTurnId: string | null = null;
   private protocolVersion: string | null;
@@ -515,7 +536,15 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       const tail = this.stdoutDecoder.end();
       if (tail) this.acceptStdout(tail);
     });
-    child.stderr.on("data", () => { /* Provider diagnostics may contain credentials. */ });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      /* Provider diagnostics may contain credentials, so none of this text is
+         retained: a bounded tail is matched against the terminal launch exits
+         (#1071) and only the canonical phrase survives the match. */
+      this.stderrTail = (this.stderrTail + (typeof chunk === "string" ? chunk : chunk.toString("utf8")))
+        .slice(-TERMINAL_EXIT_MATCH_BYTES);
+      this.terminalExit ??= terminalClaudeExitReason(this.stderrTail);
+      if (this.terminalExit) this.stderrTail = "";
+    });
     child.stdin.on("error", (error) => {
       if (!this.releasing && !this.released) this.fail(new Error(`Claude stream stdin failed: ${safeError(error)}`));
     });
@@ -752,6 +781,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   }
 
   async health(): Promise<HostState> { return this.currentState(); }
+
+  /** The canonical phrase of the terminal CLI exit this child reported, when
+      it reported one (#1071). Callers use it as the failure reason a launch
+      receipt carries, so the operator sees why a resubmit is needed. */
+  terminalExitReason(): string | null { return this.terminalExit; }
 
   onStateChange(listener: (state: HostState) => void): () => void {
     this.stateListeners.add(listener);
