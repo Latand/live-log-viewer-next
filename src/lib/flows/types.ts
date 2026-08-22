@@ -121,8 +121,17 @@ export type Round = {
   /** A prior process may have delivered this relay; retries must use the
       structured queue's stable client-message identity. */
   relayRetryRequiresIdempotency?: boolean;
-  /** Exact transcript generation that received Viewer-generated findings. */
+  /** Exact transcript generation that received Viewer-generated findings.
+      Written ONLY from durable settlement evidence (#1065): a structured relay
+      is recorded here after the delivery journal reports the message delivered,
+      never from the transport's optimistic accept. */
   relayDelivery?: ViewerFlowDelivery | null;
+  /** A structured relay the transport accepted whose delivery journal
+      settlement has not landed yet (#1065). While this is set the round is
+      UNDELIVERED: the flow stays in `relaying`, and if the journal stays silent
+      past the settlement window the bounded relay retry re-sends under the same
+      idempotent client-message identity. */
+  relayPendingSettlement?: { path: string; since: string } | null;
   reviewedAt: string | null; // verdict detected
   /** Reviewer process reached a verdict or terminal error. */
   terminalAt?: string | null;

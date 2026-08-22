@@ -50,6 +50,11 @@ let sendRelay: typeof sendToImplementer;
 const MAX_HEADLESS_NO_VERDICT_RETRIES = 1;
 const MAX_RELAY_DELIVERY_RETRIES = 3;
 const RELAY_RETRY_BACKOFF_MS = [1_000, 5_000, 30_000] as const;
+/** How long a structured relay may sit accepted-but-unsettled before the round
+    is declared undelivered and re-sent (#1065). The transport's accept only
+    means the runtime host took the operation; the delivery journal reports
+    whether the implementer actually received it. */
+const RELAY_SETTLEMENT_TIMEOUT_MS = 180_000;
 const REVIEWER_LAUNCH_LEASE_MS = 60_000;
 const SYNTHETIC_LAUNCH_LOSS_DETAILS = new Set([
   "reviewer tracking was lost before a verdict could be recovered",
@@ -169,6 +174,7 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     relayRetryAt: null,
     relayRetryRequiresIdempotency: false,
     relayDelivery: null,
+    relayPendingSettlement: null,
     reviewedAt: null,
     terminalAt: null,
     relayedAt: null,
@@ -300,7 +306,9 @@ export interface RelayDeliveryOverrides {
   onTransportSelected?: (transport: RelayDeliveryTransport) => void;
 }
 
-function relayClientMessageId(flow: Flow): string {
+/** The durable structured-delivery identity of a round's relay. Exported so a
+    test can address the exact reservation the delivery journal settles. */
+export function relayClientMessageId(flow: Flow): string {
   const round = flow.rounds?.at(-1);
   const deliveryAttempt = round?.relayDeliveryAttempt ?? 0;
   const identity = `${flow.id}:${round?.n ?? "legacy"}:${round?.reviewerBindingId ?? "legacy"}`
@@ -732,12 +740,44 @@ function retryHeadlessRound(flow: Flow, round: Round): void {
     relayDeliveryTransport: null,
     relayRetryAt: null,
     relayRetryRequiresIdempotency: false,
+    relayPendingSettlement: null,
     reviewedAt: null,
     relayedAt: null,
     error: null,
   });
   flow.state = "spawning";
   flow.stateDetail = `reviewer produced no verdict; retrying automatically (${round.autoRetryCount}/${MAX_HEADLESS_NO_VERDICT_RETRIES})`;
+}
+
+/**
+ * The durable settlement evidence for a structured relay, read from the very
+ * rows the lifecycle journal projects `delivery_delivered` from (#1065): the
+ * registry's held-delivery reservations, keyed by the relay's stable
+ * client-message id. A row that has not reached `delivered` is not evidence —
+ * flow 50dc0385 recorded `relayDelivery.deliveredAt` from the transport's
+ * optimistic accept while the journal never saw the message land, and the flow
+ * then waited in `fixing` for a REVIEW_READY that could never come.
+ */
+export function relayJournalSettlement(
+  flow: Flow,
+  registry: AgentRegistry = agentRegistry(),
+): { deliveredAt: string } | null {
+  const clientMessageId = relayClientMessageId(flow);
+  const delivery = Object.values(registry.readOnlySnapshot().heldDeliveries)
+    .find((item) => item.clientMessageId === clientMessageId);
+  if (delivery?.state !== "delivered") return null;
+  return { deliveredAt: delivery.deliveredAt ?? isoNow() };
+}
+
+function settleRelay(flow: Flow, round: Round, deliveryPath: string, deliveredAt: string): void {
+  round.relayDelivery = { path: deliveryPath, deliveredAt };
+  round.relayedAt = deliveredAt;
+  round.relayPendingSettlement = null;
+  round.relayRetryAt = null;
+  round.relayRetryRequiresIdempotency = false;
+  round.error = null;
+  flow.stateDetail = null;
+  completeRelayTransition(flow, round);
 }
 
 async function relayFindings(
@@ -750,14 +790,24 @@ async function relayFindings(
   const findings = fs.readFileSync(round.findingsPath, "utf8");
   flow.state = "relaying";
   const deliveryPath = await sendRelay(flow, entriesByPath, relayPrompt(round, findings), options);
-  const deliveredAt = isoNow();
-  round.relayDelivery = { path: deliveryPath, deliveredAt };
-  round.relayedAt = deliveredAt;
-  round.relayRetryAt = null;
-  round.relayRetryRequiresIdempotency = false;
-  round.error = null;
-  flow.stateDetail = null;
-  completeRelayTransition(flow, round);
+  /* Only the structured transport writes a delivery journal, so only it can be
+     held to journal corroboration. Legacy tmux delivery has no durable receipt
+     at all (that is why its interrupted replays are refused), and keeps the
+     transport-level settlement it always had. */
+  if (round.relayDeliveryTransport === "structured") {
+    const settlement = relayJournalSettlement(flow);
+    if (!settlement) {
+      round.relayPendingSettlement = { path: deliveryPath, since: isoNow() };
+      round.relayRetryAt = null;
+      round.relayRetryRequiresIdempotency = false;
+      round.error = null;
+      flow.stateDetail = "relay accepted by the structured transport; awaiting delivery journal settlement";
+      return;
+    }
+    settleRelay(flow, round, deliveryPath, settlement.deliveredAt);
+    return;
+  }
+  settleRelay(flow, round, deliveryPath, isoNow());
 }
 
 function scheduleRelayRetry(
@@ -766,6 +816,7 @@ function scheduleRelayRetry(
   detail: string,
   requireIdempotentDelivery = round.relayRetryRequiresIdempotency ?? false,
 ): boolean {
+  round.relayPendingSettlement = null;
   const consumed = round.relayRetryCount ?? 0;
   if (consumed >= MAX_RELAY_DELIVERY_RETRIES) {
     round.error = detail;
@@ -991,6 +1042,21 @@ export async function tickFlow(
     const relayKey = roundKey(flow, round);
     if (round.relayedAt !== null) {
       completeRelayTransition(flow, round);
+      return JSON.stringify(flow) !== before;
+    }
+    /* An accepted-but-unsettled structured relay (#1065). The round is
+       undelivered until the delivery journal says otherwise; a journal that
+       stays silent past the settlement window hands the round to the same
+       bounded retry path a transport failure uses, under the idempotent
+       client-message identity so a late-landing delivery cannot duplicate. */
+    if (round.relayPendingSettlement) {
+      const settlement = relayJournalSettlement(flow);
+      if (settlement) {
+        settleRelay(flow, round, round.relayPendingSettlement.path, settlement.deliveredAt);
+      } else if (Date.now() - unixMs(round.relayPendingSettlement.since) >= RELAY_SETTLEMENT_TIMEOUT_MS) {
+        relayStartedThisProcess.delete(relayKey);
+        scheduleRelayRetry(flow, round, "structured relay was accepted but never settled in the delivery journal", true);
+      }
       return JSON.stringify(flow) !== before;
     }
     const activeRelay = relayLeases.get(relayKey);

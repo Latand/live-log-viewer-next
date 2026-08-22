@@ -1463,11 +1463,14 @@ test("a definitive structured journal rejection retries with a fresh identity an
       expect(loadFlows()[0]!.rounds[0]).toMatchObject({ relayDeliveryTransport: "structured" });
       commands.push(command);
       const admitted = journal.executeOperation(command);
-      if (commands.length === 1) {
-        journal.transitionOperation(admitted.operationId, "rejected", { reason: "structured resume host claim is unavailable" });
-        return journal.operationResult(admitted.operationId)!;
-      }
-      return admitted;
+      /* The retry settles in the delivery journal, which is the only evidence
+         that may advance the flow past `relaying` (#1065). */
+      journal.transitionOperation(
+        admitted.operationId,
+        commands.length === 1 ? "rejected" : "delivered",
+        commands.length === 1 ? { reason: "structured resume host claim is unavailable" } : undefined,
+      );
+      return journal.operationResult(admitted.operationId)!;
     },
   } as RuntimeHostClient;
   const restoreDelivery = setRelayDeliveryForTest(async (flow, entries, text, options) => sendToImplementer(flow, entries, text, {
@@ -1527,7 +1530,7 @@ test("a definitive structured journal rejection retries with a fresh identity an
     const secondOperationId = commands[1]!.operationId;
     if (!firstOperationId || !secondOperationId) throw new Error("structured journal commands require operation ids");
     expect(journal.operationResult(firstOperationId)?.receipt.status).toBe("rejected");
-    expect(journal.operationResult(secondOperationId)?.receipt.status).toBe("queued");
+    expect(journal.operationResult(secondOperationId)?.receipt.status).toBe("delivered");
     expect(loadFlows()[0]).toMatchObject({
       state: "fixing",
       pausedState: null,
@@ -1544,6 +1547,163 @@ test("a definitive structured journal rejection retries with a fresh identity an
   } finally {
     restoreDelivery();
     journal.close();
+  }
+});
+
+test("issue 1065: an optimistically accepted structured relay stays undelivered and retries when the journal never settles", async () => {
+  const registry = agentRegistry();
+  const implementer = writeCodexEntry("relay-unsettled-implementer.jsonl", {
+    id: ["099f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const conversation = registry.ensureConversation("codex", implementer.path, null);
+  const sends: string[] = [];
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, entries, text, options) => sendToImplementer(flow, entries, text, {
+    ...options,
+    recover: async () => ({ target: null, path: implementer.path, conversationId: conversation.id, spawned: false }),
+    /* Exactly the shape of the incident: the transport accepts the relay and
+       reports success, and no delivery journal record ever follows. */
+    enqueueStructured: async (request) => {
+      sends.push(request.clientMessageId!);
+      return { ok: true, structured: true, target: null, outcome: "queued", operationId: `op-unsettled-${sends.length}`, receipt: {} as never };
+    },
+  }));
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-unsettled-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nSettle before claiming delivery.\n");
+  saveFlows([raceFlow({
+    id: "flow-relay-unsettled",
+    implementerPath: implementer.path,
+    implementerConversationId: conversation.id,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-20T16:47:51.534Z",
+      terminalAt: "2026-08-20T16:47:51.534Z",
+    }],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+
+    expect(sends).toHaveLength(1);
+    /* The verdict must NOT be recorded delivered, and the flow must NOT reach
+       `fixing`, on the transport's accept alone. */
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relaying",
+      rounds: [{
+        relayDeliveryTransport: "structured",
+        relayDelivery: null,
+        relayedAt: null,
+        relayRetryCount: 0,
+        relayPendingSettlement: { path: implementer.path, since: expect.any(String) },
+      }],
+    });
+
+    /* Inside the settlement window the round waits instead of re-sending. */
+    await tickFlows([implementer]);
+    expect(sends).toHaveLength(1);
+    expect(loadFlows()[0]!.state).toBe("relaying");
+
+    const waiting = loadFlows()[0]!;
+    waiting.rounds[0]!.relayPendingSettlement = { path: implementer.path, since: "2026-08-20T16:47:52.921Z" };
+    saveFlows([waiting]);
+    await tickFlows([implementer]);
+
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relaying",
+      stateDetail: expect.stringContaining("retrying automatically (1/3)"),
+      rounds: [{
+        relayDelivery: null,
+        relayedAt: null,
+        relayPendingSettlement: null,
+        relayRetryCount: 1,
+        relayRetryRequiresIdempotency: true,
+        relayStartedAt: null,
+        relayRetryAt: expect.any(String),
+        error: "structured relay was accepted but never settled in the delivery journal",
+      }],
+    });
+
+    const retrying = loadFlows()[0]!;
+    retrying.rounds[0]!.relayRetryAt = "2026-08-20T16:48:00.000Z";
+    saveFlows([retrying]);
+    await tickFlows([implementer]);
+
+    /* The re-send reuses the durable client-message identity, so a delivery that
+       lands late cannot duplicate the verdict. */
+    expect(sends).toHaveLength(2);
+    expect(sends[1]).toBe(sends[0]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relaying",
+      rounds: [{ relayedAt: null, relayRetryCount: 1, relayPendingSettlement: { path: implementer.path } }],
+    });
+  } finally {
+    restoreDelivery();
+  }
+});
+
+test("issue 1065: a structured relay settles from the delivery journal's delivered record", async () => {
+  const registry = agentRegistry();
+  const implementer = writeCodexEntry("relay-settled-implementer.jsonl", {
+    id: ["109f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const conversation = registry.ensureConversation("codex", implementer.path, null);
+  let clientMessageId = "";
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, entries, text, options) => sendToImplementer(flow, entries, text, {
+    ...options,
+    recover: async () => ({ target: null, path: implementer.path, conversationId: conversation.id, spawned: false }),
+    enqueueStructured: async (request) => {
+      clientMessageId = request.clientMessageId!;
+      return { ok: true, structured: true, target: null, outcome: "queued", operationId: "op-settled", receipt: {} as never };
+    },
+  }));
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-settled-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nSettle from the journal.\n");
+  saveFlows([raceFlow({
+    id: "flow-relay-settled",
+    implementerPath: implementer.path,
+    implementerConversationId: conversation.id,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-20T16:47:51.534Z",
+      terminalAt: "2026-08-20T16:47:51.534Z",
+    }],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({ state: "relaying", rounds: [{ relayedAt: null }] });
+
+    /* The durable reservation the lifecycle journal projects its
+       `delivery_delivered` event from, recorded after the transport accepted. */
+    const held = registry.holdDelivery(conversation.id, "relayed findings", clientMessageId);
+    const journaledAt = registry.recordDeliveryOutcome(held.id, "delivered").deliveredAt;
+    expect(journaledAt).toEqual(expect.any(String));
+
+    await tickFlows([implementer]);
+
+    expect(loadFlows()[0]).toMatchObject({
+      state: "fixing",
+      stateDetail: null,
+      rounds: [{
+        relayDeliveryTransport: "structured",
+        relayPendingSettlement: null,
+        relayDelivery: { path: implementer.path, deliveredAt: journaledAt },
+        relayedAt: journaledAt,
+        relayRetryCount: 0,
+        error: null,
+      }],
+    });
+  } finally {
+    restoreDelivery();
   }
 });
 
