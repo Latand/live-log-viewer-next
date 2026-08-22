@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import { parseReview, VERDICT_LINE_RE } from "@/lib/review";
+import { countFindingBlocks, parseReview, VERDICT_LINE_RE } from "@/lib/review";
 import { tailRecords } from "@/lib/scanner/activity";
 import { recordValue, recordsValue, stringValue } from "@/lib/scanner/json";
 import type { FileEntry } from "@/lib/types";
@@ -85,9 +85,14 @@ export function parseFindings(text: string): ParsedFindings | null {
   const verdict = text.match(VERDICT_LINE_RE)?.[1] as ReviewVerdict | undefined;
   if (!verdict) return null;
   const review = parseReview(text, null);
+  const structured = review?.findings.length ?? 0;
+  // A requested-changes round always names something; when the reviewer's prose
+  // escapes the structured contract, fall back to counting blocks so the board
+  // never badges it as zero findings (#930).
+  const findingsCount = structured > 0 || verdict !== "REQUEST_CHANGES" ? structured : countFindingBlocks(text);
   return {
     verdict,
-    findingsCount: review?.findings.length ?? 0,
+    findingsCount,
     content: normalizeFindings(verdict, text),
   };
 }

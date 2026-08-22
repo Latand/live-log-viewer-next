@@ -22,8 +22,13 @@ export interface ReviewCardItem {
 export const RAW_DEBUG_KEEP = 24_000;
 export const VERDICT_LINE_RE = /^\s*(?:VERDICT:\s*)?(REQUEST_CHANGES|APPROVE|COMMENT)\b/m;
 const FINDING_ITEM_RE = /^\s*(\d+)[.)]\s+(.*)$/;
-const FINDING_HEADING_RE = /^\s*#{1,6}\s+finding\s+\d+\s*$/i;
-const FINDING_FIELD_RE = /^\s*[-*]\s+\*\*(severity|file|line|title|explanation):\*\*\s*(.*)$/i;
+const FINDING_HEADING_RE = /^\s*#{1,6}\s+finding\s+\d+\b.*$/i;
+/** Reviewers label the same fields with any mix of leading bullet and bold, so
+    accept `- **Severity:** High`, `**Severity:** High`, `- Severity: High` and
+    `Severity: High` as the one field contract (#930). */
+const FINDING_FIELD_RE =
+  /^\s*(?:[-*+]\s+)?(?:\*\*|__)?(severity|file|line|title|explanation)(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(.*)$/i;
+const TOP_LEVEL_BULLET_RE = /^[-*+]\s+(.*)$/;
 const SEVERITY_RE = /(?:\[(P[0-3])\]|\b(Critical|High|Medium|Low|Info|P[0-3])\b)/i;
 const PATH_RE =
   /((?:\.{1,2}\/|\/|~\/)?[\w@.+-][\w@.+\-/]*\.(?:tsx?|jsx?|mjs|cjs|mts|cts|py|go|rs|md|json|ya?ml|toml|css|scss|html|sql|sh|env|ftl|txt))(?::(\d+))?/i;
@@ -101,6 +106,15 @@ function inlineValue(value: string): string {
   return value.trim().replace(/^`([^`]*)`$/, "$1");
 }
 
+/** Strip the bold markers a whole-line `**Severity: High**` label leaves behind
+    once the field name has been matched. */
+function fieldValue(value: string): string {
+  const trimmed = value.trim();
+  const wrapped = trimmed.match(/^\*\*([\s\S]*)\*\*$/);
+  if (wrapped) return wrapped[1]!.trim();
+  return trimmed.replace(/\*\*$/, "").trim();
+}
+
 /** Current Codex reviewers emit labelled Markdown bullets, optionally grouped
     under `### Finding N` headings. Parse that stable field contract directly so
     the flow engine and review cards share the same finding count and metadata. */
@@ -135,7 +149,7 @@ function parseStructuredFindings(text: string): ReviewFinding[] {
       const key = field[1]!.toLowerCase() as keyof StructuredFinding;
       if (key === "severity" && current?.severity) flush();
       current ??= {};
-      current[key] = field[2]?.trim() ?? "";
+      current[key] = fieldValue(field[2] ?? "");
       activeField = key;
       continue;
     }
@@ -146,6 +160,22 @@ function parseStructuredFindings(text: string): ReviewFinding[] {
   }
   flush();
   return findings;
+}
+
+/** Display-only fallback for reviewers whose findings never reach the field
+    contract above: count `### Finding N` blocks, else top-level bullets that
+    carry a severity token, so a REQUEST_CHANGES verdict with a written-out
+    findings file never reports zero (#930). */
+export function countFindingBlocks(text: string): number {
+  const lines = text.split("\n");
+  const headings = lines.filter((line) => FINDING_HEADING_RE.test(line)).length;
+  if (headings > 0) return headings;
+  let bullets = 0;
+  for (const line of lines) {
+    const bullet = line.match(TOP_LEVEL_BULLET_RE);
+    if (bullet && SEVERITY_RE.test(bullet[1] ?? "")) bullets += 1;
+  }
+  return bullets;
 }
 
 export function parseReview(text: string, ts: unknown): ReviewCardItem | null {
