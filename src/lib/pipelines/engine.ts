@@ -112,6 +112,8 @@ export type PipelineCloseReport = {
   acknowledged: Array<PipelineStageHostRef & { detail: string }>;
   /** Hosts that survived teardown, so the close cannot claim to be clean. */
   stillRunning: Array<PipelineStageHostRef & { error: string }>;
+  /** Stop failures demoted by durable terminal evidence. */
+  notes: Array<PipelineStageHostRef & { detail: string }>;
   /** Uncommitted stage work preserved in the worktree; null when unprovisioned. */
   worktree: { dir: string; uncommitted: string[]; truncated: boolean; error?: string } | null;
 };
@@ -723,6 +725,58 @@ function unixMs(value: string | null): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function verdictFindingPart(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function normalizeVerdictFinding(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const finding = value as Record<string, unknown>;
+  const severity = verdictFindingPart(finding.severity);
+  const file = verdictFindingPart(finding.file);
+  const line = verdictFindingPart(finding.line);
+  const summary = verdictFindingPart(finding.summary);
+  const location = file ? `${file}${line ? `:${line}` : ""}` : line ? `line ${line}` : null;
+  const normalized = [severity, location, summary].filter((part): part is string => Boolean(part));
+  return normalized.length > 0 ? normalized.join(" — ") : value;
+}
+
+/** Reviewer scaffolds naturally produce structured findings. The shared parser
+    still owns fence selection and all verdict validation; this adapter changes
+    only recognized finding objects in its final JSON candidate. */
+function normalizeVerdictFindingObjects(text: string): string {
+  const matches = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  const candidate = matches.at(-1);
+  if (!candidate || candidate.index === undefined) return text;
+  let value: unknown;
+  try {
+    value = JSON.parse(candidate[1] ?? "");
+  } catch {
+    return text;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return text;
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.findings) || !record.findings.some((finding) => finding && typeof finding === "object" && !Array.isArray(finding))) {
+    return text;
+  }
+  const normalized = { ...record, findings: record.findings.map(normalizeVerdictFinding) };
+  const fullCandidate = candidate[0];
+  const rawCandidate = candidate[1] ?? "";
+  const rawOffset = fullCandidate.indexOf(rawCandidate);
+  const payloadStart = candidate.index + rawOffset;
+  return `${text.slice(0, payloadStart)}${JSON.stringify(normalized)}${text.slice(payloadStart + rawCandidate.length)}`;
+}
+
+function parsePipelineStageVerdict(text: string) {
+  return parseStageVerdict(normalizeVerdictFindingObjects(text));
+}
+
+function pipelineStageVerdictRejectionReason(text: string): string {
+  return stageVerdictRejectionReason(normalizeVerdictFindingObjects(text));
+}
+
 function recoveryCheckAt(now: string): string {
   return new Date(unixMs(now) + VERDICT_RECOVERY_INTERVAL_MS).toISOString();
 }
@@ -1069,7 +1123,7 @@ async function reconcileHistoricalAttempts(pipeline: Pipeline, entries: FileEntr
         changed = JSON.stringify(attempt) !== before || changed;
         continue;
       }
-      const parsed = parseStageVerdict(durable.message!.text);
+      const parsed = parsePipelineStageVerdict(durable.message!.text);
       attempt.completedAt = new Date(durable.message!.ts).toISOString();
       attempt.output = null;
       if (!parsed) {
@@ -1626,7 +1680,7 @@ async function tickRunStage(
   const durable = await ports.durableTurnEvidence(attempt.effectiveRole.engine, attempt.agentPath);
   const durableTerminal = durable?.turn === "terminal" && durable.message !== null && durable.message.ts > unixMs(attempt.startedAt);
   if (durable && durableTerminal) {
-    const parsed = parseStageVerdict(durable.message!.text);
+    const parsed = parsePipelineStageVerdict(durable.message!.text);
     if (parsed && (!hostUnavailablePastGrace || "verdict" in parsed)) {
       markVerdictRecoverySucceeded(attempt, ports.now(), durable.message!.ts);
       settleStageVerdict(pipeline, stage, attempt, parsed, ports, persist);
@@ -1637,7 +1691,7 @@ async function tickRunStage(
         pipeline,
         attempt,
         ports,
-        stageVerdictRejectionReason(durable.message!.text),
+        pipelineStageVerdictRejectionReason(durable.message!.text),
         durable.message!.ts,
       );
       return;
@@ -1700,13 +1754,13 @@ async function tickRunStage(
     }
     return;
   }
-  const parsed = parseStageVerdict(message.text);
+  const parsed = parsePipelineStageVerdict(message.text);
   if (!parsed) {
     recordVerdictRecoveryMiss(
       pipeline,
       attempt,
       ports,
-      stageVerdictRejectionReason(message.text),
+      pipelineStageVerdictRejectionReason(message.text),
       message.ts,
     );
     return;
@@ -2144,7 +2198,7 @@ async function reconcileExhaustedVerdictRecovery(
     || message.ts <= unixMs(attempt.startedAt)
     || message.ts <= (recovery.messageTs ?? 0)
   ) return false;
-  const parsed = parseStageVerdict(message.text);
+  const parsed = parsePipelineStageVerdict(message.text);
   if (!parsed || "failureReason" in parsed) return false;
 
   attempt.state = "running";
@@ -2900,12 +2954,65 @@ async function orphanAgentPane(
   return { error: `stage agent may still be running in pane ${attempt.paneId}; wait for it to exit or kill the pane first`, status: 409 };
 }
 
-function verdictRecoveryResetRefusal(attempt: PipelineStageAttempt | null): { error: string; status: number } | null {
+function verdictRecoveryResetRefusal(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt | null,
+  ports: PipelinePorts,
+): { error: string; status: number } | null {
   if (attempt?.verdictRecovery?.state !== "exhausted") return null;
-  return {
-    error: "automatic verdict recovery exhausted; preserve its worktree and conversation lineage, then continue the same conversation or close the pipeline",
-    status: 409,
-  };
+  const refusal = (reason: string) => ({
+    error: `automatic verdict recovery exhausted; retry-stage and skip-stage require a reset-safe worktree: ${reason}. Preserve the work or use close`,
+    status: 409 as const,
+  });
+  if (!pipeline.lastPassedCommit) return refusal("the pipeline has no passed-stage commit");
+  const local = currentPipelineBranchHead(pipeline, ports.exec);
+  if (!local.ok) return refusal(local.error);
+  if (local.sha === pipeline.lastPassedCommit) return null;
+
+  const ancestor = ports.exec(
+    "git",
+    ["merge-base", "--is-ancestor", pipeline.lastPassedCommit, local.sha],
+    pipeline.worktreeDir,
+  );
+  if (ancestor.code !== 0) {
+    return refusal("the worktree HEAD is outside the accepted last-passed history");
+  }
+  const remote = currentPipelineRemoteBranchHead(pipeline, ports.exec);
+  if (!remote.ok) return refusal(remote.error);
+  if (remote.sha !== local.sha) {
+    return refusal("the worktree has unpushed commits beyond the last-passed commit");
+  }
+  return null;
+}
+
+function isHostUnavailableStopFailure(error: string): boolean {
+  const normalized = error.toLowerCase();
+  return normalized.includes("runtime host is unavailable")
+    || normalized.includes("structured host ownership is unavailable");
+}
+
+async function closeStopFailureEvidence(
+  candidate: StageHostCandidate,
+  ports: PipelinePorts,
+): Promise<string | null> {
+  try {
+    if (!(await ports.stageHostResident(candidate.target))) return "the host registry entry is dead or absent";
+  } catch {
+    // An unreadable registry leaves the transcript as the remaining authority.
+  }
+  if (!candidate.target.agentPath) return null;
+  const durable = await ports.durableTurnEvidence(candidate.attempt.effectiveRole.engine, candidate.target.agentPath);
+  if (durable?.turn !== "terminal" || !durable.message) return null;
+  if (durable.message.ts <= unixMs(candidate.attempt.startedAt)) return null;
+  return "the attempt transcript holds a completed final assistant turn";
+}
+
+function terminalizeAttemptForClose(candidate: StageHostCandidate, note: string, ports: PipelinePorts): void {
+  if (!TERMINAL_ATTEMPT_STATES.has(candidate.attempt.state)) {
+    candidate.attempt.state = "failed";
+    candidate.attempt.error = note;
+  }
+  candidate.attempt.completedAt ??= ports.now();
 }
 
 /**
@@ -2938,6 +3045,7 @@ function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
       if (seen.has(identity)) continue;
       seen.add(identity);
       candidates.push({
+        attempt,
         target: {
           stageId: run.stageId,
           attempt: attempt.n,
@@ -2959,7 +3067,7 @@ function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
 
 /** A launched host plus whether its attempt's turn ended, which decides only
     whether the pane heuristic may speak for it. */
-type StageHostCandidate = { target: PipelineStageHostRef; turnSettled: boolean };
+type StageHostCandidate = { attempt: PipelineStageAttempt; target: PipelineStageHostRef; turnSettled: boolean };
 
 /** Ceiling on a close's whole host teardown, holding the pipelines transaction. */
 const CLOSE_TEARDOWN_BUDGET_MS = 10_000;
@@ -3000,6 +3108,7 @@ function closeSummary(report: PipelineCloseReport): string | null {
   if (report.acknowledged.length > 0) {
     parts.push(`dismissed ${report.acknowledged.length} unconfirmed host${report.acknowledged.length === 1 ? "" : "s"} on the operator's word`);
   }
+  for (const note of report.notes) parts.push(`${note.detail} for ${stageHostLabel(note)}`);
   if (report.worktree?.error) {
     parts.push(`could not read the worktree at ${report.worktree.dir}: ${report.worktree.error}`);
   } else {
@@ -3239,7 +3348,7 @@ export async function patchPipeline(
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
-      const recoveryRefusal = verdictRecoveryResetRefusal(attempt);
+      const recoveryRefusal = verdictRecoveryResetRefusal(pipeline, attempt, ports);
       if (recoveryRefusal) return recoveryRefusal;
       const explicitReceiptRetry = req.stageId !== undefined || req.launchId !== undefined;
       if (explicitReceiptRetry && (typeof req.stageId !== "string" || typeof req.launchId !== "string")) {
@@ -3348,7 +3457,7 @@ export async function patchPipeline(
       pipeline.stateDetail = null;
     } else if (req.action === "skip-stage") {
       if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
-      const recoveryRefusal = verdictRecoveryResetRefusal(attempt);
+      const recoveryRefusal = verdictRecoveryResetRefusal(pipeline, attempt, ports);
       if (recoveryRefusal) return recoveryRefusal;
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
@@ -3471,7 +3580,7 @@ export async function patchPipeline(
       if (req.acknowledgeHosts !== undefined && typeof req.acknowledgeHosts !== "boolean") {
         return { error: "acknowledgeHosts must be a boolean", status: 400 };
       }
-      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], acknowledged: [], reviewers: [], stillRunning: [], worktree: null };
+      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], acknowledged: [], reviewers: [], stillRunning: [], notes: [], worktree: null };
       /* Each host's confirmation is bounded, but N of them multiply, and this
          whole loop holds the pipelines file transaction — every other pipeline
          mutation and the controller tick queue behind it. So the aggregate is
@@ -3481,7 +3590,8 @@ export async function patchPipeline(
       const teardownDeadline = ports.monotonicNow() + CLOSE_TEARDOWN_BUDGET_MS;
       const candidates = launchedStageHosts(pipeline);
       for (let index = 0; index < candidates.length; index += 1) {
-        const { target, turnSettled } = candidates[index]!;
+        const candidate = candidates[index]!;
+        const { target, turnSettled } = candidate;
         if (index > 0 && ports.monotonicNow() >= teardownDeadline) {
           for (const remaining of candidates.slice(index)) {
             close.unconfirmed.push({
@@ -3494,8 +3604,19 @@ export async function patchPipeline(
         }
         const result = await ports.stopStageAgent(target);
         if (result.outcome === "stopped") close.stopped.push(target);
-        else if (result.outcome === "failed") close.stillRunning.push({ ...target, error: result.error });
-        else if (result.outcome === "unconfirmed") {
+        else if (result.outcome === "failed") {
+          const evidence = isHostUnavailableStopFailure(result.error)
+            ? await closeStopFailureEvidence(candidate, ports)
+            : null;
+          if (evidence) {
+            const detail = `stop failed with "${result.error}"; terminalized from ${evidence}`;
+            close.alreadyStopped.push(target);
+            close.notes.push({ ...target, detail });
+            terminalizeAttemptForClose(candidate, detail, ports);
+          } else {
+            close.stillRunning.push({ ...target, error: result.error });
+          }
+        } else if (result.outcome === "unconfirmed") {
           close.unconfirmed.push({ ...target, operationId: result.operationId, detail: result.detail });
         } else if (!turnSettled && target.paneId) {
           /* The registry knows no host, but the attempt never finished its turn
