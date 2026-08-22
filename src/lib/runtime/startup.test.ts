@@ -186,13 +186,23 @@ test("server startup delegates managed rows with file credentials and their laun
       return [];
     },
   });
+  const codexCleanup = (codexOptions as { releaseCleanup?: () => void }).releaseCleanup;
+  const claudeCleanup = (claudeOptions as { releaseCleanup?: () => void }).releaseCleanup;
   expect(codexOptions).toMatchObject({
     cwd: "/repo",
     codexHome: "/managed",
     fileAuthCredentials: true,
     model: "gpt-5.4-mini",
     effort: "high",
-    env: { LLV_SPAWN_CAPABILITY: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) },
+    permissionProfile: "llv-read-only-stage",
+    forwardGitHubConfig: true,
+    releaseCleanup: expect.any(Function),
+    env: {
+      HOME: expect.stringContaining("llv-read-only-stage-"),
+      XDG_CONFIG_HOME: expect.stringContaining("llv-read-only-stage-"),
+      TMPDIR: expect.stringContaining("llv-read-only-stage-"),
+      LLV_SPAWN_CAPABILITY: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    },
   });
   expect(claudeOptions).toMatchObject({
     cwd: "/repo",
@@ -204,10 +214,14 @@ test("server startup delegates managed rows with file credentials and their laun
     allowSubagents: true,
     readOnly: true,
     permissionMode: "plan",
+    forwardGitHubConfig: true,
+    releaseCleanup: expect.any(Function),
   });
   expect(claudeOptions).toMatchObject({
     env: { LLV_SPAWN_CAPABILITY: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) },
   });
+  codexCleanup?.();
+  claudeCleanup?.();
 });
 
 function runtimeJournalClient(journal: RuntimeJournal): RuntimeHostClient {

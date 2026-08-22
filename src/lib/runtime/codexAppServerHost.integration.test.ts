@@ -6,16 +6,45 @@ import { CodexAppServerHost } from "./codexAppServerHost";
 import type { RuntimeEvent } from "./engineHost";
 import { FileRuntimeEventStore } from "./eventStore";
 import { pathIsInside, prepareCodexIntegrationTestHome } from "./integrationTestHome";
+import { materializeStructuredHostAccess, READ_ONLY_STAGE_PERMISSION_PROFILE } from "./structuredSpawn";
 import { buildPipeline, PIPELINES_SCHEMA_VERSION } from "@/lib/pipelines/store";
 
 const codexBinary = process.env.LLV_CODEX_BINARY ?? "codex";
 const isolatedHome = prepareCodexIntegrationTestHome(codexBinary);
 const mcpHome = prepareCodexIntegrationTestHome(codexBinary);
+const scratchHome = prepareCodexIntegrationTestHome(codexBinary);
 
 afterAll(() => {
   isolatedHome?.cleanup();
   mcpHome?.cleanup();
+  scratchHome?.cleanup();
 });
+
+type CommandExecResult = { exitCode: number; stdout: string; stderr: string };
+
+function hostRpc(
+  host: CodexAppServerHost,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<unknown> {
+  const rpc = (host as unknown as {
+    rpc(method: string, params: Record<string, unknown>): Promise<unknown>;
+  }).rpc.bind(host);
+  return rpc(method, params);
+}
+
+async function commandExec(
+  host: CodexAppServerHost,
+  command: string,
+  env?: Record<string, string>,
+): Promise<CommandExecResult> {
+  return await hostRpc(host, "command/exec", {
+    command: ["/bin/sh", "-lc", command],
+    permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
+    timeoutMs: 10_000,
+    ...(env ? { env } : {}),
+  }) as CommandExecResult;
+}
 
 async function waitFor(
   iterator: AsyncIterator<RuntimeEvent>,
@@ -116,6 +145,78 @@ function nativeViewerCall(event: RuntimeEvent, pipelineId: string, server: strin
     && item.error == null
     && JSON.stringify(item.result).includes(pipelineId);
 }
+
+test.skipIf(!scratchHome)("real Codex app-server accepts the read-only scratch profile for fresh and adopted threads", async () => {
+  if (!scratchHome) throw new Error("isolated Codex subscription home is unavailable");
+  const checkoutDirectory = path.join(scratchHome.directory, "checkout");
+  fs.mkdirSync(checkoutDirectory, { mode: 0o700 });
+  const freshAccess = materializeStructuredHostAccess(
+    true,
+    scratchHome.env,
+    "integration-capability",
+    scratchHome.directory,
+  );
+  const eventStore = new FileRuntimeEventStore(path.join(scratchHome.directory, "events"));
+  const optionsFor = (access: ReturnType<typeof materializeStructuredHostAccess>) => ({
+    cwd: checkoutDirectory,
+    binary: codexBinary,
+    codexHome: scratchHome.codexHome,
+    env: access.env,
+    fileAuthCredentials: true,
+    ...access.codex,
+    ...access.host,
+    approvalPolicy: "never",
+    requestTimeoutMs: 60_000,
+    eventStore,
+  });
+  const checkoutProbe = path.join(checkoutDirectory, "must-stay-absent");
+  let host: CodexAppServerHost | null = null;
+  let adopted: CodexAppServerHost | null = null;
+  let adoptedAccess: ReturnType<typeof materializeStructuredHostAccess> | null = null;
+  try {
+    host = await CodexAppServerHost.start(optionsFor(freshAccess));
+    const freshScratch = await commandExec(host, 'printf fresh > "$TMPDIR/fresh"');
+    expect(freshScratch.exitCode).toBe(0);
+    expect(fs.readFileSync(path.join(freshAccess.env.TMPDIR!, "fresh"), "utf8")).toBe("fresh");
+    const freshCheckout = await commandExec(host, 'printf blocked > "$CHECKOUT_PROBE"', {
+      CHECKOUT_PROBE: checkoutProbe,
+    });
+    expect(freshCheckout.exitCode).not.toBe(0);
+    expect(fs.existsSync(checkoutProbe)).toBeFalse();
+
+    const threadId = host.identity.threadId;
+    await hostRpc(host, "thread/name/set", { threadId, name: "Read-only scratch profile probe" });
+    const cursor = (await host.health()).eventCursor;
+    await host.release();
+    host = null;
+    expect(fs.existsSync(freshAccess.scratchDirectory!)).toBeFalse();
+
+    adoptedAccess = materializeStructuredHostAccess(
+      true,
+      scratchHome.env,
+      "integration-capability-restarted",
+      scratchHome.directory,
+    );
+    expect(adoptedAccess.scratchDirectory).not.toBe(freshAccess.scratchDirectory);
+    adopted = await CodexAppServerHost.adopt(threadId, {
+      ...optionsFor(adoptedAccess),
+      initialEventCursor: cursor,
+    });
+    const adoptedScratch = await commandExec(adopted, 'printf adopted > "$HOME/adopted"');
+    expect(adoptedScratch.exitCode).toBe(0);
+    expect(fs.readFileSync(path.join(adoptedAccess.env.HOME!, "adopted"), "utf8")).toBe("adopted");
+    const adoptedCheckout = await commandExec(adopted, 'printf blocked > "$CHECKOUT_PROBE"', {
+      CHECKOUT_PROBE: checkoutProbe,
+    });
+    expect(adoptedCheckout.exitCode).not.toBe(0);
+    expect(fs.existsSync(checkoutProbe)).toBeFalse();
+  } finally {
+    await host?.release();
+    await adopted?.release();
+    freshAccess.cleanup();
+    adoptedAccess?.cleanup();
+  }
+}, 120_000);
 
 async function exerciseNativeViewer(
   host: CodexAppServerHost,

@@ -395,6 +395,26 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test("forwards GitHub config only for read-only scratch hosts", async () => {
+    for (const forwardGitHubConfig of [false, true]) {
+      const child = new FakeClaude(new RecordingDeliveryLedger());
+      const captured: { options?: SpawnOptionsWithoutStdio } = {};
+      const host = await ClaudeStreamBrokerHost.start({
+        cwd: "/repo",
+        env: { NODE_ENV: "test", GH_CONFIG_DIR: "/shared/config/gh" },
+        forwardGitHubConfig,
+        eventStore: new MemoryEventStore(),
+        deliveryLedger: new RecordingDeliveryLedger(),
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+        spawnProcess: fakeSpawn(child, captured),
+      });
+      expect(captured.options?.env?.GH_CONFIG_DIR).toBe(
+        forwardGitHubConfig ? "/shared/config/gh" : undefined,
+      );
+      await host.release();
+    }
+  });
+
   test("read-only hosts deny mutation and native sub-agent tools", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);
