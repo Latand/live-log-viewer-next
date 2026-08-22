@@ -35,7 +35,13 @@ import { getFlowsWithPresets } from "@/lib/flows/engine";
 import type { PatchFlowRequest } from "@/lib/flows/types";
 import { pollLifecycleDigest, type LifecycleDigestRequest } from "@/lib/lifecycle/digest";
 import { queryLifecycleEvents, type LifecycleEventQuery } from "@/lib/lifecycle/journal";
-import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessSources } from "@/lib/lifecycle/liveness";
+import type { CompletedGenerationRead } from "@/lib/lifecycle/inventorySelection";
+import {
+  agentLivenessSnapshot,
+  productionLivenessSources,
+  DEFAULT_EVIDENCE_DEADLINE_MS,
+  type AgentLivenessSources,
+} from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
 import { recordManagerReport } from "@/lib/bridge/service";
@@ -247,7 +253,11 @@ export interface ViewerMcpDomainDependencies {
   readResources: typeof readResources;
   applyConversationAction: typeof applyConversationAction;
   applyConversationMigration: typeof applyConversationMigration;
-  livenessSources(): AgentLivenessSources;
+  /** Sources for the liveness read. The catalog seam travels in (#860) so a
+      project-scoped `agent_activity` consumes the SAME completed generation
+      `board_snapshot` reads instead of forcing a private whole-corpus sweep.
+      Partial harnesses that build fixed sources may ignore the argument. */
+  livenessSources(catalog?: { completedFileScan?: CompletedGenerationRead }): AgentLivenessSources;
   queryLifecycleEvents: typeof queryLifecycleEvents;
   pollLifecycleDigest: typeof pollLifecycleDigest;
   refreshLifecycleJournal: typeof refreshLifecycleJournal;
@@ -1973,18 +1983,46 @@ async function conversationMigration(args: McpToolArgs, dependencies: ViewerMcpD
  * it never echoes a pipeline's own claim about a stage. A stall observed here
  * is also journaled (#686), so the sweep leaves a durable record.
  */
-async function agentActivity(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): Promise<McpToolPayload> {
-  const sources = dependencies.livenessSources();
-  const snapshot = await agentLivenessSnapshot({
-    conversationId: text(args.conversationId) || undefined,
-    transcriptPath: (text(args.transcriptPath) || text(args.path)) || undefined,
-    project: text(args.project) || undefined,
-    liveOnly: args.liveOnly === true,
-    stallAfterMs: typeof args.stallAfterMs === "number" ? args.stallAfterMs : undefined,
-    limit: typeof args.limit === "number" ? args.limit : undefined,
-  }, sources);
-  const journal = dependencies.refreshLifecycleJournal({ liveness: snapshot.conversations });
-  return redactPayload({ ...snapshot, journaled: journal.appended });
+async function agentActivity(
+  args: McpToolArgs,
+  dependencies: ViewerMcpDomainDependencies,
+  context: McpToolCallContext = {},
+): Promise<McpToolPayload> {
+  throwIfCallEnded(context);
+  /* #860: the caller's lifetime reaches the read. Without it a project-scoped
+     call kept its generation wait and its transcript tails running after the
+     caller had given up — the shape the 70-second stall was reported as. */
+  const remainingMs = context.deadlineAt === undefined
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, context.deadlineAt - Date.now());
+  const deadline = deadlineSignal(remainingMs, {
+    signal: context.signal,
+    reason: "MCP tool deadline exceeded",
+  });
+  try {
+    /* The catalog the board already reads. One completed generation serves both,
+       so this call opens no scan of its own. */
+    const sources = dependencies.livenessSources({ completedFileScan: dependencies.completedFileScan });
+    const snapshot = await agentLivenessSnapshot({
+      conversationId: text(args.conversationId) || undefined,
+      transcriptPath: (text(args.transcriptPath) || text(args.path)) || undefined,
+      project: text(args.project) || undefined,
+      liveOnly: args.liveOnly === true,
+      stallAfterMs: typeof args.stallAfterMs === "number" ? args.stallAfterMs : undefined,
+      limit: typeof args.limit === "number" ? args.limit : undefined,
+      signal: deadline.signal,
+      /* A call with less time left than the standard evidence budget degrades
+         the remaining rows to the scan projection rather than spending a budget
+         its caller will not be there to receive. */
+      ...(Number.isFinite(remainingMs)
+        ? { evidenceDeadlineMs: Math.min(DEFAULT_EVIDENCE_DEADLINE_MS, remainingMs) }
+        : {}),
+    }, sources);
+    const journal = dependencies.refreshLifecycleJournal({ liveness: snapshot.conversations });
+    return redactPayload({ ...snapshot, journaled: journal.appended });
+  } finally {
+    deadline.release();
+  }
 }
 
 function lifecycleEventType(value: unknown): LifecycleEventQuery["type"] {
@@ -2411,7 +2449,7 @@ export function viewerMcpBindings(
     resources: (args) => resources(args, domainDependencies),
     conversation_action: (args, context) => conversationAction(args, domainDependencies, context),
     conversation_migration: (args) => conversationMigration(args, domainDependencies),
-    agent_activity: (args) => agentActivity(args, domainDependencies),
+    agent_activity: (args, context) => agentActivity(args, domainDependencies, context),
     lifecycle_events: (args) => lifecycleEvents(args, controlDependencies, domainDependencies),
     request_attention: (args, context) => requestAttention(args, domainDependencies, context),
     bridge_report: (args) => Promise.resolve(bridgeReport(args, domainDependencies)),

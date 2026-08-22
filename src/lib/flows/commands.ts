@@ -11,7 +11,7 @@ import { isShellCommand } from "@/lib/status";
 import { killPane, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
-import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
+import { isoNow, lastRound, newRound, relayJournalSettlement, sendToImplementer } from "./engine";
 import { clearHeadlessReviewArtifacts, forgetHeadlessReview, stopHeadlessReviewAndWait } from "./exec";
 import { resolveBaseRef, resolveFlowMergeIdentity } from "./git";
 import { kickoffPrompt } from "./prompts";
@@ -108,6 +108,18 @@ export function isRecoverableLegacyRelayFailurePause(flow: Flow): boolean {
     && round.relayDeliveryTransport == null
     && round.error === flow.stateDetail
     && LEGACY_PRE_ACTUATION_RELAY_FAILURES.has(flow.stateDetail);
+}
+
+/**
+ * A round whose structured relay was recorded delivered without the delivery
+ * journal ever corroborating it (#1065). Only a structured relay can be judged
+ * this way: legacy tmux delivery writes no journal, so its rounds keep the
+ * transport-level settlement they were recorded under.
+ */
+function isUncorroboratedStructuredRelay(flow: Flow, round: Round): boolean {
+  return round.relayDeliveryTransport === "structured"
+    && round.relayedAt != null
+    && relayJournalSettlement(flow) === null;
 }
 
 export function normalizeFlowSpec(value: unknown): { ok: true; spec?: string } | { ok: false } {
@@ -416,6 +428,23 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       if (note !== undefined && round) round.readyNote = note;
       flow.state = "spawning";
     } else if (flow.state === "relay_pending") {
+      flow.state = "relaying";
+    } else if (flow.state === "fixing" && round && isUncorroboratedStructuredRelay(flow, round)) {
+      /* #1065 recovery: the round claims a delivered relay the delivery journal
+         never corroborated, so the implementer is waiting on a verdict it never
+         received and the flow would sit in `fixing` forever. Advance hands the
+         round back to the existing relay path under the idempotent
+         client-message identity — a delivery that lands late still dedupes. */
+      Object.assign(round, {
+        relayDelivery: null,
+        relayedAt: null,
+        relayPendingSettlement: null,
+        relayStartedAt: null,
+        relayRetryCount: 0,
+        relayRetryAt: null,
+        relayRetryRequiresIdempotency: true,
+        error: null,
+      });
       flow.state = "relaying";
     } else {
       return { error: "flow cannot advance from its current state", status: 409 };
