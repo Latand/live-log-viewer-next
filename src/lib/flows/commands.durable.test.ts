@@ -10,8 +10,8 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-durable-create-"
 process.env.LLV_STATE_DIR = sandbox;
 
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
-const { cancelRound, closeFlow, createFlowFromRequest } = await import("./commands");
-const { newRound } = await import("./engine");
+const { cancelRound, closeFlow, createFlowFromRequest, patchFlow } = await import("./commands");
+const { newRound, relayClientMessageId } = await import("./engine");
 const { startHeadlessReview } = await import("./exec");
 const { loadFlows, saveFlows } = await import("./store");
 
@@ -206,4 +206,101 @@ test("malformed target SHAs return 400 without persisting a flow (#522)", async 
     expect(result).toEqual({ error: "targetSha must be an exact commit SHA", status: 400 });
     expect(loadFlows()).toEqual([]);
   }
+});
+
+test("issue 1065: advance rescues a flow wedged in fixing on an uncorroborated structured relay", async () => {
+  saveFlows([]);
+  const transcript = path.join(import.meta.dir, "fixtures", "codex-review-2026-07-12.jsonl");
+  const implementer = registry.ensureConversation("codex", transcript, null);
+  const created = await createFlowFromRequest({
+    implementerPath: transcript,
+    implementerConversationId: implementer.id,
+    deliverKickoff: false,
+    roles: {
+      implementer: { engine: "codex", model: "gpt-5.6-sol", effort: "high" },
+      reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "high" },
+    },
+    baseMode: "head",
+    baseRef: "12ad73656844d3583d44ae718d003c7f2f2c6ace",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+  }, []);
+  const flow = created.flow!;
+  /* The wedged state the incident left behind: the relay claimed settlement the
+     delivery journal never recorded, so the implementer never got the verdict
+     and the flow waits in `fixing` for a REVIEW_READY that cannot come. */
+  flow.rounds.push({
+    ...newRound(flow, "marker", null),
+    findingsPath: path.join(sandbox, "wedged-findings.md"),
+    verdict: "REQUEST_CHANGES",
+    findingsCount: 1,
+    reviewedAt: "2026-08-20T16:47:51.534Z",
+    terminalAt: "2026-08-20T16:47:51.534Z",
+    relayStartedAt: "2026-08-20T16:47:51.534Z",
+    relayDeliveryTransport: "structured",
+    relayDelivery: { path: transcript, deliveredAt: "2026-08-20T16:47:52.921Z" },
+    relayedAt: "2026-08-20T16:47:52.921Z",
+  });
+  flow.state = "fixing";
+  saveFlows([flow]);
+
+  const advanced = patchFlow(flow.id, { action: "advance" });
+
+  expect(advanced.error).toBeUndefined();
+  expect(loadFlows()[0]).toMatchObject({
+    state: "relaying",
+    rounds: [{
+      relayDelivery: null,
+      relayedAt: null,
+      relayPendingSettlement: null,
+      relayStartedAt: null,
+      relayRetryCount: 0,
+      relayRetryAt: null,
+      /* The re-send reuses the durable identity, so a late delivery dedupes. */
+      relayRetryRequiresIdempotency: true,
+      error: null,
+    }],
+  });
+});
+
+test("issue 1065: advance still refuses a fixing flow whose relay the delivery journal corroborated", async () => {
+  saveFlows([]);
+  const transcript = path.join(import.meta.dir, "fixtures", "codex-review-2026-07-12.jsonl");
+  const implementer = registry.ensureConversation("codex", transcript, null);
+  const created = await createFlowFromRequest({
+    implementerPath: transcript,
+    implementerConversationId: implementer.id,
+    deliverKickoff: false,
+    roles: {
+      implementer: { engine: "codex", model: "gpt-5.6-sol", effort: "high" },
+      reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "high" },
+    },
+    baseMode: "head",
+    baseRef: "12ad73656844d3583d44ae718d003c7f2f2c6ace",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+  }, []);
+  const flow = created.flow!;
+  flow.rounds.push({
+    ...newRound(flow, "marker", null),
+    findingsPath: path.join(sandbox, "settled-findings.md"),
+    verdict: "REQUEST_CHANGES",
+    findingsCount: 1,
+    reviewedAt: "2026-08-20T16:47:51.534Z",
+    terminalAt: "2026-08-20T16:47:51.534Z",
+    relayStartedAt: "2026-08-20T16:47:51.534Z",
+    relayDeliveryTransport: "structured",
+    relayDelivery: { path: transcript, deliveredAt: "2026-08-20T16:47:52.921Z" },
+    relayedAt: "2026-08-20T16:47:52.921Z",
+  });
+  flow.state = "fixing";
+  const held = registry.holdDelivery(implementer.id, "relayed findings", relayClientMessageId(flow));
+  registry.recordDeliveryOutcome(held.id, "delivered");
+  saveFlows([flow]);
+
+  expect(patchFlow(flow.id, { action: "advance" }))
+    .toEqual({ error: "flow cannot advance from its current state", status: 409 });
+  expect(loadFlows()[0]).toMatchObject({ state: "fixing", rounds: [{ relayedAt: "2026-08-20T16:47:52.921Z" }] });
 });
