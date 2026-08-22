@@ -44,6 +44,10 @@ export interface StructuredHostAccessMaterialization {
     permissionProfile?: string;
     permissionProfileConfig?: string;
   };
+  host: {
+    forwardGitHubConfig?: boolean;
+    releaseCleanup?: () => void;
+  };
   scratchDirectory: string | null;
   cleanup(): void;
 }
@@ -59,14 +63,18 @@ function githubConfigDirectory(sourceEnv: NodeJS.ProcessEnv): string {
 export function materializeStructuredHostAccess(
   readOnly: boolean,
   sourceEnv: NodeJS.ProcessEnv,
-  capability: string,
+  capability: string | null,
   scratchParent = os.tmpdir(),
 ): StructuredHostAccessMaterialization {
-  const baseEnv = { ...sourceEnv, LLV_SPAWN_CAPABILITY: capability };
+  const baseEnv = {
+    ...sourceEnv,
+    ...(capability ? { LLV_SPAWN_CAPABILITY: capability } : {}),
+  };
   if (!readOnly) {
     return {
       env: baseEnv,
       codex: { sandbox: "danger-full-access" },
+      host: {},
       scratchDirectory: null,
       cleanup: () => {},
     };
@@ -84,6 +92,7 @@ export function materializeStructuredHostAccess(
       fs.mkdirSync(directory, { mode: 0o700 });
     }
     const permissionProfileConfig = `permissions.${READ_ONLY_STAGE_PERMISSION_PROFILE}={extends=":read-only",filesystem={${JSON.stringify(scratchDirectory)}="write"}}`;
+    const cleanup = () => fs.rmSync(scratchDirectory, { recursive: true, force: true });
     return {
       env: {
         ...baseEnv,
@@ -94,8 +103,12 @@ export function materializeStructuredHostAccess(
         permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
         permissionProfileConfig,
       },
+      host: {
+        forwardGitHubConfig: true,
+        releaseCleanup: cleanup,
+      },
       scratchDirectory,
-      cleanup: () => fs.rmSync(scratchDirectory, { recursive: true, force: true }),
+      cleanup,
     };
   } catch (error) {
     fs.rmSync(scratchDirectory, { recursive: true, force: true });
@@ -849,62 +862,50 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
   }
   const access = materializeStructuredHostAccess(profile.readOnly === true, input.account.env, capability);
   const env = access.env;
-  try {
-    let host: SpawnedStructuredHost;
-    if (input.engine === "codex") {
-      const options = {
-        cwd: input.spec.cwd,
-        codexHome: input.account.home,
-        fileAuthCredentials: input.account.kind === "managed",
-        model: profile.model ?? undefined,
-        effort: profile.effort ?? undefined,
-        allowSubagents: profile.allowSubagents,
-        mcpServers: profile.mcpServers,
-        /* Plugin grant from the durable profile (issue #687): present only for
-           an operator-launched root session that did not opt out. */
-        plugins: profile.plugins,
-        ...access.codex,
-        approvalPolicy: profile.permissionMode ?? undefined,
-        initialEventCursor,
-        env,
-      };
-      host = resumeSessionId
-        ? await CodexAppServerHost.adopt(resumeSessionId, options)
-        : await CodexAppServerHost.start(options);
-    } else {
-      const sessionId = resumeSessionId ?? (input.spec.transcript ? path.basename(input.spec.transcript, ".jsonl") : undefined);
-      const options = {
-        cwd: input.spec.cwd,
-        claudeConfigDir: input.account.home,
-        claudeProjectsDir: input.account.transcriptRoot,
-        spawnPolicyBaseSettingsPath: structuredClaudeSpawnPolicyBaseSettingsPath(input.account),
-        allowSubagents: profile.allowSubagents,
-        mcpServers: profile.mcpServers,
-        mcpStatePath: input.account.kind === "managed"
-          ? path.join(input.account.home, ".claude.json")
-          : path.join(path.dirname(input.account.home), ".claude.json"),
-        readOnly: profile.readOnly === true,
-        model: profile.model ?? undefined,
-        effort: profile.effort ?? undefined,
-        permissionMode: effectiveClaudePermissionMode(profile),
-        initialEventCursor,
-        env,
-      };
-      host = resumeSessionId
-        ? await ClaudeStreamBrokerHost.adopt(resumeSessionId, options)
-        : await ClaudeStreamBrokerHost.start({ ...options, ...(sessionId ? { sessionId } : {}) });
-    }
-    if (!access.scratchDirectory) return host;
-    const release = host.release.bind(host);
-    host.release = async () => {
-      await release();
-      access.cleanup();
+  if (input.engine === "codex") {
+    const options = {
+      cwd: input.spec.cwd,
+      codexHome: input.account.home,
+      fileAuthCredentials: input.account.kind === "managed",
+      model: profile.model ?? undefined,
+      effort: profile.effort ?? undefined,
+      allowSubagents: profile.allowSubagents,
+      mcpServers: profile.mcpServers,
+      /* Plugin grant from the durable profile (issue #687): present only for
+         an operator-launched root session that did not opt out. */
+      plugins: profile.plugins,
+      ...access.codex,
+      ...access.host,
+      approvalPolicy: profile.permissionMode ?? undefined,
+      initialEventCursor,
+      env,
     };
-    return host;
-  } catch (error) {
-    access.cleanup();
-    throw error;
+    return resumeSessionId
+      ? await CodexAppServerHost.adopt(resumeSessionId, options)
+      : await CodexAppServerHost.start(options);
   }
+  const sessionId = resumeSessionId ?? (input.spec.transcript ? path.basename(input.spec.transcript, ".jsonl") : undefined);
+  const options = {
+    cwd: input.spec.cwd,
+    claudeConfigDir: input.account.home,
+    claudeProjectsDir: input.account.transcriptRoot,
+    spawnPolicyBaseSettingsPath: structuredClaudeSpawnPolicyBaseSettingsPath(input.account),
+    allowSubagents: profile.allowSubagents,
+    mcpServers: profile.mcpServers,
+    mcpStatePath: input.account.kind === "managed"
+      ? path.join(input.account.home, ".claude.json")
+      : path.join(path.dirname(input.account.home), ".claude.json"),
+    readOnly: profile.readOnly === true,
+    model: profile.model ?? undefined,
+    effort: profile.effort ?? undefined,
+    permissionMode: effectiveClaudePermissionMode(profile),
+    initialEventCursor,
+    env,
+    ...access.host,
+  };
+  return resumeSessionId
+    ? await ClaudeStreamBrokerHost.adopt(resumeSessionId, options)
+    : await ClaudeStreamBrokerHost.start({ ...options, ...(sessionId ? { sessionId } : {}) });
 }
 
 export function structuredResumeSessionId(

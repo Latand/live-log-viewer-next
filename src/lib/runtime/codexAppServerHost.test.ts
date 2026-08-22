@@ -56,6 +56,10 @@ test("read-only structured hosts receive one writable isolated scratch root", ()
       permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
       permissionProfileConfig: `permissions.${READ_ONLY_STAGE_PERMISSION_PROFILE}={extends=":read-only",filesystem={${JSON.stringify(access.scratchDirectory)}="write"}}`,
     });
+    expect(access.host).toEqual({
+      forwardGitHubConfig: true,
+      releaseCleanup: expect.any(Function),
+    });
     expect(fs.statSync(access.scratchDirectory!).mode & 0o777).toBe(0o700);
     for (const name of ["home", "config", "tmp"]) {
       expect(fs.statSync(path.join(access.scratchDirectory!, name)).mode & 0o777).toBe(0o700);
@@ -435,6 +439,7 @@ describe("CodexAppServerHost", () => {
         cwd: "/repo",
         permissionProfile,
         permissionProfileConfig,
+        forwardGitHubConfig: true,
         env: { NODE_ENV: "test" as const, GH_CONFIG_DIR: "/shared/config/gh" },
         eventStore: new MemoryEventStore(),
         spawnProcess: fakeSpawn(server, captured),
@@ -455,6 +460,18 @@ describe("CodexAppServerHost", () => {
       expect(params).not.toHaveProperty("sandbox");
       await host.release();
     }
+
+    const readWriteServer = new FakeAppServer("read-write-thread");
+    const readWriteCapture: { options?: SpawnOptionsWithoutStdio } = {};
+    const readWriteHost = await CodexAppServerHost.start({
+      cwd: "/repo",
+      sandbox: "danger-full-access",
+      env: { NODE_ENV: "test", GH_CONFIG_DIR: "/shared/config/gh" },
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(readWriteServer, readWriteCapture),
+    });
+    expect(readWriteCapture.options?.env?.GH_CONFIG_DIR).toBeUndefined();
+    await readWriteHost.release();
   });
 
   test("starts a client-managed V3 WebRTC call on the hosted thread", async () => {
@@ -3471,6 +3488,8 @@ describe("CodexAppServerHost", () => {
 
   test("startup adoption retains an unreaped Codex child until late cleanup converges", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-uncertain-codex-adoption-"));
+    const scratchDirectory = path.join(directory, "scratch");
+    fs.mkdirSync(scratchDirectory);
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
     const sessionId = "uncertain-codex-adoption";
     registry.upsert({
@@ -3505,6 +3524,7 @@ describe("CodexAppServerHost", () => {
         shutdownGraceMs: 2,
         spawnProcess: fakeSpawn(server),
         signalProcess: () => {},
+        releaseCleanup: () => fs.rmSync(scratchDirectory, { recursive: true, force: true }),
         ...ownedFakeProcess,
       }),
       { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
@@ -3520,6 +3540,7 @@ describe("CodexAppServerHost", () => {
         writerClaimEpoch: 3,
       },
     });
+    expect(fs.existsSync(scratchDirectory)).toBeTrue();
 
     server.emit("close", 0, "SIGKILL");
     await Bun.sleep(0);
@@ -3528,6 +3549,7 @@ describe("CodexAppServerHost", () => {
       claimOwner: null,
       structuredHost: { endpoint: "stdio:released", process: null },
     });
+    expect(fs.existsSync(scratchDirectory)).toBeFalse();
   });
 
   test("concurrent startup adoption creates one writer and advances its claim epoch", async () => {

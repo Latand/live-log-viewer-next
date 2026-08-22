@@ -190,6 +190,8 @@ export interface ClaudeStreamBrokerHostOptions {
   permissionMode?: string;
   tools?: string[];
   env?: NodeJS.ProcessEnv;
+  forwardGitHubConfig?: boolean;
+  releaseCleanup?: () => void;
   requestTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
@@ -297,9 +299,14 @@ export function redactClaudeHostDiagnostic(value: unknown): string {
 
 const safeError = redactClaudeHostDiagnostic;
 
-function subscriptionEnv(source: NodeJS.ProcessEnv, claudeConfigDir?: string): NodeJS.ProcessEnv {
+function subscriptionEnv(
+  source: NodeJS.ProcessEnv,
+  claudeConfigDir?: string,
+  forwardGitHubConfig = false,
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV };
   for (const name of CHILD_ENV_ALLOWLIST) if (source[name] !== undefined) env[name] = source[name];
+  if (forwardGitHubConfig && source.GH_CONFIG_DIR !== undefined) env.GH_CONFIG_DIR = source.GH_CONFIG_DIR;
   if (claudeConfigDir) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
   return env;
 }
@@ -480,6 +487,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private ledgerFailed = false;
   private writerFence: (() => boolean) | null = null;
   private releasePromise: Promise<void> | null = null;
+  private releaseCleanup: (() => void) | null;
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
   private terminationStarted = false;
   private readonly reapedPromise: Promise<void>;
@@ -501,6 +509,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.signalProcess = options.signalProcess ?? process.kill;
+    this.releaseCleanup = options.releaseCleanup ?? null;
     this.cursor = options.initialEventCursor ?? 0;
     this.protocolVersion = auth.version ?? null;
     this.account = { type: auth.authMethod, planType: auth.subscriptionType };
@@ -548,9 +557,20 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     options: ClaudeStreamBrokerHostOptions,
   ): Promise<ClaudeStreamBrokerHost> {
     const binary = options.binary ?? process.env.LLV_CLAUDE_BINARY ?? "claude";
-    const env = subscriptionEnv(options.env ?? process.env, options.claudeConfigDir);
-    const auth = await (options.readAuthStatus?.() ?? claudeCliAuthStatus(binary, env, options.cwd));
+    const env = subscriptionEnv(
+      options.env ?? process.env,
+      options.claudeConfigDir,
+      options.forwardGitHubConfig === true,
+    );
+    let auth: ClaudeAuthStatus;
+    try {
+      auth = await (options.readAuthStatus?.() ?? claudeCliAuthStatus(binary, env, options.cwd));
+    } catch (error) {
+      options.releaseCleanup?.();
+      throw error;
+    }
     if (!auth.loggedIn || auth.authMethod !== "claude.ai" || !auth.subscriptionType) {
+      options.releaseCleanup?.();
       throw new Error("Claude stream hosting requires a claude.ai subscription login");
     }
     const args = [
@@ -587,11 +607,17 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (options.tools) args.push("--tools", options.tools.join(","));
     const spawnProcess = options.spawnProcess ?? ((command, childArgs, spawnOptions) =>
       spawn(command, childArgs, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
-    const child = spawnProcess(binary, args, {
-      cwd: options.cwd,
-      env: withTelegramConnectorGrant(env, options.mcpServers),
-      detached: true,
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawnProcess(binary, args, {
+        cwd: options.cwd,
+        env: withTelegramConnectorGrant(env, options.mcpServers),
+        detached: true,
+      });
+    } catch (error) {
+      options.releaseCleanup?.();
+      throw error;
+    }
     const host = new ClaudeStreamBrokerHost(child, { sessionId }, auth, options);
     try {
       host.restore();
@@ -1091,6 +1117,9 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.emit({ kind: "session-status", status: "unhosted" });
     if (this.ledgerFailed) this.notifyStateListeners();
     this.closeSubscribers();
+    const cleanup = this.releaseCleanup;
+    this.releaseCleanup = null;
+    cleanup?.();
   }
 
   private async waitForReap(timeoutMs: number): Promise<boolean> {

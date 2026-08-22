@@ -150,33 +150,34 @@ test.skipIf(!scratchHome)("real Codex app-server accepts the read-only scratch p
   if (!scratchHome) throw new Error("isolated Codex subscription home is unavailable");
   const checkoutDirectory = path.join(scratchHome.directory, "checkout");
   fs.mkdirSync(checkoutDirectory, { mode: 0o700 });
-  const access = materializeStructuredHostAccess(
+  const freshAccess = materializeStructuredHostAccess(
     true,
     scratchHome.env,
     "integration-capability",
     scratchHome.directory,
   );
   const eventStore = new FileRuntimeEventStore(path.join(scratchHome.directory, "events"));
-  const options = {
+  const optionsFor = (access: ReturnType<typeof materializeStructuredHostAccess>) => ({
     cwd: checkoutDirectory,
     binary: codexBinary,
     codexHome: scratchHome.codexHome,
     env: access.env,
     fileAuthCredentials: true,
-    permissionProfile: access.codex.permissionProfile,
-    permissionProfileConfig: access.codex.permissionProfileConfig,
+    ...access.codex,
+    ...access.host,
     approvalPolicy: "never",
     requestTimeoutMs: 60_000,
     eventStore,
-  };
+  });
   const checkoutProbe = path.join(checkoutDirectory, "must-stay-absent");
   let host: CodexAppServerHost | null = null;
   let adopted: CodexAppServerHost | null = null;
+  let adoptedAccess: ReturnType<typeof materializeStructuredHostAccess> | null = null;
   try {
-    host = await CodexAppServerHost.start(options);
+    host = await CodexAppServerHost.start(optionsFor(freshAccess));
     const freshScratch = await commandExec(host, 'printf fresh > "$TMPDIR/fresh"');
     expect(freshScratch.exitCode).toBe(0);
-    expect(fs.readFileSync(path.join(access.env.TMPDIR!, "fresh"), "utf8")).toBe("fresh");
+    expect(fs.readFileSync(path.join(freshAccess.env.TMPDIR!, "fresh"), "utf8")).toBe("fresh");
     const freshCheckout = await commandExec(host, 'printf blocked > "$CHECKOUT_PROBE"', {
       CHECKOUT_PROBE: checkoutProbe,
     });
@@ -188,11 +189,22 @@ test.skipIf(!scratchHome)("real Codex app-server accepts the read-only scratch p
     const cursor = (await host.health()).eventCursor;
     await host.release();
     host = null;
+    expect(fs.existsSync(freshAccess.scratchDirectory!)).toBeFalse();
 
-    adopted = await CodexAppServerHost.adopt(threadId, { ...options, initialEventCursor: cursor });
+    adoptedAccess = materializeStructuredHostAccess(
+      true,
+      scratchHome.env,
+      "integration-capability-restarted",
+      scratchHome.directory,
+    );
+    expect(adoptedAccess.scratchDirectory).not.toBe(freshAccess.scratchDirectory);
+    adopted = await CodexAppServerHost.adopt(threadId, {
+      ...optionsFor(adoptedAccess),
+      initialEventCursor: cursor,
+    });
     const adoptedScratch = await commandExec(adopted, 'printf adopted > "$HOME/adopted"');
     expect(adoptedScratch.exitCode).toBe(0);
-    expect(fs.readFileSync(path.join(access.env.HOME!, "adopted"), "utf8")).toBe("adopted");
+    expect(fs.readFileSync(path.join(adoptedAccess.env.HOME!, "adopted"), "utf8")).toBe("adopted");
     const adoptedCheckout = await commandExec(adopted, 'printf blocked > "$CHECKOUT_PROBE"', {
       CHECKOUT_PROBE: checkoutProbe,
     });
@@ -201,8 +213,8 @@ test.skipIf(!scratchHome)("real Codex app-server accepts the read-only scratch p
   } finally {
     await host?.release();
     await adopted?.release();
-    access.cleanup();
-    scratchHome.cleanup();
+    freshAccess.cleanup();
+    adoptedAccess?.cleanup();
   }
 }, 120_000);
 

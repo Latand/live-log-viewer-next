@@ -177,6 +177,8 @@ export interface CodexAppServerHostOptions {
   sandbox?: string;
   permissionProfile?: string;
   permissionProfileConfig?: string;
+  forwardGitHubConfig?: boolean;
+  releaseCleanup?: () => void;
   approvalPolicy?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
@@ -235,7 +237,6 @@ const CHILD_ENV_ALLOWLIST = [
   "TERM",
   "COLORTERM",
   "NO_COLOR",
-  "GH_CONFIG_DIR",
   "XDG_CONFIG_HOME",
   "XDG_CACHE_HOME",
   "XDG_DATA_HOME",
@@ -386,12 +387,18 @@ function stderrExitDiagnostic(value: string): string {
     .slice(0, 430);
 }
 
-function subscriptionEnv(source: NodeJS.ProcessEnv, codexHome?: string, desktopSession = false): NodeJS.ProcessEnv {
+function subscriptionEnv(
+  source: NodeJS.ProcessEnv,
+  codexHome?: string,
+  desktopSession = false,
+  forwardGitHubConfig = false,
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV };
   const names = desktopSession ? [...CHILD_ENV_ALLOWLIST, ...DESKTOP_ENV_ALLOWLIST] : CHILD_ENV_ALLOWLIST;
   for (const name of names) {
     if (source[name] !== undefined) env[name] = source[name];
   }
+  if (forwardGitHubConfig && source.GH_CONFIG_DIR !== undefined) env.GH_CONFIG_DIR = source.GH_CONFIG_DIR;
   if (codexHome) env.CODEX_HOME = codexHome;
   return env;
 }
@@ -682,6 +689,7 @@ export class CodexAppServerHost implements EngineHost {
   private resolveTermination: (() => void) | null = null;
   private failureCleanupTimer: ReturnType<typeof setTimeout> | null = null;
   private releasePromise: Promise<void> | null = null;
+  private releaseCleanup: (() => void) | null;
   private writerFence: (() => boolean) | null = null;
   private ledgerFailed = false;
   private failure: Error | null = null;
@@ -703,6 +711,7 @@ export class CodexAppServerHost implements EngineHost {
     this.signalProcess = options.signalProcess ?? process.kill;
     this.processIdentity = options.processIdentity ?? ((pid) => procBackend.processIdentity(pid));
     this.pidAlive = options.pidAlive ?? ((pid) => procBackend.pidAlive(pid));
+    this.releaseCleanup = options.releaseCleanup ?? null;
     this.childStartIdentity = child.pid ? this.processIdentity(child.pid) : null;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.resolveImagePath = options.resolveImagePath ?? ((ref) => {
@@ -759,14 +768,25 @@ export class CodexAppServerHost implements EngineHost {
       "realtime_conversation",
     ];
     const granted = grantedPlugins(options.plugins);
-    const child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", args, {
-      cwd: options.cwd,
-      env: withTelegramConnectorGrant(
-        subscriptionEnv(options.env ?? process.env, options.codexHome, granted.length > 0),
-        options.mcpServers,
-      ),
-      detached: true,
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", args, {
+        cwd: options.cwd,
+        env: withTelegramConnectorGrant(
+          subscriptionEnv(
+            options.env ?? process.env,
+            options.codexHome,
+            granted.length > 0,
+            options.forwardGitHubConfig === true,
+          ),
+          options.mcpServers,
+        ),
+        detached: true,
+      });
+    } catch (error) {
+      options.releaseCleanup?.();
+      throw error;
+    }
     const provisional = new CodexAppServerHost(child, { threadId: threadId ?? "pending", path: null }, options);
     try {
       const initialized = record(await provisional.rpc("initialize", {
@@ -1812,6 +1832,9 @@ export class CodexAppServerHost implements EngineHost {
     this.setSessionStatus("unhosted", []);
     if (this.ledgerFailed || !this.eventLedgerRestored) this.notifyStateListeners();
     this.closeSubscribers();
+    const cleanup = this.releaseCleanup;
+    this.releaseCleanup = null;
+    cleanup?.();
   }
 
   private completeGroupCleanupAfterReap(): void {
