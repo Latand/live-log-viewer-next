@@ -2150,6 +2150,62 @@ test("newer same-conversation evidence supersedes an exhausted recovery exactly 
   expect(current.lastPassedCommit).toBe(STAGE_HEAD);
 });
 
+test("verdict recovery normalizes object findings and still rejects a missing core status (#879)", async () => {
+  const accepted = harness();
+  await runningStructuredStage(accepted);
+  accepted.setConversationActive(false);
+  accepted.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: {
+      text: [
+        "The review found one defect.",
+        "",
+        "```json",
+        JSON.stringify({
+          status: "fail",
+          findings: [{ severity: "medium", file: "src/lib/example.ts", line: 57, summary: "Preserve the accepted revision." }],
+          confidence: 0.87,
+        }),
+        "```",
+      ].join("\n"),
+      ts: 5_000_000,
+    },
+  });
+
+  await tickPipelines([], accepted.ports);
+
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]).toMatchObject({
+    state: "failed",
+    verdict: {
+      status: "fail",
+      findings: ["medium — src/lib/example.ts:57 — Preserve the accepted revision."],
+      confidence: 0.87,
+    },
+  });
+
+  const rejected = harness();
+  await runningStructuredStage(rejected);
+  rejected.setConversationActive(false);
+  rejected.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: {
+      text: `\`\`\`json\n${JSON.stringify({ findings: [{ severity: "medium", summary: "Missing status." }], confidence: 0.87 })}\n\`\`\``,
+      ts: 5_000_000,
+    },
+  });
+
+  await tickPipelines([], rejected.ports);
+
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]).toMatchObject({
+    state: "running",
+    verdict: null,
+    verdictRecovery: {
+      state: "pending",
+      reason: "canonical completed assistant turn is missing a valid status, findings, or confidence field",
+    },
+  });
+});
+
 test("terminal ingestion after process exit advances a trailing-marker verdict once after restart (#707)", async () => {
   const h = harness();
   await runningStructuredStage(h);
@@ -4010,24 +4066,63 @@ test("a corrupt SQLite pipeline row skips the tick without escalating", async ()
   savePipelines([]);
 });
 
-test("retry and skip never reset a verdict-recovery attempt", async () => {
-  const h = harness();
-  const pipeline = await create(h.ports);
-  await tickPipelines([], h.ports);
-  await tickPipelines([], h.ports);
-  h.messages.set("/codex/stage-1.jsonl", { text: "narrative without a JSON verdict", ts: 2_000_000 });
-  const entries = [entry("/codex/stage-1.jsonl")];
-  await tickPipelines(entries, h.ports);
-  await exhaustVerdictRecovery(h, entries);
-  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+test("retry and skip leave verdict-recovery exhaustion only when reset preserves all work (#879)", async () => {
+  const exhaust = async (h: ReturnType<typeof harness>) => {
+    const pipeline = await create(h.ports);
+    await tickPipelines([], h.ports);
+    await tickPipelines([], h.ports);
+    h.messages.set("/codex/stage-1.jsonl", { text: "narrative without a JSON verdict", ts: 2_000_000 });
+    const entries = [entry("/codex/stage-1.jsonl")];
+    await tickPipelines(entries, h.ports);
+    await exhaustVerdictRecovery(h, entries);
+    expect(loadPipelines()[0]!.state).toBe("needs_decision");
+    return pipeline;
+  };
 
-  const blockedRetry = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
-  expect(blockedRetry.status).toBe(409);
-  expect(blockedRetry.error).toContain("preserve its worktree and conversation lineage");
-  const blockedSkip = await patchPipeline(pipeline.id, { action: "skip-stage" }, h.ports);
-  expect(blockedSkip.status).toBe(409);
-  expect(blockedSkip.error).toContain("preserve its worktree and conversation lineage");
-  expect(h.calls.some((call) => call.includes("reset --hard") || call.includes("clean -fd"))).toBe(false);
+  for (const action of ["retry-stage", "skip-stage"] as const) {
+    const clean = harness();
+    const cleanPipeline = await exhaust(clean);
+    clean.setPaneAlive(false);
+
+    const recovered = await patchPipeline(cleanPipeline.id, { action }, clean.ports);
+
+    expect(recovered.error).toBeUndefined();
+    expect(clean.calls.some((call) => call.includes("reset --hard"))).toBe(true);
+    expect(clean.calls.some((call) => call.includes("clean -fd"))).toBe(true);
+
+    const dirty = harness();
+    const dirtyPipeline = await exhaust(dirty);
+    const baseExec = dirty.ports.exec;
+    dirty.ports.exec = (command, args, cwd) => command === "git" && args[0] === "status"
+      ? { code: 0, stdout: " M src/lib/example.ts\n", stderr: "" }
+      : baseExec(command, args, cwd);
+
+    const refused = await patchPipeline(dirtyPipeline.id, { action }, dirty.ports);
+
+    expect(refused.status).toBe(409);
+    expect(refused.error).toContain("close");
+    expect(dirty.calls.some((call) => call.includes("reset --hard") || call.includes("clean -fd"))).toBe(false);
+
+    const publishedAhead = harness();
+    const publishedAheadPipeline = await exhaust(publishedAhead);
+    const publishedAheadHead = "a".repeat(40);
+    const publishedAheadExec = publishedAhead.ports.exec;
+    publishedAhead.ports.exec = (command, args, cwd) => {
+      if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") {
+        return { code: 0, stdout: `${publishedAheadHead}\n`, stderr: "" };
+      }
+      if (command === "git" && args[0] === "ls-remote") {
+        return { code: 0, stdout: `${publishedAheadHead}\trefs/heads/${publishedAheadPipeline.branch}\n`, stderr: "" };
+      }
+      return publishedAheadExec(command, args, cwd);
+    };
+
+    const refusedAhead = await patchPipeline(publishedAheadPipeline.id, { action }, publishedAhead.ports);
+
+    expect(refusedAhead.status).toBe(409);
+    expect(refusedAhead.error).toContain("close");
+    expect(publishedAhead.calls.some((call) => call.includes("reset --hard") || call.includes("clean -fd"))).toBe(false);
+  }
 });
 
 test("retry and skip recover a completed pane-hosted semantic contradiction", async () => {
@@ -4320,6 +4415,7 @@ test("an adopted stage child is stopped and counted, never silently left running
     paneId: "%9",
   });
   savePipelines(stored);
+  h.setHostsResident(true);
   h.setStageHost("conversation_stage_1", { outcome: "stopped" });
   h.setStageHost("conversation_helper", { outcome: "stopped" });
 
@@ -4350,6 +4446,7 @@ test("an adopted child that cannot be stopped keeps the lane visible (#670)", as
     paneId: null,
   });
   savePipelines(stored);
+  h.setHostsResident(true);
   h.setStageHost("conversation_stage_1", { outcome: "stopped" });
   h.setStageHost("conversation_helper", { outcome: "failed", error: "structured host ownership is unavailable" });
 
@@ -4395,6 +4492,7 @@ test("an acknowledgement never dismisses a host that is provably still running (
   const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
+  h.setHostsResident(true);
   h.setStageHost("conversation_stage_1", { outcome: "failed", error: "structured host ownership is unavailable" });
 
   const refused = await patchPipeline(pipeline.id, { action: "close", acknowledgeHosts: true }, h.ports);
@@ -4492,6 +4590,30 @@ test("a pane the teardown can identify as this stage's is stopped, not refused (
   expect(loadPipelines()[0]).toMatchObject({ state: "closed", stateDetail: "closed; stopped 1 stage host" });
 });
 
+test("close terminalizes a running attempt after confirmed host and pane absence (#1047, #988)", async () => {
+  for (const absent of ["structured-host", "pane"] as const) {
+    const h = harness();
+    const pipeline = await create(h.ports);
+    await tickPipelines([], h.ports);
+    await tickPipelines([], h.ports);
+    const stored = loadPipelines()[0]!;
+    const attempt = stored.runs[0]!.attempts[0]!;
+    expect(attempt).toMatchObject({ state: "running", completedAt: null });
+    if (absent === "structured-host") attempt.paneId = null;
+    else h.setPaneStop({ outcome: "not-running" });
+    savePipelines([stored]);
+
+    const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+    expect(closed.error).toBeUndefined();
+    expect(closed.close?.alreadyStopped).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+    expect(loadPipelines()[0]!.runs[0]!.attempts[0]).toMatchObject({
+      state: "failed",
+      completedAt: expect.any(String),
+    });
+  }
+});
+
 test("a pane that cannot be identified is reported, never killed (#670)", async () => {
   const h = harness();
   const pipeline = await create(h.ports);
@@ -4543,6 +4665,7 @@ test("a stage host that cannot be stopped refuses the close instead of hiding it
   const pipeline = await create(h.ports);
   await tickPipelines([], h.ports);
   await tickPipelines([], h.ports);
+  h.setHostsResident(true);
   h.setStageHost("conversation_stage_1", { outcome: "failed", error: "structured host ownership is unavailable" });
 
   const refused = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
@@ -4556,6 +4679,71 @@ test("a stage host that cannot be stopped refuses the close instead of hiding it
   expect(stored.state).not.toBe("closed");
   expect(stored.closedAt).toBeNull();
   expect(stored.stateDetail).toContain("structured host ownership is unavailable");
+});
+
+test("terminal transcript prose without a valid fenced verdict cannot dismiss a resident host (#1047, #988)", async () => {
+  for (const text of [
+    "Review completed with no findings.",
+    "Review completed.\n\n```json\n{\"status\":\"pass\",\"findings\":\"none\",\"confidence\":0.9}\n```",
+  ]) {
+    const h = harness();
+    const pipeline = await create(h.ports);
+    await tickPipelines([], h.ports);
+    await tickPipelines([], h.ports);
+    h.setHostsResident(true);
+    h.setStageHost("conversation_stage_1", { outcome: "failed", error: "structured runtime host is unavailable" });
+    h.durableTurns.set("/codex/stage-1.jsonl", {
+      turn: "terminal",
+      message: { text, ts: 5_000_000 },
+    });
+
+    const refused = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+    expect(refused.status).toBe(409);
+    expect(refused.close?.stillRunning).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+    expect(loadPipelines()[0]).toMatchObject({ state: "running", closedAt: null });
+  }
+});
+
+test("close terminalizes host-unavailable attempts from durable evidence and records the failure (#1047, #988)", async () => {
+  for (const evidence of ["registry-absent", "terminal-transcript"] as const) {
+    const h = harness();
+    const pipeline = await create(h.ports);
+    await tickPipelines([], h.ports);
+    await tickPipelines([], h.ports);
+    const stored = loadPipelines()[0]!;
+    const attempt = stored.runs[0]!.attempts[0]!;
+    attempt.state = "needs_decision";
+    attempt.error = "operator decision was resolved after the work merged";
+    stored.state = "needs_decision";
+    stored.stateDetail = attempt.error;
+    savePipelines([stored]);
+    const stopError = evidence === "registry-absent"
+      ? "structured host termination is unavailable"
+      : "structured host termination target is unavailable";
+    h.setStageHost("conversation_stage_1", { outcome: "failed", error: stopError });
+
+    if (evidence === "terminal-transcript") {
+      h.setHostsResident(true);
+      h.durableTurns.set("/codex/stage-1.jsonl", {
+        turn: "terminal",
+        message: {
+          text: "Completed review.\n\n```json\n{\"status\":\"needs_decision\",\"findings\":[],\"confidence\":0.9}\n```",
+          ts: 5_000_000,
+        },
+      });
+    }
+
+    const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+    expect(closed.error).toBeUndefined();
+    expect(closed.close?.alreadyStopped).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+    expect(closed.close?.notes).toMatchObject([{ stageId: "plan", attempt: 1, detail: expect.stringContaining(stopError) }]);
+    const terminal = loadPipelines()[0]!;
+    expect(terminal.state).toBe("closed");
+    expect(terminal.runs[0]!.attempts[0]!.completedAt).toBeTruthy();
+    expect(terminal.stateDetail).toContain(stopError);
+  }
 });
 
 test("closing preserves uncommitted stage work and names what it left behind (#670)", async () => {
