@@ -1784,6 +1784,47 @@ test("a dead structured host with an invalid terminal verdict still takes the fa
   });
 });
 
+test("a dead structured host with a contradictory verdict still takes the fail edge (#973)", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build", next: null, onFail: { to: "recover", maxRounds: 1 } },
+    { id: "recover", kind: "run", role: { roleId: "builder" }, prompt: "Recover {{prev.output}}", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  const running = loadPipelines()[0]!;
+  running.runs[0]!.attempts[0]!.paneId = null;
+  savePipelines([running]);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: {
+      text: "VERDICT: REQUEST_CHANGES\n\n```json\n{\"status\":\"pass\"}\n```",
+      ts: 5_000_000,
+    },
+  });
+  const unavailableSince = h.ports.now();
+  Object.assign(h.ports, {
+    conversationHostUnavailableSince: async () => unavailableSince,
+  });
+
+  h.advanceWallClock(5 * 60_000);
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "failed",
+    verdict: null,
+    error: "historical attempt completed without a valid final JSON verdict",
+  });
+  expect(current.cursor).toEqual({
+    stageId: "recover",
+    state: "pending",
+    input: "historical attempt completed without a valid final JSON verdict",
+    activatedBy: { stageId: "build", attempt: 1, edge: "fail" },
+  });
+});
+
 test("a dead structured host past grace still accepts a valid terminal verdict (#973)", async () => {
   const h = harness();
   await create(h.ports);
