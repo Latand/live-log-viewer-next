@@ -12,7 +12,9 @@ import type { RoleDefinition } from "@/lib/roles/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import type { CompletedGenerationRead } from "@/lib/lifecycle/inventorySelection";
 import { queryLifecycleEvents } from "@/lib/lifecycle/journal";
+import { productionLivenessSources } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 
 import { defaultMcpSpawnRoleParams, viewerMcpBindings } from "./bindings";
@@ -978,6 +980,155 @@ test("agent_activity reports the liveness snapshot and journals the stalls it fi
   });
   expect(journaled).toHaveLength(1);
 });
+
+/**
+ * #860 — the two bounds the project-scoped liveness read was missing at this
+ * binding: the catalog it reads and the caller's lifetime.
+ */
+function activityRow(overrides: Partial<FileEntry> & { path: string }): FileEntry {
+  return {
+    root: "claude-projects" as FileEntry["root"],
+    name: path.basename(overrides.path),
+    project: "viewer",
+    title: "stage agent",
+    engine: "codex",
+    kind: "session",
+    fmt: "claude" as FileEntry["fmt"],
+    parent: null,
+    mtime: Date.parse("2026-08-22T08:55:00.000Z") / 1000,
+    size: 4096,
+    activity: "idle",
+    activityReason: "mtime_old",
+    proc: null,
+    pid: null,
+    ...overrides,
+  } as FileEntry;
+}
+
+test("project-scoped agent_activity selects from the binding's cached catalog and forces no fresh sweep (#860)", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-activity-catalog-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const now = Date.parse("2026-08-22T09:00:00.000Z");
+  const catalogReads: Array<{ signal?: AbortSignal | null }> = [];
+  let freshSweeps = 0;
+  let handedCatalog: CompletedGenerationRead | null = null;
+  const files = [
+    activityRow({ path: "/corpus/viewer/live.jsonl", activity: "stalled", activityReason: "jsonl_turn_stalled", conversationId: "conversation_selected" }),
+    activityRow({ path: "/corpus/viewer/idle.jsonl" }),
+    activityRow({ path: "/corpus/other/live.jsonl", project: "other", activity: "stalled", activityReason: "jsonl_turn_stalled" }),
+  ];
+  /* The completed generation the board path reads. A fresh whole-corpus sweep
+     would have to come through one of the two counters below. */
+  const cachedCatalogRead: CompletedGenerationRead = async (options) => {
+    catalogReads.push(options ?? {});
+    return {
+      snapshot: { files, projectCatalog: [], complete: true },
+      generation: 11,
+      targetGeneration: 11,
+      cacheStatus: "hit" as const,
+      requestCount: 1,
+      cloneDurationMs: 0,
+    };
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    completedFileScan: cachedCatalogRead,
+    listFiles: async () => { freshSweeps += 1; return files; },
+    /* Production's own selection wiring over whatever catalog read the binding
+       hands in, with only the environment-touching seams stubbed. The fallback
+       keeps a regression here off the real scanner instead of sweeping the
+       machine the test runs on. */
+    livenessSources: (catalog?: { completedFileScan?: CompletedGenerationRead }) => ({
+      ...productionLivenessSources({ completedFileScan: (handedCatalog = catalog?.completedFileScan ?? null) ?? cachedCatalogRead }),
+      now: () => now,
+      probe: { now: () => now, pidAlive: () => false, processIdentity: () => null },
+      registrySnapshot: () => ({ entries: {}, conversations: {} }),
+      pipelines: () => [],
+      describeTranscript: async () => null,
+      transcriptEvidence: async () => ({ turn: "busy", lastRecordTs: Date.parse("2026-08-22T08:40:00.000Z") }),
+      listFiles: async () => { freshSweeps += 1; return files; },
+    }),
+    refreshLifecycleJournal: () => ({ appended: 0, skipped: 0, throttled: false }),
+  } as never);
+
+  const result = await bindings.agent_activity({
+    clientRequestId: "activity-860-catalog",
+    project: "viewer",
+    liveOnly: true,
+    limit: 10,
+  });
+
+  expect(result).toMatchObject({ count: 1 });
+  expect(result.selection).toMatchObject({
+    scope: "project",
+    freshScan: false,
+    generation: 11,
+    cacheStatus: "hit",
+    scanned: 3,
+    matched: 1,
+    selected: 1,
+  });
+  expect((result.conversations as Array<Record<string, unknown>>)[0]).toMatchObject({
+    conversationId: "conversation_selected",
+    project: "viewer",
+  });
+  expect(freshSweeps).toBe(0);
+  expect(catalogReads).toHaveLength(1);
+  /* The catalog the read consumed is the binding's own, so `agent_activity` and
+     `board_snapshot` share one generation. */
+  expect(handedCatalog as CompletedGenerationRead | null).toBe(cachedCatalogRead);
+});
+
+test("agent_activity stops the liveness read at the call deadline instead of hanging the caller (#860)", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-activity-deadline-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  let observed: AbortSignal | null = null;
+  let journalWrites = 0;
+  let entered: () => void = () => {};
+  const reached = new Promise<void>((resolve) => { entered = resolve; });
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    livenessSources: () => ({
+      now: () => Date.now(),
+      probe: { now: () => Date.now(), pidAlive: () => false, processIdentity: () => null },
+      registrySnapshot: () => ({ entries: {}, conversations: {} }),
+      pipelines: () => [],
+      describeTranscript: async () => null,
+      transcriptEvidence: async () => null,
+      /* A cold generation that never publishes — the 70-second shape the issue
+         reported. Only the caller's signal can end this call. */
+      selectInventory: (_request: unknown, options?: { signal?: AbortSignal | null }) => new Promise<never>((_resolve, reject) => {
+        observed = options?.signal ?? null;
+        options?.signal?.addEventListener(
+          "abort",
+          () => { reject(new DOMException("catalog selection cancelled", "AbortError")); },
+          { once: true },
+        );
+        entered();
+      }),
+    }),
+    refreshLifecycleJournal: () => { journalWrites += 1; return { appended: 0, skipped: 0, throttled: false }; },
+  } as never);
+
+  const pending = bindings.agent_activity(
+    { clientRequestId: "activity-860-deadline", project: "viewer", liveOnly: true, limit: 10 },
+    { deadlineAt: Date.now() + 25 },
+  );
+  await reached;
+
+  /* Self-bounded: a regression that ignores the deadline fails this assertion
+     instead of hanging the suite on a call that never returns. */
+  const guard = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => { reject(new Error("agent_activity did not stop at the call deadline")); }, 2_000);
+  });
+  await expect(Promise.race([pending, guard])).rejects.toThrow("catalog selection cancelled");
+  expect(observed).not.toBeNull();
+  expect((observed as unknown as AbortSignal).aborted).toBe(true);
+  expect((observed as unknown as AbortSignal).reason).toBeInstanceOf(DeadlineExceededError);
+  /* Nothing was journaled: the call that no caller is waiting for records no
+     lifecycle evidence either. */
+  expect(journalWrites).toBe(0);
+}, 10_000);
 
 test("lifecycle_events projects the runtime deployment ledger into the journal (#686)", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-deploy-events-"));
