@@ -2984,7 +2984,9 @@ async function closeStopFailureEvidence(
   const durable = await ports.durableTurnEvidence(candidate.attempt.effectiveRole.engine, candidate.target.agentPath);
   if (durable?.turn !== "terminal" || !durable.message) return null;
   if (durable.message.ts <= unixMs(candidate.attempt.startedAt)) return null;
-  return "the attempt transcript holds a completed final assistant turn";
+  const parsed = parsePipelineStageVerdict(durable.message.text);
+  if (!parsed || "failureReason" in parsed) return null;
+  return "the attempt transcript holds a completed final assistant turn with a valid fenced verdict";
 }
 
 function terminalizeAttemptForClose(candidate: StageHostCandidate, note: string, ports: PipelinePorts): void {
@@ -3604,8 +3606,14 @@ export async function patchPipeline(
           if (pane.outcome === "stopped") close.stopped.push(target);
           else if (pane.outcome === "failed") close.stillRunning.push({ ...target, error: pane.error });
           else if (pane.outcome === "unknown") close.unconfirmed.push({ ...target, operationId: null, detail: pane.detail });
-          else close.alreadyStopped.push(target);
-        } else close.alreadyStopped.push(target);
+          else {
+            close.alreadyStopped.push(target);
+            terminalizeAttemptForClose(candidate, "the stage pane was already absent when the pipeline closed", ports);
+          }
+        } else {
+          close.alreadyStopped.push(target);
+          terminalizeAttemptForClose(candidate, "the stage host was already absent when the pipeline closed", ports);
+        }
       }
       close.worktree = closeWorktreeReport(pipeline, ports);
       if (close.stillRunning.length > 0) {

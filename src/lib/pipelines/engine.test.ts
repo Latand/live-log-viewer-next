@@ -4590,6 +4590,30 @@ test("a pane the teardown can identify as this stage's is stopped, not refused (
   expect(loadPipelines()[0]).toMatchObject({ state: "closed", stateDetail: "closed; stopped 1 stage host" });
 });
 
+test("close terminalizes a running attempt after confirmed host and pane absence (#1047, #988)", async () => {
+  for (const absent of ["structured-host", "pane"] as const) {
+    const h = harness();
+    const pipeline = await create(h.ports);
+    await tickPipelines([], h.ports);
+    await tickPipelines([], h.ports);
+    const stored = loadPipelines()[0]!;
+    const attempt = stored.runs[0]!.attempts[0]!;
+    expect(attempt).toMatchObject({ state: "running", completedAt: null });
+    if (absent === "structured-host") attempt.paneId = null;
+    else h.setPaneStop({ outcome: "not-running" });
+    savePipelines([stored]);
+
+    const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+    expect(closed.error).toBeUndefined();
+    expect(closed.close?.alreadyStopped).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+    expect(loadPipelines()[0]!.runs[0]!.attempts[0]).toMatchObject({
+      state: "failed",
+      completedAt: expect.any(String),
+    });
+  }
+});
+
 test("a pane that cannot be identified is reported, never killed (#670)", async () => {
   const h = harness();
   const pipeline = await create(h.ports);
@@ -4655,6 +4679,30 @@ test("a stage host that cannot be stopped refuses the close instead of hiding it
   expect(stored.state).not.toBe("closed");
   expect(stored.closedAt).toBeNull();
   expect(stored.stateDetail).toContain("structured host ownership is unavailable");
+});
+
+test("terminal transcript prose without a valid fenced verdict cannot dismiss a resident host (#1047, #988)", async () => {
+  for (const text of [
+    "Review completed with no findings.",
+    "Review completed.\n\n```json\n{\"status\":\"pass\",\"findings\":\"none\",\"confidence\":0.9}\n```",
+  ]) {
+    const h = harness();
+    const pipeline = await create(h.ports);
+    await tickPipelines([], h.ports);
+    await tickPipelines([], h.ports);
+    h.setHostsResident(true);
+    h.setStageHost("conversation_stage_1", { outcome: "failed", error: "structured runtime host is unavailable" });
+    h.durableTurns.set("/codex/stage-1.jsonl", {
+      turn: "terminal",
+      message: { text, ts: 5_000_000 },
+    });
+
+    const refused = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+    expect(refused.status).toBe(409);
+    expect(refused.close?.stillRunning).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+    expect(loadPipelines()[0]).toMatchObject({ state: "running", closedAt: null });
+  }
 });
 
 test("close terminalizes host-unavailable attempts from durable evidence and records the failure (#1047, #988)", async () => {
