@@ -175,6 +175,8 @@ export interface CodexAppServerHostOptions {
   plugins?: readonly string[];
   fileAuthCredentials?: boolean;
   sandbox?: string;
+  permissionProfile?: string;
+  permissionProfileConfig?: string;
   approvalPolicy?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
@@ -745,6 +747,7 @@ export class CodexAppServerHost implements EngineHost {
       spawn(command, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
     const args = [
       ...(options.fileAuthCredentials ? ["-c", "cli_auth_credentials_store=file"] : []),
+      ...(options.permissionProfileConfig ? ["-c", options.permissionProfileConfig] : []),
       "app-server",
       "--enable",
       "realtime_conversation",
@@ -789,11 +792,17 @@ export class CodexAppServerHost implements EngineHost {
         granted,
       );
       const result = threadId
-        ? await provisional.rpc("thread/resume", { threadId, config })
+        ? await provisional.rpc("thread/resume", {
+          threadId,
+          ...(options.permissionProfile ? { permissions: options.permissionProfile } : {}),
+          config,
+        })
         : await provisional.rpc("thread/start", {
           cwd: options.cwd,
           ...(options.model ? { model: options.model } : {}),
-          sandbox: options.sandbox ?? "read-only",
+          ...(options.permissionProfile
+            ? { permissions: options.permissionProfile }
+            : { sandbox: options.sandbox ?? "read-only" }),
           approvalPolicy: options.approvalPolicy ?? "never",
           config,
         });

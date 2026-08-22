@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { AccountContext } from "@/lib/accounts/contracts";
@@ -33,6 +35,63 @@ export const INITIAL_MESSAGE_TIMEOUT_MS = 30_000;
 const INITIAL_MESSAGE_POLL_MS = 250;
 export const ADMISSION_RETRY_ATTEMPTS = 3;
 const ADMISSION_RETRY_BACKOFF_MS = 250;
+export const READ_ONLY_STAGE_PERMISSION_PROFILE = "llv-read-only-stage";
+
+export interface StructuredHostAccessMaterialization {
+  env: NodeJS.ProcessEnv;
+  codex: {
+    sandbox?: string;
+    permissionProfile?: string;
+    permissionProfileConfig?: string;
+  };
+  scratchDirectory: string | null;
+  cleanup(): void;
+}
+
+/** A read-only stage keeps the checkout under Codex's read-only profile while
+    adding one private write root for temporary and test state. */
+export function materializeStructuredHostAccess(
+  readOnly: boolean,
+  sourceEnv: NodeJS.ProcessEnv,
+  capability: string,
+  scratchParent = os.tmpdir(),
+): StructuredHostAccessMaterialization {
+  const baseEnv = { ...sourceEnv, LLV_SPAWN_CAPABILITY: capability };
+  if (!readOnly) {
+    return {
+      env: baseEnv,
+      codex: { sandbox: "danger-full-access" },
+      scratchDirectory: null,
+      cleanup: () => {},
+    };
+  }
+
+  const scratchDirectory = fs.mkdtempSync(path.join(scratchParent, "llv-read-only-stage-"));
+  try {
+    fs.chmodSync(scratchDirectory, 0o700);
+    const directories = {
+      HOME: path.join(scratchDirectory, "home"),
+      XDG_CONFIG_HOME: path.join(scratchDirectory, "config"),
+      TMPDIR: path.join(scratchDirectory, "tmp"),
+    };
+    for (const directory of Object.values(directories)) {
+      fs.mkdirSync(directory, { mode: 0o700 });
+    }
+    const permissionProfileConfig = `permissions.${READ_ONLY_STAGE_PERMISSION_PROFILE}={extends=":read-only",filesystem={${JSON.stringify(scratchDirectory)}="write"}}`;
+    return {
+      env: { ...baseEnv, ...directories },
+      codex: {
+        permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
+        permissionProfileConfig,
+      },
+      scratchDirectory,
+      cleanup: () => fs.rmSync(scratchDirectory, { recursive: true, force: true }),
+    };
+  } catch (error) {
+    fs.rmSync(scratchDirectory, { recursive: true, force: true });
+    throw error;
+  }
+}
 
 /** Runtime admission calls carry the durable launch id as their idempotency
     key, so a replay lands on the original receipt. Production #367 saw
@@ -770,7 +829,6 @@ export function structuredClaudeSpawnPolicyBaseSettingsPath(
 
 async function defaultStartHost(input: StructuredSpawnInput, capability: string): Promise<SpawnedStructuredHost> {
   const profile = input.spec.launchProfile ?? {} as LaunchProfile;
-  const env = { ...input.account.env, LLV_SPAWN_CAPABILITY: capability };
   const resumeSessionId = structuredResumeSessionId(input);
   const initialEventCursor = resumeSessionId
     ? input.registry.readOnlySnapshot().entries[sessionKeyId({ engine: input.engine, sessionId: resumeSessionId })]?.structuredHost?.eventCursor
@@ -779,48 +837,64 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     && (!Number.isSafeInteger(initialEventCursor) || initialEventCursor < 0)) {
     throw new Error("structured resume event cursor is invalid");
   }
-  if (input.engine === "codex") {
-    const options = {
-      cwd: input.spec.cwd,
-      codexHome: input.account.home,
-      fileAuthCredentials: input.account.kind === "managed",
-      model: profile.model ?? undefined,
-      effort: profile.effort ?? undefined,
-      allowSubagents: profile.allowSubagents,
-      mcpServers: profile.mcpServers,
-      /* Plugin grant from the durable profile (issue #687): present only for
-         an operator-launched root session that did not opt out. */
-      plugins: profile.plugins,
-      sandbox: profile.readOnly ? "read-only" : "danger-full-access",
-      approvalPolicy: profile.permissionMode ?? undefined,
-      initialEventCursor,
-      env,
+  const access = materializeStructuredHostAccess(profile.readOnly === true, input.account.env, capability);
+  const env = access.env;
+  try {
+    let host: SpawnedStructuredHost;
+    if (input.engine === "codex") {
+      const options = {
+        cwd: input.spec.cwd,
+        codexHome: input.account.home,
+        fileAuthCredentials: input.account.kind === "managed",
+        model: profile.model ?? undefined,
+        effort: profile.effort ?? undefined,
+        allowSubagents: profile.allowSubagents,
+        mcpServers: profile.mcpServers,
+        /* Plugin grant from the durable profile (issue #687): present only for
+           an operator-launched root session that did not opt out. */
+        plugins: profile.plugins,
+        ...access.codex,
+        approvalPolicy: profile.permissionMode ?? undefined,
+        initialEventCursor,
+        env,
+      };
+      host = resumeSessionId
+        ? await CodexAppServerHost.adopt(resumeSessionId, options)
+        : await CodexAppServerHost.start(options);
+    } else {
+      const sessionId = resumeSessionId ?? (input.spec.transcript ? path.basename(input.spec.transcript, ".jsonl") : undefined);
+      const options = {
+        cwd: input.spec.cwd,
+        claudeConfigDir: input.account.home,
+        claudeProjectsDir: input.account.transcriptRoot,
+        spawnPolicyBaseSettingsPath: structuredClaudeSpawnPolicyBaseSettingsPath(input.account),
+        allowSubagents: profile.allowSubagents,
+        mcpServers: profile.mcpServers,
+        mcpStatePath: input.account.kind === "managed"
+          ? path.join(input.account.home, ".claude.json")
+          : path.join(path.dirname(input.account.home), ".claude.json"),
+        readOnly: profile.readOnly === true,
+        model: profile.model ?? undefined,
+        effort: profile.effort ?? undefined,
+        permissionMode: effectiveClaudePermissionMode(profile),
+        initialEventCursor,
+        env,
+      };
+      host = resumeSessionId
+        ? await ClaudeStreamBrokerHost.adopt(resumeSessionId, options)
+        : await ClaudeStreamBrokerHost.start({ ...options, ...(sessionId ? { sessionId } : {}) });
+    }
+    if (!access.scratchDirectory) return host;
+    const release = host.release.bind(host);
+    host.release = async () => {
+      await release();
+      access.cleanup();
     };
-    return resumeSessionId
-      ? await CodexAppServerHost.adopt(resumeSessionId, options)
-      : await CodexAppServerHost.start(options);
+    return host;
+  } catch (error) {
+    access.cleanup();
+    throw error;
   }
-  const sessionId = resumeSessionId ?? (input.spec.transcript ? path.basename(input.spec.transcript, ".jsonl") : undefined);
-  const options = {
-    cwd: input.spec.cwd,
-    claudeConfigDir: input.account.home,
-    claudeProjectsDir: input.account.transcriptRoot,
-    spawnPolicyBaseSettingsPath: structuredClaudeSpawnPolicyBaseSettingsPath(input.account),
-    allowSubagents: profile.allowSubagents,
-    mcpServers: profile.mcpServers,
-    mcpStatePath: input.account.kind === "managed"
-      ? path.join(input.account.home, ".claude.json")
-      : path.join(path.dirname(input.account.home), ".claude.json"),
-    readOnly: profile.readOnly === true,
-    model: profile.model ?? undefined,
-    effort: profile.effort ?? undefined,
-    permissionMode: effectiveClaudePermissionMode(profile),
-    initialEventCursor,
-    env,
-  };
-  return resumeSessionId
-    ? await ClaudeStreamBrokerHost.adopt(resumeSessionId, options)
-    : await ClaudeStreamBrokerHost.start({ ...options, ...(sessionId ? { sessionId } : {}) });
 }
 
 export function structuredResumeSessionId(

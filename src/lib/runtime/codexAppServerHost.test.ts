@@ -16,6 +16,7 @@ import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import type { HostState, RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef } from "./structuredContent";
+import { materializeStructuredHostAccess, READ_ONLY_STAGE_PERMISSION_PROFILE } from "./structuredSpawn";
 import type { RuntimeVoiceDelivery } from "./voiceDelivery";
 import { DEFAULT_VOICE_PERSONA, VOICE_PERSONA_FILE, legacyVoicePersonaBootstrapItemId, voicePersona } from "./voicePersona";
 
@@ -32,6 +33,41 @@ class MemoryEventStore implements RuntimeEventStore {
     this.events.set(threadId, events);
   }
 }
+
+test("read-only structured hosts receive one writable isolated scratch root", () => {
+  const scratchParent = fs.mkdtempSync(path.join(os.tmpdir(), "llv-read-only-scratch-test-"));
+  try {
+    const access = materializeStructuredHostAccess(true, { NODE_ENV: "test", HOME: "/shared/home" }, "capability", scratchParent);
+
+    expect(access.env).toMatchObject({
+      NODE_ENV: "test",
+      LLV_SPAWN_CAPABILITY: "capability",
+      HOME: path.join(access.scratchDirectory!, "home"),
+      XDG_CONFIG_HOME: path.join(access.scratchDirectory!, "config"),
+      TMPDIR: path.join(access.scratchDirectory!, "tmp"),
+    });
+    expect(access.codex).toEqual({
+      permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
+      permissionProfileConfig: `permissions.${READ_ONLY_STAGE_PERMISSION_PROFILE}={extends=":read-only",filesystem={${JSON.stringify(access.scratchDirectory)}="write"}}`,
+    });
+    expect(fs.statSync(access.scratchDirectory!).mode & 0o777).toBe(0o700);
+    for (const name of ["home", "config", "tmp"]) {
+      expect(fs.statSync(path.join(access.scratchDirectory!, name)).mode & 0o777).toBe(0o700);
+    }
+
+    access.cleanup();
+    expect(fs.existsSync(access.scratchDirectory!)).toBeFalse();
+
+    const readWrite = materializeStructuredHostAccess(false, { NODE_ENV: "test", HOME: "/shared/home" }, "capability", scratchParent);
+    expect(readWrite).toMatchObject({
+      env: { HOME: "/shared/home", LLV_SPAWN_CAPABILITY: "capability" },
+      codex: { sandbox: "danger-full-access" },
+      scratchDirectory: null,
+    });
+  } finally {
+    fs.rmSync(scratchParent, { recursive: true, force: true });
+  }
+});
 
 class FailingEventStore implements RuntimeEventStore {
   readonly stored: RuntimeEvent[] = [];
@@ -381,6 +417,35 @@ describe("CodexAppServerHost", () => {
       },
     });
     await host.release();
+  });
+
+  test("applies the isolated read-only-stage permission profile to fresh and adopted threads", async () => {
+    const permissionProfile = "llv-read-only-stage";
+    const permissionProfileConfig = 'permissions.llv-read-only-stage={extends=":read-only",filesystem={"/scratch"="write"}}';
+    for (const threadId of [null, "scratch-thread"] as const) {
+      const server = new FakeAppServer(threadId ?? "scratch-thread");
+      const captured: { args?: string[] } = {};
+      const options = {
+        cwd: "/repo",
+        permissionProfile,
+        permissionProfileConfig,
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(server, captured),
+      };
+      const host = threadId
+        ? await CodexAppServerHost.adopt(threadId, options)
+        : await CodexAppServerHost.start(options);
+
+      expect(captured.args).toEqual([
+        "-c", permissionProfileConfig,
+        "app-server", "--enable", "realtime_conversation",
+      ]);
+      const method = threadId ? "thread/resume" : "thread/start";
+      const params = server.requests.find((request) => request.method === method)?.params as Record<string, unknown>;
+      expect(params).toMatchObject({ permissions: permissionProfile });
+      expect(params).not.toHaveProperty("sandbox");
+      await host.release();
+    }
   });
 
   test("starts a client-managed V3 WebRTC call on the hosted thread", async () => {
