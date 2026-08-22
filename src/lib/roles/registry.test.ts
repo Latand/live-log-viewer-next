@@ -81,6 +81,10 @@ test("resolved prompts carry role safety fences and reject cross-engine inherite
   expect(reviewer.ok && reviewer.value.prompt).toContain("Read-only mode: edits, staging, commits, pushes, service restarts, and GitHub comments are prohibited.");
   expect(reviewer.ok && reviewer.value.prompt).toContain("actionable fix plan");
   expect(reviewer.ok && reviewer.value.prompt).toContain("No copy-paste code unless absolutely necessary.");
+  expect(reviewer.ok && reviewer.value.prompt).toContain("Report the reviewed SHA.");
+  expect(reviewer.ok && reviewer.value.prompt).toContain("State plainly when GitHub or DNS access was unavailable.");
+  expect(reviewer.ok && reviewer.value.prompt).toContain("environmental note");
+  expect(reviewer.ok && reviewer.value.prompt).toContain("bunx tsc --noEmit --incremental false");
 
   expect(resolveSpawnRole({ role: "builder", roleParams: { mode: "plain" }, engine: "claude" })).toEqual({
     ok: false,

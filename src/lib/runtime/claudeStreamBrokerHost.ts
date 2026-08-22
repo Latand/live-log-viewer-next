@@ -190,6 +190,8 @@ export interface ClaudeStreamBrokerHostOptions {
   permissionMode?: string;
   tools?: string[];
   env?: NodeJS.ProcessEnv;
+  forwardGitHubConfig?: boolean;
+  releaseCleanup?: () => void;
   requestTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
@@ -227,6 +229,25 @@ const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 export const NATIVE_MULTI_AGENT_DENY_FLAG = `native-multi-agent-deny:${NATIVE_MULTI_AGENT_TOOLS.join(",")}`;
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
+
+/** Bounded tail kept only long enough to match a terminal exit signature. */
+const TERMINAL_EXIT_MATCH_BYTES = 512;
+
+/** CLI exits that mean this launch can never start, whatever retries it gets.
+    A resume of a session the CLI never created is the incident case (#1071):
+    the child prints this and exits before the broker delivers anything. */
+const TERMINAL_CLI_EXIT_SIGNATURES: readonly { pattern: RegExp; reason: string }[] = [
+  {
+    pattern: /no conversation found with session id/i,
+    reason: "the Claude CLI found no conversation with this session id",
+  },
+];
+
+/** The canonical phrase for a terminal CLI exit, or null when the diagnostic
+    is not one. The caller's text never reaches a durable receipt. */
+export function terminalClaudeExitReason(diagnostic: string): string | null {
+  return TERMINAL_CLI_EXIT_SIGNATURES.find((signature) => signature.pattern.test(diagnostic))?.reason ?? null;
+}
 
 function record(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
@@ -297,9 +318,14 @@ export function redactClaudeHostDiagnostic(value: unknown): string {
 
 const safeError = redactClaudeHostDiagnostic;
 
-function subscriptionEnv(source: NodeJS.ProcessEnv, claudeConfigDir?: string): NodeJS.ProcessEnv {
+function subscriptionEnv(
+  source: NodeJS.ProcessEnv,
+  claudeConfigDir?: string,
+  forwardGitHubConfig = false,
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV };
   for (const name of CHILD_ENV_ALLOWLIST) if (source[name] !== undefined) env[name] = source[name];
+  if (forwardGitHubConfig && source.GH_CONFIG_DIR !== undefined) env.GH_CONFIG_DIR = source.GH_CONFIG_DIR;
   if (claudeConfigDir) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
   return env;
 }
@@ -469,6 +495,8 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly stdoutDecoder = new StringDecoder("utf8");
   private stdoutBuffer = "";
+  private stderrTail = "";
+  private terminalExit: string | null = null;
   private cursor: number;
   private activeTurnId: string | null = null;
   private protocolVersion: string | null;
@@ -480,6 +508,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private ledgerFailed = false;
   private writerFence: (() => boolean) | null = null;
   private releasePromise: Promise<void> | null = null;
+  private releaseCleanup: (() => void) | null;
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
   private terminationStarted = false;
   private readonly reapedPromise: Promise<void>;
@@ -501,6 +530,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.signalProcess = options.signalProcess ?? process.kill;
+    this.releaseCleanup = options.releaseCleanup ?? null;
     this.cursor = options.initialEventCursor ?? 0;
     this.protocolVersion = auth.version ?? null;
     this.account = { type: auth.authMethod, planType: auth.subscriptionType };
@@ -515,7 +545,15 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       const tail = this.stdoutDecoder.end();
       if (tail) this.acceptStdout(tail);
     });
-    child.stderr.on("data", () => { /* Provider diagnostics may contain credentials. */ });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      /* Provider diagnostics may contain credentials, so none of this text is
+         retained: a bounded tail is matched against the terminal launch exits
+         (#1071) and only the canonical phrase survives the match. */
+      this.stderrTail = (this.stderrTail + (typeof chunk === "string" ? chunk : chunk.toString("utf8")))
+        .slice(-TERMINAL_EXIT_MATCH_BYTES);
+      this.terminalExit ??= terminalClaudeExitReason(this.stderrTail);
+      if (this.terminalExit) this.stderrTail = "";
+    });
     child.stdin.on("error", (error) => {
       if (!this.releasing && !this.released) this.fail(new Error(`Claude stream stdin failed: ${safeError(error)}`));
     });
@@ -548,9 +586,20 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     options: ClaudeStreamBrokerHostOptions,
   ): Promise<ClaudeStreamBrokerHost> {
     const binary = options.binary ?? process.env.LLV_CLAUDE_BINARY ?? "claude";
-    const env = subscriptionEnv(options.env ?? process.env, options.claudeConfigDir);
-    const auth = await (options.readAuthStatus?.() ?? claudeCliAuthStatus(binary, env, options.cwd));
+    const env = subscriptionEnv(
+      options.env ?? process.env,
+      options.claudeConfigDir,
+      options.forwardGitHubConfig === true,
+    );
+    let auth: ClaudeAuthStatus;
+    try {
+      auth = await (options.readAuthStatus?.() ?? claudeCliAuthStatus(binary, env, options.cwd));
+    } catch (error) {
+      options.releaseCleanup?.();
+      throw error;
+    }
     if (!auth.loggedIn || auth.authMethod !== "claude.ai" || !auth.subscriptionType) {
+      options.releaseCleanup?.();
       throw new Error("Claude stream hosting requires a claude.ai subscription login");
     }
     const args = [
@@ -587,11 +636,17 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (options.tools) args.push("--tools", options.tools.join(","));
     const spawnProcess = options.spawnProcess ?? ((command, childArgs, spawnOptions) =>
       spawn(command, childArgs, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
-    const child = spawnProcess(binary, args, {
-      cwd: options.cwd,
-      env: withTelegramConnectorGrant(env, options.mcpServers),
-      detached: true,
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawnProcess(binary, args, {
+        cwd: options.cwd,
+        env: withTelegramConnectorGrant(env, options.mcpServers),
+        detached: true,
+      });
+    } catch (error) {
+      options.releaseCleanup?.();
+      throw error;
+    }
     const host = new ClaudeStreamBrokerHost(child, { sessionId }, auth, options);
     try {
       host.restore();
@@ -752,6 +807,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   }
 
   async health(): Promise<HostState> { return this.currentState(); }
+
+  /** The canonical phrase of the terminal CLI exit this child reported, when
+      it reported one (#1071). Callers use it as the failure reason a launch
+      receipt carries, so the operator sees why a resubmit is needed. */
+  terminalExitReason(): string | null { return this.terminalExit; }
 
   onStateChange(listener: (state: HostState) => void): () => void {
     this.stateListeners.add(listener);
@@ -1091,6 +1151,9 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.emit({ kind: "session-status", status: "unhosted" });
     if (this.ledgerFailed) this.notifyStateListeners();
     this.closeSubscribers();
+    const cleanup = this.releaseCleanup;
+    this.releaseCleanup = null;
+    cleanup?.();
   }
 
   private async waitForReap(timeoutMs: number): Promise<boolean> {
