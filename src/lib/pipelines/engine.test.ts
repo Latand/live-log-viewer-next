@@ -1746,6 +1746,82 @@ test("a dead structured host past grace fails through the stage fail edge (#973)
   });
 });
 
+test("a dead structured host with an invalid terminal verdict still takes the fail edge (#973)", async () => {
+  const h = harness();
+  await create(h.ports, [
+    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build", next: null, onFail: { to: "recover", maxRounds: 1 } },
+    { id: "recover", kind: "run", role: { roleId: "builder" }, prompt: "Recover {{prev.output}}", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  const running = loadPipelines()[0]!;
+  running.runs[0]!.attempts[0]!.paneId = null;
+  savePipelines([running]);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: "Finished without a structured verdict", ts: 5_000_000 },
+  });
+  const unavailableSince = h.ports.now();
+  Object.assign(h.ports, {
+    conversationHostUnavailableSince: async () => unavailableSince,
+  });
+
+  h.advanceWallClock(5 * 60_000);
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "failed",
+    verdict: null,
+    error: "historical attempt completed without a valid final JSON verdict",
+  });
+  expect(current.cursor).toEqual({
+    stageId: "recover",
+    state: "pending",
+    input: "historical attempt completed without a valid final JSON verdict",
+    activatedBy: { stageId: "build", attempt: 1, edge: "fail" },
+  });
+});
+
+test("a dead structured host past grace still accepts a valid terminal verdict (#973)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  const running = loadPipelines()[0]!;
+  running.runs[0]!.attempts[0]!.paneId = null;
+  savePipelines([running]);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: {
+      text: "Completed\n\n```json\n{\"status\":\"pass\"}\n```",
+      ts: 5_000_000,
+    },
+  });
+  const unavailableSince = h.ports.now();
+  Object.assign(h.ports, {
+    conversationHostUnavailableSince: async () => unavailableSince,
+  });
+
+  h.advanceWallClock(5 * 60_000);
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    output: "Completed",
+    verdict: { status: "pass" },
+    error: null,
+  });
+  expect(current.cursor).toEqual({
+    stageId: "build",
+    state: "pending",
+    input: "Completed",
+    activatedBy: { stageId: "plan", attempt: 1, edge: "pass" },
+  });
+});
+
 test("an inactive transcript with no verdict exhausts bounded recovery after its worker exits", async () => {
   const h = harness();
   await create(h.ports);

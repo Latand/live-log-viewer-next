@@ -1632,14 +1632,16 @@ async function tickRunStage(
       settleStageVerdict(pipeline, stage, attempt, parsed, ports, persist);
       return;
     }
-    recordVerdictRecoveryMiss(
-      pipeline,
-      attempt,
-      ports,
-      stageVerdictRejectionReason(durable.message!.text),
-      durable.message!.ts,
-    );
-    return;
+    if (!hostUnavailablePastGrace) {
+      recordVerdictRecoveryMiss(
+        pipeline,
+        attempt,
+        ports,
+        stageVerdictRejectionReason(durable.message!.text),
+        durable.message!.ts,
+      );
+      return;
+    }
   }
   if (hostUnavailablePastGrace) {
     attempt.state = "failed";
