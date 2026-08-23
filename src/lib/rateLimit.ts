@@ -262,11 +262,12 @@ export function projectRateLimitReadModel(
     const observation = engine && accountId
       ? snapshot.quotaObservations[engine][accountId]
       : undefined;
-    const providerThrottle = engine && accountId
-      && file.authoritativeTurn?.state === "busy"
-      && (activeEntry || file.proc === "running")
-      ? providerThrottleFor(engine, accountId)
+    const providerThrottle = activeEntry && file.authoritativeTurn?.state === "busy"
+      ? providerThrottleFor(activeEntry.engine, activeEntry.accountId)
       : null;
+    /* The scanner's process signal still supports the legacy quota display,
+       whose only claim is which account window to show. Provider throttle
+       changes lifecycle presentation, so it requires the identity-live entry. */
     const structured = activeEntry || file.proc === "running"
       ? rateLimitFromQuotaObservation(observation, now)
       : null;

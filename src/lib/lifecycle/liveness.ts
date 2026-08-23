@@ -407,7 +407,7 @@ export function evaluateLiveness(input: {
       ? { lifecycle: "stalled", reason: "launch_unproven_expired" }
       : { lifecycle: "gone", reason: "launch_unproven_expired" };
   }
-  if (silent && input.turnState === "busy" && input.providerRetryAt) {
+  if (input.turnState === "busy" && input.providerRetryAt) {
     return { lifecycle: "waiting", reason: "provider_throttled", retryAt: input.providerRetryAt };
   }
   if (silent) return { lifecycle: "stalled", reason: "host_alive_transcript_silent" };
@@ -719,6 +719,21 @@ export async function agentLivenessSnapshot(
      per-row registry and lineage lookups across both. */
   const rowProjectionStartedAt = performance.now();
   let unreadable = 0;
+  const providerRetryAtByAccount = {
+    claude: new Map<string, string | null>(),
+    codex: new Map<string, string | null>(),
+  };
+  const providerRetryAtFor = (engine: "claude" | "codex", accountId: string): string | null => {
+    const engineAccounts = providerRetryAtByAccount[engine];
+    if (!engineAccounts.has(accountId)) {
+      engineAccounts.set(accountId, providerThrottleRetryAt(
+        sources.limitsProvenance?.(engine, accountId),
+        now,
+        PROVIDER_THROTTLE_GRACE_MS,
+      ));
+    }
+    return engineAccounts.get(accountId) ?? null;
+  };
   const projected = hydratable.map((entry, index) => {
     /* Three outcomes, kept apart: a read that produced evidence, a read that
        produced none, and a row the budget never reached. The counters below are
@@ -735,13 +750,8 @@ export async function agentLivenessSnapshot(
     const silentForMs = lastRecordMs !== null ? Math.max(0, now - lastRecordMs) : null;
     const registryEntry = entryForPath(registry, entry.path);
     const host = hostEvidence(registryEntry, sources.probe);
-    const stallCandidate = silentForMs !== null && silentForMs >= stallAfterMs;
-    const providerRetryAt = stallCandidate && turnState === "busy" && host.state === "alive" && registryEntry?.accountId
-      ? providerThrottleRetryAt(
-          sources.limitsProvenance?.(entry.engine as "claude" | "codex", registryEntry.accountId),
-          now,
-          PROVIDER_THROTTLE_GRACE_MS,
-        )
+    const providerRetryAt = turnState === "busy" && host.state === "alive" && registryEntry?.accountId
+      ? providerRetryAtFor(entry.engine as "claude" | "codex", registryEntry.accountId)
       : null;
     const conversationId = entry.conversationId ?? conversationIdForPath(registry, entry.path);
     return {
