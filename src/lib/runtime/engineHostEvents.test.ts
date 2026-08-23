@@ -114,6 +114,78 @@ describe("projectEngineHostEvent", () => {
       .toBeGreaterThan(64 * 1024);
   });
 
+  test("issue 1100: an oversized Claude tool call keeps its call identity and bounded arguments", () => {
+    const content = "line of generated source\n".repeat(2_000);
+    const projected = projectEngineHostEvent("conversation_tools", "claude:session-tools", {
+      kind: "item",
+      turnId: "turn-tools",
+      item: {
+        type: "assistant",
+        uuid: "uuid-big-write",
+        message: { id: "msg_big", role: "assistant", content: [
+          { type: "text", text: "Writing the file now." },
+          { type: "tool_use", id: "toolu_write", name: "Write", input: { file_path: "/repo/src/generated.ts", content } },
+        ] },
+      },
+      phase: "completed",
+      seq: 21,
+    });
+    const item = projected?.payload.item as Record<string, unknown>;
+    expect(item).toMatchObject({ truncated: true, type: "assistant", uuid: "uuid-big-write", message: { id: "msg_big", role: "assistant" } });
+    const blocks = (item.message as { content: Array<Record<string, unknown>> }).content;
+    /* Prose keeps its type only — the streamed deltas already carry the text and
+       a clipped authoritative body must not overwrite them. */
+    expect(blocks[0]).toEqual({ type: "text" });
+    expect(blocks[1]).toMatchObject({ type: "tool_use", id: "toolu_write", name: "Write", input: { file_path: "/repo/src/generated.ts" } });
+    expect([...String((blocks[1]!.input as Record<string, unknown>).content)].length).toBeLessThanOrEqual(256);
+    expect(Buffer.byteLength(JSON.stringify(item))).toBeLessThanOrEqual(8 * 1024);
+  });
+
+  test("issue 1100: an oversized Codex tool item keeps id, status and a clipped command, never its output", () => {
+    const projected = projectEngineHostEvent("conversation_tools", "codex:thread-tools", {
+      kind: "item",
+      turnId: "turn-tools",
+      item: {
+        type: "commandExecution",
+        id: "call_big",
+        command: "cat huge.log",
+        cwd: "/repo",
+        status: "completed",
+        exitCode: 0,
+        aggregatedOutput: "x".repeat(20_000),
+      },
+      phase: "completed",
+      seq: 22,
+    });
+    expect(projected?.payload.item).toEqual({
+      truncated: true,
+      id: "call_big",
+      type: "commandExecution",
+      exitCode: 0,
+      status: "completed",
+      command: "cat huge.log",
+      cwd: "/repo",
+    });
+    /* A result message of many tool_results stays identity-only as well. */
+    const results = projectEngineHostEvent("conversation_tools", "claude:session-tools", {
+      kind: "item",
+      turnId: "turn-tools",
+      item: {
+        type: "user",
+        uuid: "uuid-results",
+        message: { role: "user", content: Array.from({ length: 40 }, (_, index) => ({
+          type: "tool_result", tool_use_id: `toolu_${index}`, is_error: index % 2 === 1, content: "y".repeat(1_000),
+        })) },
+      },
+      phase: "completed",
+      seq: 23,
+    });
+    const blocks = ((results?.payload.item as { message: { content: unknown[] } }).message.content);
+    expect(blocks).toHaveLength(16);
+    expect(blocks[1]).toEqual({ type: "tool_result", tool_use_id: "toolu_1", is_error: true });
+    expect(JSON.stringify(results)).not.toContain("yyyy");
+  });
+
   test("projects an early semantic chunk and lets an explicit terminal override suppress replay", () => {
     const delivery = streamingVoiceDelivery({
       sourceTurnId: "turn-stream",

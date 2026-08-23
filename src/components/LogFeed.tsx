@@ -444,7 +444,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const canRevealOlder = hiddenLocal > 0 || tail.hasMore;
 
   const lastItem = feed.items.at(-1)?.item;
-  const working: { icon: LucideIcon; label: string } =
+  const transcriptWorking: { icon: LucideIcon; label: string } =
     lastItem?.kind === "tool" && lastItem.status === "run"
       ? { icon: Wrench, label: t("feed.running", { tool: (lastItem.command ?? lastItem.summary).split(/[\s:·]/, 1)[0] || t("feed.tool") }) }
       : lastItem?.kind === "think"
@@ -587,6 +587,22 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn),
     [runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn],
   );
+  /* The status bar names the tool that is running NOW: a live tool row from the
+     structured host (issue #1100) is newer than anything the transcript window
+     shows, so it wins over the transcript's last row while it is still running. */
+  const liveRunningTool = visibleLiveTurnItems.findLast((item) => item.tool)?.tool;
+  const working: { icon: LucideIcon; label: string } = liveRunningTool?.status === "run"
+    ? {
+      icon: Wrench,
+      label: t("feed.running", {
+        tool: (typeof liveRunningTool.args.command === "string"
+          ? liveRunningTool.args.command
+          : typeof liveRunningTool.args.cmd === "string"
+            ? liveRunningTool.args.cmd
+            : liveRunningTool.name).split(/[\s:·]/, 1)[0] || t("feed.tool"),
+      }),
+    }
+    : transcriptWorking;
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */
   const windowTail = visibleLiveTurnItems.length > 0 || pendingOutbox.length > 0 || Boolean(launch);

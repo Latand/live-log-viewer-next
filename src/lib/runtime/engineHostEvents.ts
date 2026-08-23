@@ -1,5 +1,6 @@
 import type { RuntimeAttentionKind, RuntimeAttentionRequest, RuntimeEventInput } from "./contracts";
 import type { RuntimeEvent } from "./engineHost";
+import { boundedToolArgs } from "./liveTurn";
 import { terminalVoiceResponse } from "./voiceDelivery";
 
 type JsonObject = Record<string, unknown>;
@@ -28,6 +29,84 @@ function boundedValue(value: unknown, maxBytes = 8 * 1024): unknown {
     ...(text(source.type) ? { type: text(source.type) } : {}),
     ...(text(source.name) ? { name: text(source.name) } : {}),
   };
+}
+
+const TRUNCATED_ITEM_BLOCK_LIMIT = 16;
+const TRUNCATED_ITEM_STRING_LIMIT = 256;
+
+/**
+ * The bounded replacement for an oversized item keeps what the live turn
+ * projects (issue #1100): the response identity and every tool call's id,
+ * name and a bounded argument projection — a large `Write`/`Edit` input or a
+ * long shell heredoc must still show up as a tool row. Prose bodies are
+ * dropped on purpose: the streamed deltas already carry the text, and a clipped
+ * authoritative body would otherwise overwrite them.
+ */
+function truncatedItemProjection(source: JsonObject): JsonObject {
+  const message = record(source.message);
+  const blocks = Array.isArray(message.content) ? message.content : Array.isArray(source.content) ? source.content : null;
+  const reducedBlocks = blocks
+    ? blocks.slice(0, TRUNCATED_ITEM_BLOCK_LIMIT).flatMap((value): JsonObject[] => {
+      const block = record(value);
+      const type = text(block.type);
+      if (type === "tool_use") {
+        return [{
+          type,
+          ...(text(block.id) ? { id: text(block.id) } : {}),
+          ...(text(block.name) ? { name: text(block.name) } : {}),
+          input: boundedToolArgs(block.input),
+        }];
+      }
+      if (type === "tool_result") {
+        return [{
+          type,
+          ...(text(block.tool_use_id) ? { tool_use_id: text(block.tool_use_id) } : {}),
+          ...(block.is_error === true ? { is_error: true } : {}),
+        }];
+      }
+      return type ? [{ type }] : [];
+    })
+    : null;
+  const reducedStrings: JsonObject = {};
+  for (const key of ["status", "command", "cwd", "tool", "server", "query", "path", "model"]) {
+    const candidate = text(source[key]);
+    if (candidate) reducedStrings[key] = clipped(candidate, TRUNCATED_ITEM_STRING_LIMIT);
+  }
+  return {
+    truncated: true,
+    ...(text(source.id) ? { id: text(source.id) } : {}),
+    ...(text(source.uuid) ? { uuid: text(source.uuid) } : {}),
+    ...(text(source.type) ? { type: text(source.type) } : {}),
+    ...(text(source.name) ? { name: text(source.name) } : {}),
+    ...(typeof source.exitCode === "number" ? { exitCode: source.exitCode } : {}),
+    ...reducedStrings,
+    ...(record(source.arguments) && Object.keys(record(source.arguments)).length
+      ? { arguments: boundedToolArgs(source.arguments) }
+      : {}),
+    ...(blocks
+      ? {
+        message: {
+          ...(text(message.id) ? { id: text(message.id) } : {}),
+          ...(text(message.role) ? { role: text(message.role) } : {}),
+          content: reducedBlocks,
+        },
+      }
+      : {}),
+  };
+}
+
+/** An item payload bounded for the journal: small items pass through, an
+    oversized one is reduced to its live-turn projection, and a projection that
+    is still too large falls back to bare identity. */
+function boundedItem(value: unknown, maxBytes = 8 * 1024): unknown {
+  let serialized: string;
+  try { serialized = JSON.stringify(value); } catch { return { truncated: true }; }
+  if (Buffer.byteLength(serialized) <= maxBytes) return value;
+  const projection = truncatedItemProjection(record(value));
+  try {
+    if (Buffer.byteLength(JSON.stringify(projection)) <= maxBytes) return projection;
+  } catch { /* fall through to the bare identity below */ }
+  return boundedValue(value, 0);
 }
 
 function questionFrom(value: unknown): RuntimeAttentionRequest["question"] | null {
@@ -141,7 +220,7 @@ export function projectEngineHostEvent(
       payload: {
         conversationId,
         turnId: event.turnId,
-        item: boundedValue(event.item),
+        item: boundedItem(event.item),
         phase: event.phase,
         ...(voiceResponse ? { voiceResponse } : {}),
       },

@@ -43,8 +43,8 @@ import {
 } from "@/lib/runtime/voiceDelivery";
 import {
   appendRuntimeLiveTurnDelta,
-  completeRuntimeLiveTurnItem,
   normalizeRuntimeLiveTurn,
+  projectRuntimeLiveTurnItem,
 } from "@/lib/runtime/liveTurn";
 import { parseStructuredImageRefs, structuredContent } from "@/lib/runtime/structuredContent";
 import { runtimeImageCapability } from "@/lib/runtime/runtimeImageStore";
@@ -1775,8 +1775,10 @@ export class RuntimeJournal {
       const turnId = typeof payload.turnId === "string"
         ? payload.turnId
         : previous.activeTurnId ?? "unknown";
-      const liveTurn = payload.phase === "completed"
-        ? completeRuntimeLiveTurnItem(previous.liveTurn, turnId, payload.item, event.recorded_at)
+      /* Both lifecycle phases reach the live turn (issue #1100): a `started`
+         tool item is a running tool row, `completed` settles prose and tools. */
+      const liveTurn = payload.phase === "completed" || payload.phase === "started"
+        ? projectRuntimeLiveTurnItem(previous.liveTurn, turnId, payload.item, payload.phase, event.recorded_at)
         : previous.liveTurn;
       const response = record(payload.voiceResponse);
       const voiceDeliveries = payload.phase === "completed"
