@@ -14,7 +14,17 @@ fs.mkdirSync(process.env.LLV_CLAUDE_HOME, { recursive: true });
 fs.writeFileSync(path.join(process.env.LLV_CLAUDE_HOME, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "test-token", subscriptionType: "max" } }), { mode: 0o600 });
 
 const { createManagedCodexAccount, setActiveCodexAccount } = await import("@/lib/accounts/codex");
-const { fetchClaudeLimits, mapAppServerRateLimits, readBurndown, readCodexLimits, readCodexTranscriptLimits, readLimits } = await import("./limits");
+const {
+  cachedLimitsProvenance,
+  fetchClaudeLimits,
+  mapAppServerRateLimits,
+  providerThrottleRetryAt,
+  PROVIDER_THROTTLE_GRACE_MS,
+  readBurndown,
+  readCodexLimits,
+  readCodexTranscriptLimits,
+  readLimits,
+} = await import("./limits");
 const { recordLimitSample } = await import("@/lib/limitsHistoryStore");
 
 afterAll(() => {
@@ -38,6 +48,35 @@ function resetLimitsCache(): void {
   delete (globalThis as { __llvLimitsInflight?: unknown }).__llvLimitsInflight;
   fs.rmSync(path.join(process.env.LLV_STATE_DIR!, "limits-cache.json"), { force: true });
 }
+
+test("account throttle provenance round-trips from disk and expires after retry grace", () => {
+  resetLimitsCache();
+  const retryAtMs = Date.parse("2026-08-23T09:12:00.000Z");
+  const retryAt = new Date(retryAtMs).toISOString();
+  const cacheFile = path.join(process.env.LLV_STATE_DIR!, "limits-cache.json");
+  fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+  fs.writeFileSync(cacheFile, JSON.stringify({
+    version: 2,
+    engines: {
+      claude: {
+        "account-a": {
+          at: retryAtMs - 60_000,
+          data: null,
+          provenance: { source: "unavailable", reason: "oauth-rate-limited", staleSince: null, retryAt },
+          retryAt: retryAtMs,
+        },
+      },
+      codex: {},
+    },
+  }));
+  delete (globalThis as { __llvLimitsCache?: unknown }).__llvLimitsCache;
+
+  const provenance = cachedLimitsProvenance("claude", "account-a");
+  expect(provenance).toEqual({ source: "unavailable", reason: "oauth-rate-limited", staleSince: null, retryAt });
+  expect(providerThrottleRetryAt(provenance, retryAtMs + PROVIDER_THROTTLE_GRACE_MS)).toBe(retryAt);
+  expect(providerThrottleRetryAt(provenance, retryAtMs + PROVIDER_THROTTLE_GRACE_MS + 1)).toBeNull();
+  resetLimitsCache();
+});
 
 function claudeUsage(usedPercent = 20): Response {
   return Response.json({ five_hour: { utilization: usedPercent } });
