@@ -589,9 +589,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   );
   /* The status bar names the tool that is running NOW: a live tool row from the
      structured host (issue #1100) is newer than anything the transcript window
-     shows, so it wins over the transcript's last row while it is still running. */
-  const liveRunningTool = visibleLiveTurnItems.findLast((item) => item.tool)?.tool;
-  const working: { icon: LucideIcon; label: string } = liveRunningTool?.status === "run"
+     shows, so it wins over the transcript's last row while it is still running.
+     Calls run in parallel, so the newest row may already have settled while an
+     earlier one is still going — the newest RUNNING row is the one named. */
+  const liveRunningTool = visibleLiveTurnItems.findLast((item) => item.tool?.status === "run")?.tool;
+  const working: { icon: LucideIcon; label: string } = liveRunningTool
     ? {
       icon: Wrench,
       label: t("feed.running", {

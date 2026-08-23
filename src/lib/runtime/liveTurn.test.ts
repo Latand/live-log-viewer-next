@@ -334,3 +334,51 @@ test("issue 1100: a tool row never absorbs streamed prose, and a later delta sta
     "awaiting-echo", "run", "awaiting-echo", "streaming",
   ]);
 });
+
+test("issue 1100 review: a journal-bounded call record (identity only) projects a row that says its arguments were omitted, and a replay never stacks its omission marker", () => {
+  /* What `engineHostEvents` writes for an oversized message once bounded
+     arguments no longer fit: every call id, `inputOmitted`, and the count of
+     calls it had to drop past the identities that fit. */
+  const bounded = {
+    truncated: true,
+    type: "assistant",
+    uuid: "u-bounded",
+    message: {
+      id: "msg_bounded",
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: "toolu_b1", name: "Bash", input: {}, inputOmitted: true },
+        { type: "tool_use", id: "toolu_b2", name: "Read", input: {}, inputOmitted: true },
+      ],
+      omittedToolCalls: 3,
+    },
+  };
+  let live = appendRuntimeLiveTurnDelta(null, "turn-bounded", "Fanning out.", at(0));
+  live = projectRuntimeLiveTurnItem(live, "turn-bounded", claudeAssistant("u-prose", [{ type: "text", text: "Fanning out." }]), "completed", at(1));
+  live = projectRuntimeLiveTurnItem(live, "turn-bounded", bounded, "completed", at(2));
+  /* Replay of the same bounded record (refresh / journal replay after restart). */
+  live = projectRuntimeLiveTurnItem(live, "turn-bounded", bounded, "completed", at(2));
+  const items = runtimeLiveTurnItems(live);
+  expect(items.map((item) => item.tool ? `tool:${item.itemId}:${item.tool.argsOmitted ? "args-omitted" : "args"}` : item.omittedItems ? `omitted:${item.omittedItems}` : `prose:${item.text}`)).toEqual([
+    "prose:Fanning out.",
+    "tool:toolu_b1:args-omitted",
+    "tool:toolu_b2:args-omitted",
+    "omitted:3",
+  ]);
+  /* The omission marker is keyed on its message, so the replay updated nothing. */
+  expect(items.filter((item) => (item.omittedItems ?? 0) > 0)).toHaveLength(1);
+  /* The compatibility `text` is still the latest PROSE, never blanked by the marker. */
+  expect(live?.text).toBe("Fanning out.");
+  /* Their results still settle the rows; the marker survives a snapshot round-trip. */
+  live = projectRuntimeLiveTurnItem(live, "turn-bounded", claudeUser("u-results", [
+    { type: "tool_result", tool_use_id: "toolu_b1" },
+    { type: "tool_result", tool_use_id: "toolu_b2", is_error: true },
+  ]), "completed", at(3));
+  const restored = runtimeLiveTurnItems(normalizeRuntimeLiveTurn(JSON.parse(JSON.stringify(live))));
+  expect(restored.map((item) => item.tool ? `${item.itemId}:${item.tool.status}:${item.tool.argsOmitted ? "args-omitted" : "args"}` : item.omittedItems ? `omitted:${item.omittedItems}` : "prose")).toEqual([
+    "prose",
+    "toolu_b1:ok:args-omitted",
+    "toolu_b2:err:args-omitted",
+    "omitted:3",
+  ]);
+});

@@ -114,6 +114,8 @@ const session: RuntimeSession = {
 };
 
 const tailState = { lines: [] as string[] };
+/* The hosted session a test renders against; tests swap the live turn. */
+const sessionState = { session };
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const actualLogTail = await import("@/hooks/useLogTail");
@@ -125,7 +127,7 @@ mock.module("@/hooks/useRuntime", () => ({
   useRuntime: () => inertRuntime,
   useRuntimeSession: () => null,
   useRuntimeSessionForConversation: () => ({
-    session,
+    session: sessionState.session,
     uiState: "working",
     attentions: [],
     receipts: [],
@@ -167,6 +169,7 @@ beforeEach(() => {
   dom.sessionStorage.clear();
   resetCanonicalAssistantClaimsForTests();
   tailState.lines = [];
+  sessionState.session = session;
 });
 afterEach(() => {
   for (const root of roots) flushSync(() => root.unmount());
@@ -270,4 +273,30 @@ test("a live tool row newer than every transcript record still yields to the row
   expect(liveRows(host)).toEqual(["prose:streaming"]);
   const rows = [...host.querySelectorAll<HTMLElement>("[data-feed-kind]")];
   expect(rows.some((row) => row.textContent?.includes("gh issue view 1100"))).toBeTrue();
+});
+
+/* Two calls issued in one message run in parallel: the Read settles first, the
+   long Bash is still going. The rows keep response order, so the NEWEST row is
+   the settled one and the running call sits above it. */
+function parallelTurn(): RuntimeLiveTurn {
+  let live = projectRuntimeLiveTurnItem(null, "turn-parallel", {
+    type: "assistant", uuid: "uuid-parallel",
+    message: { role: "assistant", content: [
+      { type: "tool_use", id: "toolu_sleep", name: "Bash", input: { command: "sleep 30 && echo done" } },
+      { type: "tool_use", id: "toolu_read_2", name: "Read", input: { file_path: "/repo/README.md" } },
+    ] },
+  }, "completed", AT(1));
+  live = projectRuntimeLiveTurnItem(live, "turn-parallel", {
+    type: "user", uuid: "uuid-result-read-2",
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_read_2" }] },
+  }, "completed", AT(2));
+  return live!;
+}
+
+test("issue 1100 review: the status bar names the newest RUNNING tool, not a later parallel call that already settled", () => {
+  sessionState.session = { ...session, activeTurnId: "turn-parallel", liveTurn: parallelTurn() };
+  const { host } = render();
+  expect(liveRows(host)).toEqual(["tool:toolu_sleep:run", "tool:toolu_read_2:ok"]);
+  const bar = host.querySelector<HTMLElement>('[data-turn-status="running"]');
+  expect(bar?.textContent).toContain("running sleep");
 });

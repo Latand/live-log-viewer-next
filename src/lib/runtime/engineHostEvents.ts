@@ -31,48 +31,81 @@ function boundedValue(value: unknown, maxBytes = 8 * 1024): unknown {
   };
 }
 
-const TRUNCATED_ITEM_BLOCK_LIMIT = 16;
 const TRUNCATED_ITEM_STRING_LIMIT = 256;
+
+/** A bounded string form of a terminal-outcome field (a Codex `error` /
+    `failure` may be a string or an object): enough to keep the discriminant
+    the live turn reads, never the payload. */
+function boundedOutcome(value: unknown): unknown {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return clipped(value, TRUNCATED_ITEM_STRING_LIMIT);
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized ? clipped(serialized, TRUNCATED_ITEM_STRING_LIMIT) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The bounded form of one Claude content block: a tool call keeps its identity
+    and (by default) a bounded argument projection; a tool result keeps its call
+    id and outcome; prose carries nothing the live turn needs (the streamed
+    deltas already hold the text). */
+function reducedToolBlock(block: JsonObject, keepArgs: boolean): JsonObject | null {
+  const type = text(block.type);
+  if (type === "tool_use") {
+    return {
+      type,
+      ...(text(block.id) ? { id: text(block.id) } : {}),
+      ...(text(block.name) ? { name: text(block.name) } : {}),
+      ...(keepArgs ? { input: boundedToolArgs(block.input) } : { input: {}, inputOmitted: true }),
+    };
+  }
+  if (type === "tool_result") {
+    return {
+      type,
+      ...(text(block.tool_use_id) ? { tool_use_id: text(block.tool_use_id) } : {}),
+      ...(block.is_error === true ? { is_error: true } : {}),
+    };
+  }
+  return null;
+}
+
+function projectionBytes(value: JsonObject): number {
+  try { return Buffer.byteLength(JSON.stringify(value)); } catch { return Number.POSITIVE_INFINITY; }
+}
 
 /**
  * The bounded replacement for an oversized item keeps what the live turn
- * projects (issue #1100): the response identity and every tool call's id,
- * name and a bounded argument projection — a large `Write`/`Edit` input or a
- * long shell heredoc must still show up as a tool row. Prose bodies are
- * dropped on purpose: the streamed deltas already carry the text, and a clipped
- * authoritative body would otherwise overwrite them.
+ * projects (issue #1100): the response identity and EVERY tool call's id and
+ * name, so a large `Write`/`Edit` input, a long shell heredoc, or a message of
+ * many parallel calls still shows each call as a tool row. Arguments are the
+ * first thing to go: a projection that does not fit with bounded arguments is
+ * retried with identity-only calls (`inputOmitted`, which the live row reports
+ * as omitted arguments); only when even the identities do not fit are the
+ * trailing calls dropped, and then the message says how many
+ * (`omittedToolCalls` / `omittedToolResults`), which the live turn renders as an
+ * explicit omission descriptor. Prose bodies are dropped on purpose: the
+ * streamed deltas already carry the text, and a clipped authoritative body
+ * would otherwise overwrite them. Codex tool items keep their terminal outcome
+ * discriminants (`status`, `exitCode`, `error`, `success`, `failure`) so a failed
+ * oversized call never projects as a successful row.
  */
-function truncatedItemProjection(source: JsonObject): JsonObject {
+function truncatedItemProjection(source: JsonObject, maxBytes: number): JsonObject {
   const message = record(source.message);
   const blocks = Array.isArray(message.content) ? message.content : Array.isArray(source.content) ? source.content : null;
-  const reducedBlocks = blocks
-    ? blocks.slice(0, TRUNCATED_ITEM_BLOCK_LIMIT).flatMap((value): JsonObject[] => {
-      const block = record(value);
-      const type = text(block.type);
-      if (type === "tool_use") {
-        return [{
-          type,
-          ...(text(block.id) ? { id: text(block.id) } : {}),
-          ...(text(block.name) ? { name: text(block.name) } : {}),
-          input: boundedToolArgs(block.input),
-        }];
-      }
-      if (type === "tool_result") {
-        return [{
-          type,
-          ...(text(block.tool_use_id) ? { tool_use_id: text(block.tool_use_id) } : {}),
-          ...(block.is_error === true ? { is_error: true } : {}),
-        }];
-      }
-      return type ? [{ type }] : [];
-    })
-    : null;
   const reducedStrings: JsonObject = {};
   for (const key of ["status", "command", "cwd", "tool", "server", "query", "path", "model"]) {
     const candidate = text(source[key]);
     if (candidate) reducedStrings[key] = clipped(candidate, TRUNCATED_ITEM_STRING_LIMIT);
   }
-  return {
+  const outcome: JsonObject = {};
+  for (const key of ["error", "success", "failure"]) {
+    const bounded = boundedOutcome(source[key]);
+    if (bounded !== undefined) outcome[key] = bounded;
+  }
+  const base: JsonObject = {
     truncated: true,
     ...(text(source.id) ? { id: text(source.id) } : {}),
     ...(text(source.uuid) ? { uuid: text(source.uuid) } : {}),
@@ -80,19 +113,62 @@ function truncatedItemProjection(source: JsonObject): JsonObject {
     ...(text(source.name) ? { name: text(source.name) } : {}),
     ...(typeof source.exitCode === "number" ? { exitCode: source.exitCode } : {}),
     ...reducedStrings,
+    ...outcome,
     ...(record(source.arguments) && Object.keys(record(source.arguments)).length
       ? { arguments: boundedToolArgs(source.arguments) }
       : {}),
-    ...(blocks
-      ? {
-        message: {
-          ...(text(message.id) ? { id: text(message.id) } : {}),
-          ...(text(message.role) ? { role: text(message.role) } : {}),
-          content: reducedBlocks,
-        },
-      }
-      : {}),
   };
+  if (!blocks) return base;
+  const envelope = (content: JsonObject[], omitted: { calls: number; results: number }): JsonObject => ({
+    ...base,
+    message: {
+      ...(text(message.id) ? { id: text(message.id) } : {}),
+      ...(text(message.role) ? { role: text(message.role) } : {}),
+      content,
+      ...(omitted.calls ? { omittedToolCalls: omitted.calls } : {}),
+      ...(omitted.results ? { omittedToolResults: omitted.results } : {}),
+    },
+  });
+  const toolBlocks = blocks.map(record).filter((block) => {
+    const type = text(block.type);
+    return type === "tool_use" || type === "tool_result";
+  });
+  /* Rung 1: every call with bounded arguments. Rung 2: every call, identity only. */
+  for (const keepArgs of [true, false]) {
+    const content = toolBlocks.flatMap((block) => {
+      const reduced = reducedToolBlock(block, keepArgs);
+      return reduced ? [reduced] : [];
+    });
+    const candidate = envelope(content, { calls: 0, results: 0 });
+    if (projectionBytes(candidate) <= maxBytes) return candidate;
+  }
+  /* Rung 3: the leading identities that fit, with the dropped tail counted.
+     A byte estimate picks the cut in one pass; the exact serialization then
+     confirms it (and trims the odd block the estimate missed). */
+  const identities = toolBlocks.flatMap((block) => {
+    const reduced = reducedToolBlock(block, false);
+    return reduced ? [reduced] : [];
+  });
+  const omittedPast = (kept: number) => {
+    const dropped = identities.slice(kept);
+    return {
+      calls: dropped.filter((block) => block.type === "tool_use").length,
+      results: dropped.filter((block) => block.type === "tool_result").length,
+    };
+  };
+  let used = projectionBytes(envelope([], omittedPast(0)));
+  let kept = 0;
+  for (const block of identities) {
+    const bytes = projectionBytes(block) + 1;
+    if (used + bytes > maxBytes) break;
+    used += bytes;
+    kept += 1;
+  }
+  for (;;) {
+    const candidate = envelope(identities.slice(0, kept), omittedPast(kept));
+    if (projectionBytes(candidate) <= maxBytes || kept === 0) return candidate;
+    kept -= 1;
+  }
 }
 
 /** An item payload bounded for the journal: small items pass through, an
@@ -102,7 +178,7 @@ function boundedItem(value: unknown, maxBytes = 8 * 1024): unknown {
   let serialized: string;
   try { serialized = JSON.stringify(value); } catch { return { truncated: true }; }
   if (Buffer.byteLength(serialized) <= maxBytes) return value;
-  const projection = truncatedItemProjection(record(value));
+  const projection = truncatedItemProjection(record(value), maxBytes);
   try {
     if (Buffer.byteLength(JSON.stringify(projection)) <= maxBytes) return projection;
   } catch { /* fall through to the bare identity below */ }

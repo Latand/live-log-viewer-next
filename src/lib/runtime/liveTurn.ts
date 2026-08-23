@@ -178,6 +178,9 @@ interface ToolActivity {
   engine: RuntimeLiveTurnToolEngine;
   status: RuntimeLiveTurnToolStatus;
   args: Record<string, unknown> | null;
+  /** The journal's bounded projection of an oversized item already dropped
+      this call's arguments (identity-only rung); the row says so. */
+  argsOmitted?: boolean;
   /** A finish report (tool_result / item completed) as opposed to a call start. */
   finished: boolean;
 }
@@ -283,6 +286,17 @@ function codexToolActivity(item: Record<string, unknown>, type: string, phase: "
   };
 }
 
+/** Tool calls the journal's bounded projection of an oversized Claude message
+    had to drop past the identities that fit (issue #1100 review): the live turn
+    renders the count as an explicit omission descriptor so the operator knows
+    rows are missing rather than believing the turn issued fewer calls. */
+function omittedToolCalls(value: unknown): number {
+  const item = record(value);
+  const message = record(item?.message);
+  const count = message?.omittedToolCalls;
+  return typeof count === "number" && Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+}
+
 /**
  * The tool calls and tool results one host item carries, in content order.
  * Claude: an `assistant` stream message carries `tool_use` blocks (the call was
@@ -309,6 +323,7 @@ function toolActivities(value: unknown, phase: "started" | "completed"): ToolAct
         engine: "claude",
         status: "run",
         args: record(block.input) ?? {},
+        ...(block.inputOmitted === true ? { argsOmitted: true } : {}),
         finished: false,
       }];
     });
@@ -450,7 +465,8 @@ function bounded(turnId: string, items: RuntimeLiveTurnItem[]): RuntimeLiveTurn 
   const active = kept.slice(activeStart);
   return {
     turnId,
-    text: kept.findLast((item) => !item.tool)?.text ?? "",
+    /* The latest prose: tool rows and pure omission descriptors carry none. */
+    text: kept.findLast((item) => !item.tool && item.text)?.text ?? "",
     items: active,
     ...(overflow.length ? { overflow } : {}),
   };
@@ -594,8 +610,46 @@ function projectToolActivity(
       engine: activity.engine,
       status: activity.status,
       args: boundedToolArgs(activity.args ?? {}),
+      ...(activity.argsOmitted ? { argsOmitted: true } : {}),
     },
   }];
+}
+
+/** The explicit omission descriptor for one bounded message, keyed on that
+    message so a replayed item (refresh, journal replay after restart) updates
+    the count in place instead of stacking a second marker. It has no canonical
+    row to claim it; it retires through the #674 fence once the transcript
+    moves past it, like any other unclaimed descriptor. */
+function projectOmittedToolCalls(
+  current: RuntimeLiveTurnItem[],
+  count: number,
+  sourceId: string | null,
+  occurredAt: string | null,
+): RuntimeLiveTurnItem[] {
+  if (!count) return current;
+  const itemId = sourceId ? `omitted-tools:${sourceId}` : null;
+  const existingIndex = itemId ? current.findIndex((candidate) => candidate.itemId === itemId) : -1;
+  if (existingIndex >= 0) {
+    const existing = current[existingIndex]!;
+    if ((existing.omittedItems ?? 0) >= count) return current;
+    const items = current.slice();
+    items[existingIndex] = { ...existing, omittedItems: count };
+    return items;
+  }
+  return [...current, {
+    itemId,
+    text: "",
+    phase: "awaiting-echo",
+    startedAt: occurredAt,
+    completedAt: occurredAt,
+    omittedItems: count,
+  }];
+}
+
+function messageSourceId(value: unknown): string | null {
+  const item = record(value);
+  const message = record(item?.message);
+  return text(item?.id) || text(item?.uuid) || text(message?.id) || null;
 }
 
 /**
@@ -611,13 +665,15 @@ export function projectRuntimeLiveTurnItem(
 ): RuntimeLiveTurn | null {
   const identity = phase === "completed" ? itemIdentity(item) : null;
   const activities = toolActivities(item, phase);
-  if (!identity && !activities.length) return value ?? null;
+  const omitted = phase === "completed" ? omittedToolCalls(item) : 0;
+  if (!identity && !activities.length && !omitted) return value ?? null;
   const before = itemsForTurn(value, turnId, occurredAt);
   let current = before;
   /* Claude puts prose before the `tool_use` blocks of the same message, so the
      text projects first and the calls follow it in response order. */
   if (identity) current = projectAssistantText(current, identity, occurredAt);
   for (const activity of activities) current = projectToolActivity(current, activity, occurredAt);
+  current = projectOmittedToolCalls(current, omitted, messageSourceId(item), occurredAt);
   /* An empty-bodied completion with nothing to settle leaves the turn as is. */
   if (current === before) return value ?? null;
   return bounded(turnId, current);
