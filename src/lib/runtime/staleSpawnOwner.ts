@@ -24,12 +24,10 @@ function admissionOwnerAlive(owner: AdmissionOwner): boolean {
     && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity);
 }
 
-/**
- * Reconciles stale structured launches held by a healthy long-lived admission
- * process when the exact runtime operation is terminal or absent. The regular
- * stale-launch pass protects live owners, so this narrow pre-pass supplies the
- * missing per-operation evidence and retains every open operation.
- */
+/** Reconciles stale launches held by a healthy admission process when their
+    exact runtime operation is terminal or absent. This operation-specific pass
+    settles those rows before the generic bounded reconciliation examines every
+    remaining launch; open operations continue into that shared timeout pass. */
 export async function reconcileStaleSpawnsHeldByLiveOwners(
   registry: AgentRegistry,
   client: RuntimeHostClient,
