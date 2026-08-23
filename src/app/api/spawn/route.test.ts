@@ -8,6 +8,7 @@ import { NextRequest } from "next/server";
 import { agentRegistry, AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots, createManagedCodexAccount } from "@/lib/accounts/codex";
+import { NoHealthyClaudeAccountError } from "@/lib/accounts/spawnHealth";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
@@ -167,7 +168,234 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
   }
 });
 
-test("an unusable explicit account creates a terminal retryable pinned receipt and card", async () => {
+test("a pinned account with a future retry deadline queues the existing launch until that deadline", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-retry-"));
+  const store = registry();
+  const deferred: Array<() => Promise<void>> = [];
+  const waits: string[] = [];
+  const spawnedAccounts: string[] = [];
+  const retryAt = "2026-08-23T15:30:00.000Z";
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const account = (accountId: string) => ({
+      engine: "claude" as const,
+      accountId,
+      kind: "managed" as const,
+      home: path.join(cwd, accountId),
+      transcriptRoot: path.join(cwd, accountId, "projects"),
+      env: { NODE_ENV: "test" as const },
+    });
+    const dependencies = {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => ({
+        ...account("account-b"),
+        requestedAdmission: {
+          kind: "retry-at" as const,
+          reason: "hard-limit" as const,
+          stale: false,
+          retryAt,
+        },
+      }),
+      resolveSpawnAccount: (_engine: "claude" | "codex", accountId: string | null) => account(accountId ?? "account-b"),
+      waitForAccountRetry: async (until: string) => { waits.push(until); },
+      defer: (work: () => Promise<void>) => { deferred.push(work); },
+      spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
+        spawnedAccounts.push(input.account.accountId);
+        return {
+          ok: true as const,
+          target: null,
+          path: null,
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered" as const,
+          state: "settled" as const,
+        };
+      },
+    };
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "sonnet",
+        cwd,
+        ["prompt"]: "continue",
+        accountId: "account-a",
+        clientAttemptId: "account_pin_retry_20260823",
+      }),
+    }), dependencies);
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ state: "starting", initialMessage: "queued" });
+    expect(spawnedAccounts).toEqual([]);
+    const receipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
+    expect(receipt).toMatchObject({ accountId: "account-a", accountPin: true, state: "starting" });
+    expect(receipt.launchProfile.title).toContain(retryAt);
+    expect(projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]).toMatchObject({
+      title: expect.stringContaining(retryAt),
+      spawn: { accountId: "account-a", accountPin: true },
+    });
+
+    expect(deferred).toHaveLength(1);
+    await deferred[0]!();
+    expect(waits).toEqual([retryAt]);
+    expect(spawnedAccounts).toEqual(["account-a"]);
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("a pinned account without a retry deadline falls back and records the degraded pin on the card", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-fallback-"));
+  const store = registry();
+  const deferred: Array<() => Promise<void>> = [];
+  const spawnedAccounts: string[] = [];
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const dependencies = {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => ({
+        engine: "claude" as const,
+        accountId: "account-b",
+        kind: "managed" as const,
+        home: path.join(cwd, "account-b"),
+        transcriptRoot: path.join(cwd, "account-b", "projects"),
+        env: { NODE_ENV: "test" as const },
+        requestedAdmission: {
+          kind: "unavailable" as const,
+          reason: "auth-failed" as const,
+          stale: false,
+          retryAt: null,
+        },
+      }),
+      defer: (work: () => Promise<void>) => { deferred.push(work); },
+      spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
+        spawnedAccounts.push(input.account.accountId);
+        return {
+          ok: true as const,
+          target: null,
+          path: null,
+          launchId: input.receipt.launchId,
+          conversationId: input.receipt.conversationId,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered" as const,
+          state: "settled" as const,
+        };
+      },
+    };
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "sonnet",
+        cwd,
+        ["prompt"]: "continue",
+        accountId: "account-a",
+        clientAttemptId: "account_pin_fallback_20260823",
+      }),
+    }), dependencies);
+
+    expect(response.status).toBe(202);
+    const receipt = store.spawnReceiptForClientAttempt("account_pin_fallback_20260823")!;
+    expect(receipt).toMatchObject({ accountId: "account-b", accountPin: false, state: "starting" });
+    expect(receipt.launchProfile.title).toBe("Launched on another account — pin unavailable");
+    expect(projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]).toMatchObject({
+      title: "Launched on another account — pin unavailable",
+      spawn: { accountId: "account-b", accountPin: false },
+    });
+
+    expect(deferred).toHaveLength(1);
+    await deferred[0]!();
+    expect(spawnedAccounts).toEqual(["account-b"]);
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("a pinned spawn still refuses when no account is admissible", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-none-"));
+  const store = registry();
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => store,
+    resolveHealthySpawnAccount: async () => {
+      throw new NoHealthyClaudeAccountError(["account-a", "account-b"]);
+    },
+  };
+  const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+    body: JSON.stringify({
+      engine: "claude",
+      model: "sonnet",
+      cwd,
+      ["prompt"]: "continue",
+      accountId: "account-a",
+      clientAttemptId: "account_pin_none_20260823",
+    }),
+  }), dependencies);
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    state: "failed",
+    initialMessage: "failed",
+    retrySafe: true,
+    error: expect.stringContaining("No healthy Claude account is available"),
+  });
+  expect(store.spawnReceiptForClientAttempt("account_pin_none_20260823")).toMatchObject({
+    accountId: "account-a",
+    accountPin: true,
+    state: "failed",
+  });
+});
+
+test("a legacy resolver mismatch also degrades the pin to a durable fallback", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "unusable-account-pin-"));
   const store = registry();
   const previous = {
@@ -221,16 +449,15 @@ test("an unusable explicit account creates a terminal retryable pinned receipt a
 
     const response = await post();
     const responseBody = await response.json();
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(responseBody).toMatchObject({
-      state: "failed",
-      initialMessage: "failed",
-      retrySafe: true,
-      error: "the requested account is not available for this launch",
+      state: "starting",
+      initialMessage: "pending",
+      retrySafe: false,
     });
     const replay = await post();
-    expect(replay.status).toBe(200);
-    expect(await replay.json()).toMatchObject({ launchId: responseBody.launchId, state: "failed" });
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toMatchObject({ launchId: responseBody.launchId, state: "starting" });
 
     const parent = store.ensureConversation("claude", path.join(cwd, "parent.jsonl"), "parent-account");
     const conflicts = [
@@ -248,19 +475,20 @@ test("an unusable explicit account creates a terminal retryable pinned receipt a
 
     const receipt = store.spawnReceiptForClientAttempt("unusable_pin_20260731");
     expect(receipt).toMatchObject({
-      accountId: "unusable-pin",
-      accountPin: true,
+      accountId: "selected-account",
+      accountPin: false,
       requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
-      state: "failed",
-      error: "the requested account is not available for this launch",
+      state: "starting",
+      error: null,
+      launchProfile: { title: "Launched on another account — pin unavailable" },
     });
     const card = projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]?.spawn;
     expect(card).toMatchObject({
-      accountId: "unusable-pin",
-      accountPin: true,
-      state: "failed",
-      retrySafe: true,
-      error: "the requested account is not available for this launch",
+      accountId: "selected-account",
+      accountPin: false,
+      state: "starting",
+      retrySafe: false,
+      error: null,
     });
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
@@ -303,14 +531,9 @@ test("a failed pinned reviewer preserves canonical child and pipeline lineage", 
     const dependencies = {
       ...structuredRouteDependencies(cwd),
       registry: () => store,
-      resolveHealthySpawnAccount: async () => ({
-        engine: "codex" as const,
-        accountId: "selected-account",
-        kind: "managed" as const,
-        home: path.join(cwd, "selected-account"),
-        transcriptRoot: path.join(cwd, "selected-account", "sessions"),
-        env: { CODEX_HOME: path.join(cwd, "selected-account"), NODE_ENV: "test" as const },
-      }),
+      resolveHealthySpawnAccount: async () => {
+        throw new NoHealthyClaudeAccountError(["unavailable-account"]);
+      },
       pipelineAttemptTargetForSource: () => ({
         pipelineId: "pipeline-failed-pin",
         stageId: "review",

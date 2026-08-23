@@ -471,6 +471,8 @@ export const en = {
   "spawnCard.initial.delivered": "Initial message: delivered",
   "spawnCard.initial.failed": "Initial message: failed",
   "spawnCard.retrySafe": "This launch is closed. You can start a new attempt.",
+  "spawnCard.pinUnavailableFallback": "Launched on another account — pin unavailable",
+  "spawnCard.pinUnavailableQueued": "Pinned account unavailable — queued until {retryAt}",
   "spawnCard.launch": "Launch {id}",
   "spawnChip.starting": "Starting",
   "spawnChip.binding": "Binding host",

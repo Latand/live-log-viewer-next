@@ -1,12 +1,20 @@
 import path from "node:path";
 
+import { classifySpawnAccountAdmission, type SpawnAccountAdmission } from "@/lib/agent/accountLiveness";
 import { fetchClaudeLimits } from "@/lib/limits";
-import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON } from "@/lib/types";
+import { LIMITS_REAUTH_REQUIRED_REASON, type EngineLimits } from "@/lib/types";
 
 import type { ClaudeAccount } from "./claude";
 import { claudeOauthMetadata, refreshClaudeOauth } from "./claudeOauth";
 
-export type ClaudeValidityProbeResult = "valid" | "invalid" | "unknown";
+export type ClaudeValidityProbeResult = SpawnAccountAdmission;
+
+export interface ClaudeSpawnAccountSelection {
+  account: ClaudeAccount;
+  admission: SpawnAccountAdmission;
+  /** Classification of the explicitly requested account when one was given. */
+  requestedAdmission?: SpawnAccountAdmission;
+}
 
 const CLAUDE_SPAWN_HEALTH_TIMEOUT_MS = 600;
 
@@ -30,7 +38,13 @@ function refreshSingleFlight(
   if (existing) return existing;
   const pending = Promise.resolve()
     .then(() => refresh(account))
-    .catch(() => "unknown" as const)
+    .catch(() => classifySpawnAccountAdmission({
+      enabled: true,
+      authentication: "unknown",
+      limits: "unknown",
+      stale: true,
+      retryAt: null,
+    }))
     .finally(() => {
       if (inflight.get(key) === pending) inflight.delete(key);
     });
@@ -51,13 +65,47 @@ export class NoHealthyClaudeAccountError extends Error {
 }
 
 export function claudeValidityFromLimitRead(
-  result: { source: string; reason: string | null },
+  result: {
+    source: string;
+    reason: string | null;
+    data: EngineLimits | null;
+    retryAt?: number | string | null;
+  },
+  now = Date.now(),
 ): ClaudeValidityProbeResult {
-  if (result.source === "live" || result.reason === LIMITS_RATE_LIMITED_REASON) return "valid";
-  if (result.reason === LIMITS_REAUTH_REQUIRED_REASON
+  const authentication = result.reason === LIMITS_REAUTH_REQUIRED_REASON
     || result.reason === "credentials missing access token"
-    || result.reason?.startsWith("credentials unreadable:")) return "invalid";
-  return "unknown";
+    || result.reason?.startsWith("credentials unreadable:")
+    ? "failed" as const
+    : result.source === "live"
+      ? "authenticated" as const
+      : "unknown" as const;
+  const windows = result.data
+    ? [result.data.session, result.data.weekly].filter((window) => window !== null)
+    : [];
+  const exhausted = windows.filter((window) => Number.isFinite(window.usedPercent) && window.usedPercent >= 100);
+  const limits = exhausted.length > 0
+    ? "exhausted" as const
+    : windows.length > 0
+      ? "available" as const
+      : "unknown" as const;
+  let retryAt: string | null = null;
+  if (exhausted.length > 0 && exhausted.every((window) =>
+    Number.isSafeInteger(window.resetsAt)
+      && window.resetsAt! * 1_000 > now)) {
+    retryAt = new Date(Math.max(...exhausted.map((window) => window.resetsAt!)) * 1_000).toISOString();
+  } else if (typeof result.retryAt === "number" && Number.isFinite(result.retryAt)) {
+    retryAt = new Date(result.retryAt).toISOString();
+  } else if (typeof result.retryAt === "string") {
+    retryAt = result.retryAt;
+  }
+  return classifySpawnAccountAdmission({
+    enabled: true,
+    authentication,
+    limits,
+    stale: result.source !== "live",
+    retryAt,
+  }, now);
 }
 
 async function liveValidityProbe(account: ClaudeAccount): Promise<ClaudeValidityProbeResult> {
@@ -71,8 +119,24 @@ async function liveValidityProbe(account: ClaudeAccount): Promise<ClaudeValidity
 
 async function refreshValidityProbe(account: ClaudeAccount): Promise<ClaudeValidityProbeResult> {
   const refreshed = await refreshClaudeOauth(account);
-  if (refreshed === "invalid") return "invalid";
-  if (refreshed === "unknown") return "unknown";
+  if (refreshed === "invalid") {
+    return classifySpawnAccountAdmission({
+      enabled: true,
+      authentication: "failed",
+      limits: "unknown",
+      stale: false,
+      retryAt: null,
+    });
+  }
+  if (refreshed === "unknown") {
+    return classifySpawnAccountAdmission({
+      enabled: true,
+      authentication: "unknown",
+      limits: "unknown",
+      stale: true,
+      retryAt: null,
+    });
+  }
   return await liveValidityProbe(account);
 }
 
@@ -85,36 +149,66 @@ const productionDependencies: ClaudeSpawnHealthDependencies = {
 /**
  * Chooses one launchable Claude account from a single preflight health pass.
  * A current OAuth expiry is required before the live usage probe runs. Live
- * validation outranks a transient probe failure; the requested/routed account
- * breaks ties inside the same health tier.
+ * validation outranks a transient probe failure for ordinary routing. An
+ * explicit admissible pin keeps its account; the active account breaks ties
+ * inside the same health tier when the caller left the account unpinned.
  */
 export async function selectHealthyClaudeAccount(
   accounts: ClaudeAccount[],
   preferredId: string | null | undefined,
   dependencies: ClaudeSpawnHealthDependencies = productionDependencies,
-): Promise<ClaudeAccount> {
+  pinPreferred = true,
+): Promise<ClaudeSpawnAccountSelection> {
   const now = dependencies.now();
   const classified = accounts.map((account) => {
     const oauth = claudeOauthMetadata(account);
     return { account, oauth };
   });
-  const rank = (health: ClaudeValidityProbeResult) => health === "valid" ? 2 : health === "unknown" ? 1 : 0;
-  const select = (candidates: Array<{ account: ClaudeAccount; health: ClaudeValidityProbeResult }>) => candidates
-    .filter((candidate) => rank(candidate.health) > 0)
-    .sort((left, right) => rank(right.health) - rank(left.health)
+  type Evaluated = { account: ClaudeAccount; admission: SpawnAccountAdmission };
+  const rank = (admission: SpawnAccountAdmission) => admission.kind === "admissible"
+    ? admission.basis === "current" ? 2 : 1
+    : 0;
+  const select = (candidates: Evaluated[]) => candidates
+    .filter((candidate) => rank(candidate.admission) > 0)
+    .sort((left, right) => rank(right.admission) - rank(left.admission)
       || Number(right.account.id === preferredId) - Number(left.account.id === preferredId)
       || left.account.id.localeCompare(right.account.id))[0];
+  const result = (selected: Evaluated, requested?: Evaluated | null): ClaudeSpawnAccountSelection => ({
+    account: selected.account,
+    admission: selected.admission,
+    ...(pinPreferred && preferredId && requested ? { requestedAdmission: requested.admission } : {}),
+  });
 
   const current = await Promise.all(classified
     .filter((candidate) => candidate.oauth && candidate.oauth.expiresAt > now)
-    .map(async ({ account }) => ({ account, health: await dependencies.probe(account) })));
+    .map(async ({ account }) => ({ account, admission: await dependencies.probe(account) })));
+  let requested = preferredId ? current.find((candidate) => candidate.account.id === preferredId) ?? null : null;
+  if (pinPreferred && requested?.admission.kind === "admissible") return result(requested, requested);
+
+  const preferredExpired = pinPreferred && preferredId
+    ? classified.find((candidate) => candidate.account.id === preferredId
+      && candidate.oauth?.expiresAt
+      && candidate.oauth.expiresAt <= now
+      && candidate.oauth.refreshable)
+    : null;
+  if (preferredExpired) {
+    requested = {
+      account: preferredExpired.account,
+      admission: await refreshSingleFlight(preferredExpired.account, dependencies.refresh),
+    };
+    if (requested.admission.kind === "admissible") return result(requested, requested);
+  }
+
   const currentSelection = select(current);
-  if (currentSelection) return currentSelection.account;
+  if (currentSelection) return result(currentSelection, requested);
 
   const refreshed = await Promise.all(classified
     .filter((candidate) => candidate.oauth?.expiresAt && candidate.oauth.expiresAt <= now && candidate.oauth.refreshable)
-    .map(async ({ account }) => ({ account, health: await refreshSingleFlight(account, dependencies.refresh) })));
-  const refreshedSelection = select(refreshed);
-  if (refreshedSelection) return refreshedSelection.account;
+    .filter((candidate) => candidate.account.id !== preferredExpired?.account.id)
+    .map(async ({ account }) => ({ account, admission: await refreshSingleFlight(account, dependencies.refresh) })));
+  const all = [...current, ...(requested ? [requested] : []), ...refreshed];
+  const refreshedSelection = select(all);
+  if (refreshedSelection) return result(refreshedSelection, requested);
+  if (pinPreferred && requested?.admission.kind === "retry-at") return result(requested, requested);
   throw new NoHealthyClaudeAccountError(accounts.map((candidate) => candidate.id));
 }

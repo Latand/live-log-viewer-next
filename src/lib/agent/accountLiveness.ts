@@ -7,6 +7,55 @@ import type { AgentRegistryEntry, ProcessIdentity, RegistryConversation, Registr
 
 export type ManagedAccountEngine = Extract<AgentEngine, "claude" | "codex">;
 
+export type SpawnAccountAdmissionEvidence = {
+  enabled: boolean;
+  authentication: "authenticated" | "failed" | "unknown";
+  limits: "available" | "exhausted" | "unknown";
+  stale: boolean;
+  retryAt: string | null;
+};
+
+export type SpawnAccountAdmission =
+  | { kind: "admissible"; basis: "current" | "last-known"; stale: boolean; retryAt: null }
+  | { kind: "retry-at"; reason: "hard-limit"; stale: boolean; retryAt: string }
+  | { kind: "unavailable"; reason: "auth-failed" | "hard-limit" | "account-disabled"; stale: boolean; retryAt: null };
+
+function futureRetryAt(value: string | null, now: number): string | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && parsed > now ? new Date(parsed).toISOString() : null;
+}
+
+/**
+ * Classifies spawn evidence without turning an observation gap into a launch
+ * outage. Unknown stale evidence remains the last known state. Only explicit
+ * account disablement, failed authentication, or exhausted quota closes
+ * admission; a future hard-limit reset makes that closure queueable.
+ */
+export function classifySpawnAccountAdmission(
+  evidence: SpawnAccountAdmissionEvidence,
+  now = Date.now(),
+): SpawnAccountAdmission {
+  if (!evidence.enabled) {
+    return { kind: "unavailable", reason: "account-disabled", stale: evidence.stale, retryAt: null };
+  }
+  if (evidence.authentication === "failed") {
+    return { kind: "unavailable", reason: "auth-failed", stale: evidence.stale, retryAt: null };
+  }
+  if (evidence.limits === "exhausted") {
+    const retryAt = futureRetryAt(evidence.retryAt, now);
+    return retryAt
+      ? { kind: "retry-at", reason: "hard-limit", stale: evidence.stale, retryAt }
+      : { kind: "unavailable", reason: "hard-limit", stale: evidence.stale, retryAt: null };
+  }
+  return {
+    kind: "admissible",
+    basis: evidence.stale || evidence.authentication === "unknown" ? "last-known" : "current",
+    stale: evidence.stale,
+    retryAt: null,
+  };
+}
+
 /** Entry statuses that claim an agent process is (or is about to be) hosted. */
 const HOSTED_ENTRY_STATUSES = new Set<AgentRegistryEntry["status"]>(["starting", "live", "idle", "handoff"]);
 /** Receipt states of a launch that has not reached a durable terminal state. */
