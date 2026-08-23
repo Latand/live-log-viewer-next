@@ -2,10 +2,12 @@ import { identityAlive, livenessProbe, type LivenessProbe } from "@/lib/agent/ac
 import type { AgentRegistryEntry, RegistryFile } from "@/lib/agent/registry";
 import { agentRegistry } from "@/lib/agent/registry";
 import { isAbortError } from "@/lib/deadline";
+import { cachedLimitsProvenance } from "@/lib/limits";
+import { providerThrottleRetryAt, PROVIDER_THROTTLE_GRACE_MS } from "@/lib/limitsThrottle";
 import { getPipelines } from "@/lib/pipelines/engine";
 import type { Pipeline, PipelineStageAttempt } from "@/lib/pipelines/types";
 import { completedFileScan } from "@/lib/scanner/scanCache";
-import type { Engine, FileEntry } from "@/lib/types";
+import type { Engine, FileEntry, LimitsProvenance } from "@/lib/types";
 
 import {
   completedGenerationSelection,
@@ -54,6 +56,8 @@ export type AgentLivenessReason =
   | "host_alive_turn_idle"
   /** A live host whose transcript has been silent past the stall threshold. */
   | "host_alive_transcript_silent"
+  /** A live host is waiting for its account's provider retry deadline. */
+  | "provider_throttled"
   /** The zombie: an open turn whose host is gone. Nothing will ever finish it. */
   | "host_gone_turn_open"
   /** The host exited after its turn settled — a finished or killed stage. */
@@ -95,6 +99,8 @@ export interface AgentLivenessRecord {
   /** Shared vocabulary. `stalled` means the turn cannot progress on its own. */
   lifecycle: LifecycleState;
   reason: AgentLivenessReason;
+  /** Provider retry deadline when `reason` is `provider_throttled`. */
+  retryAt?: string | null;
   /** Milliseconds since `lastRecordAt`; always reported so a caller can apply
       its own threshold without a second read. */
   silentForMs: number | null;
@@ -272,6 +278,8 @@ export interface AgentLivenessSources {
     transcriptPath: string,
     options?: { signal?: AbortSignal | null },
   ): Promise<LivenessTranscriptEvidence | null>;
+  /** Current limits provenance for the account that owns a hosted row. */
+  limitsProvenance?(engine: "claude" | "codex", accountId: string): LimitsProvenance | null;
   probe: LivenessProbe;
 }
 
@@ -291,6 +299,7 @@ export function productionLivenessSources(
     registrySnapshot: () => agentRegistry().readOnlySnapshot(),
     pipelines: () => getPipelines().pipelines,
     transcriptEvidence: readLivenessTranscriptEvidence,
+    limitsProvenance: cachedLimitsProvenance,
     probe: livenessProbe(),
   };
 }
@@ -379,7 +388,8 @@ export function evaluateLiveness(input: {
   silentForMs: number | null;
   stallAfterMs: number;
   startingGraceMs?: number;
-}): { lifecycle: LifecycleState; reason: AgentLivenessReason } {
+  providerRetryAt?: string | null;
+}): { lifecycle: LifecycleState; reason: AgentLivenessReason; retryAt?: string } {
   const silent = input.silentForMs !== null && input.silentForMs >= input.stallAfterMs;
   if (input.host.state === "gone") {
     return input.turnState === "busy"
@@ -396,6 +406,9 @@ export function evaluateLiveness(input: {
     return input.turnState === "busy"
       ? { lifecycle: "stalled", reason: "launch_unproven_expired" }
       : { lifecycle: "gone", reason: "launch_unproven_expired" };
+  }
+  if (silent && input.providerRetryAt) {
+    return { lifecycle: "waiting", reason: "provider_throttled", retryAt: input.providerRetryAt };
   }
   if (silent) return { lifecycle: "stalled", reason: "host_alive_transcript_silent" };
   if (input.turnState === "idle") return { lifecycle: "waiting", reason: "host_alive_turn_idle" };
@@ -720,7 +733,16 @@ export async function agentLivenessSnapshot(
        as stalled — the exact question this surface exists to answer. */
     const lastRecordMs = evidence?.lastRecordTs ?? (Number.isFinite(entry.mtimeMs) ? entry.mtimeMs : null);
     const silentForMs = lastRecordMs !== null ? Math.max(0, now - lastRecordMs) : null;
-    const host = hostEvidence(entryForPath(registry, entry.path), sources.probe);
+    const registryEntry = entryForPath(registry, entry.path);
+    const host = hostEvidence(registryEntry, sources.probe);
+    const stallCandidate = silentForMs !== null && silentForMs >= stallAfterMs;
+    const providerRetryAt = stallCandidate && host.state === "alive" && registryEntry?.accountId
+      ? providerThrottleRetryAt(
+          sources.limitsProvenance?.(entry.engine as "claude" | "codex", registryEntry.accountId),
+          now,
+          PROVIDER_THROTTLE_GRACE_MS,
+        )
+      : null;
     const conversationId = entry.conversationId ?? conversationIdForPath(registry, entry.path);
     return {
       entry,
@@ -729,7 +751,7 @@ export async function agentLivenessSnapshot(
       lastRecordMs,
       silentForMs,
       host,
-      ...evaluateLiveness({ host, turnState, silentForMs, stallAfterMs }),
+      ...evaluateLiveness({ host, turnState, silentForMs, stallAfterMs, providerRetryAt }),
       pipeline: (conversationId ? pipelines.byConversation.get(conversationId) : undefined)
         ?? pipelines.byPath.get(entry.path)
         ?? null,
@@ -750,6 +772,7 @@ export async function agentLivenessSnapshot(
     host: row.host,
     lifecycle: row.lifecycle,
     reason: row.reason,
+    retryAt: row.retryAt ?? null,
     silentForMs: row.silentForMs,
     stalledForMs: row.lifecycle === "stalled" || row.lifecycle === "gone" ? row.silentForMs : null,
     pipeline: row.pipeline,

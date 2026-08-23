@@ -269,6 +269,62 @@ test("the files read model joins account exhaustion to a live conversation and i
   });
 });
 
+test("the files read model projects request throttling as an account scheduled wait", () => {
+  const accountId = "account-a";
+  const retryAtMs = NOW + 5 * 60_000;
+  const snapshot = {
+    entries: {
+      "codex:provider-throttled": {
+        artifactPath: "/sessions/implementer.jsonl",
+        accountId,
+        status: "live",
+      },
+    },
+    conversations: {
+      conversation_impl: {
+        id: "conversation_impl",
+        engine: "codex" as const,
+        generations: [{ path: "/sessions/implementer.jsonl", accountId }],
+      },
+    },
+    quotaObservations: { claude: {}, codex: { [accountId]: { ...observation(40), accountId } } },
+  };
+
+  const runtime = globalThis as typeof globalThis & { __llvLimitsCache?: unknown };
+  const previous = runtime.__llvLimitsCache;
+  const projected = (() => {
+    runtime.__llvLimitsCache = {
+      version: 2,
+      engines: {
+        claude: {},
+        codex: {
+          [accountId]: {
+            provenance: {
+              source: "cache",
+              reason: "oauth-rate-limited",
+              staleSince: null,
+              retryAt: new Date(retryAtMs).toISOString(),
+            },
+          },
+        },
+      },
+    };
+    try {
+      return projectRateLimitReadModel([entry({ activity: "stalled" })], [], snapshot, NOW);
+    } finally {
+      if (previous === undefined) delete runtime.__llvLimitsCache;
+      else runtime.__llvLimitsCache = previous;
+    }
+  })();
+
+  expect(projected.files[0]?.rateLimit).toEqual({
+    source: "account",
+    accountId,
+    window: null,
+    resetAt: retryAtMs / 1000,
+  });
+});
+
 test("a pane signal wins and receives the structured reset time", () => {
   const file = entry({
     rateLimit: { source: "pane", accountId: null, window: null, resetAt: null },

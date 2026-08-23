@@ -1641,7 +1641,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   deployment_status: "Read Viewer deployment or runtime operation status, or list recent deployments.",
   resources: "Read system and Viewer-owned agent resource usage.",
   conversation_migration: "Reseat, retry, or roll back a conversation account migration.",
-  agent_activity: "Read agent liveness: last transcript record, turn state, whether the host is alive or gone, and how long a stalled conversation has been silent.",
+  agent_activity: "Read agent liveness: last transcript record, turn state, host state, provider-throttle retry time, and confirmed stalls.",
   lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
   request_attention: [
     "Move the operator's one active Viewer to a typed target immediately and verify the arrival — no confirmation prompt, no pending offer. Execution is gated on server-derived authority: only the operator's root/gateway session or the target project's designated orchestrator seat may direct it; workers and unidentified callers are refused (ATTENTION_NOT_PERMITTED) with nothing recorded. The latest-interaction active view is chosen deterministically (down to the one executing browser tab); success is returned only after that view's camera/focus actually landed, and a missing view, lost target, or timeout is an explicit bounded failure. Durably attributed to the calling session, idempotent by clientRequestId across restarts, and the operator keeps a one-action Return control that restores exactly where they were.",

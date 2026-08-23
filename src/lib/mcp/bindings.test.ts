@@ -981,6 +981,82 @@ test("agent_activity reports the liveness snapshot and journals the stalls it fi
   expect(journaled).toHaveLength(1);
 });
 
+test("agent_activity exposes a provider throttle retryAt without journaling a stall", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-provider-throttle-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const now = Date.parse("2026-08-23T09:00:00.000Z");
+  const retryAt = "2026-08-23T09:12:00.000Z";
+  const transcriptPath = "/transcripts/provider-throttled.jsonl";
+  const accountId = "account-a";
+  const journaled: unknown[] = [];
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    livenessSources: () => ({
+      now: () => now,
+      probe: { now: () => now, pidAlive: () => true, processIdentity: () => "host-start" },
+      listFiles: async () => [{
+        path: transcriptPath,
+        project: "viewer",
+        title: "stage agent",
+        engine: "codex",
+        activity: "stalled",
+        activityReason: "jsonl_turn_stalled",
+        mtime: Date.parse("2026-08-23T08:20:00.000Z") / 1000,
+        conversationId: "conversation_provider_throttled",
+      }],
+      registrySnapshot: () => ({
+        entries: {
+          "codex:provider-throttled": {
+            key: { engine: "codex", accountId, sessionId: "provider-throttled" },
+            artifactPath: transcriptPath,
+            cwd: "/repo",
+            accountId,
+            status: "live",
+            host: null,
+            structuredHost: {
+              kind: "codex-app-server",
+              endpoint: "unix:/tmp/host.sock",
+              process: { pid: 42, startIdentity: "host-start" },
+              eventCursor: 0,
+              protocolVersion: null,
+              writerClaimEpoch: 1,
+              activeTurnRef: null,
+              pendingAttention: [],
+              activeFlags: [],
+            },
+            claimEpoch: 1,
+            claimOwner: null,
+            pendingAction: null,
+            updatedAt: "2026-08-23T08:00:00.000Z",
+          },
+        },
+        conversations: {},
+      }),
+      pipelines: () => [],
+      describeTranscript: async () => null,
+      transcriptEvidence: async () => ({ turn: "busy", lastRecordTs: Date.parse("2026-08-23T08:20:00.000Z") }),
+      limitsProvenance: (engine: "claude" | "codex", requestedAccountId: string) => {
+        expect([engine, requestedAccountId]).toEqual(["codex", accountId]);
+        return { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt };
+      },
+    }),
+    refreshLifecycleJournal: (input: unknown) => {
+      journaled.push(input);
+      return { appended: 0, skipped: 0, throttled: false };
+    },
+  } as never);
+
+  const result = await bindings.agent_activity({ clientRequestId: "activity-provider-throttle", liveOnly: true });
+
+  expect(result).toMatchObject({ count: 1, stalledCount: 0, journaled: 0 });
+  expect((result.conversations as Array<Record<string, unknown>>)[0]).toMatchObject({
+    lifecycle: "waiting",
+    reason: "provider_throttled",
+    retryAt,
+  });
+  expect(journaled).toHaveLength(1);
+});
+
 /**
  * #860 — the two bounds the project-scoped liveness read was missing at this
  * binding: the catalog it reads and the caller's lifetime.

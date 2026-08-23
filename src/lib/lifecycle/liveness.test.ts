@@ -4,12 +4,18 @@ import os from "node:os";
 import path from "node:path";
 
 import type { AgentRegistryEntry, RegistryFile } from "@/lib/agent/registry";
+import { PROVIDER_THROTTLE_GRACE_MS } from "@/lib/limitsThrottle";
 import type { Pipeline, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { FileScanSnapshot } from "@/lib/scanner/scanCache";
 import type { FileEntry } from "@/lib/types";
 
 import { completedGenerationSelection, type CompletedGenerationRead } from "./inventorySelection";
-import { agentLivenessSnapshot, evaluateLiveness, HOSTED_RECOVERY_MAX, type AgentLivenessSources } from "./liveness";
+import {
+  agentLivenessSnapshot,
+  evaluateLiveness,
+  HOSTED_RECOVERY_MAX,
+  type AgentLivenessSources,
+} from "./liveness";
 import { projectLivenessEvents } from "./projector";
 import { readLivenessTranscriptEvidence, type LivenessTranscript, type LivenessTranscriptEvidence } from "./transcript";
 
@@ -397,6 +403,60 @@ test("a live host whose transcript goes silent past the threshold is stalled", (
   /* No host evidence yet inside the launch grace is a start, not a stall. */
   expect(evaluateLiveness({ host: { state: "unknown" }, turnState: "unknown", silentForMs: 1_000, stallAfterMs: 10 * 60_000 }))
     .toEqual({ lifecycle: "starting", reason: "launch_unproven" });
+});
+
+test("a silent live host follows its account throttle through retryAt plus grace, then stalls", async () => {
+  const dir = sandbox();
+  const agentPath = path.join(dir, "provider-throttled.jsonl");
+  fs.writeFileSync(agentPath, "{}\n", "utf8");
+  const accountId = "account-a";
+  const retryAtMs = NOW + 5 * 60_000;
+  const retryAt = new Date(retryAtMs).toISOString();
+  const entry = { ...structuredEntry(agentPath, 4242), accountId };
+  const registry = {
+    entries: { "codex:provider-throttled": entry },
+    conversations: {},
+  } as unknown as RegistryFile;
+  const requestedAccounts: Array<[string, string]> = [];
+
+  const throttled = await agentLivenessSnapshot({}, sources({
+    probe: { now: () => NOW, pidAlive: () => true, processIdentity: () => "start-token-of-a-dead-host" },
+    listFiles: async () => [fileEntry({ path: agentPath })],
+    registrySnapshot: () => registry,
+    pipelines: () => [],
+    transcriptEvidence: async () => ({ turn: "busy" as const, lastRecordTs: FROZEN_AT }),
+    limitsProvenance: (engine, requestedAccountId) => {
+      requestedAccounts.push([engine, requestedAccountId]);
+      return { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt };
+    },
+  }));
+
+  expect(requestedAccounts).toEqual([["codex", accountId]]);
+  expect(throttled.stalledCount).toBe(0);
+  expect(throttled.conversations[0]).toMatchObject({
+    lifecycle: "waiting",
+    reason: "provider_throttled",
+    retryAt,
+    stalledForMs: null,
+  });
+
+  const afterGrace = retryAtMs + PROVIDER_THROTTLE_GRACE_MS + 1;
+  const stalled = await agentLivenessSnapshot({}, sources({
+    now: () => afterGrace,
+    probe: { now: () => afterGrace, pidAlive: () => true, processIdentity: () => "start-token-of-a-dead-host" },
+    listFiles: async () => [fileEntry({ path: agentPath })],
+    registrySnapshot: () => registry,
+    pipelines: () => [],
+    transcriptEvidence: async () => ({ turn: "busy" as const, lastRecordTs: FROZEN_AT }),
+    limitsProvenance: () => ({ source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt }),
+  }));
+
+  expect(stalled.stalledCount).toBe(1);
+  expect(stalled.conversations[0]).toMatchObject({
+    lifecycle: "stalled",
+    reason: "host_alive_transcript_silent",
+    retryAt: null,
+  });
 });
 
 test("an unregistered transcript is aged: past the grace it has stopped starting up", () => {

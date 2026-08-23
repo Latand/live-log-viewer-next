@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { FileEntry } from "@/lib/types";
 
-import { SwitchCard } from "./SwitchCard";
+import { formatRateLimitTime } from "./rateLimit";
+import { providerThrottleStatusLine, SwitchCard } from "./SwitchCard";
 
 /**
  * Issue #961: the switch card carries the same status vocabulary as the board
@@ -63,4 +64,25 @@ test("a blocked switch card carries the needs-you word; a quiet one carries none
 test("the existing status line survives beside the projected word", () => {
   const blocked = card(file({ waitingInput: { since: NOW_S - 40 } as FileEntry["waitingInput"] }));
   expect(blocked).toContain("working on the release");
+});
+
+test("a provider-throttled card names its resume time in English and Ukrainian", () => {
+  const resetAt = NOW_S + 60 * 60;
+  const throttled = file({
+    activity: "stalled",
+    rateLimit: { source: "account", accountId: "account-a", window: null, resetAt },
+  });
+
+  expect(providerThrottleStatusLine(throttled, "en")).toBe(
+    `provider is throttling — resumes at ${formatRateLimitTime(resetAt, "en")}`,
+  );
+  expect(providerThrottleStatusLine(throttled, "uk")).toBe(
+    `провайдер обмежує частоту — продовжить о ${formatRateLimitTime(resetAt, "uk")}`,
+  );
+  const html = card(throttled);
+  expect(html).toContain("provider is throttling");
+  expect(html).toContain('data-card-status="queued"');
+  expect(html).toContain('data-tone="waiting"');
+  expect(html).not.toContain("working on the release");
+  expect(html).not.toContain("data-rate-limit-reseat");
 });
