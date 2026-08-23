@@ -99,6 +99,43 @@ function valueAtPath(target: Record<string, unknown>, path: readonly string[]): 
   return value;
 }
 
+test("agent_activity preserves additive provider throttle fields through the MCP protocol", async () => {
+  const retryAt = "2026-08-23T09:12:00.000Z";
+  await withProtocolClient(inertBindings({
+    agent_activity: async () => ({
+      count: 1,
+      stalledCount: 0,
+      conversations: [{
+        conversationId: "conversation_provider_throttled",
+        lifecycle: "waiting",
+        reason: "provider_throttled",
+        retryAt,
+        host: { state: "alive", kind: "structured" },
+      }],
+    }),
+  }), async (client) => {
+    const result = await client.callTool({
+      name: "agent_activity",
+      arguments: { clientRequestId: "activity-provider-throttle-parity", liveOnly: true },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      toolName: "agent_activity",
+      count: 1,
+      stalledCount: 0,
+      conversations: [{
+        conversationId: "conversation_provider_throttled",
+        lifecycle: "waiting",
+        reason: "provider_throttled",
+        retryAt,
+        host: { state: "alive", kind: "structured" },
+      }],
+    });
+  });
+});
+
 test("every harmless bounded MCP numeric clamps, coerces, and defaults before its binding", async () => {
   const calls = new Map<McpToolName, Record<string, unknown>[]>();
   const bindings = inertBindings(Object.fromEntries(

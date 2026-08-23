@@ -68,10 +68,14 @@ test("the existing status line survives beside the projected word", () => {
 
 test("a provider-throttled card names its resume time in English and Ukrainian", () => {
   const resetAt = NOW_S + 60 * 60;
-  const throttled = file({
-    activity: "stalled",
-    rateLimit: { source: "account", accountId: "account-a", window: null, resetAt },
-  });
+  const retryAt = new Date(resetAt * 1000).toISOString();
+  const throttled = {
+    ...file({
+      activity: "stalled",
+      authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null },
+    }),
+    providerThrottle: { reason: "provider_throttled" as const, retryAt },
+  };
 
   expect(providerThrottleStatusLine(throttled, "en")).toBe(
     `provider is throttling — resumes at ${formatRateLimitTime(resetAt, "en")}`,
@@ -84,5 +88,6 @@ test("a provider-throttled card names its resume time in English and Ukrainian",
   expect(html).toContain('data-card-status="queued"');
   expect(html).toContain('data-tone="waiting"');
   expect(html).not.toContain("working on the release");
+  expect(html).not.toContain("rate-limited until");
   expect(html).not.toContain("data-rate-limit-reseat");
 });

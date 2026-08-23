@@ -403,6 +403,14 @@ test("a live host whose transcript goes silent past the threshold is stalled", (
   /* No host evidence yet inside the launch grace is a start, not a stall. */
   expect(evaluateLiveness({ host: { state: "unknown" }, turnState: "unknown", silentForMs: 1_000, stallAfterMs: 10 * 60_000 }))
     .toEqual({ lifecycle: "starting", reason: "launch_unproven" });
+  /* Throttle provenance cannot turn a settled conversation into scheduled work. */
+  expect(evaluateLiveness({
+    host: { state: "alive" },
+    turnState: "idle",
+    silentForMs: 11 * 60_000,
+    stallAfterMs: 10 * 60_000,
+    providerRetryAt: new Date(NOW + 5 * 60_000).toISOString(),
+  })).toEqual({ lifecycle: "stalled", reason: "host_alive_transcript_silent" });
 });
 
 test("a silent live host follows its account throttle through retryAt plus grace, then stalls", async () => {
@@ -438,6 +446,22 @@ test("a silent live host follows its account throttle through retryAt plus grace
     reason: "provider_throttled",
     retryAt,
     stalledForMs: null,
+  });
+
+  const settled = await agentLivenessSnapshot({}, sources({
+    probe: { now: () => NOW, pidAlive: () => true, processIdentity: () => "start-token-of-a-dead-host" },
+    listFiles: async () => [fileEntry({ path: agentPath })],
+    registrySnapshot: () => registry,
+    pipelines: () => [],
+    transcriptEvidence: async () => ({ turn: "idle" as const, lastRecordTs: FROZEN_AT }),
+    limitsProvenance: () => {
+      throw new Error("settled rows must not read throttle provenance");
+    },
+  }));
+  expect(settled.conversations[0]).toMatchObject({
+    lifecycle: "stalled",
+    reason: "host_alive_transcript_silent",
+    retryAt: null,
   });
 
   const afterGrace = retryAtMs + PROVIDER_THROTTLE_GRACE_MS + 1;

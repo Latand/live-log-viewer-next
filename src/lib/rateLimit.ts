@@ -2,22 +2,16 @@ import type { DurableQuotaObservation } from "@/lib/accounts/migration/contracts
 import { effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
 import type { Flow } from "@/lib/flows/types";
 import { SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
-import { providerThrottleRetryAt } from "@/lib/limitsThrottle";
+import { cachedProviderThrottleProvenance, providerThrottleState, type ProviderThrottleState } from "@/lib/limitsThrottle";
 import type { Engine, EngineLimits, FileEntry, LimitsProvenance, LimitWindow, LimitWindowSource, RateLimitState } from "@/lib/types";
 
 type HostedEngine = Extract<Engine, "claude" | "codex">;
 
-type RuntimeLimitsCache = {
-  engines?: Partial<Record<HostedEngine, Record<string, { provenance?: LimitsProvenance }>>>;
+export type ProviderThrottleFileEntry = FileEntry & {
+  /** Scheduled request-frequency wait. Deliberately separate from quota
+      exhaustion so flow admission and account reseating remain unchanged. */
+  providerThrottle?: ProviderThrottleState | null;
 };
-
-/** Browser-safe view of provenance already loaded by `/api/limits` in this
-    server process. The client bundle sees no cache and therefore returns null. */
-function runtimeLimitsProvenance(engine: HostedEngine, accountId: string): LimitsProvenance | null {
-  const store = globalThis as typeof globalThis & { __llvLimitsCache?: RuntimeLimitsCache | null };
-  const provenance = store.__llvLimitsCache?.engines?.[engine]?.[accountId]?.provenance;
-  return provenance ? { ...provenance } : null;
-}
 
 export const LIMITS_FRESHNESS_S = 20 * 60;
 
@@ -229,8 +223,8 @@ export function projectRateLimitReadModel(
   flows: Flow[],
   snapshot: RateLimitProjectionSnapshot,
   now = Date.now(),
-  limitsProvenance: (engine: HostedEngine, accountId: string) => LimitsProvenance | null = runtimeLimitsProvenance,
-): { files: FileEntry[]; flows: Flow[] } {
+  limitsProvenance: (engine: HostedEngine, accountId: string) => LimitsProvenance | null = cachedProviderThrottleProvenance,
+): { files: ProviderThrottleFileEntry[]; flows: Flow[] } {
   const hosts = new Map<string, { conversationId: string; engine: HostedEngine; accountId: string | null }>();
   for (const conversation of Object.values(snapshot.conversations)) {
     for (const generation of conversation.generations) {
@@ -256,25 +250,22 @@ export function projectRateLimitReadModel(
     const observation = engine && accountId
       ? snapshot.quotaObservations[engine][accountId]
       : undefined;
-    const throttleRetryAt = engine && accountId && (activeEntry || file.proc === "running")
-      ? providerThrottleRetryAt(limitsProvenance(engine, accountId), now)
-      : null;
-    const providerThrottle = throttleRetryAt && accountId
-      ? {
-          source: "account" as const,
-          accountId,
-          window: null,
-          resetAt: Date.parse(throttleRetryAt) / 1000,
-        }
+    const providerThrottle = engine && accountId
+      && file.authoritativeTurn?.state === "busy"
+      && (activeEntry || file.proc === "running")
+      ? providerThrottleState(limitsProvenance(engine, accountId), now)
       : null;
     const structured = activeEntry || file.proc === "running"
-      ? providerThrottle ?? rateLimitFromQuotaObservation(observation, now)
+      ? rateLimitFromQuotaObservation(observation, now)
       : null;
     const rateLimit = mergeRateLimits(file.rateLimit, structured, accountId);
+    const projectedFile = { ...file } as ProviderThrottleFileEntry;
+    delete projectedFile.providerThrottle;
     return {
-      ...file,
+      ...projectedFile,
       conversationId: file.conversationId ?? host?.conversationId,
       rateLimit,
+      ...(providerThrottle ? { providerThrottle } : {}),
     };
   });
   const filesByPath = new Map(projectedFiles.map((file) => [file.path, file]));

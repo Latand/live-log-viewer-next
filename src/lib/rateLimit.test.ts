@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import type { Flow } from "@/lib/flows/types";
 import type { EngineLimits, FileEntry } from "@/lib/types";
@@ -269,9 +272,10 @@ test("the files read model joins account exhaustion to a live conversation and i
   });
 });
 
-test("the files read model projects request throttling as an account scheduled wait", () => {
+test("the files read model projects a cold cached provider throttle without quota side effects", () => {
   const accountId = "account-a";
   const retryAtMs = NOW + 5 * 60_000;
+  const retryAt = new Date(retryAtMs).toISOString();
   const snapshot = {
     entries: {
       "codex:provider-throttled": {
@@ -290,39 +294,92 @@ test("the files read model projects request throttling as an account scheduled w
     quotaObservations: { claude: {}, codex: { [accountId]: { ...observation(40), accountId } } },
   };
 
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-rate-limit-cold-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
   const runtime = globalThis as typeof globalThis & { __llvLimitsCache?: unknown };
-  const previous = runtime.__llvLimitsCache;
-  const projected = (() => {
-    runtime.__llvLimitsCache = {
-      version: 2,
-      engines: {
-        claude: {},
-        codex: {
-          [accountId]: {
-            provenance: {
-              source: "cache",
-              reason: "oauth-rate-limited",
-              staleSince: null,
-              retryAt: new Date(retryAtMs).toISOString(),
-            },
+  const previousCache = runtime.__llvLimitsCache;
+  process.env.LLV_STATE_DIR = stateDir;
+  fs.writeFileSync(path.join(stateDir, "limits-cache.json"), JSON.stringify({
+    version: 2,
+    engines: {
+      claude: {},
+      codex: {
+        [accountId]: {
+          at: NOW - 60_000,
+          data: null,
+          provenance: {
+            source: "cache",
+            reason: "oauth-rate-limited",
+            staleSince: null,
+            retryAt,
           },
+          retryAt: retryAtMs,
         },
       },
-    };
-    try {
-      return projectRateLimitReadModel([entry({ activity: "stalled" })], [], snapshot, NOW);
-    } finally {
-      if (previous === undefined) delete runtime.__llvLimitsCache;
-      else runtime.__llvLimitsCache = previous;
-    }
-  })();
+    },
+  }));
+  delete runtime.__llvLimitsCache;
 
-  expect(projected.files[0]?.rateLimit).toEqual({
-    source: "account",
-    accountId,
-    window: null,
-    resetAt: retryAtMs / 1000,
+  let projected: ReturnType<typeof projectRateLimitReadModel>;
+  try {
+    projected = projectRateLimitReadModel([
+      entry({
+        activity: "live",
+        authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null },
+      }),
+    ], [flow()], snapshot, NOW);
+  } finally {
+    if (previousCache === undefined) delete runtime.__llvLimitsCache;
+    else runtime.__llvLimitsCache = previousCache;
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+
+  expect(projected.files[0]).toMatchObject({
+    activity: "live",
+    providerThrottle: { reason: "provider_throttled", retryAt },
   });
+  expect(projected.files[0]?.rateLimit).toBeNull();
+  expect(projected.flows[0]?.block).toBeUndefined();
+});
+
+test("the files read model leaves a settled conversation unchanged under account throttle", () => {
+  const accountId = "account-a";
+  const retryAt = new Date(NOW + 5 * 60_000).toISOString();
+  const snapshot = {
+    entries: {
+      "codex:provider-throttled": {
+        artifactPath: "/sessions/implementer.jsonl",
+        accountId,
+        status: "idle",
+      },
+    },
+    conversations: {
+      conversation_impl: {
+        id: "conversation_impl",
+        engine: "codex" as const,
+        generations: [{ path: "/sessions/implementer.jsonl", accountId }],
+      },
+    },
+    quotaObservations: { claude: {}, codex: { [accountId]: { ...observation(40), accountId } } },
+  };
+  const projected = projectRateLimitReadModel(
+    [entry({
+      activity: "idle",
+      authoritativeTurn: { state: "idle", source: "empty", terminalAt: null },
+      proc: null,
+      pid: null,
+    })],
+    [flow()],
+    snapshot,
+    NOW,
+    () => ({ source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt }),
+  );
+
+  expect(projected.files[0]).not.toHaveProperty("providerThrottle");
+  expect(projected.files[0]?.rateLimit).toBeNull();
+  expect(projected.flows[0]?.block).toBeUndefined();
 });
 
 test("a pane signal wins and receives the structured reset time", () => {

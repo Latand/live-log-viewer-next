@@ -5,6 +5,7 @@ import { CornerDownRight } from "lucide-react";
 import { X } from "@/components/icons";
 import { projectDisplayName } from "@/lib/displayNames";
 import { translate, useLocale, type Locale } from "@/lib/i18n";
+import type { ProviderThrottleState } from "@/lib/limitsThrottle";
 import type { FileEntry } from "@/lib/types";
 
 import { AccountSwitchChip, CardIdentityChip } from "./cardAnatomy";
@@ -54,28 +55,34 @@ function statusToneClass(tone: SwitchCardTone): string {
   return "text-primary/75";
 }
 
-/** Request throttling uses the account rate-limit shape with no quota window;
-    quota exhaustion always names `session` or `weekly`. */
+function providerThrottleForFile(file: FileEntry): ProviderThrottleState | null {
+  const throttle = (file as FileEntry & { providerThrottle?: ProviderThrottleState | null }).providerThrottle;
+  return throttle?.reason === "provider_throttled" && Number.isFinite(Date.parse(throttle.retryAt))
+    ? throttle
+    : null;
+}
+
 export function providerThrottleStatusLine(file: FileEntry, locale: Locale): string | null {
-  const rateLimit = file.rateLimit;
-  if (rateLimit?.source !== "account" || rateLimit.window !== null || rateLimit.resetAt === null) return null;
+  const throttle = providerThrottleForFile(file);
+  if (!throttle) return null;
   return translate(locale, "status.providerThrottled", {
-    time: formatRateLimitTime(rateLimit.resetAt, locale),
+    time: formatRateLimitTime(Date.parse(throttle.retryAt) / 1000, locale),
   });
 }
 
 export function SwitchCard({ file, title, project, currentProject, descendants, statusLine, size, tone, onOpen, onArchive }: Props) {
   const { locale, t } = useLocale();
   const large = size === "large";
+  const providerThrottle = providerThrottleForFile(file);
   const providerStatusLine = providerThrottleStatusLine(file, locale);
   const displayedStatusLine = providerStatusLine ?? statusLine;
   const displayedTone: SwitchCardTone = providerStatusLine ? "waiting" : tone;
-  const statusFile = providerStatusLine && file.rateLimit?.resetAt
+  const statusFile = providerStatusLine && providerThrottle
     ? {
         ...file,
         rateLimit: null,
         pendingWakeup: file.pendingWakeup ?? {
-          fireAt: file.rateLimit.resetAt * 1000,
+          fireAt: Date.parse(providerThrottle.retryAt),
           reason: providerStatusLine,
         },
       }
@@ -151,9 +158,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           </span>
         ) : null}
         <AccountSwitchChip file={file} />
-        {providerStatusLine
-          ? <RateLimitBadge rateLimit={file.rateLimit} shrinkable />
-          : <RateLimitBadge file={file} shrinkable />}
+        <RateLimitBadge file={file} shrinkable />
         <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} shrinkable />
       </div>
       {displayedStatusLine ? (

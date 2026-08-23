@@ -407,7 +407,7 @@ export function evaluateLiveness(input: {
       ? { lifecycle: "stalled", reason: "launch_unproven_expired" }
       : { lifecycle: "gone", reason: "launch_unproven_expired" };
   }
-  if (silent && input.providerRetryAt) {
+  if (silent && input.turnState === "busy" && input.providerRetryAt) {
     return { lifecycle: "waiting", reason: "provider_throttled", retryAt: input.providerRetryAt };
   }
   if (silent) return { lifecycle: "stalled", reason: "host_alive_transcript_silent" };
@@ -736,7 +736,7 @@ export async function agentLivenessSnapshot(
     const registryEntry = entryForPath(registry, entry.path);
     const host = hostEvidence(registryEntry, sources.probe);
     const stallCandidate = silentForMs !== null && silentForMs >= stallAfterMs;
-    const providerRetryAt = stallCandidate && host.state === "alive" && registryEntry?.accountId
+    const providerRetryAt = stallCandidate && turnState === "busy" && host.state === "alive" && registryEntry?.accountId
       ? providerThrottleRetryAt(
           sources.limitsProvenance?.(entry.engine as "claude" | "codex", registryEntry.accountId),
           now,
