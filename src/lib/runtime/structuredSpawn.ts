@@ -11,6 +11,7 @@ import { sessionKey, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKe
 import type { SpawnResponse } from "@/lib/agent/spawnResponse";
 import { prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
+import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { hasUserAuthoredMessage } from "@/lib/session/reader";
 import { hardenedRedact } from "@/lib/view/compactText";
@@ -67,7 +68,7 @@ export function materializeStructuredHostAccess(
   readOnly: boolean,
   sourceEnv: NodeJS.ProcessEnv,
   capability: string | null,
-  scratchParent = os.tmpdir(),
+  scratchParent?: string,
 ): StructuredHostAccessMaterialization {
   const baseEnv = {
     ...sourceEnv,
@@ -83,23 +84,19 @@ export function materializeStructuredHostAccess(
     };
   }
 
-  const scratchDirectory = fs.mkdtempSync(path.join(scratchParent, "llv-read-only-stage-"));
+  const resolvedScratchParent = scratchParent ?? statePath("scratch");
+  fs.mkdirSync(resolvedScratchParent, { recursive: true, mode: 0o700 });
+  const scratchDirectory = fs.mkdtempSync(path.join(resolvedScratchParent, "llv-read-only-stage-"));
   try {
     fs.chmodSync(scratchDirectory, 0o700);
-    const directories = {
-      HOME: path.join(scratchDirectory, "home"),
-      XDG_CONFIG_HOME: path.join(scratchDirectory, "config"),
-      TMPDIR: path.join(scratchDirectory, "tmp"),
-    };
-    for (const directory of Object.values(directories)) {
-      fs.mkdirSync(directory, { mode: 0o700 });
-    }
+    const temporaryDirectory = path.join(scratchDirectory, "tmp");
+    fs.mkdirSync(temporaryDirectory, { mode: 0o700 });
     const permissionProfileConfig = `permissions.${READ_ONLY_STAGE_PERMISSION_PROFILE}={extends=":read-only",filesystem={${JSON.stringify(scratchDirectory)}="write"}}`;
     const cleanup = () => fs.rmSync(scratchDirectory, { recursive: true, force: true });
     return {
       env: {
         ...baseEnv,
-        ...directories,
+        TMPDIR: temporaryDirectory,
         GH_CONFIG_DIR: githubConfigDirectory(sourceEnv),
       },
       codex: {

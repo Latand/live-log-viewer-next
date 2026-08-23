@@ -1,6 +1,7 @@
 import { afterAll, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Database } from "bun:sqlite";
@@ -337,6 +338,41 @@ async function exhaustVerdictRecovery(h: ReturnType<typeof harness>, entries: Fi
   await tickPipelines(entries, h.ports);
   h.advanceWallClock(30_000);
   await tickPipelines(entries, h.ports);
+}
+
+async function withRuntimeSnapshot(
+  snapshot: Record<string, unknown> | ((requestNumber: number) => Record<string, unknown>),
+  run: () => Promise<void>,
+): Promise<void> {
+  const socketPath = path.join(process.env.LLV_STATE_DIR!, `runtime-${crypto.randomUUID()}.sock`);
+  let requestNumber = 0;
+  const server = net.createServer((socket) => {
+    let frame = "";
+    socket.on("data", (chunk) => {
+      frame += String(chunk);
+      const newline = frame.indexOf("\n");
+      if (newline < 0) return;
+      const request = JSON.parse(frame.slice(0, newline)) as { id: string };
+      const result = typeof snapshot === "function" ? snapshot(requestNumber++) : snapshot;
+      socket.end(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const priorSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  process.env.LLV_RUNTIME_HOST_SOCKET = socketPath;
+  try {
+    await run();
+  } finally {
+    if (priorSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = priorSocket;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 }
 
 function boardTask(id: string, project = "viewer"): BoardTask {
@@ -1707,6 +1743,163 @@ test("a worker that dies after transcript discovery enters bounded verdict recov
   await exhaustVerdictRecovery(h);
   expect(loadPipelines()[0]!.state).toBe("needs_decision");
   expect(loadPipelines()[0]!.stateDetail).toContain("canonical stage transcript is not yet readable");
+});
+
+test("an unindexed rollout stays running while its structured host is alive and idle (#1109)", async () => {
+  await withRuntimeSnapshot({
+    sessions: [{
+      conversationId: "conversation_stage_1",
+      host: "hosted",
+      turn: "idle",
+      attentionIds: [],
+    }],
+  }, async () => {
+    const h = harness();
+    await runningStructuredStage(h);
+    h.ports.conversationAgentActive = defaultPipelinePorts().conversationAgentActive;
+
+    for (let tick = 0; tick < 4; tick += 1) {
+      if (tick > 0) h.advanceWallClock(30_000);
+      await tickPipelines([], h.ports);
+    }
+
+    const current = loadPipelines()[0]!;
+    expect(current.state).toBe("running");
+    expect(current.runs[0]!.attempts[0]).toMatchObject({
+      state: "running",
+      verdict: null,
+    });
+    expect(current.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
+  });
+});
+
+test("a dead runtime snapshot cannot poison later hosted idle evidence in the same tick (#1109)", async () => {
+  let snapshotReads = 0;
+  await withRuntimeSnapshot((requestNumber) => {
+    snapshotReads += 1;
+    return {
+      sessions: [{
+        conversationId: "conversation_stage_1",
+        host: requestNumber === 0 ? "dead" : "hosted",
+        turn: "idle",
+        attentionIds: [],
+      }],
+    };
+  }, async () => {
+    const h = harness();
+    await runningStructuredStage(h);
+    const runtimePorts = defaultPipelinePorts();
+    let primedDeadProjection = false;
+    h.ports.conversationAgentActive = async (conversationId) => {
+      if (!primedDeadProjection) {
+        primedDeadProjection = true;
+        expect(await runtimePorts.conversationAgentActive(conversationId)).toBe(false);
+      }
+      return runtimePorts.conversationAgentActive(conversationId);
+    };
+
+    await tickPipelines([], h.ports);
+
+    const current = loadPipelines()[0]!;
+    expect(current.state).toBe("running");
+    expect(current.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
+    expect(snapshotReads).toBe(2);
+  });
+});
+
+test("a phase-budget overrun cannot spend an unindexed transcript recovery check (#1109)", async () => {
+  for (const overrun of ["before-read", "during-read"] as const) {
+    const h = harness();
+    await runningStructuredStage(h);
+    let monotonicMs = 0;
+    let durableReads = 0;
+    h.setMonotonicClock(() => monotonicMs);
+    h.ports.conversationAgentActive = async () => {
+      if (overrun === "before-read") monotonicMs = 15_000;
+      return false;
+    };
+    h.ports.durableTurnEvidence = async () => {
+      durableReads += 1;
+      if (overrun === "during-read") monotonicMs = 15_000;
+      return null;
+    };
+
+    await tickPipelines([], h.ports);
+
+    const current = loadPipelines()[0]!;
+    expect(current.state).toBe("running");
+    expect(current.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
+    expect(durableReads).toBe(overrun === "before-read" ? 0 : 1);
+  }
+});
+
+test("an unindexed rollout parks once its structured host is dead past grace (#1109)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  const unavailableSince = h.ports.now();
+  h.ports.conversationHostUnavailableSince = async () => unavailableSince;
+  h.advanceWallClock(5 * 60_000);
+
+  await tickPipelines([], h.ports);
+
+  const current = loadPipelines()[0]!;
+  expect(current).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "historical attempt completed without a valid final JSON verdict",
+  });
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "failed",
+    verdict: null,
+    error: "historical attempt completed without a valid final JSON verdict",
+  });
+});
+
+test("an exhausted false park ingests its live host's late verdict without a duplicate attempt (#1109)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(true);
+  const stored = loadPipelines()[0]!;
+  const attempt = stored.runs[0]!.attempts[0]!;
+  const parkedAt = h.ports.now();
+  attempt.state = "needs_decision";
+  attempt.completedAt = parkedAt;
+  attempt.error = "stage verdict recovery exhausted after 3 checks: canonical stage transcript is not yet readable after structured stage termination";
+  attempt.verdictRecovery = {
+    state: "exhausted",
+    checks: 3,
+    maxChecks: 3,
+    startedAt: parkedAt,
+    lastCheckedAt: parkedAt,
+    nextCheckAt: null,
+    reason: "canonical stage transcript is not yet readable after structured stage termination",
+    messageTs: null,
+  };
+  stored.state = "needs_decision";
+  stored.stateDetail = attempt.error;
+  savePipelines([stored]);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: { text: PASS_TEXT, ts: 5_000_000 },
+  });
+
+  await tickPipelines([], h.ports);
+
+  const recovered = loadPipelines()[0]!;
+  expect(recovered.cursor).toEqual({
+    stageId: "build",
+    state: "running",
+    input: "integration complete",
+    activatedBy: { stageId: "plan", attempt: 1, edge: "pass" },
+  });
+  expect(recovered.runs[0]!.attempts).toHaveLength(1);
+  expect(recovered.runs[0]!.attempts[0]).toMatchObject({
+    state: "passed",
+    verdict: { status: "pass", confidence: 0.9 },
+    verdictRecovery: { state: "recovered", checks: 3, messageTs: 5_000_000 },
+  });
+  expect(recovered.runs[1]!.attempts).toHaveLength(1);
+  expect(h.calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(2);
 });
 
 test("a dead structured host past grace fails through the stage fail edge (#973)", async () => {

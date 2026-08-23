@@ -1407,6 +1407,59 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test("issue 1100: a tool-result user message keeps only the call identity and outcome on the wire", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    const sent = host.send({ id: "tools", text: "run it" });
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "tools-user", message: { role: "user", content: [{ type: "text", text: "run it" }] } });
+    await sent;
+    const events = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
+    child.emitJson({
+      type: "assistant",
+      session_id: host.identity.sessionId,
+      uuid: "tools-call",
+      message: { role: "assistant", content: [
+        { type: "tool_use", id: "toolu_ok", name: "Read", input: { file_path: "/repo/a.ts" } },
+        { type: "tool_use", id: "toolu_bad", name: "Bash", input: { command: "exit 1" } },
+      ] },
+    });
+    child.emitJson({
+      type: "user",
+      session_id: host.identity.sessionId,
+      uuid: "tools-results",
+      message: { role: "user", content: [
+        { type: "tool_result", tool_use_id: "toolu_ok", content: [{ type: "text", text: "secret-looking file body" }] },
+        { type: "tool_result", tool_use_id: "toolu_bad", is_error: true, content: "exit code 1" },
+      ] },
+    });
+    child.emitJson({ type: "result", subtype: "success", session_id: host.identity.sessionId });
+    /* The call record passes through whole (the live turn projects its tool_use blocks). */
+    expect(await nextEvent(events)).toMatchObject({
+      kind: "item",
+      phase: "completed",
+      item: { type: "assistant", uuid: "tools-call", message: { content: [{ type: "tool_use", id: "toolu_ok" }, { type: "tool_use", id: "toolu_bad" }] } },
+    });
+    /* The result record carries identity + outcome only: no result body crosses. */
+    const results = await nextEvent(events);
+    expect(results).toMatchObject({ kind: "item", phase: "completed", item: { type: "user", uuid: "tools-results" } });
+    const content = ((results as { item: { message: { content: unknown[] } } }).item.message.content);
+    expect(content).toEqual([
+      { type: "tool_result", tool_use_id: "toolu_ok" },
+      { type: "tool_result", tool_use_id: "toolu_bad", is_error: true },
+    ]);
+    expect(JSON.stringify(results)).not.toContain("secret-looking");
+    expect(await nextEvent(events)).toMatchObject({ kind: "turn-ended", status: "completed" });
+    await host.release();
+  });
+
   test("requires subscription OAuth before spawning", async () => {
     let spawned = false;
     await expect(ClaudeStreamBrokerHost.start({
