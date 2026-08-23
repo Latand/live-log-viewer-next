@@ -3285,6 +3285,87 @@ test.each(["codex", "claude"] as const)("issue 1031: a %s reviewer launches afte
   journal.close();
 });
 
+test.each(["codex", "claude"] as const)("issue 1074: a %s host start that outlives the setup deadline is fenced", async (engine) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `late-host-start-${engine}-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const accountId = `${engine}-subscription`;
+  const model = engine === "codex" ? "gpt-5.6-sol" : "opus";
+  const launchProfile = emptyLaunchProfile({ cwd, model });
+  const begun = registry.beginSpawnRequest({
+    engine,
+    cwd,
+    transport: "structured",
+    accountId,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("generic spawn receipt was unavailable");
+  const host = new RoundTripHost(engine, artifactPath, id);
+  const releaseStart = deferred();
+  let bindCalls = 0;
+  let publishCalls = 0;
+
+  const spawning = spawnStructuredConversation({
+    engine,
+    receipt: begun.receipt,
+    spec: { command: engine, cwd, windowName: "generic", engine, transcript: artifactPath, launchProfile },
+    account: { engine, accountId, kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    "prompt": "start the generic host",
+    registry,
+    client,
+  }, {
+    startHost: async () => {
+      await releaseStart.promise;
+      return host;
+    },
+    bindHost: async () => {
+      bindCalls += 1;
+      return () => {};
+    },
+    publishHost: async () => {
+      publishCalls += 1;
+      return async () => {};
+    },
+    processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+    durableSetupTimeoutMs: 20,
+  });
+
+  await expect(spawning).rejects.toThrow("structured spawn durable host setup timed out after 20ms");
+  const failed = registry.snapshot().receipts[begun.receipt.launchId]!;
+  expect(failed).toMatchObject({
+    state: "failed",
+    key: null,
+    artifactPath: null,
+    error: "structured spawn durable host setup timed out after 20ms",
+  });
+  expect(spawnResponseForReceipt(failed, failed.artifactPath, { structured: true })).toMatchObject({
+    state: "failed",
+    retrySafe: true,
+    initialMessage: "failed",
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId))
+    .toMatchObject({ host: "dead", turn: "idle", activeTurnId: null });
+  expect(journal.operationResult(begun.receipt.launchId)?.receipt).toMatchObject({
+    status: "failed",
+    reason: "structured spawn durable host setup timed out after 20ms",
+  });
+  expect(bindCalls).toBe(0);
+  expect(publishCalls).toBe(0);
+
+  releaseStart.resolve();
+  await waitFor(() => host.releaseCount === 1);
+  expect(host.releaseCount).toBe(1);
+  expect(bindCalls).toBe(0);
+  expect(publishCalls).toBe(0);
+  expect(registry.snapshot().entries[`${engine}:${id}`]).toBeUndefined();
+  expect(hasStructuredDeliveryHost({ engine, sessionId: id })).toBe(false);
+  journal.close();
+});
+
 test.each(["codex", "claude"] as const)("issue 1074: a %s launch fails when shared runtime publication never settles", async (engine) => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `generic-durable-setup-${engine}-${id}`);

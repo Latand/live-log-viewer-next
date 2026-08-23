@@ -1238,7 +1238,6 @@ export async function spawnStructuredConversation(
         throw new Error("structured resume host claim is unavailable");
       }
     }
-    host = await startHost(input, capability);
     const durableSetupTimeoutMs = dependencies.durableSetupTimeoutMs
       ?? STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS;
     durableSetupTimeout = new Promise<never>((_resolve, reject) => {
@@ -1248,6 +1247,19 @@ export async function spawnStructuredConversation(
       }, durableSetupTimeoutMs);
       durableSetupTimer.unref?.();
     });
+    const startingHost = startHost(input, capability);
+    void startingHost.then(async (lateHost) => {
+      if (!durableSetupTimedOut) return;
+      try {
+        await lateHost.release();
+      } catch (error) {
+        console.error("[spawn] late structured host could not be released after setup timeout", {
+          launchId: input.receipt.launchId,
+          error: structuredSpawnFailureReason(error),
+        });
+      }
+    }, () => {});
+    host = await withinDurableSetup(startingHost);
     const identity = hostIdentity(input.engine, host, input);
     key = identity.key;
     if (resumeKey && sessionKeyId(key) !== sessionKeyId(resumeKey)) {
