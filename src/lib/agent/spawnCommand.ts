@@ -7,7 +7,6 @@ import { after, NextRequest, NextResponse } from "next/server";
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
 import { accountManager, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
-import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
@@ -55,6 +54,11 @@ const PIN_FALLBACK_TITLE_UK_MESSAGE = uk["spawnCard.pinUnavailableFallback"];
 const PIN_FALLBACK_TITLE_UK = typeof PIN_FALLBACK_TITLE_UK_MESSAGE === "string"
   ? PIN_FALLBACK_TITLE_UK_MESSAGE
   : PIN_FALLBACK_TITLE_EN;
+const PIN_RETRY_TITLE_EN = en["spawnCard.pinUnavailableQueued"];
+const PIN_RETRY_TITLE_UK_MESSAGE = uk["spawnCard.pinUnavailableQueued"];
+const PIN_RETRY_TITLE_UK = typeof PIN_RETRY_TITLE_UK_MESSAGE === "string"
+  ? PIN_RETRY_TITLE_UK_MESSAGE
+  : PIN_RETRY_TITLE_EN;
 
 function prefersUkrainian(req: Pick<NextRequest, "headers">): boolean {
   const language = req.headers.get("accept-language")?.trim().toLowerCase() ?? "";
@@ -67,6 +71,11 @@ function pinFallbackTitle(req: Pick<NextRequest, "headers">): string {
     : PIN_FALLBACK_TITLE_EN;
 }
 
+function pinRetryTitle(req: Pick<NextRequest, "headers">, retryAt: string): string {
+  return (prefersUkrainian(req) ? PIN_RETRY_TITLE_UK : PIN_RETRY_TITLE_EN)
+    .replace("{retryAt}", retryAt);
+}
+
 export interface SpawnCommandDependencies {
   registry: typeof agentRegistry;
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
@@ -77,7 +86,6 @@ export interface SpawnCommandDependencies {
   assertStructuredRuntime: typeof assertDarwinStructuredRuntime;
   defer(work: () => Promise<void>): void;
   storeImages(images: readonly RuntimeImageUpload[]): StructuredImageRef[];
-  requestAccountMigrationTick: typeof requestAccountMigrationTick;
   adoptPipelineAttemptFromSource?: typeof adoptPipelineAttemptFromSource;
   pipelineAttemptTargetForSource?: typeof pipelineAttemptTargetForSource;
   /**
@@ -112,7 +120,6 @@ export const productionSpawnCommandDependencies: SpawnCommandDependencies = {
   assertStructuredRuntime: assertDarwinStructuredRuntime,
   defer: (work) => after(work),
   storeImages: (images) => runtimeImageStore().putMany(images),
-  requestAccountMigrationTick,
   adoptPipelineAttemptFromSource,
   pipelineAttemptTargetForSource,
 };
@@ -546,7 +553,17 @@ export async function executeSpawnRequest(
       if (body.accountId === undefined) throw error;
       return terminalizePinnedAccountFailure(error);
     }
-    const pinFallback = Boolean(requestedAccountId && account.accountId !== requestedAccountId);
+    const requestedRetryAt = requestedAccountId && account.requestedAdmission?.kind === "retry-at"
+      ? account.requestedAdmission.retryAt
+      : null;
+    const retryDeadline = requestedRetryAt ? Date.parse(requestedRetryAt) : Number.NaN;
+    const queuedUntil = Number.isFinite(retryDeadline) && retryDeadline > Date.now()
+      ? new Date(retryDeadline).toISOString()
+      : null;
+    if (queuedUntil && requestedAccountId) {
+      account = dependencies.resolveSpawnAccount(engine, requestedAccountId);
+    }
+    const pinFallback = Boolean(requestedAccountId && !queuedUntil && account.accountId !== requestedAccountId);
     /* Idempotency binds the caller's requested account even when policy
        degrades that pin to a fallback account. A replay can therefore recover
        the admitted fallback while a changed pin still conflicts. */
@@ -590,10 +607,10 @@ export async function executeSpawnRequest(
         }),
       };
     };
-    const spec = specForAccount(
-      account,
-      pinFallback ? pinFallbackTitle(req) : null,
-    );
+    let pinTitle: string | null = null;
+    if (queuedUntil) pinTitle = pinRetryTitle(req, queuedUntil);
+    else if (pinFallback) pinTitle = pinFallbackTitle(req);
+    const spec = specForAccount(account, pinTitle);
     /* The receipt keeps the caller's requested account as durable routing
        authority. The separate account context below owns this generation's
        actual launch, so a degraded fallback cannot silently rebind the pin. */
@@ -633,13 +650,6 @@ export async function executeSpawnRequest(
         observedAt: new Date().toISOString(),
       }]);
       registry.upsert({ ...entry, accountId: actualAccountId });
-      if (receipt.accountPin && receipt.accountId) {
-        const reseated = registry.requestConversationReseat(materialized.conversationId, receipt.accountId);
-        if (reseated.migration?.targetId === receipt.accountId
-          && !["committed", "rolled-back"].includes(reseated.migration.phase)) {
-          dependencies.requestAccountMigrationTick();
-        }
-      }
     };
     const adoptMaterializedAttempt = async (receipt: typeof begun.receipt, agentPath: string): Promise<void> => {
       if (!pipelineSourceConversationId || !dependencies.adoptPipelineAttemptFromSource) return;
@@ -746,7 +756,7 @@ export async function executeSpawnRequest(
       let receipt = begun.receipt;
       let initialMessage: SpawnResponse["initialMessage"] | undefined;
       const runtimeClient = structured ? dependencies.runtimeHostClient() : null;
-      if (runtimeClient) {
+      if (runtimeClient && !queuedUntil) {
         try {
           const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, runtimeClient);
           receipt = reconciled;
@@ -773,11 +783,23 @@ export async function executeSpawnRequest(
       if (receipt.artifactPath) await adoptMaterializedAttempt(receipt, receipt.artifactPath);
       const response = spawnResponseForReceipt(receipt, receipt.artifactPath, {
         structured,
-        initialMessage,
+        initialMessage: queuedUntil ? "queued" : initialMessage,
       });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
     launchId = begun.receipt.launchId;
+    if (queuedUntil) {
+      const queuedReceipt = begun.receipt.admissionOwner
+        ? registry.releaseStartingStructuredSpawn(begun.receipt.launchId, begun.receipt.admissionOwner).receipt
+        : begun.receipt;
+      return NextResponse.json(
+        spawnResponseForReceipt(queuedReceipt, queuedReceipt.artifactPath, {
+          structured: transport === "structured",
+          initialMessage: "queued",
+        }),
+        { status: 202 },
+      );
+    }
     if (engine === "claude" && transport === "tmux") {
       const profileId = path.basename(spec.transcript ?? "", ".jsonl");
       if (isManagedClaudeHome(account.home)) prepareManagedClaudeSpawnHome(account.home, cwd);

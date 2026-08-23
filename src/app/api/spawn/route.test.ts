@@ -58,7 +58,6 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
     }),
     runtimeHostClient: () => ({} as RuntimeHostClient),
     defer: (work) => { void work(); },
-    requestAccountMigrationTick: () => {},
     storeImages: (images) => images.map((image) => ({
       sha256: crypto.createHash("sha256").update(Buffer.from(image.base64, "base64")).digest("hex"),
       mime: image.mime as "image/png",
@@ -169,13 +168,14 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
   }
 });
 
-test("a pinned account with a future retry deadline falls back and queues a reseat to the requested account", async () => {
+test("a pinned account with a future retry deadline queues durably and launches on the pin after admission", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-retry-"));
-  const store = registry();
+  const registryFile = path.join(cwd, "agent-registry.json");
+  let store = new AgentRegistry(registryFile);
   const deferred: Array<() => Promise<void>> = [];
   const spawnedAccounts: string[] = [];
-  let migrationTicks = 0;
-  const retryAt = "2026-08-23T15:30:00.000Z";
+  let pinAdmissible = false;
+  const retryAt = new Date(Date.now() + 60_000).toISOString();
   const previous = {
     transport: process.env.LLV_SPAWN_TRANSPORT,
     hosts: process.env.LLV_STRUCTURED_HOSTS,
@@ -200,16 +200,18 @@ test("a pinned account with a future retry deadline falls back and queues a rese
     const dependencies = {
       ...structuredRouteDependencies(cwd),
       registry: () => store,
-      resolveHealthySpawnAccount: async () => ({
-        ...account("account-b"),
-        requestedAdmission: {
-          kind: "retry-at" as const,
-          reason: "hard-limit" as const,
-          stale: false,
-          retryAt,
-        },
-      }),
-      requestAccountMigrationTick: () => { migrationTicks += 1; },
+      resolveHealthySpawnAccount: async () => pinAdmissible
+        ? account("account-a")
+        : {
+            ...account("account-b"),
+            requestedAdmission: {
+              kind: "retry-at" as const,
+              reason: "hard-limit" as const,
+              stale: false,
+              retryAt,
+            },
+          },
+      resolveSpawnAccount: (_engine: "claude" | "codex", accountId: string | null) => account(accountId ?? "account-b"),
       defer: (work: () => Promise<void>) => { deferred.push(work); },
       spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
         spawnedAccounts.push(input.account.accountId);
@@ -225,7 +227,7 @@ test("a pinned account with a future retry deadline falls back and queues a rese
           claimOwner: null,
           pendingAction: "spawn",
         });
-        if (settled.kind !== "settled") throw new Error("expected fallback settlement");
+        if (settled.kind !== "settled") throw new Error("expected queued settlement");
         return {
           ok: true as const,
           target: null,
@@ -239,7 +241,7 @@ test("a pinned account with a future retry deadline falls back and queues a rese
         };
       },
     };
-    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    const post = async () => await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
       body: JSON.stringify({
@@ -252,35 +254,57 @@ test("a pinned account with a future retry deadline falls back and queues a rese
       }),
     }), dependencies);
 
+    const response = await post();
     expect(response.status).toBe(202);
-    expect(await response.json()).toMatchObject({ state: "starting", initialMessage: "pending" });
+    const queued = await response.json();
+    expect(queued).toMatchObject({ state: "starting", initialMessage: "queued" });
     expect(spawnedAccounts).toEqual([]);
     const receipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
     expect(receipt).toMatchObject({ accountId: "account-a", accountPin: true, state: "starting" });
-    expect(receipt.launchProfile.title).toBe("Launched on another account — pin unavailable");
+    expect(receipt.launchProfile.title).toBe(`Pinned account quota is exhausted — queued until ${retryAt}`);
     expect(projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]).toMatchObject({
-      title: "Launched on another account — pin unavailable",
+      title: `Pinned account quota is exhausted — queued until ${retryAt}`,
       spawn: { accountId: "account-a", accountPin: true },
     });
 
+    store = new AgentRegistry(registryFile);
+    const replayResponse = await post();
+    expect(replayResponse.status).toBe(202);
+    expect(await replayResponse.json()).toMatchObject({
+      launchId: queued.launchId,
+      conversationId: queued.conversationId,
+      state: "starting",
+      initialMessage: "queued",
+    });
+    expect(deferred).toHaveLength(0);
+    expect(spawnedAccounts).toEqual([]);
+
+    pinAdmissible = true;
+    const admittedResponse = await post();
+    expect(admittedResponse.status).toBe(202);
+    expect(await admittedResponse.json()).toMatchObject({
+      launchId: queued.launchId,
+      conversationId: queued.conversationId,
+      state: "starting",
+      initialMessage: "pending",
+    });
     expect(deferred).toHaveLength(1);
     await deferred[0]!();
-    expect(spawnedAccounts).toEqual(["account-b"]);
+    expect(spawnedAccounts).toEqual(["account-a"]);
     const settledReceipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
     const conversation = store.conversation(settledReceipt.conversationId)!;
     expect(conversation).toMatchObject({
       pinnedAccountId: "account-a",
-      migration: { targetId: "account-a" },
-      generations: [expect.objectContaining({ accountId: "account-b" })],
+      migration: null,
+      generations: [expect.objectContaining({ accountId: "account-a" })],
     });
-    expect(store.snapshot().entries[`claude:${settledReceipt.key!.sessionId}`]).toMatchObject({ accountId: "account-b" });
-    expect(migrationTicks).toBe(1);
+    expect(store.snapshot().entries[`claude:${settledReceipt.key!.sessionId}`]).toMatchObject({ accountId: "account-a" });
 
     store.setEngineRouting("claude", "account-c");
     expect(store.requestConversationMigrationToActiveAccount(conversation.id)).toMatchObject({
       pinnedAccountId: "account-a",
-      migration: { targetId: "account-a" },
-      generations: [expect.objectContaining({ accountId: "account-b" })],
+      migration: null,
+      generations: [expect.objectContaining({ accountId: "account-a" })],
     });
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
@@ -301,7 +325,6 @@ test("a pinned account without a retry deadline falls back and records the degra
   const store = registry();
   const deferred: Array<() => Promise<void>> = [];
   const spawnedAccounts: string[] = [];
-  let migrationTicks = 0;
   const previous = {
     transport: process.env.LLV_SPAWN_TRANSPORT,
     hosts: process.env.LLV_STRUCTURED_HOSTS,
@@ -332,7 +355,6 @@ test("a pinned account without a retry deadline falls back and records the degra
           retryAt: null,
         },
       }),
-      requestAccountMigrationTick: () => { migrationTicks += 1; },
       defer: (work: () => Promise<void>) => { deferred.push(work); },
       spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
         spawnedAccounts.push(input.account.accountId);
@@ -391,15 +413,14 @@ test("a pinned account without a retry deadline falls back and records the degra
     const conversation = store.conversation(settledReceipt.conversationId)!;
     expect(conversation).toMatchObject({
       pinnedAccountId: "account-a",
-      migration: { targetId: "account-a" },
+      migration: null,
       generations: [expect.objectContaining({ accountId: "account-b" })],
     });
     expect(store.snapshot().entries[`claude:${settledReceipt.key!.sessionId}`]).toMatchObject({ accountId: "account-b" });
-    expect(migrationTicks).toBe(1);
     store.setEngineRouting("claude", "account-c");
     expect(store.requestConversationMigrationToActiveAccount(conversation.id)).toMatchObject({
       pinnedAccountId: "account-a",
-      migration: { targetId: "account-a" },
+      migration: null,
       generations: [expect.objectContaining({ accountId: "account-b" })],
     });
   } finally {
