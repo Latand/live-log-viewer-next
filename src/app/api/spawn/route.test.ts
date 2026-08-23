@@ -168,11 +168,10 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
   }
 });
 
-test("a pinned account with a future retry deadline queues the existing launch until that deadline", async () => {
+test("a pinned account with a future retry deadline falls back while preserving the requested authority", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-retry-"));
   const store = registry();
   const deferred: Array<() => Promise<void>> = [];
-  const waits: string[] = [];
   const spawnedAccounts: string[] = [];
   const retryAt = "2026-08-23T15:30:00.000Z";
   const previous = {
@@ -208,17 +207,28 @@ test("a pinned account with a future retry deadline queues the existing launch u
           retryAt,
         },
       }),
-      resolveSpawnAccount: (_engine: "claude" | "codex", accountId: string | null) => account(accountId ?? "account-b"),
-      waitForAccountRetry: async (until: string) => { waits.push(until); },
       defer: (work: () => Promise<void>) => { deferred.push(work); },
       spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
         spawnedAccounts.push(input.account.accountId);
+        const sessionId = crypto.randomUUID();
+        const settled = input.registry.settleSpawn(input.receipt.launchId, {
+          key: { engine: input.engine, sessionId },
+          artifactPath: path.join(cwd, `${sessionId}.jsonl`),
+          cwd,
+          accountId: input.account.accountId,
+          status: "starting",
+          host: null,
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: "spawn",
+        });
+        if (settled.kind !== "settled") throw new Error("expected fallback settlement");
         return {
           ok: true as const,
           target: null,
-          path: null,
+          path: settled.entry.artifactPath,
           launchId: input.receipt.launchId,
-          conversationId: input.receipt.conversationId,
+          conversationId: settled.conversation.id,
           launched: true,
           retrySafe: false,
           initialMessage: "delivered" as const,
@@ -240,20 +250,41 @@ test("a pinned account with a future retry deadline queues the existing launch u
     }), dependencies);
 
     expect(response.status).toBe(202);
-    expect(await response.json()).toMatchObject({ state: "starting", initialMessage: "queued" });
+    expect(await response.json()).toMatchObject({ state: "starting", initialMessage: "pending" });
     expect(spawnedAccounts).toEqual([]);
     const receipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
     expect(receipt).toMatchObject({ accountId: "account-a", accountPin: true, state: "starting" });
-    expect(receipt.launchProfile.title).toContain(retryAt);
+    expect(receipt.launchProfile.title).toBe("Launched on another account — pin unavailable");
     expect(projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]).toMatchObject({
-      title: expect.stringContaining(retryAt),
+      title: "Launched on another account — pin unavailable",
       spawn: { accountId: "account-a", accountPin: true },
     });
 
     expect(deferred).toHaveLength(1);
     await deferred[0]!();
-    expect(waits).toEqual([retryAt]);
-    expect(spawnedAccounts).toEqual(["account-a"]);
+    expect(spawnedAccounts).toEqual(["account-b"]);
+    const settledReceipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
+    store.reconcileConversations([{
+      engine: "claude",
+      path: settledReceipt.artifactPath!,
+      accountId: "account-b",
+      launchProfile: settledReceipt.launchProfile,
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: new Date(Date.now() + 1_000).toISOString(),
+    }]);
+    const conversation = store.conversation(settledReceipt.conversationId)!;
+    expect(conversation).toMatchObject({
+      pinnedAccountId: "account-a",
+      migration: null,
+      generations: [expect.objectContaining({ accountId: "account-b" })],
+    });
+
+    store.setEngineRouting("claude", "account-c");
+    expect(store.requestConversationMigrationToActiveAccount(conversation.id)).toMatchObject({
+      pinnedAccountId: "account-a",
+      migration: null,
+      generations: [expect.objectContaining({ accountId: "account-b" })],
+    });
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
@@ -321,7 +352,7 @@ test("a pinned account without a retry deadline falls back and records the degra
     };
     const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
-      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin", "accept-language": "uk-UA" },
       body: JSON.stringify({
         engine: "claude",
         model: "sonnet",
@@ -334,11 +365,11 @@ test("a pinned account without a retry deadline falls back and records the degra
 
     expect(response.status).toBe(202);
     const receipt = store.spawnReceiptForClientAttempt("account_pin_fallback_20260823")!;
-    expect(receipt).toMatchObject({ accountId: "account-b", accountPin: false, state: "starting" });
-    expect(receipt.launchProfile.title).toBe("Launched on another account — pin unavailable");
+    expect(receipt).toMatchObject({ accountId: "account-a", accountPin: true, state: "starting" });
+    expect(receipt.launchProfile.title).toBe("Запущено на іншому акаунті — pin недоступний");
     expect(projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]).toMatchObject({
-      title: "Launched on another account — pin unavailable",
-      spawn: { accountId: "account-b", accountPin: false },
+      title: "Запущено на іншому акаунті — pin недоступний",
+      spawn: { accountId: "account-a", accountPin: true },
     });
 
     expect(deferred).toHaveLength(1);
@@ -475,8 +506,8 @@ test("a legacy resolver mismatch also degrades the pin to a durable fallback", a
 
     const receipt = store.spawnReceiptForClientAttempt("unusable_pin_20260731");
     expect(receipt).toMatchObject({
-      accountId: "selected-account",
-      accountPin: false,
+      accountId: "unusable-pin",
+      accountPin: true,
       requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       state: "starting",
       error: null,
@@ -484,8 +515,8 @@ test("a legacy resolver mismatch also degrades the pin to a durable fallback", a
     });
     const card = projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]?.spawn;
     expect(card).toMatchObject({
-      accountId: "selected-account",
-      accountPin: false,
+      accountId: "unusable-pin",
+      accountPin: true,
       state: "starting",
       retrySafe: false,
       error: null,

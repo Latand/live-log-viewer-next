@@ -158,6 +158,7 @@ export async function selectHealthyClaudeAccount(
   preferredId: string | null | undefined,
   dependencies: ClaudeSpawnHealthDependencies = productionDependencies,
   pinPreferred = true,
+  fallbackPreferredId: string | null | undefined = preferredId,
 ): Promise<ClaudeSpawnAccountSelection> {
   const now = dependencies.now();
   const classified = accounts.map((account) => {
@@ -171,7 +172,7 @@ export async function selectHealthyClaudeAccount(
   const select = (candidates: Evaluated[]) => candidates
     .filter((candidate) => rank(candidate.admission) > 0)
     .sort((left, right) => rank(right.admission) - rank(left.admission)
-      || Number(right.account.id === preferredId) - Number(left.account.id === preferredId)
+      || Number(right.account.id === fallbackPreferredId) - Number(left.account.id === fallbackPreferredId)
       || left.account.id.localeCompare(right.account.id))[0];
   const result = (selected: Evaluated, requested?: Evaluated | null): ClaudeSpawnAccountSelection => ({
     account: selected.account,
@@ -209,6 +210,5 @@ export async function selectHealthyClaudeAccount(
   const all = [...current, ...(requested ? [requested] : []), ...refreshed];
   const refreshedSelection = select(all);
   if (refreshedSelection) return result(refreshedSelection, requested);
-  if (pinPreferred && requested?.admission.kind === "retry-at") return result(requested, requested);
   throw new NoHealthyClaudeAccountError(accounts.map((candidate) => candidate.id));
 }

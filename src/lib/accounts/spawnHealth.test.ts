@@ -127,6 +127,25 @@ test("an exhausted explicit account exposes its retry deadline while routing fin
   });
 });
 
+test("an unavailable explicit pin falls back to the healthy active account before account-id ordering", async () => {
+  const requested = account("account-z", NOW + 60_000);
+  const lexicalFirst = account("account-a", NOW + 60_000);
+  const active = account("account-b", NOW + 60_000);
+
+  const selected = await selectHealthyClaudeAccount([
+    requested,
+    lexicalFirst,
+    active,
+  ], requested.id, {
+    now: () => NOW,
+    probe: async (candidate) => candidate.id === requested.id ? unavailable() : current(),
+    refresh: async () => unavailable(),
+  }, true, active.id);
+
+  expect(selected.account.id).toBe(active.id);
+  expect(selected.requestedAdmission).toEqual(unavailable());
+});
+
 test("a self-throttled prober launches the preferred account from last-known stale state", async () => {
   const accounts = [account("account-a", NOW + 60_000), account("account-b", NOW + 60_000)];
   const retryAt = NOW + 5 * 60_000;

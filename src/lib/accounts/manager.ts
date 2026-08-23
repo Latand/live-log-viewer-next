@@ -52,6 +52,7 @@ export async function resolveHealthySpawnAccount(
     requestedExists ? routed : active,
     undefined,
     requested !== undefined && requested !== null && requestedExists,
+    active,
   );
   return {
     ...contextForSpawn(engine, selected.account.id),
