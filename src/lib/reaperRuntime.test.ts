@@ -2085,21 +2085,27 @@ test("the reaper cycle runs the stale structured spawn convergence pass when a r
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const runtimeClient = { snapshot: async () => ({ revision: 0, sessions: [] }) };
   const passes: Array<{ registry: unknown; client: unknown }> = [];
+  let legacyPasses = 0;
 
   try {
     await runReaperCycle({
       registry,
       hosts: [],
       files: [],
-      actuation: {
+      actuation: ({
         runtimeClient: (() => runtimeClient) as never,
+        reconcileLiveOwnerSpawns: async () => {
+          legacyPasses += 1;
+          return { examined: 0, terminalized: [], recovered: [] };
+        },
         terminalizeStaleSpawns: (async (passRegistry: unknown, passClient: unknown) => {
           passes.push({ registry: passRegistry, client: passClient });
           return { examined: 0, terminalized: [], recovered: [] };
         }) as never,
-      },
+      } as never),
     });
     expect(passes).toEqual([{ registry, client: runtimeClient }]);
+    expect(legacyPasses).toBe(0);
 
     /* No runtime client — the pass never runs and the cycle still completes. */
     const report = await runReaperCycle({
