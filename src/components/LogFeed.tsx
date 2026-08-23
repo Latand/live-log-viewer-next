@@ -8,7 +8,7 @@ import { useLogTail } from "@/hooks/useLogTail";
 import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
 import { useToolActivityCues } from "@/hooks/useToolActivityCues";
 import { accountIdFromPath } from "@/lib/accounts/badge";
-import { conversationIdentity } from "@/lib/accounts/identity";
+import { conversationIdentity, isLaunchPlaceholder } from "@/lib/accounts/identity";
 import { activeCardMigration, cardMigrationState, migrationHoldsDelivery, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -192,9 +192,29 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      own state across polls: glued to the live tail, or released by the user.
      A remount inherits the transcript's remembered state. */
   const [magnet, setMagnetState] = useState(() => (memoryKey ? (scrollMemory.get(memoryKey)?.magnet ?? follow) : follow));
+  /* The transcript the tail reads (issue #1100): while the board still
+     projects the launch placeholder `spawn:<launchId>` — a path nothing can
+     read — the matching runtime session already names the canonical artifact
+     its host writes, so the SAME tail reads that path from the first turn on.
+     The canonical rows attach as soon as the file has lines, and the live
+     overlay (prose + tool rows from the host stream) yields to them row by row
+     through the identity claims, exactly as after the flip. One subscription
+     either way: when the board flips the card to the artifact the path is
+     unchanged, so nothing re-subscribes, re-parses or resets the reader's
+     position. A placeholder whose host has not named an artifact yet still
+     reads nothing; the late flip itself stays the board's concern (#1108).
+     Conversation identity (`memoryKey`: outbox, claims, scroll memory) keeps
+     keying on the card; only the transcript-stream state below keys on
+     `tailPath`. */
+  const launchArtifactPath = file && isLaunchPlaceholder(file) ? runtimeSession?.artifactPath ?? null : null;
+  const tailFile = useMemo<FileEntry | null>(
+    () => (file && launchArtifactPath ? { ...file, path: launchArtifactPath } : file),
+    [file, launchArtifactPath],
+  );
+  const tailPath = tailFile?.path ?? null;
   /* Released reader must never lose lines above the viewport: the tail cap
      applies only while the magnet holds the bottom in view anyway. */
-  const tail = useLogTail(file, paused, magnet ? (compact ? TAIL_CAP : FOCUS_CAP) : 0);
+  const tail = useLogTail(tailFile, paused, magnet ? (compact ? TAIL_CAP : FOCUS_CAP) : 0);
   const scroller = useRef<HTMLDivElement | null>(null);
   const content = useRef<HTMLDivElement | null>(null);
   const anchorRef = useRef<{ top: number; height: number } | null>(null);
@@ -212,7 +232,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const glueAtRef = useRef(0);
   const restoreInitializedPathRef = useRef<string | null>(null);
   const pendingRestoreRef = useRef<PendingRestore | null>(null);
-  const filePathRef = useRef(file?.path ?? null);
+  const filePathRef = useRef(tailPath);
   const controlledFollowRef = useRef(follow);
 
   const setMagnet = (value: boolean, withPulse = false) => {
@@ -278,7 +298,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   };
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => setVisibleCount(initialCount), [file?.path, initialCount]);
+  useEffect(() => setVisibleCount(initialCount), [tailPath, initialCount]);
   /* Same instance, new transcript: pick up that transcript's remembered state. */
   useEffect(() => {
     if (!memoryKey) return;
@@ -288,7 +308,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
        
       setMagnetState(remembered);
     }
-  }, [file?.path, memoryKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tailPath, memoryKey]); // eslint-disable-line react-hooks/exhaustive-deps
   /* External Follow transitions from the focus header drive the same magnet.
      A compact pane's constant true value leaves remount memory authoritative. */
   useEffect(() => {
@@ -336,7 +356,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const session: FeedSession | null = useMemo(
     () => (file ? createFeedSession({ engine: file.engine, fmt: file.fmt, showSvc, lineFilter: lf }) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [file?.path, file?.engine, file?.fmt, showSvc, lf, locale],
+    [tailPath, file?.engine, file?.fmt, showSvc, lf, locale],
   );
   const feed = useMemo(
     () => (file && session ? session.feed(tail.lines, tail.linesStart, file.activity === "live") : EMPTY_FEED),
@@ -349,7 +369,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      stay silent. The window end anchors "newly appended" to the tail stream;
      loading gates the baseline so an unloaded feed is not mistaken for an
      empty conversation. */
-  useToolActivityCues(feed.items, memoryKey, file?.path ?? null, tail.linesStart + tail.lines.length, Boolean(file) && !tail.loading);
+  useToolActivityCues(feed.items, memoryKey, tailPath, tail.linesStart + tail.lines.length, Boolean(file) && !tail.loading);
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
   const visibleStartIndex = feed.items.length - visibleItems.length;
@@ -371,10 +391,10 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   }, [tail.error, tail.size, tail.tickTime, file, onStatus]);
 
   useLayoutEffect(() => {
-    filePathRef.current = file?.path ?? null;
+    filePathRef.current = tailPath;
     restoreInitializedPathRef.current = null;
     pendingRestoreRef.current = null;
-  }, [file?.path]);
+  }, [tailPath]);
 
   /* Older history grows the content above the viewport; keep what the user
      was reading in place by compensating the scroll offset. */
@@ -401,11 +421,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     /* First non-empty render of a released pane after a remount: stage the
        remembered distance from the tail for immediate and resize retries. */
     let initializedRestore = false;
-    if (file && len && restoreInitializedPathRef.current !== file.path) {
-      restoreInitializedPathRef.current = file.path;
+    if (tailPath && len && restoreInitializedPathRef.current !== tailPath) {
+      restoreInitializedPathRef.current = tailPath;
       const remembered = memoryKey ? scrollMemory.get(memoryKey) : undefined;
       pendingRestoreRef.current = !magnet && remembered && (remembered.fromBottom > 0 || remembered.anchor)
-        ? { path: file.path, ...remembered, applied: false }
+        ? { path: tailPath, ...remembered, applied: false }
         : null;
       initializedRestore = true;
     }
@@ -456,7 +476,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     setMagnet(true, true);
   };
 
-  const transcriptGeneration = file?.path ?? null;
+  const transcriptGeneration = tailPath;
   /* Optimistic bubbles retire on their OWN transcript echo (round-1 P1#4,
      round-2 finding 2): a bubble disappears the moment ITS echo lands, resolved
      causally by occurrence count. A user text that appears twice is two echoes
@@ -579,10 +599,10 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     ? visibleOutbox(outbox, transcriptEchoCounts, nowMs(), paneLaunchOwner, newestTranscriptAtMs)
     : [];
   useEffect(() => {
-    if (!memoryKey || !file) return;
-    adoptCanonicalAssistantClaims(file.path, memoryKey);
+    if (!memoryKey || !tailPath) return;
+    adoptCanonicalAssistantClaims(tailPath, memoryKey);
     publishCanonicalAssistantClaims(memoryKey, feed.items);
-  }, [file, memoryKey, feed.items]);
+  }, [tailPath, memoryKey, feed.items]);
   const visibleLiveTurnItems = useMemo(
     () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn),
     [runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn],
@@ -671,7 +691,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             rememberScroll(memoryKey, {
               magnet: magnetRef.current,
               fromBottom: Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop),
-              anchor: magnetRef.current ? null : viewportAnchor(el, file.path),
+              anchor: magnetRef.current ? null : viewportAnchor(el, tailPath ?? file.path),
             });
           }
           if (el.scrollTop < 120 && canRevealOlder && !tail.loadingOlder && !tail.loading) revealOlder();

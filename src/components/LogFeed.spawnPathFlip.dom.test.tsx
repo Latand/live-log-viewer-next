@@ -10,14 +10,21 @@ import { emptyStore, type RuntimeSession } from "@/components/runtime/runtimeMod
 import type { LogSubscriber } from "@/hooks/logBus";
 
 /**
- * Issue #1100, layer (b) evidence: a freshly spawned conversation's card is
- * `spawn:<launchId>` until the scanner carries its transcript, then the SAME
- * pane receives the artifact path. This renders the real `LogFeed` with the
- * REAL `useLogTail` over a fake log bus and proves that the tail follows the
- * card's path flip on its own: while the path is the placeholder nothing is
- * read (the bus answers the way the server does), the live overlay carries the
- * tool rows; once the path flips, the tail subscribes to the artifact, the
- * canonical rows render, and the live tool rows retire exactly once.
+ * Issue #1100, the canonical tail during the FIRST turn: a freshly spawned
+ * conversation's card is `spawn:<launchId>` until the board carries its
+ * transcript, but the matching runtime session names the canonical artifact
+ * its host writes as soon as the registry records it. This renders the real
+ * `LogFeed` with the REAL `useLogTail` over a fake log bus (answering the way
+ * the server does: a placeholder is not readable, the artifact serves its
+ * bytes) and proves, without any second message:
+ *
+ * 1. artifact named → the ONE tail reads it while the card is still the
+ *    placeholder; the canonical rows (tool call included) land during the
+ *    spawn phase and the live overlay rows retire exactly once; the later
+ *    card flip neither re-subscribes nor duplicates a row;
+ * 2. artifact not named yet → nothing is read, the live overlay carries the
+ *    tool rows from the host stream, and the tail follows the card's flip on
+ *    its own — canonical rows land, live rows retire once.
  */
 
 const dom = new HappyWindow({ width: 1280, height: 800 });
@@ -84,7 +91,7 @@ const TRANSCRIPT = [
   { type: "user", uuid: "uuid-flip-result", timestamp: AT(3), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_flip_status", content: "" }] } },
 ].map((line) => JSON.stringify(line)).join("\n") + "\n";
 
-const session: RuntimeSession = {
+const sessionBase: RuntimeSession = {
   conversationId: CONVERSATION_ID,
   sessionKey: { engine: "claude", sessionId: "session-spawn-flip" },
   hostKind: "claude-broker",
@@ -104,6 +111,8 @@ const session: RuntimeSession = {
   activeTurnId: "turn-flip",
   liveTurn: firstTurn(),
 };
+/* Per test: whether the runtime session already names the artifact. */
+let session: RuntimeSession = sessionBase;
 
 /* The log bus as the server behaves: a placeholder path is not a readable
    artifact, the transcript path serves its bytes. Every subscription is logged
@@ -162,6 +171,7 @@ beforeEach(() => {
   resetCanonicalAssistantClaimsForTests();
   resetLogTailCacheForTests();
   bus.events = [];
+  session = sessionBase;
 });
 afterEach(() => {
   for (const root of roots) flushSync(() => root.unmount());
@@ -231,13 +241,46 @@ function canonicalRows(host: HTMLElement): string[] {
   return [...host.querySelectorAll<HTMLElement>("[data-feed-kind]")].map((row) => row.dataset.feedKind ?? "");
 }
 
-test("the tail follows the card's spawn → artifact path flip: canonical rows land, live tool rows retire once, no duplicates", async () => {
+function oneRendering(host: HTMLElement): void {
+  const all = [...host.querySelectorAll<HTMLElement>("[data-feed-kind], [data-live-turn]")];
+  /* The prose and the tool call are claimed by their canonical rows; only the
+     still-streaming prose remains, below the transcript. */
+  expect(liveRows(host)).toEqual(["prose:streaming"]);
+  expect(host.querySelectorAll('[data-live-turn-item-id="toolu_flip_status"]').length).toBe(0);
+  expect(all.at(-1)?.hasAttribute("data-live-turn")).toBeTrue();
+  /* Exactly one rendering of the call across both layers. */
+  expect(all.filter((row) => row.textContent?.includes("git status --short")).length).toBe(1);
+  const canonical = canonicalRows(host);
+  expect(canonical.length).toBeGreaterThan(0);
+  expect(canonical.some((kind) => kind === "tool" || kind === "cmd-group")).toBeTrue();
+}
+
+test("first turn, card still spawn:<launchId>, runtime session names the artifact: the one tail reads it at once, canonical rows land during the spawn phase, live tool rows retire once, and the later card flip neither re-subscribes nor duplicates", async () => {
   const { host, paint } = mount();
   paint(launchCard);
   await settle();
-  /* Launch window: the pane asked the bus for the placeholder (unreadable, as
-     on the server), read nothing, and shows the turn from the host stream —
-     tool call included. */
+  /* Spawn phase: the placeholder path was never asked for — the tail read the
+     artifact the runtime already named, the canonical rows are there and the
+     overlay yielded to them. No second message, no path flip. */
+  expect(bus.events).toEqual([`subscribe:${ARTIFACT_PATH}`]);
+  oneRendering(host);
+
+  /* The board catches up and flips the card to the artifact: same path, so
+     nothing re-subscribes, re-reads or duplicates. */
+  paint(transcriptCard);
+  await settle();
+  expect(bus.events).toEqual([`subscribe:${ARTIFACT_PATH}`]);
+  oneRendering(host);
+});
+
+test("a placeholder whose host has not named an artifact yet reads nothing and shows the host-stream rows; the tail follows the card's spawn → artifact flip on its own: canonical rows land, live tool rows retire once, no duplicates", async () => {
+  session = { ...sessionBase, artifactPath: null };
+  const { host, paint } = mount();
+  paint(launchCard);
+  await settle();
+  /* Launch window without a named artifact: the pane asked the bus for the
+     placeholder (unreadable, as on the server), read nothing, and shows the
+     turn from the host stream — tool call included. */
   expect(bus.events).toEqual([`subscribe:${LAUNCH_PATH}`]);
   expect(canonicalRows(host)).toEqual([]);
   expect(liveRows(host)).toEqual(["prose:uuid-flip-text", "tool:toolu_flip_status:ok", "prose:streaming"]);
@@ -251,16 +294,5 @@ test("the tail follows the card's spawn → artifact path flip: canonical rows l
     `unsubscribe:${LAUNCH_PATH}`,
     `subscribe:${ARTIFACT_PATH}`,
   ]);
-  const canonical = canonicalRows(host);
-  expect(canonical.length).toBeGreaterThan(0);
-  expect(canonical.some((kind) => kind === "tool" || kind === "cmd-group")).toBeTrue();
-  /* The prose and the tool call are claimed by their canonical rows; only the
-     still-streaming prose remains, below the transcript. */
-  expect(liveRows(host)).toEqual(["prose:streaming"]);
-  expect(host.querySelectorAll('[data-live-turn-item-id="toolu_flip_status"]').length).toBe(0);
-  const all = [...host.querySelectorAll<HTMLElement>("[data-feed-kind], [data-live-turn]")];
-  expect(all.at(-1)?.hasAttribute("data-live-turn")).toBeTrue();
-  /* Exactly one rendering of the call across both layers. */
-  const callRows = all.filter((row) => row.textContent?.includes("git status --short"));
-  expect(callRows.length).toBe(1);
+  oneRendering(host);
 });
