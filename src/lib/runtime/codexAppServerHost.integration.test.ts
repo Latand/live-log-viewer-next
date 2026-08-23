@@ -202,9 +202,9 @@ test.skipIf(!scratchHome)("real Codex app-server accepts the read-only scratch p
       ...optionsFor(adoptedAccess),
       initialEventCursor: cursor,
     });
-    const adoptedScratch = await commandExec(adopted, 'printf adopted > "$HOME/adopted"');
+    const adoptedScratch = await commandExec(adopted, 'printf adopted > "$TMPDIR/adopted"');
     expect(adoptedScratch.exitCode).toBe(0);
-    expect(fs.readFileSync(path.join(adoptedAccess.env.HOME!, "adopted"), "utf8")).toBe("adopted");
+    expect(fs.readFileSync(path.join(adoptedAccess.env.TMPDIR!, "adopted"), "utf8")).toBe("adopted");
     const adoptedCheckout = await commandExec(adopted, 'printf blocked > "$CHECKOUT_PROBE"', {
       CHECKOUT_PROBE: checkoutProbe,
     });
