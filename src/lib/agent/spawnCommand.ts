@@ -54,16 +54,34 @@ const PIN_FALLBACK_TITLE_UK_MESSAGE = uk["spawnCard.pinUnavailableFallback"];
 const PIN_FALLBACK_TITLE_UK = typeof PIN_FALLBACK_TITLE_UK_MESSAGE === "string"
   ? PIN_FALLBACK_TITLE_UK_MESSAGE
   : PIN_FALLBACK_TITLE_EN;
-const PIN_FALLBACK_TITLES = new Set([
-  PIN_FALLBACK_TITLE_EN,
-  PIN_FALLBACK_TITLE_UK,
-]);
+const PIN_RETRY_TITLE_EN = en["spawnCard.pinUnavailableQueued"];
+const PIN_RETRY_TITLE_UK_MESSAGE = uk["spawnCard.pinUnavailableQueued"];
+const PIN_RETRY_TITLE_UK = typeof PIN_RETRY_TITLE_UK_MESSAGE === "string"
+  ? PIN_RETRY_TITLE_UK_MESSAGE
+  : PIN_RETRY_TITLE_EN;
+
+function prefersUkrainian(req: Pick<NextRequest, "headers">): boolean {
+  const language = req.headers.get("accept-language")?.trim().toLowerCase() ?? "";
+  return language === "uk" || language.startsWith("uk-");
+}
 
 function pinFallbackTitle(req: Pick<NextRequest, "headers">): string {
-  const language = req.headers.get("accept-language")?.trim().toLowerCase() ?? "";
-  return language === "uk" || language.startsWith("uk-")
+  return prefersUkrainian(req)
     ? PIN_FALLBACK_TITLE_UK
     : PIN_FALLBACK_TITLE_EN;
+}
+
+function pinRetryTitle(req: Pick<NextRequest, "headers">, retryAt: string): string {
+  return (prefersUkrainian(req) ? PIN_RETRY_TITLE_UK : PIN_RETRY_TITLE_EN)
+    .replace("{retryAt}", retryAt);
+}
+
+async function waitForAccountRetry(retryAt: string): Promise<void> {
+  const deadline = Date.parse(retryAt);
+  if (!Number.isFinite(deadline)) return;
+  while (deadline > Date.now()) {
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(deadline - Date.now(), 60_000)));
+  }
 }
 
 export interface SpawnCommandDependencies {
@@ -76,6 +94,7 @@ export interface SpawnCommandDependencies {
   assertStructuredRuntime: typeof assertDarwinStructuredRuntime;
   defer(work: () => Promise<void>): void;
   storeImages(images: readonly RuntimeImageUpload[]): StructuredImageRef[];
+  waitForAccountRetry?(retryAt: string): Promise<void>;
   adoptPipelineAttemptFromSource?: typeof adoptPipelineAttemptFromSource;
   pipelineAttemptTargetForSource?: typeof pipelineAttemptTargetForSource;
   /**
@@ -533,20 +552,22 @@ export async function executeSpawnRequest(
         new Error(existingAttempt.error ?? "the requested account is not available for this launch"),
       );
     }
+    const requestedAccountId = typeof body.accountId === "string" ? body.accountId : null;
     let account: HealthySpawnAccountResolution;
-    let pinFallback = existingAttempt?.accountPin === true
-      && existingAttempt.launchProfile.title !== null
-      && PIN_FALLBACK_TITLES.has(existingAttempt.launchProfile.title);
     try {
-      account = existingAttempt && existingAttempt.accountId !== null && !pinFallback
+      account = existingAttempt && existingAttempt.accountId !== null && !(existingAttempt.accountPin && requestedAccountId)
         ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
         : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
     } catch (error) {
       if (body.accountId === undefined) throw error;
       return terminalizePinnedAccountFailure(error);
     }
-    if (!existingAttempt && body.accountId !== undefined) {
-      pinFallback = account.accountId !== body.accountId;
+    const queuedUntil = requestedAccountId && account.requestedAdmission?.kind === "retry-at"
+      ? account.requestedAdmission.retryAt
+      : null;
+    let pinFallback = Boolean(requestedAccountId && !queuedUntil && account.accountId !== requestedAccountId);
+    if (queuedUntil && requestedAccountId) {
+      account = dependencies.resolveSpawnAccount(engine, requestedAccountId);
     }
     /* Idempotency binds the caller's requested account even when policy
        degrades that pin to a fallback account. A replay can therefore recover
@@ -554,38 +575,47 @@ export async function executeSpawnRequest(
     const digest = requestDigestForAccount(
       typeof body.accountId === "string" ? body.accountId : account.accountId,
     );
-    const specBase = freshSpecFor(engine, cwd, {
-      model: selectedModel.model,
-      effort: reasoning.effort,
-      fast: reasoning.fast,
-      codexHome: engine === "codex" ? account.home : null,
-      claudeConfigDir: engine === "claude" ? account.home : null,
-      claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
-      allowSubagents: body.allowSubagents === true,
-      mcpServers: grantedServers,
-      deferClaudeSpawnPolicy: true,
-    });
-    const permissionMode = engine === "claude" && transport === "structured"
-      ? structuredClaudePermissionMode(specBase.launchProfile?.permissionMode, {
-        agentInitiated,
-        operatorAuthenticated: authenticatedCaller?.kind === "operator",
-        roleSpawn: Boolean(role.value),
-      })
-      : specBase.launchProfile?.permissionMode;
-    const spec = {
-      ...specBase,
-      launchProfile: emptyLaunchProfile({
-        ...(specBase.launchProfile ?? {}),
-        cwd,
-        parentConversationId,
+    const specForAccount = (
+      launchAccount: HealthySpawnAccountResolution,
+      title: string | null,
+    ) => {
+      const specBase = freshSpecFor(engine, cwd, {
+        model: selectedModel.model,
+        effort: reasoning.effort,
+        fast: reasoning.fast,
+        codexHome: engine === "codex" ? launchAccount.home : null,
+        claudeConfigDir: engine === "claude" ? launchAccount.home : null,
+        claudeProjectsDir: engine === "claude" ? launchAccount.transcriptRoot : null,
         allowSubagents: body.allowSubagents === true,
         mcpServers: grantedServers,
-        plugins,
-        permissionMode,
-        ...(pinFallback ? { title: pinFallbackTitle(req) } : {}),
-        ...(explicitProject ? { project: explicitProject } : {}),
-      }),
+        deferClaudeSpawnPolicy: true,
+      });
+      const permissionMode = engine === "claude" && transport === "structured"
+        ? structuredClaudePermissionMode(specBase.launchProfile?.permissionMode, {
+          agentInitiated,
+          operatorAuthenticated: authenticatedCaller?.kind === "operator",
+          roleSpawn: Boolean(role.value),
+        })
+        : specBase.launchProfile?.permissionMode;
+      return {
+        ...specBase,
+        launchProfile: emptyLaunchProfile({
+          ...(specBase.launchProfile ?? {}),
+          cwd,
+          parentConversationId,
+          allowSubagents: body.allowSubagents === true,
+          mcpServers: grantedServers,
+          plugins,
+          permissionMode,
+          ...(title ? { title } : {}),
+          ...(explicitProject ? { project: explicitProject } : {}),
+        }),
+      };
     };
+    const spec = specForAccount(
+      account,
+      queuedUntil ? pinRetryTitle(req, queuedUntil) : pinFallback ? pinFallbackTitle(req) : null,
+    );
     /* The receipt keeps the caller's requested account as durable routing
        authority. The separate account context below owns this generation's
        actual launch, so a degraded fallback cannot silently rebind the pin. */
@@ -599,6 +629,33 @@ export async function executeSpawnRequest(
       existingAttempt?.accountPin ?? (body.accountId !== undefined),
     ));
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
+    const recordActualLaunchAccount = (
+      receipt: typeof begun.receipt,
+      actualAccountId: string,
+      agentPath: string | null,
+    ): void => {
+      if (!agentPath || receipt.accountId === actualAccountId) return;
+      const snapshot = registry.readOnlySnapshot();
+      const materialized = snapshot.receipts[receipt.launchId];
+      if (!materialized?.key || materialized.artifactPath !== agentPath) return;
+      const entry = snapshot.entries[sessionKeyId(materialized.key)];
+      const conversation = snapshot.conversations[materialized.conversationId];
+      if (!entry || !conversation) return;
+      registry.reconcileConversations([{
+        engine: materialized.engine,
+        path: agentPath,
+        accountId: actualAccountId,
+        launchProfile: materialized.launchProfile,
+        turn: {
+          state: conversation.turn.state,
+          source: conversation.turn.source,
+          terminalAt: conversation.turn.terminalAt,
+        },
+        expectedTurnObservedAt: conversation.turn.observedAt,
+        observedAt: new Date().toISOString(),
+      }]);
+      registry.upsert({ ...entry, accountId: actualAccountId });
+    };
     const adoptMaterializedAttempt = async (receipt: typeof begun.receipt, agentPath: string): Promise<void> => {
       if (!pipelineSourceConversationId || !dependencies.adoptPipelineAttemptFromSource) return;
       const materialized = registry.readOnlySnapshot().receipts[receipt.launchId] ?? receipt;
@@ -629,20 +686,39 @@ export async function executeSpawnRequest(
       receipt: typeof begun.receipt,
       runtimeClient: NonNullable<ReturnType<typeof dependencies.runtimeHostClient>>,
       imageRefs: StructuredImageRef[],
+      retryAt: string | null = null,
     ): void => {
       dependencies.defer(async () => {
         let response: SpawnResponse;
         try {
+          let launchAccount = account;
+          let launchSpec = spec;
+          if (retryAt && requestedAccountId) {
+            let nextRetryAt = retryAt;
+            for (;;) {
+              await (dependencies.waitForAccountRetry ?? waitForAccountRetry)(nextRetryAt);
+              const released = await dependencies.resolveHealthySpawnAccount(engine, requestedAccountId);
+              if (released.requestedAdmission?.kind === "retry-at") {
+                nextRetryAt = released.requestedAdmission.retryAt;
+                continue;
+              }
+              launchAccount = released;
+              pinFallback = released.accountId !== requestedAccountId;
+              launchSpec = specForAccount(released, pinFallback ? pinFallbackTitle(req) : null);
+              break;
+            }
+          }
           response = await dependencies.spawnStructuredConversation({
             engine,
             receipt,
-            spec,
-            account,
+            spec: launchSpec,
+            account: launchAccount,
             prompt,
             imageRefs,
             registry,
             client: runtimeClient,
           });
+          recordActualLaunchAccount(receipt, launchAccount.accountId, response.path);
         } catch (error) {
           console.error("[spawn] structured launch failed", {
             launchId: receipt.launchId,
@@ -659,10 +735,12 @@ export async function executeSpawnRequest(
              `failStructuredSpawn` no-ops on an already-terminal receipt, and a
              failed launch is claimable for retry under the same launch id, so
              a transient blip cannot become a second launch. */
-          if (error instanceof RuntimeHostUnavailableError) {
+          if (error instanceof RuntimeHostUnavailableError || retryAt) {
             registry.failStructuredSpawn(
               receipt.launchId,
-              `structured spawn transport failed: ${error.message}`.slice(0, 240),
+              (error instanceof RuntimeHostUnavailableError
+                ? `structured spawn transport failed: ${error.message}`
+                : error instanceof Error ? error.message : String(error)).slice(0, 240),
             );
           }
           return;
@@ -703,13 +781,24 @@ export async function executeSpawnRequest(
       let receipt = begun.receipt;
       let initialMessage: SpawnResponse["initialMessage"] | undefined;
       const runtimeClient = structured ? dependencies.runtimeHostClient() : null;
+      let queuedForPin = Boolean(queuedUntil && receipt.state === "starting" && !receipt.key);
       if (runtimeClient) {
-        try {
-          const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, runtimeClient);
-          receipt = reconciled;
-          initialMessage = reconciled.initialMessage;
-        } catch {
-          /* The durable registry receipt remains available during runtime resynchronization. */
+        if (!queuedForPin
+          && receipt.accountPin
+          && receipt.state === "starting"
+          && !receipt.key
+          && typeof runtimeClient.operationStatus === "function") {
+          const operation = await runtimeClient.operationStatus(receipt.launchId).catch(() => undefined);
+          queuedForPin = operation === null;
+        }
+        if (!queuedForPin) {
+          try {
+            const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, runtimeClient);
+            receipt = reconciled;
+            initialMessage = reconciled.initialMessage;
+          } catch {
+            /* The durable registry receipt remains available during runtime resynchronization. */
+          }
         }
         const admission = registry.claimStartingStructuredSpawn(receipt.launchId);
         receipt = admission.receipt;
@@ -724,13 +813,13 @@ export async function executeSpawnRequest(
             }
             throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error));
           }
-          deferStructuredSpawn(receipt, runtimeClient, imageRefs);
+          deferStructuredSpawn(receipt, runtimeClient, imageRefs, queuedForPin ? queuedUntil : null);
         }
       }
       if (receipt.artifactPath) await adoptMaterializedAttempt(receipt, receipt.artifactPath);
       const response = spawnResponseForReceipt(receipt, receipt.artifactPath, {
         structured,
-        initialMessage,
+        initialMessage: queuedForPin ? "queued" : initialMessage,
       });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
@@ -755,10 +844,11 @@ export async function executeSpawnRequest(
       let imageRefs;
       try { imageRefs = dependencies.storeImages(images); }
       catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
-      deferStructuredSpawn(begun.receipt, runtimeClient, imageRefs);
+      deferStructuredSpawn(begun.receipt, runtimeClient, imageRefs, queuedUntil);
       return NextResponse.json(
         spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, {
           structured: true,
+          ...(queuedUntil ? { initialMessage: "queued" as const } : {}),
         }),
         { status: 202 },
       );

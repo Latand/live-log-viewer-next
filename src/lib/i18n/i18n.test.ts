@@ -20,9 +20,12 @@ describe("translation parity between en and uk", () => {
 });
 
 describe("degraded account pin copy (#926)", () => {
-  test("fallback launches explain the degraded guarantee in both locales", () => {
+  test("fallback and queued launches explain the degraded guarantee in both locales", () => {
+    const retryAt = "2026-08-23T15:30:00.000Z";
     expect(translate("en", "spawnCard.pinUnavailableFallback")).toBe("Launched on another account — pin unavailable");
     expect(translate("uk", "spawnCard.pinUnavailableFallback")).toBe("Запущено на іншому акаунті — pin недоступний");
+    expect(translate("en", "spawnCard.pinUnavailableQueued", { retryAt })).toContain(retryAt);
+    expect(translate("uk", "spawnCard.pinUnavailableQueued", { retryAt })).toContain(retryAt);
   });
 });
 
