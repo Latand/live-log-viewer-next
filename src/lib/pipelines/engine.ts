@@ -623,7 +623,12 @@ export function defaultPipelinePorts(): PipelinePorts {
       }
       const session = snapshot.sessions.find((item) => item.conversationId === conversationId);
       if (!session) return null;
-      if (["dead", "unhosted", "conflict"].includes(session.host)) return false;
+      if (["dead", "unhosted", "conflict"].includes(session.host)) {
+        /* A host may be adopted again during this controller pass. Do not let
+           affirmative death evidence poison later liveness checks in the tick. */
+        runtimeSnapshot = null;
+        return false;
+      }
       if (session.turn === "running" || session.turn === "interrupt_requested" || session.attentionIds.length > 0) return true;
       /* A hosted idle turn is an inter-turn state with unknown agent activity. */
       return null;

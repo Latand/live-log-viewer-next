@@ -341,10 +341,11 @@ async function exhaustVerdictRecovery(h: ReturnType<typeof harness>, entries: Fi
 }
 
 async function withRuntimeSnapshot(
-  snapshot: Record<string, unknown>,
+  snapshot: Record<string, unknown> | ((requestNumber: number) => Record<string, unknown>),
   run: () => Promise<void>,
 ): Promise<void> {
   const socketPath = path.join(process.env.LLV_STATE_DIR!, `runtime-${crypto.randomUUID()}.sock`);
+  let requestNumber = 0;
   const server = net.createServer((socket) => {
     let frame = "";
     socket.on("data", (chunk) => {
@@ -352,7 +353,8 @@ async function withRuntimeSnapshot(
       const newline = frame.indexOf("\n");
       if (newline < 0) return;
       const request = JSON.parse(frame.slice(0, newline)) as { id: string };
-      socket.end(`${JSON.stringify({ id: request.id, ok: true, result: snapshot })}\n`);
+      const result = typeof snapshot === "function" ? snapshot(requestNumber++) : snapshot;
+      socket.end(`${JSON.stringify({ id: request.id, ok: true, result })}\n`);
     });
   });
   await new Promise<void>((resolve, reject) => {
@@ -1768,6 +1770,40 @@ test("an unindexed rollout stays running while its structured host is alive and 
       verdict: null,
     });
     expect(current.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
+  });
+});
+
+test("a dead runtime snapshot cannot poison later hosted idle evidence in the same tick (#1109)", async () => {
+  let snapshotReads = 0;
+  await withRuntimeSnapshot((requestNumber) => {
+    snapshotReads += 1;
+    return {
+      sessions: [{
+        conversationId: "conversation_stage_1",
+        host: requestNumber === 0 ? "dead" : "hosted",
+        turn: "idle",
+        attentionIds: [],
+      }],
+    };
+  }, async () => {
+    const h = harness();
+    await runningStructuredStage(h);
+    const runtimePorts = defaultPipelinePorts();
+    let primedDeadProjection = false;
+    h.ports.conversationAgentActive = async (conversationId) => {
+      if (!primedDeadProjection) {
+        primedDeadProjection = true;
+        expect(await runtimePorts.conversationAgentActive(conversationId)).toBe(false);
+      }
+      return runtimePorts.conversationAgentActive(conversationId);
+    };
+
+    await tickPipelines([], h.ports);
+
+    const current = loadPipelines()[0]!;
+    expect(current.state).toBe("running");
+    expect(current.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
+    expect(snapshotReads).toBe(2);
   });
 });
 
