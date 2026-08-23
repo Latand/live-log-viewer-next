@@ -382,3 +382,112 @@ test("issue 1100 review: a journal-bounded call record (identity only) projects 
     "omitted:3",
   ]);
 });
+
+test("issue 1100 review: a journal-bounded result batch settles the rows whose outcomes it dropped as `unknown` — never left running, an omitted failure never reads as ok, replay and snapshot keep it, a later real result still wins", () => {
+  /* Six parallel calls issued (two messages, in order), then ONE oversized
+     user message whose bounded projection kept the first two results and had
+     to drop four (`omittedToolResults`) — among them the failure of call 6. */
+  let live = projectRuntimeLiveTurnItem(null, "turn-results", claudeAssistant("u-calls-a", [
+    { type: "text", text: "Fanning out." },
+    { type: "tool_use", id: "toolu_r1", name: "Read", input: { file_path: "/repo/a.ts" } },
+    { type: "tool_use", id: "toolu_r2", name: "Read", input: { file_path: "/repo/b.ts" } },
+    { type: "tool_use", id: "toolu_r3", name: "Read", input: { file_path: "/repo/c.ts" } },
+  ]), "completed", at(1));
+  live = projectRuntimeLiveTurnItem(live, "turn-results", claudeAssistant("u-calls-b", [
+    { type: "tool_use", id: "toolu_r4", name: "Bash", input: { command: "bun test" } },
+    { type: "tool_use", id: "toolu_r5", name: "Bash", input: { command: "bunx tsc" } },
+    { type: "tool_use", id: "toolu_r6", name: "Bash", input: { command: "bun run build" } },
+  ]), "completed", at(2));
+  const boundedResults = {
+    truncated: true,
+    type: "user",
+    uuid: "u-results-bounded",
+    message: {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "toolu_r1" },
+        { type: "tool_result", tool_use_id: "toolu_r2", is_error: true },
+      ],
+      omittedToolResults: 4,
+    },
+  };
+  live = projectRuntimeLiveTurnItem(live, "turn-results", boundedResults, "completed", at(3));
+  const statuses = () => runtimeLiveTurnItems(live).filter((item) => item.tool).map((item) => `${item.itemId}:${item.tool!.status}`);
+  expect(statuses()).toEqual([
+    "toolu_r1:ok",
+    "toolu_r2:err",
+    "toolu_r3:unknown",
+    "toolu_r4:unknown",
+    "toolu_r5:unknown",
+    "toolu_r6:unknown",
+  ]);
+  /* Nothing is left running, and the rows whose outcome was dropped carry the
+     message's time as their finish, like any settled row. */
+  expect(runtimeLiveTurnItems(live).some((item) => item.tool?.status === "run")).toBeFalse();
+  expect(runtimeLiveTurnItems(live).filter((item) => item.tool?.status === "unknown").every((item) => item.completedAt === at(3))).toBeTrue();
+  /* No omission descriptor for results: the accounting sits on the rows themselves. */
+  expect(runtimeLiveTurnItems(live).filter((item) => (item.omittedItems ?? 0) > 0)).toHaveLength(0);
+  /* The compatibility text is still the latest prose. */
+  expect(live?.text).toBe("Fanning out.");
+
+  /* Replay of the same bounded message (refresh / journal replay): idempotent. */
+  const before = JSON.stringify(live);
+  live = projectRuntimeLiveTurnItem(live, "turn-results", boundedResults, "completed", at(3));
+  expect(JSON.stringify(live)).toBe(before);
+
+  /* A later call record for a settled row never demotes it back to running;
+     the snapshot round-trip keeps `unknown` as `unknown`. */
+  live = projectRuntimeLiveTurnItem(live, "turn-results", claudeAssistant("u-calls-b", [
+    { type: "tool_use", id: "toolu_r4", name: "Bash", input: { command: "bun test" } },
+  ]), "completed", at(2));
+  const restored = runtimeLiveTurnItems(normalizeRuntimeLiveTurn(JSON.parse(JSON.stringify(live))));
+  expect(restored.filter((item) => item.tool).map((item) => `${item.itemId}:${item.tool!.status}`)).toEqual(statuses());
+
+  /* A real result that does arrive later for one of those rows sets its real
+     outcome — the bound never hides a failure that reaches the stream. */
+  live = projectRuntimeLiveTurnItem(live, "turn-results", claudeUser("u-late", [
+    { type: "tool_result", tool_use_id: "toolu_r6", is_error: true },
+  ]), "completed", at(4));
+  expect(statuses().at(-1)).toBe("toolu_r6:err");
+});
+
+test("issue 1100 review: an omitted result settles only Claude rows issued no later than its message, never a call that came after", () => {
+  let live = projectRuntimeLiveTurnItem(null, "turn-order", claudeAssistant("u-first", [
+    { type: "tool_use", id: "toolu_o1", name: "Read", input: { file_path: "/repo/a.ts" } },
+    { type: "tool_use", id: "toolu_o2", name: "Read", input: { file_path: "/repo/b.ts" } },
+  ]), "completed", at(1));
+  /* A Codex row in the same window is never a candidate for a Claude message. */
+  live = projectRuntimeLiveTurnItem(live, "turn-order", { type: "commandExecution", id: "call_codex", command: "ls", status: "inProgress" }, "started", at(1));
+  /* A call issued AFTER the results message (out-of-order redelivery of the
+     message later on) stays running: the message could not have settled it. */
+  live = projectRuntimeLiveTurnItem(live, "turn-order", claudeAssistant("u-later", [
+    { type: "tool_use", id: "toolu_o3", name: "Bash", input: { command: "bun test" } },
+  ]), "completed", at(5));
+  live = projectRuntimeLiveTurnItem(live, "turn-order", {
+    truncated: true,
+    type: "user",
+    uuid: "u-results-order",
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_o1" }], omittedToolResults: 1 },
+  }, "completed", at(3));
+  expect(runtimeLiveTurnItems(live).filter((item) => item.tool).map((item) => `${item.itemId}:${item.tool!.status}`)).toEqual([
+    "toolu_o1:ok",
+    "toolu_o2:unknown",
+    "call_codex:run",
+    "toolu_o3:run",
+  ]);
+  /* More omitted results than rows to settle: exactly the rows settle, no
+     descriptor is invented for calls that were never rows. */
+  live = projectRuntimeLiveTurnItem(live, "turn-order", {
+    truncated: true,
+    type: "user",
+    uuid: "u-results-surplus",
+    message: { role: "user", content: [], omittedToolResults: 50 },
+  }, "completed", at(6));
+  expect(runtimeLiveTurnItems(live).filter((item) => item.tool).map((item) => `${item.itemId}:${item.tool!.status}`)).toEqual([
+    "toolu_o1:ok",
+    "toolu_o2:unknown",
+    "call_codex:run",
+    "toolu_o3:unknown",
+  ]);
+  expect(runtimeLiveTurnItems(live).filter((item) => (item.omittedItems ?? 0) > 0)).toHaveLength(0);
+});

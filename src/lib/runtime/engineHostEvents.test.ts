@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { streamingVoiceDelivery } from "./voiceDelivery";
 import { projectEngineHostEvent } from "./engineHostEvents";
-import { projectRuntimeLiveTurnItem, runtimeLiveTurnItems } from "./liveTurn";
+import { normalizeRuntimeLiveTurn, projectRuntimeLiveTurnItem, runtimeLiveTurnItems } from "./liveTurn";
 
 describe("projectEngineHostEvent", () => {
   test("projects a Codex user-input request into a question card", () => {
@@ -251,6 +251,75 @@ describe("projectEngineHostEvent", () => {
     const shownTools = rows.filter((row) => row.tool).length;
     const foldedAway = rows.reduce((total, row) => total + (row.tool ? 0 : (row.omittedItems ?? 0)), 0);
     expect(shownTools + foldedAway).toBe(400);
+  });
+
+  test("issue 1100 review: an oversized result batch cannot leave calls running — retained results settle their rows, omitted outcomes settle as `unknown`, a dropped failure never reads as ok (the reviewer's 400-result probe)", () => {
+    const at = (second: number) => `2026-08-23T09:00:${String(second).padStart(2, "0")}.000Z`;
+    const calls = Array.from({ length: 400 }, (_, index) => ({
+      type: "tool_use", id: `toolu_batch_${String(index).padStart(4, "0")}_${"i".repeat(40)}`, name: "Read", input: { file_path: `/repo/${index}.ts` },
+    }));
+    /* 400 calls issued across 16 ordinary messages: every call is a running row. */
+    let live = null as ReturnType<typeof projectRuntimeLiveTurnItem>;
+    for (let message = 0; message < 16; message += 1) {
+      const projected = projectEngineHostEvent("conversation_tools", "claude:session-tools", {
+        kind: "item",
+        turnId: "turn-tools",
+        item: { type: "assistant", uuid: `uuid-batch-${message}`, message: { id: `msg_batch_${message}`, role: "assistant", content: calls.slice(message * 25, message * 25 + 25) } },
+        phase: "completed",
+        seq: 100 + message,
+      });
+      live = projectRuntimeLiveTurnItem(live, "turn-tools", projected?.payload.item, "completed", at(message));
+    }
+    expect(runtimeLiveTurnItems(live).filter((row) => row.tool)).toHaveLength(400);
+    expect(runtimeLiveTurnItems(live).every((row) => !row.tool || row.tool.status === "run")).toBeTrue();
+
+    /* ONE user message with all 400 results, each with a body: the identities
+       alone overflow the item bound, so the leading results survive and the
+       trailing ones — the last call's failure among them — are counted. */
+    const results = projectEngineHostEvent("conversation_tools", "claude:session-tools", {
+      kind: "item",
+      turnId: "turn-tools",
+      item: {
+        type: "user", uuid: "uuid-batch-results",
+        message: { role: "user", content: calls.map((call, index) => ({
+          type: "tool_result", tool_use_id: call.id, is_error: index === 5 || index === 399, content: "z".repeat(2_000),
+        })) },
+      },
+      phase: "completed",
+      seq: 120,
+    });
+    const item = results?.payload.item as Record<string, unknown>;
+    const message = item.message as { content: Array<Record<string, unknown>>; omittedToolResults?: number };
+    expect(Buffer.byteLength(JSON.stringify(item))).toBeLessThanOrEqual(8 * 1024);
+    expect(JSON.stringify(item)).not.toContain("zzzz");
+    expect(message.content.length).toBeGreaterThan(0);
+    expect(message.content.length).toBeLessThan(400);
+    expect(message.omittedToolResults).toBe(400 - message.content.length);
+
+    live = projectRuntimeLiveTurnItem(live, "turn-tools", item, "completed", at(20));
+    /* Replay of the same bounded message must not change anything. */
+    const once = JSON.stringify(live);
+    live = projectRuntimeLiveTurnItem(live, "turn-tools", item, "completed", at(20));
+    expect(JSON.stringify(live)).toBe(once);
+
+    const rows = runtimeLiveTurnItems(live).filter((row) => row.tool);
+    expect(rows).toHaveLength(400);
+    expect(rows.filter((row) => row.tool?.status === "run")).toHaveLength(0);
+    const kept = message.content.length;
+    /* Retained results carry their real outcome, in order. */
+    expect(rows.slice(0, kept).map((row) => row.tool?.status)).toEqual(calls.slice(0, kept).map((_, index) => (index === 5 ? "err" : "ok")));
+    /* Every omitted outcome is accounted on its own row: exactly the count the
+       message declared, none of them claiming success — the dropped failure of
+       the last call included. */
+    const unknown = rows.filter((row) => row.tool?.status === "unknown");
+    expect(unknown).toHaveLength(message.omittedToolResults!);
+    expect(rows.slice(kept).every((row) => row.tool?.status === "unknown")).toBeTrue();
+    expect(rows.at(-1)?.itemId).toBe(calls[399]!.id);
+    expect(rows.at(-1)?.tool?.status).toBe("unknown");
+    expect(unknown.every((row) => row.completedAt === at(20))).toBeTrue();
+    /* The snapshot keeps the distinction. */
+    const restored = runtimeLiveTurnItems(normalizeRuntimeLiveTurn(JSON.parse(JSON.stringify(live)))).filter((row) => row.tool);
+    expect(restored.map((row) => row.tool?.status)).toEqual(rows.map((row) => row.tool?.status));
   });
 
   test("issue 1100 review: an oversized FAILED Codex tool keeps its terminal outcome, so the live row is an error", () => {

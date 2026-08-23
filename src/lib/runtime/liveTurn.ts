@@ -12,7 +12,12 @@ const TOOL_ARG_KEY_LIMIT = 12;
 const TOOL_NAME_LIMIT = 128;
 
 export type RuntimeLiveTurnItemPhase = "streaming" | "awaiting-echo";
-export type RuntimeLiveTurnToolStatus = "run" | "ok" | "err";
+/** `run`: call seen, no finish yet. `ok` / `err`: the finish arrived with its
+    outcome. `unknown`: the call finished, but its result sat in a batch the
+    journal's item bound could not retain (`omittedToolResults`), so the live
+    projection knows it is no longer running and nothing about its outcome —
+    the canonical transcript row carries the truth and claims this one. */
+export type RuntimeLiveTurnToolStatus = "run" | "ok" | "err" | "unknown";
 export type RuntimeLiveTurnToolEngine = "claude" | "codex";
 
 /**
@@ -291,9 +296,21 @@ function codexToolActivity(item: Record<string, unknown>, type: string, phase: "
     renders the count as an explicit omission descriptor so the operator knows
     rows are missing rather than believing the turn issued fewer calls. */
 function omittedToolCalls(value: unknown): number {
+  return omittedCount(value, "omittedToolCalls");
+}
+
+/** Tool results the same bounded projection had to drop from an oversized
+    `user` message: each one is a call that finished whose outcome the live
+    turn never sees, so the matching rows settle as `unknown` rather than
+    spinning as running until the transcript echo claims them. */
+function omittedToolResults(value: unknown): number {
+  return omittedCount(value, "omittedToolResults");
+}
+
+function omittedCount(value: unknown, key: "omittedToolCalls" | "omittedToolResults"): number {
   const item = record(value);
   const message = record(item?.message);
-  const count = message?.omittedToolCalls;
+  const count = message?.[key];
   return typeof count === "number" && Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
 }
 
@@ -355,7 +372,7 @@ function normalizedTool(value: unknown): RuntimeLiveTurnTool | null {
   return {
     name: clipChars(name || "tool", TOOL_NAME_LIMIT),
     engine: tool.engine === "codex" ? "codex" : "claude",
-    status: tool.status === "ok" ? "ok" : tool.status === "err" ? "err" : "run",
+    status: tool.status === "ok" ? "ok" : tool.status === "err" ? "err" : tool.status === "unknown" ? "unknown" : "run",
     args: boundedToolArgs(tool.args),
     ...(tool.argsOmitted === true ? { argsOmitted: true } : {}),
   };
@@ -615,6 +632,44 @@ function projectToolActivity(
   }];
 }
 
+/**
+ * Results the journal's bounded projection dropped from an oversized `user`
+ * message (issue #1100 review): each is a finished call whose outcome never
+ * reaches the live turn. A Claude `user` message answers calls already issued
+ * before it, so the rows it can settle are the Claude rows still running,
+ * started no later than the message, that its retained results did not settle;
+ * the newest `count` of them (the projection keeps the leading results and
+ * drops the trailing ones) become `unknown` — no longer running, outcome not
+ * retained — and say so. Exactly `count` rows settle: a result for a call that
+ * has no row (its record was bounded away or folded, which the call-side
+ * accounting already declares) has nothing to settle and claims nothing. A
+ * replay of the same message finds those rows already settled and changes
+ * nothing; a later real result for such a row still sets its real outcome.
+ */
+function settleOmittedResults(
+  current: RuntimeLiveTurnItem[],
+  count: number,
+  settledIds: ReadonlySet<string>,
+  occurredAt: string | null,
+): RuntimeLiveTurnItem[] {
+  if (!count) return current;
+  const messageAt = occurredAt ? Date.parse(occurredAt) : Number.NaN;
+  const candidates: number[] = [];
+  current.forEach((item, index) => {
+    const tool = item.tool;
+    if (!tool || tool.engine !== "claude" || tool.status !== "run") return;
+    if (item.itemId && settledIds.has(item.itemId)) return;
+    const startedAt = item.startedAt ? Date.parse(item.startedAt) : Number.NaN;
+    if (!Number.isNaN(messageAt) && !Number.isNaN(startedAt) && startedAt > messageAt) return;
+    candidates.push(index);
+  });
+  const settle = new Set(candidates.slice(-count));
+  if (!settle.size) return current;
+  return current.map((item, index) => settle.has(index) && item.tool
+    ? { ...item, completedAt: occurredAt, tool: { ...item.tool, status: "unknown" as const } }
+    : item);
+}
+
 /** The explicit omission descriptor for one bounded message, keyed on that
     message so a replayed item (refresh, journal replay after restart) updates
     the count in place instead of stacking a second marker. It has no canonical
@@ -666,7 +721,8 @@ export function projectRuntimeLiveTurnItem(
   const identity = phase === "completed" ? itemIdentity(item) : null;
   const activities = toolActivities(item, phase);
   const omitted = phase === "completed" ? omittedToolCalls(item) : 0;
-  if (!identity && !activities.length && !omitted) return value ?? null;
+  const omittedResults = phase === "completed" ? omittedToolResults(item) : 0;
+  if (!identity && !activities.length && !omitted && !omittedResults) return value ?? null;
   const before = itemsForTurn(value, turnId, occurredAt);
   let current = before;
   /* Claude puts prose before the `tool_use` blocks of the same message, so the
@@ -674,6 +730,12 @@ export function projectRuntimeLiveTurnItem(
   if (identity) current = projectAssistantText(current, identity, occurredAt);
   for (const activity of activities) current = projectToolActivity(current, activity, occurredAt);
   current = projectOmittedToolCalls(current, omitted, messageSourceId(item), occurredAt);
+  current = settleOmittedResults(
+    current,
+    omittedResults,
+    new Set(activities.filter((activity) => activity.finished).map((activity) => activity.callId)),
+    occurredAt,
+  );
   /* An empty-bodied completion with nothing to settle leaves the turn as is. */
   if (current === before) return value ?? null;
   return bounded(turnId, current);

@@ -117,3 +117,20 @@ test("a tool row whose arguments were bounded away still names the tool and says
   expect(row.dataset.liveTool).toBe("Grep");
   expect(row.textContent).toContain("arguments omitted");
 });
+
+test("a call whose result the journal's bound dropped reads as finished with its outcome omitted: no spinner, no check, no error styling", () => {
+  const host = mount([
+    {
+      itemId: "toolu_dropped", text: "", phase: "awaiting-echo", startedAt: AT, completedAt: AT,
+      tool: { name: "Bash", engine: "claude", status: "unknown", args: { command: "bun run build" } },
+    },
+  ]);
+  const row = host.querySelector<HTMLElement>("[data-live-tool]")!;
+  expect(row.dataset.liveToolStatus).toBe("unknown");
+  expect(row.textContent).toContain("bun run build");
+  expect(row.textContent).toContain("outcome omitted");
+  expect(row.textContent).not.toContain("executing");
+  expect(row.textContent).not.toContain("error");
+  expect(row.querySelector(".animate-spin")).toBeNull();
+  expect(row.className).not.toContain("border-danger");
+});

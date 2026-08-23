@@ -1014,6 +1014,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "feed.liveTail": "живий хвіст",
   "feed.liveOmittedItems": "… ({count} попередніх живих записів, {chars} символів)",
   "feed.liveToolArgsOmitted": "аргументи пропущено",
+  "feed.liveToolOutcomeOmitted": "результат пропущено",
   "feed.liveOmittedChars": "… (+{chars} символів)",
   "feed.backToLive": "Повернутись до живого хвоста",
   "feed.newCount": "{count} нових",

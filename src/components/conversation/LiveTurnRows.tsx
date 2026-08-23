@@ -35,11 +35,16 @@ function LiveToolRow({ item, tool }: { item: RuntimeLiveTurnItem; tool: RuntimeL
   const { t } = useLocale();
   const summary = useMemo(() => summarizeTool(tool.name, tool.args, tool.engine), [tool.name, tool.args, tool.engine]);
   const isErr = tool.status === "err";
+  /* `unknown` is a finished call whose result the journal's bound could not
+     retain: no spinner (it is not running), no check (its outcome is not
+     known), just the word for what happened to it. */
   const label = tool.status === "run"
     ? t("render.executing")
     : tool.status === "err"
       ? t("render.error")
-      : "";
+      : tool.status === "unknown"
+        ? t("feed.liveToolOutcomeOmitted")
+        : "";
   const files = tool.name === "apply_patch" && !summary.chips.length ? patchFileNames(tool.args.input) : "";
   const base = files ? `${summary.summary} · ${files}` : summary.summary;
   const detail = tool.argsOmitted ? `${base} · ${t("feed.liveToolArgsOmitted")}` : base;
@@ -60,7 +65,7 @@ function LiveToolRow({ item, tool }: { item: RuntimeLiveTurnItem; tool: RuntimeL
       </span>
       {tool.status !== "ok" ? (
         <span className={`inline-flex shrink-0 items-center gap-1 text-caption font-semibold ${isErr ? "text-danger" : "text-muted"}`}>
-          <StatusIcon status={tool.status} className="h-3 w-3" />
+          {tool.status !== "unknown" ? <StatusIcon status={tool.status} className="h-3 w-3" /> : null}
           {label}
         </span>
       ) : null}

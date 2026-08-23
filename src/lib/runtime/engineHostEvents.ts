@@ -84,13 +84,15 @@ function projectionBytes(value: JsonObject): number {
  * first thing to go: a projection that does not fit with bounded arguments is
  * retried with identity-only calls (`inputOmitted`, which the live row reports
  * as omitted arguments); only when even the identities do not fit are the
- * trailing calls dropped, and then the message says how many
- * (`omittedToolCalls` / `omittedToolResults`), which the live turn renders as an
- * explicit omission descriptor. Prose bodies are dropped on purpose: the
- * streamed deltas already carry the text, and a clipped authoritative body
- * would otherwise overwrite them. Codex tool items keep their terminal outcome
- * discriminants (`status`, `exitCode`, `error`, `success`, `failure`) so a failed
- * oversized call never projects as a successful row.
+ * trailing calls dropped, and then the message says how many: `omittedToolCalls`,
+ * which the live turn renders as an explicit omission descriptor, and
+ * `omittedToolResults`, which settles that many still-running rows as
+ * `unknown` (finished, outcome not retained) instead of leaving them spinning.
+ * Prose bodies are dropped on purpose: the streamed deltas already carry the
+ * text, and a clipped authoritative body would otherwise overwrite them. Codex
+ * tool items keep their terminal outcome discriminants (`status`, `exitCode`,
+ * `error`, `success`, `failure`) so a failed oversized call never projects as a
+ * successful row.
  */
 function truncatedItemProjection(source: JsonObject, maxBytes: number): JsonObject {
   const message = record(source.message);

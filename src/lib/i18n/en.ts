@@ -1044,6 +1044,7 @@ export const en = {
   "feed.liveTail": "live tail",
   "feed.liveOmittedItems": "… ({count} earlier live items, {chars} characters)",
   "feed.liveToolArgsOmitted": "arguments omitted",
+  "feed.liveToolOutcomeOmitted": "outcome omitted",
   "feed.liveOmittedChars": "… (+{chars} characters)",
   "feed.backToLive": "Back to the live tail",
   "feed.newCount": "{count} new",
