@@ -602,13 +602,11 @@ export async function executeSpawnRequest(
             conversationId: receipt.conversationId,
             error,
           });
-          /* Structured is the default transport now, so "socket configured,
-             host unreachable" is a default-path failure — and the one failure
-             nothing else can terminalize: `spawnStructuredConversation` marks
-             the receipt failed only when it can project the dead spawn through
-             that same dead socket, and the stale-spawn reaper reconciles
-             through it too. Without this the operator sees an accepted 202
-             that never becomes a conversation. Retry-safe:
+          /* Structured is the default transport now, and this injected launch
+             seam can still throw before it records a durable result. Preserve a
+             route-level transport fallback so tests, older launch adapters, and
+             partial upgrades still turn an accepted 202 into a terminal card.
+             Retry-safe:
              `failStructuredSpawn` no-ops on an already-terminal receipt, and a
              failed launch is claimable for retry under the same launch id, so
              a transient blip cannot become a second launch. */
