@@ -35,23 +35,34 @@ class MemoryEventStore implements RuntimeEventStore {
 }
 
 test("read-only structured hosts receive one writable isolated scratch root", () => {
-  const scratchParent = fs.mkdtempSync(path.join(os.tmpdir(), "llv-read-only-scratch-test-"));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-read-only-scratch-test-"));
+  const stateDirectory = path.join(directory, "state");
+  const previousStateDirectory = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = stateDirectory;
   try {
     const access = materializeStructuredHostAccess(
       true,
-      { NODE_ENV: "test", HOME: "/shared/home", XDG_CONFIG_HOME: "/shared/config" },
+      {
+        NODE_ENV: "test",
+        HOME: "/shared/home",
+        XDG_CONFIG_HOME: "/shared/config",
+        XDG_CACHE_HOME: "/shared/cache",
+        TMPDIR: "/container-private/tmp",
+      },
       "capability",
-      scratchParent,
     );
 
     expect(access.env).toMatchObject({
       NODE_ENV: "test",
       LLV_SPAWN_CAPABILITY: "capability",
-      HOME: path.join(access.scratchDirectory!, "home"),
-      XDG_CONFIG_HOME: path.join(access.scratchDirectory!, "config"),
+      HOME: "/shared/home",
+      XDG_CONFIG_HOME: "/shared/config",
+      XDG_CACHE_HOME: "/shared/cache",
       TMPDIR: path.join(access.scratchDirectory!, "tmp"),
       GH_CONFIG_DIR: "/shared/config/gh",
     });
+    expect(path.dirname(access.scratchDirectory!)).toBe(path.join(stateDirectory, "scratch"));
+    expect(access.scratchDirectory!.startsWith(`${stateDirectory}${path.sep}`)).toBeTrue();
     expect(access.codex).toEqual({
       permissionProfile: READ_ONLY_STAGE_PERMISSION_PROFILE,
       permissionProfileConfig: `permissions.${READ_ONLY_STAGE_PERMISSION_PROFILE}={extends=":read-only",filesystem={${JSON.stringify(access.scratchDirectory)}="write"}}`,
@@ -61,21 +72,22 @@ test("read-only structured hosts receive one writable isolated scratch root", ()
       releaseCleanup: expect.any(Function),
     });
     expect(fs.statSync(access.scratchDirectory!).mode & 0o777).toBe(0o700);
-    for (const name of ["home", "config", "tmp"]) {
-      expect(fs.statSync(path.join(access.scratchDirectory!, name)).mode & 0o777).toBe(0o700);
-    }
+    expect(fs.statSync(path.join(access.scratchDirectory!, "tmp")).mode & 0o777).toBe(0o700);
 
     access.cleanup();
     expect(fs.existsSync(access.scratchDirectory!)).toBeFalse();
 
-    const readWrite = materializeStructuredHostAccess(false, { NODE_ENV: "test", HOME: "/shared/home" }, "capability", scratchParent);
+    const sourceEnv: NodeJS.ProcessEnv = { NODE_ENV: "test", HOME: "/shared/home", TMPDIR: "/original/tmp" };
+    const readWrite = materializeStructuredHostAccess(false, sourceEnv, "capability", directory);
     expect(readWrite).toMatchObject({
-      env: { HOME: "/shared/home", LLV_SPAWN_CAPABILITY: "capability" },
+      env: { ...sourceEnv, LLV_SPAWN_CAPABILITY: "capability" },
       codex: { sandbox: "danger-full-access" },
       scratchDirectory: null,
     });
   } finally {
-    fs.rmSync(scratchParent, { recursive: true, force: true });
+    if (previousStateDirectory === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDirectory;
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 

@@ -437,6 +437,22 @@ function sanitizedUserReplay(
     : [];
   const text = content?.content.text ?? userText(message);
   if (text) sanitizedBlocks.push({ type: "text", text });
+  /* Tool results keep only their identity and outcome (issue #1100): the live
+     turn marks the matching `tool_use` row finished/failed from this, while the
+     result body itself stays in the transcript. */
+  const blocks = record(message.message)?.content;
+  if (Array.isArray(blocks)) {
+    for (const block of blocks) {
+      const result = record(block);
+      const toolUseId = stringField(result, "tool_use_id");
+      if (result?.type !== "tool_result" || !toolUseId) continue;
+      sanitizedBlocks.push({
+        type: "tool_result",
+        tool_use_id: toolUseId,
+        ...(result.is_error === true ? { is_error: true } : {}),
+      });
+    }
+  }
   return {
     ...message,
     ...(content ? { contentDigest: content.contentDigest } : {}),

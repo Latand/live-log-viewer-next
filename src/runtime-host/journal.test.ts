@@ -2710,3 +2710,58 @@ test("snapshot over the socket splices the cached frame and stays a valid respon
     journal.close();
   }
 });
+
+test("issue 1100: tool items project into the session's live turn on both lifecycle phases and survive reopen", () => {
+  const dir = sandbox("live-turn-tools");
+  const filename = path.join(dir, "events.sqlite");
+  const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
+  const scope = runtimeScope("session", "conversation_tools");
+  journal.append({ scope, kind: "host.connected", payload: { conversationId: "conversation_tools", sessionKey: { engine: "codex", sessionId: "thread-tools" } } });
+  journal.append({ scope, kind: "turn-started", payload: { conversationId: "conversation_tools", turnId: "turn-tools" } });
+  journal.append({
+    scope,
+    kind: "item",
+    payload: {
+      conversationId: "conversation_tools",
+      turnId: "turn-tools",
+      phase: "started",
+      item: { type: "commandExecution", id: "call_build", command: "bun run build", cwd: "/repo", status: "inProgress" },
+    },
+  });
+  journal.append({ scope, kind: "delta", payload: { conversationId: "conversation_tools", turnId: "turn-tools", text: "Building…" } });
+  journal.append({
+    scope,
+    kind: "item",
+    payload: {
+      conversationId: "conversation_tools",
+      turnId: "turn-tools",
+      phase: "completed",
+      item: { type: "assistant", uuid: "uuid-claude-tool", message: { role: "assistant", content: [
+        { type: "tool_use", id: "toolu_read", name: "Read", input: { file_path: "/repo/README.md" } },
+      ] } },
+    },
+  });
+  const running = journal.sessionState("conversation_tools")?.liveTurn?.items ?? [];
+  expect(running.map((item) => item.tool ? `${item.itemId}:${item.tool.status}` : `text:${item.text}`))
+    .toEqual(["call_build:run", "text:Building…", "toolu_read:run"]);
+  journal.append({
+    scope,
+    kind: "item",
+    payload: {
+      conversationId: "conversation_tools",
+      turnId: "turn-tools",
+      phase: "completed",
+      item: { type: "commandExecution", id: "call_build", command: "bun run build", cwd: "/repo", status: "completed", exitCode: 1 },
+    },
+  });
+  journal.close();
+
+  /* A reopened journal (host restart) rebuilds the same rows from the durable events. */
+  const reopened = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
+  const items = reopened.sessionState("conversation_tools")?.liveTurn?.items ?? [];
+  expect(items.map((item) => item.tool ? `${item.itemId}:${item.tool.status}` : `text:${item.text}`))
+    .toEqual(["call_build:err", "text:Building…", "toolu_read:run"]);
+  expect(items[0]?.tool).toMatchObject({ name: "shell", engine: "codex", args: { cmd: "bun run build", workdir: "/repo" } });
+  expect(reopened.snapshot().sessions.find((session) => session.conversationId === "conversation_tools")?.liveTurn?.items).toHaveLength(3);
+  reopened.close();
+});

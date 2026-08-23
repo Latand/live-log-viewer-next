@@ -31,6 +31,21 @@ function sourceIdOf({ item }: FeedEntry): string | null {
     : null;
 }
 
+/** The engine call ids a canonical row carries: one for a tool row, every
+    member of a folded run (issue #1100). A live tool row is claimed by this
+    identity exactly as a prose row is claimed by its response id. */
+function toolIdsOf({ item }: FeedEntry): string[] {
+  if (item.kind === "tool") return item.id ? [item.id] : [];
+  if (item.kind === "cmd-group") return item.ids.filter((id) => typeof id === "string" && id.length > 0);
+  return [];
+}
+
+/** Every durable identity a canonical row can claim a live row with. */
+function claimIdsOf(entry: FeedEntry): string[] {
+  const sourceId = sourceIdOf(entry);
+  return [...(sourceId ? [sourceId] : []), ...toolIdsOf(entry)];
+}
+
 export function readCanonicalAssistantClaims(conversationId: string): ReadonlySet<string> {
   const cached = claims.get(conversationId);
   if (cached) return cached;
@@ -68,10 +83,7 @@ export function publishCanonicalAssistantClaims(
 ): void {
   if (!conversationId) return;
   const previous = readCanonicalAssistantClaims(conversationId);
-  const discovered = feed.flatMap((entry) => {
-    const sourceId = sourceIdOf(entry);
-    return sourceId ? [sourceId] : [];
-  });
+  const discovered = feed.flatMap(claimIdsOf);
   if (!discovered.some((sourceId) => !previous.has(sourceId))) return;
   const merged = new Set(previous);
   for (const sourceId of discovered) {
@@ -134,6 +146,11 @@ function canonicalAssistantItems(feed: readonly FeedEntry[]): CanonicalAssistant
         text: item.text.trim(),
         at: timestamp(item.ts),
       }];
+    }
+    /* A tool row (or each call of a folded run) claims the live tool row that
+       carries the same engine call id; the transcript row now shows the call. */
+    if (item.kind === "tool" || item.kind === "cmd-group") {
+      return toolIdsOf(entry).map((id) => ({ sourceId: id, text: "", at: null }));
     }
     if (!sourceId) return [];
     return [{
