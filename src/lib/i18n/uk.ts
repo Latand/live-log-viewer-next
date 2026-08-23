@@ -406,7 +406,6 @@ export const uk: Record<keyof typeof en, Message> = {
   "spawnCard.initial.failed": "Перше повідомлення: помилка доставки",
   "spawnCard.retrySafe": "Цей запуск завершено. Можна створити нову спробу.",
   "spawnCard.pinUnavailableFallback": "Запущено на іншому акаунті — pin недоступний",
-  "spawnCard.pinUnavailableQueued": "Закріплений акаунт недоступний — запуск у черзі до {retryAt}",
   "spawnCard.launch": "Запуск {id}",
   "spawnChip.starting": "Запускається",
   "spawnChip.binding": "Під’єднання хоста",
