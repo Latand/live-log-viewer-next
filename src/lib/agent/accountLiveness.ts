@@ -1,9 +1,5 @@
-import fs from "node:fs";
-
 import { procBackend } from "@/lib/proc";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
-import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
-import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 
 import type { AgentEngine } from "./cli";
 import { sessionKeyId } from "./sessionKey";
@@ -23,80 +19,6 @@ export type SpawnAccountAdmission =
   | { kind: "admissible"; basis: "current" | "last-known"; stale: boolean; retryAt: null }
   | { kind: "retry-at"; reason: "hard-limit"; stale: boolean; retryAt: string }
   | { kind: "unavailable"; reason: "auth-failed" | "hard-limit" | "account-disabled"; stale: boolean; retryAt: null };
-
-const queuedPinnedSpawnBootstrap = globalThis as typeof globalThis & {
-  __llvQueuedPinnedSpawnBootstrap?: boolean;
-  __llvQueuedPinnedSpawnWakeups?: Map<string, ReturnType<typeof setTimeout>>;
-};
-
-const QUEUED_PIN_WAKE_RETRY_MS = 30_000;
-const QUEUED_PIN_WAKE_MAX_TIMER_MS = 2_147_000_000;
-
-function queuedPinnedSpawnRetryAt(filename: string): number | null {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(`${filename}.queued-pinned-spawns.json`, "utf8")) as {
-      records?: Record<string, { retryAt?: unknown }>;
-    };
-    const deadlines = Object.values(parsed.records ?? {}).flatMap((record) => {
-      const deadline = typeof record.retryAt === "string" ? Date.parse(record.retryAt) : Number.NaN;
-      return Number.isFinite(deadline) ? [deadline] : [];
-    });
-    return deadlines.length > 0 ? Math.min(...deadlines) : null;
-  } catch {
-    return null;
-  }
-}
-
-function queuedPinnedSpawnDrainUrl(): string {
-  const configured = process.env.PORT?.trim() ?? "8898";
-  const port = /^\d{1,5}$/.test(configured) ? configured : "8898";
-  return `http://127.0.0.1:${port}/api/spawn?drainQueuedPinnedSpawns=1`;
-}
-
-export function scheduleQueuedPinnedSpawnWake(filename: string): void {
-  if (process.env.NODE_ENV === "test") return;
-  const wakeups = queuedPinnedSpawnBootstrap.__llvQueuedPinnedSpawnWakeups ??= new Map();
-  const existing = wakeups.get(filename);
-  if (existing) clearTimeout(existing);
-  wakeups.delete(filename);
-  const retryAt = queuedPinnedSpawnRetryAt(filename);
-  if (retryAt === null) return;
-  const delay = Math.min(Math.max(0, retryAt - Date.now()), QUEUED_PIN_WAKE_MAX_TIMER_MS);
-  const timer = setTimeout(() => {
-    wakeups.delete(filename);
-    void fetch(queuedPinnedSpawnDrainUrl(), {
-      headers: { [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability() },
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error(`queued pinned spawn wake returned ${response.status}`);
-      })
-      .catch((error) => console.error("[spawn] queued pinned launch wake failed", { error }))
-      .finally(() => {
-        const next = queuedPinnedSpawnRetryAt(filename);
-        if (next !== null && next <= Date.now()) {
-          const retry = setTimeout(() => scheduleQueuedPinnedSpawnWake(filename), QUEUED_PIN_WAKE_RETRY_MS);
-          retry.unref?.();
-          wakeups.set(filename, retry);
-        } else {
-          scheduleQueuedPinnedSpawnWake(filename);
-        }
-      });
-  }, delay);
-  timer.unref?.();
-  wakeups.set(filename, timer);
-}
-
-if (process.env.NEXT_RUNTIME === "nodejs"
-  && process.env.NODE_ENV !== "test"
-  && process.env.NEXT_PHASE !== "phase-production-build"
-  && !queuedPinnedSpawnBootstrap.__llvQueuedPinnedSpawnBootstrap) {
-  queuedPinnedSpawnBootstrap.__llvQueuedPinnedSpawnBootstrap = true;
-  queueMicrotask(() => {
-    void import("./registry")
-      .then(({ agentRegistry }) => scheduleQueuedPinnedSpawnWake(agentRegistry().filename))
-      .catch((error) => console.error("[spawn] queued pinned launch bootstrap failed", { error }));
-  });
-}
 
 function futureRetryAt(value: string | null, now: number): string | null {
   if (!value) return null;
@@ -195,12 +117,6 @@ function withinGrace(timestamp: string | null | undefined, probe: LivenessProbe)
   return probe.now() - recordedAt < UNPROVEN_LAUNCH_GRACE_MS;
 }
 
-function isDurableQueuedPinnedSpawn(receipt: SpawnReceipt): boolean {
-  if (receipt.transport !== "structured" || !receipt.accountPin || receipt.state !== "path-pending") return false;
-  const title = receipt.launchProfile.title ?? "";
-  return /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(title);
-}
-
 /**
  * A registry entry is live when its recorded host process answers a probe, or
  * when it is young enough that no host evidence exists yet. A hosted status
@@ -221,7 +137,6 @@ export function entryIsLive(entry: AgentRegistryEntry, probe: LivenessProbe): bo
  */
 export function receiptIsLive(file: RegistryFile, receipt: SpawnReceipt, probe: LivenessProbe): boolean {
   if (!OPEN_RECEIPT_STATES.has(receipt.state)) return false;
-  if (isDurableQueuedPinnedSpawn(receipt)) return true;
   if (identityAlive(receipt.admissionOwner, probe)) return true;
   if (identityAlive(receipt.verifiedHost?.agent, probe) || identityAlive(receipt.pane?.panePid, probe)) return true;
   const entry = receipt.key ? file.entries[sessionKeyId(receipt.key)] : undefined;

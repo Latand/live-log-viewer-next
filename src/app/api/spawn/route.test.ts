@@ -10,13 +10,11 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots, createManagedCodexAccount } from "@/lib/accounts/codex";
 import { NoHealthyClaudeAccountError } from "@/lib/accounts/spawnHealth";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
-import { drainQueuedPinnedSpawns } from "@/lib/agent/spawnCommand";
 import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "@/lib/runtime/client";
-import { recoverPendingStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
@@ -176,7 +174,7 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
   }
 });
 
-test("a pinned account with a future retry deadline queues durably and launches on the pin after admission", async () => {
+test("a sole pinned account with a future retry deadline stays queued and replays on the pin after admission", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-retry-"));
   const registryFile = path.join(cwd, "agent-registry.json");
   let store = new AgentRegistry(registryFile);
@@ -228,10 +226,10 @@ test("a pinned account with a future retry deadline queues durably and launches 
       defer: (work: () => Promise<void>) => { deferred.push(work); },
       spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
         spawnedAccounts.push(input.account.accountId);
-        const sessionId = input.receipt.key!.sessionId;
+        const sessionId = crypto.randomUUID();
         const settled = input.registry.settleSpawn(input.receipt.launchId, {
           key: { engine: input.engine, sessionId },
-          artifactPath: input.receipt.artifactPath!,
+          artifactPath: path.join(cwd, `${sessionId}.jsonl`),
           cwd,
           accountId: input.account.accountId,
           status: "starting",
@@ -270,10 +268,10 @@ test("a pinned account with a future retry deadline queues durably and launches 
     const response = await post();
     expect(response.status).toBe(202);
     const queued = await response.json();
-    expect(queued).toMatchObject({ state: "path-pending", initialMessage: "queued" });
+    expect(queued).toMatchObject({ state: "starting", initialMessage: "queued" });
     expect(spawnedAccounts).toEqual([]);
     const receipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
-    expect(receipt).toMatchObject({ accountId: "account-a", accountPin: true, state: "path-pending" });
+    expect(receipt).toMatchObject({ accountId: "account-a", accountPin: true, state: "starting" });
     expect(receipt.launchProfile.title).toBe(`Pinned account quota is exhausted — queued until ${retryAt}`);
     expect(projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]).toMatchObject({
       title: `Pinned account quota is exhausted — queued until ${retryAt}`,
@@ -281,24 +279,28 @@ test("a pinned account with a future retry deadline queues durably and launches 
     });
 
     store = new AgentRegistry(registryFile);
-    await recoverPendingStructuredSpawns(store, {
-      effectBatch: async () => [],
-      operationStatus: async () => null,
-    } as unknown as RuntimeHostClient);
-    expect(store.spawnReceiptForClientAttempt("account_pin_retry_20260823")).toMatchObject({
+    const replayResponse = await post();
+    expect(replayResponse.status).toBe(202);
+    expect(await replayResponse.json()).toMatchObject({
       launchId: queued.launchId,
-      state: "path-pending",
-      accountId: "account-a",
+      conversationId: queued.conversationId,
+      state: "starting",
+      initialMessage: "queued",
     });
     expect(deferred).toHaveLength(0);
     expect(spawnedAccounts).toEqual([]);
 
     pinAdmissible = true;
-    await drainQueuedPinnedSpawns(
-      store,
-      dependencies,
-      () => Date.parse(retryAt) + 1,
-    );
+    const admittedResponse = await post();
+    expect(admittedResponse.status).toBe(202);
+    expect(await admittedResponse.json()).toMatchObject({
+      launchId: queued.launchId,
+      conversationId: queued.conversationId,
+      state: "starting",
+      initialMessage: "pending",
+    });
+    expect(deferred).toHaveLength(1);
+    await deferred[0]!();
     expect(spawnedAccounts).toEqual(["account-a"]);
     const settledReceipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
     const conversation = store.conversation(settledReceipt.conversationId)!;
@@ -326,6 +328,67 @@ test("a pinned account with a future retry deadline queues durably and launches 
     else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
     if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
     else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("a retry-at pin gates tmux before any host starts", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-tmux-retry-"));
+  const store = new AgentRegistry(path.join(cwd, "agent-registry.json"));
+  const retryAt = new Date(Date.now() + 60_000).toISOString();
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  process.env.LLV_SPAWN_TRANSPORT = "tmux";
+  let tmuxStarts = 0;
+  try {
+    const account = {
+      engine: "claude" as const,
+      accountId: "account-a",
+      kind: "managed" as const,
+      home: path.join(cwd, "account-a"),
+      transcriptRoot: path.join(cwd, "account-a", "projects"),
+      env: { NODE_ENV: "test" as const },
+    };
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "sonnet",
+        cwd,
+        ["prompt"]: "continue",
+        accountId: "account-a",
+        clientAttemptId: "account_pin_tmux_retry_20260823",
+      }),
+    }), {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => ({
+        ...account,
+        requestedAdmission: {
+          kind: "retry-at" as const,
+          reason: "hard-limit" as const,
+          stale: false,
+          retryAt,
+        },
+      }),
+      resolveSpawnAccount: () => account,
+      spawnTmuxAgent: async () => {
+        tmuxStarts += 1;
+        throw new Error("tmux must stay gated");
+      },
+    });
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ state: "starting", initialMessage: "queued" });
+    expect(tmuxStarts).toBe(0);
+    expect(store.spawnReceiptForClientAttempt("account_pin_tmux_retry_20260823")).toMatchObject({
+      accountId: "account-a",
+      accountPin: true,
+      transport: "tmux",
+      state: "starting",
+    });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
   }
 });
 
