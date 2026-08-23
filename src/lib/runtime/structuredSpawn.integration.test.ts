@@ -3165,9 +3165,13 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
   });
 });
 
-test("issue 1031: a reviewer launch after the reviewed second turn fails when shared runtime publication times out", async () => {
+/* Reviewer metadata is committed during child admission, and the reviewed
+   conversation retains its delivered relay. Both engines then enter the shared
+   controller path; holding its first real projection append reproduces the
+   observed live idle child with an unfinished durable setup operation. */
+test.each(["codex", "claude"] as const)("issues 1031/1074: a %s reviewer launch fails when shared runtime publication never settles", async (engine) => {
   const id = crypto.randomUUID();
-  const cwd = path.join(sandbox, `reviewer-durable-setup-${id}`);
+  const cwd = path.join(sandbox, `reviewer-durable-setup-${engine}-${id}`);
   fs.mkdirSync(cwd, { recursive: true });
   const reviewedPath = path.join(cwd, "reviewed.jsonl");
   fs.writeFileSync(reviewedPath, [
@@ -3180,16 +3184,28 @@ test("issue 1031: a reviewer launch after the reviewed second turn fails when sh
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const durableClient = runtimeClient(journal);
+  const publicationStarted = deferred();
+  const releasePublication = deferred();
+  let appendCalls = 0;
   const client = {
     ...durableClient,
-    append: async () => { throw new RuntimeHostUnavailableError("runtime host request timed out"); },
+    append: async (...args: Parameters<RuntimeHostClient["append"]>) => {
+      appendCalls += 1;
+      if (appendCalls === 1) {
+        publicationStarted.resolve();
+        await releasePublication.promise;
+      }
+      return await durableClient.append(...args);
+    },
   } as RuntimeHostClient;
-  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-sol" });
-  const reviewed = registry.ensureConversation("codex", reviewedPath, "codex-subscription");
+  const accountId = `${engine}-subscription`;
+  const model = engine === "codex" ? "gpt-5.6-sol" : "opus";
+  const launchProfile = emptyLaunchProfile({ cwd, model });
+  const reviewed = registry.ensureConversation(engine, reviewedPath, accountId);
   registry.reconcileConversations([{
-    engine: "codex",
+    engine,
     path: reviewedPath,
-    accountId: "codex-subscription",
+    accountId,
     launchProfile,
     turn: { state: "terminal", source: "assistant", terminalAt: "2026-08-18T15:48:00.000Z" },
     observedAt: "2026-08-18T15:48:00.000Z",
@@ -3210,32 +3226,32 @@ test("issue 1031: a reviewer launch after the reviewed second turn fails when sh
   const reviewerRole = resolveSpawnRole({
     role: "reviewer",
     roleParams: { diffSource: "origin/main...HEAD", lens: "correctness" },
-    engine: "codex",
-    model: "gpt-5.6-sol",
+    engine,
+    model,
   });
   if (!reviewerRole.ok || !reviewerRole.value) throw new Error("reviewer role scaffold was unavailable");
   expect(reviewerRole.value.scaffold).toContain("origin/main...HEAD");
   const prompt = `${reviewerRole.value.scaffold}\n\nreview the implementer diff`;
 
   const begun = registry.beginSpawnRequest({
-    engine: "codex",
+    engine,
     cwd,
     transport: "structured",
-    accountId: "codex-subscription",
+    accountId,
     parentConversationId: reviewed.id,
     role: "reviewer",
     reviewsConversationId: reviewed.id,
     launchProfile,
   });
   if (begun.kind !== "created") throw new Error("reviewer spawn receipt was unavailable");
-  const host = new RoundTripHost("codex", artifactPath, id);
+  const host = new RoundTripHost(engine, artifactPath, id);
   await bindStructuredDeliveryQueue([], { registry, client, deferStartupWork: true });
 
-  await expect(spawnStructuredConversation({
-    engine: "codex",
+  const spawning = spawnStructuredConversation({
+    engine,
     receipt: begun.receipt,
-    spec: { command: "codex", cwd, windowName: "reviewer", engine: "codex", transcript: artifactPath, launchProfile },
-    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    spec: { command: engine, cwd, windowName: "reviewer", engine, transcript: artifactPath, launchProfile },
+    account: { engine, accountId, kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
     "prompt": prompt,
     registry,
     client,
@@ -3244,7 +3260,7 @@ test("issue 1031: a reviewer launch after the reviewed second turn fails when sh
     bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
       const state = await runningHost.health();
       targetRegistry.setStructuredHostClaimed(key, {
-        kind: "codex-app-server",
+        kind: engine === "codex" ? "codex-app-server" : "claude-broker",
         endpoint: state.endpoint,
         process: { pid: process.pid, startIdentity: "test-process" },
         eventCursor: state.eventCursor,
@@ -3258,14 +3274,37 @@ test("issue 1031: a reviewer launch after the reviewed second turn fails when sh
     },
     deliverFirst: async () => {},
     processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
-  })).rejects.toThrow("runtime host request timed out");
+    durableSetupTimeoutMs: 20,
+  });
+  await publicationStarted.promise;
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "path-pending",
+    agentRole: "reviewer",
+  });
+  expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
+    status: "idle",
+    pendingAction: "spawn",
+    structuredHostOperationId: begun.receipt.launchId,
+    structuredHost: {
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      process: { pid: process.pid, startIdentity: "test-process" },
+    },
+  });
+  expect((await durableClient.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("queued");
+  expect(fs.existsSync(artifactPath)).toBe(false);
+  await expect(spawning).rejects.toThrow("structured spawn durable host setup timed out after 20ms");
 
   expect(host.releaseCount).toBe(1);
   const failed = registry.snapshot().receipts[begun.receipt.launchId]!;
   expect(failed).toMatchObject({
     state: "failed",
     agentRole: "reviewer",
-    error: "runtime host request timed out",
+    error: "structured spawn durable host setup timed out after 20ms",
+  });
+  expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
+    status: "dead",
+    pendingAction: null,
+    structuredHost: null,
   });
   expect(registry.snapshot().lineageEdges[failed.conversationId]).toMatchObject({
     kind: "review",
@@ -3279,8 +3318,11 @@ test("issue 1031: a reviewer launch after the reviewed second turn fails when sh
   });
   expect((await durableClient.operationStatus(begun.receipt.launchId))?.receipt).toMatchObject({
     status: "failed",
-    reason: "runtime host request timed out",
+    reason: "structured spawn durable host setup timed out after 20ms",
   });
+  releasePublication.resolve();
+  await waitFor(() => appendCalls >= 3);
+  expect(hasStructuredDeliveryHost({ engine, sessionId: id })).toBe(false);
   journal.close();
 });
 

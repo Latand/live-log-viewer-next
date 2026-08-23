@@ -299,7 +299,7 @@ export async function reconcileStructuredSpawnReplay(
   if (current.state === "completed") {
     return { ...current, initialMessage: "delivered" };
   }
-  if (current.state === "failed" || current.state === "conflicted") {
+  if (current.state === "conflicted") {
     return { ...current, initialMessage: "failed" };
   }
   const [initialOperation, spawnOperation, runtime] = await Promise.all([
@@ -380,15 +380,35 @@ export async function reconcileStructuredSpawnReplay(
     }
   }
   const messageStatus = operation?.receipt.status;
-  const runtimeSession = runtime?.sessions.find((candidate) => candidate.conversationId === current.conversationId) ?? null;
+  const runtimeSession = runtime?.sessions.find((candidate) => candidate.conversationId === current.conversationId
+    && candidate.cwd === current.cwd
+    && (!current.key || sessionKeyId(candidate.sessionKey) === sessionKeyId(current.key))) ?? null;
+  const liveRuntimeSession = runtimeSession
+    && (runtimeSession.host === "registering"
+      || runtimeSession.host === "hosted"
+      || runtimeSession.host === "recovering")
+    ? runtimeSession
+    : null;
   const operationStartedAt = operation ? Date.parse(operation.receipt.at) : Number.NaN;
   const stageStartedAt = Number.isFinite(operationStartedAt) ? operationStartedAt : Date.parse(current.createdAt);
   const ageMs = (options.now ?? Date.now)() - stageStartedAt;
-  const timeoutMs = options.timeoutMs ?? STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS;
+  /* A delivered spawn operation with no matching live runtime session has no
+     remaining cold-start work, so the established message bound terminalizes
+     its empty placeholder. Registering/hosted/recovering sessions, queued
+     spawn operations, and an unavailable runtime snapshot retain the wider
+     durable-setup bound: each can still be a healthy slow launch. */
+  const deliveredWithoutLiveSession = runtime !== null
+    && spawnOperation?.receipt.conversationId === current.conversationId
+    && spawnOperation.receipt.status === "delivered"
+    && liveRuntimeSession === null;
+  const timeoutMs = options.timeoutMs
+    ?? (deliveredWithoutLiveSession
+      ? INITIAL_MESSAGE_TIMEOUT_MS
+      : STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS);
   let terminalReason = failedOperationReason(operation, "structured initial message")
     ?? failedOperationReason(spawnOperation, "structured spawn");
   if (!terminalReason && ageMs >= timeoutMs) {
-    if (runtimeSession) {
+    if (liveRuntimeSession) {
       terminalReason = `structured spawn durable setup remained incomplete for ${timeoutMs}ms`;
     } else if (runtime) {
       terminalReason = `structured spawn runtime snapshot has no session after ${timeoutMs}ms`;
@@ -470,8 +490,10 @@ export async function reconcileStructuredSpawnReplay(
   };
 }
 
-/* Foreground setup, replay, and reaper share one five-minute ceiling. This
-   preserves verified cold-start progress while bounding every placeholder. */
+/* Foreground setup and the reaper share one five-minute ceiling. Ordinary
+   replay keeps that ceiling while cold-start work is still possible; a
+   delivered spawn with no matching live session uses the established
+   30-second empty-placeholder bound. */
 export const STALE_STRUCTURED_SPAWN_TIMEOUT_MS = STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS;
 export const STALE_STRUCTURED_SPAWN_ACTUATION_CAP = 50;
 
