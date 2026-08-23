@@ -3165,14 +3165,12 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
   });
 });
 
-/* Reviewer metadata is committed during child admission, and the reviewed
-   conversation retains its delivered relay. Both engines then enter the shared
-   controller path; holding its first real projection append reproduces the
-   observed live idle child with an unfinished durable setup operation. */
-test.each(["codex", "claude"] as const)("issues 1031/1074: a %s reviewer launch fails when shared runtime publication never settles", async (engine) => {
-  const id = crypto.randomUUID();
-  const cwd = path.join(sandbox, `reviewer-durable-setup-${engine}-${id}`);
-  fs.mkdirSync(cwd, { recursive: true });
+function prepareReviewerIncidentState(
+  registry: AgentRegistry,
+  engine: "codex" | "claude",
+  cwd: string,
+  model: string,
+) {
   const reviewedPath = path.join(cwd, "reviewed.jsonl");
   fs.writeFileSync(reviewedPath, [
     JSON.stringify({ type: "user", message: { role: "user", content: "implement the fixture" } }),
@@ -3180,26 +3178,7 @@ test.each(["codex", "claude"] as const)("issues 1031/1074: a %s reviewer launch 
     JSON.stringify({ type: "user", message: { role: "user", content: "apply the queued relay" } }),
     JSON.stringify({ type: "assistant", message: { role: "assistant", content: "second turn complete" } }),
   ].join("\n") + "\n");
-  const artifactPath = path.join(cwd, `${id}.jsonl`);
-  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
-  const durableClient = runtimeClient(journal);
-  const publicationStarted = deferred();
-  const releasePublication = deferred();
-  let appendCalls = 0;
-  const client = {
-    ...durableClient,
-    append: async (...args: Parameters<RuntimeHostClient["append"]>) => {
-      appendCalls += 1;
-      if (appendCalls === 1) {
-        publicationStarted.resolve();
-        await releasePublication.promise;
-      }
-      return await durableClient.append(...args);
-    },
-  } as RuntimeHostClient;
   const accountId = `${engine}-subscription`;
-  const model = engine === "codex" ? "gpt-5.6-sol" : "opus";
   const launchProfile = emptyLaunchProfile({ cwd, model });
   const reviewed = registry.ensureConversation(engine, reviewedPath, accountId);
   registry.reconcileConversations([{
@@ -3221,8 +3200,6 @@ test.each(["codex", "claude"] as const)("issues 1031/1074: a %s reviewer launch 
   );
   expect(registry.beginDeliveryAttempt(relay.id, reviewed.generations.at(-1)!.id)).not.toBeNull();
   registry.recordDeliveryOutcome(relay.id, "delivered");
-  expect(registry.conversation(reviewed.id)?.turn.state).toBe("terminal");
-  expect(registry.snapshot().heldDeliveries[relay.id]).toMatchObject({ state: "delivered", attempts: 1 });
   const reviewerRole = resolveSpawnRole({
     role: "reviewer",
     roleParams: { diffSource: "origin/main...HEAD", lens: "correctness" },
@@ -3230,9 +3207,7 @@ test.each(["codex", "claude"] as const)("issues 1031/1074: a %s reviewer launch 
     model,
   });
   if (!reviewerRole.ok || !reviewerRole.value) throw new Error("reviewer role scaffold was unavailable");
-  expect(reviewerRole.value.scaffold).toContain("origin/main...HEAD");
   const prompt = `${reviewerRole.value.scaffold}\n\nreview the implementer diff`;
-
   const begun = registry.beginSpawnRequest({
     engine,
     cwd,
@@ -3244,15 +3219,115 @@ test.each(["codex", "claude"] as const)("issues 1031/1074: a %s reviewer launch 
     launchProfile,
   });
   if (begun.kind !== "created") throw new Error("reviewer spawn receipt was unavailable");
+  return { accountId, begun, launchProfile, prompt, relay, reviewed };
+}
+
+/* Retained incident evidence shows the failed reviewers reached staged host
+   identity before a runtime request timeout, while later builders against the
+   same reviewed conversation completed. This controlled regression proves the
+   second-turn/delivered-relay state itself traverses the healthy publication
+   path; the separate #1074 regression below isolates the shared stalled append. */
+test.each(["codex", "claude"] as const)("issue 1031: a %s reviewer launches after the implementer second turn and delivered relay", async (engine) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `reviewer-trigger-${engine}-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const model = engine === "codex" ? "gpt-5.6-sol" : "opus";
+  const fixture = prepareReviewerIncidentState(registry, engine, cwd, model);
+  expect(registry.conversation(fixture.reviewed.id)?.turn.state).toBe("terminal");
+  expect(registry.snapshot().heldDeliveries[fixture.relay.id]).toMatchObject({ state: "delivered", attempts: 1 });
+  const host = new RoundTripHost(engine, artifactPath, id);
+  await bindStructuredDeliveryQueue([], { registry, client, deferStartupWork: true });
+
+  const response = await spawnStructuredConversation({
+    engine,
+    receipt: fixture.begun.receipt,
+    spec: { command: engine, cwd, windowName: "reviewer", engine, transcript: artifactPath, launchProfile: fixture.launchProfile },
+    account: { engine, accountId: fixture.accountId, kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    "prompt": fixture.prompt,
+    registry,
+    client,
+  }, {
+    startHost: async () => host,
+    bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+      const state = await runningHost.health();
+      targetRegistry.setStructuredHostClaimed(key, {
+        kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+        endpoint: state.endpoint,
+        process: { pid: process.pid, startIdentity: "test-process" },
+        eventCursor: state.eventCursor,
+        protocolVersion: state.protocolVersion,
+        writerClaimEpoch: claimEpoch,
+        activeTurnRef: state.activeTurnRef,
+        pendingAttention: state.pendingAttention,
+        activeFlags: state.activeFlags,
+      }, "idle", claimOwner, claimEpoch);
+      return () => {};
+    },
+    processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+  });
+
+  expect(response).toMatchObject({ launched: true, state: "settled", initialMessage: "delivered", path: artifactPath });
+  expect(host.sent.map((entry) => entry.text)).toEqual([fixture.prompt]);
+  expect(registry.snapshot().receipts[fixture.begun.receipt.launchId]).toMatchObject({
+    state: "completed",
+    agentRole: "reviewer",
+    error: null,
+  });
+  expect(registry.snapshot().lineageEdges[fixture.begun.receipt.conversationId]).toMatchObject({
+    kind: "review",
+    role: "reviewer",
+    reviewsConversationId: fixture.reviewed.id,
+  });
+  journal.close();
+});
+
+test.each(["codex", "claude"] as const)("issue 1074: a %s launch fails when shared runtime publication never settles", async (engine) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `generic-durable-setup-${engine}-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const durableClient = runtimeClient(journal);
+  const publicationStarted = deferred();
+  const releasePublication = deferred();
+  let appendCalls = 0;
+  const client = {
+    ...durableClient,
+    append: async (...args: Parameters<RuntimeHostClient["append"]>) => {
+      appendCalls += 1;
+      if (appendCalls === 1) {
+        publicationStarted.resolve();
+        await releasePublication.promise;
+      }
+      return await durableClient.append(...args);
+    },
+  } as RuntimeHostClient;
+  const accountId = `${engine}-subscription`;
+  const model = engine === "codex" ? "gpt-5.6-sol" : "opus";
+  const launchProfile = emptyLaunchProfile({ cwd, model });
+  const begun = registry.beginSpawnRequest({
+    engine,
+    cwd,
+    transport: "structured",
+    accountId,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("generic spawn receipt was unavailable");
+  expect(begun.receipt.agentRole).toBeNull();
   const host = new RoundTripHost(engine, artifactPath, id);
   await bindStructuredDeliveryQueue([], { registry, client, deferStartupWork: true });
 
   const spawning = spawnStructuredConversation({
     engine,
     receipt: begun.receipt,
-    spec: { command: engine, cwd, windowName: "reviewer", engine, transcript: artifactPath, launchProfile },
+    spec: { command: engine, cwd, windowName: "generic", engine, transcript: artifactPath, launchProfile },
     account: { engine, accountId, kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
-    "prompt": prompt,
+    "prompt": "start the generic host",
     registry,
     client,
   }, {
@@ -3279,7 +3354,7 @@ test.each(["codex", "claude"] as const)("issues 1031/1074: a %s reviewer launch 
   await publicationStarted.promise;
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
     state: "path-pending",
-    agentRole: "reviewer",
+    agentRole: null,
   });
   expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
     status: "idle",
@@ -3298,18 +3373,13 @@ test.each(["codex", "claude"] as const)("issues 1031/1074: a %s reviewer launch 
   const failed = registry.snapshot().receipts[begun.receipt.launchId]!;
   expect(failed).toMatchObject({
     state: "failed",
-    agentRole: "reviewer",
+    agentRole: null,
     error: "structured spawn durable host setup timed out after 20ms",
   });
   expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
     status: "dead",
     pendingAction: null,
     structuredHost: null,
-  });
-  expect(registry.snapshot().lineageEdges[failed.conversationId]).toMatchObject({
-    kind: "review",
-    role: "reviewer",
-    reviewsConversationId: reviewed.id,
   });
   expect(spawnResponseForReceipt(failed, failed.artifactPath, { structured: true })).toMatchObject({
     state: "failed",

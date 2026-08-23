@@ -102,6 +102,59 @@ test("a stale dead-evidence structured launch converges to durable retry-safe fa
   expect(Object.keys(after.conversations)).toHaveLength(conversationCount);
 });
 
+test.each(["codex", "claude"] as const)("an overdue %s placeholder still fails when runtime effect history is unavailable", async (engine) => {
+  const store = registry();
+  const begun = store.beginSpawnRequest({
+    engine,
+    cwd: "/repo",
+    transport: "structured",
+    accountId: "work",
+    clientAttemptId: `effect_history_outage_${engine}`,
+    requestDigest: engine === "codex" ? "c".repeat(64) : "a".repeat(64),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected structured launch creation");
+  const receipt = begun.receipt;
+  const artifactPath = path.join(path.dirname(store.filename), `${engine}-effect-outage.jsonl`);
+  store.stageStructuredSpawn(receipt.launchId, {
+    key: { engine, sessionId: `${engine}-effect-outage` },
+    artifactPath,
+    cwd: "/repo",
+    accountId: "work",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "dead",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  const client = {
+    operationStatus: async () => null,
+    snapshot: async () => ({ revision: 0, sessions: [] }),
+    effectBatch: async () => { throw new Error("runtime effect history is unavailable"); },
+  } as unknown as RuntimeHostClient;
+
+  const beforeDeadline = await reconcileStructuredSpawnReplay(receipt.launchId, store, client, {
+    now: () => Date.parse(receipt.createdAt) + STALE_STRUCTURED_SPAWN_TIMEOUT_MS - 1,
+  });
+  expect(beforeDeadline).toMatchObject({ state: "path-pending", initialMessage: "pending", error: null });
+
+  const result = await terminalizeStaleStructuredSpawns(store, client, { now: AGED });
+
+  expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
+  const failed = store.snapshot().receipts[receipt.launchId]!;
+  expect(failed).toMatchObject({
+    state: "failed",
+    error: expect.stringContaining("runtime effect history remained unavailable"),
+  });
+  expect(spawnResponseForReceipt(failed, failed.artifactPath, { structured: true })).toMatchObject({
+    state: "failed",
+    retrySafe: true,
+    initialMessage: "failed",
+  });
+});
+
 test("a live admission owner loses an overdue deferred launch at the bounded timeout", async () => {
   const store = registry();
   const receipt = staleStructuredReceipt(store, "live_owner_20260719_a1");
@@ -111,6 +164,36 @@ test("a live admission owner loses an overdue deferred launch at the bounded tim
   });
   expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
   expect(store.snapshot().receipts[receipt.launchId]!.state).toBe("failed");
+});
+
+test("a terminal runtime operation preserves its reason through generic stale reconciliation", async () => {
+  const store = registry();
+  const receipt = staleStructuredReceipt(store, "terminal_operation_reason");
+  const client = {
+    effectBatch: async () => [],
+    operationStatus: async (operationId: string) => operationId === receipt.launchId ? {
+      receipt: {
+        operationId,
+        idempotencyKey: operationId,
+        conversationId: receipt.conversationId,
+        kind: "spawn" as const,
+        status: "failed" as const,
+        reason: "synthetic terminal spawn failure",
+        at: receipt.createdAt,
+        revision: 2,
+      },
+      replayed: false,
+    } : null,
+    snapshot: async () => ({ revision: 0, sessions: [] }),
+  } as unknown as RuntimeHostClient;
+
+  const result = await terminalizeStaleStructuredSpawns(store, client, { now: AGED });
+
+  expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
+  expect(store.snapshot().receipts[receipt.launchId]).toMatchObject({
+    state: "failed",
+    error: "synthetic terminal spawn failure",
+  });
 });
 
 test("a receipt younger than the pass timeout is never touched", async () => {

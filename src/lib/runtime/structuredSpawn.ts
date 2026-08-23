@@ -308,8 +308,15 @@ export async function reconcileStructuredSpawnReplay(
     client.snapshot().catch(() => null),
   ]);
   let operation = initialOperation;
+  let effectHistoryUnavailable = false;
   if (!operation && current.state === "path-pending" && current.artifactPath) {
-    const effect = await structuredSpawnEffectForLaunch(client, launchId);
+    /* Effect history can be unavailable during the same runtime-journal outage
+       this replay is meant to bound. Missing evidence remains unconfirmed so
+       the normal deadline path can settle the placeholder retry-safely. */
+    const effect = await structuredSpawnEffectForLaunch(client, launchId).catch(() => {
+      effectHistoryUnavailable = true;
+      return null;
+    });
     const prompt = typeof effect?.prompt === "string" ? effect.prompt : null;
     const imageRefs = parseStructuredImageRefs(effect?.images ?? [], 16);
     if (
@@ -410,6 +417,8 @@ export async function reconcileStructuredSpawnReplay(
   if (!terminalReason && ageMs >= timeoutMs) {
     if (liveRuntimeSession) {
       terminalReason = `structured spawn durable setup remained incomplete for ${timeoutMs}ms`;
+    } else if (effectHistoryUnavailable) {
+      terminalReason = `structured spawn runtime effect history remained unavailable for ${timeoutMs}ms`;
     } else if (runtime) {
       terminalReason = `structured spawn runtime snapshot has no session after ${timeoutMs}ms`;
     } else {
