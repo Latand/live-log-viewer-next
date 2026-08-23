@@ -624,8 +624,8 @@ export function defaultPipelinePorts(): PipelinePorts {
       const session = snapshot.sessions.find((item) => item.conversationId === conversationId);
       if (!session) return null;
       if (["dead", "unhosted", "conflict"].includes(session.host)) return false;
-      if (session.turn === "idle") return false;
       if (session.turn === "running" || session.turn === "interrupt_requested" || session.attentionIds.length > 0) return true;
+      /* A hosted idle turn is an inter-turn state with unknown agent activity. */
       return null;
     },
     conversationHostUnavailableSince: async (conversationId) => {
@@ -691,6 +691,9 @@ const MISSING_STAGE_VERDICT = "stage completed without a valid final JSON verdic
 const HISTORICAL_MISSING_STAGE_VERDICT = "historical attempt completed without a valid final JSON verdict";
 const VERDICT_RECOVERY_MAX_CHECKS = 3;
 const VERDICT_RECOVERY_INTERVAL_MS = 30_000;
+/** Matches the production controller's default phase lease. A slow tick may
+    still accept positive evidence; late negative evidence cannot consume recovery. */
+const VERDICT_RECOVERY_ACCOUNTING_BUDGET_MS = 15_000;
 const SPAWN_HANDSHAKE_MAX_ATTEMPTS = 3;
 const SPAWN_HANDSHAKE_RETRY_DELAY_MS = 1_000;
 const DEAD_RUNNING_ATTEMPT_GRACE_MS = 3 * 60_000;
@@ -1521,7 +1524,9 @@ async function tickRunStage(
   entries: FileEntry[],
   ports: PipelinePorts,
   persist: () => void,
+  recoveryAccountingDeadline: number,
 ): Promise<void> {
+  const canSpendRecoveryCheck = () => ports.monotonicNow() < recoveryAccountingDeadline;
   const prior = currentAttempt(pipeline, stage.id);
   const attempt = pipeline.cursor?.state === "pending" && prior && ["passed", "failed", "needs_decision", "skipped"].includes(prior.state)
     ? newAttempt(pipeline, stage)
@@ -1672,6 +1677,8 @@ async function tickRunStage(
     && unixMs(ports.now()) - unavailableAt >= DEAD_RUNNING_ATTEMPT_GRACE_MS;
   if (entry && structuredActive !== false && scanProjectsOpenTurn && !hostUnavailablePastGrace) return;
 
+  if (!canSpendRecoveryCheck()) return;
+
   /* The transcript artifact is the completion authority (#337). A terminal turn
      whose completion evidence belongs to this attempt and ends in a valid fenced
      verdict settles once — even when the runtime ledger is stale `running`, the
@@ -1687,6 +1694,7 @@ async function tickRunStage(
       return;
     }
     if (!hostUnavailablePastGrace) {
+      if (!canSpendRecoveryCheck()) return;
       recordVerdictRecoveryMiss(
         pipeline,
         attempt,
@@ -1709,7 +1717,7 @@ async function tickRunStage(
     /* A readable durable artifact means the disappearance is a projection loss,
        not an ended stage — wait for the scan or the terminal turn evidence. */
     if (durable) return;
-    if (structuredActive === false) {
+    if (structuredActive === false && canSpendRecoveryCheck()) {
       recordVerdictRecoveryMiss(
         pipeline,
         attempt,
@@ -1717,7 +1725,11 @@ async function tickRunStage(
         "canonical stage transcript is not yet readable after structured stage termination",
         null,
       );
-    } else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) {
+    } else if (
+      attempt.paneId
+      && !(await ports.paneAgentAlive(attempt.paneId))
+      && canSpendRecoveryCheck()
+    ) {
       recordVerdictRecoveryMiss(
         pipeline,
         attempt,
@@ -1735,7 +1747,7 @@ async function tickRunStage(
   if (durable?.turn === "busy" && !attempt.paneId) return;
   const message = ports.lastMessage(entry);
   if (!message || message.ts <= unixMs(attempt.startedAt)) {
-    if (structuredActive === false) {
+    if (structuredActive === false && canSpendRecoveryCheck()) {
       recordVerdictRecoveryMiss(
         pipeline,
         attempt,
@@ -1743,7 +1755,11 @@ async function tickRunStage(
         "canonical completed assistant turn has not been ingested after structured stage termination",
         message?.ts ?? null,
       );
-    } else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) {
+    } else if (
+      attempt.paneId
+      && !(await ports.paneAgentAlive(attempt.paneId))
+      && canSpendRecoveryCheck()
+    ) {
       recordVerdictRecoveryMiss(
         pipeline,
         attempt,
@@ -1756,6 +1772,7 @@ async function tickRunStage(
   }
   const parsed = parsePipelineStageVerdict(message.text);
   if (!parsed) {
+    if (!canSpendRecoveryCheck()) return;
     recordVerdictRecoveryMiss(
       pipeline,
       attempt,
@@ -2034,7 +2051,13 @@ async function tickReviewStage(
   }
 }
 
-async function tickPipeline(pipeline: Pipeline, entries: FileEntry[], ports: PipelinePorts, persist: () => void): Promise<boolean> {
+async function tickPipeline(
+  pipeline: Pipeline,
+  entries: FileEntry[],
+  ports: PipelinePorts,
+  persist: () => void,
+  recoveryAccountingDeadline: number,
+): Promise<boolean> {
   const before = JSON.stringify(pipeline);
   if (pipeline.state === "provisioning") {
     if (!pipeline.baseBranch || !pipeline.baseRef || !pipeline.lastPassedCommit) {
@@ -2060,7 +2083,9 @@ async function tickPipeline(pipeline: Pipeline, entries: FileEntry[], ports: Pip
   } else if (pipeline.state === "running") {
     const stage = currentStage(pipeline);
     if (!stage) park(pipeline, "pipeline cursor points to an unknown stage");
-    else if (stage.kind === "run") await tickRunStage(pipeline, stage, entries, ports, persist);
+    else if (stage.kind === "run") {
+      await tickRunStage(pipeline, stage, entries, ports, persist, recoveryAccountingDeadline);
+    }
     else await tickReviewStage(pipeline, stage, entries, ports, persist);
   }
   return JSON.stringify(pipeline) !== before;
@@ -2382,6 +2407,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
   if (tickStore.__llvPipelineTick) return { pipelines: [], changed: false };
   tickStore.__llvPipelineTick = true;
   let followUp = false;
+  const recoveryAccountingDeadline = ports.monotonicNow() + VERDICT_RECOVERY_ACCOUNTING_BUDGET_MS;
   try {
     const result = await withPipelineControllerMutation(async (pipelines, persist) => {
       let changed = false;
@@ -2398,7 +2424,13 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileTerminalStageHosts(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
-          pipelineChanged = await tickPipeline(pipeline, entries, ports, persistPipeline) || pipelineChanged;
+          pipelineChanged = await tickPipeline(
+            pipeline,
+            entries,
+            ports,
+            persistPipeline,
+            recoveryAccountingDeadline,
+          ) || pipelineChanged;
         }
         if (pipelineChanged) {
           changed = true;
