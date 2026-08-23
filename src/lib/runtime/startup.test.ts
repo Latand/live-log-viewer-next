@@ -127,6 +127,9 @@ test("startup retry preserves a host registered after the first attempt fails", 
 
 test("server startup delegates managed rows with file credentials and their launch profile", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-"));
+  const stateDirectory = path.join(directory, "state");
+  const previousStateDirectory = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = stateDirectory;
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const artifactPath = "/managed/sessions/startup-thread.jsonl";
   const conversation = registry.ensureConversation("codex", artifactPath, "managed");
@@ -166,26 +169,36 @@ test("server startup delegates managed rows with file credentials and their laun
   });
   let codexOptions: unknown;
   let claudeOptions: unknown;
-  await adoptStructuredHostsAtStartup({
-    registry,
-    resolveCodexOwner: () => ({ home: "/managed", kind: "managed" }),
-    resolveClaudeOwner: () => ({
-      home: "/managed-claude",
-      kind: "managed",
-      transcriptRoot: "/managed-claude/projects",
-      env: { NODE_ENV: "test", CLAUDE_CONFIG_DIR: "/managed-claude" },
-    }),
-    adopt: async (received, optionsFor) => {
-      expect(received).toBe(registry);
-      codexOptions = optionsFor(registry.snapshot().entries["codex:startup-thread"]!);
-      return [];
-    },
-    adoptClaude: async (received, optionsFor) => {
-      expect(received).toBe(registry);
-      claudeOptions = optionsFor(registry.snapshot().entries["codex:startup-thread"]!);
-      return [];
-    },
-  });
+  try {
+    await adoptStructuredHostsAtStartup({
+      registry,
+      resolveCodexOwner: () => ({ home: "/managed", kind: "managed" }),
+      resolveClaudeOwner: () => ({
+        home: "/managed-claude",
+        kind: "managed",
+        transcriptRoot: "/managed-claude/projects",
+        env: {
+          NODE_ENV: "test",
+          HOME: "/operator-home",
+          XDG_CONFIG_HOME: "/operator-config",
+          CLAUDE_CONFIG_DIR: "/managed-claude",
+        },
+      }),
+      adopt: async (received, optionsFor) => {
+        expect(received).toBe(registry);
+        codexOptions = optionsFor(registry.snapshot().entries["codex:startup-thread"]!);
+        return [];
+      },
+      adoptClaude: async (received, optionsFor) => {
+        expect(received).toBe(registry);
+        claudeOptions = optionsFor(registry.snapshot().entries["codex:startup-thread"]!);
+        return [];
+      },
+    });
+  } finally {
+    if (previousStateDirectory === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDirectory;
+  }
   const codexCleanup = (codexOptions as { releaseCleanup?: () => void }).releaseCleanup;
   const claudeCleanup = (claudeOptions as { releaseCleanup?: () => void }).releaseCleanup;
   expect(codexOptions).toMatchObject({
@@ -198,9 +211,8 @@ test("server startup delegates managed rows with file credentials and their laun
     forwardGitHubConfig: true,
     releaseCleanup: expect.any(Function),
     env: {
-      HOME: expect.stringContaining("llv-read-only-stage-"),
-      XDG_CONFIG_HOME: expect.stringContaining("llv-read-only-stage-"),
-      TMPDIR: expect.stringContaining("llv-read-only-stage-"),
+      HOME: process.env.HOME,
+      TMPDIR: expect.stringContaining(path.join(stateDirectory, "scratch", "llv-read-only-stage-")),
       LLV_SPAWN_CAPABILITY: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     },
   });
@@ -208,7 +220,11 @@ test("server startup delegates managed rows with file credentials and their laun
     cwd: "/repo",
     claudeConfigDir: "/managed-claude",
     claudeProjectsDir: "/managed-claude/projects",
-    env: { CLAUDE_CONFIG_DIR: "/managed-claude" },
+    env: {
+      HOME: "/operator-home",
+      XDG_CONFIG_HOME: "/operator-config",
+      CLAUDE_CONFIG_DIR: "/managed-claude",
+    },
     model: "gpt-5.4-mini",
     effort: "high",
     allowSubagents: true,
@@ -218,10 +234,14 @@ test("server startup delegates managed rows with file credentials and their laun
     releaseCleanup: expect.any(Function),
   });
   expect(claudeOptions).toMatchObject({
-    env: { LLV_SPAWN_CAPABILITY: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) },
+    env: {
+      TMPDIR: expect.stringContaining(path.join(stateDirectory, "scratch", "llv-read-only-stage-")),
+      LLV_SPAWN_CAPABILITY: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    },
   });
   codexCleanup?.();
   claudeCleanup?.();
+  fs.rmSync(directory, { recursive: true, force: true });
 });
 
 function runtimeJournalClient(journal: RuntimeJournal): RuntimeHostClient {
