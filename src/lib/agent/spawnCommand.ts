@@ -6,10 +6,13 @@ import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
+import type { AccountContext } from "@/lib/accounts/contracts";
 import { accountManager, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
+import { claudeValidityFromLimitRead } from "@/lib/accounts/spawnHealth";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
-import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
-import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
+import { scheduleQueuedPinnedSpawnWake, type SpawnAccountAdmission } from "@/lib/agent/accountLiveness";
+import { freshSpecFor, type AgentEngine, type ResumeSpec } from "@/lib/agent/cli";
+import { agentRegistry, SpawnChildLimitError, type AgentRegistry, type SpawnReceipt, type SpawnRequest } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { grantedMcpServers, mcpServersForSession, normalizeSpawnMcpServers, SCHEDULED_REPORT_SESSION_CLASS, type McpSessionClass } from "@/lib/agent/mcpAllowlist";
 import { normalizeSpawnPlugins, pluginAllowlistForSession, SCHEDULED_REPORT_PLUGINS, sessionOriginFor } from "@/lib/agent/pluginAllowlist";
@@ -25,13 +28,15 @@ import { applyClaudeSpawnPolicy, prepareManagedClaudeSpawnHome } from "@/lib/age
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
+import { fetchClaudeLimits } from "@/lib/limits";
+import { procBackend } from "@/lib/proc";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient, RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
 import { publishFilesRevision } from "@/lib/runtime/filesRevision";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
-import { assertStructuredTextEnvelope, type StructuredImageRef } from "@/lib/runtime/structuredContent";
+import { assertStructuredTextEnvelope, parseStructuredImageRefs, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "@/lib/pipelines/engine";
@@ -41,6 +46,7 @@ import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import { en } from "@/lib/i18n/en";
 import { uk } from "@/lib/i18n/uk";
+import { writeJsonDurably } from "@/lib/state/durableJson";
 import type { ApiError } from "@/lib/types";
 
 import { sourceCwdStatus } from "@/app/api/spawn/sourceCwd";
@@ -76,10 +82,130 @@ function pinRetryTitle(req: Pick<NextRequest, "headers">, retryAt: string): stri
     .replace("{retryAt}", retryAt);
 }
 
+const PINNED_SPAWN_HEALTH_TIMEOUT_MS = 600;
+const QUEUED_PIN_RETRY_MS = 30_000;
+const QUEUED_PIN_LOCK_KEY = { engine: "claude", sessionId: "queued-pinned-spawns" } as const;
+
+async function resolvePinnedSpawnAdmission(
+  engine: "claude" | "codex",
+  account: AccountContext,
+): Promise<SpawnAccountAdmission> {
+  if (engine === "codex") {
+    return { kind: "admissible", basis: "current", stale: false, retryAt: null };
+  }
+  return claudeValidityFromLimitRead(await fetchClaudeLimits(
+    path.join(account.home, ".credentials.json"),
+    Date.now,
+    PINNED_SPAWN_HEALTH_TIMEOUT_MS,
+  ));
+}
+
+interface QueuedPinnedSpawnRecord {
+  version: 1;
+  launchId: string;
+  retryAt: string;
+  accountId: string;
+  spec: ResumeSpec;
+  "prompt": string;
+  imageRefs: StructuredImageRef[];
+  parentArtifactPath: string | null;
+  pipelineSourceConversationId: string | null;
+  claim: { pid: number; startIdentity: string | null; claimedAt: string } | null;
+}
+
+interface QueuedPinnedSpawnFile {
+  version: 1;
+  records: Record<string, QueuedPinnedSpawnRecord>;
+}
+
+function queuedPinnedSpawnFilename(registry: AgentRegistry): string {
+  return `${registry.filename}.queued-pinned-spawns.json`;
+}
+
+function queuedPinnedSpawnOwner(): { pid: number; startIdentity: string | null } {
+  return { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+}
+
+function queuedPinnedSpawnClaimAlive(
+  claim: QueuedPinnedSpawnRecord["claim"],
+): boolean {
+  return Boolean(claim
+    && procBackend.pidAlive(claim.pid)
+    && (claim.startIdentity === null || procBackend.processIdentity(claim.pid) === claim.startIdentity));
+}
+
+function normalizeQueuedPinnedSpawn(value: unknown): QueuedPinnedSpawnRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Partial<QueuedPinnedSpawnRecord>;
+  const spec = record.spec as Partial<ResumeSpec> | undefined;
+  const retryAt = typeof record.retryAt === "string" ? Date.parse(record.retryAt) : Number.NaN;
+  const imageRefs = parseStructuredImageRefs(record.imageRefs ?? [], 16);
+  if (record.version !== 1
+    || typeof record.launchId !== "string"
+    || typeof record.accountId !== "string"
+    || !Number.isFinite(retryAt)
+    || !spec
+    || (spec.engine !== "claude" && spec.engine !== "codex")
+    || typeof spec.command !== "string"
+    || typeof spec.cwd !== "string"
+    || typeof spec.windowName !== "string"
+    || !spec.launchProfile
+    || typeof record.prompt !== "string"
+    || !imageRefs) return null;
+  const claim = record.claim && Number.isInteger(record.claim.pid) && record.claim.pid > 0
+    && typeof record.claim.claimedAt === "string"
+    ? {
+        pid: record.claim.pid,
+        startIdentity: typeof record.claim.startIdentity === "string" ? record.claim.startIdentity : null,
+        claimedAt: record.claim.claimedAt,
+      }
+    : null;
+  return {
+    version: 1,
+    launchId: record.launchId,
+    retryAt: new Date(retryAt).toISOString(),
+    accountId: record.accountId,
+    spec: spec as ResumeSpec,
+    ["prompt"]: record.prompt,
+    imageRefs,
+    parentArtifactPath: typeof record.parentArtifactPath === "string" ? record.parentArtifactPath : null,
+    pipelineSourceConversationId: typeof record.pipelineSourceConversationId === "string"
+      ? record.pipelineSourceConversationId
+      : null,
+    claim,
+  };
+}
+
+function readQueuedPinnedSpawns(registry: AgentRegistry): QueuedPinnedSpawnFile {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(queuedPinnedSpawnFilename(registry), "utf8")) as Partial<QueuedPinnedSpawnFile>;
+    const records = Object.fromEntries(Object.entries(parsed.records ?? {}).flatMap(([launchId, value]) => {
+      const record = normalizeQueuedPinnedSpawn(value);
+      return record && record.launchId === launchId ? [[launchId, record]] : [];
+    }));
+    return { version: 1, records };
+  } catch {
+    return { version: 1, records: {} };
+  }
+}
+
+async function mutateQueuedPinnedSpawns<T>(
+  registry: AgentRegistry,
+  mutate: (file: QueuedPinnedSpawnFile) => T,
+): Promise<T> {
+  return await registry.withOperationLock(QUEUED_PIN_LOCK_KEY, queuedPinnedSpawnOwner(), async () => {
+    const file = readQueuedPinnedSpawns(registry);
+    const result = mutate(file);
+    writeJsonDurably(queuedPinnedSpawnFilename(registry), file);
+    return result;
+  });
+}
+
 export interface SpawnCommandDependencies {
   registry: typeof agentRegistry;
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
   resolveSpawnAccount: typeof accountManager.resolveSpawn;
+  resolvePinnedSpawnAdmission?: typeof resolvePinnedSpawnAdmission;
   runtimeHostClient: typeof runtimeHostClient;
   publishFilesRevision?: typeof publishFilesRevision;
   spawnStructuredConversation: typeof spawnStructuredConversation;
@@ -114,6 +240,7 @@ export const productionSpawnCommandDependencies: SpawnCommandDependencies = {
   registry: agentRegistry,
   resolveHealthySpawnAccount,
   resolveSpawnAccount: (engine, accountId) => accountManager.resolveSpawn(engine, accountId),
+  resolvePinnedSpawnAdmission,
   runtimeHostClient,
   publishFilesRevision,
   spawnStructuredConversation,
@@ -123,6 +250,210 @@ export const productionSpawnCommandDependencies: SpawnCommandDependencies = {
   adoptPipelineAttemptFromSource,
   pipelineAttemptTargetForSource,
 };
+
+type QueuedPinnedSpawnDependencies = Pick<SpawnCommandDependencies,
+  | "resolveSpawnAccount"
+  | "resolvePinnedSpawnAdmission"
+  | "runtimeHostClient"
+  | "spawnStructuredConversation"
+  | "publishFilesRevision"
+  | "adoptPipelineAttemptFromSource"
+>;
+
+async function persistQueuedPinnedSpawn(
+  registry: AgentRegistry,
+  record: Omit<QueuedPinnedSpawnRecord, "version" | "claim">,
+): Promise<void> {
+  await mutateQueuedPinnedSpawns(registry, (file) => {
+    file.records[record.launchId] = { version: 1, ...record, claim: null };
+  });
+}
+
+async function claimDueQueuedPinnedSpawn(
+  registry: AgentRegistry,
+  now: number,
+): Promise<QueuedPinnedSpawnRecord | null> {
+  return await mutateQueuedPinnedSpawns(registry, (file) => {
+    const candidate = Object.values(file.records)
+      .filter((record) => Date.parse(record.retryAt) <= now)
+      .sort((left, right) => left.retryAt.localeCompare(right.retryAt))[0];
+    if (!candidate || queuedPinnedSpawnClaimAlive(candidate.claim)) return null;
+    const owner = queuedPinnedSpawnOwner();
+    candidate.claim = { ...owner, claimedAt: new Date(now).toISOString() };
+    return structuredClone(candidate);
+  });
+}
+
+async function settleQueuedPinnedSpawnClaim(
+  registry: AgentRegistry,
+  claimed: QueuedPinnedSpawnRecord,
+  result: { kind: "remove" } | { kind: "retry"; retryAt: string },
+): Promise<void> {
+  await mutateQueuedPinnedSpawns(registry, (file) => {
+    const current = file.records[claimed.launchId];
+    if (!current?.claim || !claimed.claim
+      || current.claim.pid !== claimed.claim.pid
+      || current.claim.startIdentity !== claimed.claim.startIdentity
+      || current.claim.claimedAt !== claimed.claim.claimedAt) return;
+    if (result.kind === "remove") {
+      delete file.records[claimed.launchId];
+      return;
+    }
+    current.retryAt = result.retryAt;
+    current.claim = null;
+  });
+}
+
+async function adoptQueuedPipelineAttempt(
+  record: QueuedPinnedSpawnRecord,
+  receipt: SpawnReceipt,
+  agentPath: string,
+  dependencies: QueuedPinnedSpawnDependencies,
+): Promise<void> {
+  if (!record.pipelineSourceConversationId || !dependencies.adoptPipelineAttemptFromSource) return;
+  try {
+    await dependencies.adoptPipelineAttemptFromSource(
+      record.pipelineSourceConversationId as `conversation_${string}`,
+      {
+        launchId: receipt.launchId,
+        conversationId: receipt.conversationId,
+        sessionId: receipt.key?.sessionId ?? null,
+        agentPath,
+        paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
+        startedAt: receipt.createdAt,
+        runtime: {
+          engine: receipt.engine,
+          model: receipt.launchProfile.model,
+          effort: receipt.launchProfile.effort,
+        },
+      },
+    );
+  } catch (error) {
+    console.error("[spawn] queued pipeline attempt adoption failed", {
+      launchId: receipt.launchId,
+      conversationId: receipt.conversationId,
+      sourceConversationId: record.pipelineSourceConversationId,
+      error,
+    });
+  }
+}
+
+async function actuateQueuedPinnedSpawn(
+  registry: AgentRegistry,
+  record: QueuedPinnedSpawnRecord,
+  dependencies: QueuedPinnedSpawnDependencies,
+  now: () => number,
+): Promise<{ kind: "remove" } | { kind: "retry"; retryAt: string }> {
+  let receipt = registry.readOnlySnapshot().receipts[record.launchId];
+  if (!receipt || receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") {
+    return { kind: "remove" };
+  }
+  if (receipt.state !== "path-pending"
+    || !receipt.key
+    || receipt.artifactPath !== record.spec.transcript
+    || receipt.accountId !== record.accountId
+    || !receipt.accountPin) {
+    registry.failStructuredSpawn(record.launchId, "queued pinned spawn lost its durable admission identity");
+    return { kind: "remove" };
+  }
+
+  let account: AccountContext;
+  let admission: SpawnAccountAdmission;
+  try {
+    account = dependencies.resolveSpawnAccount(receipt.engine, record.accountId);
+    admission = await (dependencies.resolvePinnedSpawnAdmission ?? resolvePinnedSpawnAdmission)(receipt.engine, account);
+  } catch (error) {
+    registry.failStructuredSpawn(
+      record.launchId,
+      (error instanceof Error ? error.message : String(error)).slice(0, 240),
+    );
+    return { kind: "remove" };
+  }
+  if (admission.kind === "retry-at") {
+    return { kind: "retry", retryAt: admission.retryAt };
+  }
+  if (admission.kind === "unavailable") {
+    registry.failStructuredSpawn(record.launchId, `pinned account is unavailable: ${admission.reason}`);
+    return { kind: "remove" };
+  }
+
+  const client = dependencies.runtimeHostClient();
+  if (!client) {
+    return { kind: "retry", retryAt: new Date(now() + QUEUED_PIN_RETRY_MS).toISOString() };
+  }
+  const spec: ResumeSpec = {
+    ...record.spec,
+    launchProfile: record.spec.launchProfile
+      ? { ...record.spec.launchProfile, title: null }
+      : record.spec.launchProfile,
+  };
+  try {
+    const response = await dependencies.spawnStructuredConversation({
+      engine: receipt.engine,
+      receipt,
+      spec,
+      account,
+      ["prompt"]: record.prompt,
+      imageRefs: record.imageRefs,
+      registry,
+      client,
+    });
+    receipt = registry.readOnlySnapshot().receipts[record.launchId] ?? receipt;
+    if (record.parentArtifactPath && response.path) {
+      try {
+        rememberHandoffChild(response.path, record.parentArtifactPath);
+        persistHandoffLineage();
+      } catch (error) {
+        console.error("[spawn] queued handoff lineage persistence failed", {
+          launchId: receipt.launchId,
+          conversationId: receipt.conversationId,
+          error,
+        });
+      }
+    }
+    if (response.path) await adoptQueuedPipelineAttempt(record, receipt, response.path, dependencies);
+    if (response.path && fs.existsSync(response.path)) {
+      try { await dependencies.publishFilesRevision?.(client); }
+      catch (error) {
+        console.error("[spawn] queued transcript materialization refresh failed", {
+          launchId: receipt.launchId,
+          conversationId: receipt.conversationId,
+          error,
+        });
+      }
+    }
+    return { kind: "remove" };
+  } catch (error) {
+    console.error("[spawn] queued pinned launch failed", {
+      launchId: receipt.launchId,
+      conversationId: receipt.conversationId,
+      error,
+    });
+    if (error instanceof RuntimeHostUnavailableError) {
+      registry.failStructuredSpawn(
+        receipt.launchId,
+        `structured spawn transport failed: ${error.message}`.slice(0, 240),
+      );
+    }
+    const current = registry.readOnlySnapshot().receipts[record.launchId];
+    return !current || current.state === "failed" || current.state === "conflicted"
+      ? { kind: "remove" }
+      : { kind: "retry", retryAt: new Date(now() + QUEUED_PIN_RETRY_MS).toISOString() };
+  }
+}
+
+export async function drainQueuedPinnedSpawns(
+  registry: AgentRegistry = agentRegistry(),
+  dependencies: QueuedPinnedSpawnDependencies = productionSpawnCommandDependencies,
+  now: () => number = Date.now,
+): Promise<void> {
+  for (;;) {
+    const claimed = await claimDueQueuedPinnedSpawn(registry, now());
+    if (!claimed) return;
+    const result = await actuateQueuedPinnedSpawn(registry, claimed, dependencies, now);
+    await settleQueuedPinnedSpawnClaim(registry, claimed, result);
+  }
+}
 
 interface SuggestResponse {
   dirs: string[];
@@ -146,7 +477,18 @@ function addDir(dirs: string[], cwd: string | null, project: string): void {
 /** Recent real working directories to prefill the spawn dialog; the current
     project's transcripts rank first so its directory lands on top. `src` names
     a transcript whose own cwd must win — the handoff card inherits it. */
-export async function spawnSuggestions(req: NextRequest): Promise<NextResponse<SuggestResponse>> {
+export async function spawnSuggestions(
+  req: NextRequest,
+): Promise<NextResponse<SuggestResponse | { ok: true } | ApiError>> {
+  if (req.nextUrl.searchParams.get("drainQueuedPinnedSpawns") === "1") {
+    const registry = agentRegistry();
+    const caller = authenticatedAgentSpawnCaller(req, undefined, registry);
+    if ("error" in caller || caller.kind !== "operator") {
+      return NextResponse.json({ error: "queued pinned spawn drain requires Viewer operator authority" }, { status: 403 });
+    }
+    await drainQueuedPinnedSpawns(registry);
+    return NextResponse.json({ ok: true });
+  }
   const project = req.nextUrl.searchParams.get("project") ?? "";
   const src = req.nextUrl.searchParams.get("src");
   const { cwd: srcCwd, cwdExists } = sourceCwdStatus(src);
@@ -551,7 +893,21 @@ export async function executeSpawnRequest(
         : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
     } catch (error) {
       if (body.accountId === undefined) throw error;
-      return terminalizePinnedAccountFailure(error);
+      if (engine === "claude" && requestedAccountId) {
+        try {
+          const pinned = dependencies.resolveSpawnAccount(engine, requestedAccountId);
+          const admission = await (dependencies.resolvePinnedSpawnAdmission ?? resolvePinnedSpawnAdmission)(engine, pinned);
+          if (admission.kind === "retry-at" || admission.kind === "admissible") {
+            account = { ...pinned, admission, requestedAdmission: admission };
+          } else {
+            return terminalizePinnedAccountFailure(error);
+          }
+        } catch {
+          return terminalizePinnedAccountFailure(error);
+        }
+      } else {
+        return terminalizePinnedAccountFailure(error);
+      }
     }
     const requestedRetryAt = requestedAccountId && account.requestedAdmission?.kind === "retry-at"
       ? account.requestedAdmission.retryAt
@@ -750,13 +1106,15 @@ export async function executeSpawnRequest(
       });
     };
     if (begun.kind === "replay") {
-      const structured = begun.receipt.transport === "structured"
+      const queuedPin = readQueuedPinnedSpawns(registry).records[begun.receipt.launchId] ?? null;
+      const structured = Boolean(queuedPin)
+        || begun.receipt.transport === "structured"
         || (begun.receipt.transport === null
           && Boolean(begun.receipt.key && registry.readOnlySnapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost));
       let receipt = begun.receipt;
       let initialMessage: SpawnResponse["initialMessage"] | undefined;
       const runtimeClient = structured ? dependencies.runtimeHostClient() : null;
-      if (runtimeClient && !queuedUntil) {
+      if (runtimeClient && !queuedUntil && !queuedPin) {
         try {
           const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, runtimeClient);
           receipt = reconciled;
@@ -783,18 +1141,65 @@ export async function executeSpawnRequest(
       if (receipt.artifactPath) await adoptMaterializedAttempt(receipt, receipt.artifactPath);
       const response = spawnResponseForReceipt(receipt, receipt.artifactPath, {
         structured,
-        initialMessage: queuedUntil ? "queued" : initialMessage,
+        initialMessage: queuedUntil || queuedPin ? "queued" : initialMessage,
       });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
     launchId = begun.receipt.launchId;
-    if (queuedUntil) {
-      const queuedReceipt = begun.receipt.admissionOwner
-        ? registry.releaseStartingStructuredSpawn(begun.receipt.launchId, begun.receipt.admissionOwner).receipt
-        : begun.receipt;
+    if (queuedUntil && transport === "structured") {
+      const artifactPath = spec.transcript ?? null;
+      const key = artifactPath ? sessionKeyFromTranscript(engine, artifactPath) : null;
+      if (!artifactPath || !key) {
+        registry.failStructuredSpawn(begun.receipt.launchId, "queued pinned spawn identity is unavailable");
+        throw new Error("queued pinned spawn identity is unavailable");
+      }
+      let imageRefs: StructuredImageRef[];
+      try { imageRefs = dependencies.storeImages(images); }
+      catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
+      const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+        key,
+        artifactPath,
+        cwd,
+        accountId: requestedAccountId!,
+        launchProfile: spec.launchProfile,
+        status: "unhosted",
+        host: null,
+        structuredHost: {
+          kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+          endpoint: "stdio:queued",
+          process: null,
+          eventCursor: 0,
+          protocolVersion: null,
+          writerClaimEpoch: 0,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        },
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: "spawn",
+      });
+      if (staged.kind === "conflict") throw new Error(staged.code);
+      const queuedReceipt = staged.receipt.admissionOwner
+        ? registry.releaseStructuredSpawnAdmissionOwner(
+            staged.receipt.launchId,
+            staged.receipt.admissionOwner,
+          ).receipt
+        : staged.receipt;
+      await persistQueuedPinnedSpawn(registry, {
+        launchId: queuedReceipt.launchId,
+        retryAt: queuedUntil,
+        accountId: requestedAccountId!,
+        spec,
+        ["prompt"]: prompt,
+        imageRefs,
+        parentArtifactPath,
+        pipelineSourceConversationId,
+      });
+      scheduleQueuedPinnedSpawnWake(registry.filename);
       return NextResponse.json(
         spawnResponseForReceipt(queuedReceipt, queuedReceipt.artifactPath, {
-          structured: transport === "structured",
+          structured: true,
           initialMessage: "queued",
         }),
         { status: 202 },

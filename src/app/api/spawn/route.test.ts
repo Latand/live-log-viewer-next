@@ -10,11 +10,13 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots, createManagedCodexAccount } from "@/lib/accounts/codex";
 import { NoHealthyClaudeAccountError } from "@/lib/accounts/spawnHealth";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
+import { drainQueuedPinnedSpawns } from "@/lib/agent/spawnCommand";
 import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "@/lib/runtime/client";
+import { recoverPendingStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
@@ -55,6 +57,12 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
       home: path.join(cwd, "account"),
       transcriptRoot: path.join(cwd, "projects"),
       env: { NODE_ENV: "test" },
+    }),
+    resolvePinnedSpawnAdmission: async () => ({
+      kind: "admissible",
+      basis: "current",
+      stale: false,
+      retryAt: null,
     }),
     runtimeHostClient: () => ({} as RuntimeHostClient),
     defer: (work) => { void work(); },
@@ -200,25 +208,30 @@ test("a pinned account with a future retry deadline queues durably and launches 
     const dependencies = {
       ...structuredRouteDependencies(cwd),
       registry: () => store,
-      resolveHealthySpawnAccount: async () => pinAdmissible
-        ? account("account-a")
-        : {
-            ...account("account-b"),
-            requestedAdmission: {
-              kind: "retry-at" as const,
-              reason: "hard-limit" as const,
-              stale: false,
-              retryAt,
-            },
-          },
+      resolveHealthySpawnAccount: async () => {
+        throw new NoHealthyClaudeAccountError(["account-a"]);
+      },
       resolveSpawnAccount: (_engine: "claude" | "codex", accountId: string | null) => account(accountId ?? "account-b"),
+      resolvePinnedSpawnAdmission: async () => pinAdmissible
+        ? {
+            kind: "admissible" as const,
+            basis: "current" as const,
+            stale: false,
+            retryAt: null,
+          }
+        : {
+            kind: "retry-at" as const,
+            reason: "hard-limit" as const,
+            stale: false,
+            retryAt,
+          },
       defer: (work: () => Promise<void>) => { deferred.push(work); },
       spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
         spawnedAccounts.push(input.account.accountId);
-        const sessionId = crypto.randomUUID();
+        const sessionId = input.receipt.key!.sessionId;
         const settled = input.registry.settleSpawn(input.receipt.launchId, {
           key: { engine: input.engine, sessionId },
-          artifactPath: path.join(cwd, `${sessionId}.jsonl`),
+          artifactPath: input.receipt.artifactPath!,
           cwd,
           accountId: input.account.accountId,
           status: "starting",
@@ -257,10 +270,10 @@ test("a pinned account with a future retry deadline queues durably and launches 
     const response = await post();
     expect(response.status).toBe(202);
     const queued = await response.json();
-    expect(queued).toMatchObject({ state: "starting", initialMessage: "queued" });
+    expect(queued).toMatchObject({ state: "path-pending", initialMessage: "queued" });
     expect(spawnedAccounts).toEqual([]);
     const receipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
-    expect(receipt).toMatchObject({ accountId: "account-a", accountPin: true, state: "starting" });
+    expect(receipt).toMatchObject({ accountId: "account-a", accountPin: true, state: "path-pending" });
     expect(receipt.launchProfile.title).toBe(`Pinned account quota is exhausted — queued until ${retryAt}`);
     expect(projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]).toMatchObject({
       title: `Pinned account quota is exhausted — queued until ${retryAt}`,
@@ -268,28 +281,24 @@ test("a pinned account with a future retry deadline queues durably and launches 
     });
 
     store = new AgentRegistry(registryFile);
-    const replayResponse = await post();
-    expect(replayResponse.status).toBe(202);
-    expect(await replayResponse.json()).toMatchObject({
+    await recoverPendingStructuredSpawns(store, {
+      effectBatch: async () => [],
+      operationStatus: async () => null,
+    } as unknown as RuntimeHostClient);
+    expect(store.spawnReceiptForClientAttempt("account_pin_retry_20260823")).toMatchObject({
       launchId: queued.launchId,
-      conversationId: queued.conversationId,
-      state: "starting",
-      initialMessage: "queued",
+      state: "path-pending",
+      accountId: "account-a",
     });
     expect(deferred).toHaveLength(0);
     expect(spawnedAccounts).toEqual([]);
 
     pinAdmissible = true;
-    const admittedResponse = await post();
-    expect(admittedResponse.status).toBe(202);
-    expect(await admittedResponse.json()).toMatchObject({
-      launchId: queued.launchId,
-      conversationId: queued.conversationId,
-      state: "starting",
-      initialMessage: "pending",
-    });
-    expect(deferred).toHaveLength(1);
-    await deferred[0]!();
+    await drainQueuedPinnedSpawns(
+      store,
+      dependencies,
+      () => Date.parse(retryAt) + 1,
+    );
     expect(spawnedAccounts).toEqual(["account-a"]);
     const settledReceipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
     const conversation = store.conversation(settledReceipt.conversationId)!;
@@ -446,6 +455,12 @@ test("a pinned spawn still refuses when no account is admissible", async () => {
     resolveHealthySpawnAccount: async () => {
       throw new NoHealthyClaudeAccountError(["account-a", "account-b"]);
     },
+    resolvePinnedSpawnAdmission: async () => ({
+      kind: "unavailable" as const,
+      reason: "auth-failed" as const,
+      stale: false,
+      retryAt: null,
+    }),
   };
   const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
     method: "POST",
