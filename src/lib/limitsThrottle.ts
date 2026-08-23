@@ -26,8 +26,10 @@ export function cachedProviderThrottleProvenance(
   const store = globalThis as typeof globalThis & {
     __llvLimitsCache?: { engines?: Partial<Record<HostedEngine, Record<string, { provenance?: unknown }>>> } | null;
   };
-  const warm = throttleProvenance(store.__llvLimitsCache?.engines?.[engine]?.[accountId]?.provenance);
-  if (warm) return warm;
+  const warmAccounts = store.__llvLimitsCache?.engines?.[engine];
+  if (warmAccounts && Object.prototype.hasOwnProperty.call(warmAccounts, accountId)) {
+    return throttleProvenance(warmAccounts[accountId]?.provenance);
+  }
   if (typeof window !== "undefined" || typeof process === "undefined") return null;
 
   const loadBuiltin = (process as typeof process & {

@@ -241,6 +241,17 @@ export function projectRateLimitReadModel(
     const host = hosts.get(entry.artifactPath);
     if (host) activeEntries.set(entry.artifactPath, { engine: host.engine, accountId: entry.accountId });
   }
+  const providerThrottleByAccount: Record<HostedEngine, Map<string, ProviderThrottleState | null>> = {
+    claude: new Map(),
+    codex: new Map(),
+  };
+  const providerThrottleFor = (engine: HostedEngine, accountId: string): ProviderThrottleState | null => {
+    const engineAccounts = providerThrottleByAccount[engine];
+    if (!engineAccounts.has(accountId)) {
+      engineAccounts.set(accountId, providerThrottleState(limitsProvenance(engine, accountId), now));
+    }
+    return engineAccounts.get(accountId) ?? null;
+  };
 
   const projectedFiles = files.map((file) => {
     const host = hosts.get(file.path);
@@ -253,7 +264,7 @@ export function projectRateLimitReadModel(
     const providerThrottle = engine && accountId
       && file.authoritativeTurn?.state === "busy"
       && (activeEntry || file.proc === "running")
-      ? providerThrottleState(limitsProvenance(engine, accountId), now)
+      ? providerThrottleFor(engine, accountId)
       : null;
     const structured = activeEntry || file.proc === "running"
       ? rateLimitFromQuotaObservation(observation, now)

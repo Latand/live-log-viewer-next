@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { Flow } from "@/lib/flows/types";
-import type { EngineLimits, FileEntry } from "@/lib/types";
+import type { EngineLimits, FileEntry, LimitsProvenance } from "@/lib/types";
 
 import { projectRateLimitReadModel, quotaAsEngineLimits, quotaReadingFromAccountLimits, quotaReadingFromEngineLimits, rateLimitFromQuotaObservation, reconcileQuotaReadings } from "./rateLimit";
 
@@ -194,6 +194,39 @@ function observation(usedPercent: number, observedAt = NOW) {
   };
 }
 
+type TestLimitsCacheEntry = { provenance: LimitsProvenance };
+
+function withLimitsCaches<T>(
+  diskCodex: Record<string, TestLimitsCacheEntry>,
+  warmCodex: Record<string, TestLimitsCacheEntry> | null,
+  read: () => T,
+): T {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-rate-limit-cache-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  const runtime = globalThis as typeof globalThis & { __llvLimitsCache?: unknown };
+  const previousCache = runtime.__llvLimitsCache;
+  process.env.LLV_STATE_DIR = stateDir;
+  fs.writeFileSync(path.join(stateDir, "limits-cache.json"), JSON.stringify({
+    version: 2,
+    engines: { claude: {}, codex: diskCodex },
+  }));
+  if (warmCodex) {
+    runtime.__llvLimitsCache = { version: 2, engines: { claude: {}, codex: warmCodex } };
+  } else {
+    delete runtime.__llvLimitsCache;
+  }
+
+  try {
+    return read();
+  } finally {
+    if (previousCache === undefined) delete runtime.__llvLimitsCache;
+    else runtime.__llvLimitsCache = previousCache;
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+}
+
 test("fresh exhausted account limits become a structured rate-limit signal", () => {
   expect(rateLimitFromQuotaObservation(observation(100), NOW)).toEqual({
     source: "account",
@@ -274,8 +307,7 @@ test("the files read model joins account exhaustion to a live conversation and i
 
 test("the files read model projects a cold cached provider throttle without quota side effects", () => {
   const accountId = "account-a";
-  const retryAtMs = NOW + 5 * 60_000;
-  const retryAt = new Date(retryAtMs).toISOString();
+  const retryAt = new Date(NOW + 5 * 60_000).toISOString();
   const snapshot = {
     entries: {
       "codex:provider-throttled": {
@@ -294,47 +326,16 @@ test("the files read model projects a cold cached provider throttle without quot
     quotaObservations: { claude: {}, codex: { [accountId]: { ...observation(40), accountId } } },
   };
 
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-rate-limit-cold-"));
-  const previousStateDir = process.env.LLV_STATE_DIR;
-  const runtime = globalThis as typeof globalThis & { __llvLimitsCache?: unknown };
-  const previousCache = runtime.__llvLimitsCache;
-  process.env.LLV_STATE_DIR = stateDir;
-  fs.writeFileSync(path.join(stateDir, "limits-cache.json"), JSON.stringify({
-    version: 2,
-    engines: {
-      claude: {},
-      codex: {
-        [accountId]: {
-          at: NOW - 60_000,
-          data: null,
-          provenance: {
-            source: "cache",
-            reason: "oauth-rate-limited",
-            staleSince: null,
-            retryAt,
-          },
-          retryAt: retryAtMs,
-        },
-      },
+  const projected = withLimitsCaches({
+    [accountId]: {
+      provenance: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt },
     },
-  }));
-  delete runtime.__llvLimitsCache;
-
-  let projected: ReturnType<typeof projectRateLimitReadModel>;
-  try {
-    projected = projectRateLimitReadModel([
+  }, null, () => projectRateLimitReadModel([
       entry({
         activity: "live",
         authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null },
       }),
-    ], [flow()], snapshot, NOW);
-  } finally {
-    if (previousCache === undefined) delete runtime.__llvLimitsCache;
-    else runtime.__llvLimitsCache = previousCache;
-    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
-    else process.env.LLV_STATE_DIR = previousStateDir;
-    fs.rmSync(stateDir, { recursive: true, force: true });
-  }
+    ], [flow()], snapshot, NOW));
 
   expect(projected.files[0]).toMatchObject({
     activity: "live",
@@ -342,6 +343,122 @@ test("the files read model projects a cold cached provider throttle without quot
   });
   expect(projected.files[0]?.rateLimit).toBeNull();
   expect(projected.flows[0]?.block).toBeUndefined();
+});
+
+test("a healthy warm account entry wins over stale throttled disk provenance", () => {
+  const accountId = "account-a";
+  const retryAt = new Date(NOW + 5 * 60_000).toISOString();
+  const snapshot = {
+    conversations: {
+      conversation_impl: {
+        id: "conversation_impl",
+        engine: "codex" as const,
+        generations: [{ path: "/sessions/implementer.jsonl", accountId }],
+      },
+    },
+    quotaObservations: { claude: {}, codex: { [accountId]: { ...observation(40), accountId } } },
+  };
+  const projected = withLimitsCaches({
+    [accountId]: {
+      provenance: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt },
+    },
+  }, {
+    [accountId]: {
+      provenance: { source: "live", reason: null, staleSince: null, retryAt: null },
+    },
+  }, () => projectRateLimitReadModel([
+      entry({ authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null } }),
+    ], [], snapshot, NOW));
+
+  expect(projected.files[0]).not.toHaveProperty("providerThrottle");
+});
+
+test("cold throttle fallback remains account-scoped and ignores an expired retry", () => {
+  const throttledAccountId = "account-a";
+  const healthyAccountId = "account-b";
+  const expiredAccountId = "account-expired";
+  const retryAt = new Date(NOW + 5 * 60_000).toISOString();
+  const expiredRetryAt = new Date(NOW - 60_001).toISOString();
+  const paths = {
+    throttled: "/sessions/throttled.jsonl",
+    healthy: "/sessions/healthy.jsonl",
+    expired: "/sessions/expired.jsonl",
+  };
+  const snapshot = {
+    conversations: {
+      conversation_impl: {
+        id: "conversation_impl",
+        engine: "codex" as const,
+        generations: [
+          { path: paths.throttled, accountId: throttledAccountId },
+          { path: paths.healthy, accountId: healthyAccountId },
+          { path: paths.expired, accountId: expiredAccountId },
+        ],
+      },
+    },
+    quotaObservations: {
+      claude: {},
+      codex: {
+        [throttledAccountId]: { ...observation(40), accountId: throttledAccountId },
+        [healthyAccountId]: { ...observation(40), accountId: healthyAccountId },
+        [expiredAccountId]: { ...observation(40), accountId: expiredAccountId },
+      },
+    },
+  };
+  const projected = withLimitsCaches({
+    [throttledAccountId]: {
+      provenance: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt },
+    },
+    [expiredAccountId]: {
+      provenance: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt: expiredRetryAt },
+    },
+  }, {
+    [healthyAccountId]: {
+      provenance: { source: "live", reason: null, staleSince: null, retryAt: null },
+    },
+  }, () => projectRateLimitReadModel([
+      entry({ path: paths.throttled, authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null } }),
+      entry({ path: paths.healthy, authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null } }),
+      entry({ path: paths.expired, authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null } }),
+    ], [], snapshot, NOW));
+
+  expect(projected.files[0]?.providerThrottle).toEqual({ reason: "provider_throttled", retryAt });
+  expect(projected.files[1]).not.toHaveProperty("providerThrottle");
+  expect(projected.files[2]).not.toHaveProperty("providerThrottle");
+});
+
+test("the files read model resolves provider provenance once per active account", () => {
+  const accountId = "account-a";
+  const retryAt = new Date(NOW + 5 * 60_000).toISOString();
+  const paths = Array.from({ length: 50 }, (_, index) => `/sessions/worker-${index}.jsonl`);
+  const snapshot = {
+    conversations: {
+      conversation_impl: {
+        id: "conversation_impl",
+        engine: "codex" as const,
+        generations: paths.map((sessionPath) => ({ path: sessionPath, accountId })),
+      },
+    },
+    quotaObservations: { claude: {}, codex: { [accountId]: { ...observation(40), accountId } } },
+  };
+  let lookups = 0;
+  const projected = projectRateLimitReadModel(
+    paths.map((sessionPath) => entry({
+      path: sessionPath,
+      authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null },
+    })),
+    [],
+    snapshot,
+    NOW,
+    () => {
+      lookups += 1;
+      return { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt };
+    },
+  );
+
+  expect(lookups).toBe(1);
+  expect(projected.files).toHaveLength(50);
+  expect(projected.files.every((file) => file.providerThrottle?.retryAt === retryAt)).toBeTrue();
 });
 
 test("the files read model leaves a settled conversation unchanged under account throttle", () => {
