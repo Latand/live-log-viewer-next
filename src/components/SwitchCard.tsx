@@ -4,7 +4,8 @@ import { CornerDownRight } from "lucide-react";
 
 import { X } from "@/components/icons";
 import { projectDisplayName } from "@/lib/displayNames";
-import { useLocale } from "@/lib/i18n";
+import { translate, useLocale, type Locale } from "@/lib/i18n";
+import type { ProviderThrottleState } from "@/lib/limitsThrottle";
 import type { FileEntry } from "@/lib/types";
 
 import { AccountSwitchChip, CardIdentityChip } from "./cardAnatomy";
@@ -13,6 +14,7 @@ import { EffortPills } from "./EffortPills";
 import { CtxChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
 import { RateLimitBadge } from "./RateLimitBadge";
+import { formatRateLimitTime } from "./rateLimit";
 import { WakeupChip, wakeupChipKey } from "./WakeupChip";
 import { activityDot, cleanTitle, fmtAge } from "./utils";
 
@@ -53,9 +55,38 @@ function statusToneClass(tone: SwitchCardTone): string {
   return "text-primary/75";
 }
 
+function providerThrottleForFile(file: FileEntry): ProviderThrottleState | null {
+  const throttle = (file as FileEntry & { providerThrottle?: ProviderThrottleState | null }).providerThrottle;
+  return throttle?.reason === "provider_throttled" && Number.isFinite(Date.parse(throttle.retryAt))
+    ? throttle
+    : null;
+}
+
+export function providerThrottleStatusLine(file: FileEntry, locale: Locale): string | null {
+  const throttle = providerThrottleForFile(file);
+  if (!throttle) return null;
+  return translate(locale, "status.providerThrottled", {
+    time: formatRateLimitTime(Date.parse(throttle.retryAt) / 1000, locale),
+  });
+}
+
 export function SwitchCard({ file, title, project, currentProject, descendants, statusLine, size, tone, onOpen, onArchive }: Props) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const large = size === "large";
+  const providerThrottle = providerThrottleForFile(file);
+  const providerStatusLine = providerThrottleStatusLine(file, locale);
+  const displayedStatusLine = providerStatusLine ?? statusLine;
+  const displayedTone: SwitchCardTone = providerStatusLine ? "waiting" : tone;
+  const statusFile = providerStatusLine && providerThrottle
+    ? {
+        ...file,
+        rateLimit: null,
+        pendingWakeup: file.pendingWakeup ?? {
+          fireAt: Date.parse(providerThrottle.retryAt),
+          reason: providerStatusLine,
+        },
+      }
+    : file;
   return (
     <article
       /* reasoning-host (issue #270): the card's width is an explicit constant,
@@ -65,7 +96,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
       /* Small cards hold the same three-row anatomy as large ones, so their
          fixed height budgets a two-line title + the ops row + the status line
          without clipping (#964). */
-      className={`reasoning-host group relative flex ${large ? "h-[150px] w-[300px]" : "h-[128px] w-[220px]"} shrink-0 flex-col rounded-[8px] border p-3 shadow-1 transition-colors hover:border-accent/45 ${toneClass(tone)}`}
+      className={`reasoning-host group relative flex ${large ? "h-[150px] w-[300px]" : "h-[128px] w-[220px]"} shrink-0 flex-col rounded-[8px] border p-3 shadow-1 transition-colors hover:border-accent/45 ${toneClass(displayedTone)}`}
       role="button"
       tabIndex={0}
       aria-label={t("switchCard.openColumn", { title: cleanTitle(title, 80) })}
@@ -74,7 +105,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
         if (event.key === "Enter") onOpen(file);
       }}
     >
-      {file.activity === "live" ? null : (
+      {file.activity === "live" || providerStatusLine ? null : (
         <button
           type="button"
           className="absolute right-1.5 top-1.5 z-10 hidden h-5 w-5 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:border-danger/50 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 group-hover:flex group-focus-within:flex"
@@ -92,12 +123,12 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           identity treatment (model or engine; effort rides beside it and in the
           tooltip), the #961 status word, and where the card lives. */}
       <div data-card-row="identity" className="relative flex min-w-0 items-center gap-1.5">
-        <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} />
+        <span className={`h-2 w-2 shrink-0 rounded-full ${providerStatusLine ? "bg-warning" : activityDot(file.activity)}`} />
         <CardIdentityChip file={file} />
         <EffortPills file={file} />
         {/* The operator-facing status word (issue #961): same vocabulary and
             tones as the board cards, so a switch column reads identically. */}
-        <CardStatusBadge file={file} />
+        <CardStatusBadge file={statusFile} />
         <span
           className={`ml-auto min-w-0 truncate rounded-full border border-border bg-canvas px-1.5 py-0.5 text-[9.5px] font-semibold ${
             project === currentProject ? "text-muted" : "text-primary"
@@ -130,14 +161,14 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
         <RateLimitBadge file={file} shrinkable />
         <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} shrinkable />
       </div>
-      {statusLine ? (
+      {displayedStatusLine ? (
         <div
           className={`relative mt-1 min-w-0 truncate font-semibold ${
-            tone === "waiting" || tone === "stalled" ? (large ? "text-[12.5px]" : "text-[11.5px]") : large ? "text-[11.5px]" : "text-[10.5px]"
-          } ${statusToneClass(tone)}`}
-          data-tone={tone}
+            displayedTone === "waiting" || displayedTone === "stalled" ? (large ? "text-[12.5px]" : "text-[11.5px]") : large ? "text-[11.5px]" : "text-[10.5px]"
+          } ${statusToneClass(displayedTone)}`}
+          data-tone={displayedTone}
         >
-          {statusLine}
+          {displayedStatusLine}
         </div>
       ) : null}
       {file.pid && file.proc === "running" ? (

@@ -1753,6 +1753,7 @@ export const en = {
   "status.stalled": "interrupted or awaiting permission",
   "status.finishedTurn": "finished the turn — waiting for a reply",
   "status.rateLimited": "rate-limited",
+  "status.providerThrottled": "provider is throttling — resumes at {time}",
   "status.flow": "flow: {label}",
   "rateLimit.badge": "rate-limited",
   "rateLimit.badgeUntil": "rate-limited until {time}",

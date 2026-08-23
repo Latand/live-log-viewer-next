@@ -1711,6 +1711,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "status.stalled": "перервано або чекає дозволу",
   "status.finishedTurn": "закінчив хід — чекає відповіді",
   "status.rateLimited": "вичерпано ліміт",
+  "status.providerThrottled": "провайдер обмежує частоту — продовжить о {time}",
   "status.flow": "флоу: {label}",
   "rateLimit.badge": "вичерпано ліміт",
   "rateLimit.badgeUntil": "ліміт до {time}",

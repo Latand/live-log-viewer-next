@@ -2,9 +2,16 @@ import type { DurableQuotaObservation } from "@/lib/accounts/migration/contracts
 import { effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
 import type { Flow } from "@/lib/flows/types";
 import { SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
+import { providerThrottleState, type ProviderThrottleState } from "@/lib/limitsThrottle";
 import type { Engine, EngineLimits, FileEntry, LimitsProvenance, LimitWindow, LimitWindowSource, RateLimitState } from "@/lib/types";
 
 type HostedEngine = Extract<Engine, "claude" | "codex">;
+
+export type ProviderThrottleFileEntry = FileEntry & {
+  /** Scheduled request-frequency wait. Deliberately separate from quota
+      exhaustion so flow admission and account reseating remain unchanged. */
+  providerThrottle?: ProviderThrottleState | null;
+};
 
 export const LIMITS_FRESHNESS_S = 20 * 60;
 
@@ -147,6 +154,11 @@ export function quotaUsesSource(quota: ReconciledQuota, source: QuotaReadingSour
 }
 
 export interface RateLimitProjectionSnapshot {
+  entries?: Record<string, {
+    artifactPath: string;
+    accountId: string | null;
+    status: string;
+  }>;
   conversations: Record<string, {
     id: string;
     engine: HostedEngine;
@@ -211,7 +223,9 @@ export function projectRateLimitReadModel(
   flows: Flow[],
   snapshot: RateLimitProjectionSnapshot,
   now = Date.now(),
-): { files: FileEntry[]; flows: Flow[] } {
+  limitsProvenance: (engine: HostedEngine, accountId: string) => LimitsProvenance | null = () => null,
+  hostIsLive: (entry: NonNullable<RateLimitProjectionSnapshot["entries"]>[string]) => boolean = () => false,
+): { files: ProviderThrottleFileEntry[]; flows: Flow[] } {
   const hosts = new Map<string, { conversationId: string; engine: HostedEngine; accountId: string | null }>();
   for (const conversation of Object.values(snapshot.conversations)) {
     for (const generation of conversation.generations) {
@@ -222,20 +236,49 @@ export function projectRateLimitReadModel(
       });
     }
   }
+  const activeEntries = new Map<string, { engine: HostedEngine; accountId: string }>();
+  for (const entry of Object.values(snapshot.entries ?? {})) {
+    const host = hosts.get(entry.artifactPath);
+    if (!host || !entry.accountId || !["starting", "live", "idle", "handoff"].includes(entry.status) || !hostIsLive(entry)) continue;
+    activeEntries.set(entry.artifactPath, { engine: host.engine, accountId: entry.accountId });
+  }
+  const providerThrottleByAccount: Record<HostedEngine, Map<string, ProviderThrottleState | null>> = {
+    claude: new Map(),
+    codex: new Map(),
+  };
+  const providerThrottleFor = (engine: HostedEngine, accountId: string): ProviderThrottleState | null => {
+    const engineAccounts = providerThrottleByAccount[engine];
+    if (!engineAccounts.has(accountId)) {
+      engineAccounts.set(accountId, providerThrottleState(limitsProvenance(engine, accountId), now));
+    }
+    return engineAccounts.get(accountId) ?? null;
+  };
 
   const projectedFiles = files.map((file) => {
     const host = hosts.get(file.path);
-    const observation = host?.accountId
-      ? snapshot.quotaObservations[host.engine][host.accountId]
+    const activeEntry = activeEntries.get(file.path);
+    const accountId = activeEntry?.accountId ?? host?.accountId ?? null;
+    const engine = activeEntry?.engine ?? host?.engine;
+    const observation = engine && accountId
+      ? snapshot.quotaObservations[engine][accountId]
       : undefined;
-    const structured = file.proc === "running"
+    const providerThrottle = activeEntry && file.authoritativeTurn?.state === "busy"
+      ? providerThrottleFor(activeEntry.engine, activeEntry.accountId)
+      : null;
+    /* The scanner's process signal still supports the legacy quota display,
+       whose only claim is which account window to show. Provider throttle
+       changes lifecycle presentation, so it requires the identity-live entry. */
+    const structured = activeEntry || file.proc === "running"
       ? rateLimitFromQuotaObservation(observation, now)
       : null;
-    const rateLimit = mergeRateLimits(file.rateLimit, structured, host?.accountId ?? null);
+    const rateLimit = mergeRateLimits(file.rateLimit, structured, accountId);
+    const projectedFile = { ...file } as ProviderThrottleFileEntry;
+    delete projectedFile.providerThrottle;
     return {
-      ...file,
+      ...projectedFile,
       conversationId: file.conversationId ?? host?.conversationId,
       rateLimit,
+      ...(providerThrottle ? { providerThrottle } : {}),
     };
   });
   const filesByPath = new Map(projectedFiles.map((file) => [file.path, file]));

@@ -15,7 +15,7 @@ process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-lifecycle
 const { patchPipeline } = await import("@/lib/pipelines/engine");
 const { pipelineIdentity, savePipelines } = await import("@/lib/pipelines/store");
 const { queryLifecycleEvents } = await import("./journal");
-const { refreshLifecycleJournal } = await import("./projector");
+const { projectLivenessEvents, refreshLifecycleJournal } = await import("./projector");
 
 afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
 
@@ -296,4 +296,31 @@ test("only a reading backed by a transcript read becomes a durable alarm (#860)"
   }, { force: true });
   expect(queryLifecycleEvents({ conversationId: "conversation_read_tail" }).events.map((event) => event.type))
     .toEqual(["agent_stalled"]);
+});
+
+test("a provider-throttled scheduled wait produces no stall alarm", () => {
+  const conversationId = "conversation_provider_throttled";
+  const events = projectLivenessEvents([
+    livenessRecord({
+      conversationId,
+      lifecycle: "waiting",
+      reason: "provider_throttled",
+      retryAt: "2026-07-26T09:15:00.000Z",
+      host: { state: "alive", kind: "structured", pid: 4242 },
+      stalledForMs: null,
+    }),
+  ]);
+
+  expect(events).toEqual([]);
+  refreshLifecycleJournal({
+    liveness: [livenessRecord({
+      conversationId,
+      lifecycle: "waiting",
+      reason: "provider_throttled",
+      retryAt: "2026-07-26T09:15:00.000Z",
+      host: { state: "alive", kind: "structured", pid: 4242 },
+      stalledForMs: null,
+    })],
+  }, { force: true });
+  expect(queryLifecycleEvents({ conversationId }).count).toBe(0);
 });

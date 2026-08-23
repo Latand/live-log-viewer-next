@@ -33,6 +33,8 @@ const FAILURE_COOLDOWN_MS = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60_000;
 const CODEX_INITIALIZE_TIMEOUT_REASON = "app-server-initialize-timeout";
 
+export { providerThrottleRetryAt, PROVIDER_THROTTLE_GRACE_MS } from "./limitsThrottle";
+
 type EngineName = "claude" | "codex";
 type EngineCacheEntry = {
   at: number;
@@ -165,6 +167,16 @@ function writeDiskCache(value: LimitsCache): void {
 
 function lastCache(engine: EngineName, accountId: string): EngineCacheEntry | null {
   return cache().engines[engine][accountId] ?? null;
+}
+
+/** Read-only account provenance for lifecycle/card projections. This never
+    refreshes limits or changes which account is active. */
+export function cachedLimitsProvenance(
+  engine: "claude" | "codex",
+  accountId: string,
+): LimitsProvenance | null {
+  const provenance = lastCache(engine, accountId)?.provenance;
+  return provenance ? { ...provenance } : null;
 }
 
 type ResolvedRead = {
