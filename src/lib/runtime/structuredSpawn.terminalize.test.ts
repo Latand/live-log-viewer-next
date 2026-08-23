@@ -10,6 +10,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import {
   STALE_STRUCTURED_SPAWN_TIMEOUT_MS,
+  reconcileStructuredSpawnReplay,
   terminalizeStaleStructuredSpawns,
 } from "./structuredSpawn";
 
@@ -49,7 +50,6 @@ test("a stale dead-evidence structured launch converges to durable retry-safe fa
 
   const first = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT, {
     now: AGED,
-    ownerAlive: () => false,
   });
   expect(first.examined).toBe(1);
   expect(first.terminalized).toEqual([receipt.launchId]);
@@ -63,7 +63,6 @@ test("a stale dead-evidence structured launch converges to durable retry-safe fa
   /* Idempotence: a second pass is a no-op — terminal receipts are skipped. */
   const second = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT, {
     now: AGED,
-    ownerAlive: () => false,
   });
   expect(second).toEqual({ examined: 0, terminalized: [], recovered: [] });
 
@@ -73,30 +72,27 @@ test("a stale dead-evidence structured launch converges to durable retry-safe fa
   expect(Object.keys(after.conversations)).toHaveLength(conversationCount);
 });
 
-test("a live admission owner keeps responsibility for its deferred launch", async () => {
+test("a live admission owner loses an overdue deferred launch at the bounded timeout", async () => {
   const store = registry();
   const receipt = staleStructuredReceipt(store, "live_owner_20260719_a1");
 
   const result = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT, {
     now: AGED,
-    ownerAlive: () => true,
   });
-  expect(result).toEqual({ examined: 0, terminalized: [], recovered: [] });
-  expect(store.snapshot().receipts[receipt.launchId]!.state).toBe("starting");
+  expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
+  expect(store.snapshot().receipts[receipt.launchId]!.state).toBe("failed");
 });
 
 test("a receipt younger than the pass timeout is never touched", async () => {
   const store = registry();
   const receipt = staleStructuredReceipt(store, "fresh_20260719_a1");
 
-  const result = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT, {
-    ownerAlive: () => false,
-  });
+  const result = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT);
   expect(result).toEqual({ examined: 0, terminalized: [], recovered: [] });
   expect(store.snapshot().receipts[receipt.launchId]!.state).toBe("starting");
 });
 
-test("a staged launch whose host entry is claimed stays with its claimant", async () => {
+test("a staged launch whose host entry stays claimed still fails at the bounded timeout", async () => {
   const store = registry();
   const receipt = staleStructuredReceipt(store, "claimed_20260719_a1");
   const staged = store.stageStructuredSpawn(receipt.launchId, {
@@ -126,10 +122,9 @@ test("a staged launch whose host entry is claimed stays with its claimant", asyn
 
   const result = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT, {
     now: AGED,
-    ownerAlive: () => false,
   });
-  expect(result).toEqual({ examined: 0, terminalized: [], recovered: [] });
-  expect(store.snapshot().receipts[receipt.launchId]!.state).not.toBe("failed");
+  expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
+  expect(store.snapshot().receipts[receipt.launchId]!.state).toBe("failed");
 });
 
 test("issue 533: host loss after recoverable timeout reaches retry-safe failure despite the same process staying live", async () => {
@@ -157,7 +152,6 @@ test("issue 533: host loss after recoverable timeout reaches retry-safe failure 
 
   const result = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT, {
     now: AGED,
-    ownerAlive: () => true,
   });
 
   expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
@@ -172,6 +166,183 @@ test("issue 533: host loss after recoverable timeout reaches retry-safe failure 
   });
 });
 
+test("issue 1074: a stale materialized launch is recovered from its late transcript on the reaper tick", async () => {
+  const store = registry();
+  const receipt = staleStructuredReceipt(store, "materialized_incident_placeholder");
+  const sessionId = "materialized-incident-session";
+  const artifactPath = path.join(path.dirname(store.filename), `${sessionId}.jsonl`);
+  fs.writeFileSync(artifactPath, JSON.stringify({
+    type: "event_msg",
+    payload: { type: "user_message", message: "delayed initial message" },
+  }) + "\n");
+  store.stageStructuredSpawn(receipt.launchId, {
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: "/repo",
+    accountId: "work",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:incident",
+      process: { pid: process.pid, startIdentity: "incident-host" },
+      eventCursor: 3,
+      protocolVersion: "v2",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:incident",
+    pendingAction: "spawn",
+  });
+  store.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "work",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    turn: { state: "busy", source: "assistant", terminalAt: null },
+    observedAt: new Date().toISOString(),
+  }]);
+  expect(store.snapshot().receipts[receipt.launchId]).toMatchObject({
+    state: "path-pending",
+    artifactLifecycle: "materialized",
+  });
+
+  const result = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT, {
+    now: AGED,
+  });
+
+  expect(result).toEqual({ examined: 1, terminalized: [], recovered: [receipt.launchId] });
+  expect(store.snapshot().receipts[receipt.launchId]).toMatchObject({
+    state: "completed",
+    artifactLifecycle: "materialized",
+    completionMode: "route-recovered",
+    error: null,
+  });
+});
+
+test.each(["codex", "claude"] as const)("issue 1074: a stale %s registering host fails at the generic setup bound", async (engine) => {
+  const store = registry();
+  const begun = store.beginSpawnRequest({
+    engine,
+    cwd: "/repo",
+    transport: "structured",
+    accountId: "work",
+    clientAttemptId: `registering_${engine}_incident`,
+    requestDigest: engine === "codex" ? "c".repeat(64) : "a".repeat(64),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected structured launch creation");
+  const receipt = begun.receipt;
+  const key = { engine, sessionId: `${engine}-registering-session` };
+  const artifactPath = path.join(path.dirname(store.filename), `${key.sessionId}.jsonl`);
+  store.stageStructuredSpawn(receipt.launchId, {
+    key,
+    artifactPath,
+    cwd: "/repo",
+    accountId: "work",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      endpoint: "stdio:registering",
+      process: { pid: process.pid, startIdentity: `${engine}-incident-host` },
+      eventCursor: 1,
+      protocolVersion: "v2",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: `structured-host:${engine}-incident`,
+    pendingAction: "spawn",
+  });
+  let operationStatus = "queued";
+  let operationReason: string | null = null;
+  let released = 0;
+  const terminated: Array<{ pid: number; startIdentity: string | null }> = [];
+  const operationResult = () => ({
+    operationId: receipt.launchId,
+    replayed: false,
+    receipt: {
+      operationId: receipt.launchId,
+      idempotencyKey: receipt.launchId,
+      conversationId: receipt.conversationId,
+      kind: "spawn" as const,
+      status: operationStatus,
+      reason: operationReason,
+      at: receipt.createdAt,
+      revision: operationStatus === "queued" ? 1 : 2,
+    },
+  });
+  const client = {
+    effectBatch: async () => [],
+    operationStatus: async (operationId: string) => operationId === receipt.launchId ? operationResult() : null,
+    transitionOperation: async (_operationId: string, status: string, details?: { reason?: string | null }) => {
+      operationStatus = status;
+      operationReason = details?.reason ?? null;
+      return operationResult();
+    },
+    snapshot: async () => ({
+      sessions: [{
+        conversationId: receipt.conversationId,
+        sessionKey: key,
+        hostKind: engine === "codex" ? "codex-app-server" : "claude-broker",
+        host: "registering",
+        turn: "idle",
+        provenance: "structured",
+        revision: 1,
+        attentionIds: [],
+        recentReceipts: [],
+        accountId: "work",
+        parentConversationId: null,
+        cwd: "/repo",
+        artifactPath,
+        capabilities: { steer: engine === "codex", structuredAttention: true },
+        activeTurnId: null,
+      }],
+    }),
+  } as unknown as RuntimeHostClient;
+
+  const result = await terminalizeStaleStructuredSpawns(store, client, {
+    now: AGED,
+    reconcile: (launchId, registry, runtimeClient, options) => reconcileStructuredSpawnReplay(
+      launchId,
+      registry,
+      runtimeClient,
+      {
+        ...options,
+        releaseHost: async () => {
+          released += 1;
+          return false;
+        },
+        terminateHostProcess: async (expected) => {
+          terminated.push(expected);
+          return true;
+        },
+      },
+    ),
+  });
+
+  expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
+  expect(released).toBe(1);
+  expect(terminated).toEqual([{ pid: process.pid, startIdentity: `${engine}-incident-host` }]);
+  expect(operationStatus).toBe("failed");
+  expect(operationReason ?? "").toContain("durable setup remained incomplete");
+  const failed = store.snapshot().receipts[receipt.launchId]!;
+  expect(failed).toMatchObject({ state: "failed", error: operationReason });
+  expect(spawnResponseForReceipt(failed, failed.artifactPath, { structured: true })).toMatchObject({
+    state: "failed",
+    retrySafe: true,
+    initialMessage: "failed",
+  });
+});
+
 test("the actuation cap bounds one cycle and the remainder converges on the next", async () => {
   const store = registry();
   const receipts = [
@@ -182,7 +353,6 @@ test("the actuation cap bounds one cycle and the remainder converges on the next
 
   const first = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT, {
     now: AGED,
-    ownerAlive: () => false,
     actuationCap: 2,
   });
   expect(first.examined).toBe(2);
@@ -190,7 +360,6 @@ test("the actuation cap bounds one cycle and the remainder converges on the next
 
   const second = await terminalizeStaleStructuredSpawns(store, DEAD_RUNTIME_CLIENT, {
     now: AGED,
-    ownerAlive: () => false,
     actuationCap: 2,
   });
   expect(second.examined).toBe(1);
