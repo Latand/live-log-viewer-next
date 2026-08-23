@@ -6,7 +6,13 @@ import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
 import { pinnedIdentityEntries } from "@/lib/scanner/pinRideAlong";
-import { agentRegistry, readOnlyConversationLookupFromSnapshot, supersedenceChainTail } from "@/lib/agent/registry";
+import { identityAlive, livenessProbe } from "@/lib/agent/accountLiveness";
+import {
+  agentRegistry,
+  readOnlyConversationLookupFromSnapshot,
+  supersedenceChainTail,
+  type AgentRegistryEntry,
+} from "@/lib/agent/registry";
 import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
@@ -27,6 +33,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import { projectSupersededTaskHandoffs } from "@/lib/tasks/supersedence";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
+import { cachedLimitsProvenance } from "@/lib/limits";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlayLineageProjectAffinity } from "@/lib/session/projectAffinity";
@@ -701,7 +708,20 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   timings.push(`files-flows;dur=${(performance.now() - flowsStartedAt).toFixed(1)}`);
   markTiming("files-stores");
   const projectsStartedAt = performance.now();
-  const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
+  const hostProbe = livenessProbe();
+  const projected = projectRateLimitReadModel(
+    files,
+    flows,
+    registrySnapshot,
+    Date.now(),
+    cachedLimitsProvenance,
+    (entry) => {
+      const fullEntry = entry as AgentRegistryEntry;
+      return identityAlive(fullEntry.host?.agent, hostProbe)
+        || identityAlive(fullEntry.host?.panePid, hostProbe)
+        || identityAlive(fullEntry.structuredHost?.process, hostProbe);
+    },
+  );
   markTiming("files-project-rate-limits");
   let effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
   const projectAliases = projectAliasSnapshot();

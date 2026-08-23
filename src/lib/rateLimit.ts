@@ -2,7 +2,7 @@ import type { DurableQuotaObservation } from "@/lib/accounts/migration/contracts
 import { effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
 import type { Flow } from "@/lib/flows/types";
 import { SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
-import { cachedProviderThrottleProvenance, providerThrottleState, type ProviderThrottleState } from "@/lib/limitsThrottle";
+import { providerThrottleState, type ProviderThrottleState } from "@/lib/limitsThrottle";
 import type { Engine, EngineLimits, FileEntry, LimitsProvenance, LimitWindow, LimitWindowSource, RateLimitState } from "@/lib/types";
 
 type HostedEngine = Extract<Engine, "claude" | "codex">;
@@ -223,7 +223,8 @@ export function projectRateLimitReadModel(
   flows: Flow[],
   snapshot: RateLimitProjectionSnapshot,
   now = Date.now(),
-  limitsProvenance: (engine: HostedEngine, accountId: string) => LimitsProvenance | null = cachedProviderThrottleProvenance,
+  limitsProvenance: (engine: HostedEngine, accountId: string) => LimitsProvenance | null = () => null,
+  hostIsLive: (entry: NonNullable<RateLimitProjectionSnapshot["entries"]>[string]) => boolean = () => false,
 ): { files: ProviderThrottleFileEntry[]; flows: Flow[] } {
   const hosts = new Map<string, { conversationId: string; engine: HostedEngine; accountId: string | null }>();
   for (const conversation of Object.values(snapshot.conversations)) {
@@ -237,9 +238,9 @@ export function projectRateLimitReadModel(
   }
   const activeEntries = new Map<string, { engine: HostedEngine; accountId: string }>();
   for (const entry of Object.values(snapshot.entries ?? {})) {
-    if (!entry.accountId || !["starting", "live", "idle", "handoff"].includes(entry.status)) continue;
     const host = hosts.get(entry.artifactPath);
-    if (host) activeEntries.set(entry.artifactPath, { engine: host.engine, accountId: entry.accountId });
+    if (!host || !entry.accountId || !["starting", "live", "idle", "handoff"].includes(entry.status) || !hostIsLive(entry)) continue;
+    activeEntries.set(entry.artifactPath, { engine: host.engine, accountId: entry.accountId });
   }
   const providerThrottleByAccount: Record<HostedEngine, Map<string, ProviderThrottleState | null>> = {
     claude: new Map(),

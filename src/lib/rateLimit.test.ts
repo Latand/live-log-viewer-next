@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import type { Flow } from "@/lib/flows/types";
+import { identityAlive, livenessProbe } from "@/lib/agent/accountLiveness";
+import type { AgentRegistryEntry } from "@/lib/agent/registry";
 import type { EngineLimits, FileEntry, LimitsProvenance } from "@/lib/types";
 
 import { projectRateLimitReadModel, quotaAsEngineLimits, quotaReadingFromAccountLimits, quotaReadingFromEngineLimits, rateLimitFromQuotaObservation, reconcileQuotaReadings } from "./rateLimit";
@@ -305,7 +307,7 @@ test("the files read model joins account exhaustion to a live conversation and i
   });
 });
 
-test("the files read model projects a cold cached provider throttle without quota side effects", () => {
+test("the files read model projects injected cold-cache provenance without quota side effects", () => {
   const accountId = "account-a";
   const retryAt = new Date(NOW + 5 * 60_000).toISOString();
   const snapshot = {
@@ -326,16 +328,17 @@ test("the files read model projects a cold cached provider throttle without quot
     quotaObservations: { claude: {}, codex: { [accountId]: { ...observation(40), accountId } } },
   };
 
-  const projected = withLimitsCaches({
-    [accountId]: {
-      provenance: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt },
-    },
-  }, null, () => projectRateLimitReadModel([
+  const projected = projectRateLimitReadModel([
       entry({
         activity: "live",
         authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null },
       }),
-    ], [flow()], snapshot, NOW));
+    ], [flow()], snapshot, NOW, () => ({
+      source: "cache",
+      reason: "oauth-rate-limited",
+      staleSince: null,
+      retryAt,
+    }));
 
   expect(projected.files[0]).toMatchObject({
     activity: "live",
@@ -345,7 +348,7 @@ test("the files read model projects a cold cached provider throttle without quot
   expect(projected.flows[0]?.block).toBeUndefined();
 });
 
-test("a healthy warm account entry wins over stale throttled disk provenance", () => {
+test("the pure files projection never reads provider provenance implicitly", () => {
   const accountId = "account-a";
   const retryAt = new Date(NOW + 5 * 60_000).toISOString();
   const snapshot = {
@@ -358,22 +361,135 @@ test("a healthy warm account entry wins over stale throttled disk provenance", (
     },
     quotaObservations: { claude: {}, codex: { [accountId]: { ...observation(40), accountId } } },
   };
+
   const projected = withLimitsCaches({
     [accountId]: {
       provenance: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt },
     },
-  }, {
-    [accountId]: {
-      provenance: { source: "live", reason: null, staleSince: null, retryAt: null },
-    },
-  }, () => projectRateLimitReadModel([
+  }, null, () => projectRateLimitReadModel([
       entry({ authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null } }),
     ], [], snapshot, NOW));
 
   expect(projected.files[0]).not.toHaveProperty("providerThrottle");
 });
 
-test("cold throttle fallback remains account-scoped and ignores an expired retry", () => {
+test("a stale live registry status cannot hide a stalled host behind provider throttle", () => {
+  const accountId = "account-a";
+  const retryAt = new Date(NOW + 5 * 60_000).toISOString();
+  const snapshot = {
+    entries: {
+      "codex:stale-host": {
+        artifactPath: "/sessions/implementer.jsonl",
+        accountId,
+        status: "live",
+      },
+    },
+    conversations: {
+      conversation_impl: {
+        id: "conversation_impl",
+        engine: "codex" as const,
+        generations: [{ path: "/sessions/implementer.jsonl", accountId }],
+      },
+    },
+    quotaObservations: { claude: {}, codex: { [accountId]: { ...observation(40), accountId } } },
+  };
+
+  const projected = projectRateLimitReadModel(
+    [entry({
+      activity: "stalled",
+      proc: null,
+      pid: null,
+      authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null },
+    })],
+    [],
+    snapshot,
+    NOW,
+    () => ({ source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt }),
+  );
+
+  expect(projected.files[0]).not.toHaveProperty("providerThrottle");
+  expect(projected.files[0]?.activity).toBe("stalled");
+});
+
+test("only an identity-confirmed structured host receives provider throttle projection", () => {
+  const accountId = "account-a";
+  const retryAt = new Date(NOW + 5 * 60_000).toISOString();
+  const structuredEntry = (pathName: string, pid: number, startIdentity: string): AgentRegistryEntry => ({
+    key: { engine: "codex", sessionId: `session-${pid}` },
+    artifactPath: pathName,
+    cwd: "/workspace",
+    accountId,
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:owned",
+      process: { pid, startIdentity },
+      eventCursor: 1,
+      protocolVersion: null,
+      writerClaimEpoch: 1,
+      activeTurnRef: "turn-1",
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: null,
+    pendingAction: null,
+    updatedAt: new Date(NOW - 10 * 60_000).toISOString(),
+  });
+  const paths = {
+    live: "/sessions/live.jsonl",
+    dead: "/sessions/dead.jsonl",
+    reused: "/sessions/reused.jsonl",
+  };
+  const snapshot = {
+    entries: {
+      live: structuredEntry(paths.live, 501, "start-live"),
+      dead: structuredEntry(paths.dead, 502, "start-dead"),
+      reused: structuredEntry(paths.reused, 503, "start-original"),
+    },
+    conversations: {
+      conversation_impl: {
+        id: "conversation_impl",
+        engine: "codex" as const,
+        generations: Object.values(paths).map((pathName) => ({ path: pathName, accountId })),
+      },
+    },
+    quotaObservations: { claude: {}, codex: { [accountId]: { ...observation(40), accountId } } },
+  };
+  const probe = livenessProbe({
+    now: () => NOW,
+    pidAlive: (pid) => pid === 501 || pid === 503,
+    processIdentity: (pid) => pid === 501 ? "start-live" : pid === 503 ? "start-replacement" : null,
+  });
+
+  const projected = projectRateLimitReadModel(
+    Object.values(paths).map((pathName) => entry({
+      path: pathName,
+      activity: "stalled",
+      proc: null,
+      pid: null,
+      authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null },
+    })),
+    [],
+    snapshot,
+    NOW,
+    () => ({ source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt }),
+    (registryEntry) => {
+      const fullEntry = registryEntry as AgentRegistryEntry;
+      return identityAlive(fullEntry.host?.agent, probe)
+        || identityAlive(fullEntry.host?.panePid, probe)
+        || identityAlive(fullEntry.structuredHost?.process, probe);
+    },
+  );
+
+  expect(projected.files[0]?.providerThrottle).toEqual({ reason: "provider_throttled", retryAt });
+  expect(projected.files[1]).not.toHaveProperty("providerThrottle");
+  expect(projected.files[2]).not.toHaveProperty("providerThrottle");
+  expect(projected.files.slice(1).every((file) => file.activity === "stalled")).toBeTrue();
+});
+
+test("injected throttle provenance remains account-scoped and ignores an expired retry", () => {
   const throttledAccountId = "account-a";
   const healthyAccountId = "account-b";
   const expiredAccountId = "account-expired";
@@ -405,22 +521,16 @@ test("cold throttle fallback remains account-scoped and ignores an expired retry
       },
     },
   };
-  const projected = withLimitsCaches({
-    [throttledAccountId]: {
-      provenance: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt },
-    },
-    [expiredAccountId]: {
-      provenance: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt: expiredRetryAt },
-    },
-  }, {
-    [healthyAccountId]: {
-      provenance: { source: "live", reason: null, staleSince: null, retryAt: null },
-    },
-  }, () => projectRateLimitReadModel([
+  const provenanceByAccount: Record<string, LimitsProvenance | undefined> = {
+    [throttledAccountId]: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt },
+    [healthyAccountId]: { source: "live", reason: null, staleSince: null, retryAt: null },
+    [expiredAccountId]: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt: expiredRetryAt },
+  };
+  const projected = projectRateLimitReadModel([
       entry({ path: paths.throttled, authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null } }),
       entry({ path: paths.healthy, authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null } }),
       entry({ path: paths.expired, authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null } }),
-    ], [], snapshot, NOW));
+    ], [], snapshot, NOW, (_engine, accountId) => provenanceByAccount[accountId] ?? null);
 
   expect(projected.files[0]?.providerThrottle).toEqual({ reason: "provider_throttled", retryAt });
   expect(projected.files[1]).not.toHaveProperty("providerThrottle");

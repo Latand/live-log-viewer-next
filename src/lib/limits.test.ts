@@ -78,6 +78,47 @@ test("account throttle provenance round-trips from disk and expires after retry 
   resetLimitsCache();
 });
 
+test("present healthy memory provenance wins over stale throttled disk provenance", () => {
+  resetLimitsCache();
+  const retryAt = "2026-08-23T09:12:00.000Z";
+  const cacheFile = path.join(process.env.LLV_STATE_DIR!, "limits-cache.json");
+  fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+  fs.writeFileSync(cacheFile, JSON.stringify({
+    version: 2,
+    engines: {
+      claude: {},
+      codex: {
+        "account-a": {
+          at: Date.parse(retryAt) - 60_000,
+          data: null,
+          provenance: { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt },
+        },
+      },
+    },
+  }));
+  (globalThis as { __llvLimitsCache?: unknown }).__llvLimitsCache = {
+    version: 2,
+    engines: {
+      claude: {},
+      codex: {
+        "account-a": {
+          at: Date.parse(retryAt),
+          data: null,
+          provenance: { source: "live", reason: null, staleSince: null, retryAt: null },
+        },
+      },
+    },
+  };
+
+  expect(cachedLimitsProvenance("codex", "account-a")).toEqual({
+    source: "live",
+    reason: null,
+    staleSince: null,
+    retryAt: null,
+  });
+  resetLimitsCache();
+});
+
 function claudeUsage(usedPercent = 20): Response {
   return Response.json({ five_hour: { utilization: usedPercent } });
 }
