@@ -39,7 +39,7 @@ export const INITIAL_MESSAGE_TIMEOUT_MS = 30_000;
 const INITIAL_MESSAGE_POLL_MS = 250;
 export const ADMISSION_RETRY_ATTEMPTS = 3;
 const ADMISSION_RETRY_BACKOFF_MS = 250;
-export const STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS = 60_000;
+export const STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS = 5 * 60_000;
 export const READ_ONLY_STAGE_PERMISSION_PROFILE = "llv-read-only-stage";
 
 export interface StructuredHostAccessMaterialization {
@@ -299,6 +299,9 @@ export async function reconcileStructuredSpawnReplay(
   if (current.state === "completed") {
     return { ...current, initialMessage: "delivered" };
   }
+  if (current.state === "failed" || current.state === "conflicted") {
+    return { ...current, initialMessage: "failed" };
+  }
   const [initialOperation, spawnOperation, runtime] = await Promise.all([
     client.operationStatus(`spawn_message_${launchId}`, { currentRetryLeaf: true }).catch(() => null),
     client.operationStatus(launchId, { currentRetryLeaf: true }).catch(() => null),
@@ -381,12 +384,10 @@ export async function reconcileStructuredSpawnReplay(
   const operationStartedAt = operation ? Date.parse(operation.receipt.at) : Number.NaN;
   const stageStartedAt = Number.isFinite(operationStartedAt) ? operationStartedAt : Date.parse(current.createdAt);
   const ageMs = (options.now ?? Date.now)() - stageStartedAt;
-  const timeoutMs = options.timeoutMs ?? INITIAL_MESSAGE_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS;
   let terminalReason = failedOperationReason(operation, "structured initial message")
     ?? failedOperationReason(spawnOperation, "structured spawn");
-  if (!terminalReason
-    && current.state !== "failed"
-    && ageMs >= timeoutMs) {
+  if (!terminalReason && ageMs >= timeoutMs) {
     if (runtimeSession) {
       terminalReason = `structured spawn durable setup remained incomplete for ${timeoutMs}ms`;
     } else if (runtime) {
@@ -397,6 +398,17 @@ export async function reconcileStructuredSpawnReplay(
   }
   if (terminalReason) {
     terminalReason = terminalReason.slice(0, 240);
+    /* Claim the terminal receipt before any asynchronous cleanup. A concurrent
+       completion or same-key successor then wins atomically and prevents this
+       stale replay from releasing its host. */
+    const failure = registry.failStructuredSpawn(launchId, terminalReason);
+    if (!failure.claimed) {
+      const settled = failure.receipt ?? registry.readOnlySnapshot().receipts[launchId] ?? current;
+      return {
+        ...settled,
+        initialMessage: settled.state === "completed" ? "delivered" : "failed",
+      };
+    }
     const spawnStatus = spawnOperation?.receipt.status;
     if (spawnStatus === "pending" || spawnStatus === "queued" || spawnStatus === "delivering") {
       try {
@@ -408,28 +420,35 @@ export async function reconcileStructuredSpawnReplay(
         });
       }
     }
-    if (current.key) {
+    const cleanup = failure.cleanup;
+    if (cleanup) {
       let released = false;
-      try {
-        released = await (options.releaseHost ?? releaseStructuredDeliveryHost)(current.key);
-      } catch (error) {
-        console.error("[spawn] registered host release failed during reconciliation", {
-          launchId,
-          error: structuredSpawnFailureReason(error),
-        });
+      const entryBeforeRelease = registry.readOnlySnapshot().entries[sessionKeyId(cleanup.key)];
+      if (cleanup.releaseRegisteredHost && entryBeforeRelease?.structuredHostOperationId === launchId) {
+        try {
+          released = await (options.releaseHost ?? releaseStructuredDeliveryHost)(cleanup.key);
+        } catch (error) {
+          console.error("[spawn] registered host release failed during reconciliation", {
+            launchId,
+            error: structuredSpawnFailureReason(error),
+          });
+        }
       }
-      if (!released) {
-        const entry = registry.readOnlySnapshot().entries[sessionKeyId(current.key)];
-        const expected = entry?.structuredHostOperationId === launchId
-          ? entry.structuredHost?.process ?? null
-          : null;
-        if (expected) {
+      if (!released && cleanup.process) {
+        const entryBeforeTermination = registry.readOnlySnapshot().entries[sessionKeyId(cleanup.key)];
+        const stillOwned = cleanup.releaseRegisteredHost
+          ? entryBeforeTermination?.structuredHostOperationId === launchId
+          : entryBeforeTermination?.structuredHostOperationId == null
+            && entryBeforeTermination.artifactPath === failure.receipt?.artifactPath
+            && entryBeforeTermination.status === "dead"
+            && entryBeforeTermination.claimOwner === null;
+        if (stillOwned) {
           try {
-            const terminated = await (options.terminateHostProcess ?? terminateVerifiedStructuredSpawnProcess)(expected);
-            if (!terminated && expected.pid !== process.pid) {
+            const terminated = await (options.terminateHostProcess ?? terminateVerifiedStructuredSpawnProcess)(cleanup.process);
+            if (!terminated && cleanup.process.pid !== process.pid) {
               console.error("[spawn] staged host termination remained unconfirmed", {
                 launchId,
-                pid: expected.pid,
+                pid: cleanup.process.pid,
               });
             }
           } catch (error) {
@@ -441,7 +460,6 @@ export async function reconcileStructuredSpawnReplay(
         }
       }
     }
-    registry.failStructuredSpawn(launchId, terminalReason);
     const failed = registry.readOnlySnapshot().receipts[launchId] ?? current;
     return { ...failed, initialMessage: "failed" };
   }
@@ -452,10 +470,9 @@ export async function reconcileStructuredSpawnReplay(
   };
 }
 
-/* Bounds for the reaper-cycle convergence pass (#334/#1031). The five-minute
-   background ceiling leaves a wider launch window than the replay POST while
-   still guaranteeing that a registering host and queued receipt converge. */
-export const STALE_STRUCTURED_SPAWN_TIMEOUT_MS = 5 * 60_000;
+/* Foreground setup, replay, and reaper share one five-minute ceiling. This
+   preserves verified cold-start progress while bounding every placeholder. */
+export const STALE_STRUCTURED_SPAWN_TIMEOUT_MS = STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS;
 export const STALE_STRUCTURED_SPAWN_ACTUATION_CAP = 50;
 
 /** Bounded, idempotent convergence for stale non-terminal structured launches

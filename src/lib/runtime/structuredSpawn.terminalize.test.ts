@@ -39,6 +39,36 @@ function staleStructuredReceipt(store: AgentRegistry, attempt: string) {
   return begun.receipt;
 }
 
+function stagedStructuredReceipt(store: AgentRegistry, attempt: string) {
+  const receipt = staleStructuredReceipt(store, attempt);
+  const key = { engine: "codex" as const, sessionId: `session-${attempt}` };
+  const artifactPath = path.join(path.dirname(store.filename), `${key.sessionId}.jsonl`);
+  store.stageStructuredSpawn(receipt.launchId, {
+    key,
+    artifactPath,
+    cwd: "/repo",
+    accountId: "work",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:live",
+      process: { pid: process.pid, startIdentity: `host-${attempt}` },
+      eventCursor: 1,
+      protocolVersion: "v2",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: `structured-host:${attempt}`,
+    pendingAction: "spawn",
+  });
+  return { receipt, key };
+}
+
 const AGED = () => Date.now() + STALE_STRUCTURED_SPAWN_TIMEOUT_MS + 60_000;
 
 test("a stale dead-evidence structured launch converges to durable retry-safe failed exactly once", async () => {
@@ -125,6 +155,113 @@ test("a staged launch whose host entry stays claimed still fails at the bounded 
   });
   expect(result).toEqual({ examined: 1, terminalized: [receipt.launchId], recovered: [] });
   expect(store.snapshot().receipts[receipt.launchId]!.state).toBe("failed");
+});
+
+test("reconciliation never releases a host after concurrent spawn completion", async () => {
+  const store = registry();
+  const { receipt } = stagedStructuredReceipt(store, "concurrent_completion");
+  let released = 0;
+  let operationStatus = "queued";
+  const client = {
+    effectBatch: async () => [],
+    operationStatus: async (operationId: string) => operationId === receipt.launchId ? {
+      operationId,
+      replayed: false,
+      receipt: {
+        operationId,
+        idempotencyKey: receipt.launchId,
+        conversationId: receipt.conversationId,
+        kind: "spawn" as const,
+        status: operationStatus,
+        reason: null,
+        at: receipt.createdAt,
+        revision: 1,
+      },
+    } : null,
+    snapshot: async () => {
+      expect(store.finalizeStructuredSpawn(receipt.launchId).kind).toBe("settled");
+      return { revision: 1, sessions: [] };
+    },
+    transitionOperation: async () => {
+      operationStatus = "failed";
+      throw new Error("a completed launch must not be failed");
+    },
+  } as unknown as RuntimeHostClient;
+
+  const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, store, client, {
+    now: AGED,
+    releaseHost: async () => { released += 1; return true; },
+  });
+
+  expect(reconciled).toMatchObject({ state: "completed", initialMessage: "delivered", error: null });
+  expect(store.snapshot().receipts[receipt.launchId]!.state).toBe("completed");
+  expect(operationStatus).toBe("queued");
+  expect(released).toBe(0);
+});
+
+test("reconciliation preserves a newer same-key host owner", async () => {
+  const store = registry();
+  const { receipt, key } = stagedStructuredReceipt(store, "newer_same_key_owner");
+  const previous = store.snapshot().entries[`codex:${key.sessionId}`]!;
+  const { updatedAt: _updatedAt, ...newerEntry } = previous;
+  let released = 0;
+  const client = {
+    effectBatch: async () => [],
+    operationStatus: async (operationId: string) => operationId === receipt.launchId ? {
+      operationId,
+      replayed: false,
+      receipt: {
+        operationId,
+        idempotencyKey: receipt.launchId,
+        conversationId: receipt.conversationId,
+        kind: "spawn" as const,
+        status: "queued" as const,
+        reason: null,
+        at: receipt.createdAt,
+        revision: 1,
+      },
+    } : null,
+    snapshot: async () => ({ revision: 1, sessions: [] }),
+    transitionOperation: async (operationId: string) => {
+      store.upsert({
+        ...newerEntry,
+        structuredHostOperationId: "newer-launch-operation",
+        structuredHost: {
+          ...newerEntry.structuredHost!,
+          process: { pid: process.pid, startIdentity: "newer-host" },
+        },
+        claimOwner: "structured-host:newer",
+      });
+      return {
+        operationId,
+        replayed: false,
+        receipt: {
+          operationId,
+          idempotencyKey: receipt.launchId,
+          conversationId: receipt.conversationId,
+          kind: "spawn" as const,
+          status: "failed" as const,
+          reason: "stale launch superseded",
+          at: receipt.createdAt,
+          revision: 2,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, store, client, {
+    now: AGED,
+    releaseHost: async () => { released += 1; return true; },
+  });
+
+  expect(reconciled).toMatchObject({ state: "failed", initialMessage: "failed" });
+  expect(store.snapshot().entries[`codex:${key.sessionId}`]).toMatchObject({
+    status: "idle",
+    structuredHostOperationId: "newer-launch-operation",
+    claimOwner: "structured-host:newer",
+    structuredHost: { process: { startIdentity: "newer-host" } },
+  });
+  expect(released).toBe(0);
 });
 
 test("issue 533: host loss after recoverable timeout reaches retry-safe failure despite the same process staying live", async () => {

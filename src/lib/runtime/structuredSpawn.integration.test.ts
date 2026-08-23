@@ -23,7 +23,7 @@ import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
-import { INITIAL_MESSAGE_TIMEOUT_MS, STALE_STRUCTURED_SPAWN_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudeLaunchForm, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
+import { INITIAL_MESSAGE_TIMEOUT_MS, STALE_STRUCTURED_SPAWN_TIMEOUT_MS, STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudeLaunchForm, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
 import { structuredContentDigest } from "./structuredContent";
 
@@ -558,7 +558,7 @@ test.each(["codex", "claude"] as const)("%s replay terminalizes a live registeri
   let released = 0;
 
   const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
-    now: () => Date.parse(begun.receipt.createdAt) + INITIAL_MESSAGE_TIMEOUT_MS,
+    now: () => Date.parse(begun.receipt.createdAt) + STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS,
     releaseHost: async () => { released += 1; return true; },
   });
 
@@ -567,7 +567,7 @@ test.each(["codex", "claude"] as const)("%s replay terminalizes a live registeri
     initialMessage: "failed",
     key,
     artifactPath,
-    error: `structured spawn durable setup remained incomplete for ${INITIAL_MESSAGE_TIMEOUT_MS}ms`,
+    error: `structured spawn durable setup remained incomplete for ${STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS}ms`,
   });
   expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
     status: "dead",
@@ -685,16 +685,74 @@ test.each(["hosted", "recovering"] as const)("a matching %s session fails its qu
   let released = 0;
 
   const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
-    now: () => admittedAt + INITIAL_MESSAGE_TIMEOUT_MS,
+    now: () => admittedAt + STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS,
     releaseHost: async () => { released += 1; return true; },
   });
 
   expect(reconciled).toMatchObject({
     state: "failed",
     initialMessage: "failed",
-    error: `structured spawn durable setup remained incomplete for ${INITIAL_MESSAGE_TIMEOUT_MS}ms`,
+    error: `structured spawn durable setup remained incomplete for ${STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS}ms`,
   });
   expect(released).toBe(1);
+});
+
+test.each(["registering", "hosted", "recovering"] as const)("a healthy slow %s launch survives ordinary replay during the cold-start window", async (host) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `${host}-cold-start-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const key = { engine: "codex" as const, sessionId: id };
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "work",
+    status: "starting",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  const admittedAt = Date.parse(begun.receipt.createdAt);
+  const client = {
+    snapshot: async () => ({
+      sessions: [{
+        conversationId: begun.receipt.conversationId,
+        sessionKey: key,
+        cwd,
+        artifactPath,
+        host,
+      }],
+    }),
+    operationStatus: async (operationId: string) => operationId === `spawn_message_${begun.receipt.launchId}` ? {
+      receipt: {
+        operationId,
+        idempotencyKey: `spawn_${begun.receipt.launchId}`,
+        conversationId: begun.receipt.conversationId,
+        kind: "send" as const,
+        status: "queued" as const,
+        at: new Date(admittedAt).toISOString(),
+        revision: 1,
+      },
+      replayed: true,
+    } : null,
+  } as unknown as RuntimeHostClient;
+  let released = 0;
+
+  const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
+    now: () => admittedAt + 60_000,
+    releaseHost: async () => { released += 1; return true; },
+  });
+
+  expect(STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS).toBeGreaterThan(60_000);
+  expect(reconciled).toMatchObject({ state: "path-pending", initialMessage: "queued", error: null });
+  expect(released).toBe(0);
 });
 
 test("replay terminalizes an explicit initial-message failure before the stage timeout", async () => {
@@ -3107,7 +3165,7 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
   });
 });
 
-test("issue 1031: a reviewer launch after the reviewed second turn fails within the durable-setup bound", async () => {
+test("issue 1031: a reviewer launch after the reviewed second turn fails when shared runtime publication times out", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `reviewer-durable-setup-${id}`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -3171,8 +3229,7 @@ test("issue 1031: a reviewer launch after the reviewed second turn fails within 
   });
   if (begun.kind !== "created") throw new Error("reviewer spawn receipt was unavailable");
   const host = new RoundTripHost("codex", artifactPath, id);
-  const latePublication = deferred();
-  let ownsAfterTimeout: boolean | null = null;
+  await bindStructuredDeliveryQueue([], { registry, client, deferStartupWork: true });
 
   await expect(spawnStructuredConversation({
     engine: "codex",
@@ -3199,25 +3256,16 @@ test("issue 1031: a reviewer launch after the reviewed second turn fails within 
       }, "idle", claimOwner, claimEpoch);
       return () => {};
     },
-    publishHost: async (_key, _host, ownsOperation) => {
-      await new Promise<void>((resolve) => setTimeout(resolve, 80));
-      ownsAfterTimeout = await ownsOperation?.() ?? null;
-      latePublication.resolve();
-      return async () => {};
-    },
     deliverFirst: async () => {},
     processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
-    durableSetupTimeoutMs: 10,
-  })).rejects.toThrow("structured spawn durable host setup timed out after 10ms");
+  })).rejects.toThrow("runtime host request timed out");
 
   expect(host.releaseCount).toBe(1);
-  await latePublication.promise;
-  expect(ownsAfterTimeout).toBeFalse();
   const failed = registry.snapshot().receipts[begun.receipt.launchId]!;
   expect(failed).toMatchObject({
     state: "failed",
     agentRole: "reviewer",
-    error: "structured spawn durable host setup timed out after 10ms",
+    error: "runtime host request timed out",
   });
   expect(registry.snapshot().lineageEdges[failed.conversationId]).toMatchObject({
     kind: "review",
@@ -3231,7 +3279,7 @@ test("issue 1031: a reviewer launch after the reviewed second turn fails within 
   });
   expect((await durableClient.operationStatus(begun.receipt.launchId))?.receipt).toMatchObject({
     status: "failed",
-    reason: "structured spawn durable host setup timed out after 10ms",
+    reason: "runtime host request timed out",
   });
   journal.close();
 });
