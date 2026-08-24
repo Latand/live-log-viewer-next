@@ -249,6 +249,76 @@ test("create-project flow: submit, duplicate refusal message, then success selec
   expect(container.querySelector("form")).toBeNull();
 });
 
+/* Issue #1122: for a missing directory the rail swaps the dead-end error for
+   a "create directory and project" action that resubmits with the mkdir
+   opt-in, and a failed mkdir reads back its cause. */
+test("create-project flow: missing directory offers mkdir-and-create instead of dead-ending", async () => {
+  const selections: string[] = [];
+  const creations: Array<[string, string, boolean]> = [];
+  let outcome: CreateProjectOutcome = { ok: false, code: "MISSING_DIRECTORY" };
+  const container = renderRail((project) => selections.push(project), {
+    onCreateProject: async (name, root, options) => {
+      creations.push([name, root, options?.createRoot === true]);
+      return outcome;
+    },
+  });
+  flushSync(() => container.querySelector('button[aria-label="Create project"]')!.dispatchEvent(click()));
+  const form = container.querySelector("form")!;
+  const inputs = [...form.querySelectorAll("input")] as HTMLInputElement[];
+  const type = (input: HTMLInputElement, value: string) => {
+    const propsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+    (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[propsKey]!
+      .onChange({ target: { value } });
+  };
+  flushSync(() => {
+    type(inputs[0]!, "Fresh Project");
+    type(inputs[1]!, "/data/projects/fresh");
+  });
+  const submit = () =>
+    form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+  const settle = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  const offerButton = () =>
+    ([...container.querySelectorAll("button")] as HTMLElement[])
+      .find((button) => button.textContent === "Create directory and project");
+
+  flushSync(submit);
+  await settle();
+  expect(creations).toEqual([["Fresh Project", "/data/projects/fresh", false]]);
+  expect(container.textContent).toContain("This directory doesn't exist yet");
+  expect(offerButton()).toBeDefined();
+
+  /* Editing the root retracts the offer — it was made for the typed path. */
+  flushSync(() => type(inputs[1]!, "/data/projects/fresher"));
+  expect(offerButton()).toBeUndefined();
+  flushSync(submit);
+  await settle();
+  expect(offerButton()).toBeDefined();
+
+  /* The offered action resubmits with the mkdir opt-in; a failed mkdir reads
+     back its cause and retracts the offer. */
+  outcome = { ok: false, code: "MKDIR_FAILED", message: "EACCES: permission denied, mkdir '/data/projects/fresher'" };
+  flushSync(() => offerButton()!.dispatchEvent(click()));
+  await settle();
+  expect(creations[creations.length - 1]).toEqual(["Fresh Project", "/data/projects/fresher", true]);
+  expect(container.textContent).toContain("Couldn't create the directory");
+  expect(container.textContent).toContain("EACCES");
+  expect(offerButton()).toBeUndefined();
+  expect(selections).toEqual([]);
+
+  /* Success through the offer selects the project and closes the form. */
+  outcome = { ok: false, code: "MISSING_DIRECTORY" };
+  flushSync(submit);
+  await settle();
+  outcome = { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
+  flushSync(() => offerButton()!.dispatchEvent(click()));
+  await settle();
+  expect(selections).toEqual(["dir-0123456789abcdef0123456789abcdef"]);
+  expect(container.querySelector("form")).toBeNull();
+});
+
 /* Restore the real fetch for any later test file sharing this process. */
 afterAll(() => {
   globalThis.fetch = realFetch;
