@@ -71,8 +71,16 @@ test("bridge reports survive as the second channel, for the operator away from t
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
    this constant as defaultPromptVersion, so a v3 seat reads as stale without a diff. */
-test("the default mandate is at version 7", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(7);
+test("the default mandate is at version 8", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(8);
+});
+
+test("the mandate requires a visible first-turn status even when every mission is already complete", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## Initial visible status");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Your first turn after receiving this mandate");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("inventory the mandate missions and state your plan");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("all mandate missions are complete; standing by");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("generic continuation nudge");
 });
 
 /* #1016 — the seat had the attention tool and never used it: nothing it read said

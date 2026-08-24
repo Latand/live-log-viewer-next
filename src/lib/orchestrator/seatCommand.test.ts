@@ -112,9 +112,10 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(recorded.spawns[0]).toMatchObject({
     role: "orchestrator",
     project: "proj-a",
-    ["prompt"]: "own the board",
     clientAttemptId: "req_00000001",
   });
+  expect(String(recorded.spawns[0]!.prompt)).toStartWith("own the board");
+  expect(String(recorded.spawns[0]!.prompt)).toContain("all mandate missions are complete; standing by");
   const { active, pending } = orchestratorSeatFor("proj-a");
   expect(active?.conversationId).toBe(NEW_ID);
   expect(active?.mandate).toBe("own the board");
@@ -221,11 +222,13 @@ test("selecting an EXISTING conversation delivers the mandate without spawning a
   }, deps);
   expect(result.status).toBe(200);
   expect(recorded.spawns).toHaveLength(0);
-  expect(recorded.deliveries).toEqual([{
+  expect(recorded.deliveries).toHaveLength(1);
+  expect(recorded.deliveries[0]).toMatchObject({
     conversationId: OLD_ID,
     clientMessageId: "orchmandate_req_00000002",
-    text: "updated mandate",
-  }]);
+  });
+  expect(recorded.deliveries[0]!.text).toStartWith("updated mandate");
+  expect(recorded.deliveries[0]!.text).toContain("all mandate missions are complete; standing by");
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(OLD_ID);
 });
 
@@ -371,6 +374,7 @@ test("rotation composes a bounded handoff, switches designation atomically, and 
   expect(spawnedPrompt).toContain(NEW_ID);
   expect(spawnedPrompt).toContain("[doing] Ship the handoff (task_1)");
   expect(spawnedPrompt).toContain("Prioritize the review queue.");
+  expect(spawnedPrompt).toContain("all mandate missions are complete; standing by");
 
   const { active } = orchestratorSeatFor("proj-a");
   expect(active?.conversationId).toBe(SUCCESSOR);
@@ -462,7 +466,10 @@ test("a pending replay completes with the ORIGINAL mandate, not a recomposed one
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
   /* The retry recomposes a different mandate; the durable intent's text wins. */
   await executeOrchestratorSeatRequest({ ...spawnRequest(), mandate: "recomposed differently" }, deps);
-  expect(recorded.spawns.map((body) => body.prompt)).toEqual(["own the board", "own the board"]);
+  const prompts = recorded.spawns.map((body) => String(body.prompt));
+  expect(prompts[0]).toBe(prompts[1]);
+  expect(prompts[0]).toStartWith("own the board");
+  expect(prompts[0]).not.toContain("recomposed differently");
 });
 
 test("rotation preserves the requested effort end to end into the successor spawn body", async () => {

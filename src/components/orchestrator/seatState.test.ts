@@ -9,6 +9,7 @@ import {
   deriveOrchestratorPanelState,
   deriveRotateDraftState,
   newSeatRequestId,
+  orchestratorQuietBannerEligible,
   parseSeatStatus,
   ROTATION_CONTEXT_PERCENT,
   seatRequestSettled,
@@ -179,6 +180,45 @@ describe("the panel names every state in the map (#977)", () => {
       kind: "live",
       transition: { kind: "error", error: "spawn did not report an accepted launch" },
     });
+  });
+});
+
+describe("the gone-quiet banner waits for the mandate's first visible acknowledgement (#1118)", () => {
+  const active = seat({
+    designatedAt: "2026-08-24T09:00:00.000Z",
+    activatedAt: "2026-08-24T09:00:02.000Z",
+  });
+  const stalled = (overrides: Partial<FileEntry> = {}) => file({
+    activity: "stalled",
+    lastTurn: { startedAt: Date.parse("2026-08-24T09:00:01.000Z"), endedAt: null },
+    lastAssistantMessageAt: null,
+    ...overrides,
+  });
+
+  test("a fresh seat's first mandate turn stays in flight before any visible assistant status", () => {
+    const state = deriveOrchestratorPanelState({ ...base, status: status({ seat: active }), file: stalled(), surface: "live-root" });
+    expect(orchestratorQuietBannerEligible(state, stalled())).toBe(false);
+  });
+
+  test("an assistant status in the current mandate turn acknowledges it and keeps the banner retired", () => {
+    const acknowledged = stalled({ lastAssistantMessageAt: Date.parse("2026-08-24T09:00:03.000Z") });
+    const state = deriveOrchestratorPanelState({ ...base, status: status({ seat: active }), file: acknowledged, surface: "live-root" });
+    expect(orchestratorQuietBannerEligible(state, acknowledged)).toBe(false);
+  });
+
+  test("a later turn that goes quiet after the mandate acknowledgement remains eligible", () => {
+    const later = stalled({
+      lastTurn: { startedAt: Date.parse("2026-08-24T09:30:00.000Z"), endedAt: null },
+      lastAssistantMessageAt: Date.parse("2026-08-24T09:00:03.000Z"),
+    });
+    const state = deriveOrchestratorPanelState({ ...base, status: status({ seat: active }), file: later, surface: "live-root" });
+    expect(orchestratorQuietBannerEligible(state, later)).toBe(true);
+  });
+
+  test("unknown assistant history fails closed and preserves the warning", () => {
+    const unknown = stalled({ lastAssistantMessageAt: undefined });
+    const state = deriveOrchestratorPanelState({ ...base, status: status({ seat: active }), file: unknown, surface: "live-root" });
+    expect(orchestratorQuietBannerEligible(state, unknown)).toBe(true);
   });
 });
 

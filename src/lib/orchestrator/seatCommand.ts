@@ -12,6 +12,7 @@ import { projectForCwd } from "@/lib/scanner/describe";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 
 import { loadTasks } from "@/lib/tasks/store";
+import { orchestratorMandateForDelivery } from "./prompt";
 import {
   beginOrchestratorSeatIntent,
   completeOrchestratorSeatIntent,
@@ -393,7 +394,10 @@ export async function executeOrchestratorSeatRequest(
       clientMessageId: `orchmandate_${clientRequestId}`,
       /* On a pending replay the ORIGINAL intent's mandate is what completes:
          a retry that recomposed its text must not deliver a second variant. */
-      text: begun.kind === "replay" ? begun.seat.mandate : mandate,
+      text: orchestratorMandateForDelivery(
+        begun.kind === "replay" ? begun.seat.mandate : mandate,
+        begun.kind === "replay" ? begun.seat.promptVersion : promptVersion,
+      ),
     });
     if (!delivery.ok) {
       const error = delivery.error ?? "mandate delivery failed";
@@ -452,7 +456,10 @@ export async function executeOrchestratorSeatRequest(
   /* A pending replay spawns the ORIGINAL intent's mandate: the spawn receipt is
      matched by clientAttemptId AND request digest, so a recomposed retry would
      otherwise conflict with its own first attempt. */
-  const spawnMandate = begun.kind === "replay" ? begun.seat.mandate : mandate;
+  const spawnMandate = orchestratorMandateForDelivery(
+    begun.kind === "replay" ? begun.seat.mandate : mandate,
+    begun.kind === "replay" ? begun.seat.promptVersion : promptVersion,
+  );
 
   const spawnFields = ["engine", "model", "cwd", "effort", "fast", "accountId", "images", "roleParams", "allowSubagents"] as const;
   const cwd = resolveOrchestratorCwd(project, rawBody.cwd);
