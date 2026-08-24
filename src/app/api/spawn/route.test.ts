@@ -15,6 +15,7 @@ import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "@/lib/runtime/client";
+import { recoverPendingStructuredSpawns, terminalizeStaleStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
@@ -174,7 +175,7 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
   }
 });
 
-test("a sole pinned account with a future retry deadline stays queued and replays on the pin after admission", async () => {
+test("a queued pinned account survives restart and launches exactly once on the pin after admission", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-retry-"));
   const registryFile = path.join(cwd, "agent-registry.json");
   let store = new AgentRegistry(registryFile);
@@ -271,7 +272,17 @@ test("a sole pinned account with a future retry deadline stays queued and replay
     expect(queued).toMatchObject({ state: "starting", initialMessage: "queued" });
     expect(spawnedAccounts).toEqual([]);
     const receipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
-    expect(receipt).toMatchObject({ accountId: "account-a", accountPin: true, state: "starting" });
+    expect(receipt).toMatchObject({
+      accountId: "account-a",
+      accountPin: true,
+      state: "starting",
+      queuedPinnedSpawn: {
+        version: 1,
+        accountId: "account-a",
+        retryAt,
+        ["prompt"]: "continue",
+      },
+    });
     expect(receipt.launchProfile.title).toBe(`Pinned account quota is exhausted — queued until ${retryAt}`);
     expect(projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]).toMatchObject({
       title: `Pinned account quota is exhausted — queued until ${retryAt}`,
@@ -279,28 +290,42 @@ test("a sole pinned account with a future retry deadline stays queued and replay
     });
 
     store = new AgentRegistry(registryFile);
-    const replayResponse = await post();
-    expect(replayResponse.status).toBe(202);
-    expect(await replayResponse.json()).toMatchObject({
+    expect(store.spawnReceiptForClientAttempt("account_pin_retry_20260823")).toMatchObject({
       launchId: queued.launchId,
       conversationId: queued.conversationId,
       state: "starting",
-      initialMessage: "queued",
+      queuedPinnedSpawn: { retryAt, accountId: "account-a" },
     });
     expect(deferred).toHaveLength(0);
     expect(spawnedAccounts).toEqual([]);
 
-    pinAdmissible = true;
-    const admittedResponse = await post();
-    expect(admittedResponse.status).toBe(202);
-    expect(await admittedResponse.json()).toMatchObject({
-      launchId: queued.launchId,
-      conversationId: queued.conversationId,
-      state: "starting",
-      initialMessage: "pending",
+    const recoveryClient = {
+      effectBatch: async () => [],
+      operationStatus: async () => null,
+      snapshot: async () => ({ revision: 0, sessions: [] }),
+      transitionOperation: async () => null,
+    } as unknown as RuntimeHostClient;
+    await recoverPendingStructuredSpawns(store, recoveryClient, {
+      now: () => Date.parse(retryAt) - 1,
+      resolveSpawnAccount: dependencies.resolveSpawnAccount,
+      resolvePinnedSpawnAdmission: dependencies.resolvePinnedSpawnAdmission,
+      spawnStructuredConversation: dependencies.spawnStructuredConversation,
     });
-    expect(deferred).toHaveLength(1);
-    await deferred[0]!();
+    expect(store.spawnReceiptForClientAttempt("account_pin_retry_20260823")).toMatchObject({
+      state: "starting",
+      admissionOwner: null,
+      queuedPinnedSpawn: { retryAt },
+    });
+    expect(spawnedAccounts).toEqual([]);
+
+    pinAdmissible = true;
+    const recover = async () => await recoverPendingStructuredSpawns(store, recoveryClient, {
+      now: () => Date.parse(retryAt) + 1,
+      resolveSpawnAccount: dependencies.resolveSpawnAccount,
+      resolvePinnedSpawnAdmission: dependencies.resolvePinnedSpawnAdmission,
+      spawnStructuredConversation: dependencies.spawnStructuredConversation,
+    });
+    await Promise.all([recover(), recover()]);
     expect(spawnedAccounts).toEqual(["account-a"]);
     const settledReceipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
     const conversation = store.conversation(settledReceipt.conversationId)!;
@@ -316,6 +341,155 @@ test("a sole pinned account with a future retry deadline stays queued and replay
       pinnedAccountId: "account-a",
       migration: null,
       generations: [expect.objectContaining({ accountId: "account-a" })],
+    });
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("queued pin recovery atomically refreshes a moved retry deadline and its card copy", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-moved-retry-"));
+  const registryFile = path.join(cwd, "agent-registry.json");
+  const initialRetryAt = new Date(Date.now() + 60_000).toISOString();
+  const movedRetryAt = new Date(Date.now() + 120_000).toISOString();
+  const store = new AgentRegistry(registryFile);
+  const begun = store.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "account-a",
+    accountPin: true,
+    clientAttemptId: "account_pin_moved_retry_20260824",
+    launchProfile: emptyLaunchProfile({ cwd }),
+  });
+  if (begun.kind !== "created") throw new Error("expected queued receipt creation");
+  store.queuePinnedStructuredSpawn(begun.receipt.launchId, {
+    version: 1,
+    retryAt: initialRetryAt,
+    accountId: "account-a",
+    locale: "en",
+    spec: {
+      engine: "claude",
+      command: "claude",
+      cwd,
+      windowName: "queued-pin",
+      launchProfile: emptyLaunchProfile({ cwd }),
+    },
+    ["prompt"]: "continue",
+    imageRefs: [],
+    parentArtifactPath: null,
+    pipelineSourceConversationId: null,
+  }, `Pinned account quota is exhausted — queued until ${initialRetryAt}`);
+  store.releaseStartingStructuredSpawn(begun.receipt.launchId, begun.receipt.admissionOwner!);
+
+  const restarted = new AgentRegistry(registryFile);
+  const recoveryClient = {
+    effectBatch: async () => [],
+    operationStatus: async () => null,
+    snapshot: async () => ({ revision: 0, sessions: [] }),
+    transitionOperation: async () => null,
+  } as unknown as RuntimeHostClient;
+  const tick = await terminalizeStaleStructuredSpawns(restarted, recoveryClient, {
+    now: () => Date.parse(initialRetryAt) + 1,
+    resolveSpawnAccount: () => ({
+      engine: "claude",
+      accountId: "account-a",
+      kind: "managed",
+      home: path.join(cwd, "account-a"),
+      transcriptRoot: path.join(cwd, "account-a", "projects"),
+      env: { NODE_ENV: "test" },
+    }),
+    resolvePinnedSpawnAdmission: async () => ({
+      kind: "retry-at",
+      reason: "hard-limit",
+      stale: false,
+      retryAt: movedRetryAt,
+    }),
+    spawnStructuredConversation: async () => {
+      throw new Error("a moved retry deadline must remain queued");
+    },
+  });
+
+  expect(tick).toEqual({ examined: 1, terminalized: [], recovered: [] });
+  const refreshed = restarted.spawnReceiptForClientAttempt("account_pin_moved_retry_20260824")!;
+  expect(refreshed).toMatchObject({
+    state: "starting",
+    admissionOwner: null,
+    queuedPinnedSpawn: { retryAt: movedRetryAt, accountId: "account-a" },
+  });
+  expect(refreshed.launchProfile.title).toBe(`Pinned account quota is exhausted — queued until ${movedRetryAt}`);
+  expect(projectLaunchConversations([], restarted.snapshot(), Date.parse(initialRetryAt) + 1).cards[0]?.title)
+    .toBe(`Pinned account quota is exhausted — queued until ${movedRetryAt}`);
+});
+
+test("a queued payload write failure terminalizes without publishing a deadline-only card", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-payload-failure-"));
+  const store = new AgentRegistry(path.join(cwd, "agent-registry.json"));
+  const retryAt = new Date(Date.now() + 60_000).toISOString();
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const account = {
+      engine: "claude" as const,
+      accountId: "account-a",
+      kind: "managed" as const,
+      home: path.join(cwd, "account-a"),
+      transcriptRoot: path.join(cwd, "account-a", "projects"),
+      env: { NODE_ENV: "test" as const },
+    };
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "sonnet",
+        cwd,
+        ["prompt"]: "continue",
+        accountId: "account-a",
+        clientAttemptId: "account_pin_payload_failure_20260824",
+      }),
+    }), {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => ({
+        ...account,
+        requestedAdmission: {
+          kind: "retry-at" as const,
+          reason: "hard-limit" as const,
+          stale: false,
+          retryAt,
+        },
+      }),
+      resolveSpawnAccount: () => account,
+      storeImages: () => { throw new Error("image store unavailable"); },
+      defer: () => { throw new Error("a failed queue must not defer launch work"); },
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "image store unavailable" });
+    expect(store.spawnReceiptForClientAttempt("account_pin_payload_failure_20260824")).toMatchObject({
+      state: "failed",
+      queuedPinnedSpawn: null,
+      launchProfile: { title: null },
     });
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;

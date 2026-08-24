@@ -3,8 +3,11 @@ import os from "node:os";
 import path from "node:path";
 
 import type { AccountContext } from "@/lib/accounts/contracts";
+import { accountManager } from "@/lib/accounts/manager";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
+import { claudeValidityFromLimitRead } from "@/lib/accounts/spawnHealth";
 import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
+import type { SpawnAccountAdmission } from "@/lib/agent/accountLiveness";
 import { effectiveClaudePermissionMode, type AgentEngine, type ResumeSpec } from "@/lib/agent/cli";
 import type { AgentRegistry, AgentRegistryEntry, ProcessIdentity, RegistryFile, SpawnReceipt, StructuredHostColumns } from "@/lib/agent/registry";
 import { sessionKey, sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
@@ -12,6 +15,10 @@ import type { SpawnResponse } from "@/lib/agent/spawnResponse";
 import { prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { statePath } from "@/lib/configDir";
+import { rememberHandoffChild, persistHandoffLineage } from "@/lib/handoffLineage";
+import { en } from "@/lib/i18n/en";
+import { uk } from "@/lib/i18n/uk";
+import { fetchClaudeLimits } from "@/lib/limits";
 import { procBackend } from "@/lib/proc";
 import { signalProcessGroup } from "@/lib/processGroup";
 import { hasUserAuthoredMessage } from "@/lib/session/reader";
@@ -26,6 +33,7 @@ import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry"
 import { publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "./structuredDeliveryController";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { runtimeImageCapability } from "./runtimeImageStore";
+import { publishFilesRevision } from "./filesRevision";
 import { parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "./structuredContent";
 
 export type SpawnedStructuredHost = EngineHost & {
@@ -42,6 +50,27 @@ export const ADMISSION_RETRY_ATTEMPTS = 3;
 const ADMISSION_RETRY_BACKOFF_MS = 250;
 export const STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS = 5 * 60_000;
 export const READ_ONLY_STAGE_PERMISSION_PROFILE = "llv-read-only-stage";
+const PINNED_SPAWN_HEALTH_TIMEOUT_MS = 600;
+
+export function queuedPinnedSpawnTitle(locale: "en" | "uk", retryAt: string): string {
+  const localized = locale === "uk" ? uk["spawnCard.pinUnavailableQueued"] : en["spawnCard.pinUnavailableQueued"];
+  const template = typeof localized === "string" ? localized : en["spawnCard.pinUnavailableQueued"];
+  return template.replace("{retryAt}", retryAt);
+}
+
+export async function resolvePinnedSpawnAdmission(
+  engine: "claude" | "codex",
+  account: AccountContext,
+): Promise<SpawnAccountAdmission> {
+  if (engine === "codex") {
+    return { kind: "admissible", basis: "current", stale: false, retryAt: null };
+  }
+  return claudeValidityFromLimitRead(await fetchClaudeLimits(
+    path.join(account.home, ".credentials.json"),
+    Date.now,
+    PINNED_SPAWN_HEALTH_TIMEOUT_MS,
+  ));
+}
 
 export interface StructuredHostAccessMaterialization {
   env: NodeJS.ProcessEnv;
@@ -503,6 +532,133 @@ export async function reconcileStructuredSpawnReplay(
 export const STALE_STRUCTURED_SPAWN_TIMEOUT_MS = STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS;
 export const STALE_STRUCTURED_SPAWN_ACTUATION_CAP = 50;
 
+function queuedPinnedSpawnForReceipt(receipt: SpawnReceipt): NonNullable<SpawnReceipt["queuedPinnedSpawn"]> | null {
+  const queued = receipt.queuedPinnedSpawn;
+  return receipt.transport === "structured"
+    && receipt.purpose === "launch"
+    && receipt.state === "starting"
+    && !receipt.key
+    && !receipt.pane
+    && receipt.accountPin
+    && Boolean(receipt.accountId)
+    && queued?.accountId === receipt.accountId
+    && queued.spec.engine === receipt.engine
+    && queued.spec.cwd === receipt.cwd
+    ? queued
+    : null;
+}
+
+export interface StructuredSpawnRecoveryOptions {
+  now?: () => number;
+  timeoutMs?: number;
+  actuationCap?: number;
+  resolveSpawnAccount?: (engine: "claude" | "codex", accountId: string | null) => AccountContext;
+  resolvePinnedSpawnAdmission?: (engine: "claude" | "codex", account: AccountContext) => Promise<SpawnAccountAdmission>;
+  spawnStructuredConversation?: typeof spawnStructuredConversation;
+  publishFilesRevision?: typeof publishFilesRevision;
+}
+
+async function actuateQueuedPinnedSpawn(
+  registry: AgentRegistry,
+  client: RuntimeHostClient,
+  receipt: SpawnReceipt,
+  options: StructuredSpawnRecoveryOptions,
+): Promise<SpawnReceipt> {
+  const queued = queuedPinnedSpawnForReceipt(receipt);
+  const currentTime = (options.now ?? Date.now)();
+  if (!queued || Date.parse(queued.retryAt) > currentTime) return receipt;
+  const admissionClaim = registry.claimStartingStructuredSpawn(receipt.launchId);
+  if (!admissionClaim.claimed || !admissionClaim.receipt.admissionOwner) return admissionClaim.receipt;
+  const claimedQueue = queuedPinnedSpawnForReceipt(admissionClaim.receipt);
+  if (!claimedQueue) {
+    return registry.failStructuredSpawn(
+      receipt.launchId,
+      "queued pinned spawn lost its durable admission payload",
+    ).receipt ?? admissionClaim.receipt;
+  }
+  let account: AccountContext;
+  let admission: SpawnAccountAdmission;
+  try {
+    account = (options.resolveSpawnAccount
+      ?? ((engine, accountId) => accountManager.resolveSpawn(engine, accountId)))(receipt.engine, claimedQueue.accountId);
+    if (account.engine !== receipt.engine || account.accountId !== claimedQueue.accountId) {
+      throw new Error("queued pinned spawn resolved a different account");
+    }
+    admission = await (options.resolvePinnedSpawnAdmission ?? resolvePinnedSpawnAdmission)(receipt.engine, account);
+  } catch (error) {
+    return registry.failStructuredSpawn(
+      receipt.launchId,
+      structuredSpawnFailureReason(error),
+    ).receipt ?? admissionClaim.receipt;
+  }
+  if (admission.kind === "retry-at") {
+    const nextRetryMs = Date.parse(admission.retryAt);
+    if (!Number.isFinite(nextRetryMs) || nextRetryMs <= currentTime) {
+      return registry.failStructuredSpawn(
+        receipt.launchId,
+        "pinned account retry deadline did not advance",
+      ).receipt ?? admissionClaim.receipt;
+    }
+    const nextRetryAt = new Date(nextRetryMs).toISOString();
+    const refreshed = registry.queuePinnedStructuredSpawn(receipt.launchId, {
+      ...claimedQueue,
+      retryAt: nextRetryAt,
+    }, queuedPinnedSpawnTitle(claimedQueue.locale, nextRetryAt));
+    return refreshed.admissionOwner
+      ? registry.releaseStartingStructuredSpawn(refreshed.launchId, refreshed.admissionOwner).receipt
+      : refreshed;
+  }
+  if (admission.kind === "unavailable") {
+    return registry.failStructuredSpawn(
+      receipt.launchId,
+      `pinned account is unavailable: ${admission.reason}`,
+    ).receipt ?? admissionClaim.receipt;
+  }
+  let response: SpawnResponse;
+  try {
+    response = await (options.spawnStructuredConversation ?? spawnStructuredConversation)({
+      engine: receipt.engine,
+      receipt: admissionClaim.receipt,
+      spec: claimedQueue.spec,
+      account,
+      ["prompt"]: claimedQueue.prompt,
+      imageRefs: claimedQueue.imageRefs,
+      registry,
+      client,
+    });
+  } catch (error) {
+    const current = registry.readOnlySnapshot().receipts[receipt.launchId];
+    if (current?.queuedPinnedSpawn && current.admissionOwner) {
+      registry.releaseStartingStructuredSpawn(current.launchId, current.admissionOwner);
+    }
+    throw error;
+  }
+  if (claimedQueue.parentArtifactPath && response.path) {
+    try {
+      rememberHandoffChild(response.path, claimedQueue.parentArtifactPath);
+      persistHandoffLineage();
+    } catch (error) {
+      console.error("[spawn] queued handoff lineage persistence failed", {
+        launchId: receipt.launchId,
+        conversationId: receipt.conversationId,
+        error,
+      });
+    }
+  }
+  if (response.path && fs.existsSync(response.path)) {
+    try {
+      await (options.publishFilesRevision ?? publishFilesRevision)(client);
+    } catch (error) {
+      console.error("[spawn] queued transcript materialization refresh failed", {
+        launchId: receipt.launchId,
+        conversationId: receipt.conversationId,
+        error,
+      });
+    }
+  }
+  return registry.readOnlySnapshot().receipts[receipt.launchId] ?? admissionClaim.receipt;
+}
+
 /** Bounded, idempotent convergence for stale non-terminal structured launches
     (#334/#1031): every launch older than the setup bound enters the replay
     reconciler, including rows with a live admission owner, a registering host,
@@ -510,14 +666,15 @@ export const STALE_STRUCTURED_SPAWN_ACTUATION_CAP = 50;
     the receipt; every other overdue launch settles as retry-safe failure and
     releases its registered host or reaps its verified staged process. Running
     the pass twice is a no-op because terminal receipts are skipped. Held
-    deliveries and receipts remain durable. */
+    deliveries and receipts remain durable.
+
+    The same existing reaper tick actuates a valid queued pin once its durable
+    deadline arrives. A future queue stays WAITING, while an incomplete queue
+    follows the ordinary setup bound and cannot become immortal. */
 export async function terminalizeStaleStructuredSpawns(
   registry: AgentRegistry,
   client: RuntimeHostClient,
-  options: {
-    now?: () => number;
-    timeoutMs?: number;
-    actuationCap?: number;
+  options: StructuredSpawnRecoveryOptions & {
     reconcile?: typeof reconcileStructuredSpawnReplay;
   } = {},
 ): Promise<{ examined: number; terminalized: string[]; recovered: string[] }> {
@@ -533,6 +690,25 @@ export async function terminalizeStaleStructuredSpawns(
     if (examined >= actuationCap) break;
     if (receipt.transport !== "structured") continue;
     if (receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") continue;
+    const queued = queuedPinnedSpawnForReceipt(receipt);
+    if (queued) {
+      if (Date.parse(queued.retryAt) > now()) continue;
+      examined += 1;
+      try {
+        const supersededReason = supersededQueuedSpawnReason(snapshot, receipt);
+        const recoveredReceipt = supersededReason
+          ? registry.failStructuredSpawn(receipt.launchId, supersededReason).receipt ?? receipt
+          : await actuateQueuedPinnedSpawn(registry, client, receipt, options);
+        if (recoveredReceipt.state === "failed") terminalized.push(receipt.launchId);
+        else if (recoveredReceipt.state === "completed") recovered.push(receipt.launchId);
+      } catch (error) {
+        console.error("[reaper] queued pinned spawn recovery failed", {
+          launchId: receipt.launchId,
+          error,
+        });
+      }
+      continue;
+    }
     const createdMs = Date.parse(receipt.createdAt);
     if (!Number.isFinite(createdMs) || now() - createdMs < timeoutMs) continue;
     examined += 1;
@@ -746,11 +922,7 @@ function supersededQueuedSpawnReason(
 export async function recoverPendingStructuredSpawns(
   registry: AgentRegistry,
   client: RuntimeHostClient,
-  options: {
-    now?: () => number;
-    timeoutMs?: number;
-    actuationCap?: number;
-  } = {},
+  options: StructuredSpawnRecoveryOptions = {},
 ): Promise<void> {
   /* Boot reconciliation shares the reaper's bounded contract so placeholders
      admitted by an older process settle before startup replay considers them. */
@@ -824,6 +996,7 @@ export async function recoverPendingStructuredSpawns(
       }
       continue;
     }
+    if (queuedPinnedSpawnForReceipt(receipt)) continue;
     if (receipt.state === "starting" && !receipt.key && receipt.transport !== "tmux") {
       const operation = await client.operationStatus(receipt.launchId);
       if (receipt.transport !== "structured" && !effect && !operation) continue;

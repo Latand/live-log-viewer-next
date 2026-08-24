@@ -8,9 +8,7 @@ import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { accountManager, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
-import { claudeValidityFromLimitRead } from "@/lib/accounts/spawnHealth";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
-import type { SpawnAccountAdmission } from "@/lib/agent/accountLiveness";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
@@ -28,7 +26,6 @@ import { applyClaudeSpawnPolicy, prepareManagedClaudeSpawnHome } from "@/lib/age
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
-import { fetchClaudeLimits } from "@/lib/limits";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient, RuntimeHostUnavailableError } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
@@ -36,7 +33,7 @@ import { publishFilesRevision } from "@/lib/runtime/filesRevision";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
 import { assertStructuredTextEnvelope, type StructuredImageRef } from "@/lib/runtime/structuredContent";
-import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
+import { queuedPinnedSpawnTitle, reconcileStructuredSpawnReplay, resolvePinnedSpawnAdmission, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "@/lib/pipelines/engine";
 import { listFiles } from "@/lib/scanner";
@@ -58,11 +55,6 @@ const PIN_FALLBACK_TITLE_UK_MESSAGE = uk["spawnCard.pinUnavailableFallback"];
 const PIN_FALLBACK_TITLE_UK = typeof PIN_FALLBACK_TITLE_UK_MESSAGE === "string"
   ? PIN_FALLBACK_TITLE_UK_MESSAGE
   : PIN_FALLBACK_TITLE_EN;
-const PIN_RETRY_TITLE_EN = en["spawnCard.pinUnavailableQueued"];
-const PIN_RETRY_TITLE_UK_MESSAGE = uk["spawnCard.pinUnavailableQueued"];
-const PIN_RETRY_TITLE_UK = typeof PIN_RETRY_TITLE_UK_MESSAGE === "string"
-  ? PIN_RETRY_TITLE_UK_MESSAGE
-  : PIN_RETRY_TITLE_EN;
 
 function prefersUkrainian(req: Pick<NextRequest, "headers">): boolean {
   const language = req.headers.get("accept-language")?.trim().toLowerCase() ?? "";
@@ -73,27 +65,6 @@ function pinFallbackTitle(req: Pick<NextRequest, "headers">): string {
   return prefersUkrainian(req)
     ? PIN_FALLBACK_TITLE_UK
     : PIN_FALLBACK_TITLE_EN;
-}
-
-function pinRetryTitle(req: Pick<NextRequest, "headers">, retryAt: string): string {
-  return (prefersUkrainian(req) ? PIN_RETRY_TITLE_UK : PIN_RETRY_TITLE_EN)
-    .replace("{retryAt}", retryAt);
-}
-
-const PINNED_SPAWN_HEALTH_TIMEOUT_MS = 600;
-
-async function resolvePinnedSpawnAdmission(
-  engine: "claude" | "codex",
-  account: AccountContext,
-): Promise<SpawnAccountAdmission> {
-  if (engine === "codex") {
-    return { kind: "admissible", basis: "current", stale: false, retryAt: null };
-  }
-  return claudeValidityFromLimitRead(await fetchClaudeLimits(
-    path.join(account.home, ".credentials.json"),
-    Date.now,
-    PINNED_SPAWN_HEALTH_TIMEOUT_MS,
-  ));
 }
 
 export interface SpawnCommandDependencies {
@@ -644,8 +615,11 @@ export async function executeSpawnRequest(
         }),
       };
     };
+    const queuedTitle = queuedUntil
+      ? queuedPinnedSpawnTitle(prefersUkrainian(req) ? "uk" : "en", queuedUntil)
+      : null;
     let pinTitle: string | null = null;
-    if (queuedUntil) pinTitle = pinRetryTitle(req, queuedUntil);
+    if (queuedTitle && transport === "tmux") pinTitle = queuedTitle;
     else if (pinFallback) pinTitle = pinFallbackTitle(req);
     const spec = specForAccount(account, pinTitle);
     /* The receipt keeps the caller's requested account as durable routing
@@ -661,6 +635,29 @@ export async function executeSpawnRequest(
       existingAttempt?.accountPin ?? (body.accountId !== undefined),
     ));
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
+    if (begun.kind === "created") launchId = begun.receipt.launchId;
+    let queuedReceipt = begun.receipt;
+    if (queuedUntil && queuedTitle && requestedAccountId && transport === "structured") {
+      const existingQueue = begun.receipt.queuedPinnedSpawn;
+      let queuedImageRefs: StructuredImageRef[];
+      if (existingQueue) {
+        queuedImageRefs = existingQueue.imageRefs;
+      } else {
+        try { queuedImageRefs = dependencies.storeImages(images); }
+        catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
+      }
+      queuedReceipt = registry.queuePinnedStructuredSpawn(begun.receipt.launchId, {
+        version: 1,
+        retryAt: queuedUntil,
+        accountId: requestedAccountId,
+        locale: prefersUkrainian(req) ? "uk" : "en",
+        spec,
+        ["prompt"]: prompt,
+        imageRefs: queuedImageRefs,
+        parentArtifactPath,
+        pipelineSourceConversationId,
+      }, queuedTitle);
+    }
     const recordActualLaunchAccount = (
       receipt: typeof begun.receipt,
       actualAccountId: string,
@@ -785,10 +782,10 @@ export async function executeSpawnRequest(
       });
     };
     if (begun.kind === "replay") {
-      const structured = begun.receipt.transport === "structured"
-        || (begun.receipt.transport === null
-          && Boolean(begun.receipt.key && registry.readOnlySnapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost));
-      let receipt = begun.receipt;
+      const structured = queuedReceipt.transport === "structured"
+        || (queuedReceipt.transport === null
+          && Boolean(queuedReceipt.key && registry.readOnlySnapshot().entries[sessionKeyId(queuedReceipt.key)]?.structuredHost));
+      let receipt = queuedReceipt;
       let initialMessage: SpawnResponse["initialMessage"] | undefined;
       const runtimeClient = structured ? dependencies.runtimeHostClient() : null;
       if (runtimeClient && !queuedUntil) {
@@ -822,13 +819,12 @@ export async function executeSpawnRequest(
       });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
-    launchId = begun.receipt.launchId;
     if (queuedUntil) {
-      const queuedReceipt = begun.receipt.admissionOwner
-        ? registry.releaseStartingStructuredSpawn(begun.receipt.launchId, begun.receipt.admissionOwner).receipt
-        : begun.receipt;
+      const releasedQueuedReceipt = queuedReceipt.admissionOwner
+        ? registry.releaseStartingStructuredSpawn(queuedReceipt.launchId, queuedReceipt.admissionOwner).receipt
+        : queuedReceipt;
       return NextResponse.json(
-        spawnResponseForReceipt(queuedReceipt, queuedReceipt.artifactPath, {
+        spawnResponseForReceipt(releasedQueuedReceipt, releasedQueuedReceipt.artifactPath, {
           structured: transport === "structured",
           initialMessage: "queued",
         }),
@@ -947,9 +943,9 @@ export async function executeSpawnRequest(
     }
     return NextResponse.json(spawnResponseForReceipt(settled.receipt, childPath));
   } catch (error) {
-    const receipt = launchId ? agentRegistry().readOnlySnapshot().receipts[launchId] : null;
+    const receipt = launchId ? registry.readOnlySnapshot().receipts[launchId] : null;
     if (!receipt || receipt.pane === null) {
-      if (receipt) agentRegistry().failSpawn(receipt.launchId, "spawn failed before pane binding");
+      if (receipt) registry.failSpawn(receipt.launchId, "spawn failed before pane binding");
       deleteInboxImages(imagePaths);
     }
     if (error instanceof SpawnParentError) return NextResponse.json({ error: error.message }, { status: error.status });
@@ -962,8 +958,8 @@ export async function executeSpawnRequest(
     const accountError = spawnAccountErrorResponse(error);
     if (accountError) return accountError;
     if (receipt?.pane) {
-      if (receipt.state === "prompt-delivered" || receipt.state === "host-verified") agentRegistry().markSpawnPathPending(receipt.launchId);
-      const recovered = agentRegistry().readOnlySnapshot().receipts[receipt.launchId];
+      if (receipt.state === "prompt-delivered" || receipt.state === "host-verified") registry.markSpawnPathPending(receipt.launchId);
+      const recovered = registry.readOnlySnapshot().receipts[receipt.launchId];
       if (recovered) return NextResponse.json(spawnResponseForReceipt(recovered, recovered.artifactPath));
     }
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
