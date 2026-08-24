@@ -1955,6 +1955,9 @@ export function TmuxComposerCore({
               idempotencyKey: clientMessageId,
               clientMessageId,
               images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
+              /* #1117: the composer is the operator's own surface; the
+                 structured branch above is stamped server-side by /api/runtime/send. */
+              origin: { kind: "operator" },
               /* The "on resume" profile (issue #241 §4): when this send reopens a
                  finished root conversation, boot it with the model/effort the
                  strip's picker saved. Ignored for a live pane or a subagent relay. */

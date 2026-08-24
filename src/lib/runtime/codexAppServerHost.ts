@@ -955,6 +955,7 @@ export class CodexAppServerHost implements EngineHost {
       ...(normalized.expectedTurnId !== undefined ? { expectedTurnId: normalized.expectedTurnId } : {}),
       ...(normalized.runtime ? { runtime: normalized.runtime } : {}),
       ...(normalized.selectedContext ? { selectedContext: normalized.selectedContext } : {}),
+      ...(normalized.origin ? { origin: normalized.origin } : {}),
     };
     if (!entry.id) throw new Error("queue entry id is required");
     const confirmed = await this.confirmedDelivery(entry);
@@ -974,6 +975,9 @@ export class CodexAppServerHost implements EngineHost {
              canonical structured-user record, so it survives a restart and a
              re-parse and the transcript row renders the composer badge. */
           normalized.selectedContext,
+          /* #1117: authorship lands on the same record, so the feed can tell
+             the operator's bubble from an inter-agent relay without a join. */
+          normalized.origin,
         ),
       },
     ];

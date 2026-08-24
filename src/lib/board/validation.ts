@@ -113,8 +113,10 @@ function rejectMutationAliasCycles(mutations: readonly BoardMutationV1[]): void 
   }
 }
 
-export async function validateBoardPatchRequest(request: Request): Promise<{ project: string; baseRevision: number; patch?: BoardPatch; mutations?: BoardMutationV1[] }> {
-  const body = record(await readBoundedJson(request, MAX_BOARD_BODY_BYTES), "request");
+export type ValidatedBoardPatchPayload = { project: string; baseRevision: number; patch?: BoardPatch; mutations?: BoardMutationV1[] };
+
+export function validateBoardPatchPayload(value: unknown): ValidatedBoardPatchPayload {
+  const body = record(value, "request");
   exact(body, ["schemaVersion", "project", "baseRevision", "patch", "mutations"], "request");
   if (body.schemaVersion !== 1) throw new ViewValidationError("UNSUPPORTED_SCHEMA_VERSION", "schemaVersion must be 1");
   if (typeof body.project !== "string" || body.project.length === 0 || body.project.length > 256) throw new ViewValidationError("INVALID_REQUEST", "invalid project");
@@ -147,4 +149,12 @@ export async function validateBoardPatchRequest(request: Request): Promise<{ pro
     patch.taskPanelOpen = rawPatch.taskPanelOpen;
   }
   return { project: body.project, baseRevision: body.baseRevision as number, patch };
+}
+
+export async function readBoardPatchPayload(request: Request): Promise<unknown> {
+  return readBoundedJson(request, MAX_BOARD_BODY_BYTES);
+}
+
+export async function validateBoardPatchRequest(request: Request): Promise<ValidatedBoardPatchPayload> {
+  return validateBoardPatchPayload(await readBoardPatchPayload(request));
 }

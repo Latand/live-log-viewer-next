@@ -1108,6 +1108,8 @@ export const en = {
   "render.showJson": "show JSON",
   "render.toDir": "to",
   "render.fromDir": "from",
+  "render.internalTag": "internal",
+  "render.agentPeer": "agent",
   "render.delivered": "delivered",
   "render.notDelivered": "not delivered",
   "render.reasoning": "agent reasoning",

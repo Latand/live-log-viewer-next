@@ -87,6 +87,25 @@ export function isClaudeProtocolUser(record: Record<string, unknown>): boolean {
   );
 }
 
+/**
+ * True when a Claude user record is a REAL MESSAGE that reached the engine
+ * through the structured/SDK delivery path (#1117): the feed renders it as a
+ * system row by default, but its uuid joins the delivery ledger's
+ * `engineMessageId`, so ledger evidence can reclassify it as the operator's
+ * own bubble or an inter-agent relay. Scaffold shapes — meta records, command
+ * caveats, task notifications, interrupt sentinels, compaction summaries —
+ * are excluded: they have no author to recover and must stay system rows.
+ */
+export function isClaudeSdkDeliveredUser(record: Record<string, unknown>): boolean {
+  if (str(record.promptSource) !== "sdk") return false;
+  if (record.isMeta === true || record.isCompactSummary === true || "interruptedMessageId" in record) return false;
+  const originKind = originKindOf(record);
+  if (originKind && originKind !== "human") return false;
+  const text = claudeUserText(rec(record.message).content).trim();
+  if (!text) return false;
+  return !(isClaudeInterruptSentinelText(text) || isCommandCaveatText(text) || isTaskNotificationText(text));
+}
+
 /** True when a Claude user record is journaled metadata that must never open
     or steer a work-duration window. Narrower than the feed contract: SDK and
     idle-delivered peer/coordinator prompts render as system rows but DO

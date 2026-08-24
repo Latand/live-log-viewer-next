@@ -2166,3 +2166,95 @@ test("a post-admission settlement failure preserves the accepted receipt as deli
   });
   expect(commands).toBe(1);
 });
+
+test("a runtime-synchronization hold persists the admission origin, and a replay without it stays compatible", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  const dependencies = {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+    startupFailed: () => false,
+  };
+
+  const held = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "held-origin-message",
+    text: "relay held across the synchronization window",
+    hasImages: false,
+    origin: { kind: "agent", role: "orchestrator" },
+  }, dependencies);
+
+  expect(held).toMatchObject({ ok: true, structured: true, outcome: "held" });
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "held-origin-message",
+    command: { origin: { kind: "agent", role: "orchestrator" } },
+  }]);
+
+  /* The origin is excluded from the request digest: the same logical message
+     replayed without the stamp answers from the reservation, never a 409. */
+  expect(await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "held-origin-message",
+    text: "relay held across the synchronization window",
+    hasImages: false,
+  }, dependencies)).toMatchObject({ ok: true, structured: true, outcome: "held" });
+  expect(registry.pendingDeliveries(conversation.id)).toHaveLength(1);
+});
+
+for (const engine of ["claude", "codex"] as const) {
+  test(`a migration-held delivery replays its persisted origin into the host command — ${engine}`, async () => {
+    const { conversation } = registryWithConversation("default", engine);
+    const origin = engine === "claude"
+      ? { kind: "operator" as const }
+      : { kind: "agent" as const, role: "reviewer" };
+    let command: unknown;
+    const receipt = () => ({
+      operationId: "held-origin-replay",
+      idempotencyKey: "held-origin-replay-message",
+      conversationId: conversation.id,
+      kind: "send" as const,
+      status: "delivered" as const,
+      queuePosition: 1,
+      at: "2026-07-13T00:00:00.000Z",
+      revision: 2,
+    });
+    const client = {
+      snapshot: async () => snapshot(conversation.id, engine),
+      command: async (value: unknown) => {
+        command = value;
+        return { operationId: "held-origin-replay", replayed: false, receipt: receipt() };
+      },
+      operationStatus: async () => ({ operationId: "held-origin-replay", replayed: true, receipt: receipt() }),
+    } as unknown as RuntimeHostClient;
+
+    const outcome = await deliverHeldStructuredMessage({
+      conversationId: conversation.id,
+      path: artifactPath,
+      deliveryId: "held-origin-replay",
+      clientMessageId: "held-origin-replay-message",
+      text: "after the migration window",
+      command: {
+        operationId: "held-origin-replay",
+        kind: "send",
+        policy: "interrupt-active",
+        origin,
+      },
+    }, {
+      enabled: () => true,
+      client: () => client,
+      kick: async () => {},
+    });
+
+    expect(outcome).toBe("delivered");
+    expect(command).toMatchObject({
+      kind: "send",
+      operationId: "held-origin-replay",
+      text: "after the migration window",
+      origin,
+    });
+  });
+}

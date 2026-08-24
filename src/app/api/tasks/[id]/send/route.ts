@@ -62,7 +62,10 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
   const outcomes: DeliveryOutcome[] = [];
   for (const targetPath of paths) {
     const entry = byPath.get(targetPath);
-    outcomes.push(await deliverConversationMessage({ pid: entry?.pid ?? null, path: targetPath, text, images: [] }));
+    /* #1117: a task send is the operator's own dispatch, and this route is
+       reachable only from operator surfaces — stamped server-side, like
+       /api/runtime/send, so the delivered card renders as the operator's. */
+    outcomes.push(await deliverConversationMessage({ pid: entry?.pid ?? null, path: targetPath, text, images: [], origin: { kind: "operator" } }));
   }
 
   const at = isoNow();

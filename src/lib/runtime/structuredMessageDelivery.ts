@@ -14,6 +14,7 @@ import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/
 
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 
+import type { MessageOrigin } from "./messageOrigin";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt, RuntimeOperationResult, RuntimeSendSettings, RuntimeSession } from "./contracts";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
@@ -50,6 +51,12 @@ export interface StructuredMessageRequest {
       effect so a replayed key re-delivers naming the SAME card, and the
       transcript record keeps the reference the operator actually submitted. */
   selectedContext?: SelectedContextRef;
+  /** Message authorship stamped by the admitting surface (#1117): rides the
+      durable send effect onto the delivery evidence (Claude ledger record,
+      Codex structured-user marker). A migration hold persists it on the held
+      command and replays it at drain time, so a held operator message never
+      resurfaces as a system row nor a held relay as an operator bubble. */
+  origin?: MessageOrigin;
 }
 
 export type StructuredMessageResult =
@@ -190,6 +197,7 @@ function commandInput(request: StructuredMessageRequest) {
     ...(request.kind ? { kind: request.kind } : {}),
     ...(request.policy ? { policy: request.policy } : {}),
     ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
+    ...(request.origin ? { origin: request.origin } : {}),
   };
 }
 
@@ -502,6 +510,9 @@ export async function deliverHeldStructuredMessage(
       contentDigest: content.contentDigest,
       policy: command.policy,
       ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
+      /* #1117: the authorship persisted on the held record survives the
+         migration hold — the drained message re-attributes exactly as admitted. */
+      ...(command.origin ? { origin: command.origin } : {}),
     });
     try {
       await (dependencies.kick ?? kickStructuredDeliveryQueue)();
@@ -866,6 +877,7 @@ export async function enqueueStructuredMessage(
       ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
       ...(request.runtime ? { runtime: request.runtime } : {}),
       ...(request.selectedContext ? { selectedContext: request.selectedContext } : {}),
+      ...(request.origin ? { origin: request.origin } : {}),
     });
     const result = commandResult;
     const receipt = result.receipt;

@@ -218,7 +218,8 @@ export const BulkActionBar = memo(function BulkActionBar({
         }
         const items = await execute("message", [...byPath.keys()], (path) => {
           const node = byPath.get(path);
-          return postJson("/api/tmux", { pid: node?.file.pid ?? undefined, path, text, images });
+          /* #1117: a bulk send is the operator's own message to each target. */
+          return postJson("/api/tmux", { pid: node?.file.pid ?? undefined, path, text, images, origin: { kind: "operator" } });
         });
         if (items.length && items.every((item) => item.ok)) {
           composer.setText("");

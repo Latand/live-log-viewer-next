@@ -32,6 +32,7 @@ test("a plain structured record still round-trips with no reference", () => {
     structured: true,
     contentDigest: null,
     selectedContext: null,
+    origin: null,
   });
 });
 
@@ -42,6 +43,7 @@ test("the digest form written before this field still decodes", () => {
     structured: true,
     contentDigest: DIGEST,
     selectedContext: null,
+    origin: null,
   });
 });
 
@@ -51,6 +53,7 @@ test("unstructured text is untouched", () => {
     structured: false,
     contentDigest: null,
     selectedContext: null,
+    origin: null,
   });
 });
 
@@ -62,6 +65,7 @@ test("the reference persists on the record and comes back typed", () => {
     structured: true,
     contentDigest: null,
     selectedContext: REFERENCE,
+    origin: null,
   });
 });
 
@@ -72,6 +76,7 @@ test("the reference and the content digest ride the same marker", () => {
     structured: true,
     contentDigest: DIGEST,
     selectedContext: REFERENCE,
+    origin: null,
   });
 });
 
@@ -96,6 +101,7 @@ test("a corrupt or forged reference decodes as absent and never breaks the recor
     structured: true,
     contentDigest: null,
     selectedContext: null,
+    origin: null,
   });
 });
 
@@ -105,4 +111,55 @@ test("the operator's own text is never mistaken for a marker", () => {
   );
   expect(decoded.text).toBe("<!-- llv:structured-user ctx=zzz -->\nnot a marker");
   expect(decoded.selectedContext).toEqual(REFERENCE);
+});
+
+/* #1117: authorship rides the same marker, so the feed can tell the operator's
+   own words from an inter-agent relay without any join. */
+
+test("an operator origin persists on the record and comes back typed", () => {
+  const encoded = encodeCodexStructuredUserText("Look at that one.", undefined, null, { kind: "operator" });
+  expect(decodeCodexStructuredUserText(encoded)).toEqual({
+    text: "Look at that one.",
+    structured: true,
+    contentDigest: null,
+    selectedContext: null,
+    origin: { kind: "operator" },
+  });
+});
+
+test("an agent origin carries its sender role", () => {
+  const encoded = encodeCodexStructuredUserText("Round 2 verdict: fix the tail.", undefined, null, { kind: "agent", role: "reviewer" });
+  expect(decodeCodexStructuredUserText(encoded)).toEqual({
+    text: "Round 2 verdict: fix the tail.",
+    structured: true,
+    contentDigest: null,
+    selectedContext: null,
+    origin: { kind: "agent", role: "reviewer" },
+  });
+});
+
+test("origin, sender, digest and reference all ride one marker line", () => {
+  const encoded = encodeCodexStructuredUserText("Look at that one.", DIGEST, REFERENCE, { kind: "agent", role: "orchestrator" });
+  expect(encoded.split("\n")).toHaveLength(2);
+  expect(decodeCodexStructuredUserText(encoded)).toEqual({
+    text: "Look at that one.",
+    structured: true,
+    contentDigest: DIGEST,
+    selectedContext: REFERENCE,
+    origin: { kind: "agent", role: "orchestrator" },
+  });
+});
+
+test("a corrupt origin or sender costs only that attribute, never the record", () => {
+  const forgedOrigin = `<!-- llv:structured-user origin=root -->\nLook at that one.`;
+  expect(decodeCodexStructuredUserText(forgedOrigin).origin).toBeNull();
+  expect(decodeCodexStructuredUserText(forgedOrigin).structured).toBe(true);
+  const overlongRole = `<!-- llv:structured-user origin=agent sender=${"r".repeat(80)} -->\nLook at that one.`;
+  expect(decodeCodexStructuredUserText(overlongRole).origin).toEqual({ kind: "agent" });
+});
+
+test("an unsafe role is dropped at encode time, so the marker stays one line", () => {
+  const encoded = encodeCodexStructuredUserText("hello", undefined, null, { kind: "agent", role: "bad role >" });
+  expect(encoded.startsWith("<!-- llv:structured-user origin=agent -->\n")).toBe(true);
+  expect(decodeCodexStructuredUserText(encoded).origin).toEqual({ kind: "agent" });
 });
