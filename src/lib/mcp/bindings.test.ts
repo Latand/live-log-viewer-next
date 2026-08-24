@@ -1027,6 +1027,15 @@ test("conversation_action archives every generation from either target form and 
     prefs: { hidden: [earlierPath, currentPath] },
   });
 
+  expect(mutateBoard(project, 2, [{ kind: "set-presentation", taskPanelOpen: true }], boardFile)).toMatchObject({
+    ok: true,
+    applied: true,
+    board: {
+      pathAliases: { [earlierPath]: currentPath },
+      prefs: { hidden: [earlierPath, currentPath], taskPanelOpen: true },
+    },
+  });
+
   const repeatedByExactEarlierPath = await bindings.conversation_action({
     clientRequestId: "archive-resumed-by-earlier-path-again",
     action: "archive",
@@ -1036,7 +1045,7 @@ test("conversation_action archives every generation from either target form and 
     projectsTouched: [],
     outcomes: [{ transcriptPath: earlierPath, paths: [], outcome: "already-archived" }],
   });
-  expect(boardFor(project, boardFile).revision).toBe(2);
+  expect(boardFor(project, boardFile).revision).toBe(3);
 
   const restoredByExactEarlierPath = await bindings.conversation_action({
     clientRequestId: "unarchive-resumed-by-earlier-path",
@@ -1046,7 +1055,10 @@ test("conversation_action archives every generation from either target form and 
   expect(restoredByExactEarlierPath).toMatchObject({
     outcomes: [{ transcriptPath: earlierPath, paths: [earlierPath, currentPath], outcome: "unarchived" }],
   });
-  expect(boardFor(project, boardFile)).toMatchObject({ revision: 3, prefs: { hidden: [] } });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 4,
+    prefs: { hidden: [], taskPanelOpen: true },
+  });
   fs.rmSync(boardFile);
 
   expect(patchBoard(project, 0, { hidden: [currentPath] }, boardFile)).toMatchObject({ ok: true, applied: true });

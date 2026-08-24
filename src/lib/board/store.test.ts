@@ -287,7 +287,7 @@ describe("board store", () => {
       expanded: [paths[2]],
     });
   });
-  test("hidden patches preserve an exact alias source alongside its canonical target", () => {
+  test("hidden patches preserve an exact alias source through unrelated mutations", () => {
     const file = temporaryFile();
     const project = "archive-exact-alias";
     const earlier = "/sessions/earlier.jsonl";
@@ -300,6 +300,15 @@ describe("board store", () => {
       board: {
         pathAliases: { [earlier]: current },
         prefs: { hidden: [earlier, current] },
+      },
+    });
+
+    expect(mutateBoard(project, 2, [{ kind: "set-presentation", taskPanelOpen: true }], file)).toMatchObject({
+      ok: true,
+      applied: true,
+      board: {
+        pathAliases: { [earlier]: current },
+        prefs: { hidden: [earlier, current], taskPanelOpen: true },
       },
     });
   });
