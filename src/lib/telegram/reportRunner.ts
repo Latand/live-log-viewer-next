@@ -21,6 +21,7 @@ import {
   scheduledRunDue,
   slotInstant,
 } from "./reportSchedule";
+import { reportAttemptId, TELEGRAM_REPORT_PROJECT } from "./reportLineage";
 import { connectorReadPort, planReportSources, type TelegramReadPort } from "./reportSources";
 import { launchReportConversation, type ReportSpawnInput, type ReportSpawnResult } from "./reportSpawn";
 import {
@@ -55,8 +56,10 @@ import { readTelegramConnection, type StoredTelegramConnection } from "./session
  *
  * The account check is the FIRST thing that happens and the Viewer does it
  * itself, through the connector's own `get_me`, against the identity recorded
- * at Connect. A mismatch settles `account-mismatch` before a single chat is
- * listed and before any conversation exists, so "no report and no further
+ * at Connect — by NUMERIC ID and nothing else (#1091). A mismatch settles
+ * `account-mismatch` before a single chat is listed and before any
+ * conversation exists, and a record with no id to compare fails
+ * `account_check_failed` before even that read, so "no report and no further
  * reads" is a property of the code rather than an instruction an agent is
  * trusted to follow — and the recorded identity never has to enter a prompt.
  *
@@ -88,10 +91,20 @@ export type ReportRunnerLogCode =
 export interface ReportRunnerPorts {
   now(): number;
   connection(): StoredTelegramConnection;
-  /** The Viewer's own bounded reads: the account check and the source pass. */
-  readPort(): TelegramReadPort;
+  /** The Viewer's own bounded reads: the account check and the source pass,
+      every one of them bound to the credential generation the run verified
+      (#1091). */
+  readPort(credentialRef: string): TelegramReadPort;
+  /** Runs the one-time id migration a pre-#1091 connection is owed: the
+      ordinary health check, which re-reads the account through the login
+      bridge and persists whatever id it reports. */
+  migrateIdentity(): Promise<void>;
   /** The operator's own spawn lane, in process and outside any request scope. */
   spawn(input: ReportSpawnInput): Promise<ReportSpawnResult>;
+  /** The conversation the durable report-run marker names, read from registry
+      storage alone (#1091) — no Daily Reports state involved, so it answers
+      after a reload that lost the launch's own write. */
+  reportRunConversation(runId: string): Promise<string | null>;
   /** Whether the launched conversation is still able to produce a report. */
   conversationLive(conversationId: string): Promise<boolean>;
   log(code: ReportRunnerLogCode): void;
@@ -110,17 +123,55 @@ async function conversationLive(conversationId: string): Promise<boolean> {
   }
 }
 
+/** The marker's read side for the runner: the durable receipt whose attempt id
+    spells this run (#1091), resolved to the conversation the board shows. */
+async function reportRunConversation(runId: string): Promise<string | null> {
+  try {
+    const { agentRegistry } = await import("@/lib/agent/registry");
+    const registry = agentRegistry();
+    const receipt = registry.spawnReceiptForClientAttempt(reportAttemptId(runId));
+    return receipt ? registry.canonicalConversationId(receipt.conversationId) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The one-time id migration, run through the ordinary health check so there
+    is exactly one code path that re-reads an account (#1091). */
+async function migrateIdentity(): Promise<void> {
+  try {
+    const { telegramService } = await import("./service");
+    await telegramService().checkHealth();
+  } catch {
+    /* A health check that could not run leaves the record exactly as it was;
+       the run fails closed and the next one tries again. */
+  }
+}
+
 export const productionReportRunnerPorts: ReportRunnerPorts = {
   now: Date.now,
   connection: () => {
     try { return readTelegramConnection(); }
-    catch { return { version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "session_unsafe" }; }
+    catch { return { version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "session_unsafe", identityIdUpgradedAt: null }; }
   },
-  readPort: connectorReadPort,
+  readPort: (credentialRef) => connectorReadPort(credentialRef),
+  migrateIdentity,
   spawn: launchReportConversation,
+  reportRunConversation,
   conversationLive,
   log: (code) => console.error(`[telegram report] ${code}`),
 };
+
+/** What one run is bound to: the recorded numeric id it verified against and
+    the credential generation that recorded it (#1091). */
+type VerifiedAccount = { id: string; credentialRef: string };
+
+/** A record verifies a run only when it carries BOTH — an id with no
+    generation names an account nothing can be read as. */
+function verifiedAccount(connection: StoredTelegramConnection): VerifiedAccount | null {
+  const id = connection.identity?.id;
+  return id && connection.credentialRef ? { id, credentialRef: connection.credentialRef } : null;
+}
 
 export type RunLaunchResult =
   /** The run is durable and visible; its conversation opens behind this. */
@@ -136,13 +187,17 @@ export class TelegramReportRunner {
 
   constructor(private readonly ports: ReportRunnerPorts = productionReportRunnerPorts) {}
 
-  /** Whether a report run may hold the connector right now: the feature is on
-      and the account is connected. It is passed to the launch as a CALLBACK,
-      not a value, so admission resolves it after the source pass rather than
-      before it — a logout during that minute must revoke the grant, not be
-      overtaken by state read before it happened. */
-  grantActive(): boolean {
-    return readTelegramReports().settings.enabled && this.ports.connection().status === "connected";
+  /** Whether a report run may hold the connector right now: the feature is on,
+      the account is connected, and — for a run that verified one — it is still
+      the credential generation that run was planned for (#1091). It is passed
+      to the launch as a CALLBACK, not a value, so admission resolves it after
+      the source pass rather than before it: a logout during that minute must
+      revoke the grant, and a reconnect as somebody else must revoke it too
+      rather than hand the new account's connector to the old account's plan. */
+  grantActive(credentialRef: string | null = null): boolean {
+    const connection = this.ports.connection();
+    if (credentialRef !== null && connection.credentialRef !== credentialRef) return false;
+    return readTelegramReports().settings.enabled && connection.status === "connected";
   }
 
   payload(): TelegramReportsPayload {
@@ -276,18 +331,65 @@ export class TelegramReportRunner {
     }
   }
 
+  /**
+   * The recorded identity a run may verify against and the credential
+   * generation that recorded it, or `null` when there is none (#1091).
+   *
+   * "None" means the record carries no numeric account id, which is the state
+   * every connection enrolled before #1091 starts in. The repair is the
+   * connection's own one-time health migration: the health check re-reads the
+   * account through the login bridge — the credential itself, not the surface
+   * the run is checking — persists the id and stamps the record as migrated,
+   * so this costs one bridge round trip per connection and never repeats.
+   * A record that comes back without an id (a bridge too old to report one)
+   * has already been stamped and is not re-probed: it simply has nothing to
+   * verify against, and the run fails closed rather than falling back to a
+   * name.
+   *
+   * The generation travels WITH the id because the id alone does not say which
+   * credential produced it: everything the run does afterwards is bound to
+   * this pair, so a logout and reconnect cannot slip a second account's
+   * dialogs behind a check the first one passed.
+   */
+  private async verifiedIdentity(): Promise<VerifiedAccount | null> {
+    const stored = this.ports.connection();
+    if (stored.identity?.id) return verifiedAccount(stored);
+    /* Nothing recorded to migrate, or a record already stamped as migrated:
+       either way there is no id and no second bridge read to try for one. */
+    if (!stored.identity || stored.identityIdUpgradedAt) return null;
+    await this.ports.migrateIdentity();
+    const connection = this.ports.connection();
+    /* The migration re-reads the account, so it can also discover that the
+       session no longer authorizes anything. */
+    if (connection.status !== "connected") return null;
+    return verifiedAccount(connection);
+  }
+
   private async executeLocked(runId: string): Promise<void> {
     const file = readTelegramReports();
-    const connection = this.ports.connection();
     const active = file.active;
     if (!active || active.runId !== runId) return;
     const window = { startAt: active.windowStart, endAt: active.windowEnd };
-    const port = this.ports.readPort();
 
-    /* The account check, before anything reads a chat. A mismatch is the
-       issue's `account-mismatch` outcome: no report, no window advance, and —
-       because this runs before the source pass — no read of the wrong
-       account's dialogs either. */
+    /* The account check, before anything reads a chat. It needs the recorded
+       numeric id, so a connection enrolled before that id existed completes its
+       one-time migration HERE, first, rather than authorizing the run on a
+       display name anybody can copy (#1091). A record that still carries no id
+       afterwards fails the check closed, with nothing read at all. */
+    const recorded = await this.verifiedIdentity();
+    if (!recorded) {
+      this.ports.log("account_check_failed");
+      this.settle(runId, "failed", "account_check_failed", false);
+      return;
+    }
+    /* Every read from here on is bound to the generation that recorded the id
+       being verified, so the connector cannot answer this pass as a different
+       account (#1091). */
+    const port = this.ports.readPort(recorded.credentialRef);
+
+    /* A mismatch is the issue's `account-mismatch` outcome: no report, no
+       window advance, and — because this runs before the source pass — no read
+       of the wrong account's dialogs either. */
     let live: Awaited<ReturnType<TelegramReadPort["getMe"]>>;
     try {
       live = await port.getMe();
@@ -296,7 +398,7 @@ export class TelegramReportRunner {
       this.settle(runId, "failed", "account_check_failed", false);
       return;
     }
-    if (!sameTelegramAccount(live, connection.identity)) {
+    if (!sameTelegramAccount(live, recorded)) {
       this.ports.log("account_mismatch");
       this.settle(runId, "account-mismatch", null, false);
       return;
@@ -324,6 +426,19 @@ export class TelegramReportRunner {
       deleteRunScratch(runId);
       return;
     }
+    /* A reconnect inside that same minute is the other way this run stops
+       being about the account it verified (#1091). Every read the plan is made
+       of was refused the moment the generation moved, so what is on disk is
+       one account's — but the conversation about to be launched would hold the
+       NEW account's connector, so there is nothing left to run. The plan goes
+       with it rather than sitting in scratch naming the departed account's
+       correspondents. */
+    if (this.ports.connection().credentialRef !== recorded.credentialRef) {
+      this.ports.log("account_mismatch");
+      deleteRunScratch(runId);
+      this.settle(runId, "account-mismatch", null, false);
+      return;
+    }
     /* The operator's own brief, with the Viewer's non-negotiable preamble in
        front of it. Their text may name private chats, which is why it reaches
        nothing but the run it was written for. */
@@ -342,16 +457,20 @@ export class TelegramReportRunner {
           model: CODEX_SOL_MODEL,
           effort: "medium",
           cwd: reportWorkspaceDir(),
-          /* The durable marker that ties this conversation to this run, both
-             ways: the receipt carries it, and the history row carries the
-             conversation the receipt produced. No `src`, `parent` or role — see
-             the note on lineage at the bottom of this file. */
+          /* The durable report-run marker (#1091), in the two fields the
+             ordinary spawn path already makes durable: the receipt's attempt
+             id spells the run id, and explicit project ownership is what the
+             board groups the card by. Still no `src`, `parent` or role — see
+             `reportLineage.ts` for why a lineage parent would revoke the run's
+             own connector grant. */
           clientAttemptId: reportAttemptId(runId),
+          project: TELEGRAM_REPORT_PROJECT,
           ["prompt"]: prompt,
         },
         /* The grant is decided by the report session class, inside admission,
-           from durable state read at that instant. */
-        grantActive: () => this.grantActive(),
+           from durable state read at that instant — and only for the
+           generation this run verified (#1091). */
+        grantActive: () => this.grantActive(recorded.credentialRef),
       });
     } catch {
       this.ports.log("launch_failed");
@@ -368,6 +487,32 @@ export class TelegramReportRunner {
     updateTelegramReports((state) => {
       if (state.active?.runId === runId) state.active.conversationId = conversationId;
     });
+  }
+
+  /**
+   * Re-links a live run to its conversation from the durable marker (#1091).
+   *
+   * The launch's own write of the conversation id is the LAST thing
+   * `executeLocked` does, so a process that died between the spawn being
+   * admitted and that write left a run nothing could name: a real conversation
+   * on the board, a panel row with no route to it, and a sweep about to call
+   * it a launch that never happened. The marker is the durable evidence that
+   * repairs it — the receipt's attempt id spells the run id, in registry
+   * storage, which is exactly what survives the reload — and the recovered id
+   * is persisted, so the settled history row carries it too.
+   *
+   * Only a run this process is NOT planning is looked up: while the source
+   * pass is still running here the launch has not happened yet, so there is
+   * nothing to find and no reason to read the registry every tick.
+   */
+  private async relinkActiveRun(runId: string): Promise<string | null> {
+    if (this.planning.has(runId)) return null;
+    const conversationId = await this.ports.reportRunConversation(runId);
+    if (!conversationId) return null;
+    updateTelegramReports((state) => {
+      if (state.active?.runId === runId && !state.active.conversationId) state.active.conversationId = conversationId;
+    });
+    return conversationId;
   }
 
   /**
@@ -400,7 +545,8 @@ export class TelegramReportRunner {
     }
     const startedAt = Date.parse(active.startedAt);
     const expired = Number.isFinite(startedAt) && this.ports.now() - startedAt > RUN_TIMEOUT_MS;
-    if (!active.conversationId) {
+    const conversationId = active.conversationId ?? await this.relinkActiveRun(active.runId);
+    if (!conversationId) {
       /* No conversation yet: either this process is still planning the run's
          sources, or the process that was doing so is gone and the run is an
          orphan no restart would otherwise clear. */
@@ -408,7 +554,7 @@ export class TelegramReportRunner {
       else if (expired) this.settle(active.runId, "failed", "timed_out", false);
       return;
     }
-    const alive = await this.ports.conversationLive(active.conversationId);
+    const alive = await this.ports.conversationLive(conversationId);
     if (!alive) {
       /* A run that ended — including a connector crash that took the turn down
          with it — never silently succeeds. It becomes a failed row the
@@ -513,74 +659,28 @@ export class TelegramReportRunner {
 }
 
 /**
- * Characters the connector strips from every name it returns.
- *
- * Its `sanitize_name` removes Unicode Cc/Cf (which covers the zero-width and
- * bidi block) and collapses whitespace, while the identity recorded at Connect
- * comes off the login bridge UNSANITIZED. Two spellings of one name therefore
- * have to be normalized to the same thing before they are compared, or an
- * operator whose display name carries an invisible character would fail every
- * report with `account-mismatch` and never learn why.
- */
-const STRIPPED_BY_CONNECTOR = /[\p{Cc}\p{Cf}]/gu;
-
-/** Both sides spell "this account has no name" with their own placeholder, and
-    neither is evidence of anything. */
-const NAME_PLACEHOLDERS = new Set(["[empty]", "telegram account"]);
-
-function comparableName(value: string): string {
-  const normalized = value.replace(STRIPPED_BY_CONNECTOR, "").replace(/\s+/g, " ").trim().toLowerCase();
-  return NAME_PLACEHOLDERS.has(normalized) ? "" : normalized;
-}
-
-/**
  * Whether the connector is logged into the account this report belongs to.
  *
- * The evidence is the identity Connect recorded — display name and public
- * handle — because that is what the operator's connection carries; the
- * connector's `get_me` is asked for the same two fields.
+ * THE NUMERIC ACCOUNT ID IS THE WHOLE ANSWER (issue #1091). It is the only
+ * field of an account nobody can hand themselves, so equal ids are the same
+ * account whatever it is called today, and anything else is not this account:
+ * a different id is a different account however familiar its display name, and
+ * a MISSING id on either side is no evidence at all.
  *
- * AGREEMENT ON EITHER field is enough, and that is deliberate. Both fields are
- * the operator's to change at any moment, and the recorded copy is only
- * refreshed by a health check, so demanding that both agree would end every
- * report with `account-mismatch` the day the operator renamed themselves or
- * took a new @handle — a silently dead feature, which is a worse failure than
- * the one this check exists to catch. A genuinely different account agrees on
- * neither. A connection with NO comparable field cannot be verified against
- * anything, so it fails closed.
+ * There is no name or handle rule here any more, deliberately. Both fields are
+ * public and copyable, which is exactly how the v1 check let a second account
+ * wearing the operator's name pass; keeping them as a fallback for records that
+ * carry no id would leave that same hole open for every connection enrolled
+ * before the id existed. Those records are repaired instead — the runner
+ * completes their one-time health migration (`recordedIdentityAfterHealthCheck`)
+ * before a run is allowed to read anything — and a record that still has no id
+ * afterwards fails the check closed.
  */
 export function sameTelegramAccount(
-  live: { name: string; username: string | null } | null,
-  recorded: { name: string; username: string | null } | null,
+  live: { id?: string | null } | null,
+  recorded: { id?: string | null } | null,
 ): boolean {
-  if (!live || !recorded) return false;
-  const liveName = comparableName(live.name);
-  const recordedName = comparableName(recorded.name);
-  if (liveName && recordedName && liveName === recordedName) return true;
-  const liveHandle = (live.username ?? "").trim().toLowerCase();
-  const recordedHandle = (recorded.username ?? "").trim().toLowerCase();
-  return Boolean(liveHandle) && liveHandle === recordedHandle;
-}
-
-/**
- * The durable identity the launch carries into the registry (issue #1086).
- *
- * `clientAttemptId` is the spawn lane's own replay key: it is written on the
- * receipt, resolvable through `spawnReceiptForClientAttempt`, and it survives a
- * restart. Together with the `conversationId` the history row keeps, it is the
- * two-way link between a report row and the board conversation that produced
- * it.
- *
- * A lineage PARENT is deliberately not used, and the reason is mechanical: the
- * registry re-decides every stored MCP grant from the row's own evidence
- * (`mcpServersForStoredSession` at `registry.ts`, `decideStoredGrant` in
- * `mcpAllowlist.ts`), and a `parentConversationId` classifies the row as
- * delegated, whose grant is the baseline. A report run given a parent would
- * therefore lose `telegram` at the moment its receipt is written. It is also
- * true rather than convenient: no conversation spawns the 10:00 report.
- */
-export function reportAttemptId(runId: string): string {
-  return `telegram-report-${runId}`;
+  return Boolean(live?.id && recorded?.id && live.id === recorded.id);
 }
 
 function activeRow(active: NonNullable<ReturnType<typeof readTelegramReports>["active"]>): TelegramReportRow {

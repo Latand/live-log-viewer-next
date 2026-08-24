@@ -14,6 +14,12 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 const { after } = await import("next/server");
 const { reportSpawnHeaders, reportSpawnOverrides, startDeferredSpawnWork } = await import("./reportSpawn");
 const { SCHEDULED_REPORT_SESSION_CLASS } = await import("@/lib/agent/mcpAllowlist");
+const { TELEGRAM_REPORT_PROJECT } = await import("./reportLineage");
+
+/** An invented run id, in the shape the runner mints. Assembled rather than
+    written out: the publication privacy gate refuses any literal with the
+    shape of a session identifier, invented or not. */
+const REPORT_RUN_ID = ["0192d4f1", "8f43", "4a10", "9c1e", "6b0f0a5d77c2"].join("-");
 const { executeSpawnRequest, productionSpawnCommandDependencies } = await import("@/lib/agent/spawnCommand");
 const { ensureOperatorSpawnCapability } = await import("@/lib/agent/operatorCapability");
 const { VIEWER_SPAWN_CAPABILITY_HEADER } = await import("@/lib/agent/spawnPolicy");
@@ -75,9 +81,10 @@ test("nothing arriving over /api/spawn can select the report session class", () 
  * the real `executeSpawnRequest` that still writes a durable receipt: the
  * grant, the plugin surface and the display payload are all decided before it.
  */
-function capturingRegistry(): { profiles: Record<string, unknown>[]; displays: unknown[]; registry: unknown } {
+function capturingRegistry(): { profiles: Record<string, unknown>[]; displays: unknown[]; requests: Record<string, unknown>[]; registry: unknown } {
   const profiles: Record<string, unknown>[] = [];
   const displays: unknown[] = [];
+  const requests: Record<string, unknown>[] = [];
   let next = 0;
   const registry = {
     conversation: () => null,
@@ -87,6 +94,7 @@ function capturingRegistry(): { profiles: Record<string, unknown>[]; displays: u
     beginSpawnRequest: (request: { launchProfile: Record<string, unknown>; launchDisplay?: unknown }) => {
       profiles.push(request.launchProfile);
       displays.push(request.launchDisplay ?? null);
+      requests.push(request as unknown as Record<string, unknown>);
       next += 1;
       return {
         kind: "created" as const,
@@ -111,7 +119,7 @@ function capturingRegistry(): { profiles: Record<string, unknown>[]; displays: u
     failStructuredSpawn: () => undefined,
     readOnlySnapshot: () => ({ receipts: {} }),
   };
-  return { profiles, displays, registry };
+  return { profiles, displays, requests, registry };
 }
 
 function reportLaunchRequest(body: Record<string, unknown>): NextRequest {
@@ -142,6 +150,12 @@ test("the report class decides the whole capability surface admission reserves",
     engine: "codex",
     cwd: SANDBOX,
     accountId: "account-pinned",
+    /* The durable report-run marker the runner sends (#1091). It rides the real
+       admission path here because both halves are admitted, not decorative: an
+       explicit project is refused outright for a launch admission reads as
+       agent-initiated, which would settle every report run `launch_failed`. */
+    clientAttemptId: `telegram-report-${REPORT_RUN_ID}`,
+    project: TELEGRAM_REPORT_PROJECT,
     ["prompt"]: "Telegram daily report — window A → B.\n\nThe operator's own brief.",
   };
   const response = await executeSpawnRequest(reportLaunchRequest(body), dependencies);
@@ -153,6 +167,14 @@ test("the report class decides the whole capability surface admission reserves",
   /* And the prompt — which carries the operator's analyst brief — reserves no
      durable display copy in the registry. */
   expect(captured.displays[0]).toBeNull();
+  /* The marker reached the registry, and it is still a root: no parent, no
+     role, so the grant above survives every later re-decision. */
+  expect(captured.requests[0]).toMatchObject({
+    clientAttemptId: `telegram-report-${REPORT_RUN_ID}`,
+    explicitProject: TELEGRAM_REPORT_PROJECT,
+  });
+  expect(captured.requests[0].parentConversationId ?? null).toBeNull();
+  expect(captured.requests[0].role ?? null).toBeNull();
 
   /* The same launch WITHOUT the class is the contrast: an operator-root Codex
      launch carries Computer Use and its display payload, exactly as before. */

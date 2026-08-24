@@ -19,6 +19,7 @@ const {
   loginBridgePath,
   telegramMcpServerPath,
   telegramSessionReaderPath,
+  TELEGRAM_BURST_CONSUMING_TOOLS,
 } = await import("./packaging");
 const { installPinnedUv, uvReleaseFor, UV_BOOTSTRAP_VERSION } = await import("../../../bin/provision-telegram-connector.mjs");
 
@@ -312,6 +313,85 @@ test("the packaged MCP entrypoint enforces bearer auth and token-bound identity"
   expect(output.name).toMatch(/^telegram-[a-f0-9]{64}$/);
 });
 
+test("the entrypoint withholds the burst consumers the feed must own alone (#1091)", () => {
+  const python = Bun.which("python3");
+  expect(python).not.toBeNull();
+  /* A fake vendor tree with just enough of FastMCP to hold a tool registry:
+     the real one needs Telethon and a Telegram session, and what is under test
+     is which tools survive the entrypoint, not what they do. The runner
+     registers them at import, exactly as the vendored one does by importing
+     `telegram_mcp.tools`. */
+  const fakeVendor = path.join(SANDBOX, "withheld-tools-vendor");
+  for (const directory of ["mcp/server", "telegram_mcp"]) {
+    fs.mkdirSync(path.join(fakeVendor, directory), { recursive: true });
+    fs.writeFileSync(path.join(fakeVendor, directory, "__init__.py"), "");
+  }
+  fs.writeFileSync(path.join(fakeVendor, "mcp", "__init__.py"), "");
+  fs.writeFileSync(path.join(fakeVendor, "mcp", "server", "fastmcp.py"), [
+    "class _Server:",
+    "    name = 'telegram'",
+    "class _Tool:",
+    "    def __init__(self, name): self.name = name",
+    "class _ToolManager:",
+    "    def __init__(self): self._tools = {}",
+    "    def register(self, name): self._tools[name] = _Tool(name)",
+    "    def list_tools(self): return list(self._tools.values())",
+    "    def remove_tool(self, name): del self._tools[name]",
+    "class FastMCP:",
+    "    def __init__(self):",
+    "        self._mcp_server = _Server()",
+    "        self._tool_manager = _ToolManager()",
+    "    def streamable_http_app(self):",
+    "        async def app(scope, receive, send): return None",
+    "        return app",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(fakeVendor, "telegram_mcp", "runtime.py"), [
+    "from mcp.server.fastmcp import FastMCP",
+    "mcp = FastMCP()",
+    "",
+  ].join("\n"));
+  fs.writeFileSync(path.join(fakeVendor, "telegram_mcp", "runner.py"), [
+    "import json",
+    "from telegram_mcp.runtime import mcp",
+    "for _name in ('get_me', 'wait_for_new_message', 'wait_for_settled_message'):",
+    "    mcp._tool_manager.register(_name)",
+    "def main():",
+    "    print(json.dumps([tool.name for tool in mcp._tool_manager.list_tools()]))",
+    "",
+  ].join("\n"));
+
+  const entrypoint = path.resolve(import.meta.dir, "..", "..", "..", "bin", "telegram-mcp-server.py");
+  const runEntrypoint = (excluded?: string) => {
+    const env = { ...process.env, LLV_TELEGRAM_VENDOR_DIR: fakeVendor, LLV_TELEGRAM_MCP_TOKEN: "C".repeat(43) } as Record<string, string>;
+    delete env.LLV_TELEGRAM_EXCLUDED_TOOLS;
+    if (excluded !== undefined) env.LLV_TELEGRAM_EXCLUDED_TOOLS = excluded;
+    return Bun.spawnSync({ cmd: [python!, entrypoint], env, stdout: "pipe", stderr: "pipe" });
+  };
+
+  /* Feed on — the connector the Viewer actually launches. The consumer that
+     would pop a settled burst before the feed sees it is gone from the served
+     surface; the tool that only REPORTS pending chats costs the feed nothing
+     and stays. */
+  const withheld = runEntrypoint(TELEGRAM_BURST_CONSUMING_TOOLS.join(","));
+  expect(withheld.stderr.toString()).toBe("");
+  expect(withheld.exitCode).toBe(0);
+  expect(JSON.parse(withheld.stdout.toString())).toEqual(["get_me", "wait_for_new_message"]);
+
+  /* Feed off — no exclusion travels with the launch, and the audited read
+     surface is served whole, exactly as before this rule existed. */
+  const untouched = runEntrypoint();
+  expect(untouched.exitCode).toBe(0);
+  expect(JSON.parse(untouched.stdout.toString())).toEqual(["get_me", "wait_for_new_message", "wait_for_settled_message"]);
+
+  /* A name that is not registered fails the launch instead of serving a
+     surface nobody narrowed: after a vendor bump that renamed a consumer,
+     starting anyway would restore the very race this removes. */
+  const renamed = runEntrypoint("wait_for_settled_burst");
+  expect(renamed.exitCode).not.toBe(0);
+  expect(renamed.stderr.toString()).toContain("wait_for_settled_burst");
+});
+
 test("health and logout bridges acquire the vendored session lock before connecting", () => {
   const python = Bun.which("python3");
   expect(python).not.toBeNull();
@@ -352,6 +432,7 @@ test("health and logout bridges acquire the vendored session lock before connect
     "from .sessions import StringSession",
     "class User:",
     "    first_name, last_name, username = 'Account', 'A', None",
+    "    id = 770000001",
     "class TelegramClient:",
     "    def __init__(self, session, *args, **kwargs): self.session = session",
     "    async def connect(self):",
@@ -376,7 +457,13 @@ test("health and logout bridges acquire the vendored session lock before connect
     stderr: "pipe",
   });
   expect(result.exitCode).toBe(0);
-  expect(JSON.parse(result.stdout.toString())).toMatchObject({ event: "health", status: "connected" });
+  /* The health event carries the numeric account id the verifier compares
+     (#1091), as a string so a 64-bit id survives JSON. */
+  expect(JSON.parse(result.stdout.toString())).toMatchObject({
+    event: "health",
+    status: "connected",
+    identity: { name: "Account A", username: null, id: "770000001" },
+  });
 
   const logout = Bun.spawnSync({
     cmd: [python!, path.resolve(import.meta.dir, "..", "..", "..", "bin", "telegram-login-bridge.py"), "logout"],
