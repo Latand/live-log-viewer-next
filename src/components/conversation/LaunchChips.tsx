@@ -83,10 +83,11 @@ export function LaunchChipsView({
         <span className="truncate">{t(`spawnChip.initial.${launch.initialMessage}` as MessageKey)}</span>
         <span className="sr-only">{initialDetail}</span>
       </span>
-      {/* The launch id is a failure handle — what an operator quotes when the
-          launch needs chasing (issue #1138). A launch that worked is identified
-          by the conversation it became, so the id stays out of its chips. */}
-      {launch.state === "failed" ? (
+      {/* The launch id is the handle an operator quotes while a launch is still
+          being chased — pending, settling, or failed (issue #1138). A launch
+          that worked is identified by the conversation it became, so only the
+          success states drop the id from their chips. */}
+      {launch.state !== "recovered" && launch.state !== "live-late-success" ? (
         <span
           data-launch-chip="id"
           title={t("spawnCard.launch", { id: launch.launchId })}
