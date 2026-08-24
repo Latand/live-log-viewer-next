@@ -3413,7 +3413,7 @@ test("a bound review flow paused while relaying resumes without operator action"
   expect(loadPipelines()[0]).toMatchObject({ state: "running", stateDetail: null });
 });
 
-test("a parked review stage ingests ten verdicts across three attempts exactly once (#921)", async () => {
+test("a parked review stage ingests ten verdicts when relay terminalization races ingestion (#921)", async () => {
   const h = harness();
   const stages = [
     { id: "build", kind: "run", prompt: "build", next: "review" },
@@ -3430,6 +3430,7 @@ test("a parked review stage ingests ten verdicts across three attempts exactly o
     accountRef: "managed:fc164f825080",
   } as const;
   const privateWorktree = path.join(process.env.LLV_STATE_DIR!, "private-worktree");
+  const startupClaimError = "review flow paused during startup: structured resume host claim is unavailable";
   let completedRounds = 0;
   const populateRounds = (flow: Flow, count: number): void => {
     const flowDir = path.join(process.env.LLV_STATE_DIR!, "flows", flow.id);
@@ -3470,53 +3471,106 @@ test("a parked review stage ingests ten verdicts across three attempts exactly o
         reviewHeadSha: ORIGIN_MAIN_SHA,
         reviewedAt,
         terminalAt: reviewedAt,
+        relayStartedAt: null,
+        relayDeliveryTransport: null,
+        relayDelivery: null,
+        relayPendingSettlement: null,
+        relayRetryAt: null,
+        relayedAt: null,
+        error: null,
         reviewerPath: `/codex/${flow.id}-reviewer-${n}.jsonl`,
         reviewerConversationId: `conversation_${flow.id}_reviewer_${n}`,
       } as never;
     });
   };
-  const parkAndRetry = async (flow: Flow, rounds: number): Promise<void> => {
-    populateRounds(flow, rounds);
-    flow.state = "done_comment";
+
+  const parkAtStartupClaim = (flow: Flow): void => {
+    flow.cwd = privateWorktree;
+    flow.hostClaim = claim;
+    flow.state = "relaying";
+    flow.pausedState = null;
     flow.stateDetail = null;
-    await tickPipelines([entry(flow.rounds.at(-1)!.reviewerPath!)], h.ports);
-    expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision" });
+    const pipeline = loadPipelines()[0]!;
+    const attempt = pipeline.runs[1]!.attempts.at(-1)!;
+    pipeline.state = "needs_decision";
+    pipeline.stateDetail = startupClaimError;
+    attempt.state = "needs_decision";
+    attempt.error = startupClaimError;
+    savePipelines([pipeline]);
+  };
+
+  const recordHiddenRoundsAndRetry = async (flow: Flow, rounds: number): Promise<void> => {
+    parkAtStartupClaim(flow);
+    expect(loadPipelines()[0]).toMatchObject({
+      state: "needs_decision",
+      stateDetail: startupClaimError,
+    });
+
+    /* The incident's round artifacts appeared only after the parent stage had
+       already parked. Keep the flow live while its read projection records the
+       hidden rounds; the operator's retry then closes that attempt. */
+    populateRounds(flow, rounds);
+    const projected = structuredClone(loadPipelines()[0]!);
+    expect(reconcileEmbeddedReviewFlows(
+      [projected],
+      [flow],
+      flow.rounds.at(-1)!.reviewedAt!,
+    )).toBe(true);
+    savePipelines([projected]);
+    expect(loadPipelines()[0]).toMatchObject({
+      state: "needs_decision",
+      stateDetail: startupClaimError,
+    });
+
     await patchPipeline(loadPipelines()[0]!.id, { action: "retry-stage" }, h.ports);
+    expect(flow.state).toBe("closed");
     await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
   };
 
-  await parkAndRetry(h.flows.get("flow-1")!, 2);
-  await parkAndRetry(h.flows.get("flow-2")!, 3);
+  await recordHiddenRoundsAndRetry(h.flows.get("flow-1")!, 2);
+  await recordHiddenRoundsAndRetry(h.flows.get("flow-2")!, 3);
 
   const flow = h.flows.get("flow-3")!;
+  parkAtStartupClaim(flow);
   populateRounds(flow, 5);
   expect(completedRounds).toBe(10);
-  flow.state = "needs_decision";
-  flow.pausedState = null;
-  flow.stateDetail = `relay delivery failed after 3 automatic retries: structured host claim ${claim.sessionKey} on account ${claim.accountRef} failed: structured resume host claim is unavailable`;
-
-  /* Exercise the read-side projection before the controller consumes the same
-     terminal generation. Its write must remain compatible with the later
-     one-shot verdict settlement. */
-  const projected = structuredClone(loadPipelines()[0]!);
-  expect(reconcileEmbeddedReviewFlows(
-    [projected],
-    [...h.flows.values()],
-    "2026-08-06T15:20:00.000Z",
-  )).toBe(true);
-  savePipelines([projected]);
-
-  await tickPipelines([entry(flow.rounds.at(-1)!.reviewerPath!)], h.ports);
-  expect(loadPipelines()[0]).toMatchObject({
-    state: "needs_decision",
-    stateDetail: expect.stringContaining("review loop ended in needs_decision"),
+  const finalRound = flow.rounds.at(-1)!;
+  finalRound.relayRetryCount = 3;
+  const claimFailure = `structured host claim ${claim.sessionKey} on account ${claim.accountRef} failed: structured resume host claim is unavailable`;
+  const terminalDetail = `relay delivery failed after 3 automatic retries: ${claimFailure}`;
+  let releaseRelay!: () => void;
+  let markRelayStarted!: () => void;
+  const relayStarted = new Promise<void>((resolve) => { markRelayStarted = resolve; });
+  const relayReleased = new Promise<void>((resolve) => { releaseRelay = resolve; });
+  const restoreDelivery = setRelayDeliveryForTest(async () => {
+    markRelayStarted();
+    await relayReleased;
+    throw new Error(claimFailure);
   });
 
-  const raced = await Promise.all([
-    tickPipelines([entry(flow.rounds.at(-1)!.reviewerPath!)], h.ports),
-    tickPipelines([entry(flow.rounds.at(-1)!.reviewerPath!)], h.ports),
-  ]);
-  expect(raced.filter((result) => result.changed)).toHaveLength(1);
+  let flowChanged: boolean;
+  let ingested: Awaited<ReturnType<typeof tickPipelines>>;
+  try {
+    const flowTick = tickFlow(
+      flow,
+      [entry("/codex/stage-1.jsonl")],
+      new Map([["/codex/stage-1.jsonl", entry("/codex/stage-1.jsonl")]]),
+      () => {},
+    );
+    await relayStarted;
+    /* Resolve the in-flight relay immediately before the controller reads the
+       parked stage. The relay exhausts its fourth claim attempt while the
+       controller is entering ingestion, so the terminal flow generation and
+       the parent settlement contend in one real flow/pipeline race. */
+    releaseRelay();
+    const pipelineTick = tickPipelines([entry(finalRound.reviewerPath!)], h.ports);
+    [flowChanged, ingested] = await Promise.all([flowTick, pipelineTick]);
+  } finally {
+    restoreDelivery();
+  }
+  expect(flowChanged).toBe(true);
+  expect(ingested.changed).toBe(true);
+  expect(flow).toMatchObject({ state: "needs_decision", stateDetail: terminalDetail });
 
   const settled = loadPipelines()[0]!;
   const reviewAttempts = settled.runs[1]!.attempts;
@@ -3530,7 +3584,7 @@ test("a parked review stage ingests ten verdicts across three attempts exactly o
     verdict: {
       status: "fail",
       findings: [
-        flow.stateDetail,
+        terminalDetail,
         "High — src/lib/claim.ts:42 — Claim failure stays invisible",
         "Medium — src/lib/flows/state.ts:17 — Round count is stale",
       ],
@@ -3541,7 +3595,9 @@ test("a parked review stage ingests ten verdicts across three attempts exactly o
       hostClaim: claim,
     },
   });
-  expect(settled.stateDetail).toBe(flow.stateDetail);
+  expect(reviewAttempts.filter((candidate) => candidate.verdict !== null)).toHaveLength(1);
+  expect(reviewAttempts.filter((candidate) => candidate.completedAt !== null)).toHaveLength(1);
+  expect(settled.stateDetail).toBe(terminalDetail);
   expect(attempt.output).toContain("Review flow round 5: REQUEST_CHANGES");
   expect(JSON.stringify(attempt)).not.toContain(privateWorktree);
 
