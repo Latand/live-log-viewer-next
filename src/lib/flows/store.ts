@@ -100,6 +100,8 @@ export const FLOWS_SCHEMA_VERSION = 3;
 
 type FlowFile = { schemaVersion?: unknown; flows?: unknown };
 type PresetFile = { presets?: unknown };
+const SAFE_HOST_CLAIM_SESSION = /^(?:claude|codex):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SAFE_HOST_CLAIM_ACCOUNT = /^(?:default|unknown|managed:[0-9a-f]{12})$/;
 
 function atomicWriteJson(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -150,6 +152,10 @@ function isFlow(value: unknown): value is Flow {
     (flow.headRef === undefined || flow.headRef === null || typeof flow.headRef === "string") &&
     (flow.targetSha === undefined || flow.targetSha === null || typeof flow.targetSha === "string") &&
     (flow.spec === undefined || typeof flow.spec === "string") &&
+    (flow.hostClaim === undefined || flow.hostClaim === null || (
+      SAFE_HOST_CLAIM_SESSION.test(flow.hostClaim.sessionKey)
+      && SAFE_HOST_CLAIM_ACCOUNT.test(flow.hostClaim.accountRef)
+    )) &&
     Array.isArray(flow.rounds)
   );
 }
@@ -204,7 +210,11 @@ function flowsFileSignature(): string {
     records stay pristine while callers mutate and save their copies. Deeper
     config leaves are shared; nothing mutates their internals in place. */
 function reviveCachedFlows(flows: Flow[]): Flow[] {
-  return flows.map((flow) => ({ ...flow, rounds: flow.rounds.map((round) => ({ ...round })) }));
+  return flows.map((flow) => ({
+    ...flow,
+    hostClaim: flow.hostClaim ? { ...flow.hostClaim } : null,
+    rounds: flow.rounds.map((round) => ({ ...round })),
+  }));
 }
 
 /** The normalized flow projection keeps the signature cache introduced for
@@ -269,6 +279,7 @@ function parseFlowsFromDisk(): Flow[] {
       : flow.reviewerFallback ?? null,
     pausedState: flow.pausedState ?? null,
     kickoffDelivery: flow.kickoffDelivery ?? null,
+    hostClaim: flow.hostClaim ?? null,
     rounds: flow.rounds.map((round) => ({
       ...round,
       reviewerConversationId: round.reviewerConversationId ?? null,
@@ -318,6 +329,7 @@ function decodeFlow(value: unknown): Flow | null {
       : flow.reviewerFallback ?? null,
     pausedState: flow.pausedState ?? null,
     kickoffDelivery: flow.kickoffDelivery ?? null,
+    hostClaim: flow.hostClaim ?? null,
     rounds: flow.rounds.map((round) => ({
       ...round,
       reviewerConversationId: round.reviewerConversationId ?? null,

@@ -148,6 +148,7 @@ test("flow specs persist in SQLite and legacy flow entries import on first boot"
       reviewerFallback: configuredReviewerFallback(),
       pausedState: null,
       kickoffDelivery: null,
+      hostClaim: null,
     }]);
   } finally {
     if (previousState === undefined) delete process.env.LLV_STATE_DIR;
