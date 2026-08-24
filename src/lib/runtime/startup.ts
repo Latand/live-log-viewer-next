@@ -22,7 +22,7 @@ import {
   type AdoptedCodexHost,
   type StructuredHostAdoptionFilter,
 } from "./registry";
-import { runtimeHostClient, type RuntimeHostClient } from "./client";
+import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationResult } from "./contracts";
 import {
   bindStructuredDeliveryQueue,
@@ -54,12 +54,10 @@ function retainedStartupHostIsCurrent(
   snapshot: RegistryFile,
   item: AdoptedStructuredHost,
   retainedTerminalHostKeys: ReadonlySet<string> = new Set(),
-  restartRecoveryHostKeys: ReadonlySet<string> = new Set(),
 ): boolean {
   const key = sessionKeyId(item.key);
   const entry = snapshot.entries[key];
   if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") return false;
-  if (restartRecoveryHostKeys.has(key) && !retainedTerminalHostKeys.has(key)) return false;
   const conversation = Object.values(snapshot.conversations).find((candidate) =>
     candidate.engine === item.key.engine
       && candidate.generations.at(-1)?.id === item.key.sessionId);
@@ -73,11 +71,10 @@ async function revalidateRetainedStartupHosts(
   retained: readonly AdoptedStructuredHost[],
   snapshot: RegistryFile = registry.readOnlySnapshot(),
   retainedTerminalHostKeys: ReadonlySet<string> = new Set(),
-  restartRecoveryHostKeys: ReadonlySet<string> = new Set(),
 ): Promise<AdoptedStructuredHost[]> {
   const current: AdoptedStructuredHost[] = [];
   for (const item of retained) {
-    if (retainedStartupHostIsCurrent(snapshot, item, retainedTerminalHostKeys, restartRecoveryHostKeys)) current.push(item);
+    if (retainedStartupHostIsCurrent(snapshot, item, retainedTerminalHostKeys)) current.push(item);
     else await item.host.release();
   }
   return current;
@@ -211,7 +208,7 @@ function orchestratorRestartRecoveriesByHostKey(
 
 async function enqueueOrchestratorRestartRecoveries(
   registry: AgentRegistry,
-  client: RuntimeHostClient,
+  client: RuntimeHostClient | null,
   targets: readonly OrchestratorRestartRecoveryTarget[],
   publishedHostKeys: ReadonlySet<string>,
   orchestratorSeats: () => OrchestratorSeat[],
@@ -237,6 +234,9 @@ async function enqueueOrchestratorRestartRecoveries(
       status: result?.status ?? 503,
       error: result?.error ?? "structured delivery unavailable",
     });
+    throw new RuntimeHostUnavailableError(
+      result?.error ?? "orchestrator restart recovery delivery admission failed",
+    );
   }
 }
 
@@ -484,10 +484,9 @@ function structuredStartupAdoptionFilter(
        revive a retired round, held work or not — the successor owns it. */
     if (conversation.supersededBy) return false;
     const orchestratorRecoveryTargets = orchestratorRecoveries.get(sessionKeyId(entry.key));
-    if (orchestratorRecoveryTargets) {
-      const seats = orchestratorSeats();
-      return orchestratorRecoveryTargets.some((target) =>
-        orchestratorRestartRecoveryTargetIsCurrent(registry, target, seats));
+    if (orchestratorRecoveryTargets?.some((target) =>
+      orchestratorRestartRecoveryTargetIsCurrent(registry, target, orchestratorSeats()))) {
+      return true;
     }
     const conversationId = registry.canonicalConversationId(conversation.id);
     const hasPendingWork = pendingDeliveryConversationIds.has(conversationId)
@@ -537,7 +536,6 @@ export async function adoptStructuredHostsAtStartup(
     orchestratorRestartRecoveryTargets(registry, orchestratorSeats()),
   );
   const orchestratorRecoveriesByHostKey = orchestratorRestartRecoveriesByHostKey(orchestratorRecoveries);
-  const restartRecoveryHostKeys = new Set(orchestratorRecoveriesByHostKey.keys());
   const controllerBoundEarly = client !== null;
   if (client && !hasStructuredDeliveryController(registry)) {
     await bindStructuredDeliveryQueue([], {
@@ -562,7 +560,6 @@ export async function adoptStructuredHostsAtStartup(
     retryAdoptedHosts,
     registry.readOnlySnapshot(),
     orchestratorHostKeys,
-    restartRecoveryHostKeys,
   );
   rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
   /* Pending work makes a terminal conversation adoption-eligible. Clear any
@@ -681,19 +678,14 @@ export async function adoptStructuredHostsAtStartup(
     nextAdoptedHosts,
     registry.readOnlySnapshot(),
     orchestratorHostKeys,
-    restartRecoveryHostKeys,
   );
   rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
   const candidateHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
-  const shouldRetainCandidateOrAdopt: StructuredHostAdoptionFilter = (entry) => {
-    const key = sessionKeyId(entry.key);
-    return restartRecoveryHostKeys.has(key)
-      ? candidateHostKeys.has(key) && shouldAdopt(entry)
-      : candidateHostKeys.has(key) || shouldAdopt(entry);
-  };
+  const shouldRetainCandidateOrAdopt: StructuredHostAdoptionFilter = (entry) =>
+    candidateHostKeys.has(sessionKeyId(entry.key)) || shouldAdopt(entry);
   const candidateCodexHosts = nextAdoptedHosts.filter(
     (item): item is AdoptedCodexHost => item.key.engine === "codex"
-      && !restartRecoveryHostKeys.has(sessionKeyId(item.key)),
+      && !orchestratorHostKeys.has(sessionKeyId(item.key)),
   );
   const existingCodexContinuations = client
     ? await interruptedCodexContinuations(registry, client, candidateCodexHosts)
@@ -711,7 +703,6 @@ export async function adoptStructuredHostsAtStartup(
     nextAdoptedHosts,
     publicationSnapshot,
     orchestratorHostKeys,
-    restartRecoveryHostKeys,
   );
   rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
   const finalShouldAdopt = structuredStartupAdoptionFilter(
@@ -722,12 +713,8 @@ export async function adoptStructuredHostsAtStartup(
     orchestratorSeats,
   );
   const finalHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
-  const shouldPublish: StructuredHostAdoptionFilter = (entry) => {
-    const key = sessionKeyId(entry.key);
-    return restartRecoveryHostKeys.has(key)
-      ? finalHostKeys.has(key) && finalShouldAdopt(entry)
-      : finalHostKeys.has(key) || finalShouldAdopt(entry);
-  };
+  const shouldPublish: StructuredHostAdoptionFilter = (entry) =>
+    finalHostKeys.has(sessionKeyId(entry.key)) || finalShouldAdopt(entry);
   const interruptedCodex = interruptedCodexConversations(
     registry,
     shouldPublish,
@@ -736,7 +723,7 @@ export async function adoptStructuredHostsAtStartup(
   );
   const finalCodexHosts = nextAdoptedHosts.filter(
     (item): item is AdoptedCodexHost => item.key.engine === "codex"
-      && !restartRecoveryHostKeys.has(sessionKeyId(item.key)),
+      && !orchestratorHostKeys.has(sessionKeyId(item.key)),
   );
   reportProgress("finalizing structured delivery");
   if (controllerBoundEarly) {
@@ -744,14 +731,14 @@ export async function adoptStructuredHostsAtStartup(
   } else {
     await bindStructuredDeliveryQueue(nextAdoptedHosts, { registry, client });
   }
+  await enqueueOrchestratorRestartRecoveries(
+    registry,
+    client,
+    orchestratorRecoveries,
+    finalHostKeys,
+    orchestratorSeats,
+  );
   if (client) {
-    await enqueueOrchestratorRestartRecoveries(
-      registry,
-      client,
-      orchestratorRecoveries,
-      finalHostKeys,
-      orchestratorSeats,
-    );
     await enqueueInterruptedCodexContinuations(
       registry,
       client,
