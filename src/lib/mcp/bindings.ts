@@ -29,6 +29,7 @@ import {
 import type { AttentionRequestV1, FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
 import { applyBoardCommand } from "@/lib/board/command";
 import { boardFor } from "@/lib/board/store";
+import { MAX_BOARD_MUTATIONS_PER_REQUEST, MAX_BOARD_PATH_LIST_ITEMS } from "@/lib/board/validation";
 import { applyConversationAction } from "@/lib/conversation/actions";
 import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
@@ -2142,34 +2143,56 @@ function writeArchivePlacement(
 ): { appliedPaths: ReadonlySet<string> } {
   let board = dependencies.boardFor(project);
   const appliedPaths = new Set<string>();
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const pendingPaths = [...new Set(paths)]
-      .filter((pathname) => action === "archive"
+  const uniquePaths = [...new Set(paths)];
+  const batchSize = action === "archive"
+    ? MAX_BOARD_PATH_LIST_ITEMS
+    : MAX_BOARD_MUTATIONS_PER_REQUEST;
+  for (let offset = 0; offset < uniquePaths.length; offset += batchSize) {
+    const batch = uniquePaths.slice(offset, offset + batchSize);
+    let settled = false;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const pendingPaths = batch.filter((pathname) => action === "archive"
         ? !board.prefs.hidden.includes(pathname)
         : board.prefs.hidden.includes(pathname));
-    if (pendingPaths.length === 0) return { appliedPaths };
+      if (pendingPaths.length === 0) {
+        settled = true;
+        break;
+      }
 
-    const result = dependencies.applyBoardCommand({
-      schemaVersion: 1,
-      project,
-      baseRevision: board.revision,
-      ...(action === "archive"
-        ? { patch: { hidden: pendingPaths } }
-        : {
-            mutations: pendingPaths.map((pathname) => ({
-              kind: "restore" as const,
-              path: pathname,
-              placement: "auto" as const,
-            })),
-          }),
-    }, snapshot);
-    board = result.board;
-    if (result.ok && result.applied) {
-      for (const pathname of pendingPaths) appliedPaths.add(pathname);
-      return { appliedPaths };
+      const previousBoard = board;
+      const result = dependencies.applyBoardCommand({
+        schemaVersion: 1,
+        project,
+        baseRevision: board.revision,
+        ...(action === "archive"
+          ? { patch: { hidden: pendingPaths } }
+          : {
+              mutations: pendingPaths.map((pathname) => ({
+                kind: "restore" as const,
+                path: pathname,
+                placement: "auto" as const,
+              })),
+            }),
+      }, snapshot);
+      board = result.board;
+      if (result.ok && result.applied) {
+        const hiddenBefore = new Set(previousBoard.prefs.hidden);
+        const hiddenAfter = new Set(board.prefs.hidden);
+        for (const pathname of uniquePaths) {
+          const changed = action === "archive"
+            ? !hiddenBefore.has(pathname) && hiddenAfter.has(pathname)
+            : hiddenBefore.has(pathname) && !hiddenAfter.has(pathname);
+          if (changed) appliedPaths.add(pathname);
+        }
+        settled = true;
+        break;
+      }
+    }
+    if (!settled) {
+      throw new Error(`board state changed repeatedly while ${action === "archive" ? "archiving" : "unarchiving"} conversations`);
     }
   }
-  throw new Error(`board state changed repeatedly while ${action === "archive" ? "archiving" : "unarchiving"} conversations`);
+  return { appliedPaths };
 }
 
 async function archiveConversationAction(

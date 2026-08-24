@@ -37,6 +37,73 @@ afterEach(() => {
   for (const sandbox of sandboxes.splice(0)) fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
+function bulkArchiveFixture(
+  conversationCount: number,
+  generationsPerConversation: number,
+  beforeApply?: (input: unknown, call: number, boardFile: string, project: string) => void,
+) {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-bulk-"));
+  sandboxes.push(sandbox);
+  const boardFile = path.join(sandbox, "board.json");
+  const project = "fixture-bulk-archive-project";
+  const conversationIds = Array.from(
+    { length: conversationCount },
+    (_, index) => `conversation_bulk_${index}`,
+  );
+  const pathsByTarget = conversationIds.map((_, conversationIndex) => Array.from(
+    { length: generationsPerConversation },
+    (_, generationIndex) => `/fixtures/bulk-archive/conversation-${conversationIndex}/generation-${generationIndex}.jsonl`,
+  ));
+  const launchProfile = {
+    cwd: "/fixtures/bulk-archive",
+    project,
+    model: null,
+    effort: null,
+  };
+  const emptyRegistrySnapshot = new AgentRegistry(path.join(sandbox, "agent-registry.json")).readOnlySnapshot();
+  const registrySnapshot: typeof emptyRegistrySnapshot = {
+    ...emptyRegistrySnapshot,
+    conversations: Object.fromEntries(conversationIds.map((conversationId, index) => [conversationId, {
+      id: conversationId,
+      generations: pathsByTarget[index]!.map((pathname) => ({ path: pathname, launchProfile })),
+      continuityPaths: [],
+      abandonedContinuityPaths: [],
+      migration: null,
+      projectOwnership: {
+        project,
+        source: "operator",
+        setAt: "2026-08-24T08:00:00.000Z",
+        operationId: `ownership_${conversationId}`,
+      },
+    } as never])),
+  };
+  let commandCalls = 0;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => registrySnapshot,
+    completedFileScan: async () => {
+      throw new Error("registered bulk archiving must not scan transcripts");
+    },
+    boardFor: (key: string) => boardFor(key, boardFile),
+    applyBoardCommand: (input: unknown, snapshot: typeof registrySnapshot) => {
+      commandCalls += 1;
+      beforeApply?.(input, commandCalls, boardFile, project);
+      return applyBoardCommand(input, {
+        registrySnapshot: () => snapshot,
+        patchBoard: (key, revision, patch) => patchBoard(key, revision, patch, boardFile),
+        mutateBoard: (key, revision, mutations) => mutateBoard(key, revision, mutations, boardFile),
+      });
+    },
+  } as never);
+  return {
+    bindings,
+    boardFile,
+    project,
+    targets: conversationIds.map((conversationId) => ({ conversationId })),
+    pathsByTarget,
+    allPaths: pathsByTarget.flat(),
+  };
+}
+
 test("spawn_agent reaches spawn validation through the operator admission lane", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-binding-spawn-"));
   sandboxes.push(sandbox);
@@ -1379,6 +1446,113 @@ test("conversation_action attributes archive outcomes only to paths written by i
   });
   expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
   expect(commandCalls).toBe(2);
+});
+
+test("conversation_action chunks archive expansions at the board path-list limit", async () => {
+  const fixture = bulkArchiveFixture(86, 6);
+
+  const archived = await fixture.bindings.conversation_action({
+    clientRequestId: "archive-bulk-path-limit",
+    action: "archive",
+    targets: fixture.targets,
+  });
+
+  expect(archived).toMatchObject({
+    projectsTouched: [fixture.project],
+    outcomes: fixture.pathsByTarget.map((paths, index) => ({
+      conversationId: fixture.targets[index]!.conversationId,
+      transcriptPath: paths.at(-1),
+      paths,
+      project: fixture.project,
+      outcome: "archived",
+    })),
+  });
+  expect(boardFor(fixture.project, fixture.boardFile)).toMatchObject({
+    revision: 2,
+    prefs: { hidden: fixture.allPaths },
+  });
+
+  const repeated = await fixture.bindings.conversation_action({
+    clientRequestId: "archive-bulk-path-limit-again",
+    action: "archive",
+    targets: fixture.targets,
+  });
+  expect(repeated).toMatchObject({
+    projectsTouched: [],
+    outcomes: fixture.targets.map(() => ({ paths: [], outcome: "already-archived" })),
+  });
+  expect(boardFor(fixture.project, fixture.boardFile).revision).toBe(2);
+});
+
+test("conversation_action chunks symmetric unarchive at the board mutation limit", async () => {
+  const fixture = bulkArchiveFixture(65, 2);
+  await fixture.bindings.conversation_action({
+    clientRequestId: "archive-bulk-mutation-limit",
+    action: "archive",
+    targets: fixture.targets,
+  });
+
+  const unarchived = await fixture.bindings.conversation_action({
+    clientRequestId: "unarchive-bulk-mutation-limit",
+    action: "unarchive",
+    targets: fixture.targets,
+  });
+
+  expect(unarchived).toMatchObject({
+    projectsTouched: [fixture.project],
+    outcomes: fixture.pathsByTarget.map((paths, index) => ({
+      conversationId: fixture.targets[index]!.conversationId,
+      transcriptPath: paths.at(-1),
+      paths,
+      project: fixture.project,
+      outcome: "unarchived",
+    })),
+  });
+  expect(boardFor(fixture.project, fixture.boardFile)).toMatchObject({
+    revision: 3,
+    prefs: { hidden: [] },
+  });
+
+  const repeated = await fixture.bindings.conversation_action({
+    clientRequestId: "unarchive-bulk-mutation-limit-again",
+    action: "unarchive",
+    targets: fixture.targets,
+  });
+  expect(repeated).toMatchObject({
+    projectsTouched: [],
+    outcomes: fixture.targets.map(() => ({ paths: [], outcome: "not-found" })),
+  });
+  expect(boardFor(fixture.project, fixture.boardFile).revision).toBe(3);
+});
+
+test("conversation_action aggregates only successful chunks across a revision conflict", async () => {
+  const fixture = bulkArchiveFixture(86, 6, (input, call, boardFile, project) => {
+    if (call !== 2) return;
+    const patch = (input as { patch: { hidden: string[] } }).patch;
+    expect(patch.hidden).toEqual(fixture.allPaths.slice(512));
+    expect(patchBoard(project, 1, { hidden: patch.hidden }, boardFile)).toMatchObject({
+      ok: true,
+      applied: true,
+    });
+  });
+
+  const archived = await fixture.bindings.conversation_action({
+    clientRequestId: "archive-bulk-conflict",
+    action: "archive",
+    targets: fixture.targets,
+  });
+
+  expect(archived).toMatchObject({
+    projectsTouched: [fixture.project],
+    outcomes: [
+      ...fixture.pathsByTarget.slice(0, -1).map((paths) => ({ paths, outcome: "archived" })),
+      { paths: fixture.pathsByTarget.at(-1)!.slice(0, 2), outcome: "archived" },
+    ],
+  });
+  expect(boardFor(fixture.project, fixture.boardFile)).toMatchObject({
+    revision: 2,
+    prefs: { hidden: fixture.allPaths },
+  });
 });
 
 test("conversation_action refuses archive batches above 100 before reading board or runtime state", async () => {
