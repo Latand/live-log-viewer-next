@@ -194,6 +194,9 @@ type ConnectorRecord = {
       that cannot be parsed is a connector that cannot be STOPPED, so the
       feed is a condition of ADOPTION rather than of reading the record. */
   feedFile?: string;
+  /** ISO instant this feed listener started, which is the earliest moment its
+      feed can vouch for (#1091). Optional for the same reason as `feedFile`. */
+  feedSince?: string;
 };
 
 let liveConnectorChild: {
@@ -223,6 +226,7 @@ function readConnectorRecord(): ConnectorRecord | null {
       || typeof row.identity !== "string" || typeof row.credentialRef !== "string"
       || typeof row.connectorTokenSha256 !== "string" || typeof row.command !== "string" || typeof row.entrypoint !== "string") return null;
     if (row.feedFile !== undefined && typeof row.feedFile !== "string") return null;
+    if (row.feedSince !== undefined && typeof row.feedSince !== "string") return null;
     return row as ConnectorRecord;
   } catch {
     return null;
@@ -256,6 +260,33 @@ function recordedConnectorRunsFeed(binding: ConnectorBinding): boolean {
   return record?.feedFile === telegramIncomingFeedPath(binding.credentialRef);
 }
 
+/**
+ * The earliest instant this credential generation's feed can vouch for, or
+ * `null` when nothing proves one (#1091).
+ *
+ * A report asks the feed for "the dialogs active since the last run", and the
+ * feed can only answer for the time it was LISTENING. The file itself cannot
+ * say when that began — it is append-only across connector generations, so a
+ * line older than the current listener proves nothing about the quiet stretch
+ * between them — and `incoming_feed_status` reports only that a feed is
+ * running, never since when. The record written at spawn is the durable
+ * evidence, and a listener adopted across a Viewer restart keeps the record it
+ * was spawned with, so an uninterrupted listener keeps its original coverage
+ * while a replaced one starts a new one at its own spawn.
+ *
+ * Coverage is claimed from the spawn rather than from the readiness probe a
+ * few seconds later, which is the only direction that can overstate it — by
+ * the seconds a connector takes to reach Telegram. What the caller does with
+ * this is decide whether a window is covered at all; a boundary that lands
+ * inside those seconds is not the omission class this exists to catch.
+ */
+export function connectorFeedCoverageSince(credentialRef: string): number | null {
+  const record = readConnectorRecord();
+  if (!record || record.feedFile !== telegramIncomingFeedPath(credentialRef) || !record.feedSince) return null;
+  const since = Date.parse(record.feedSince);
+  return Number.isFinite(since) ? since : null;
+}
+
 function ownsRecordedConnector(binding: ConnectorBinding): boolean {
   const record = readConnectorRecord();
   return Boolean(record
@@ -285,7 +316,11 @@ function recordConnectorProcess(child: ConnectorChild, spec: ProcessSpec, bindin
     connectorTokenSha256: connectorTokenSha256(binding.connectorToken),
     command: spec.command,
     entrypoint: spec.args[0],
-    ...(spec.env?.TELEGRAM_EVENT_FEED_FILE ? { feedFile: spec.env.TELEGRAM_EVENT_FEED_FILE } : {}),
+    /* The feed and the instant it starts covering are recorded together: a
+       feed file with no start stamp vouches for nothing (#1091). */
+    ...(spec.env?.TELEGRAM_EVENT_FEED_FILE
+      ? { feedFile: spec.env.TELEGRAM_EVENT_FEED_FILE, feedSince: new Date().toISOString() }
+      : {}),
   };
   const tmp = `${pidFilePath()}.${process.pid}.tmp`;
   try {

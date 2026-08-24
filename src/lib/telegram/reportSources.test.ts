@@ -1,15 +1,36 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import type { FeedDialog } from "./reportFeed";
-import {
+const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-telegram-sources-"));
+const OLD_STATE = process.env.LLV_STATE_DIR;
+const OLD_PORT = process.env.LLV_TELEGRAM_MCP_PORT;
+process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
+/* A port nothing listens on. The production port's refusals are asserted by
+   the sentence they throw, and this is what guarantees a REGRESSION in one of
+   them cannot reach the connector actually serving this machine. */
+process.env.LLV_TELEGRAM_MCP_PORT = "59809";
+
+const {
   CHAT_PAGE_LIMIT,
+  connectorReadPort,
   listReportGroups,
   MAX_PRIVATE_DIALOGS,
   MAX_PROBES,
   planReportSources,
-  type TelegramChatSummary,
-  type TelegramReadPort,
-} from "./reportSources";
+} = await import("./reportSources");
+
+import type { FeedDialog } from "./reportFeed";
+import type { TelegramChatSummary, TelegramReadPort } from "./reportSources";
+
+afterAll(() => {
+  fs.rmSync(SANDBOX, { recursive: true, force: true });
+  if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = OLD_STATE;
+  if (OLD_PORT === undefined) delete process.env.LLV_TELEGRAM_MCP_PORT;
+  else process.env.LLV_TELEGRAM_MCP_PORT = OLD_PORT;
+});
 
 /**
  * The fake connector: chats in the order the real one returns them (pinned and
@@ -28,6 +49,10 @@ class FakeTelegram implements TelegramReadPort {
   maxConcurrent = 0;
   /** What the connector's incoming feed recorded, newest first (#1091). */
   feed: FeedDialog[] = [];
+  /** The earliest instant this feed can vouch for. The default models the
+      ordinary case — a listener that has been up since before the window —
+      so a test about coverage has to say so by moving it. */
+  feedCoveredSinceMs: number | null = Date.parse("2026-08-19T07:00:00.000Z");
   /** Set to model a connector that is running no feed to read. */
   feedFailure: Error | null = null;
   constructor(
@@ -38,13 +63,16 @@ class FakeTelegram implements TelegramReadPort {
     this.calls.push("getMe");
     return { name: "Account A", username: "account_a", id: "770000001" };
   }
-  async feedDialogs(input: { sinceMs: number }): Promise<FeedDialog[]> {
+  async feedDialogs(input: { sinceMs: number }): Promise<{ dialogs: FeedDialog[]; coveredSinceMs: number | null }> {
     this.calls.push(`feedDialogs:${input.sinceMs}`);
     return this.track(() => {
       /* The production port throws when the connector is running no feed at
          all, or when its file cannot be read safely (#1091). */
       if (this.feedFailure) throw this.feedFailure;
-      return this.feed.filter((row) => Date.parse(row.lastMessageAt) >= input.sinceMs);
+      return {
+        dialogs: this.feed.filter((row) => Date.parse(row.lastMessageAt) >= input.sinceMs),
+        coveredSinceMs: this.feedCoveredSinceMs,
+      };
     });
   }
   async listChats(input: { kind: "user" | "group"; limit: number }): Promise<TelegramChatSummary[]> {
@@ -277,6 +305,98 @@ test("a connector with no feed fails the plan instead of walking alone", async (
   /* The GROUP picker is untouched by it: choosing sources is not a report run,
      and it reads no feed. */
   expect((await listReportGroups(port)).length).toBe(0);
+});
+
+test("a feed younger than the window cannot stand in for a walk that ran out of budget", async () => {
+  /* The tail's second regression (#1091). The feed is RUNNING — so the pass
+     does not fail on the missing-feed rule — but it started this morning,
+     while the window opened yesterday. Everything before the listener began is
+     the walk's problem alone, and on this account the walk stops at the probe
+     budget over a list ordered by pins: whatever sat past it would be missing
+     from a plan that reported success. It fails instead. */
+  const many = Array.from({ length: MAX_PROBES + 20 }, (_, index) => dialog(String(9000 + index), `Dialog ${index}`));
+  const dates = Object.fromEntries(many.map((chat) => [chat.id, "2026-07-01T09:00:00.000Z"]));
+  const port = new FakeTelegram(many, dates);
+  port.feedCoveredSinceMs = Date.parse("2026-08-21T05:00:00.000Z");
+
+  await expect(planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" })).rejects.toThrow(/cover/i);
+});
+
+test("a feed that cannot vouch for anything is the same answer as a feed that started late", async () => {
+  /* No coverage evidence at all — a connector record from before the stamp
+     existed. Unknown is not "covered": the same bar applies. */
+  const many = Array.from({ length: MAX_PROBES + 20 }, (_, index) => dialog(String(9500 + index), `Dialog ${index}`));
+  const dates = Object.fromEntries(many.map((chat) => [chat.id, "2026-07-01T09:00:00.000Z"]));
+  const port = new FakeTelegram(many, dates);
+  port.feedCoveredSinceMs = null;
+
+  await expect(planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" })).rejects.toThrow(/cover/i);
+});
+
+test("a young feed still plans the window when the walk reached every candidate", async () => {
+  /* The rule is about what could be MISSED, not about the feed's age: an
+     account whose whole dialog list fits inside the budget was judged dialog
+     by dialog, on last message date, so nothing could hide past a bound. A run
+     on the first day after a connect is an ordinary run here. */
+  const port = new FakeTelegram(
+    [dialog("901", "Dialog A"), dialog("902", "Dialog B")],
+    { "901": "2026-08-20T15:00:00.000Z", "902": "2026-06-01T09:00:00.000Z" },
+  );
+  port.feedCoveredSinceMs = Date.parse("2026-08-21T05:00:00.000Z");
+
+  const plan = await planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" });
+
+  expect(plan.privateDialogs.map((row) => row.id)).toEqual(["901"]);
+  expect(plan.probeBudgetExhausted).toBe(false);
+});
+
+test("a young feed over a dialog list longer than the enumeration fails too", async () => {
+  /* The other end of the same hole: the probe budget was never reached, but
+     the paged enumeration stopped on a FULL page, so the list did not end
+     where the walk did. Whatever sits below it was never even a candidate. */
+  const rooms: TelegramChatSummary[] = Array.from({ length: 3 * CHAT_PAGE_LIMIT }, (_, index) => ({
+    id: `-100${2000 + index}`,
+    kind: "group",
+    title: `Room ${index}`,
+    username: null,
+    unread: 0,
+  }));
+  const port = new FakeTelegram(rooms, {});
+  port.feedCoveredSinceMs = Date.parse("2026-08-21T05:00:00.000Z");
+
+  await expect(planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" })).rejects.toThrow(/cover/i);
+
+  /* The same list with the feed listening since before the window is a plan:
+     every dialog that received anything is in it whatever the walk enumerated. */
+  const covered = new FakeTelegram(rooms, {});
+  expect((await planReportSources(covered, { ...WINDOW, groups: [], promptVersion: "v1" })).privateDialogs).toEqual([]);
+});
+
+test("one read port answers for exactly one credential generation (#1091)", async () => {
+  /* The critical hole this closes: the port re-reads the stored credential on
+     every call, so a logout and reconnect inside the minute a source pass
+     takes would have had the SECOND account answer the listings and probes of
+     a pass the FIRST account's id check authorized — one plan, two people's
+     correspondents. The pinned generation refuses instead, before the call
+     leaves this process. */
+  const { saveTelegramSession } = await import("./sessionStore");
+  const first = saveTelegramSession("1ApWapzMBu4placeholder-not-a-real-session");
+  const port = connectorReadPort(first.credentialRef);
+
+  const second = saveTelegramSession("1BpWapzMBu4placeholder-also-not-a-session");
+  expect(second.credentialRef).not.toBe(first.credentialRef);
+
+  await expect(port.listChats({ kind: "user", limit: 10 })).rejects.toThrow(/generation changed/);
+  await expect(port.getMe()).rejects.toThrow(/generation changed/);
+  await expect(port.lastMessageAt("101")).rejects.toThrow(/generation changed/);
+  /* A port that pins nothing — the operator's own group picker, one action —
+     binds itself to the generation of its FIRST read, so a swap inside that
+     one pass ends the same way. (The first call here fails on the dead port
+     this file points at; the pin is taken before it is attempted.) */
+  const unpinned = connectorReadPort();
+  await expect(unpinned.listChats({ kind: "user", limit: 10 })).rejects.toThrow();
+  saveTelegramSession("1CpWapzMBu4placeholder-a-third-session");
+  await expect(unpinned.listChats({ kind: "user", limit: 10 })).rejects.toThrow(/generation changed/);
 });
 
 test("a group below the connector's pre-filter ceiling is still selectable", async () => {

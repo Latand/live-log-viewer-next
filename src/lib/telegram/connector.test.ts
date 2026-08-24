@@ -12,7 +12,7 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_TELEGRAM_API_ID = "12345";
 process.env.LLV_TELEGRAM_API_HASH = "0123456789abcdef0123456789abcdef";
 
-const { TELEGRAM_READ_TOOL_ALLOWLIST, connectorServerName, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
+const { TELEGRAM_READ_TOOL_ALLOWLIST, connectorFeedCoverageSince, connectorServerName, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
 const { telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
 
 import type { ConnectorProbe, TelegramConnectorPorts } from "./connector";
@@ -246,7 +246,7 @@ test("a listening connector that runs no feed is replaced, not adopted (#1091)",
 /** A connector record of the shape the supervisor writes, so the REAL feed
     eligibility check has something to read. Nothing here is a live process:
     the check reads the record only. */
-async function writeConnectorRecord(feedFile: string): Promise<void> {
+async function writeConnectorRecord(feedFile: string, feedSince?: string): Promise<void> {
   fs.writeFileSync(
     path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json"),
     JSON.stringify({
@@ -258,10 +258,36 @@ async function writeConnectorRecord(feedFile: string): Promise<void> {
       command: (await import("./packaging")).telegramVenvPython(),
       entrypoint: (await import("./packaging")).telegramMcpServerPath(),
       feedFile,
+      ...(feedSince ? { feedSince } : {}),
     }),
     { mode: 0o600 },
   );
 }
+
+test("the record says since when this generation's feed can be believed (#1091)", async () => {
+  /* A report asks the feed for the dialogs active since the last run, and the
+     feed can only answer for the time it was listening — which the file itself
+     cannot say and `incoming_feed_status` does not report. The record written
+     at spawn is the evidence, and it is scoped to the credential generation
+     for the same reason the feed file is: another account's listener says
+     nothing about this one's window. */
+  const { telegramIncomingFeedPath } = await import("./sessionStore");
+  const startedAt = "2026-08-21T04:00:00.000Z";
+
+  await writeConnectorRecord(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef), startedAt);
+  expect(connectorFeedCoverageSince(CONNECTOR_SESSION.credentialRef)).toBe(Date.parse(startedAt));
+
+  /* Another generation's listener: no coverage of THIS account's window. */
+  expect(connectorFeedCoverageSince("credential-generation-of-another-account")).toBeNull();
+
+  /* A feed with no start stamp vouches for nothing rather than for
+     everything — the caller treats unknown coverage as uncovered. */
+  await writeConnectorRecord(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef));
+  expect(connectorFeedCoverageSince(CONNECTOR_SESSION.credentialRef)).toBeNull();
+
+  fs.rmSync(path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json"), { force: true });
+  expect(connectorFeedCoverageSince(CONNECTOR_SESSION.credentialRef)).toBeNull();
+});
 
 test("a listener writing another credential generation's feed is not adopted (#1091)", async () => {
   const { telegramIncomingFeedPath } = await import("./sessionStore");
@@ -473,7 +499,7 @@ test("stop waits through SIGKILL escalation until a TERM-resistant connector exi
     expect(childPid).toBeGreaterThan(1);
     const pidFile = path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json");
     const recorded = JSON.parse(fs.readFileSync(pidFile, "utf8")) as {
-      pid: number; identity: string; credentialRef: string; connectorTokenSha256: string; feedFile?: string;
+      pid: number; identity: string; credentialRef: string; connectorTokenSha256: string; feedFile?: string; feedSince?: string;
     };
     expect(recorded.pid).toBe(childPid);
     expect(recorded.credentialRef).toBe(CONNECTOR_SESSION.credentialRef);
@@ -482,6 +508,10 @@ test("stop waits through SIGKILL escalation until a TERM-resistant connector exi
        checks before adopting it (#1091). */
     const { telegramIncomingFeedPath } = await import("./sessionStore");
     expect(recorded.feedFile).toBe(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef));
+    /* Recorded together with it: the instant this listener started, which is
+       the earliest moment its feed can vouch for a report's window (#1091). */
+    expect(Date.parse(recorded.feedSince!)).toBeLessThanOrEqual(Date.now());
+    expect(connectorFeedCoverageSince(CONNECTOR_SESSION.credentialRef)).toBe(Date.parse(recorded.feedSince!));
     expect(recorded.connectorTokenSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(fs.readFileSync(pidFile, "utf8")).not.toContain(CONNECTOR_SESSION.connectorToken);
 

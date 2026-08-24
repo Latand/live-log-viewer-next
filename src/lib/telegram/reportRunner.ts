@@ -91,8 +91,10 @@ export type ReportRunnerLogCode =
 export interface ReportRunnerPorts {
   now(): number;
   connection(): StoredTelegramConnection;
-  /** The Viewer's own bounded reads: the account check and the source pass. */
-  readPort(): TelegramReadPort;
+  /** The Viewer's own bounded reads: the account check and the source pass,
+      every one of them bound to the credential generation the run verified
+      (#1091). */
+  readPort(credentialRef: string): TelegramReadPort;
   /** Runs the one-time id migration a pre-#1091 connection is owed: the
       ordinary health check, which re-reads the account through the login
       bridge and persists whatever id it reports. */
@@ -152,13 +154,24 @@ export const productionReportRunnerPorts: ReportRunnerPorts = {
     try { return readTelegramConnection(); }
     catch { return { version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "session_unsafe", identityIdUpgradedAt: null }; }
   },
-  readPort: connectorReadPort,
+  readPort: (credentialRef) => connectorReadPort(credentialRef),
   migrateIdentity,
   spawn: launchReportConversation,
   reportRunConversation,
   conversationLive,
   log: (code) => console.error(`[telegram report] ${code}`),
 };
+
+/** What one run is bound to: the recorded numeric id it verified against and
+    the credential generation that recorded it (#1091). */
+type VerifiedAccount = { id: string; credentialRef: string };
+
+/** A record verifies a run only when it carries BOTH — an id with no
+    generation names an account nothing can be read as. */
+function verifiedAccount(connection: StoredTelegramConnection): VerifiedAccount | null {
+  const id = connection.identity?.id;
+  return id && connection.credentialRef ? { id, credentialRef: connection.credentialRef } : null;
+}
 
 export type RunLaunchResult =
   /** The run is durable and visible; its conversation opens behind this. */
@@ -174,13 +187,17 @@ export class TelegramReportRunner {
 
   constructor(private readonly ports: ReportRunnerPorts = productionReportRunnerPorts) {}
 
-  /** Whether a report run may hold the connector right now: the feature is on
-      and the account is connected. It is passed to the launch as a CALLBACK,
-      not a value, so admission resolves it after the source pass rather than
-      before it — a logout during that minute must revoke the grant, not be
-      overtaken by state read before it happened. */
-  grantActive(): boolean {
-    return readTelegramReports().settings.enabled && this.ports.connection().status === "connected";
+  /** Whether a report run may hold the connector right now: the feature is on,
+      the account is connected, and — for a run that verified one — it is still
+      the credential generation that run was planned for (#1091). It is passed
+      to the launch as a CALLBACK, not a value, so admission resolves it after
+      the source pass rather than before it: a logout during that minute must
+      revoke the grant, and a reconnect as somebody else must revoke it too
+      rather than hand the new account's connector to the old account's plan. */
+  grantActive(credentialRef: string | null = null): boolean {
+    const connection = this.ports.connection();
+    if (credentialRef !== null && connection.credentialRef !== credentialRef) return false;
+    return readTelegramReports().settings.enabled && connection.status === "connected";
   }
 
   payload(): TelegramReportsPayload {
@@ -315,8 +332,8 @@ export class TelegramReportRunner {
   }
 
   /**
-   * The recorded identity a run may verify against, or `null` when there is
-   * none (#1091).
+   * The recorded identity a run may verify against and the credential
+   * generation that recorded it, or `null` when there is none (#1091).
    *
    * "None" means the record carries no numeric account id, which is the state
    * every connection enrolled before #1091 starts in. The repair is the
@@ -328,10 +345,15 @@ export class TelegramReportRunner {
    * has already been stamped and is not re-probed: it simply has nothing to
    * verify against, and the run fails closed rather than falling back to a
    * name.
+   *
+   * The generation travels WITH the id because the id alone does not say which
+   * credential produced it: everything the run does afterwards is bound to
+   * this pair, so a logout and reconnect cannot slip a second account's
+   * dialogs behind a check the first one passed.
    */
-  private async verifiedIdentity(): Promise<{ id: string } | null> {
+  private async verifiedIdentity(): Promise<VerifiedAccount | null> {
     const stored = this.ports.connection();
-    if (stored.identity?.id) return { id: stored.identity.id };
+    if (stored.identity?.id) return verifiedAccount(stored);
     /* Nothing recorded to migrate, or a record already stamped as migrated:
        either way there is no id and no second bridge read to try for one. */
     if (!stored.identity || stored.identityIdUpgradedAt) return null;
@@ -340,7 +362,7 @@ export class TelegramReportRunner {
     /* The migration re-reads the account, so it can also discover that the
        session no longer authorizes anything. */
     if (connection.status !== "connected") return null;
-    return connection.identity?.id ? { id: connection.identity.id } : null;
+    return verifiedAccount(connection);
   }
 
   private async executeLocked(runId: string): Promise<void> {
@@ -348,7 +370,6 @@ export class TelegramReportRunner {
     const active = file.active;
     if (!active || active.runId !== runId) return;
     const window = { startAt: active.windowStart, endAt: active.windowEnd };
-    const port = this.ports.readPort();
 
     /* The account check, before anything reads a chat. It needs the recorded
        numeric id, so a connection enrolled before that id existed completes its
@@ -361,6 +382,10 @@ export class TelegramReportRunner {
       this.settle(runId, "failed", "account_check_failed", false);
       return;
     }
+    /* Every read from here on is bound to the generation that recorded the id
+       being verified, so the connector cannot answer this pass as a different
+       account (#1091). */
+    const port = this.ports.readPort(recorded.credentialRef);
 
     /* A mismatch is the issue's `account-mismatch` outcome: no report, no
        window advance, and — because this runs before the source pass — no read
@@ -401,6 +426,19 @@ export class TelegramReportRunner {
       deleteRunScratch(runId);
       return;
     }
+    /* A reconnect inside that same minute is the other way this run stops
+       being about the account it verified (#1091). Every read the plan is made
+       of was refused the moment the generation moved, so what is on disk is
+       one account's — but the conversation about to be launched would hold the
+       NEW account's connector, so there is nothing left to run. The plan goes
+       with it rather than sitting in scratch naming the departed account's
+       correspondents. */
+    if (this.ports.connection().credentialRef !== recorded.credentialRef) {
+      this.ports.log("account_mismatch");
+      deleteRunScratch(runId);
+      this.settle(runId, "account-mismatch", null, false);
+      return;
+    }
     /* The operator's own brief, with the Viewer's non-negotiable preamble in
        front of it. Their text may name private chats, which is why it reaches
        nothing but the run it was written for. */
@@ -430,8 +468,9 @@ export class TelegramReportRunner {
           ["prompt"]: prompt,
         },
         /* The grant is decided by the report session class, inside admission,
-           from durable state read at that instant. */
-        grantActive: () => this.grantActive(),
+           from durable state read at that instant — and only for the
+           generation this run verified (#1091). */
+        grantActive: () => this.grantActive(recorded.credentialRef),
       });
     } catch {
       this.ports.log("launch_failed");

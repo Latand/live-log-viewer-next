@@ -8,7 +8,7 @@ const OLD_STATE = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
 const { TelegramReportRunner, RUN_TIMEOUT_MS } = await import("./reportRunner");
-const { readTelegramReports, readReportText, reportInboxPath, updateTelegramReports } = await import("./reportStore");
+const { readTelegramReports, readReportText, reportInboxPath, reportSourcesPath, updateTelegramReports } = await import("./reportStore");
 const { DEFAULT_DAILY_REPORT_PROMPT } = await import("./reportPrompt");
 /* The tag lives in the operator's editable brief; fixtures use a synthetic
    one, exactly as a real operator's own tag never appears in this repo. */
@@ -34,6 +34,14 @@ const CONNECTED: StoredTelegramConnection = {
   identityIdUpgradedAt: null,
 };
 
+/** What a logout and a reconnect leave behind: a second account, enrolled as
+    its own credential generation, connected and healthy (#1091). */
+const RECONNECTED_AS_ANOTHER_ACCOUNT: StoredTelegramConnection = {
+  ...CONNECTED,
+  credentialRef: "credential-ref-second-placeholder",
+  identity: { name: "Account B", username: "account_b", id: "770000002" },
+};
+
 class FakePorts implements ReportRunnerPorts {
   clock = NOW;
   connectionState: StoredTelegramConnection = { ...CONNECTED };
@@ -44,6 +52,12 @@ class FakePorts implements ReportRunnerPorts {
   chats: TelegramChatSummary[] = [{ id: "101", kind: "user", title: "Dialog A", username: null, unread: 2 }];
   /** What the connector's incoming feed recorded as active (#1091). */
   feed: Array<{ id: string; title: string; lastMessageAt: string }> = [];
+  /** The earliest instant that feed can vouch for: a listener up since well
+      before any window these tests use. */
+  feedCoveredSinceMs: number | null = Date.parse("2026-08-18T00:00:00.000Z");
+  /** Called as each read SETTLES, so a test can move the world between two
+      connector calls — a logout and reconnect inside one source pass. */
+  afterRead: ((name: string) => void) | null = null;
   lastMessage: string | null = "2026-08-21T05:00:00.000Z";
   listChatsError: Error | null = null;
   /** Holds the source pass open, to model a run still being planned. */
@@ -71,25 +85,35 @@ class FakePorts implements ReportRunnerPorts {
   logs: string[] = [];
   now() { return this.clock; }
   connection() { return this.connectionState; }
-  readPort(): TelegramReadPort {
+  readPort(credentialRef: string): TelegramReadPort {
+    /* What the production port does on every call: re-read the stored
+       credential and refuse one from a generation other than the pinned one,
+       so a logout-and-reconnect mid-pass fails the read instead of answering
+       as the new account (#1091). */
+    const read = async <T>(name: string, answer: () => Promise<T>): Promise<T> => {
+      this.reads.push(name);
+      if (this.connectionState.credentialRef !== credentialRef) {
+        throw new Error("Telegram credential generation changed");
+      }
+      try {
+        return await answer();
+      } finally {
+        this.afterRead?.(name);
+      }
+    };
     return {
-      getMe: async () => {
-        this.reads.push("getMe");
+      getMe: () => read("getMe", async () => {
         if (this.getMeError) throw this.getMeError;
         return this.liveIdentity;
-      },
-      feedDialogs: async () => {
-        this.reads.push("feedDialogs");
-        return this.feed;
-      },
-      listChats: async () => {
-        this.reads.push("listChats");
+      }),
+      feedDialogs: () => read("feedDialogs", async () => ({ dialogs: this.feed, coveredSinceMs: this.feedCoveredSinceMs })),
+      listChats: () => read("listChats", async () => {
         if (this.listChatsGate) await this.listChatsGate;
         if (this.listChatsError) throw this.listChatsError;
         return this.chats;
-      },
-      pageChats: async () => [],
-      lastMessageAt: async () => this.lastMessage,
+      }),
+      pageChats: () => read("pageChats", async () => []),
+      lastMessageAt: () => read("lastMessageAt", async () => this.lastMessage),
     };
   }
   /** What `recordedIdentityAfterHealthCheck` does, in one line: persist the id
@@ -341,6 +365,88 @@ test("the recorded id decides: a full rename passes, a same-named stranger does 
   expect(impostor.reads).toEqual(["getMe"]);
   const history = otherAccount.payload().history;
   expect(history[0]).toMatchObject({ status: "account-mismatch", conversationId: null, hasReport: false });
+});
+
+test("a reconnect during the source pass refuses the reads and launches nothing", async () => {
+  /* The hole the id check alone does not close. `get_me` verified account A;
+     the source pass that follows is tens of seconds of connector reads, and
+     the operator can log out and connect account B inside it. The reads are
+     bound to the generation that recorded the id being verified, so the first
+     one after the swap fails instead of answering as B — no listing, no probe,
+     and no plan holding two accounts' correspondents. */
+  const ports = new FakePorts();
+  enableReports();
+  ports.afterRead = (name) => {
+    if (name === "getMe") ports.connectionState = { ...RECONNECTED_AS_ANOTHER_ACCOUNT };
+  };
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+
+  const file = readTelegramReports();
+  expect(file.history[0]).toMatchObject({ status: "failed", errorCode: "sources_failed", conversationId: null });
+  expect(ports.spawns.length).toBe(0);
+  /* One read past the check, and it refused: nothing was listed or probed. */
+  expect(ports.reads).toEqual(["getMe", "feedDialogs"]);
+  expect(fs.existsSync(reportSourcesPath(file.history[0].id))).toBe(false);
+  /* The window it did not cover is still owed to the next run. */
+  expect(file.cursor.unreportedSinceAt).toBe(new Date(NOW - 24 * 3_600_000).toISOString());
+});
+
+test("a reconnect after the source pass settles the run instead of launching for the new account", async () => {
+  /* The same swap, one moment later: every read belonged to account A, so the
+     plan on disk is A's alone — and launching it now would hand the run
+     account B's connector. It settles as the mismatch it is, and A's plan is
+     removed rather than left in scratch naming their correspondents. */
+  const ports = new FakePorts();
+  enableReports();
+  ports.afterRead = (name) => {
+    if (name === "lastMessageAt") ports.connectionState = { ...RECONNECTED_AS_ANOTHER_ACCOUNT };
+  };
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+
+  const file = readTelegramReports();
+  expect(file.history[0]).toMatchObject({ status: "account-mismatch", errorCode: null, conversationId: null, hasReport: false });
+  expect(ports.spawns.length).toBe(0);
+  expect(ports.logs).toEqual(["account_mismatch"]);
+  expect(fs.existsSync(reportSourcesPath(file.history[0].id))).toBe(false);
+  expect(file.cursor.lastSuccessfulWindowEndAt).toBeNull();
+});
+
+test("the grant admission resolves belongs to the generation the run verified", async () => {
+  /* Admission asks this callback at the instant it writes the receipt, which
+     is what makes a logout during the source pass revoke the connector. A
+     reconnect has to revoke it too: the run being admitted planned for the
+     account that is no longer the one connected. */
+  const ports = new FakePorts();
+  enableReports();
+  const runner = new TelegramReportRunner(ports);
+
+  expect(runner.grantActive(CONNECTED.credentialRef)).toBe(true);
+  expect(runner.grantActive(RECONNECTED_AS_ANOTHER_ACCOUNT.credentialRef)).toBe(false);
+
+  ports.connectionState = { ...RECONNECTED_AS_ANOTHER_ACCOUNT };
+  expect(runner.grantActive(CONNECTED.credentialRef)).toBe(false);
+  /* Unbound, it is still the plain question the feature asks. */
+  expect(runner.grantActive()).toBe(true);
+});
+
+test("a connection with no credential generation verifies nothing", async () => {
+  /* An id with no generation behind it names an account that nothing can be
+     read as: there is no credential to bind the pass to, so the run fails
+     closed exactly as a record with no id does. */
+  const ports = new FakePorts();
+  enableReports();
+  ports.connectionState = { ...CONNECTED, credentialRef: null };
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+
+  expect(readTelegramReports().history[0]).toMatchObject({ status: "failed", errorCode: "account_check_failed" });
+  expect(ports.spawns.length).toBe(0);
+  expect(ports.reads).toEqual([]);
 });
 
 test("a connection with no recorded identity fails closed, with nothing read", async () => {
