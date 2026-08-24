@@ -36,6 +36,26 @@ function toolEvent(w: WakeupEventInfo): ToolEvent {
   };
 }
 
+test("expanding a routine card mounts the raw plan as monospace payload", () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const w = wakeup({ fireAt: Date.now() + 60_000, reason: "Fallback poll", prompt: "stage: verify\nresume the round" });
+  flushSync(() => root!.render(<WakeupCard event={toolEvent(w)} wakeup={w} />));
+
+  // Collapsed by default: the internal prompt is not in the DOM at all.
+  expect(container.textContent).toContain("Fallback poll");
+  expect(container.textContent).not.toContain("stage: verify");
+
+  const details = container.querySelector("details")!;
+  (details as unknown as { open: boolean }).open = true;
+  flushSync(() => details.dispatchEvent(new dom.Event("toggle") as unknown as Event));
+
+  const pre = container.querySelector("pre")!;
+  expect(pre.textContent).toContain("stage: verify");
+  expect(pre.className).toContain("font-mono");
+});
+
 test("stops the countdown interval once the wakeup fires", () => {
   const realSet = globalThis.setInterval;
   const realClear = globalThis.clearInterval;

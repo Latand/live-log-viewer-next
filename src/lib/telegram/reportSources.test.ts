@@ -16,6 +16,7 @@ const {
   CHAT_PAGE_LIMIT,
   connectorReadPort,
   listReportGroups,
+  MAX_MATURE_FEED_PROBES,
   MAX_PRIVATE_DIALOGS,
   MAX_PROBES,
   planReportSources,
@@ -196,18 +197,37 @@ test("a dialog active after a long run of cold ones is still a source", async ()
   expect(plan.probeBudgetExhausted).toBe(false);
 });
 
-test("a very long dialog list stops at the probe ceiling and says so", async () => {
+test("a partial feed stops at the ordinary probe ceiling and fails closed", async () => {
   const many: TelegramChatSummary[] = Array.from({ length: 400 }, (_, index) => dialog(String(5000 + index), `Dialog ${index}`));
   const dates: Record<string, string> = { "5000": "2026-08-20T15:00:00.000Z" };
   for (let index = 1; index < many.length; index += 1) dates[String(5000 + index)] = "2026-01-01T00:00:00.000Z";
   const port = new FakeTelegram(many, dates);
+  port.feedCoveredSinceMs = Date.parse("2026-08-21T05:00:00.000Z");
+
+  await expect(planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" })).rejects.toThrow(/cover/i);
+  expect(port.calls.filter((call) => call.startsWith("lastMessageAt"))).toHaveLength(MAX_PROBES);
+  expect(port.maxConcurrent).toBe(1);
+});
+
+test("a mature empty feed still finds an outgoing-only dialog beyond the ordinary probe budget (#1128)", async () => {
+  const many = Array.from({ length: MAX_PROBES + 1 }, (_, index) => dialog(String(6100 + index), `Dialog ${index}`));
+  const last = many.at(-1)!;
+  const dates = Object.fromEntries(many.map((chat) => [chat.id, "2026-01-01T00:00:00.000Z"]));
+  dates[last.id] = "2026-08-20T15:00:00.000Z";
+  const port = new FakeTelegram(many, dates);
+  /* The mature inbound feed is empty while the dialog's latest message falls
+     inside the window, which models operator-sent activity only. */
 
   const plan = await planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" });
-  expect(plan.privateDialogs.map((row) => row.id)).toEqual(["5000"]);
-  /* One bound, and it is the only one: the walk probes every candidate it can
-     afford, then reports that it ran out rather than pretending completeness. */
-  expect(plan.probes).toBe(MAX_PROBES);
-  expect(plan.probeBudgetExhausted).toBe(true);
+
+  expect(port.feed).toEqual([]);
+  expect(plan.privateDialogs.map((row) => row.id)).toEqual([last.id]);
+  expect(plan.feedDialogs).toBe(0);
+  expect(port.calls).toContain(`lastMessageAt:${last.id}`);
+  expect(plan.probes).toBe(MAX_PROBES + 1);
+  expect(plan.probes).toBeLessThanOrEqual(MAX_MATURE_FEED_PROBES);
+  expect(plan.probeBudgetExhausted).toBe(false);
+  expect(port.maxConcurrent).toBe(1);
 });
 
 test("the operator's groups ride along with their pass, and dialogs stay bounded", async () => {
@@ -233,12 +253,11 @@ function burst(id: string, title: string, at: string): FeedDialog {
   return { id, title, lastMessageAt: at };
 }
 
-test("a dialog the feed recorded is a source even when the walk never reaches it", async () => {
+test("a feed-recorded dialog remains a source beyond the ordinary probe ceiling", async () => {
   /* The acceptance criterion of #1091: an active dialog ranked LAST by the
-     connector's list order still appears in the run's sources. The walk cannot
-     get to it — the probe budget runs out hundreds of candidates earlier — and
-     it does not have to, because the feed recorded the burst when it arrived. */
-  const many = Array.from({ length: 400 }, (_, index) => dialog(String(5000 + index), `Dialog ${index}`));
+     connector's list order still appears in the run's sources. The feed carries
+     it before the direction-neutral residual walk begins. */
+  const many = Array.from({ length: MAX_PROBES + 49 }, (_, index) => dialog(String(5000 + index), `Dialog ${index}`));
   const last = dialog("6001", "Dialog answered an hour ago");
   const dates: Record<string, string> = {};
   for (const chat of many) dates[chat.id] = "2026-01-01T00:00:00.000Z";
@@ -250,10 +269,12 @@ test("a dialog the feed recorded is a source even when the walk never reaches it
 
   expect(plan.privateDialogs.map((row) => row.id)).toEqual([last.id]);
   expect(plan.feedDialogs).toBe(1);
-  /* It cost no probe, and the exhausted budget says nothing about it. */
+  /* The feed entry costs no probe. The residual walk still covers every other
+     enumerated dialog because this feed covers the whole window. */
   expect(port.calls).not.toContain(`lastMessageAt:${last.id}`);
-  expect(plan.probes).toBe(MAX_PROBES);
-  expect(plan.probeBudgetExhausted).toBe(true);
+  expect(plan.probes).toBe(many.length);
+  expect(plan.probes).toBeGreaterThan(MAX_PROBES);
+  expect(plan.probeBudgetExhausted).toBe(false);
   /* Still one read at a time, feed included — the connector dies under
      concurrent reads (#1087). */
   expect(port.maxConcurrent).toBe(1);
@@ -350,10 +371,10 @@ test("a young feed still plans the window when the walk reached every candidate"
   expect(plan.probeBudgetExhausted).toBe(false);
 });
 
-test("a young feed over a dialog list longer than the enumeration fails too", async () => {
-  /* The other end of the same hole: the probe budget was never reached, but
-     the paged enumeration stopped on a FULL page, so the list did not end
-     where the walk did. Whatever sits below it was never even a candidate. */
+test("a truncated enumeration fails for partial and mature feeds", async () => {
+  /* The paged enumeration stopped on a FULL page, so the list did not end
+     where the walk did. Whatever sits below it was never even a candidate,
+     including any outgoing-only private dialog. */
   const rooms: TelegramChatSummary[] = Array.from({ length: 3 * CHAT_PAGE_LIMIT }, (_, index) => ({
     id: `-100${2000 + index}`,
     kind: "group",
@@ -366,10 +387,10 @@ test("a young feed over a dialog list longer than the enumeration fails too", as
 
   await expect(planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" })).rejects.toThrow(/cover/i);
 
-  /* The same list with the feed listening since before the window is a plan:
-     every dialog that received anything is in it whatever the walk enumerated. */
+  /* Mature feed coverage vouches for incoming bursts only. Outgoing activity
+     beyond the bounded enumeration remains unknown and keeps the same fence. */
   const covered = new FakeTelegram(rooms, {});
-  expect((await planReportSources(covered, { ...WINDOW, groups: [], promptVersion: "v1" })).privateDialogs).toEqual([]);
+  await expect(planReportSources(covered, { ...WINDOW, groups: [], promptVersion: "v1" })).rejects.toThrow(/cover/i);
 });
 
 test("one read port answers for exactly one credential generation (#1091)", async () => {

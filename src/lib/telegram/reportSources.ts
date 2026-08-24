@@ -6,21 +6,20 @@ import { readFeedDialogsSince, scopedFeedFile, type FeedDialog } from "./reportF
 import type { TelegramReportGroup } from "./reportContracts";
 
 /**
- * Source discovery for a Daily Report run (issues #1086, #1091).
+ * Source discovery for a Daily Report run (issues #1086, #1091, #1128).
  *
- * THE FEED IS THE SOURCE OF "ACTIVE SINCE THE LAST RUN". The connector records
- * every settled incoming private burst to its event feed the moment it happens
- * (`reportFeed.ts`), so the dialogs a report is about are read from that file,
- * in one bounded pass, with no dependence on any list order at all. A dialog
- * ranked dead last by the connector's chat listing is exactly as visible as the
- * first one.
+ * THE FEED IS THE SOURCE OF INCOMING ACTIVITY SINCE THE LAST RUN. The connector
+ * records every settled incoming private burst to its event feed the moment it
+ * happens (`reportFeed.ts`), so incoming dialogs are read from that file in one
+ * bounded pass, with no dependence on any list order. A dialog ranked dead last
+ * by the connector's chat listing is exactly as visible as the first one.
  *
- * The candidate WALK survives behind it, because the feed knows only what
- * arrived while the connector was running and listening: a dialog where the
- * operator did the writing, or one that was active before this connector
- * generation started, has no feed line. So the walk still runs, over the
- * candidates the feed has not already accounted for, and still decides by
- * LAST MESSAGE DATE — never by position.
+ * The candidate WALK supplies direction-neutral coverage. The feed knows only
+ * what arrived while the connector was running and listening: a dialog where
+ * the operator did the writing, or one that was active before this connector
+ * generation started, has no feed line. The walk runs over every enumerated
+ * candidate the feed has not already accounted for and decides by LAST MESSAGE
+ * DATE. Position never decides selection.
  *
  * The walk is a SUPPLEMENT and never a substitute. A run whose connector is
  * not running a feed at all fails (`sources_failed`) instead of quietly
@@ -33,10 +32,10 @@ import type { TelegramReportGroup } from "./reportContracts";
  * A feed that is RUNNING is still not automatically a feed that covers the
  * window: a listener started this morning knows nothing about last night, and
  * on the first day after a connect it knows nothing about the window at all.
- * So the plan is returned only when one of the two passes covered the whole
- * window — the feed by listening from before it opened, or the walk by
- * enumerating and probing every candidate. Otherwise the pass fails on the
- * same principle as a missing feed.
+ * A complete plan needs incoming coverage from the feed plus outgoing coverage
+ * from the walk. A mature feed lets the walk spend the enumeration's full
+ * bounded surface; a younger feed retains the smaller ordinary probe ceiling.
+ * Any exhausted probe budget or truncated enumeration fails the pass.
  *
  * The connector's chat listing is NOT ordered by recency — it follows pinned
  * and folder order, proven on the live connector by a dialog whose last
@@ -58,9 +57,11 @@ import type { TelegramReportGroup } from "./reportContracts";
  * sequentially. The connector died once under three concurrent 120-message
  * reads, so NOTHING here runs in parallel — not the feed read, not the
  * listings, not the probes — and nothing asks for more than one message at a
- * time. ONE bound keeps that honest on a large account — {@link MAX_PROBES}
- * probes for the whole run — and every candidate inside it is probed. An
- * earlier revision also stopped after a run of consecutive stale candidates,
+ * time. The ordinary walk stops at {@link MAX_PROBES}; a feed covering the
+ * window raises the ceiling only to the already bounded enumeration surface so
+ * outgoing-only dialogs receive the same coverage as incoming dialogs. Every
+ * candidate inside the applicable ceiling is probed. An earlier revision also
+ * stopped after a run of consecutive stale candidates,
  * which was a recency assumption about a list this module opens by saying is
  * not ordered by recency: a dialog answered an hour ago, sitting below a block
  * of dormant ones, was silently dropped from the report.
@@ -112,10 +113,13 @@ export const CHAT_PAGE_LIMIT = 100;
     ceiling reach 300 dialogs, well past where an account's active private
     conversations live, and the connector refuses a page above 10 anyway. */
 export const MAX_CHAT_PAGES = 3;
-/** Hard ceiling on single-message probes for one run, and the ONLY bound on
-    the walk: every candidate up to it is probed, whatever the ones before it
-    said, because the list order is not recency. */
+/** Hard ceiling on single-message probes while the feed covers only part of
+    the report window. */
 export const MAX_PROBES = 150;
+/** Mature-feed ceiling for the direction-neutral residual walk. It equals the
+    already bounded enumeration surface, so every enumerated dialog can be
+    checked for operator-sent activity while connector reads remain finite. */
+export const MAX_MATURE_FEED_PROBES = MAX_CHAT_PAGES * CHAT_PAGE_LIMIT;
 /** Private dialogs carried into one report, newest activity first. */
 export const MAX_PRIVATE_DIALOGS = 25;
 
@@ -140,8 +144,8 @@ export type ReportSourcePlan = {
   /** Whether more active dialogs existed than the plan carries. */
   truncated: boolean;
   /** Whether the walk ran out of probe budget before it ran out of
-      candidates, so the plan is a bounded view rather than a complete one.
-      Dialogs the feed supplied are unaffected by it either way. */
+      candidates. Complete plans keep this false; an exhausted walk fails the
+      source pass before persistence. */
   probeBudgetExhausted: boolean;
 };
 
@@ -210,9 +214,11 @@ async function candidateDialogs(
  *     cost no probe and depend on no list order, so an active dialog ranked
  *     last by the connector is in the plan regardless of what the walk reaches.
  *  2. THE WALK — every remaining candidate, probed in list order until the
- *     probe budget runs out, carried when its last message falls in the window.
- *     Position never decides whether a dialog is LOOKED at; the date decides
- *     whether it is CARRIED.
+ *     applicable probe budget runs out, carried when its last message falls in
+ *     the window. A mature feed raises the budget to the bounded enumeration
+ *     surface because its journal contains incoming activity only. Position
+ *     never decides whether a dialog is LOOKED at; the date decides whether it
+ *     is CARRIED.
  *
  * Groups are exactly what the operator picked, with their full/light flag — a
  * group is a source because the operator said so, never because it was busy.
@@ -233,9 +239,11 @@ export async function planReportSources(
   /* Sequential on purpose: see the module comment. */
   const enumerated = await candidateDialogs(port);
   const candidates = enumerated.candidates.filter((chat) => !carried.has(chat.id));
+  const feedCoversIncomingWindow = fromFeed.coveredSinceMs !== null && fromFeed.coveredSinceMs <= windowStart;
+  const probeLimit = feedCoversIncomingWindow ? MAX_MATURE_FEED_PROBES : MAX_PROBES;
   let probes = 0;
   for (const chat of candidates) {
-    if (probes >= MAX_PROBES) break;
+    if (probes >= probeLimit) break;
     /* Sequential on purpose: see the module comment. */
     const at = await port.lastMessageAt(chat.id);
     probes += 1;
@@ -244,24 +252,16 @@ export async function planReportSources(
     active.push({ id: chat.id, title: chat.title, lastMessageAt: new Date(instant).toISOString() });
   }
   active.sort((left, right) => Date.parse(right.lastMessageAt) - Date.parse(left.lastMessageAt));
-  const probeBudgetExhausted = probes >= MAX_PROBES && candidates.length > probes;
+  const probeBudgetExhausted = probes >= probeLimit && candidates.length > probes;
   /* The completeness bar, and the reason a plan may not be returned at all.
-     ONE of the two passes has to have covered the whole window:
-
-      - the FEED, when it was listening from before the window opened. Then
-        every dialog that received anything is in the plan, whatever the walk
-        reached, and the walk is the supplement it is meant to be.
-      - the WALK, when it enumerated every dialog and probed every candidate.
-        Then each one was judged by its last message date.
-
-     Neither is a plan that can silently omit an active dialog — a connector
-     that started mid-window (its first day, or after downtime) on an account
-     whose dialog list outruns the enumeration or the probe budget. v1 answered
-     that with a quietly narrower report, which is the defect #1091 exists to
-     end, so it fails the source pass instead and the run records
-     `sources_failed`. The next run's window still covers the day it missed. */
-  const feedCoversWindow = fromFeed.coveredSinceMs !== null && fromFeed.coveredSinceMs <= windowStart;
-  if (!feedCoversWindow && (probeBudgetExhausted || enumerated.truncated)) {
+     The FEED covers settled incoming activity from its coverage instant. The
+     WALK covers operator-sent activity only when it reaches every candidate.
+     A mature feed therefore grants the walk the full bounded enumeration
+     surface. A truncated enumeration still leaves outgoing activity unknown,
+     and a younger feed cannot fill either direction past the ordinary probe
+     ceiling. Both conditions fail the source pass and record `sources_failed`;
+     the next run's window still covers the day it missed. */
+  if (probeBudgetExhausted || enumerated.truncated) {
     throw new Error("Telegram report sources cannot cover this window");
   }
   return {

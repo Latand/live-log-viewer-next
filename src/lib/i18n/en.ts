@@ -1183,6 +1183,7 @@ export const en = {
   "wakeup.superseded": "superseded",
   "wakeup.noTime": "wakeup scheduled",
   "wakeup.plan": "wake plan",
+  "wakeup.planInternal": "internal prompt",
   "wakeup.noPlan": "no wake plan given",
   "wakeup.inRel": "in {rel}",
   "wakeup.agoRel": "{rel} ago",
