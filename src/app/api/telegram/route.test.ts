@@ -35,7 +35,7 @@ class FakeAdapter implements TelegramAdapter {
   emit: ((event: TelegramEnrollmentEvent) => void) | null = null;
   canceled = 0;
   passwords: string[] = [];
-  health: TelegramHealthResult = { status: "connected", identity: { name: "Account A", username: "account_a" } };
+  health: TelegramHealthResult = { status: "connected", identity: { name: "Account A", username: "account_a", id: "770000001" } };
   healthCalls = 0;
   logoutResult: { ok: boolean; code: TelegramErrorCode | null } = { ok: true, code: null };
   unavailableReason() { return null; }
@@ -125,7 +125,7 @@ test("the login round trip over the narrow API, without a session string ever cr
   expect(submitted.status).toBe(200);
   expect(adapter.passwords).toEqual(["2fa-pw"]);
 
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: "account_a" } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: "account_a", id: "770000001" } });
   await new Promise((resolve) => setTimeout(resolve, 0));
   const connected = await GET(getRequest());
   const connectedBody = await payload(connected);
@@ -155,7 +155,7 @@ test("cancel and delete round-trip; delete works with no remote logout", async (
 test("a failed remote logout keeps the local session and says so", async () => {
   adapter.logoutResult = { ok: false, code: "network_failed" };
   await POST(postRequest({ action: "start" }));
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null, id: "770000001" } });
   await new Promise((resolve) => setTimeout(resolve, 0));
   const response = await POST(postRequest({ action: "logout" }));
   const { telegram } = await payload(response) as { telegram: { phase: string; error: { code: string } } };
@@ -198,7 +198,7 @@ test("#1070: a save clears a stale credentials_missing error and leaves no temp 
   fs.rmSync(CREDS_FILE, { force: true });
   /* The durable connection says the world lacks credentials. */
   const { writeTelegramConnection } = await import("@/lib/telegram/sessionStore");
-  writeTelegramConnection({ version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "credentials_missing" });
+  writeTelegramConnection({ version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "credentials_missing", identityIdUpgradedAt: null });
   const logged: string[] = [];
   const originals = { log: console.log, warn: console.warn, error: console.error } as const;
   console.log = console.warn = console.error = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };

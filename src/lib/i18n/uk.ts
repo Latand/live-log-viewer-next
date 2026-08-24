@@ -1152,6 +1152,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "wakeup.superseded": "замінено",
   "wakeup.noTime": "пробудження заплановано",
   "wakeup.plan": "план пробудження",
+  "wakeup.planInternal": "внутрішній промпт",
   "wakeup.noPlan": "план пробудження не задано",
   "wakeup.inRel": "через {rel}",
   "wakeup.agoRel": "{rel} тому",

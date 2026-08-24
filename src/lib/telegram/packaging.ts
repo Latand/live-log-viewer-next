@@ -7,7 +7,7 @@ import path from "node:path";
 import { configFilePath, stateDir, statePath } from "@/lib/configDir";
 import { withFileTransaction } from "@/lib/state/fileTransaction";
 
-import { ensureTelegramStateDir } from "./sessionStore";
+import { ensureTelegramStateDir, telegramIncomingFeedPath } from "./sessionStore";
 
 /**
  * Packaging of the pinned Telegram MCP connector (issue #1059).
@@ -95,6 +95,19 @@ export function telegramSessionReaderPath(): string {
 export function telegramProvisionerPath(): string {
   return packageAssetPath(process.env.LLV_TELEGRAM_PROVISIONER, "bin", "provision-telegram-connector.mjs");
 }
+
+/**
+ * Read tools that CONSUME a settled burst: they pop the chat out of the
+ * connector's pending set, so whichever consumer scans first takes it
+ * (`wait_for_settled_message` in `telegram_mcp/tools/events.py`). The incoming
+ * event feed consumes exactly the same bursts, which is why a connector that
+ * runs the feed withholds these instead of racing it — see
+ * {@link connectorLaunchSpec}.
+ *
+ * `wait_for_new_message` is deliberately NOT here: it reports the pending set
+ * without removing anything, so it costs the feed no burst and stays exposed.
+ */
+export const TELEGRAM_BURST_CONSUMING_TOOLS: readonly string[] = Object.freeze(["wait_for_settled_message"]);
 
 export type TelegramApiCredentials = { apiId: string; apiHash: string };
 
@@ -232,7 +245,7 @@ export function ensureConnectorProvisioned(): Promise<boolean> {
     The session string travels ONLY as child environment (the upstream
     contract) — never as an argument, so it cannot surface in process listings,
     transcripts, or the activity journal. */
-export function connectorLaunchSpec(input: { sessionString: string; connectorToken: string; credentials: TelegramApiCredentials }): ProcessSpec {
+export function connectorLaunchSpec(input: { credentialRef: string; sessionString: string; connectorToken: string; credentials: TelegramApiCredentials }): ProcessSpec {
   const vendor = stagedConnectorSourceDir();
   return {
     command: telegramVenvPython(),
@@ -244,6 +257,22 @@ export function connectorLaunchSpec(input: { sessionString: string; connectorTok
       TELEGRAM_API_HASH: input.credentials.apiHash,
       TELEGRAM_SESSION_STRING: input.sessionString,
       TELEGRAM_EXPOSED_TOOLS: "read-only",
+      /* Run the incoming feed (#1091). Without it the connector records
+         activity nowhere, and private-dialog discovery is back to guessing
+         from a chat list that is not ordered by recency. */
+      TELEGRAM_EVENT_FEED: "1",
+      TELEGRAM_EVENT_FEED_FILE: telegramIncomingFeedPath(input.credentialRef),
+      /* The feed CONSUMES settled bursts, and upstream documents a blocking
+         `wait_for_settled_message` as the other consumer of the same bursts —
+         whichever scans first takes one, so a concurrent waiter could eat the
+         burst that was a report's only evidence of an active dialog. This
+         connector does not run that race: the burst consumers are WITHHELD
+         from the surface it exposes, leaving the feed the only one. The
+         withholding happens in the Viewer's own entrypoint because upstream's
+         `TELEGRAM_EXPOSED_TOOLS` can only widen a read-only surface with write
+         tools, never narrow it; connector readiness then verifies that the
+         advertised surface really is missing them. */
+      LLV_TELEGRAM_EXCLUDED_TOOLS: TELEGRAM_BURST_CONSUMING_TOOLS.join(","),
       LLV_TELEGRAM_MCP_TOKEN: input.connectorToken,
       LLV_TELEGRAM_VENDOR_DIR: vendor,
       MCP_TRANSPORT: "http",

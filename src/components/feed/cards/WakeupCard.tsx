@@ -5,28 +5,62 @@ import { useEffect, useState } from "react";
 import { useLocale } from "@/lib/i18n";
 import { wakeupPhase } from "@/lib/wakeup";
 
-import { ChevronRight, GlyphIcon } from "../../icons";
+import { GlyphIcon } from "../../icons";
 import { fmtWakeClock, fmtWakeRelative } from "../../wakeupFormat";
-import { mdBlocks } from "../markdown";
 import { type ToolEvent, type WakeupEventInfo } from "../parse";
 import { OutputPreview } from "./OutputPreview";
 
+/* The raw wake-plan prompt is orchestrator payload — stage ids, SHAs, playbook
+   steps — so it renders as bare monospace text and is never fed through the
+   markdown pipeline: internal machine text must not masquerade as user-facing
+   prose (issue #1124). A rejected call keeps the harness's bounded error output
+   above it, so the reason it was refused stays visible. */
+function WakeupBody({ event, wakeup }: { event: ToolEvent; wakeup: WakeupEventInfo }) {
+  const { t } = useLocale();
+  return (
+    <div className="mb-1 mt-1 rounded-surface bg-sunken px-2.5 py-2">
+      {wakeup.failed && event.outputPreview.trim() ? (
+        <div className="mb-2">
+          <OutputPreview output={event.outputPreview} truncated={event.outputTruncated} />
+        </div>
+      ) : null}
+      {wakeup.prompt ? (
+        <>
+          <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[10.5px] font-semibold text-muted">
+            <span className="uppercase tracking-wide">{t("wakeup.plan")}</span>
+            <span className="rounded-md border border-border bg-card px-1.5 py-px font-mono font-normal">
+              {t("wakeup.planInternal")}
+            </span>
+          </div>
+          <pre className="max-w-full whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-[11px] leading-snug text-secondary">
+            {wakeup.prompt}
+          </pre>
+        </>
+      ) : (
+        <span className="text-[11px] text-muted">{t("wakeup.noPlan")}</span>
+      )}
+    </div>
+  );
+}
+
 /**
- * A `ScheduleWakeup` call as a dedicated card: the reason is the visible
- * summary, the absolute fire time carries a live countdown, and the wake plan
- * (the prompt) sits behind an expander as readable text (issue #161). Only the
- * newest successful wakeup of a conversation is active; a superseded, elapsed,
- * or rejected one shows a quiet past/failed state. A rejected call also surfaces
- * the harness's bounded error output so the reason it was refused stays visible.
+ * A `ScheduleWakeup` call in the feed's own quiet language (issue #1124): the
+ * same borderless row idiom as a tool line — glyph, the full reason (wrapping,
+ * never truncated), and ONE schedule element that fuses the absolute fire time
+ * with the live countdown, stated exactly once. Routine scheduling is neutral
+ * chrome; alarm styling is reserved for a genuinely rejected call, which keeps
+ * the danger edge and opens to show the harness's refusal. The wake plan sits
+ * collapsed behind the row and mounts only on first expand, so a long feed
+ * never carries walls of internal prompt text in its DOM.
  */
 export function WakeupCard({ event, wakeup }: { event: ToolEvent; wakeup: WakeupEventInfo }) {
   const { locale, t } = useLocale();
-  const { fireAt, superseded, failed, reason, prompt } = wakeup;
+  const { fireAt, superseded, failed, reason } = wakeup;
 
   const [now, setNow] = useState(() => Date.now());
-  // A superseded, failed, or already-fired card is static; only a genuinely
-  // pending one counts down. `active` is derived from the CURRENT clock, so the
-  // interval below stops the moment the fire time passes (issue #161 review).
+  // Only a genuinely pending schedule counts down. `active` is derived from the
+  // CURRENT clock, so the interval below stops the moment the fire time passes
+  // (issue #161 review). A superseded or failed card is static.
   const phase = failed ? "failed" : superseded ? "superseded" : wakeupPhase(fireAt, now);
   const active = phase === "pending";
   useEffect(() => {
@@ -36,78 +70,55 @@ export function WakeupCard({ event, wakeup }: { event: ToolEvent; wakeup: Wakeup
   }, [active]);
 
   const clock = fireAt !== null ? fmtWakeClock(fireAt, locale) : "";
-  const relative = active && fireAt !== null ? fmtWakeRelative(fireAt, now, t) : "";
 
-  /* The state badge: an amber live countdown while pending, an error label when
-     the scheduling call was rejected, a quiet grey label once fired/superseded. */
-  const badge = failed
-    ? { text: t("wakeup.failed"), tone: "text-danger" }
-    : superseded
-      ? { text: t("wakeup.superseded"), tone: "text-muted" }
-      : phase === "pending"
-        ? { text: relative, tone: "text-warning" }
-        : phase === "fired"
-          ? { text: clock ? t("wakeup.firedAt", { time: clock }) : t("wakeup.fired"), tone: "text-muted" }
-          : { text: "", tone: "text-muted" };
-
-  /* The headline follows the card's state before it reads the clock: a
-     superseded FUTURE schedule reads "was set for" and never promises to wake
-     (issue #161 review). Only a still-active or already-fired schedule speaks of
-     its time as future or past. */
-  const headline = failed
+  /* The single time element. A superseded FUTURE schedule reads "was set for"
+     and never promises to wake (issue #161 review); only a still-active or
+     already-fired schedule speaks of its time as future or past. */
+  const schedule = failed
     ? t("wakeup.failed")
-    : !clock
-      ? t("wakeup.noTime")
-      : superseded
-        ? t("wakeup.wasSetFor", { time: clock })
-        : fireAt !== null && fireAt <= now
-          ? t("wakeup.firedAt", { time: clock })
-          : t("wakeup.wakesAt", { time: clock });
+    : superseded
+      ? clock
+        ? `${t("wakeup.wasSetFor", { time: clock })} · ${t("wakeup.superseded")}`
+        : t("wakeup.superseded")
+      : active && fireAt !== null
+        ? `${t("wakeup.wakesAt", { time: clock })} · ${fmtWakeRelative(fireAt, now, t)}`
+        : phase === "fired"
+          ? clock
+            ? t("wakeup.firedAt", { time: clock })
+            : t("wakeup.fired")
+          : t("wakeup.noTime");
 
-  const cardTone = active ? "border-warning/45 bg-warning-soft" : failed ? "border-danger/35 bg-card" : "border-border bg-card";
-  const iconTone = active ? "bg-warning-soft text-warning" : failed ? "bg-danger-soft text-danger" : "bg-sunken text-muted";
+  const rowTone = failed ? "border-l-2 border-danger bg-danger-soft pl-2 pr-1 text-danger" : "text-muted";
+  const reasonTone = failed ? "font-semibold" : superseded ? "text-muted" : "text-secondary";
+  const scheduleTone = failed ? "font-semibold text-danger" : "text-muted";
+
+  // The body mounts lazily on first expand (same contract as ToolLine); a
+  // rejected call opens immediately so its refusal is visible without a click.
+  const [mounted, setMounted] = useState(failed);
 
   return (
-    <details className={`group/wake my-2.5 ml-9 overflow-hidden rounded-surface border ${cardTone}`} open={active || failed}>
-      <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2.5 px-3 py-2">
-        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg ${iconTone}`}>
-          <GlyphIcon name="clock" className="h-3.5 w-3.5" />
-        </span>
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-[12.5px] font-semibold" title={reason || headline}>
+    <details
+      className="ml-9"
+      open={failed}
+      onToggle={(e) => {
+        if (e.currentTarget.open) setMounted(true);
+      }}
+    >
+      <summary
+        className={`flex cursor-pointer list-none items-start gap-2 rounded-control py-0.5 text-ui hover:bg-sunken [@media(pointer:coarse)]:min-h-11 [&::-webkit-details-marker]:hidden ${rowTone}`}
+      >
+        <GlyphIcon name="clock" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        {/* The reason wraps in full (grow/shrink around a 10rem basis); on a
+            narrow viewport the schedule element drops to its own line instead
+            of squeezing the reason into a sliver column. */}
+        <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span className={`min-w-0 grow shrink basis-40 leading-snug [overflow-wrap:anywhere] ${reasonTone}`}>
             {reason || t("wakeup.card")}
           </span>
-          <span className="truncate text-[11px] text-muted">{headline}</span>
+          <span className={`ml-auto whitespace-nowrap text-[11px] tabular-nums ${scheduleTone}`}>{schedule}</span>
         </span>
-        {badge.text ? (
-          <span className={`shrink-0 text-[11px] font-bold tabular-nums ${badge.tone}`}>{badge.text}</span>
-        ) : null}
       </summary>
-      <div className="border-t border-border px-3 py-2">
-        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-muted">
-          <span className={`font-semibold ${failed ? "text-danger" : "text-primary"}`}>{headline}</span>
-          {relative ? <span>· {relative}</span> : null}
-          {superseded ? <span className="rounded-md bg-sunken px-1.5 py-0.5">{t("wakeup.superseded")}</span> : null}
-        </div>
-        {/* The harness's rejection message (already redacted and bounded on the
-            ToolEvent), so a refused schedule keeps its actionable detail. */}
-        {failed && event.outputPreview.trim() ? (
-          <div className="mb-2">
-            <OutputPreview output={event.outputPreview} truncated={event.outputTruncated} />
-          </div>
-        ) : null}
-        {prompt ? (
-          <details className="group/plan">
-            <summary className="inline-flex min-h-[44px] cursor-pointer list-none items-center gap-1.5 text-[11.5px] font-semibold text-muted hover:text-accent [&::-webkit-details-marker]:hidden">
-              <ChevronRight className="h-3 w-3 transition-transform group-open/plan:rotate-90" aria-hidden />
-              {t("wakeup.plan")}
-            </summary>
-            <div className="border-t border-border pt-2 text-[12.5px] leading-snug">{mdBlocks(prompt)}</div>
-          </details>
-        ) : (
-          <span className="text-[11.5px] text-muted">{t("wakeup.noPlan")}</span>
-        )}
-      </div>
+      {mounted ? <WakeupBody event={event} wakeup={wakeup} /> : null}
     </details>
   );
 }
