@@ -330,16 +330,20 @@ export function reconcileDeadStructuredRegistryHost(
 }
 
 /** Bounded reconciliation pass for completed conversation rows. Active conversation
-    recovery stays demand-driven, while terminal rows cannot retain a dead
-    engine process and its writer claim indefinitely. */
-export function reconcileDeadStructuredRegistryHosts(registry: AgentRegistry): void {
+    recovery stays demand-driven. `shouldRetain` protects rows the same startup
+    pass will re-host; every other terminal row releases its dead process claim. */
+export function reconcileDeadStructuredRegistryHosts(
+  registry: AgentRegistry,
+  shouldRetain: StructuredHostAdoptionFilter = () => false,
+): void {
   const snapshot = registry.readOnlySnapshot();
   for (const conversation of Object.values(snapshot.conversations)) {
     if (conversation.turn.state !== "terminal" && !conversation.supersededBy) continue;
     const generation = conversation.generations.at(-1);
     if (!generation) continue;
     const key = { engine: conversation.engine, sessionId: generation.id } as const;
-    if (!snapshot.entries[sessionKeyId(key)]?.structuredHost?.process) continue;
+    const entry = snapshot.entries[sessionKeyId(key)];
+    if (!entry?.structuredHost?.process || shouldRetain(entry)) continue;
     reconcileDeadStructuredRegistryHost(registry, conversation.id, key);
   }
 }
