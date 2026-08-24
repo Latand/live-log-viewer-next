@@ -15,8 +15,9 @@ import { ROTATION_THRESHOLD_FRACTION, type ContextWindowPolicy } from "./context
  * are separately injectable.
  */
 
-/** How many tail bytes are scanned for a provider-reported usage record. */
-const USAGE_SCAN_TAIL_BYTES = 256 * 1024;
+/** Bounded reads and total search depth for provider-reported usage records. */
+const USAGE_SCAN_CHUNK_BYTES = 256 * 1024;
+const USAGE_SCAN_MAX_BYTES = 4 * 1024 * 1024;
 
 export interface OrchestratorContextReading {
   /** Tokens currently in context, or null when nothing could be read at all. */
@@ -68,38 +69,72 @@ export function readOrchestratorTranscriptFacts(
 }
 
 /**
- * The newest provider-reported context size in the transcript tail.
+ * The newest provider-reported context size near the end of the transcript.
  *
  * Claude rows carry `message.usage` (input + cache reads/creation is what sat
  * in context for that turn); Codex rollouts carry token-usage info events.
- * Only the tail is scanned, newest line first — this is a status read, not a
- * transcript parse, and it must stay cheap on a multi-megabyte file.
+ * Bounded chunks are scanned backwards, newest line first, up to a fixed cap.
+ * Incomplete rows are carried as bytes so a chunk boundary cannot corrupt JSON
+ * or split a multi-byte character before the row is parsed.
  */
 export function lastReportedContextTokens(path: string, totalBytes: number): number | null {
-  let tail: string;
   try {
     const descriptor = fs.openSync(path, "r");
     try {
-      const start = Math.max(0, totalBytes - USAGE_SCAN_TAIL_BYTES);
-      const buffer = Buffer.alloc(Math.min(USAGE_SCAN_TAIL_BYTES, totalBytes));
-      fs.readSync(descriptor, buffer, 0, buffer.length, start);
-      tail = buffer.toString("utf8");
+      const scanStart = Math.max(0, totalBytes - USAGE_SCAN_MAX_BYTES);
+      const precedingByte = Buffer.alloc(1);
+      const scanStartsAtRowBoundary = scanStart === 0
+        || (fs.readSync(descriptor, precedingByte, 0, 1, scanStart - 1) === 1 && precedingByte[0] === 0x0a);
+      let cursor = totalBytes;
+      let newerRowSuffix = Buffer.alloc(0);
+
+      while (cursor > scanStart) {
+        const start = Math.max(scanStart, cursor - USAGE_SCAN_CHUNK_BYTES);
+        const buffer = Buffer.alloc(cursor - start);
+        const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, start);
+        const combined = newerRowSuffix.length > 0
+          ? Buffer.concat([buffer.subarray(0, bytesRead), newerRowSuffix])
+          : buffer.subarray(0, bytesRead);
+        const firstNewline = combined.indexOf(0x0a);
+        const reachedCompleteRowBoundary = start === scanStart && scanStartsAtRowBoundary;
+
+        if (reachedCompleteRowBoundary || firstNewline >= 0) {
+          const completeRows = reachedCompleteRowBoundary ? combined : combined.subarray(firstNewline + 1);
+          const tokens = lastReportedContextTokensInRows(completeRows);
+          if (tokens !== null) return tokens;
+        }
+
+        if (reachedCompleteRowBoundary) {
+          newerRowSuffix = Buffer.alloc(0);
+        } else if (firstNewline >= 0) {
+          newerRowSuffix = combined.subarray(0, firstNewline);
+        } else {
+          newerRowSuffix = combined;
+        }
+        cursor = start;
+      }
     } finally {
       fs.closeSync(descriptor);
     }
   } catch {
     return null;
   }
-  const lines = tail.split("\n");
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index]!;
+  return null;
+}
+
+function lastReportedContextTokensInRows(rows: Buffer): number | null {
+  let lineEnd = rows.length;
+  while (lineEnd > 0) {
+    const newline = rows.lastIndexOf(0x0a, lineEnd - 1);
+    const line = rows.subarray(newline + 1, lineEnd);
+    lineEnd = Math.max(0, newline);
     if (!line.includes("input_tokens")) continue;
     try {
-      const row = JSON.parse(line) as Record<string, unknown>;
+      const row = JSON.parse(line.toString("utf8")) as Record<string, unknown>;
       const tokens = claudeUsageTokens(row) ?? codexUsageTokens(row);
       if (tokens !== null) return tokens;
     } catch {
-      /* a truncated first line of the tail window, or a non-JSON row */
+      /* a non-JSON row that happens to mention input_tokens */
     }
   }
   return null;
