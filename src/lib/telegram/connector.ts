@@ -7,7 +7,7 @@ import { procBackend } from "@/lib/proc";
 import { withFileTransaction } from "@/lib/state/fileTransaction";
 
 import type { TelegramErrorCode } from "./contracts";
-import { connectorLaunchSpec, telegramApiCredentials, telegramMcpServerPath, telegramMcpUrl, telegramVenvPython, type ProcessSpec } from "./packaging";
+import { connectorLaunchSpec, TELEGRAM_BURST_CONSUMING_TOOLS, telegramApiCredentials, telegramMcpServerPath, telegramMcpUrl, telegramVenvPython, type ProcessSpec } from "./packaging";
 import { ensureTelegramStateDir, telegramIncomingFeedPath, type StoredTelegramSession } from "./sessionStore";
 
 /**
@@ -20,14 +20,21 @@ import { ensureTelegramStateDir, telegramIncomingFeedPath, type StoredTelegramSe
  * authenticated and verified before publication:
  *
  *  - every tool must carry `readOnlyHint: true`; and
- *  - every tool name must be on {@link TELEGRAM_READ_TOOL_ALLOWLIST}, the
+ *  - every tool name must be on {@link TELEGRAM_FEED_EXPOSED_TOOLS}: the
  *    reviewed list of tools whose implementations were audited to perform no
- *    server-side mutation. The annotation alone is NOT trusted: upstream
- *    shipped `get_invite_link`/`export_chat_invite` annotated read-only while
- *    minting invite links (see vendor/telegram-mcp/PROVENANCE.md), which is
- *    exactly the failure an annotation-only check cannot catch.
+ *    server-side mutation ({@link TELEGRAM_READ_TOOL_ALLOWLIST}), MINUS the
+ *    ones this connector withholds. The annotation alone is NOT trusted:
+ *    upstream shipped `get_invite_link`/`export_chat_invite` annotated
+ *    read-only while minting invite links (see
+ *    vendor/telegram-mcp/PROVENANCE.md), which is exactly the failure an
+ *    annotation-only check cannot catch.
  *
  * A surface violating either bound is refused and reported `not_read_only`.
+ * That includes a still-advertised burst consumer (#1091): the connector runs
+ * the incoming event feed, the entrypoint withholds the tools that would race
+ * it for the same bursts, and this gate is what proves the withholding
+ * happened rather than trusting that it did. A listener that predates the
+ * withholding fails verification once and is replaced by one that has it.
  * A pre-auth HMAC challenge proves the listener knows the current generation's
  * bearer token before that token is sent. The MCP handshake must then return
  * the token-derived server identity.
@@ -62,6 +69,15 @@ export const TELEGRAM_READ_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   "search_public_chats", "wait_for_new_message", "wait_for_settled_message",
 ]);
 
+/** The surface a connector running the incoming feed may advertise (#1091):
+    the audited read set MINUS every tool that consumes a settled burst. The
+    audited set itself stays whole — those tools write nothing, and they are
+    the right surface for a connector with no feed to compete with — so the
+    vendor-parity check above keeps meaning what it says. */
+export const TELEGRAM_FEED_EXPOSED_TOOLS: ReadonlySet<string> = new Set(
+  [...TELEGRAM_READ_TOOL_ALLOWLIST].filter((name) => !TELEGRAM_BURST_CONSUMING_TOOLS.includes(name)),
+);
+
 export type ConnectorProbe =
   | { ok: true; serverName: string; tools: Array<{ name: string; readOnly: boolean }> }
   | { ok: false };
@@ -95,11 +111,13 @@ const TERMINATION_POLL_MS = 25;
 const PID_FILE = "connector.json";
 
 /** The read-only gate, pure so it is directly provable: one tool that lacks
-    an affirmative readOnlyHint OR falls outside the audited allowlist fails
-    the whole surface; an empty surface proves nothing and fails too. */
+    an affirmative readOnlyHint OR falls outside the exposed allowlist fails
+    the whole surface; an empty surface proves nothing and fails too. Every
+    connector the Viewer launches or adopts runs the feed, so the default
+    allowlist is the withheld one. */
 export function verifyReadOnlyTools(
   tools: Array<{ name: string; readOnly: boolean }>,
-  allowlist: ReadonlySet<string> = TELEGRAM_READ_TOOL_ALLOWLIST,
+  allowlist: ReadonlySet<string> = TELEGRAM_FEED_EXPOSED_TOOLS,
 ): { ok: boolean; offending: string[] } {
   const offending = tools
     .filter((tool) => !tool.readOnly || !allowlist.has(tool.name))

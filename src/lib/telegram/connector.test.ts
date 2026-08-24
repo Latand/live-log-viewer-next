@@ -12,8 +12,8 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_TELEGRAM_API_ID = "12345";
 process.env.LLV_TELEGRAM_API_HASH = "0123456789abcdef0123456789abcdef";
 
-const { TELEGRAM_READ_TOOL_ALLOWLIST, connectorFeedCoverageSince, connectorServerName, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
-const { telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
+const { TELEGRAM_FEED_EXPOSED_TOOLS, TELEGRAM_READ_TOOL_ALLOWLIST, connectorFeedCoverageSince, connectorServerName, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
+const { TELEGRAM_BURST_CONSUMING_TOOLS, telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
 
 import type { ConnectorProbe, TelegramConnectorPorts } from "./connector";
 
@@ -107,6 +107,36 @@ test("every advertised tool must carry an affirmative readOnlyHint AND be on the
   expect(verifyReadOnlyTools([]).ok).toBe(false);
 });
 
+test("a connector still advertising a burst consumer is refused, feed or no feed (#1091)", () => {
+  /* The feed and `wait_for_settled_message` consume the SAME settled bursts —
+     each pops the chat out of the connector's pending set, so whichever scans
+     first takes it and the other never sees that dialog. Every connector the
+     Viewer launches runs the feed, so a surface still advertising the consumer
+     is one that would race the report's only evidence of an active dialog: it
+     fails verification and is replaced, rather than being trusted. */
+  expect([...TELEGRAM_BURST_CONSUMING_TOOLS]).toEqual(["wait_for_settled_message"]);
+  const racing = verifyReadOnlyTools([
+    { name: "get_me", readOnly: true },
+    { name: "wait_for_settled_message", readOnly: true },
+  ]);
+  expect(racing.ok).toBe(false);
+  expect(racing.offending).toEqual(["wait_for_settled_message"]);
+  /* The withholding is scoped to the consumers and nothing else:
+     `wait_for_new_message` reports the pending set without removing anything,
+     so it takes no burst from the feed and stays exposed. */
+  expect(verifyReadOnlyTools([{ name: "wait_for_new_message", readOnly: true }]).ok).toBe(true);
+  /* The AUDITED surface is unchanged — the consumer writes nothing, and a
+     connector with no feed to starve may expose it. Only exposure narrows. */
+  expect(TELEGRAM_READ_TOOL_ALLOWLIST.has("wait_for_settled_message")).toBe(true);
+  expect(verifyReadOnlyTools(
+    [{ name: "wait_for_settled_message", readOnly: true }],
+    TELEGRAM_READ_TOOL_ALLOWLIST,
+  ).ok).toBe(true);
+  expect([...TELEGRAM_FEED_EXPOSED_TOOLS].sort()).toEqual(
+    [...TELEGRAM_READ_TOOL_ALLOWLIST].filter((name) => name !== "wait_for_settled_message").sort(),
+  );
+});
+
 test("the allowlist equals the vendored registry's read-only surface, minus nothing", () => {
   /* Re-derive the read-annotated tool set from the ACTUAL vendored source, so
      a vendor bump that adds or re-annotates a tool cannot silently diverge
@@ -129,6 +159,18 @@ test("the allowlist equals the vendored registry's read-only surface, minus noth
     expect(registry.has(disproven)).toBe(false);
     expect(TELEGRAM_READ_TOOL_ALLOWLIST.has(disproven)).toBe(false);
   }
+  /* The withheld set is derived from what the vendored implementations DO with
+     a settled burst, not from their names (#1091): a consumer pops the chat
+     out of the pending set the feed reads. A vendor bump that makes another
+     tool pop — or that stops the withheld one from popping — fails here rather
+     than silently reopening (or pointlessly keeping) the race. */
+  const events = fs.readFileSync(path.join(toolsDir, "events.py"), "utf8");
+  const bodyOf = (name: string): string => events.split(`async def ${name}(`)[1]!.split("@mcp.tool(")[0]!;
+  for (const consumer of TELEGRAM_BURST_CONSUMING_TOOLS) {
+    expect(registry.has(consumer)).toBe(true);
+    expect(bodyOf(consumer)).toContain("_pending_msgs.pop");
+  }
+  expect(bodyOf("wait_for_new_message")).not.toContain("_pending_msgs.pop");
 });
 
 test("an already-listening read-only connector is adopted, never duplicated", async () => {
@@ -215,6 +257,12 @@ test("the connector runs its incoming feed, beside the credential (#1091)", asyn
   /* A second account's connector writes a different file, so nothing it
      records can be read as the first account's activity (#1091). */
   expect(launch("credential-generation-b").env.TELEGRAM_EVENT_FEED_FILE).not.toBe(spec.env.TELEGRAM_EVENT_FEED_FILE);
+  /* Turning the feed on is half of it: the tools that would pop the same
+     bursts are withheld in the same breath, so the feed is the only consumer
+     left. The entrypoint reads this list; `TELEGRAM_EXPOSED_TOOLS` cannot
+     express it, because upstream's read-only mode only ever WIDENS. */
+  expect(spec.env.LLV_TELEGRAM_EXCLUDED_TOOLS).toBe("wait_for_settled_message");
+  expect(spec.env.LLV_TELEGRAM_EXCLUDED_TOOLS!.split(",")).toEqual([...TELEGRAM_BURST_CONSUMING_TOOLS]);
 });
 
 test("an allowlisted foreign listener is never adopted", async () => {
