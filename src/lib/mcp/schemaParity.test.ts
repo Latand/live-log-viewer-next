@@ -292,6 +292,41 @@ test("get_conversation listTools publishes every bounded tail target", async () 
   });
 });
 
+test("conversation_action publishes archive actions, current-generation semantics, and the 100-target bound", async () => {
+  let calls = 0;
+  await withProtocolClient(inertBindings({
+    conversation_action: async () => { calls += 1; return {}; },
+  }), async (client) => {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "conversation_action");
+    const action = tool?.inputSchema.properties?.action as { enum?: string[] } | undefined;
+    const targets = tool?.inputSchema.properties?.targets as {
+      maxItems?: number;
+      items?: { properties?: Record<string, unknown> };
+    } | undefined;
+
+    expect(action?.enum).toEqual(expect.arrayContaining(["archive", "unarchive"]));
+    expect(tool?.description).toContain("current generation path");
+    expect(tool?.description).toContain("readable transcript");
+    expect(targets?.maxItems).toBe(100);
+    expect(Object.keys(targets?.items?.properties ?? {})).toEqual(expect.arrayContaining([
+      "conversationId",
+      "transcriptPath",
+    ]));
+
+    const result = await client.callTool({
+      name: "conversation_action",
+      arguments: {
+        clientRequestId: "archive-schema-overflow",
+        action: "archive",
+        targets: Array.from({ length: 101 }, (_, index) => ({ transcriptPath: `/fixtures/project/session-${index}.jsonl` })),
+      },
+    });
+    expect(result.isError).toBe(true);
+  });
+  expect(calls).toBe(0);
+});
+
 test("search_transcripts publishes its body-query, project, cursor, and bounded page schema", async () => {
   await withProtocolClient(inertBindings(), async (client) => {
     const listed = await client.listTools();

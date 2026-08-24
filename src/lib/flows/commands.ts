@@ -6,6 +6,7 @@ import { validateLaunchModel } from "@/lib/agent/models";
 import { agentRegistry } from "@/lib/agent/registry";
 import { headCwd } from "@/lib/agent/transcript";
 import { livePaneTarget } from "@/lib/delivery";
+import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { isShellCommand } from "@/lib/status";
 import { killPane, paneInfo } from "@/lib/tmux";
@@ -21,7 +22,7 @@ import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } fro
 /**
  * User-facing flow commands: creating a flow from an HTTP request and the
  * PATCH actions (pause/resume/advance/retry/extend/close). The poller-driven
- * transitions live in engine.ts; these are the transitions a human triggers.
+ * transitions live in engine.ts; these are the transitions an external caller triggers.
  */
 
 function validateRole(value: unknown): RoleConfig | null {
@@ -388,7 +389,11 @@ export async function closeFlow(id: string): Promise<{
   });
 }
 
-export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; error?: string; status?: number } {
+export function patchFlow(
+  id: string,
+  req: PatchFlowRequest,
+  actor: PauseResumeActor | null = OPERATOR_PAUSE_RESUME_ACTOR,
+): { flow?: Flow; error?: string; status?: number } {
   const flows = loadFlows();
   const flow = flows.find((item) => item.id === id);
   if (!flow) return { error: "flow not found", status: 404 };
@@ -397,7 +402,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     if (flow.state !== "paused" && flow.state !== "closed") {
       flow.pausedState = flow.state;
       flow.state = "paused";
-      flow.stateDetail = "paused by user";
+      flow.stateDetail = pauseResumeDetail("paused", actor);
     }
   } else if (req.action === "resume") {
     if (flow.state === "paused") {
@@ -409,7 +414,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       }
       flow.state = flow.pausedState && flow.pausedState !== "paused" ? flow.pausedState : "waiting_ready";
       flow.pausedState = null;
-      flow.stateDetail = null;
+      flow.stateDetail = pauseResumeDetail("resumed", actor);
     }
   } else if (req.action === "set-mode") {
     if (req.mode !== "auto" && req.mode !== "manual") return { error: "mode must be auto or manual", status: 400 };

@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import type { CreateProjectOutcome } from "@/hooks/useProjectCuration";
+import type { CreateProjectOutcome, CreateProjectRequestOptions } from "@/hooks/useProjectCuration";
 import { projectMatchesQuery } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
@@ -44,7 +44,7 @@ interface Props {
   now: number;
   onSelect: (project: string) => void;
   onToggleCrown?: (project: string, crowned: boolean) => void;
-  onCreateProject?: (name: string, root: string) => Promise<CreateProjectOutcome>;
+  onCreateProject?: (name: string, root: string, options?: CreateProjectRequestOptions) => Promise<CreateProjectOutcome>;
 }
 
 const EMPTY_CROWNS: ReadonlySet<string> = new Set();
@@ -290,7 +290,7 @@ function CreateProjectForm({
   onCreated,
   onCancel,
 }: {
-  onCreate: (name: string, root: string) => Promise<CreateProjectOutcome>;
+  onCreate: (name: string, root: string, options?: CreateProjectRequestOptions) => Promise<CreateProjectOutcome>;
   onCreated: (project: string) => void;
   onCancel: () => void;
 }) {
@@ -299,11 +299,14 @@ function CreateProjectForm({
   const [name, setName] = useState("");
   const [root, setRoot] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /* Set on a MISSING_DIRECTORY refusal: the error line turns into a notice
+     and the mkdir-and-create action renders below it (issue #1122). */
+  const [offerCreateRoot, setOfferCreateRoot] = useState(false);
   const [busy, setBusy] = useState(false);
   const inputClass = `w-full rounded-[9px] border border-border bg-canvas px-2.5 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
     isMobile ? "min-h-11" : "py-1.5"
   }`;
-  const submit = async () => {
+  const submit = async (createRoot = false) => {
     if (busy) return;
     if (!name.trim()) {
       setError(t("rail.invalidName"));
@@ -315,10 +318,20 @@ function CreateProjectForm({
     }
     setBusy(true);
     setError(null);
-    const outcome = await onCreate(name.trim(), root.trim());
+    setOfferCreateRoot(false);
+    const outcome = await onCreate(name.trim(), root.trim(), createRoot ? { createRoot: true } : undefined);
     setBusy(false);
     if (outcome.ok) {
       onCreated(outcome.project);
+      return;
+    }
+    if (outcome.code === "MISSING_DIRECTORY") {
+      setOfferCreateRoot(true);
+      setError(t("rail.missingRoot"));
+      return;
+    }
+    if (outcome.code === "MKDIR_FAILED") {
+      setError(outcome.message ? `${t("rail.mkdirFailed")} — ${outcome.message}` : t("rail.mkdirFailed"));
       return;
     }
     const key = CREATE_ERROR_KEYS[outcome.code];
@@ -345,9 +358,26 @@ function CreateProjectForm({
         placeholder={t("rail.newProjectRoot")}
         value={root}
         spellCheck={false}
-        onChange={(event) => setRoot(event.target.value)}
+        onChange={(event) => {
+          setRoot(event.target.value);
+          setOfferCreateRoot(false);
+        }}
       />
-      {error ? <div className="px-0.5 text-[11px] font-semibold text-danger">{error}</div> : null}
+      {error ? (
+        <div className={`px-0.5 text-[11px] font-semibold ${offerCreateRoot ? "text-warning" : "text-danger"}`}>{error}</div>
+      ) : null}
+      {offerCreateRoot ? (
+        <button
+          type="button"
+          disabled={busy}
+          className={`w-full rounded-[9px] border border-border bg-card text-[12px] font-semibold hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
+            isMobile ? "min-h-11" : "py-1.5"
+          }`}
+          onClick={() => void submit(true)}
+        >
+          {t("rail.createRootAndProject")}
+        </button>
+      ) : null}
       <div className="flex gap-1.5">
         <button
           type="submit"

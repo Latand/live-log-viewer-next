@@ -3,7 +3,13 @@ import { expect, test } from "bun:test";
 import { FOCUS_TARGET_KINDS } from "@/lib/attention/targets";
 import { BRIDGE_REPORT_CLASSES } from "@/lib/bridge/types";
 
-import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SPAWN_CONFIG, ORCHESTRATOR_SYSTEM_PROMPT } from "./prompt";
+import {
+  ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE,
+  ORCHESTRATOR_PROMPT_VERSION,
+  ORCHESTRATOR_SPAWN_CONFIG,
+  ORCHESTRATOR_SYSTEM_PROMPT,
+  orchestratorMandateForDelivery,
+} from "./prompt";
 
 test("the manager draft defaults to Claude Opus 5 on low effort through the role preset", () => {
   /* OrchestratorPanel seeds its shared launch controls from this live preset. */
@@ -71,8 +77,26 @@ test("bridge reports survive as the second channel, for the operator away from t
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
    this constant as defaultPromptVersion, so a v3 seat reads as stale without a diff. */
-test("the default mandate is at version 7", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(7);
+test("the default mandate is at version 8", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(8);
+});
+
+test("the mandate requires a visible first-turn status even when every mission is already complete", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## Initial visible status");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Your first turn after receiving this mandate");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("inventory the mandate missions and state your plan");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("all mandate missions are complete; standing by");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("generic continuation nudge");
+});
+
+test("mandate delivery keys off directive content and appends it exactly once", () => {
+  const custom = "Caller-edited current-version mandate";
+  const delivered = orchestratorMandateForDelivery(custom);
+
+  expect(delivered).toStartWith(custom);
+  expect(delivered.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
+  expect(orchestratorMandateForDelivery(delivered)).toBe(delivered);
+  expect(orchestratorMandateForDelivery(ORCHESTRATOR_SYSTEM_PROMPT)).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
 });
 
 /* #1016 — the seat had the attention tool and never used it: nothing it read said

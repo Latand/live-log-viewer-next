@@ -6,13 +6,18 @@ import type { ProjectCatalogEntry } from "@/lib/types";
 
 export type CreateProjectOutcome =
   | { ok: true; project: string }
-  | { ok: false; code: string };
+  | { ok: false; code: string; message?: string };
+
+export interface CreateProjectRequestOptions {
+  /** Ask the server to mkdir a missing root before creating the project. */
+  createRoot?: boolean;
+}
 
 export interface UseProjectCuration {
   /** Server crowns with this tab's optimistic toggles layered on top. */
   crownedProjects: ReadonlySet<string>;
   toggleCrown: (project: string, crowned: boolean) => void;
-  createProject: (name: string, root: string) => Promise<CreateProjectOutcome>;
+  createProject: (name: string, root: string, options?: CreateProjectRequestOptions) => Promise<CreateProjectOutcome>;
   /** Freshly created projects, overlaid until the server catalog carries them. */
   createdCatalog: ProjectCatalogEntry[];
 }
@@ -88,13 +93,13 @@ export function useProjectCuration(
     });
   }, []);
 
-  const createProject = useCallback(async (name: string, root: string): Promise<CreateProjectOutcome> => {
+  const createProject = useCallback(async (name: string, root: string, options?: CreateProjectRequestOptions): Promise<CreateProjectOutcome> => {
     let response: Response;
     try {
       response = await fetch("/api/projects/create", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name, root }),
+        body: JSON.stringify(options?.createRoot ? { name, root, createRoot: true } : { name, root }),
       });
     } catch {
       return { ok: false, code: "NETWORK" };
@@ -107,7 +112,11 @@ export function useProjectCuration(
     }
     const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
     if (!response.ok || typeof record?.project !== "string") {
-      return { ok: false, code: typeof record?.error === "string" ? record.error : "ERROR" };
+      return {
+        ok: false,
+        code: typeof record?.error === "string" ? record.error : "ERROR",
+        message: typeof record?.message === "string" ? record.message : undefined,
+      };
     }
     const entry: ProjectCatalogEntry = {
       project: record.project,

@@ -13,6 +13,7 @@ const {
   readTelegramSession,
   saveTelegramSession,
   telegramConnectionPath,
+  telegramIncomingFeedPath,
   telegramConnectorTokenPath,
   telegramSessionPath,
   writeTelegramConnection,
@@ -157,14 +158,46 @@ test("deletion is idempotent and leaves nothing behind", () => {
   expect(readTelegramSession()).toBeNull();
 });
 
+test("disconnect takes the incoming feed with the credential (#1091)", () => {
+  const session = saveTelegramSession(PLACEHOLDER_SESSION);
+  /* What the connector wrote for this generation, plus the pre-#1091 unscoped
+     name a Viewer that predates the scoping left behind. Both name the
+     operator's correspondents, so neither outlives the credential. */
+  const scoped = telegramIncomingFeedPath(session.credentialRef);
+  const legacy = path.join(path.dirname(scoped), "incoming_feed.jsonl");
+  const unrelated = path.join(path.dirname(scoped), "report-history.json");
+  for (const pathname of [scoped, legacy, unrelated]) fs.writeFileSync(pathname, "{}\n", { mode: 0o600 });
+
+  deleteTelegramSession();
+
+  expect(fs.existsSync(scoped)).toBe(false);
+  expect(fs.existsSync(legacy)).toBe(false);
+  /* Only the feed: disconnect is not a sweep of the directory. */
+  expect(fs.existsSync(unrelated)).toBe(true);
+});
+
+test("a reconnect cannot read the previous credential generation's feed (#1091)", () => {
+  const first = saveTelegramSession(PLACEHOLDER_SESSION);
+  deleteTelegramSession();
+  const second = saveTelegramSession(PLACEHOLDER_SESSION);
+
+  expect(second.credentialRef).not.toBe(first.credentialRef);
+  expect(telegramIncomingFeedPath(second.credentialRef)).not.toBe(telegramIncomingFeedPath(first.credentialRef));
+  /* A digest of the ref, never the ref itself: nothing read from disk is
+     spliced into a path. */
+  expect(path.basename(telegramIncomingFeedPath(second.credentialRef))).toMatch(/^incoming_feed-[0-9a-f]{16}\.jsonl$/);
+  expect(telegramIncomingFeedPath(second.credentialRef)).not.toContain(second.credentialRef);
+});
+
 test("connection status round-trips and never carries the session string", () => {
   writeTelegramConnection({
     version: 1,
     status: "connected",
     credentialRef: "ref-1",
-    identity: { name: "Account A", username: "account_a" },
+    identity: { name: "Account A", username: "account_a", id: "770000001" },
     lastHealthCheckAt: "2026-08-20T10:00:00.000Z",
     errorCode: null,
+    identityIdUpgradedAt: null,
   });
   const read = readTelegramConnection();
   expect(read.status).toBe("connected");

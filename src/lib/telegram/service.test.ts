@@ -8,7 +8,7 @@ const OLD_STATE = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
 const { TelegramConnectionService } = await import("./service");
-const { readTelegramSession, saveTelegramSession, telegramSessionPath, writeTelegramConnection } = await import("./sessionStore");
+const { readTelegramConnection, readTelegramSession, saveTelegramSession, telegramSessionPath, writeTelegramConnection } = await import("./sessionStore");
 
 import type { TelegramAdapter, TelegramEnrollmentEvent, TelegramHealthResult } from "./adapter";
 import type { TelegramErrorCode } from "./contracts";
@@ -30,7 +30,7 @@ class FakeAdapter implements TelegramAdapter {
   canceled = 0;
   passwords: string[] = [];
   unavailable: TelegramErrorCode | null = null;
-  health: TelegramHealthResult = { status: "connected", identity: { name: "Account A", username: "account_a" } };
+  health: TelegramHealthResult = { status: "connected", identity: { name: "Account A", username: "account_a", id: "770000001" } };
   healthPromise: Promise<TelegramHealthResult> | null = null;
   logoutResult: { ok: boolean; code: TelegramErrorCode | null } = { ok: true, code: null };
   logoutCalls = 0;
@@ -104,7 +104,7 @@ test("the full QR login without 2FA: scan refresh, verify, connect", async () =>
   await settle();
   expect(service.status().phase).toBe("verifying");
 
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: "account_a" } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: "account_a", id: "770000001" } });
   /* Authorization alone does NOT publish connected — the operation stays in
      verifying until the connector's read-only surface stands verified. */
   expect(service.status().phase).toBe("verifying");
@@ -127,7 +127,7 @@ test("the session string never appears in any status payload", async () => {
   await service.startLogin();
   adapter.emit!({ type: "qr", url: "tg://login?token=x", expiresAt: "2026-08-20T12:00:30.000Z" });
   expect(JSON.stringify(service.status())).not.toContain(PLACEHOLDER_SESSION);
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null, id: "770000001" } });
   await settle();
   expect(JSON.stringify(service.status())).not.toContain(PLACEHOLDER_SESSION);
 });
@@ -154,7 +154,7 @@ test("2FA: password phase, invalid retry, then success", async () => {
   expect(status.login?.passwordError).toBe(true);
 
   await service.submitPassword(login!.operationId, "correct");
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null, id: "770000001" } });
   await settle();
   expect(service.status().phase).toBe("connected");
 });
@@ -237,7 +237,7 @@ test("health releases the shared connector before the session bridge connects", 
   const order: string[] = [];
   adapter.checkSession = async () => {
     order.push("health");
-    return { status: "connected", identity: { name: "Account A", username: null } };
+    return { status: "connected", identity: { name: "Account A", username: null, id: "770000001" } };
   };
   saveTelegramSession(PLACEHOLDER_SESSION);
   const service = new TelegramConnectionService({
@@ -330,7 +330,7 @@ test("successful logout serializes health behind its terminal connector stop", a
   let healthCalls = 0;
   adapter.checkSession = async () => {
     healthCalls += 1;
-    return { status: "connected", identity: { name: "Account A", username: null } };
+    return { status: "connected", identity: { name: "Account A", username: null, id: "770000001" } };
   };
   let connectorRunning = true;
   const service = new TelegramConnectionService({
@@ -382,7 +382,7 @@ test("a failed remote logout PRESERVES the local session and reports why", async
 test("local deletion works directly from connected", async () => {
   const { adapter, calls, service } = harness();
   await service.startLogin();
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null, id: "770000001" } });
   await settle();
   const status = await service.deleteLocalSession();
   expect(status.phase).toBe("disconnected");
@@ -468,7 +468,7 @@ test("host cleanup failure cannot preserve an authorized canceled credential", a
     credentialsConfigured: () => true,
   });
   const started = await service.startLogin();
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null, id: "770000001" } });
   await settle();
 
   const cancellation = service.cancelLogin(started.login!.operationId);
@@ -490,7 +490,7 @@ test("a connector refusing the read-only bound blocks connected and never regist
     credentialsConfigured: () => true,
   });
   await refusing.startLogin();
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null, id: "770000001" } });
   await settle();
   const status = refusing.status();
   expect(status.phase).toBe("error");
@@ -513,7 +513,7 @@ test("a connector bring-up that THROWS surfaces too, instead of leaving connecte
     credentialsConfigured: () => true,
   });
   await throwing.startLogin();
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null, id: "770000001" } });
   await settle();
   const status = throwing.status();
   expect(status.phase).toBe("error");
@@ -539,7 +539,7 @@ test("host registration failure blocks connected after connector verification", 
     credentialsConfigured: () => true,
   });
   await service.startLogin();
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null, id: "770000001" } });
   await settle();
 
   expect(service.status().phase).toBe("error");
@@ -607,9 +607,10 @@ test("missing session health revokes an adopted connector and host registrations
     version: 1,
     status: "connected",
     credentialRef: "missing-session-ref",
-    identity: { name: "Account A", username: null },
+    identity: { name: "Account A", username: null, id: "770000001" },
     lastHealthCheckAt: null,
     errorCode: null,
+    identityIdUpgradedAt: null,
   });
   const { calls, service } = harness();
 
@@ -627,7 +628,7 @@ test("local deletion invalidates an in-flight health result", async () => {
 
   const pending = service.checkHealth();
   const deletion = service.deleteLocalSession();
-  resolveHealth({ status: "connected", identity: { name: "Account A", username: "account_a" } });
+  resolveHealth({ status: "connected", identity: { name: "Account A", username: "account_a", id: "770000001" } });
   expect((await deletion).phase).toBe("disconnected");
   expect((await pending).phase).toBe("disconnected");
   expect(readTelegramSession()).toBeNull();
@@ -650,7 +651,7 @@ test("cancel during connector verification cannot publish the authorized session
     credentialsConfigured: () => true,
   });
   const started = await service.startLogin();
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null, id: "770000001" } });
   await settle();
   const cancellation = service.cancelLogin(started.login!.operationId);
   resolveConnector({ ok: true, url: "http://127.0.0.1:8809/mcp" });
@@ -693,11 +694,57 @@ test("retry authorization cannot overwrite a preserved unsafe session", async ()
   const before = fs.readFileSync(telegramSessionPath());
 
   await service.startLogin();
-  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null } });
+  adapter.emit!({ type: "authorized", sessionString: PLACEHOLDER_SESSION, identity: { name: "Account A", username: null, id: "770000001" } });
   await settle();
 
   expect(service.status().phase).toBe("error");
   expect(service.status().error?.code).toBe("session_unsafe");
   expect(fs.readFileSync(telegramSessionPath())).toEqual(before);
   expect(fs.existsSync(path.join(path.dirname(telegramSessionPath()), "connector-token"))).toBe(false);
+});
+
+test("a pre-#1091 connection recovers its account id on the next health check, once", async () => {
+  /* The migration #1091 names. A connection enrolled before the numeric id was
+     recorded carries a name and a handle only, and the report-run verifier has
+     nothing durable to compare. The health check already re-reads the account,
+     so the id arrives with it, is persisted, and the record is stamped as
+     migrated. */
+  const { adapter, service } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  writeTelegramConnection({
+    version: 1,
+    status: "connected",
+    credentialRef: "legacy-ref",
+    identity: { name: "Account A", username: "account_a", id: null },
+    lastHealthCheckAt: "2026-08-19T12:00:00.000Z",
+    errorCode: null,
+    identityIdUpgradedAt: null,
+  });
+
+  expect((await service.checkHealth()).phase).toBe("connected");
+  const upgraded = readTelegramConnection();
+  expect(upgraded.identity).toEqual({ name: "Account A", username: "account_a", id: "770000001" });
+  expect(upgraded.identityIdUpgradedAt).toBe("2026-08-20T12:00:00.000Z");
+
+  /* A later read that carries no id — an older bridge on a downgraded install —
+     must not erase the recorded one, or the verifier silently falls back to
+     comparing names again. And the migration does not re-run: the stamp is the
+     one it already earned. */
+  adapter.health = { status: "connected", identity: { name: "Account A renamed", username: "account_a", id: null } };
+  expect((await service.checkHealth()).phase).toBe("connected");
+  const later = readTelegramConnection();
+  expect(later.identity).toEqual({ name: "Account A renamed", username: "account_a", id: "770000001" });
+  expect(later.identityIdUpgradedAt).toBe("2026-08-20T12:00:00.000Z");
+});
+
+test("the recorded account id never crosses the browser boundary", async () => {
+  const { service } = harness();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+
+  const status = await service.checkHealth();
+
+  expect(status.identity).toEqual({ name: "Account A", username: "account_a" });
+  expect(JSON.stringify(status)).not.toContain("770000001");
+  /* It is recorded, just not published. */
+  expect(readTelegramConnection().identity?.id).toBe("770000001");
 });

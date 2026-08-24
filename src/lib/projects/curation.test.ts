@@ -115,9 +115,49 @@ test("duplicate identities are refused, in the store and against the visible cat
 test("invalid inputs are refused without touching the store", () => {
   expect(createManualProject("", path.join(SANDBOX, "plain-folder"))).toMatchObject({ ok: false, code: "INVALID_NAME" });
   expect(createManualProject("Name", "relative/path")).toMatchObject({ ok: false, code: "INVALID_ROOT" });
-  expect(createManualProject("Name", path.join(SANDBOX, "missing-folder"))).toMatchObject({ ok: false, code: "INVALID_ROOT" });
   const file = path.join(SANDBOX, "a-file");
   fs.writeFileSync(file, "not a directory\n");
   expect(createManualProject("Name", file)).toMatchObject({ ok: false, code: "INVALID_ROOT" });
+  expect(projectCurationSnapshot().manualProjects).toEqual([]);
+});
+
+test("a missing directory refuses with MISSING_DIRECTORY; opting in mkdirs recursively and creates", () => {
+  const root = path.join(SANDBOX, "missing-folder", "nested");
+  expect(createManualProject("Name", root)).toMatchObject({ ok: false, code: "MISSING_DIRECTORY" });
+  expect(fs.existsSync(root)).toBe(false);
+  expect(projectCurationSnapshot().manualProjects).toEqual([]);
+
+  const created = createManualProject("Fresh", root, new Set(), { createMissingRoot: true });
+  if (!created.ok) throw new Error(`expected creation, got ${created.code}`);
+  expect(fs.statSync(root).isDirectory()).toBe(true);
+  expect(created.entry.project).toBe(projectIdentityFromDirectory(root)!.project);
+  expect(created.entry.root).toBe(fs.realpathSync.native(root));
+
+  resetProjectCurationForTests();
+  expect(projectCurationSnapshot().manualProjects).toEqual([created.entry]);
+});
+
+test("createMissingRoot never overrides the relative-path and file-path refusals", () => {
+  expect(createManualProject("Name", "relative/path", new Set(), { createMissingRoot: true }))
+    .toMatchObject({ ok: false, code: "INVALID_ROOT" });
+  const file = path.join(SANDBOX, "still-a-file");
+  fs.writeFileSync(file, "not a directory\n");
+  expect(createManualProject("Name", file, new Set(), { createMissingRoot: true }))
+    .toMatchObject({ ok: false, code: "INVALID_ROOT" });
+  expect(fs.statSync(file).isFile()).toBe(true);
+  expect(projectCurationSnapshot().manualProjects).toEqual([]);
+});
+
+test("a failed mkdir surfaces MKDIR_FAILED with the readable cause", () => {
+  const sealed = path.join(SANDBOX, "sealed");
+  fs.mkdirSync(sealed, { mode: 0o500 });
+  try {
+    const denied = createManualProject("Name", path.join(sealed, "child"), new Set(), { createMissingRoot: true });
+    expect(denied).toMatchObject({ ok: false, code: "MKDIR_FAILED" });
+    if (denied.ok) throw new Error("expected a failure");
+    expect(denied.message).toContain("EACCES");
+  } finally {
+    fs.chmodSync(sealed, 0o700);
+  }
   expect(projectCurationSnapshot().manualProjects).toEqual([]);
 });

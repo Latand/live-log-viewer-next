@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { applyBoardCommand } from "@/lib/board/command";
+import { boardFor, mutateBoard, patchBoard } from "@/lib/board/store";
 import { DeadlineExceededError } from "@/lib/deadline";
 import { CORPUS_BODY_MARKERS, pipelineCorpus } from "@/lib/pipelines/fixtures/corpus";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -18,7 +20,12 @@ import { productionLivenessSources } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 
 import { defaultMcpSpawnRoleParams, viewerMcpBindings } from "./bindings";
-import { createMcpToolService, MemoryMcpReceiptStore, type McpToolResult } from "./server";
+import {
+  createMcpToolService,
+  MemoryMcpReceiptStore,
+  type McpReceiptStore,
+  type McpToolResult,
+} from "./server";
 
 const sandboxes: string[] = [];
 const originalStateDir = process.env.LLV_STATE_DIR;
@@ -601,7 +608,7 @@ test("board_snapshot returns an inert bounded board projection with durable line
         conversation_worker: [{ kind: "pipeline", containerId: "pipeline_608", role: "builder" }],
       },
     }),
-    boardFor: () => ({ schemaVersion: 1, revision: 7, updatedAt: "2026-07-23T00:00:00.000Z", prefs: { manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false } }),
+    boardFor: () => ({ schemaVersion: 1, revision: 7, updatedAt: "2026-07-23T00:00:00.000Z", prefs: { manual: [], hidden: ["/sessions/hidden-a.jsonl", "/sessions/hidden-b.jsonl"], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false } }),
     noteWrite: () => { writes += 1; },
   } as never);
 
@@ -614,6 +621,7 @@ test("board_snapshot returns an inert bounded board projection with durable line
 
   expect(result).toMatchObject({
     count: 1,
+    hiddenCount: 2,
     board: { revision: 7 },
     conversations: [{
       conversationId: "conversation_worker",
@@ -637,15 +645,16 @@ test("flow tools read durable flows and return a stable action receipt", async (
     { id: "flow_closed", project: "viewer", state: "closed", closedAt: "2026-07-23T01:00:00.000Z" },
     { id: "flow_other", project: "other", state: "waiting_ready", closedAt: null },
   ];
-  const actions: Array<{ id: string; action: string }> = [];
+  const actions: Array<{ id: string; action: string; actor: unknown }> = [];
   const bindings = viewerMcpBindings(undefined, undefined, {
     getFlowsWithPresets: () => ({ flows, presets: [] }),
-    patchFlow: (id: string, request: { action: string }) => {
-      actions.push({ id, action: request.action });
+    patchFlow: (id: string, request: { action: string }, actor: unknown) => {
+      actions.push({ id, action: request.action, actor });
       return { flow: { ...flows[0], id, state: "paused" } };
     },
     cancelRound: async () => ({ flow: flows[0] }),
     closeFlow: async () => ({ flow: flows[0] }),
+    callerAttribution: () => ({ kind: "agent", conversationId: "conversation_reviewer", role: "reviewer" }),
   } as never);
 
   expect(await bindings.list_flows({ clientRequestId: "list-flows", project: "viewer" })).toMatchObject({
@@ -665,7 +674,11 @@ test("flow tools read durable flows and return a stable action receipt", async (
   });
   expect(actionOperationId).toMatch(/^mcp_flow_action_[0-9a-f]{24}$/);
   expect((actionResult.receipt as { operationId: string }).operationId).toBe(actionOperationId);
-  expect(actions).toEqual([{ id: "flow_open", action: "pause" }]);
+  expect(actions).toEqual([{
+    id: "flow_open",
+    action: "pause",
+    actor: { kind: "agent", role: "reviewer", conversationId: "conversation_reviewer" },
+  }]);
 });
 
 test("list_pipelines applies project, state, and closed filters to the durable registry", async () => {
@@ -859,6 +872,298 @@ test("conversation_action delegates to the ownership-fenced conversation command
   });
 });
 
+test("conversation_action archives ghosts and reconciles interrupted receipts without another board revision", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-"));
+  sandboxes.push(sandbox);
+  const boardFile = path.join(sandbox, "board.json");
+  const project = "fixture-owned-project";
+  const predecessorPath = "/fixtures/fixture-project/predecessor.jsonl";
+  const currentPath = "/fixtures/fixture-project/current.jsonl";
+  const deletedGhostPath = "/fixtures/fixture-project/deleted-ghost.jsonl";
+  const spawnPath = "spawn:launch_fixture_placeholder";
+  const unknownPath = "/fixtures/fixture-project/unknown.jsonl";
+  const interruptedReceiptStore = (expectedKey: string): { store: McpReceiptStore; completed: McpToolResult[] } => {
+    const completed: McpToolResult[] = [];
+    return {
+      completed,
+      store: {
+        claim: (key) => {
+          expect(key).toBe(expectedKey);
+          return completed[0]
+            ? { kind: "replay", result: completed[0] }
+            : { kind: "pending", unfinishedAgeMs: 4_000 };
+        },
+        complete: (key, _digest, result) => {
+          expect(key).toBe(expectedKey);
+          completed.push(result);
+        },
+      },
+    };
+  };
+  const launchProfile = {
+    cwd: "/fixtures/fixture-project",
+    project,
+    model: null,
+    effort: null,
+  };
+  const conversation = (id: string, paths: string[]) => ({
+    id,
+    generations: paths.map((pathname) => ({ path: pathname, launchProfile })),
+    continuityPaths: [],
+    abandonedContinuityPaths: [],
+    migration: null,
+    projectOwnership: {
+      project,
+      source: "operator",
+      setAt: "2026-08-24T08:00:00.000Z",
+      operationId: `ownership_${id}`,
+    },
+  });
+  const emptyRegistrySnapshot = new AgentRegistry(path.join(sandbox, "agent-registry.json")).readOnlySnapshot();
+  const registrySnapshot: typeof emptyRegistrySnapshot = {
+    ...emptyRegistrySnapshot,
+    conversations: {
+      conversation_current: conversation("conversation_current", [predecessorPath, currentPath]) as never,
+      conversation_deleted_ghost: conversation("conversation_deleted_ghost", [deletedGhostPath]) as never,
+    },
+    receipts: {
+      launch_fixture_placeholder: {
+        launchId: "launch_fixture_placeholder",
+        conversationId: "conversation_spawn_placeholder",
+        createdAt: "2026-08-24T08:05:00.000Z",
+        explicitProject: project,
+        cwd: "/fixtures/fixture-project",
+        launchProfile,
+      } as never,
+    },
+  };
+  let runtimeCalls = 0;
+  let scanCalls = 0;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => registrySnapshot,
+    completedFileScan: async () => {
+      scanCalls += 1;
+      expect(boardFor(project, boardFile).prefs.hidden).toEqual(scanCalls <= 2
+        ? [currentPath, deletedGhostPath, spawnPath]
+        : []);
+      throw new Error("ghost archiving must not require a transcript scan");
+    },
+    boardFor: (key: string) => boardFor(key, boardFile),
+    applyBoardCommand: (input: unknown, snapshot: typeof registrySnapshot) => applyBoardCommand(input, {
+      registrySnapshot: () => snapshot,
+      patchBoard: (key, revision, patch) => patchBoard(key, revision, patch, boardFile),
+      mutateBoard: (key, revision, mutations) => mutateBoard(key, revision, mutations, boardFile),
+    }),
+    applyConversationAction: async () => {
+      runtimeCalls += 1;
+      throw new Error("archive must not enter runtime conversation control");
+    },
+  } as never);
+
+  const archiveArgs = {
+    clientRequestId: "archive-ghosts-first",
+    action: "archive",
+    targets: [
+      { conversationId: "conversation_current" },
+      { transcriptPath: deletedGhostPath },
+      { transcriptPath: spawnPath },
+      { transcriptPath: predecessorPath },
+      { transcriptPath: unknownPath },
+    ],
+  };
+  const first = await bindings.conversation_action(archiveArgs);
+
+  expect(first).toMatchObject({
+    action: "archive",
+    project,
+    projectsTouched: [project],
+    outcomes: [
+      { conversationId: "conversation_current", transcriptPath: currentPath, project, outcome: "archived" },
+      { conversationId: "conversation_deleted_ghost", transcriptPath: deletedGhostPath, project, outcome: "archived" },
+      { conversationId: "conversation_spawn_placeholder", transcriptPath: spawnPath, project, outcome: "archived" },
+      { conversationId: "conversation_current", transcriptPath: currentPath, project, outcome: "already-archived" },
+      { conversationId: null, transcriptPath: unknownPath, project: null, outcome: "resolution-failed" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 1,
+    pathAliases: {},
+    prefs: { hidden: [currentPath, deletedGhostPath, spawnPath] },
+  });
+  expect(boardFor(project, boardFile).prefs.hidden).not.toContain(predecessorPath);
+
+  const interruptedArchive = interruptedReceiptStore("conversation_action:archive-ghosts-first");
+  const archiveRecovery = createMcpToolService(bindings, interruptedArchive.store);
+  const recoveredArchive = await archiveRecovery.callTool("conversation_action", archiveArgs);
+  expect(recoveredArchive).toMatchObject({
+    ok: true,
+    projectsTouched: [],
+    outcomes: [
+      { transcriptPath: currentPath, outcome: "already-archived" },
+      { transcriptPath: deletedGhostPath, outcome: "already-archived" },
+      { transcriptPath: spawnPath, outcome: "already-archived" },
+      { transcriptPath: currentPath, outcome: "already-archived" },
+      { transcriptPath: unknownPath, outcome: "resolution-failed" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 1,
+    prefs: { hidden: [currentPath, deletedGhostPath, spawnPath] },
+  });
+  expect(interruptedArchive.completed).toEqual([recoveredArchive]);
+  expect(await archiveRecovery.callTool("conversation_action", archiveArgs)).toEqual({
+    ...recoveredArchive,
+    replayed: true,
+  });
+  expect(boardFor(project, boardFile).revision).toBe(1);
+
+  const replayByContent = await bindings.conversation_action({
+    clientRequestId: "archive-ghosts-again",
+    action: "archive",
+    targets: [
+      { transcriptPath: predecessorPath },
+      { transcriptPath: deletedGhostPath },
+      { transcriptPath: spawnPath },
+    ],
+  });
+  expect(replayByContent).toMatchObject({
+    outcomes: [
+      { outcome: "already-archived" },
+      { outcome: "already-archived" },
+      { outcome: "already-archived" },
+    ],
+  });
+  expect(boardFor(project, boardFile).revision).toBe(1);
+
+  const unarchiveArgs = {
+    clientRequestId: "unarchive-ghosts",
+    action: "unarchive",
+    targets: [
+      { conversationId: "conversation_current" },
+      { transcriptPath: deletedGhostPath },
+      { transcriptPath: spawnPath },
+      { transcriptPath: unknownPath },
+    ],
+  };
+  const restored = await bindings.conversation_action(unarchiveArgs);
+  expect(restored).toMatchObject({
+    outcomes: [
+      { conversationId: "conversation_current", transcriptPath: currentPath, outcome: "unarchived" },
+      { outcome: "unarchived" },
+      { outcome: "unarchived" },
+      { project: null, outcome: "resolution-failed" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+
+  const interruptedUnarchive = interruptedReceiptStore("conversation_action:unarchive-ghosts");
+  const unarchiveRecovery = createMcpToolService(bindings, interruptedUnarchive.store);
+  const recoveredUnarchive = await unarchiveRecovery.callTool("conversation_action", unarchiveArgs);
+  expect(recoveredUnarchive).toMatchObject({
+    ok: true,
+    projectsTouched: [],
+    outcomes: [
+      { transcriptPath: currentPath, outcome: "not-found" },
+      { transcriptPath: deletedGhostPath, outcome: "not-found" },
+      { transcriptPath: spawnPath, outcome: "not-found" },
+      { transcriptPath: unknownPath, outcome: "resolution-failed" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+  expect(interruptedUnarchive.completed).toEqual([recoveredUnarchive]);
+  expect(runtimeCalls).toBe(0);
+  expect(scanCalls).toBe(4);
+});
+
+test("conversation_action attributes archive outcomes only when its board command applied", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-race-"));
+  sandboxes.push(sandbox);
+  const boardFile = path.join(sandbox, "board.json");
+  const project = "fixture-concurrent-project";
+  const transcriptPath = "/fixtures/concurrent-project/session.jsonl";
+  const emptyRegistrySnapshot = new AgentRegistry(path.join(sandbox, "agent-registry.json")).readOnlySnapshot();
+  const registrySnapshot: typeof emptyRegistrySnapshot = {
+    ...emptyRegistrySnapshot,
+    conversations: {
+      conversation_concurrent: {
+        id: "conversation_concurrent",
+        generations: [{
+          path: transcriptPath,
+          launchProfile: { cwd: "/fixtures/concurrent-project", project, model: null, effort: null },
+        }],
+        continuityPaths: [],
+        abandonedContinuityPaths: [],
+        migration: null,
+        projectOwnership: {
+          project,
+          source: "operator",
+          setAt: "2026-08-24T08:00:00.000Z",
+          operationId: "ownership_conversation_concurrent",
+        },
+      } as never,
+    },
+  };
+  let commandCalls = 0;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => registrySnapshot,
+    boardFor: (key: string) => boardFor(key, boardFile),
+    applyBoardCommand: (input: unknown, snapshot: typeof registrySnapshot) => {
+      commandCalls += 1;
+      if (commandCalls === 1) {
+        expect(patchBoard(project, 0, { hidden: [transcriptPath] }, boardFile)).toMatchObject({ ok: true, applied: true });
+      } else {
+        expect(mutateBoard(project, 1, [{ kind: "restore", path: transcriptPath, placement: "auto" }], boardFile))
+          .toMatchObject({ ok: true, applied: true });
+      }
+      return applyBoardCommand(input, {
+        registrySnapshot: () => snapshot,
+        patchBoard: (key, revision, patch) => patchBoard(key, revision, patch, boardFile),
+        mutateBoard: (key, revision, mutations) => mutateBoard(key, revision, mutations, boardFile),
+      });
+    },
+  } as never);
+
+  const archived = await bindings.conversation_action({
+    clientRequestId: "archive-concurrent-content",
+    action: "archive",
+    conversationId: "conversation_concurrent",
+  });
+  expect(archived).toMatchObject({
+    projectsTouched: [],
+    outcomes: [{ transcriptPath, project, outcome: "already-archived" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 1, prefs: { hidden: [transcriptPath] } });
+
+  const unarchived = await bindings.conversation_action({
+    clientRequestId: "unarchive-concurrent-content",
+    action: "unarchive",
+    conversationId: "conversation_concurrent",
+  });
+  expect(unarchived).toMatchObject({
+    projectsTouched: [],
+    outcomes: [{ transcriptPath, project, outcome: "not-found" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+  expect(commandCalls).toBe(2);
+});
+
+test("conversation_action refuses archive batches above 100 before reading board or runtime state", async () => {
+  let reads = 0;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => { reads += 1; return {} as never; },
+    boardFor: () => { reads += 1; return {} as never; },
+    applyConversationAction: async () => { reads += 1; return {} as never; },
+  } as never);
+  const targets = Array.from({ length: 101 }, (_, index) => ({ transcriptPath: `/fixtures/project/session-${index}.jsonl` }));
+
+  await expect(bindings.conversation_action({
+    clientRequestId: "archive-too-many",
+    action: "archive",
+    targets,
+  })).rejects.toThrow("targets supports at most 100 conversations per call");
+  expect(reads).toBe(0);
+});
+
 test("conversation_migration delegates to the revision-fenced migration command with a stable receipt", async () => {
   const requests: unknown[] = [];
   const bindings = viewerMcpBindings(undefined, undefined, {
@@ -904,10 +1209,15 @@ test("a refused pipeline close exposes its host report through MCP, not only pro
     stillRunning: [{ stageId: "build", attempt: 2, conversationId: "conversation_build", agentPath: null, paneId: "%7", error: "structured runtime host is unavailable" }],
     worktree: { dir: "/repo-pipeline-1", uncommitted: ["notes.md"], truncated: false },
   };
+  let pauseActor: unknown;
   const bindings = viewerMcpBindings(undefined, undefined, {
-    patchPipeline: async (_id: string, request: { action?: string }) => (request.action === "close"
-      ? { error: "could not stop stage build attempt 2 (conversation_build): structured runtime host is unavailable", status: 409, close }
-      : { pipeline: { id: "pipeline_1", state: "paused" } }),
+    patchPipeline: async (_id: string, request: { action?: string }, _ports: unknown, actor: unknown) => {
+      if (request.action === "pause") pauseActor = actor;
+      return request.action === "close"
+        ? { error: "could not stop stage build attempt 2 (conversation_build): structured runtime host is unavailable", status: 409, close }
+        : { pipeline: { id: "pipeline_1", state: "paused" } };
+    },
+    callerAttribution: () => ({ kind: "manager", conversationId: "conversation_orchestrator", role: "orchestrator" }),
   } as never);
   const results = new Map<string, McpToolResult>();
   const service = createMcpToolService(bindings, {
@@ -937,6 +1247,7 @@ test("a refused pipeline close exposes its host report through MCP, not only pro
   });
   expect(paused).toMatchObject({ ok: true, pipelineId: "pipeline_1" });
   expect((paused as { details?: unknown }).details).toBeUndefined();
+  expect(pauseActor).toEqual({ kind: "agent", role: "orchestrator", conversationId: "conversation_orchestrator" });
 });
 
 test("agent_activity reports the liveness snapshot and journals the stalls it finds (#645)", async () => {

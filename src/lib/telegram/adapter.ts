@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 
-import type { TelegramErrorCode, TelegramIdentity } from "./contracts";
+import { validTelegramAccountId, type TelegramAccountIdentity, type TelegramErrorCode } from "./contracts";
 import { bridgeLaunchSpec, ensureConnectorProvisioned, telegramApiCredentials } from "./packaging";
 
 /**
@@ -21,7 +21,7 @@ export type TelegramEnrollmentEvent =
   | { type: "password_required" }
   | { type: "password_invalid" }
   | { type: "verifying" }
-  | { type: "authorized"; sessionString: string; identity: TelegramIdentity }
+  | { type: "authorized"; sessionString: string; identity: TelegramAccountIdentity }
   | { type: "failed"; code: TelegramErrorCode };
 
 export interface TelegramEnrollmentHandle {
@@ -31,7 +31,7 @@ export interface TelegramEnrollmentHandle {
 }
 
 export type TelegramHealthResult =
-  | { status: "connected"; identity: TelegramIdentity }
+  | { status: "connected"; identity: TelegramAccountIdentity }
   | { status: "expired" }
   | { status: "error"; code: TelegramErrorCode };
 
@@ -45,11 +45,15 @@ export interface TelegramAdapter {
 
 const BRIDGE_CALL_TIMEOUT_MS = 60_000;
 
-function identityOf(value: unknown): TelegramIdentity {
-  const raw = (value && typeof value === "object" ? value : {}) as { name?: unknown; username?: unknown };
+function identityOf(value: unknown): TelegramAccountIdentity {
+  const raw = (value && typeof value === "object" ? value : {}) as { name?: unknown; username?: unknown; id?: unknown };
   return {
     name: typeof raw.name === "string" && raw.name ? raw.name : "Telegram account",
     username: typeof raw.username === "string" && raw.username ? raw.username : null,
+    /* The numeric account id the bridge reads off the authorized user (#1091).
+       A bridge that predates it simply reports no id, and the connection keeps
+       the pre-#1091 shape until its one-time upgrade runs. */
+    id: validTelegramAccountId(raw.id),
   };
 }
 

@@ -76,6 +76,22 @@ test("a refused tool never reaches its binding", async () => {
   expect(calls).toEqual(["deployment_status"]);
 });
 
+test("a worker archive receives the standard permission failure without reaching board mutation", async () => {
+  const { calls, service: tools } = service("worker");
+  const result = await tools.callTool("conversation_action", {
+    clientRequestId: "worker-archive",
+    conversationId: "conversation_target",
+    action: "archive",
+  });
+
+  expect(result).toMatchObject({
+    ok: false,
+    code: "tool_not_permitted",
+    retryable: false,
+  });
+  expect(calls).toEqual([]);
+});
+
 test("a refusal does not spend the clientRequestId, so a later designation still works", async () => {
   const calls: string[] = [];
   const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [

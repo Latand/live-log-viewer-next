@@ -33,6 +33,12 @@ function pipeline(over: Partial<Pipeline>): Pipeline {
 
 const render = (p: Pipeline) => renderToStaticMarkup(<PipelineStrip pipeline={p} />);
 
+test("a paused pipeline card renders the attributed actor (#1121)", () => {
+  for (const detail of ["paused by operator", "paused by orchestrator conversation_orchestrator"]) {
+    expect(render(pipeline({ state: "paused", pausedState: "running", stateDetail: detail }))).toContain(detail);
+  }
+});
+
 test("a verdict-less errored attempt still exposes the verdict popover trigger", () => {
   const p = pipeline({ runs: [{ stageId: "build", attempts: [attempt({ state: "failed", error: "spawn failed: tmux pane gone" })] }] });
   /* No verdict, but the error must be reachable — the trigger renders. */

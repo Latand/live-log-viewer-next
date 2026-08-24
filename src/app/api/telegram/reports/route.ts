@@ -4,7 +4,7 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { validReportChatId, validReportTime, type TelegramReportSettings } from "@/lib/telegram/reportContracts";
 import { DEFAULT_DAILY_REPORT_PROMPT } from "@/lib/telegram/reportPrompt";
 import { ensureTelegramReportScheduler, telegramReportRunner } from "@/lib/telegram/reportRunner";
-import { connectorReadPort } from "@/lib/telegram/reportSources";
+import { connectorReadPort, listReportGroups } from "@/lib/telegram/reportSources";
 import {
   effectiveReportPrompt,
   readReportText,
@@ -113,10 +113,11 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ reports: runner.payload(), runId: launched.runId }, { status: 202 });
       }
       case "groups": {
-        /* One bounded listing for the source picker. It reaches the connector,
-           so it is an explicit action rather than part of the poll. */
-        const chats = await connectorReadPort().listChats({ kind: "group", limit: 100 });
-        return NextResponse.json({ groups: chats.map((chat) => ({ id: chat.id, title: chat.title })) });
+        /* One bounded, sequential walk for the source picker — the typed head
+           plus the paged raw list, so a group below the connector's pre-filter
+           ceiling can still be chosen (#1091). It reaches the connector, so it
+           is an explicit action rather than part of the poll. */
+        return NextResponse.json({ groups: await listReportGroups(connectorReadPort()) });
       }
       default:
         return failure(400, "invalid_action", "Unknown reports action");

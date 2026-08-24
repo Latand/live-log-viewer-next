@@ -35,11 +35,40 @@ export type TelegramErrorCode =
   | "logout_failed"
   | "health_failed";
 
-/** Sanitized account identity: display name and public username only. */
+/** Sanitized account identity: display name and public username only. This is
+    the shape that crosses the browser boundary. */
 export type TelegramIdentity = {
   name: string;
   username: string | null;
 };
+
+/**
+ * The identity as it is RECORDED (issue #1091).
+ *
+ * Names and handles are the operator's to change at any moment; the numeric
+ * Telegram user id is not, so it is what "the same account" actually means and
+ * what the report-run verifier compares. It is recorded at Connect, kept in
+ * owner-only `connection.json`, and deliberately absent from
+ * {@link TelegramStatusPayload}: no surface outside the server has a use for
+ * it, so it stays on the same side of the boundary as the credential.
+ *
+ * `id` is a decimal STRING because a Telegram id is a 64-bit integer and JSON
+ * numbers are not. `null` is a pre-#1091 record that has not been upgraded yet.
+ */
+export type TelegramAccountIdentity = TelegramIdentity & {
+  id: string | null;
+};
+
+/** Telegram user ids are positive integers; the marked form a connector
+    returns for a user is the id itself. Anything else is not an id. */
+export function validTelegramAccountId(value: unknown): string | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 ? String(value) : null;
+  }
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^[1-9]\d{0,18}$/.test(trimmed) ? trimmed : null;
+}
 
 /** A live login operation as the browser sees it. The QR url is the
     `tg://login` token Telegram mints for scanning — it is the one value that

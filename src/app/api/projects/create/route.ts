@@ -12,6 +12,8 @@ const headers = { "Cache-Control": "no-store" };
 const FAILURE_STATUS: Record<string, number> = {
   INVALID_NAME: 400,
   INVALID_ROOT: 400,
+  MISSING_DIRECTORY: 400,
+  MKDIR_FAILED: 500,
   DUPLICATE_PROJECT: 409,
   STORE_ERROR: 500,
 };
@@ -39,7 +41,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   for (const entry of conversationCatalogSnapshot()) {
     existing.add(canonicalProject(entry.project));
   }
-  const result = createManualProject(name, root, existing);
+  const result = createManualProject(name, root, existing, { createMissingRoot: record?.createRoot === true });
   if (!result.ok) {
     return NextResponse.json(
       { error: result.code, message: result.message },

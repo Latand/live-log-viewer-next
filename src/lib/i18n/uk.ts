@@ -85,6 +85,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "rail.creating": "Створення…",
   "rail.invalidName": "Вкажіть назву проєкту",
   "rail.invalidRoot": "Теку не знайдено",
+  "rail.missingRoot": "Такої теки ще немає",
+  "rail.createRootAndProject": "Створити теку і проєкт",
+  "rail.mkdirFailed": "Не вдалося створити теку",
   "rail.duplicateProject": "Такий проєкт уже існує",
   "rail.createFailed": "Не вдалося створити проєкт",
 
@@ -1151,6 +1154,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "wakeup.superseded": "замінено",
   "wakeup.noTime": "пробудження заплановано",
   "wakeup.plan": "план пробудження",
+  "wakeup.planInternal": "внутрішній промпт",
   "wakeup.noPlan": "план пробудження не задано",
   "wakeup.inRel": "через {rel}",
   "wakeup.agoRel": "{rel} тому",

@@ -1,7 +1,7 @@
 import type { FileEntry } from "../types";
 import { resolveTarget } from "../tmux";
 import { ctxFor } from "./context";
-import { lastTurnFor } from "./turnDuration";
+import { lastAssistantMessageAtFor, lastTurnFor } from "./turnDuration";
 import { discoverFiles } from "./discover";
 import { entryEffort, entryEffortResult, entryFast } from "./effort";
 import { linkEntries } from "./links";
@@ -99,6 +99,7 @@ async function runObservation(signal?: AbortSignal): Promise<FileEntry[]> {
     if (probe.atComposer && entry.activity === "stalled") { entry.activity = Date.now() / 1000 - entry.mtime < 900 ? "recent" : "idle"; entry.activityReason = "pane_at_composer"; }
     entry.plan = planFor(entry); entry.goal = goalFor(entry); entry.ctx = ctxFor(entry);
     entry.lastTurn = lastTurnFor(entry);
+    entry.lastAssistantMessageAt = lastAssistantMessageAtFor(entry);
     entry.pendingWakeup = pendingWakeupFor(entry);
   }, signal);
   throwIfCancelled(signal);

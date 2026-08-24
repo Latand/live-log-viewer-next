@@ -340,6 +340,28 @@ async function exhaustVerdictRecovery(h: ReturnType<typeof harness>, entries: Fi
   await tickPipelines(entries, h.ports);
 }
 
+test("pause and resume state details name the operator or calling agent (#1121)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+
+  const operatorPause = await patchPipeline(pipeline.id, { action: "pause" }, h.ports);
+  expect(operatorPause.pipeline).toMatchObject({ state: "paused", stateDetail: "paused by operator" });
+  const operatorResume = await patchPipeline(pipeline.id, { action: "resume" }, h.ports);
+  expect(operatorResume.pipeline).toMatchObject({ state: "provisioning", stateDetail: "resumed by operator" });
+
+  const agent = { kind: "agent" as const, role: "orchestrator", conversationId: "conversation_orchestrator" };
+  const agentPause = await patchPipeline(pipeline.id, { action: "pause" }, h.ports, agent);
+  expect(agentPause.pipeline).toMatchObject({
+    state: "paused",
+    stateDetail: "paused by orchestrator conversation_orchestrator",
+  });
+  const agentResume = await patchPipeline(pipeline.id, { action: "resume" }, h.ports, agent);
+  expect(agentResume.pipeline).toMatchObject({
+    state: "provisioning",
+    stateDetail: "resumed by orchestrator conversation_orchestrator",
+  });
+});
+
 async function withRuntimeSnapshot(
   snapshot: Record<string, unknown> | ((requestNumber: number) => Record<string, unknown>),
   run: () => Promise<void>,

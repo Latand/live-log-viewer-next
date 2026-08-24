@@ -16,6 +16,7 @@ import { lastAssistantMessage, readFindingsFile } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
+import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { redactBounded } from "@/lib/monitor/redact";
 import { parseReview, type ReviewFinding } from "@/lib/review";
@@ -180,7 +181,7 @@ export interface PipelinePorts {
   conversationIdForPath(pathname: string): string | null;
   pipelineAdoptionCandidates(pipelineId: string): PipelineAdoptionCandidate[];
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
-  patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
+  patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string, actor?: PauseResumeActor | null): { error?: string; status?: number };
   closeFlow(id: string): Promise<{
     flow?: Flow;
     error?: string;
@@ -667,8 +668,8 @@ export function defaultPipelinePorts(): PipelinePorts {
       flowSnapshot = null;
       return result;
     },
-    patchFlow: (id, action, note) => {
-      const result = patchFlow(id, { action, ...(note ? { note } : {}) });
+    patchFlow: (id, action, note, actor = null) => {
+      const result = patchFlow(id, { action, ...(note ? { note } : {}) }, actor);
       flowSnapshot = null;
       return result;
     },
@@ -3220,6 +3221,7 @@ export async function patchPipeline(
   id: string,
   req: PatchPipelineRequest,
   ports: PipelinePorts = defaultPipelinePorts(),
+  actor: PauseResumeActor | null = OPERATOR_PAUSE_RESUME_ACTOR,
 ): Promise<PipelineMutationResult> {
   return withPipelineMutation(async (pipelines, persist) => {
     const pipeline = pipelines.find((item) => item.id === id);
@@ -3432,16 +3434,16 @@ export async function patchPipeline(
         pipeline.pausedState = pipeline.state;
         pipeline.state = "paused";
         pipeline.pausedAt = ports.now();
-        pipeline.stateDetail = "paused by user";
-        if (flow && flow.state !== "paused" && flow.state !== "closed") ports.patchFlow(flow.id, "pause");
+        pipeline.stateDetail = pauseResumeDetail("paused", actor);
+        if (flow && flow.state !== "paused" && flow.state !== "closed") ports.patchFlow(flow.id, "pause", undefined, actor);
       }
     } else if (req.action === "resume") {
       if (pipeline.state !== "paused") return { error: "pipeline is not paused", status: 409 };
       pipeline.state = pipeline.pausedState ?? "running";
       pipeline.pausedState = null;
       pipeline.resumedAt = ports.now();
-      pipeline.stateDetail = null;
-      if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
+      pipeline.stateDetail = pauseResumeDetail("resumed", actor);
+      if (flow?.state === "paused") ports.patchFlow(flow.id, "resume", undefined, actor);
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
       const recoveryRefusal = verdictRecoveryResetRefusal(pipeline, attempt, ports);

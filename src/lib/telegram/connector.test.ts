@@ -12,8 +12,8 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_TELEGRAM_API_ID = "12345";
 process.env.LLV_TELEGRAM_API_HASH = "0123456789abcdef0123456789abcdef";
 
-const { TELEGRAM_READ_TOOL_ALLOWLIST, connectorServerName, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
-const { telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
+const { TELEGRAM_FEED_EXPOSED_TOOLS, TELEGRAM_READ_TOOL_ALLOWLIST, connectorFeedCoverageSince, connectorServerName, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
+const { TELEGRAM_BURST_CONSUMING_TOOLS, telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
 
 import type { ConnectorProbe, TelegramConnectorPorts } from "./connector";
 
@@ -36,10 +36,13 @@ const READ_ONLY: ConnectorProbe = {
   ],
 };
 
-function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?: boolean; owned?: boolean; recordFails?: boolean } = {}) {
+function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?: boolean; owned?: boolean; recordFails?: boolean; runsFeed?: boolean } = {}) {
   const calls = { spawns: 0, probes: 0, stops: 0, records: 0, kills: [] as Array<NodeJS.Signals | undefined>, probeTokens: [] as string[] };
   let clock = 0;
   let owned = options.owned ?? false;
+  /* A record written by this Viewer generation names the feed file (#1091);
+     `runsFeed: false` models the record a pre-feed generation left behind. */
+  let runsFeed = options.runsFeed ?? true;
   const ports: TelegramConnectorPorts = {
     spawn: () => {
       calls.spawns += 1;
@@ -54,11 +57,13 @@ function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?:
     sleep: async () => { clock += 10_000; },
     now: () => clock,
     ownsProcess: () => owned,
+    runsFeed: () => runsFeed,
     stop: () => { calls.stops += 1; owned = false; },
     recordProcess: () => {
       calls.records += 1;
       if (options.recordFails) return false;
       owned = true;
+      runsFeed = true;
       return true;
     },
   };
@@ -102,6 +107,36 @@ test("every advertised tool must carry an affirmative readOnlyHint AND be on the
   expect(verifyReadOnlyTools([]).ok).toBe(false);
 });
 
+test("a connector still advertising a burst consumer is refused, feed or no feed (#1091)", () => {
+  /* The feed and `wait_for_settled_message` consume the SAME settled bursts —
+     each pops the chat out of the connector's pending set, so whichever scans
+     first takes it and the other never sees that dialog. Every connector the
+     Viewer launches runs the feed, so a surface still advertising the consumer
+     is one that would race the report's only evidence of an active dialog: it
+     fails verification and is replaced, rather than being trusted. */
+  expect([...TELEGRAM_BURST_CONSUMING_TOOLS]).toEqual(["wait_for_settled_message"]);
+  const racing = verifyReadOnlyTools([
+    { name: "get_me", readOnly: true },
+    { name: "wait_for_settled_message", readOnly: true },
+  ]);
+  expect(racing.ok).toBe(false);
+  expect(racing.offending).toEqual(["wait_for_settled_message"]);
+  /* The withholding is scoped to the consumers and nothing else:
+     `wait_for_new_message` reports the pending set without removing anything,
+     so it takes no burst from the feed and stays exposed. */
+  expect(verifyReadOnlyTools([{ name: "wait_for_new_message", readOnly: true }]).ok).toBe(true);
+  /* The AUDITED surface is unchanged — the consumer writes nothing, and a
+     connector with no feed to starve may expose it. Only exposure narrows. */
+  expect(TELEGRAM_READ_TOOL_ALLOWLIST.has("wait_for_settled_message")).toBe(true);
+  expect(verifyReadOnlyTools(
+    [{ name: "wait_for_settled_message", readOnly: true }],
+    TELEGRAM_READ_TOOL_ALLOWLIST,
+  ).ok).toBe(true);
+  expect([...TELEGRAM_FEED_EXPOSED_TOOLS].sort()).toEqual(
+    [...TELEGRAM_READ_TOOL_ALLOWLIST].filter((name) => name !== "wait_for_settled_message").sort(),
+  );
+});
+
 test("the allowlist equals the vendored registry's read-only surface, minus nothing", () => {
   /* Re-derive the read-annotated tool set from the ACTUAL vendored source, so
      a vendor bump that adds or re-annotates a tool cannot silently diverge
@@ -124,6 +159,18 @@ test("the allowlist equals the vendored registry's read-only surface, minus noth
     expect(registry.has(disproven)).toBe(false);
     expect(TELEGRAM_READ_TOOL_ALLOWLIST.has(disproven)).toBe(false);
   }
+  /* The withheld set is derived from what the vendored implementations DO with
+     a settled burst, not from their names (#1091): a consumer pops the chat
+     out of the pending set the feed reads. A vendor bump that makes another
+     tool pop — or that stops the withheld one from popping — fails here rather
+     than silently reopening (or pointlessly keeping) the race. */
+  const events = fs.readFileSync(path.join(toolsDir, "events.py"), "utf8");
+  const bodyOf = (name: string): string => events.split(`async def ${name}(`)[1]!.split("@mcp.tool(")[0]!;
+  for (const consumer of TELEGRAM_BURST_CONSUMING_TOOLS) {
+    expect(registry.has(consumer)).toBe(true);
+    expect(bodyOf(consumer)).toContain("_pending_msgs.pop");
+  }
+  expect(bodyOf("wait_for_new_message")).not.toContain("_pending_msgs.pop");
 });
 
 test("an already-listening read-only connector is adopted, never duplicated", async () => {
@@ -170,6 +217,7 @@ test("a spawn failure reports connector_failed without probing forever", async (
 test("the launch env — not this test's env — carries the session; argv never does", async () => {
   const { connectorLaunchSpec } = await import("./packaging");
   const spec = connectorLaunchSpec({
+    credentialRef: CONNECTOR_SESSION.credentialRef,
     sessionString: PLACEHOLDER_SESSION,
     connectorToken: CONNECTOR_SESSION.connectorToken,
     credentials: { apiId: "12345", apiHash: "0123456789abcdef0123456789abcdef" },
@@ -184,6 +232,39 @@ test("the launch env — not this test's env — carries the session; argv never
   expect(spec.args).toEqual([expect.stringContaining("telegram-mcp-server.py")]);
 });
 
+test("the connector runs its incoming feed, beside the credential (#1091)", async () => {
+  const { connectorLaunchSpec } = await import("./packaging");
+  const { telegramIncomingFeedPath } = await import("./sessionStore");
+  const launch = (credentialRef: string) => connectorLaunchSpec({
+    credentialRef,
+    sessionString: PLACEHOLDER_SESSION,
+    connectorToken: CONNECTOR_SESSION.connectorToken,
+    credentials: { apiId: "12345", apiHash: "0123456789abcdef0123456789abcdef" },
+  });
+  const spec = launch(CONNECTOR_SESSION.credentialRef);
+  /* Without this the connector records activity nowhere and a report's
+     private-dialog discovery is back to guessing from a chat list that is not
+     ordered by recency. */
+  expect(spec.env.TELEGRAM_EVENT_FEED).toBe("1");
+  /* The feed names the operator's correspondents, so it lives inside the 0700
+     telegram directory rather than at the connector's XDG default. */
+  expect(spec.env.TELEGRAM_EVENT_FEED_FILE).toBe(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef));
+  /* Named for the credential GENERATION, and by a digest of it rather than
+     the ref itself, so no value read from disk is ever spliced into a path. */
+  expect(path.dirname(spec.env.TELEGRAM_EVENT_FEED_FILE!)).toBe(path.join(process.env.LLV_STATE_DIR!, "telegram"));
+  expect(path.basename(spec.env.TELEGRAM_EVENT_FEED_FILE!)).toMatch(/^incoming_feed-[0-9a-f]{16}\.jsonl$/);
+  expect(spec.env.TELEGRAM_EVENT_FEED_FILE).not.toContain(CONNECTOR_SESSION.credentialRef);
+  /* A second account's connector writes a different file, so nothing it
+     records can be read as the first account's activity (#1091). */
+  expect(launch("credential-generation-b").env.TELEGRAM_EVENT_FEED_FILE).not.toBe(spec.env.TELEGRAM_EVENT_FEED_FILE);
+  /* Turning the feed on is half of it: the tools that would pop the same
+     bursts are withheld in the same breath, so the feed is the only consumer
+     left. The entrypoint reads this list; `TELEGRAM_EXPOSED_TOOLS` cannot
+     express it, because upstream's read-only mode only ever WIDENS. */
+  expect(spec.env.LLV_TELEGRAM_EXCLUDED_TOOLS).toBe("wait_for_settled_message");
+  expect(spec.env.LLV_TELEGRAM_EXCLUDED_TOOLS!.split(",")).toEqual([...TELEGRAM_BURST_CONSUMING_TOOLS]);
+});
+
 test("an allowlisted foreign listener is never adopted", async () => {
   const foreign: ConnectorProbe = { ...READ_ONLY, serverName: "telegram" };
   const { ports, calls } = fakePorts([foreign]);
@@ -191,6 +272,98 @@ test("an allowlisted foreign listener is never adopted", async () => {
   expect(result).toEqual({ ok: false, code: "connector_failed" });
   expect(calls.spawns).toBe(1);
   expect(calls.stops).toBeGreaterThanOrEqual(2);
+});
+
+test("a listening connector that runs no feed is replaced, not adopted (#1091)", async () => {
+  /* The tail's own regression: a connector spawned by a Viewer generation that
+     predates the feed is a perfectly good read surface, so it was adopted
+     happily — and it records no activity at all, which sends the report's
+     dialog discovery back to a bounded walk over a list ordered by pins. It is
+     ineligible now: stopped and replaced, once, and the replacement records
+     the feed it was launched with. */
+  const { ports, calls } = fakePorts([READ_ONLY], { owned: true, runsFeed: false });
+
+  const result = await ensureTelegramConnector(CONNECTOR_SESSION, ports);
+
+  expect(result).toEqual({ ok: true, url: telegramMcpUrl() });
+  expect(calls.spawns).toBe(1);
+  expect(calls.stops).toBeGreaterThanOrEqual(1);
+  expect(calls.records).toBe(1);
+});
+
+/** A connector record of the shape the supervisor writes, so the REAL feed
+    eligibility check has something to read. Nothing here is a live process:
+    the check reads the record only. */
+async function writeConnectorRecord(feedFile: string, feedSince?: string): Promise<void> {
+  fs.writeFileSync(
+    path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json"),
+    JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      identity: "start-token-placeholder",
+      credentialRef: CONNECTOR_SESSION.credentialRef,
+      connectorTokenSha256: "f".repeat(64),
+      command: (await import("./packaging")).telegramVenvPython(),
+      entrypoint: (await import("./packaging")).telegramMcpServerPath(),
+      feedFile,
+      ...(feedSince ? { feedSince } : {}),
+    }),
+    { mode: 0o600 },
+  );
+}
+
+test("the record says since when this generation's feed can be believed (#1091)", async () => {
+  /* A report asks the feed for the dialogs active since the last run, and the
+     feed can only answer for the time it was listening — which the file itself
+     cannot say and `incoming_feed_status` does not report. The record written
+     at spawn is the evidence, and it is scoped to the credential generation
+     for the same reason the feed file is: another account's listener says
+     nothing about this one's window. */
+  const { telegramIncomingFeedPath } = await import("./sessionStore");
+  const startedAt = "2026-08-21T04:00:00.000Z";
+
+  await writeConnectorRecord(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef), startedAt);
+  expect(connectorFeedCoverageSince(CONNECTOR_SESSION.credentialRef)).toBe(Date.parse(startedAt));
+
+  /* Another generation's listener: no coverage of THIS account's window. */
+  expect(connectorFeedCoverageSince("credential-generation-of-another-account")).toBeNull();
+
+  /* A feed with no start stamp vouches for nothing rather than for
+     everything — the caller treats unknown coverage as uncovered. */
+  await writeConnectorRecord(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef));
+  expect(connectorFeedCoverageSince(CONNECTOR_SESSION.credentialRef)).toBeNull();
+
+  fs.rmSync(path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json"), { force: true });
+  expect(connectorFeedCoverageSince(CONNECTOR_SESSION.credentialRef)).toBeNull();
+});
+
+test("a listener writing another credential generation's feed is not adopted (#1091)", async () => {
+  const { telegramIncomingFeedPath } = await import("./sessionStore");
+  /* The operator disconnected one account and connected another. A listener
+     left writing the FIRST generation's feed would hand the second account
+     the first one's recent dialogs as its own active sources — after the id
+     check had already passed. The record names the file, so the mismatch is
+     visible without probing anything. */
+  await writeConnectorRecord(telegramIncomingFeedPath("credential-generation-of-another-account"));
+  const stale = fakePorts([READ_ONLY], { owned: true });
+  delete stale.ports.runsFeed;
+
+  const replaced = await ensureTelegramConnector(CONNECTOR_SESSION, stale.ports);
+
+  expect(replaced).toEqual({ ok: true, url: telegramMcpUrl() });
+  expect(stale.calls.spawns).toBe(1);
+  expect(stale.calls.stops).toBeGreaterThanOrEqual(1);
+
+  /* The same record naming THIS generation's feed is adopted, so the refusal
+     above is the feed scope and not the check refusing everything. */
+  await writeConnectorRecord(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef));
+  const current = fakePorts([READ_ONLY], { owned: true });
+  delete current.ports.runsFeed;
+
+  const adopted = await ensureTelegramConnector(CONNECTOR_SESSION, current.ports);
+
+  expect(adopted).toEqual({ ok: true, url: telegramMcpUrl() });
+  expect(current.calls.spawns).toBe(0);
 });
 
 test("a credential-generation mismatch stops the old record before spawning", async () => {
@@ -207,6 +380,7 @@ test("concurrent Viewer generations serialize adoption and spawn one recorded co
   let records = 0;
   const ports: TelegramConnectorPorts = {
     ownsProcess: () => owned,
+    runsFeed: () => true,
     stop: async () => { await Promise.resolve(); owned = false; },
     spawn: () => {
       spawns += 1;
@@ -250,6 +424,7 @@ test("an older failed readiness probe cannot stop a newer credential generation"
   const ports: TelegramConnectorPorts = {
     ownsProcess: (candidate) => binding?.credentialRef === candidate.credentialRef
       && binding.connectorToken === candidate.connectorToken,
+    runsFeed: () => true,
     stop: () => { stops += 1; binding = null; },
     spawn: () => { spawns += 1; return { pid: process.pid, kill: () => true }; },
     recordProcess: (_child, _spec, candidate) => { binding = { ...candidate }; return true; },
@@ -300,6 +475,7 @@ test("stop invalidates an in-flight connector operation", async () => {
     sleep: async () => {},
     now: () => 0,
     ownsProcess: () => true,
+    runsFeed: () => true,
     beginOperation: () => {
       const current = ++generation;
       return () => current === generation;
@@ -328,6 +504,7 @@ test("a stalled readiness probe is bounded and terminates the spawned child", as
     sleep: async () => {},
     now: () => 0,
     ownsProcess: () => owned,
+    runsFeed: () => owned,
     recordProcess: () => { owned = true; return true; },
     stop: () => { owned = false; child.kill("SIGTERM"); },
     probeTimeoutMs: 10,
@@ -370,10 +547,19 @@ test("stop waits through SIGKILL escalation until a TERM-resistant connector exi
     expect(childPid).toBeGreaterThan(1);
     const pidFile = path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json");
     const recorded = JSON.parse(fs.readFileSync(pidFile, "utf8")) as {
-      pid: number; identity: string; credentialRef: string; connectorTokenSha256: string;
+      pid: number; identity: string; credentialRef: string; connectorTokenSha256: string; feedFile?: string; feedSince?: string;
     };
     expect(recorded.pid).toBe(childPid);
     expect(recorded.credentialRef).toBe(CONNECTOR_SESSION.credentialRef);
+    /* The feed is child ENVIRONMENT, so the record is the only durable proof
+       that this process runs one — and it is what a later Viewer generation
+       checks before adopting it (#1091). */
+    const { telegramIncomingFeedPath } = await import("./sessionStore");
+    expect(recorded.feedFile).toBe(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef));
+    /* Recorded together with it: the instant this listener started, which is
+       the earliest moment its feed can vouch for a report's window (#1091). */
+    expect(Date.parse(recorded.feedSince!)).toBeLessThanOrEqual(Date.now());
+    expect(connectorFeedCoverageSince(CONNECTOR_SESSION.credentialRef)).toBe(Date.parse(recorded.feedSince!));
     expect(recorded.connectorTokenSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(fs.readFileSync(pidFile, "utf8")).not.toContain(CONNECTOR_SESSION.connectorToken);
 
