@@ -6,10 +6,11 @@ import {
   VERDICT_LINE_RE,
   type ReviewCardItem,
 } from "@/lib/review";
-import { isClaudeProtocolUser } from "@/lib/claudeProtocolUser";
+import { isClaudeProtocolUser, isClaudeSdkDeliveredUser } from "@/lib/claudeProtocolUser";
 import { getLocale, translate } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { decodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
+import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import { isViewerMcpServer } from "@/lib/mcp/presentation";
 import type { FileEntry } from "@/lib/types";
@@ -193,6 +194,10 @@ export type Tmsg = {
   /** Outgoing only: delivery state recovered from the tool result. */
   delivery?: "ok" | "err";
   msgId?: string;
+  /** #1117: an MCP/structured inter-agent relay rather than a teammate
+      envelope — the card adds an explicit "internal" tag and `peer` names the
+      sender ROLE the delivery evidence attributed, not a teammate id. */
+  internal?: boolean;
 };
 export type CmdGroupItem = {
   kind: "cmd-group";
@@ -227,7 +232,11 @@ export type Item =
   | { kind: "image"; media: string; data: string; w?: number; h?: number; bytes?: number }
   | { kind: "inbox-image"; name: string; path: string }
   | { kind: "blob"; bytes: number; text: string; sourceId?: string }
-  | { kind: "sysmsg"; label: string; text: string }
+  /* `deliveredMessage` (#1117): set on a Claude user row that is a REAL message
+     delivered through the structured/SDK path — its engine uuid joins the
+     delivery ledger, so the renderer can resolve it into the operator's bubble
+     or an internal relay card. Without evidence it renders as this system row. */
+  | { kind: "sysmsg"; label: string; text: string; deliveredMessage?: { engineMessageId: string | null; ts: unknown } }
   | { kind: "compact"; ts: unknown; trigger?: string; preTokens?: number; summary?: string }
   | { kind: "raw"; text: string; err: boolean };
 
@@ -426,6 +435,10 @@ interface CodexUserContent {
       canonical structured-user marker. Absent on every record written before
       the field existed, and on every turn that carried none. */
   selectedContext?: SelectedContextRef | null;
+  /** Authorship stamped on the marker at delivery (#1117). `agent` renders as
+      an internal relay card; `operator` and records that predate the attribute
+      keep the user bubble. */
+  origin?: MessageOrigin | null;
 }
 
 /* Codex has added content-part variants over time. Keep the text path broad,
@@ -1644,8 +1657,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   };
   /* Inbound teammate traffic arrives as user text wrapped in <teammate-message>;
      idle_notification JSON bodies collapse to a thin service-style row. */
-  const addUserText = (ts: unknown, text: string, isHarness = false) => {
-    if (isHarness) return void addSysMsg(text, tr("render.system"));
+  const addUserText = (ts: unknown, text: string, isHarness = false, deliveredMessage?: { engineMessageId: string | null; ts: unknown }) => {
+    if (isHarness) return void addSysMsg(text, tr("render.system"), deliveredMessage);
     const rest = text.replace(TMSG_RE, (_whole, _tag: string, attrs: string, body: string) => {
       const peer = tmsgAttr(attrs, "teammate_id") || tmsgAttr(attrs, "from") || tr("render.teammate");
       const summary = tmsgAttr(attrs, "summary");
@@ -1683,15 +1696,28 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   /* Codex stores human input and harness context in user-role response rows.
      Known envelope markers identify harness rows. Echoed composer messages
      keep their user classification even when their text starts similarly. */
-  const addSysMsg = (text: string, fallbackLabel?: string) => {
-    push({ kind: "sysmsg", label: sysMsgLabel(text, fallbackLabel), text });
+  const addSysMsg = (text: string, fallbackLabel?: string, deliveredMessage?: { engineMessageId: string | null; ts: unknown }) => {
+    push({ kind: "sysmsg", label: sysMsgLabel(text, fallbackLabel), text, ...(deliveredMessage ? { deliveredMessage } : {}) });
   };
+  /* An agent-origin structured record (#1117) is inter-agent traffic: it
+     renders as the internal relay card naming the sender role, never as the
+     operator's own bubble. Operator and pre-attribute records keep the bubble. */
+  const internalRelayItem = (ts: unknown, text: string, origin: MessageOrigin): Tmsg => ({
+    kind: "tmsg",
+    ts,
+    dir: "in",
+    peer: origin.role ?? tr("render.agentPeer"),
+    summary: "",
+    text,
+    internal: true,
+  });
   const emitCodexUserContent = (ts: unknown, content: CodexUserContent): PendingCodexUser => {
     const entrySeqs: number[] = [];
     const emit = (item: Item) => entrySeqs.push(push(item));
     const { cleaned, images } = extractInboxImages(content.text);
     const voice = cleaned ? parseRealtimeDelegation(cleaned) : null;
     if (voice) emit({ kind: "voice", ts, ...voice });
+    else if (cleaned && content.origin?.kind === "agent") emit(internalRelayItem(ts, cleaned, content.origin));
     else if (cleaned) emit({ kind: "user", ts, text: cleaned, ...(content.selectedContext ? { selectedContext: content.selectedContext } : {}) });
     for (const image of images) emit({ kind: "inbox-image", name: image.name, path: image.path });
     for (const attachment of content.attachments) emit(attachment);
@@ -1750,15 +1776,23 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (!pending) return;
     const { cleaned, images } = extractInboxImages(decoded.text);
     if (cleaned) {
-      const userSeq = pending.entrySeqs.find((seq) => {
+      /* The echo replaces its provisional row LIKE FOR LIKE: an internal relay
+         stays the relay card (with the echo's timestamp), a user text stays
+         the bubble — the echo must never re-author the message. */
+      const internal = decoded.origin?.kind === "agent";
+      const echoItem: Item = internal
+        ? internalRelayItem(ts, cleaned, decoded.origin!)
+        : { kind: "user", ts, text: cleaned };
+      const matchSeq = pending.entrySeqs.find((seq) => {
         const idx = entryIndex(seq);
-        return idx >= 0 && entries[idx]?.item.kind === "user";
+        const kind = idx >= 0 ? entries[idx]?.item.kind : undefined;
+        return internal ? kind === "tmsg" : kind === "user";
       });
-      if (userSeq !== undefined) {
-        const idx = entryIndex(userSeq);
-        entries[idx] = { ...entries[idx], item: { kind: "user", ts, text: cleaned } };
+      if (matchSeq !== undefined) {
+        const idx = entryIndex(matchSeq);
+        entries[idx] = { ...entries[idx], item: echoItem };
       } else {
-        pending.entrySeqs.push(push({ kind: "user", ts, text: cleaned }));
+        pending.entrySeqs.push(push(echoItem));
       }
     }
     for (const image of images) pending.entrySeqs.push(push({ kind: "inbox-image", name: image.name, path: image.path }));
@@ -1915,10 +1949,17 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         return;
       }
       const isHarness = isClaudeProtocolUser(obj);
-      if (typeof content === "string") addUserText(ts, content, isHarness);
+      /* #1117: an SDK-delivered REAL message renders as a system row only for
+         lack of evidence — its engine uuid joins the delivery ledger, so the
+         renderer can resolve the row into the operator's bubble or an internal
+         relay card. Scaffold rows carry no join identity and stay system. */
+      const deliveredMessage = isClaudeSdkDeliveredUser(obj)
+        ? { engineMessageId: textPart(obj.uuid) || null, ts }
+        : undefined;
+      if (typeof content === "string") addUserText(ts, content, isHarness, deliveredMessage);
       else {
         for (const part of arr(content)) {
-          if (part.type === "text") addUserText(ts, textPart(part.text), isHarness);
+          if (part.type === "text") addUserText(ts, textPart(part.text), isHarness, deliveredMessage);
           else if (part.type === "image") pushImage(part, fileWrap);
           else if (part.type === "tool_result") {
             const inner = arr(part.content);

@@ -1074,6 +1074,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "render.showJson": "показати JSON",
   "render.toDir": "до",
   "render.fromDir": "від",
+  "render.internalTag": "внутрішнє",
+  "render.agentPeer": "агент",
   "render.delivered": "доставлено",
   "render.notDelivered": "не доставлено",
   "render.reasoning": "міркування агента",

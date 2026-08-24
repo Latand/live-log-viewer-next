@@ -6,6 +6,7 @@ import type { Workflow } from "@/lib/workflows/types";
 import type { RuntimeLiveTurn } from "@/lib/runtime/liveTurn";
 import type { RuntimeVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
+import type { MessageOrigin } from "./messageOrigin";
 import type { RuntimeImageCapability, StructuredImageRef } from "./structuredContent";
 
 export const RUNTIME_SCHEMA_VERSION = 1;
@@ -239,6 +240,10 @@ export interface RuntimeSendCommand extends RuntimeCommandBase {
       offered none — an EXPLICIT empty selection is the `none` variant, which is
       present. */
   selectedContext?: SelectedContextRef;
+  /** #1117: who authored this message, stamped by the admitting surface and
+      carried on the durable send effect so delivery evidence (ledger record,
+      structured-user marker) can say operator vs inter-agent. */
+  origin?: MessageOrigin;
 }
 
 /**

@@ -9,6 +9,7 @@ import { SelectedContextBadge } from "../SelectedContextBadge";
 import { CopyButton } from "./CopyButton";
 import { InboxImageCard } from "./InboxImage";
 import { md, mdBlocks } from "./markdown";
+import { useMessageProvenance, type ProvenanceLookup } from "./messageProvenance";
 import { tr, type Item } from "./parse";
 import { BlobCard } from "./cards/BlobCard";
 import { CmdGroupCard } from "./cards/CmdGroupCard";
@@ -24,10 +25,44 @@ import { WakeupCard } from "./cards/WakeupCard";
 import { SpeakButton } from "./SpeakButton";
 import { McpCallCard } from "../runtime/McpCallCard";
 
+/**
+ * Resolves a delivered Claude system row (#1117) with ledger evidence: an
+ * operator-authored delivery becomes the operator's own bubble, an inter-agent
+ * relay becomes the internal card naming the sender role. No evidence — no
+ * provider, unknown id, scaffold row — keeps the system row untouched.
+ */
+function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
+  if (item.kind !== "sysmsg" || !item.deliveredMessage) return item;
+  const resolved = provenance(item.deliveredMessage.engineMessageId);
+  if (resolved?.origin === "operator") {
+    return {
+      kind: "user",
+      ts: item.deliveredMessage.ts,
+      text: item.text,
+      ...(resolved.selectedContext ? { selectedContext: resolved.selectedContext } : {}),
+    };
+  }
+  if (resolved?.origin === "agent") {
+    return {
+      kind: "tmsg",
+      ts: item.deliveredMessage.ts,
+      dir: "in",
+      peer: resolved.senderRole ?? tr("render.agentPeer"),
+      summary: "",
+      text: item.text,
+      internal: true,
+    };
+  }
+  return item;
+}
+
 /* Memoized: feed items are immutable after buildFeed, so a pane re-render
    (poll tick, camera state, files refresh) skips re-parsing markdown for
-   every message that did not change. */
-export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item; speakText?: string }) {
+   every message that did not change. The provenance lookup arrives by context,
+   so a resolved map re-renders exactly the memoized consumers. */
+export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: { item: Item; speakText?: string }) {
+  const provenance = useMessageProvenance();
+  const item = resolveDeliveredItem(sourceItem, provenance);
   if (item.kind === "image") return <ImageCard media={item.media} data={item.data} w={item.w} h={item.h} bytes={item.bytes} />;
   if (item.kind === "inbox-image") return <InboxImageCard name={item.name} path={item.path} />;
   if (item.kind === "blob") return <BlobCard bytes={item.bytes} text={item.text} />;
@@ -151,6 +186,14 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
           <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
             <Mail className="h-3.5 w-3.5" aria-hidden />
           </span>
+          {/* #1117: an MCP/structured relay says outright that it is internal
+              traffic, and the peer pill names the sender ROLE, so the operator
+              never mistakes it for their own words or for scaffold. */}
+          {item.internal ? (
+            <span className="rounded-full border border-accent/40 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-accent">
+              {tr("render.internalTag")}
+            </span>
+          ) : null}
           <span className="text-[11px] font-semibold text-muted">{item.dir === "out" ? tr("render.toDir") : tr("render.fromDir")}</span>
           <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-bold text-accent">{item.peer}</span>
           {item.delivery ? (

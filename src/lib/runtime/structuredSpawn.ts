@@ -29,6 +29,7 @@ import { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import { CodexAppServerHost } from "./codexAppServerHost";
 import { isRuntimeHostTransportFailure, type RuntimeHostClient } from "./client";
 import { StructuredHostAdoptionCleanupError, type EngineHost, type HostState } from "./engineHost";
+import { messageOriginRole, type MessageOrigin } from "./messageOrigin";
 import { runtimeSettingsCapability, type RuntimeOperationResult, type RuntimeSession } from "./contracts";
 import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
 import { publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "./structuredDeliveryController";
@@ -353,6 +354,7 @@ export async function reconcileStructuredSpawnReplay(
       && effect.cwd === current.cwd
       && (prompt.trim() || imageRefs.length)
     ) {
+      const readmittedOrigin = spawnMessageOrigin(current, registry);
       const readmitted = await enqueueStructuredMessage({
         path: current.artifactPath,
         conversationId: current.conversationId,
@@ -360,6 +362,7 @@ export async function reconcileStructuredSpawnReplay(
         operationId: `spawn_message_${launchId}`,
         text: prompt,
         imageRefs,
+        ...(readmittedOrigin ? { origin: readmittedOrigin } : {}),
       }, {
         client: () => client,
         registry: () => registry,
@@ -1202,6 +1205,7 @@ export async function recoverPendingStructuredSpawns(
     }
     if (imageRefs === null) throw new Error(`structured spawn recovery has invalid image refs for ${receipt.launchId}`);
     if (prompt.trim() || imageRefs.length) {
+      const origin = spawnMessageOrigin(receipt, registry);
       const delivered = await enqueueStructuredMessage({
         path: receipt.artifactPath,
         conversationId: receipt.conversationId,
@@ -1209,6 +1213,7 @@ export async function recoverPendingStructuredSpawns(
         operationId: `spawn_message_${receipt.launchId}`,
         text: prompt,
         imageRefs,
+        ...(origin ? { origin } : {}),
       }, {
         client: () => client,
         registry: () => registry,
@@ -1363,8 +1368,24 @@ async function defaultBindHost(
     : await bindClaudeHostPersistence(registry, key, host as ClaudeStreamBrokerHost, claimOwner, claimEpoch, releasedStatus);
 }
 
+/**
+ * Authorship of a spawn's FIRST message (#1117), from the receipt's recorded
+ * delegation depth: 0 is an operator/external root whose prompt the operator
+ * typed; a deeper launch was delegated, so its mandate is inter-agent traffic
+ * from the parent conversation (named by its role when the registry knows one).
+ * Legacy receipts without a depth stay unattributed — the feed must not guess.
+ */
+function spawnMessageOrigin(receipt: SpawnReceipt, registry: AgentRegistry): MessageOrigin | undefined {
+  if (receipt.delegationDepth === 0) return { kind: "operator" };
+  if (receipt.delegationDepth === null || receipt.delegationDepth === undefined) return undefined;
+  const parent = receipt.parentConversationId ? registry.conversation(receipt.parentConversationId) : null;
+  const role = messageOriginRole(parent?.agentRole ?? undefined);
+  return { kind: "agent", ...(role ? { role } : {}) };
+}
+
 async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: string): Promise<void | "held"> {
   if (!input.prompt.trim() && !input.imageRefs?.length) return;
+  const origin = spawnMessageOrigin(input.receipt, input.registry);
   const delivered = await enqueueStructuredMessage({
     path: artifactPath,
     conversationId: input.receipt.conversationId,
@@ -1372,6 +1393,7 @@ async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: st
     operationId: `spawn_message_${input.receipt.launchId}`,
     text: input.prompt,
     imageRefs: input.imageRefs,
+    ...(origin ? { origin } : {}),
   }, {
     client: () => input.client,
     registry: () => input.registry,

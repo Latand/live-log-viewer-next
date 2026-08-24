@@ -1,5 +1,6 @@
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 
+import type { MessageOrigin } from "./messageOrigin";
 import type { RuntimeSendSettings } from "./contracts";
 import type { RuntimeVoiceDelivery, RuntimeVoiceResponse } from "./voiceDelivery";
 import {
@@ -25,6 +26,11 @@ export interface QueueEntry {
       submitted. Hosts that can persist it write it onto the canonical
       structured-user record; the rest ignore it, exactly as with `runtime`. */
   selectedContext?: SelectedContextRef;
+  /** #1117: who authored this message, stamped at admission. The Claude
+      broker journals it on the delivery ledger's queued record; the Codex
+      host stamps it onto the structured-user marker. Absent = unknown, and
+      the feed keeps its current rendering. */
+  origin?: MessageOrigin;
 }
 
 export interface NormalizedQueueEntry {
@@ -34,6 +40,7 @@ export interface NormalizedQueueEntry {
   expectedTurnId?: string | null;
   runtime?: RuntimeSendSettings;
   selectedContext?: SelectedContextRef;
+  origin?: MessageOrigin;
 }
 
 export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
@@ -46,6 +53,7 @@ export function normalizeQueueEntry(entry: QueueEntry): NormalizedQueueEntry {
     ...(entry.expectedTurnId !== undefined ? { expectedTurnId: entry.expectedTurnId } : {}),
     ...(entry.runtime ? { runtime: entry.runtime } : {}),
     ...(entry.selectedContext ? { selectedContext: entry.selectedContext } : {}),
+    ...(entry.origin ? { origin: entry.origin } : {}),
   };
 }
 

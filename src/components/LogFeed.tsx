@@ -36,6 +36,7 @@ import {
 } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
 import { FeedItem } from "./feed/FeedItem";
+import { MessageProvenanceProvider, useDeliveredMessageProvenance } from "./feed/messageProvenance";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
 import { BoundedLru } from "./feed/scrollMemory";
 import { ConversationAttention } from "./runtime/ConversationAttention";
@@ -370,6 +371,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      loading gates the baseline so an unloaded feed is not mistaken for an
      empty conversation. */
   useToolActivityCues(feed.items, memoryKey, tailPath, tail.linesStart + tail.lines.length, Boolean(file) && !tail.loading);
+  /* Delivered-message authorship (#1117), Claude only: joins the delivery
+     ledger by engine message id server-side and resolves a delivered "system"
+     row into the operator's bubble or the internal relay card at render time.
+     Codex rows carry their authorship in the transcript marker instead. */
+  const provenanceLookup = useDeliveredMessageProvenance(file?.engine === "claude" ? tailPath : null, feed.items);
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
   const visibleStartIndex = feed.items.length - visibleItems.length;
@@ -484,12 +490,15 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      visible. The counts carry that occurrence information. */
   /* The launch's own first message identity (issue #648): a structured / MCP
      spawn journals its first user record with SDK / agent provenance, so the
-     transcript parser renders it as a SYSTEM row, not a `user` bubble — the
+     transcript parser CLASSIFIES it as a system row, not a `user` item — the
      echo-text retirement path would never see it. Its text is still the launch
      prompt's transcript echo, so treat a system-row row that matches a
      launch-owned bubble's own text (raw draft OR scaffolded echo) as that
      bubble's echo. Derived from the outbox so it survives adoption (which strips
-     the launch prompt fields from the server projection). */
+     the launch prompt fields from the server projection). Since #1117 the
+     RENDERER may resolve that same row into the operator's bubble or an
+     internal relay card from delivery evidence; the parse-level kind — what
+     everything here keys on — is unchanged. */
   const launchEchoKeys = useMemo(() => {
     const keys = new Set<string>();
     for (const entry of outbox) {
@@ -506,9 +515,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     return feed.items.flatMap(({ anchorKey, key, item }) => {
       const text = "text" in item ? item.text : "";
       if (!text.trim()) return [];
-      /* A genuine user bubble is always an echo; a non-user row only echoes the
-         launch when it exactly carries a launch-owned bubble's own identity. */
-      if (item.kind !== "user" && !launchEchoKeys.has(text.trim())) return [];
+      /* A genuine user bubble is always an echo, and so is a delivered
+         structured message (#1117): the system-kind row carrying a ledger join
+         identity IS the send's transcript echo, whatever the renderer resolves
+         it into. Any other non-user row only echoes the launch when it exactly
+         carries a launch-owned bubble's own identity. */
+      const deliveredEcho = item.kind === "sysmsg" && Boolean(item.deliveredMessage);
+      if (item.kind !== "user" && !deliveredEcho && !launchEchoKeys.has(text.trim())) return [];
       return [{ generation: transcriptGeneration, id: anchorKey ?? `key:${key}`, text }];
     });
   }, [feed.items, transcriptGeneration, launchEchoKeys]);
@@ -555,7 +568,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt, launch?.promptEcho, launch?.initialMessage, launch?.deliveredAt, launch?.error, launchOwner, launchOwnsThisPane]);
   /* Settle the launch bubble from the delivery receipt the server projects
      (issue #648), independent of any transcript echo. A structured / MCP spawn's
-     first message is journaled as a system row (SDK / agent provenance), so echo
+     first message is journaled with SDK / agent provenance and parses as a
+     system-kind row (#1117 resolves its VISUAL at render time), so echo
      retirement can never fire; the delivered receipt is the proof the prompt
      reached the agent. It settles the bubble to `delivered` with the receipt time
      as `settledAt`, so it retires on the delivered TTL instead of spinning on
@@ -638,6 +652,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
 
   return (
     <RawLineProvider value={getRawLine}>
+    <MessageProvenanceProvider value={provenanceLookup}>
     <div className="flex min-h-0 flex-1 flex-col">
     {/* The pill anchors to the scroller wrapper — NOT the pane column — so the
         pinned status bar below is structurally outside its overlay area. */}
@@ -827,6 +842,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       <TurnStatusBar file={file} workingLabel={working.label} workingIcon={working.icon} compact={compact} />
     ) : null}
     </div>
+    </MessageProvenanceProvider>
     </RawLineProvider>
   );
 }

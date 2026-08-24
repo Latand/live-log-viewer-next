@@ -379,6 +379,9 @@ export async function sendToImplementer(
           conversationId: recovered.conversationId,
           clientMessageId: relayClientMessageId(flow),
           text,
+          /* #1117: a relayed verdict is inter-agent traffic from the round's
+             reviewer, and the feed labels it exactly that way. */
+          origin: { kind: "agent", role: "reviewer" },
         },
         { registry: () => registry },
       );

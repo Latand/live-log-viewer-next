@@ -27,4 +27,8 @@ export class BoundedLru<Value> {
       this.values.delete(oldest);
     }
   }
+
+  clear(): void {
+    this.values.clear();
+  }
 }
