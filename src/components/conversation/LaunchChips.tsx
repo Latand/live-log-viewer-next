@@ -83,13 +83,18 @@ export function LaunchChipsView({
         <span className="truncate">{t(`spawnChip.initial.${launch.initialMessage}` as MessageKey)}</span>
         <span className="sr-only">{initialDetail}</span>
       </span>
-      <span
-        data-launch-chip="id"
-        title={t("spawnCard.launch", { id: launch.launchId })}
-        className="inline-flex shrink-0 items-center rounded-full border border-border/70 px-2 py-0.5 font-mono text-caption text-muted/80"
-      >
-        {launch.launchId.slice(0, 8)}
-      </span>
+      {/* The launch id is a failure handle — what an operator quotes when the
+          launch needs chasing (issue #1138). A launch that worked is identified
+          by the conversation it became, so the id stays out of its chips. */}
+      {launch.state === "failed" ? (
+        <span
+          data-launch-chip="id"
+          title={t("spawnCard.launch", { id: launch.launchId })}
+          className="inline-flex shrink-0 items-center rounded-full border border-border/70 px-2 py-0.5 font-mono text-caption text-muted/80"
+        >
+          {launch.launchId.slice(0, 8)}
+        </span>
+      ) : null}
       {launch.error ? (
         <span data-launch-chip="error" className="min-w-0 basis-full break-words text-caption font-semibold text-danger">
           {launch.error}
