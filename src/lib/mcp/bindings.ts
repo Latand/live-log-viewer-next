@@ -27,6 +27,7 @@ import {
   isGeometricTarget,
 } from "@/lib/attention/targets";
 import type { AttentionRequestV1, FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
+import { applyBoardCommand } from "@/lib/board/command";
 import { boardFor } from "@/lib/board/store";
 import { applyConversationAction } from "@/lib/conversation/actions";
 import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
@@ -76,6 +77,7 @@ import {
   type BoundedTranscriptTail,
 } from "@/lib/selection/resolve";
 import { readSession, type SessionReadResult } from "@/lib/session/reader";
+import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
@@ -238,6 +240,7 @@ export interface ViewerMcpDomainDependencies {
   completedFileScan(options?: Parameters<typeof completedFileScan>[0]): ReturnType<typeof completedFileScan>;
   registrySnapshot(): RegistrySnapshot;
   boardFor(project: string): ReturnType<typeof boardFor>;
+  applyBoardCommand(input: unknown, snapshot: RegistrySnapshot): ReturnType<typeof applyBoardCommand>;
   getFlowsWithPresets(): ReturnType<typeof getFlowsWithPresets>;
   patchFlow: typeof patchFlow;
   cancelRound: typeof cancelRound;
@@ -440,6 +443,7 @@ export const productionDomainDependencies: ViewerMcpDomainDependencies = {
   completedFileScan,
   registrySnapshot: () => agentRegistry().readOnlySnapshot(),
   boardFor,
+  applyBoardCommand: (input, snapshot) => applyBoardCommand(input, { registrySnapshot: () => snapshot }),
   getFlowsWithPresets,
   patchFlow,
   cancelRound,
@@ -1708,10 +1712,12 @@ async function boardSnapshot(
         } : null,
       };
     });
+  const board = project ? dependencies.boardFor(project) : null;
   return redactPayload({
     count: conversations.length,
     conversations,
-    board: project ? dependencies.boardFor(project) : null,
+    hiddenCount: board?.prefs.hidden.length ?? null,
+    board,
   });
 }
 
@@ -1924,12 +1930,289 @@ async function resources(args: McpToolArgs, dependencies: ViewerMcpDomainDepende
   return redactPayload({ ...await dependencies.readResources(args.fresh === true) });
 }
 
+type ConversationArchiveInput = {
+  conversationId: string;
+  transcriptPath: string;
+};
+
+type ResolvedConversationArchiveTarget = {
+  conversationId: string | null;
+  transcriptPath: string;
+  project: string;
+};
+
+function conversationArchiveInputs(
+  args: McpToolArgs,
+  dependencies: ViewerMcpDomainDependencies,
+): { inputs: ConversationArchiveInput[]; selectedTarget: ReturnType<typeof resolveSelectedContext>["target"] | null } {
+  if (args.targets !== undefined) {
+    if (!Array.isArray(args.targets) || args.targets.length === 0) {
+      throw new Error("targets must be a non-empty list");
+    }
+    if (args.targets.length > 100) throw new Error("targets supports at most 100 conversations per call");
+    if (text(args.conversationId) || text(args.transcriptPath) || text(args.path) || args.selectedContext !== undefined) {
+      throw new Error("targets cannot be combined with conversationId, transcriptPath or selectedContext");
+    }
+    return {
+      inputs: args.targets.map((candidate, index) => {
+        if (!objectRecord(candidate)) throw new Error(`targets[${index}] must be an object`);
+        const conversationId = text(candidate.conversationId);
+        const transcriptPath = text(candidate.transcriptPath);
+        if (!conversationId && !transcriptPath) {
+          throw new Error(`targets[${index}] requires conversationId or transcriptPath`);
+        }
+        return { conversationId, transcriptPath };
+      }),
+      selectedTarget: null,
+    };
+  }
+
+  const selected = resolveSelectedContext(
+    args,
+    text(args.conversationId),
+    dependencies.selectedContext ?? productionSelectedContextDependencies,
+  );
+  const conversationId = selected.conversationId;
+  const transcriptPath = text(args.transcriptPath) || text(args.path);
+  if (!conversationId && !transcriptPath) {
+    throw new Error("conversationId, transcriptPath or selectedContext is required");
+  }
+  return { inputs: [{ conversationId, transcriptPath }], selectedTarget: selected.target };
+}
+
+function latestReceiptForConversation(
+  snapshot: RegistrySnapshot,
+  conversationId: string,
+): RegistrySnapshot["receipts"][string] | null {
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
+  return Object.values(snapshot.receipts ?? {})
+    .filter((receipt) => lookup.canonicalConversationId(receipt.conversationId) === conversationId)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
+}
+
+function projectForArchiveTarget(
+  conversation: RegistrySnapshot["conversations"][string] | null,
+  receipt: RegistrySnapshot["receipts"][string] | null,
+  fallbackProject: string | null = null,
+): string | null {
+  const generation = conversation?.generations.at(-1);
+  const explicitOwnership = conversation?.projectOwnership
+    ?? (receipt?.explicitProject
+      ? {
+          project: receipt.explicitProject,
+          source: "operator" as const,
+          setAt: receipt.createdAt,
+          operationId: receipt.launchId,
+        }
+      : null);
+  return resolveProjectAttribution({
+    projectOwnership: explicitOwnership,
+    cwd: generation?.launchProfile.cwd ?? receipt?.cwd,
+    launchProfileProject: generation?.launchProfile.project ?? receipt?.launchProfile.project,
+    fallbackProject: fallbackProject ?? (receipt?.cwd ? path.basename(receipt.cwd) : null),
+  }).project;
+}
+
+function resolveArchiveTargetFromRegistry(
+  input: ConversationArchiveInput,
+  snapshot: RegistrySnapshot,
+): ResolvedConversationArchiveTarget | null {
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
+  const requestedConversationId = input.conversationId;
+  if (requestedConversationId && !requestedConversationId.startsWith("conversation_")) return null;
+
+  const canonicalId = requestedConversationId
+    ? lookup.canonicalConversationId(requestedConversationId as `conversation_${string}`)
+    : null;
+  const byId = canonicalId ? snapshot.conversations[canonicalId] ?? null : null;
+  const launchId = input.transcriptPath.startsWith("spawn:") ? input.transcriptPath.slice("spawn:".length) : "";
+  const pathReceipt = launchId ? snapshot.receipts?.[launchId] ?? null : null;
+  const byPath = input.transcriptPath && !pathReceipt
+    ? lookup.conversationForPath(input.transcriptPath)
+    : null;
+  const pathConversationId = pathReceipt
+    ? lookup.canonicalConversationId(pathReceipt.conversationId)
+    : byPath?.id ?? null;
+  if (canonicalId && pathConversationId && canonicalId !== pathConversationId) return null;
+
+  const conversation = byId ?? byPath ?? (pathConversationId ? snapshot.conversations[pathConversationId] ?? null : null);
+  const conversationId = conversation?.id ?? canonicalId ?? pathConversationId;
+  const receipt = pathReceipt ?? (conversationId ? latestReceiptForConversation(snapshot, conversationId) : null);
+  if (requestedConversationId && !conversation && !receipt) return null;
+
+  const transcriptPath = conversation?.generations.at(-1)?.path
+    ?? (requestedConversationId && receipt ? `spawn:${receipt.launchId}` : input.transcriptPath);
+  if (!transcriptPath) return null;
+  const project = projectForArchiveTarget(conversation, receipt);
+  if (!project) return null;
+  return { conversationId: conversationId ?? null, transcriptPath, project };
+}
+
+function resolveArchiveTargetFromFiles(
+  input: ConversationArchiveInput,
+  files: readonly FileEntry[],
+): ResolvedConversationArchiveTarget | null {
+  const matches = files
+    .filter((entry) => input.transcriptPath ? entry.path === input.transcriptPath : entry.conversationId === input.conversationId)
+    .sort((left, right) => right.mtime - left.mtime);
+  const entry = matches[0];
+  if (!entry) return null;
+  return {
+    conversationId: entry.conversationId ?? (input.conversationId || null),
+    transcriptPath: entry.path,
+    project: entry.project,
+  };
+}
+
+function canonicalBoardPath(board: ReturnType<typeof boardFor>, pathname: string): string {
+  let current = pathname;
+  const seen = new Set<string>();
+  while (board.pathAliases?.[current] !== undefined) {
+    if (seen.has(current)) throw new Error("board path alias cycle");
+    seen.add(current);
+    current = board.pathAliases[current]!;
+  }
+  return current;
+}
+
+function writeArchivePlacement(
+  project: string,
+  action: "archive" | "unarchive",
+  paths: readonly string[],
+  snapshot: RegistrySnapshot,
+  dependencies: ViewerMcpDomainDependencies,
+): { board: ReturnType<typeof boardFor>; appliedPaths: ReadonlySet<string> } {
+  let board = dependencies.boardFor(project);
+  const appliedPaths = new Set<string>();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const pendingPaths = [...new Set(paths.map((pathname) => canonicalBoardPath(board, pathname)))]
+      .filter((pathname) => action === "archive"
+        ? !board.prefs.hidden.includes(pathname)
+        : board.prefs.hidden.includes(pathname));
+    if (pendingPaths.length === 0) return { board, appliedPaths };
+
+    const result = dependencies.applyBoardCommand({
+      schemaVersion: 1,
+      project,
+      baseRevision: board.revision,
+      ...(action === "archive"
+        ? { patch: { hidden: pendingPaths } }
+        : {
+            mutations: pendingPaths.map((pathname) => ({
+              kind: "restore" as const,
+              path: pathname,
+              placement: "auto" as const,
+            })),
+          }),
+    }, snapshot);
+    board = result.board;
+    if (result.ok && result.applied) {
+      for (const pathname of pendingPaths) appliedPaths.add(canonicalBoardPath(board, pathname));
+      return { board, appliedPaths };
+    }
+  }
+  throw new Error(`board state changed repeatedly while ${action === "archive" ? "archiving" : "unarchiving"} conversations`);
+}
+
+async function archiveConversationAction(
+  args: McpToolArgs,
+  action: "archive" | "unarchive",
+  dependencies: ViewerMcpDomainDependencies,
+  context: McpToolCallContext,
+): Promise<McpToolPayload> {
+  const { inputs, selectedTarget } = conversationArchiveInputs(args, dependencies);
+  const snapshot = dependencies.registrySnapshot();
+  const resolved = inputs.map((input) => resolveArchiveTargetFromRegistry(input, snapshot));
+  const outcomes: Array<Record<string, unknown>> = [];
+  const resolvedProjects = new Set<string>();
+  const projectsTouched = new Set<string>();
+  const applyResolved = (members: Array<{ index: number; target: ResolvedConversationArchiveTarget }>): void => {
+    const grouped = new Map<string, Array<{ index: number; target: ResolvedConversationArchiveTarget }>>();
+    for (const member of members) {
+      const projectMembers = grouped.get(member.target.project) ?? [];
+      projectMembers.push(member);
+      grouped.set(member.target.project, projectMembers);
+      resolvedProjects.add(member.target.project);
+    }
+
+    for (const [project, projectMembers] of grouped) {
+      throwIfCallEnded(context);
+      const write = writeArchivePlacement(
+        project,
+        action,
+        projectMembers.map(({ target }) => target.transcriptPath),
+        snapshot,
+        dependencies,
+      );
+      if (write.appliedPaths.size > 0) projectsTouched.add(project);
+      const attributedPaths = new Set<string>();
+      for (const { index, target } of projectMembers) {
+        const transcriptPath = canonicalBoardPath(write.board, target.transcriptPath);
+        const applied = write.appliedPaths.has(transcriptPath) && !attributedPaths.has(transcriptPath);
+        if (applied) attributedPaths.add(transcriptPath);
+        outcomes[index] = {
+          conversationId: target.conversationId,
+          transcriptPath,
+          project,
+          outcome: action === "archive"
+            ? applied ? "archived" : "already-archived"
+            : applied ? "unarchived" : "not-found",
+        };
+      }
+    }
+  };
+
+  applyResolved(resolved.flatMap((target, index) => target ? [{ index, target }] : []));
+
+  const unresolvedIndexes = resolved.flatMap((target, index) => target ? [] : [index]);
+  if (unresolvedIndexes.length > 0) {
+    let files: readonly FileEntry[] | null = null;
+    try {
+      files = (await dependencies.completedFileScan()).snapshot.files;
+    } catch {
+      files = null;
+    }
+    throwIfCallEnded(context);
+    const scanResolved: Array<{ index: number; target: ResolvedConversationArchiveTarget }> = [];
+    for (const index of unresolvedIndexes) {
+      const target = files ? resolveArchiveTargetFromFiles(inputs[index]!, files) : null;
+      if (target) {
+        resolved[index] = target;
+        scanResolved.push({ index, target });
+        continue;
+      }
+      outcomes[index] = {
+        conversationId: inputs[index]!.conversationId || null,
+        transcriptPath: inputs[index]!.transcriptPath || null,
+        project: null,
+        outcome: files ? "not-found" : "resolution-failed",
+      };
+    }
+    applyResolved(scanResolved);
+  }
+
+  const operationId = mcpOperationId("conversation_action", requestId(args));
+  const projects = [...resolvedProjects];
+  return redactPayload({
+    action,
+    outcomes,
+    project: projects.length === 1 ? projects[0] : null,
+    projectsTouched: [...projectsTouched],
+    ...mutationReceipt(operationId),
+    ...selectedContextEcho(selectedTarget),
+  });
+}
+
 async function conversationAction(
   args: McpToolArgs,
   dependencies: ViewerMcpDomainDependencies,
   context: McpToolCallContext = {},
 ): Promise<McpToolPayload> {
   throwIfCallEnded(context);
+  const action = required(args, "action");
+  if (action === "archive" || action === "unarchive") {
+    return archiveConversationAction(args, action, dependencies, context);
+  }
   /* #844 §7: the selected card is actionable from its reference alone. The
      identity comes back from one keyed registry lookup, so no `operator_snapshot`
      and no scan stands between "the operator pointed at that card" and acting on
@@ -1951,7 +2234,7 @@ async function conversationAction(
     operationId,
     conversationId,
     transcriptPath,
-    action: required(args, "action"),
+    action,
     key: text(args.key),
     label: args.label,
     question: args.question,
