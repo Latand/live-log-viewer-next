@@ -2066,25 +2066,35 @@ function writeArchivePlacement(
   paths: readonly string[],
   snapshot: RegistrySnapshot,
   dependencies: ViewerMcpDomainDependencies,
-): ReturnType<typeof boardFor> {
+): { board: ReturnType<typeof boardFor>; appliedPaths: ReadonlySet<string> } {
   let board = dependencies.boardFor(project);
+  const appliedPaths = new Set<string>();
   for (let attempt = 0; attempt < 4; attempt += 1) {
+    const pendingPaths = [...new Set(paths.map((pathname) => canonicalBoardPath(board, pathname)))]
+      .filter((pathname) => action === "archive"
+        ? !board.prefs.hidden.includes(pathname)
+        : board.prefs.hidden.includes(pathname));
+    if (pendingPaths.length === 0) return { board, appliedPaths };
+
     const result = dependencies.applyBoardCommand({
       schemaVersion: 1,
       project,
       baseRevision: board.revision,
       ...(action === "archive"
-        ? { patch: { hidden: [...paths] } }
+        ? { patch: { hidden: pendingPaths } }
         : {
-            mutations: paths.map((pathname) => ({
+            mutations: pendingPaths.map((pathname) => ({
               kind: "restore" as const,
               path: pathname,
               placement: "auto" as const,
             })),
           }),
     }, snapshot);
-    if (result.ok) return result.board;
     board = result.board;
+    if (result.ok && result.applied) {
+      for (const pathname of pendingPaths) appliedPaths.add(canonicalBoardPath(board, pathname));
+      return { board, appliedPaths };
+    }
   }
   throw new Error(`board state changed repeatedly while ${action === "archive" ? "archiving" : "unarchiving"} conversations`);
 }
@@ -2098,72 +2108,81 @@ async function archiveConversationAction(
   const { inputs, selectedTarget } = conversationArchiveInputs(args, dependencies);
   const snapshot = dependencies.registrySnapshot();
   const resolved = inputs.map((input) => resolveArchiveTargetFromRegistry(input, snapshot));
-  if (resolved.some((target) => target === null)) {
-    const files = await dependencies.completedFileScan().then((read) => read.snapshot.files).catch(() => [] as FileEntry[]);
-    for (let index = 0; index < resolved.length; index += 1) {
-      resolved[index] ??= resolveArchiveTargetFromFiles(inputs[index]!, files);
-    }
-  }
-  throwIfCallEnded(context);
-
   const outcomes: Array<Record<string, unknown>> = [];
-  const grouped = new Map<string, Array<{ index: number; target: ResolvedConversationArchiveTarget }>>();
-  for (let index = 0; index < resolved.length; index += 1) {
-    const target = resolved[index];
-    if (!target) {
+  const resolvedProjects = new Set<string>();
+  const projectsTouched = new Set<string>();
+  const applyResolved = (members: Array<{ index: number; target: ResolvedConversationArchiveTarget }>): void => {
+    const grouped = new Map<string, Array<{ index: number; target: ResolvedConversationArchiveTarget }>>();
+    for (const member of members) {
+      const projectMembers = grouped.get(member.target.project) ?? [];
+      projectMembers.push(member);
+      grouped.set(member.target.project, projectMembers);
+      resolvedProjects.add(member.target.project);
+    }
+
+    for (const [project, projectMembers] of grouped) {
+      throwIfCallEnded(context);
+      const write = writeArchivePlacement(
+        project,
+        action,
+        projectMembers.map(({ target }) => target.transcriptPath),
+        snapshot,
+        dependencies,
+      );
+      if (write.appliedPaths.size > 0) projectsTouched.add(project);
+      const attributedPaths = new Set<string>();
+      for (const { index, target } of projectMembers) {
+        const transcriptPath = canonicalBoardPath(write.board, target.transcriptPath);
+        const applied = write.appliedPaths.has(transcriptPath) && !attributedPaths.has(transcriptPath);
+        if (applied) attributedPaths.add(transcriptPath);
+        outcomes[index] = {
+          conversationId: target.conversationId,
+          transcriptPath,
+          project,
+          outcome: action === "archive"
+            ? applied ? "archived" : "already-archived"
+            : applied ? "unarchived" : "not-found",
+        };
+      }
+    }
+  };
+
+  applyResolved(resolved.flatMap((target, index) => target ? [{ index, target }] : []));
+
+  const unresolvedIndexes = resolved.flatMap((target, index) => target ? [] : [index]);
+  if (unresolvedIndexes.length > 0) {
+    let files: readonly FileEntry[] | null = null;
+    try {
+      files = (await dependencies.completedFileScan()).snapshot.files;
+    } catch {
+      files = null;
+    }
+    throwIfCallEnded(context);
+    const scanResolved: Array<{ index: number; target: ResolvedConversationArchiveTarget }> = [];
+    for (const index of unresolvedIndexes) {
+      const target = files ? resolveArchiveTargetFromFiles(inputs[index]!, files) : null;
+      if (target) {
+        resolved[index] = target;
+        scanResolved.push({ index, target });
+        continue;
+      }
       outcomes[index] = {
         conversationId: inputs[index]!.conversationId || null,
         transcriptPath: inputs[index]!.transcriptPath || null,
         project: null,
-        outcome: "not-found",
-      };
-      continue;
-    }
-    const members = grouped.get(target.project) ?? [];
-    members.push({ index, target });
-    grouped.set(target.project, members);
-  }
-
-  const projectsTouched: string[] = [];
-  for (const [project, members] of grouped) {
-    throwIfCallEnded(context);
-    const board = dependencies.boardFor(project);
-    const hidden = new Set(board.prefs.hidden);
-    const changedPaths: string[] = [];
-    for (const { index, target } of members) {
-      const transcriptPath = canonicalBoardPath(board, target.transcriptPath);
-      const wasHidden = hidden.has(transcriptPath);
-      const outcome = action === "archive"
-        ? wasHidden ? "already-archived" : "archived"
-        : wasHidden ? "unarchived" : "not-found";
-      if (action === "archive" && !wasHidden) {
-        hidden.add(transcriptPath);
-        changedPaths.push(transcriptPath);
-      }
-      if (action === "unarchive" && wasHidden) {
-        hidden.delete(transcriptPath);
-        changedPaths.push(transcriptPath);
-      }
-      outcomes[index] = {
-        conversationId: target.conversationId,
-        transcriptPath,
-        project,
-        outcome,
+        outcome: files ? "not-found" : "resolution-failed",
       };
     }
-    if (changedPaths.length > 0) {
-      writeArchivePlacement(project, action, [...new Set(changedPaths)], snapshot, dependencies);
-      projectsTouched.push(project);
-    }
+    applyResolved(scanResolved);
   }
 
   const operationId = mcpOperationId("conversation_action", requestId(args));
-  const projects = [...grouped.keys()];
+  const projects = [...resolvedProjects];
   return redactPayload({
     action,
     outcomes,
     project: projects.length === 1 ? projects[0] : null,
-    projectsTouched,
+    projectsTouched: [...projectsTouched],
     ...mutationReceipt(operationId),
     ...selectedContextEcho(selectedTarget),
   });
