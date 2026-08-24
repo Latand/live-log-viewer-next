@@ -108,6 +108,75 @@ test("provider-reported usage wins and is NOT labelled an estimate, even with a 
   });
 });
 
+test("provider usage before an oversized user row is still recovered", () => {
+  const file = transcript([
+    { type: "assistant", message: { usage: { input_tokens: 200_000, cache_read_input_tokens: 121_000 } } },
+    { type: "user", message: { content: [{ type: "image", source: { data: "a".repeat(300 * 1024) } }] } },
+    { type: "queue-operation", operation: "enqueue" },
+    { type: "last-prompt", text: "inspect image" },
+    { type: "ai-title", title: "Image inspection" },
+  ]);
+
+  const gathered = readOrchestratorTranscriptFacts(file, null);
+  expect(gathered.reportedContextTokens).toBe(321_000);
+  expect(contextReading({ policy: OPUS, facts: gathered })).toMatchObject({
+    tokens: 321_000,
+    estimated: false,
+  });
+});
+
+test("a provider usage row split across backward-read chunks is reassembled", () => {
+  const file = transcript([
+    { type: "assistant", message: { usage: { input_tokens: 222_000 }, note: "u".repeat(4 * 1024) } },
+    { type: "metadata", value: "a".repeat(255 * 1024) },
+  ]);
+
+  expect(lastReportedContextTokens(file, fs.statSync(file).size)).toBe(222_000);
+});
+
+test("a complete provider usage row at the scan cap boundary is recoverable", () => {
+  const file = path.join(sandbox, "cap-boundary.jsonl");
+  const capBytes = 4 * 1024 * 1024;
+  const olderRow = `${JSON.stringify({ type: "older" })}\n`;
+  const usageRow = `${JSON.stringify({ type: "assistant", message: { usage: { input_tokens: 123_000 } } })}\n`;
+  const userPrefix = "{\"type\":\"user\",\"data\":\"";
+  const userSuffix = "\"}\n";
+  const payloadBytes = capBytes - Buffer.byteLength(usageRow) - Buffer.byteLength(userPrefix) - Buffer.byteLength(userSuffix);
+  fs.writeFileSync(file, `${olderRow}${usageRow}${userPrefix}${"a".repeat(payloadBytes)}${userSuffix}`, "utf8");
+
+  expect(fs.statSync(file).size - Buffer.byteLength(olderRow)).toBe(capBytes);
+  expect(lastReportedContextTokens(file, fs.statSync(file).size)).toBe(123_000);
+});
+
+test("a recoverable provider reading prevents a bytes estimate from driving strong rotation advice", () => {
+  const file = transcript([
+    { type: "assistant", message: { usage: { input_tokens: 100_000 } } },
+    { type: "user", message: { content: [{ type: "image", source: { data: "a".repeat(2_100 * 1024) } }] } },
+    { type: "last-prompt", text: "inspect image" },
+  ]);
+  const gathered = readOrchestratorTranscriptFacts(file, null);
+  const context = contextReading({ policy: OPUS, facts: gathered });
+  const recommendation = rotationRecommendation({ context, facts: gathered, activity: "live", policy: OPUS });
+
+  expect(context).toMatchObject({ tokens: 100_000, estimated: false });
+  expect(recommendation).toMatchObject({ recommended: false, level: "none", advisory: null });
+});
+
+test("provider usage outside the scan cap leaves the byte fallback visibly estimated", () => {
+  const file = transcript([
+    { type: "assistant", message: { usage: { input_tokens: 100_000 } } },
+    { type: "user", message: { content: [{ type: "image", source: { data: "a".repeat(4 * 1024 * 1024) } }] } },
+  ]);
+  const gathered = readOrchestratorTranscriptFacts(file, null);
+  const context = contextReading({ policy: OPUS, facts: gathered });
+  const recommendation = rotationRecommendation({ context, facts: gathered, activity: "live", policy: OPUS });
+
+  expect(gathered.reportedContextTokens).toBeNull();
+  expect(context).toMatchObject({ estimated: true });
+  expect(context.basis).toContain("ESTIMATE");
+  expect(recommendation.reasons[0]).toContain("(estimate)");
+});
+
 test("codex token-usage info rows are read too", () => {
   const file = transcript([
     { payload: { info: { last_token_usage: { input_tokens: 30_000, cached_input_tokens: 20_000 } } } },
