@@ -292,27 +292,50 @@ test("get_conversation listTools publishes every bounded tail target", async () 
   });
 });
 
-test("conversation_action publishes archive actions, current-generation semantics, and the 100-target bound", async () => {
+test("conversation_action publishes full-generation archive outcomes and the 100-target bound", async () => {
   let calls = 0;
   await withProtocolClient(inertBindings({
-    conversation_action: async () => { calls += 1; return {}; },
+    conversation_action: async () => {
+      calls += 1;
+      return {
+        action: "archive",
+        outcomes: [{ outcome: "archived", paths: ["/fixtures/project/earlier.jsonl", "/fixtures/project/current.jsonl"] }],
+      };
+    },
   }), async (client) => {
     const listed = await client.listTools();
     const tool = listed.tools.find((candidate) => candidate.name === "conversation_action");
     const action = tool?.inputSchema.properties?.action as { enum?: string[] } | undefined;
     const targets = tool?.inputSchema.properties?.targets as {
       maxItems?: number;
-      items?: { properties?: Record<string, unknown> };
+      items?: { properties?: Record<string, { description?: string }> };
     } | undefined;
 
     expect(action?.enum).toEqual(expect.arrayContaining(["archive", "unarchive"]));
-    expect(tool?.description).toContain("current generation path");
+    expect(tool?.description).toContain("every registered generation path");
+    expect(tool?.description).toContain("preserving an exact transcriptPath");
+    expect(tool?.description).toContain("outcome lists the paths changed from the pre-write board");
+    expect(tool?.description).toContain("full expanded set was already hidden");
     expect(tool?.description).toContain("readable transcript");
     expect(targets?.maxItems).toBe(100);
     expect(Object.keys(targets?.items?.properties ?? {})).toEqual(expect.arrayContaining([
       "conversationId",
       "transcriptPath",
     ]));
+    expect(targets?.items?.properties?.conversationId?.description).toContain("every registered generation path");
+    expect(targets?.items?.properties?.transcriptPath?.description).toContain("preserve it");
+
+    const archived = await client.callTool({
+      name: "conversation_action",
+      arguments: {
+        clientRequestId: "archive-schema-paths",
+        action: "archive",
+        conversationId: "conversation_fixture",
+      },
+    });
+    expect(archived.structuredContent).toMatchObject({
+      outcomes: [{ outcome: "archived", paths: ["/fixtures/project/earlier.jsonl", "/fixtures/project/current.jsonl"] }],
+    });
 
     const result = await client.callTool({
       name: "conversation_action",
@@ -324,7 +347,7 @@ test("conversation_action publishes archive actions, current-generation semantic
     });
     expect(result.isError).toBe(true);
   });
-  expect(calls).toBe(0);
+  expect(calls).toBe(1);
 });
 
 test("search_transcripts publishes its body-query, project, cursor, and bounded page schema", async () => {

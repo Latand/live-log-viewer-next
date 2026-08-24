@@ -1977,6 +1977,7 @@ type ConversationArchiveInput = {
 type ResolvedConversationArchiveTarget = {
   conversationId: string | null;
   transcriptPath: string;
+  transcriptPaths: readonly string[];
   project: string;
 };
 
@@ -2026,6 +2027,21 @@ function latestReceiptForConversation(
   const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
   return Object.values(snapshot.receipts ?? {})
     .filter((receipt) => lookup.canonicalConversationId(receipt.conversationId) === conversationId)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
+}
+
+function latestPendingLaunchReceiptForConversation(
+  snapshot: RegistrySnapshot,
+  conversationId: string,
+): RegistrySnapshot["receipts"][string] | null {
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
+  return Object.values(snapshot.receipts ?? {})
+    .filter((receipt) => (
+      lookup.canonicalConversationId(receipt.conversationId) === conversationId
+      && receipt.transport === "structured"
+      && receipt.purpose === "launch"
+      && receipt.artifactLifecycle === "pending"
+    ))
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
 }
 
@@ -2079,12 +2095,25 @@ function resolveArchiveTargetFromRegistry(
   const receipt = pathReceipt ?? (conversationId ? latestReceiptForConversation(snapshot, conversationId) : null);
   if (requestedConversationId && !conversation && !receipt) return null;
 
-  const transcriptPath = conversation?.generations.at(-1)?.path
-    ?? (requestedConversationId && receipt ? `spawn:${receipt.launchId}` : input.transcriptPath);
+  const generationPaths = conversation?.generations.map((generation) => generation.path) ?? [];
+  const placeholderReceipt = conversationId
+    ? latestPendingLaunchReceiptForConversation(snapshot, conversationId)
+    : null;
+  const placeholderPath = placeholderReceipt
+    ? `spawn:${placeholderReceipt.launchId}`
+    : "";
+  const transcriptPath = input.transcriptPath
+    || generationPaths.at(-1)
+    || placeholderPath;
   if (!transcriptPath) return null;
+  const transcriptPaths = [...new Set([
+    ...(input.transcriptPath ? [input.transcriptPath] : []),
+    ...generationPaths,
+    ...(placeholderPath ? [placeholderPath] : []),
+  ])];
   const project = projectForArchiveTarget(conversation, receipt);
   if (!project) return null;
-  return { conversationId: conversationId ?? null, transcriptPath, project };
+  return { conversationId: conversationId ?? null, transcriptPath, transcriptPaths, project };
 }
 
 function resolveArchiveTargetFromFiles(
@@ -2099,6 +2128,7 @@ function resolveArchiveTargetFromFiles(
   return {
     conversationId: entry.conversationId ?? (input.conversationId || null),
     transcriptPath: entry.path,
+    transcriptPaths: [entry.path],
     project: entry.project,
   };
 }
@@ -2120,15 +2150,19 @@ function writeArchivePlacement(
   paths: readonly string[],
   snapshot: RegistrySnapshot,
   dependencies: ViewerMcpDomainDependencies,
-): { board: ReturnType<typeof boardFor>; appliedPaths: ReadonlySet<string> } {
+): {
+  boardBefore: ReturnType<typeof boardFor>;
+  appliedPaths: ReadonlySet<string>;
+} {
   let board = dependencies.boardFor(project);
+  const boardBefore = board;
   const appliedPaths = new Set<string>();
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const pendingPaths = [...new Set(paths.map((pathname) => canonicalBoardPath(board, pathname)))]
       .filter((pathname) => action === "archive"
         ? !board.prefs.hidden.includes(pathname)
         : board.prefs.hidden.includes(pathname));
-    if (pendingPaths.length === 0) return { board, appliedPaths };
+    if (pendingPaths.length === 0) return { boardBefore, appliedPaths };
 
     const result = dependencies.applyBoardCommand({
       schemaVersion: 1,
@@ -2147,7 +2181,7 @@ function writeArchivePlacement(
     board = result.board;
     if (result.ok && result.applied) {
       for (const pathname of pendingPaths) appliedPaths.add(canonicalBoardPath(board, pathname));
-      return { board, appliedPaths };
+      return { boardBefore, appliedPaths };
     }
   }
   throw new Error(`board state changed repeatedly while ${action === "archive" ? "archiving" : "unarchiving"} conversations`);
@@ -2179,23 +2213,26 @@ async function archiveConversationAction(
       const write = writeArchivePlacement(
         project,
         action,
-        projectMembers.map(({ target }) => target.transcriptPath),
+        projectMembers.flatMap(({ target }) => target.transcriptPaths),
         snapshot,
         dependencies,
       );
       if (write.appliedPaths.size > 0) projectsTouched.add(project);
-      const attributedPaths = new Set<string>();
       for (const { index, target } of projectMembers) {
-        const transcriptPath = canonicalBoardPath(write.board, target.transcriptPath);
-        const applied = write.appliedPaths.has(transcriptPath) && !attributedPaths.has(transcriptPath);
-        if (applied) attributedPaths.add(transcriptPath);
+        const paths = target.transcriptPaths.filter((pathname) => {
+          const canonicalPath = canonicalBoardPath(write.boardBefore, pathname);
+          return action === "archive"
+            ? !write.boardBefore.prefs.hidden.includes(canonicalPath)
+            : write.boardBefore.prefs.hidden.includes(canonicalPath);
+        });
         outcomes[index] = {
           conversationId: target.conversationId,
-          transcriptPath,
+          transcriptPath: target.transcriptPath,
+          paths,
           project,
           outcome: action === "archive"
-            ? applied ? "archived" : "already-archived"
-            : applied ? "unarchived" : "not-found",
+            ? paths.length > 0 ? "archived" : "already-archived"
+            : paths.length > 0 ? "unarchived" : "not-found",
         };
       }
     }
@@ -2223,6 +2260,7 @@ async function archiveConversationAction(
       outcomes[index] = {
         conversationId: inputs[index]!.conversationId || null,
         transcriptPath: inputs[index]!.transcriptPath || null,
+        paths: [],
         project: null,
         outcome: files ? "not-found" : "resolution-failed",
       };

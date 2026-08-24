@@ -872,6 +872,212 @@ test("conversation_action delegates to the ownership-fenced conversation command
   });
 });
 
+test("conversation_action archives every generation from either target form and unarchives symmetrically", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-generations-"));
+  sandboxes.push(sandbox);
+  const boardFile = path.join(sandbox, "board.json");
+  const project = "fixture-generation-project";
+  const earlierPath = "/fixtures/codex/raw-sessions/2026/08/rollout-earlier.jsonl";
+  const currentPath = "/fixtures/codex/accounts/account-a/sessions/2026/08/rollout-current.jsonl";
+  const pendingPath = "/fixtures/codex/accounts/account-a/sessions/2026/08/rollout-pending.jsonl";
+  const pendingSpawnPath = "spawn:launch_pending_generation";
+  const emptyRegistrySnapshot = new AgentRegistry(path.join(sandbox, "agent-registry.json")).readOnlySnapshot();
+  const registrySnapshot: typeof emptyRegistrySnapshot = {
+    ...emptyRegistrySnapshot,
+    conversations: {
+      conversation_resumed: {
+        id: "conversation_resumed",
+        generations: [earlierPath, currentPath].map((pathname) => ({
+          path: pathname,
+          launchProfile: {
+            cwd: "/fixtures/generation-project",
+            project,
+            model: null,
+            effort: null,
+          },
+        })),
+        continuityPaths: [],
+        abandonedContinuityPaths: [],
+        migration: null,
+        projectOwnership: {
+          project,
+          source: "operator",
+          setAt: "2026-08-24T08:00:00.000Z",
+          operationId: "ownership_conversation_resumed",
+        },
+      } as never,
+      conversation_pending: {
+        id: "conversation_pending",
+        generations: [{
+          path: pendingPath,
+          launchProfile: {
+            cwd: "/fixtures/generation-project",
+            project,
+            model: null,
+            effort: null,
+          },
+        }],
+        continuityPaths: [],
+        abandonedContinuityPaths: [],
+        migration: null,
+        projectOwnership: {
+          project,
+          source: "operator",
+          setAt: "2026-08-24T08:01:00.000Z",
+          operationId: "ownership_conversation_pending",
+        },
+      } as never,
+    },
+    receipts: {
+      launch_pending_generation: {
+        launchId: "launch_pending_generation",
+        conversationId: "conversation_pending",
+        createdAt: "2026-08-24T08:02:00.000Z",
+        artifactLifecycle: "pending",
+        transport: "structured",
+        purpose: "launch",
+        explicitProject: project,
+        cwd: "/fixtures/generation-project",
+        launchProfile: {
+          cwd: "/fixtures/generation-project",
+          project,
+          model: null,
+          effort: null,
+        },
+      } as never,
+    },
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => registrySnapshot,
+    completedFileScan: async () => {
+      throw new Error("registered generation archiving must not scan transcripts");
+    },
+    boardFor: (key: string) => boardFor(key, boardFile),
+    applyBoardCommand: (input: unknown, snapshot: typeof registrySnapshot) => applyBoardCommand(input, {
+      registrySnapshot: () => snapshot,
+      patchBoard: (key, revision, patch) => patchBoard(key, revision, patch, boardFile),
+      mutateBoard: (key, revision, mutations) => mutateBoard(key, revision, mutations, boardFile),
+    }),
+  } as never);
+
+  const byId = await bindings.conversation_action({
+    clientRequestId: "archive-resumed-by-id",
+    action: "archive",
+    conversationId: "conversation_resumed",
+  });
+  expect(byId).toMatchObject({
+    projectsTouched: [project],
+    outcomes: [{
+      conversationId: "conversation_resumed",
+      transcriptPath: currentPath,
+      paths: [earlierPath, currentPath],
+      project,
+      outcome: "archived",
+    }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 1,
+    prefs: { hidden: [earlierPath, currentPath] },
+  });
+
+  const repeated = await bindings.conversation_action({
+    clientRequestId: "archive-resumed-by-id-again",
+    action: "archive",
+    conversationId: "conversation_resumed",
+  });
+  expect(repeated).toMatchObject({
+    projectsTouched: [],
+    outcomes: [{ transcriptPath: currentPath, paths: [], outcome: "already-archived" }],
+  });
+  expect(boardFor(project, boardFile).revision).toBe(1);
+
+  const restoredById = await bindings.conversation_action({
+    clientRequestId: "unarchive-resumed-by-id",
+    action: "unarchive",
+    conversationId: "conversation_resumed",
+  });
+  expect(restoredById).toMatchObject({
+    projectsTouched: [project],
+    outcomes: [{ transcriptPath: currentPath, paths: [earlierPath, currentPath], outcome: "unarchived" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+  fs.rmSync(boardFile);
+
+  const byExactEarlierPath = await bindings.conversation_action({
+    clientRequestId: "archive-resumed-by-earlier-path",
+    action: "archive",
+    transcriptPath: earlierPath,
+  });
+  expect(byExactEarlierPath).toMatchObject({
+    outcomes: [{
+      conversationId: "conversation_resumed",
+      transcriptPath: earlierPath,
+      paths: [earlierPath, currentPath],
+      outcome: "archived",
+    }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 1,
+    prefs: { hidden: [earlierPath, currentPath] },
+  });
+
+  const restoredByExactEarlierPath = await bindings.conversation_action({
+    clientRequestId: "unarchive-resumed-by-earlier-path",
+    action: "unarchive",
+    transcriptPath: earlierPath,
+  });
+  expect(restoredByExactEarlierPath).toMatchObject({
+    outcomes: [{ transcriptPath: earlierPath, paths: [earlierPath, currentPath], outcome: "unarchived" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+  fs.rmSync(boardFile);
+
+  expect(patchBoard(project, 0, { hidden: [currentPath] }, boardFile)).toMatchObject({ ok: true, applied: true });
+  const repairedPartialArchive = await bindings.conversation_action({
+    clientRequestId: "archive-resumed-partial-hidden",
+    action: "archive",
+    conversationId: "conversation_resumed",
+  });
+  expect(repairedPartialArchive).toMatchObject({
+    projectsTouched: [project],
+    outcomes: [{ transcriptPath: currentPath, paths: [earlierPath], outcome: "archived" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 2,
+    prefs: { hidden: [currentPath, earlierPath] },
+  });
+
+  const pendingPlaceholder = await bindings.conversation_action({
+    clientRequestId: "archive-pending-placeholder-by-id",
+    action: "archive",
+    conversationId: "conversation_pending",
+  });
+  expect(pendingPlaceholder).toMatchObject({
+    outcomes: [{
+      transcriptPath: pendingPath,
+      paths: [pendingPath, pendingSpawnPath],
+      outcome: "archived",
+    }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 3,
+    prefs: { hidden: [currentPath, earlierPath, pendingPath, pendingSpawnPath] },
+  });
+
+  const restoredPendingPlaceholder = await bindings.conversation_action({
+    clientRequestId: "unarchive-pending-placeholder-by-id",
+    action: "unarchive",
+    conversationId: "conversation_pending",
+  });
+  expect(restoredPendingPlaceholder).toMatchObject({
+    outcomes: [{ paths: [pendingPath, pendingSpawnPath], outcome: "unarchived" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 4,
+    prefs: { hidden: [currentPath, earlierPath] },
+  });
+});
+
 test("conversation_action archives ghosts and reconciles interrupted receipts without another board revision", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-"));
   sandboxes.push(sandbox);
@@ -944,7 +1150,7 @@ test("conversation_action archives ghosts and reconciles interrupted receipts wi
     completedFileScan: async () => {
       scanCalls += 1;
       expect(boardFor(project, boardFile).prefs.hidden).toEqual(scanCalls <= 2
-        ? [currentPath, deletedGhostPath, spawnPath]
+        ? [predecessorPath, currentPath, deletedGhostPath, spawnPath]
         : []);
       throw new Error("ghost archiving must not require a transcript scan");
     },
@@ -978,19 +1184,18 @@ test("conversation_action archives ghosts and reconciles interrupted receipts wi
     project,
     projectsTouched: [project],
     outcomes: [
-      { conversationId: "conversation_current", transcriptPath: currentPath, project, outcome: "archived" },
-      { conversationId: "conversation_deleted_ghost", transcriptPath: deletedGhostPath, project, outcome: "archived" },
-      { conversationId: "conversation_spawn_placeholder", transcriptPath: spawnPath, project, outcome: "archived" },
-      { conversationId: "conversation_current", transcriptPath: currentPath, project, outcome: "already-archived" },
-      { conversationId: null, transcriptPath: unknownPath, project: null, outcome: "resolution-failed" },
+      { conversationId: "conversation_current", transcriptPath: currentPath, paths: [predecessorPath, currentPath], project, outcome: "archived" },
+      { conversationId: "conversation_deleted_ghost", transcriptPath: deletedGhostPath, paths: [deletedGhostPath], project, outcome: "archived" },
+      { conversationId: "conversation_spawn_placeholder", transcriptPath: spawnPath, paths: [spawnPath], project, outcome: "archived" },
+      { conversationId: "conversation_current", transcriptPath: predecessorPath, paths: [predecessorPath, currentPath], project, outcome: "archived" },
+      { conversationId: null, transcriptPath: unknownPath, paths: [], project: null, outcome: "resolution-failed" },
     ],
   });
   expect(boardFor(project, boardFile)).toMatchObject({
     revision: 1,
     pathAliases: {},
-    prefs: { hidden: [currentPath, deletedGhostPath, spawnPath] },
+    prefs: { hidden: [predecessorPath, currentPath, deletedGhostPath, spawnPath] },
   });
-  expect(boardFor(project, boardFile).prefs.hidden).not.toContain(predecessorPath);
 
   const interruptedArchive = interruptedReceiptStore("conversation_action:archive-ghosts-first");
   const archiveRecovery = createMcpToolService(bindings, interruptedArchive.store);
@@ -999,16 +1204,16 @@ test("conversation_action archives ghosts and reconciles interrupted receipts wi
     ok: true,
     projectsTouched: [],
     outcomes: [
-      { transcriptPath: currentPath, outcome: "already-archived" },
-      { transcriptPath: deletedGhostPath, outcome: "already-archived" },
-      { transcriptPath: spawnPath, outcome: "already-archived" },
-      { transcriptPath: currentPath, outcome: "already-archived" },
-      { transcriptPath: unknownPath, outcome: "resolution-failed" },
+      { transcriptPath: currentPath, paths: [], outcome: "already-archived" },
+      { transcriptPath: deletedGhostPath, paths: [], outcome: "already-archived" },
+      { transcriptPath: spawnPath, paths: [], outcome: "already-archived" },
+      { transcriptPath: predecessorPath, paths: [], outcome: "already-archived" },
+      { transcriptPath: unknownPath, paths: [], outcome: "resolution-failed" },
     ],
   });
   expect(boardFor(project, boardFile)).toMatchObject({
     revision: 1,
-    prefs: { hidden: [currentPath, deletedGhostPath, spawnPath] },
+    prefs: { hidden: [predecessorPath, currentPath, deletedGhostPath, spawnPath] },
   });
   expect(interruptedArchive.completed).toEqual([recoveredArchive]);
   expect(await archiveRecovery.callTool("conversation_action", archiveArgs)).toEqual({
@@ -1028,9 +1233,9 @@ test("conversation_action archives ghosts and reconciles interrupted receipts wi
   });
   expect(replayByContent).toMatchObject({
     outcomes: [
-      { outcome: "already-archived" },
-      { outcome: "already-archived" },
-      { outcome: "already-archived" },
+      { paths: [], outcome: "already-archived" },
+      { paths: [], outcome: "already-archived" },
+      { paths: [], outcome: "already-archived" },
     ],
   });
   expect(boardFor(project, boardFile).revision).toBe(1);
@@ -1048,10 +1253,10 @@ test("conversation_action archives ghosts and reconciles interrupted receipts wi
   const restored = await bindings.conversation_action(unarchiveArgs);
   expect(restored).toMatchObject({
     outcomes: [
-      { conversationId: "conversation_current", transcriptPath: currentPath, outcome: "unarchived" },
-      { outcome: "unarchived" },
-      { outcome: "unarchived" },
-      { project: null, outcome: "resolution-failed" },
+      { conversationId: "conversation_current", transcriptPath: currentPath, paths: [predecessorPath, currentPath], outcome: "unarchived" },
+      { paths: [deletedGhostPath], outcome: "unarchived" },
+      { paths: [spawnPath], outcome: "unarchived" },
+      { paths: [], project: null, outcome: "resolution-failed" },
     ],
   });
   expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
@@ -1063,10 +1268,10 @@ test("conversation_action archives ghosts and reconciles interrupted receipts wi
     ok: true,
     projectsTouched: [],
     outcomes: [
-      { transcriptPath: currentPath, outcome: "not-found" },
-      { transcriptPath: deletedGhostPath, outcome: "not-found" },
-      { transcriptPath: spawnPath, outcome: "not-found" },
-      { transcriptPath: unknownPath, outcome: "resolution-failed" },
+      { transcriptPath: currentPath, paths: [], outcome: "not-found" },
+      { transcriptPath: deletedGhostPath, paths: [], outcome: "not-found" },
+      { transcriptPath: spawnPath, paths: [], outcome: "not-found" },
+      { transcriptPath: unknownPath, paths: [], outcome: "resolution-failed" },
     ],
   });
   expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
@@ -1075,7 +1280,7 @@ test("conversation_action archives ghosts and reconciles interrupted receipts wi
   expect(scanCalls).toBe(4);
 });
 
-test("conversation_action attributes archive outcomes only when its board command applied", async () => {
+test("conversation_action reports archive outcomes from the pre-write board during concurrent matching writes", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-race-"));
   sandboxes.push(sandbox);
   const boardFile = path.join(sandbox, "board.json");
@@ -1130,7 +1335,7 @@ test("conversation_action attributes archive outcomes only when its board comman
   });
   expect(archived).toMatchObject({
     projectsTouched: [],
-    outcomes: [{ transcriptPath, project, outcome: "already-archived" }],
+    outcomes: [{ transcriptPath, paths: [transcriptPath], project, outcome: "archived" }],
   });
   expect(boardFor(project, boardFile)).toMatchObject({ revision: 1, prefs: { hidden: [transcriptPath] } });
 
@@ -1141,7 +1346,7 @@ test("conversation_action attributes archive outcomes only when its board comman
   });
   expect(unarchived).toMatchObject({
     projectsTouched: [],
-    outcomes: [{ transcriptPath, project, outcome: "not-found" }],
+    outcomes: [{ transcriptPath, paths: [transcriptPath], project, outcome: "unarchived" }],
   });
   expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
   expect(commandCalls).toBe(2);
