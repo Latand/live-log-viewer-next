@@ -372,10 +372,12 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      empty conversation. */
   useToolActivityCues(feed.items, memoryKey, tailPath, tail.linesStart + tail.lines.length, Boolean(file) && !tail.loading);
   /* Delivered-message authorship (#1117): joins the Claude delivery ledger by
-     engine message id server-side, and the flow store's relayed texts on both
-     engines, resolving a delivered "system" row or a legacy relay paste into
-     the operator's bubble or the internal relay card at render time. Codex
-     structured rows carry their authorship in the transcript marker instead. */
+     engine message id server-side, and on both engines joins each settled
+     delivery occurrence (registry receipt or flow round: content digest,
+     settlement time, sender) to the one row nearest it, resolving a delivered
+     "system" row or a legacy paste into the operator's bubble or the internal
+     relay card at render time. Codex structured rows carry their authorship in
+     the transcript marker instead. */
   const provenanceLookup = useDeliveredMessageProvenance(
     file?.engine === "claude" || file?.engine === "codex" ? tailPath : null,
     feed.items,

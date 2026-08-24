@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { flowRelayedMessageProvenance } from "@/lib/flows/relayProvenance";
 import { claudeMessageProvenance, type DeliveredMessageProvenance } from "@/lib/runtime/claudeMessageProvenance";
+import { deliveredMessageOccurrences } from "@/lib/runtime/deliveredMessageOccurrences";
+import type { DeliveredMessageOccurrence } from "@/lib/runtime/messageOrigin";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { pathAllowed } from "@/lib/scanner/roots";
 import type { ApiError } from "@/lib/types";
@@ -14,17 +15,17 @@ export interface MessageProvenanceResponse {
       (#1117). Only rows with real delivery evidence appear; the feed keeps
       today's rendering for everything else. */
   messages: Record<string, DeliveredMessageProvenance>;
-  /** Flow-relay authorship keyed by the relayed message's own trimmed text —
-      the join for deliveries that left no per-row evidence (legacy tmux relays
-      on both engines, pre-#1117 structured relays). */
-  relayedTexts: Record<string, DeliveredMessageProvenance>;
+  /** Occurrence evidence for deliveries that left no per-row identity —
+      legacy tmux pastes on both engines, flow relays, pre-#1117 structured
+      sends — each joined by the feed to the ONE row nearest its settlement. */
+  occurrences: DeliveredMessageOccurrence[];
 }
 
 /**
  * Delivery-evidence provenance for one conversation. The `messages` id join is
- * Claude-only (a non-Claude path yields an empty map); the flow-relay text
- * join serves both engines, since a legacy relay's transcript row looks the
- * same on each.
+ * Claude-only (a non-Claude path yields an empty map); the occurrence join
+ * serves both engines, since a legacy paste's transcript row looks the same
+ * on each.
  */
 export function GET(req: NextRequest): NextResponse<MessageProvenanceResponse | ApiError> {
   const rejection = rejectCrossOrigin(req);
@@ -34,7 +35,7 @@ export function GET(req: NextRequest): NextResponse<MessageProvenanceResponse | 
     return NextResponse.json({ error: "path not allowed" }, { status: 403 });
   }
   return NextResponse.json(
-    { messages: claudeMessageProvenance(path), relayedTexts: flowRelayedMessageProvenance(path) },
+    { messages: claudeMessageProvenance(path), occurrences: deliveredMessageOccurrences(path) },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

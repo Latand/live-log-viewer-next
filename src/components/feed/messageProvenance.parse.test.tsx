@@ -3,10 +3,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { setLocale } from "@/lib/i18n";
 import { encodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
-import type { DeliveredMessageProvenance } from "@/lib/runtime/messageOrigin";
+import type { DeliveredMessageOccurrence, DeliveredMessageProvenance } from "@/lib/runtime/messageOrigin";
+import { messageTextDigest } from "@/lib/runtime/messageTextDigest";
 
 import { FeedItem } from "./FeedItem";
-import { MessageProvenanceProvider, type ProvenanceLookup } from "./messageProvenance";
+import { MessageProvenanceProvider, provenanceLookupFor } from "./messageProvenance";
 import { createFeedSession, type Item } from "./parse";
 
 /**
@@ -14,29 +15,33 @@ import { createFeedSession, type Item } from "./parse";
  * renderer: the operator's message is the operator's bubble, an inter-agent
  * relay is the visibly labelled internal card naming the sender role, and true
  * scaffold keeps the system row. Codex carries authorship in the structured
- * marker; Claude joins the delivery ledger through the provenance context.
+ * marker; Claude joins the delivery ledger through the provenance context; a
+ * delivery that left no per-row identity on either engine joins by occurrence.
  */
 
 /* Assembled from parts so the invented id can never fingerprint as a real
    engine message identifier on the publication gate. */
 const ENGINE_MESSAGE_ID = ["11111111", "2222", "4333", "8444", "555555555555"].join("-");
 
+const T0 = Date.parse("2026-07-31T09:00:00.000Z");
+const at = (offsetMs: number) => new Date(T0 + offsetMs).toISOString();
+
 function codexItems(lines: string[]): Item[] {
   const session = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
   return session.feed(lines, 0, false).items.map((entry) => entry.item);
 }
 
-function codexUserLine(recordText: string): string {
+function codexUserLine(recordText: string, timestamp = at(1_000)): string {
   return JSON.stringify({
-    timestamp: "2026-07-31T09:00:01.000Z",
+    timestamp,
     type: "response_item",
     payload: { type: "message", role: "user", content: [{ type: "input_text", text: recordText }] },
   });
 }
 
-function codexEventLine(recordText: string): string {
+function codexEventLine(recordText: string, timestamp = at(1_000)): string {
   return JSON.stringify({
-    timestamp: "2026-07-31T09:00:01.000Z",
+    timestamp,
     type: "event_msg",
     payload: { type: "user_message", message: recordText },
   });
@@ -47,6 +52,11 @@ function claudeItems(lines: string[]): Item[] {
   return session.feed(lines, 0, false).items.map((entry) => entry.item);
 }
 
+/** A legacy tmux paste on Claude: a plain user row with no SDK provenance. */
+function claudeUserLine(text: string, timestamp = at(1_000)): string {
+  return JSON.stringify({ type: "user", timestamp, message: { role: "user", content: text } });
+}
+
 test("a codex agent-origin record renders as the internal relay card, not a user bubble", () => {
   const items = codexItems([
     codexUserLine(encodeCodexStructuredUserText("Implement issue #12 in this worktree.", undefined, null, { kind: "agent", role: "orchestrator" })),
@@ -55,7 +65,7 @@ test("a codex agent-origin record renders as the internal relay card, not a user
   const relay = items.find((item) => item.kind === "tmsg");
   expect(relay).toEqual({
     kind: "tmsg",
-    ts: "2026-07-31T09:00:01.000Z",
+    ts: at(1_000),
     dir: "in",
     peer: "orchestrator",
     summary: "",
@@ -92,14 +102,14 @@ test("a claude SDK-delivered message parses as a system row carrying its ledger 
   const items = claudeItems([JSON.stringify({
     type: "user",
     uuid: ENGINE_MESSAGE_ID,
-    timestamp: "2026-07-31T09:00:01.000Z",
+    timestamp: at(1_000),
     promptSource: "sdk",
     message: { role: "user", content: [{ type: "text", text: "please rerun the failing check" }] },
   })]);
   const row = items.find((item) => item.kind === "sysmsg");
   expect(row!.kind === "sysmsg" && row!.deliveredMessage).toEqual({
     engineMessageId: ENGINE_MESSAGE_ID,
-    ts: "2026-07-31T09:00:01.000Z",
+    ts: at(1_000),
   });
 });
 
@@ -120,30 +130,32 @@ const DELIVERED_ROW: Item = {
   kind: "sysmsg",
   label: "system",
   text: "please rerun the failing check",
-  deliveredMessage: { engineMessageId: ENGINE_MESSAGE_ID, ts: "2026-07-31T09:00:01.000Z" },
+  deliveredMessage: { engineMessageId: ENGINE_MESSAGE_ID, ts: at(1_000) },
 };
 
-function renderWithProvenance(
-  item: Item,
-  provenance: Record<string, DeliveredMessageProvenance>,
-  relayedTexts: Record<string, DeliveredMessageProvenance> = {},
-): string {
-  const lookup: ProvenanceLookup = {
-    byId: (id) => (id ? provenance[id] ?? null : null),
-    byText: (text) => relayedTexts[text.trim()] ?? null,
-  };
-  return renderToStaticMarkup(
+interface Evidence {
+  messages?: Record<string, DeliveredMessageProvenance>;
+  occurrences?: DeliveredMessageOccurrence[];
+}
+
+/** Renders every row of one feed under the lookup the hook would build from
+    this evidence, so the occurrence join sees the whole window. */
+function renderAll(items: Item[], evidence: Evidence): string[] {
+  const lookup = provenanceLookupFor(evidence, items);
+  return items.map((item) => renderToStaticMarkup(
     <MessageProvenanceProvider value={lookup}>
       <FeedItem item={item} />
     </MessageProvenanceProvider>,
-  );
+  ));
+}
+
+function renderWithProvenance(item: Item, evidence: Evidence): string {
+  return renderAll([item], evidence)[0];
 }
 
 test("ledger evidence resolves a delivered row into the operator's own bubble", () => {
   setLocale("en");
-  const html = renderWithProvenance(DELIVERED_ROW, {
-    [ENGINE_MESSAGE_ID]: { origin: "operator" },
-  });
+  const html = renderWithProvenance(DELIVERED_ROW, { messages: { [ENGINE_MESSAGE_ID]: { origin: "operator" } } });
   expect(html).toContain("bg-user");
   expect(html).toContain("please rerun the failing check");
   expect(html).not.toContain("system");
@@ -152,7 +164,7 @@ test("ledger evidence resolves a delivered row into the operator's own bubble", 
 test("ledger evidence resolves a delivered row into the internal card naming the sender role", () => {
   setLocale("en");
   const html = renderWithProvenance(DELIVERED_ROW, {
-    [ENGINE_MESSAGE_ID]: { origin: "agent", senderRole: "orchestrator" },
+    messages: { [ENGINE_MESSAGE_ID]: { origin: "agent", senderRole: "orchestrator" } },
   });
   expect(html).toContain("internal");
   expect(html).toContain("orchestrator");
@@ -169,62 +181,138 @@ test("without evidence the delivered row keeps the current system style", () => 
   expect(html).not.toContain("bg-user");
 });
 
-/* The flow-relay text join (#1117 round 2): a legacy tmux relay writes only
+/* The occurrence join (#1117 rounds 2–3): a legacy tmux paste writes only
    engine input, so its transcript row is a plain user bubble on both engines.
-   The flow store's reconstruction of the relayed text is the evidence that
-   re-attributes it — and only an exact match ever does. */
+   The delivery's own settled receipt — content digest, settlement time, the
+   origin stamped at admission — is the evidence that re-attributes it, and it
+   attaches to exactly one row: the one nearest the settlement. */
 
+const MANDATE = "Implement issue #12 in this worktree, then report back.";
 const RELAYED_TEXT = "Review round findings are below.\n\nP1 — the held command drops its origin.";
-const RELAYED_EVIDENCE: Record<string, DeliveredMessageProvenance> = {
-  [RELAYED_TEXT]: { origin: "agent", senderRole: "reviewer" },
-};
 
-test("a claude legacy relay paste resolves into the internal card through the text join", () => {
+function occurrence(text: string, deliveredAt: string, provenance: DeliveredMessageProvenance): DeliveredMessageOccurrence {
+  return { textDigest: messageTextDigest(text), deliveredAt, ...provenance };
+}
+
+test("a generic legacy MCP send into a tmux-owned claude conversation renders as the internal card naming the sender role", () => {
   setLocale("en");
-  const items = claudeItems([JSON.stringify({
-    type: "user",
-    timestamp: "2026-07-31T09:00:02.000Z",
-    message: { role: "user", content: RELAYED_TEXT },
-  })]);
-  const row = items.find((item) => item.kind === "user");
-  expect(row).toBeDefined();
-  const html = renderWithProvenance(row!, {}, RELAYED_EVIDENCE);
+  const items = claudeItems([claudeUserLine(MANDATE, at(1_000))]);
+  expect(items.find((item) => item.kind === "user")).toBeDefined();
+  const [html] = renderAll(items, {
+    occurrences: [occurrence(MANDATE, at(0), { origin: "agent", senderRole: "orchestrator" })],
+  });
   expect(html).toContain("internal");
-  expect(html).toContain("reviewer");
+  expect(html).toContain("orchestrator");
+  expect(html).toContain("Implement issue #12");
   expect(html).not.toContain("bg-user");
 });
 
-test("a codex legacy relay paste resolves into the internal card through the text join", () => {
+test("a generic legacy MCP send into a tmux-owned codex conversation renders as the internal card naming the sender role", () => {
   setLocale("en");
-  const items = codexItems([codexUserLine(RELAYED_TEXT)]);
-  const row = items.find((item) => item.kind === "user");
-  expect(row).toBeDefined();
-  const html = renderWithProvenance(row!, {}, RELAYED_EVIDENCE);
+  const items = codexItems([codexUserLine(MANDATE, at(1_000)), codexEventLine(MANDATE, at(1_200))]);
+  expect(items.filter((item) => item.kind === "user")).toHaveLength(1);
+  const [html] = renderAll(items, {
+    occurrences: [occurrence(MANDATE, at(0), { origin: "agent", senderRole: "orchestrator" })],
+  });
   expect(html).toContain("internal");
-  expect(html).toContain("reviewer");
+  expect(html).toContain("orchestrator");
   expect(html).not.toContain("bg-user");
 });
 
-test("an operator bubble with different text never matches the relay evidence", () => {
+test("a legacy operator send keeps the operator's bubble on both engines", () => {
   setLocale("en");
-  const html = renderWithProvenance(
-    { kind: "user", ts: "2026-07-31T09:00:03.000Z", text: "ship it once the checks pass" },
-    {},
-    RELAYED_EVIDENCE,
-  );
+  const evidence: Evidence = { occurrences: [occurrence("what is left on the branch?", at(0), { origin: "operator" })] };
+  for (const items of [
+    claudeItems([claudeUserLine("what is left on the branch?", at(1_000))]),
+    codexItems([codexUserLine("what is left on the branch?", at(1_000))]),
+  ]) {
+    const [html] = renderAll(items, evidence);
+    expect(html).toContain("bg-user");
+    expect(html).not.toContain("internal");
+  }
+});
+
+test("two identical rows — a relay and the operator's own message — resolve by settlement time on claude", () => {
+  setLocale("en");
+  const relayEvidence: Evidence = { occurrences: [occurrence(RELAYED_TEXT, at(0), { origin: "agent", senderRole: "reviewer" })] };
+  /* The relay landed first; the operator repeated its text minutes later. */
+  const relayFirst = claudeItems([claudeUserLine(RELAYED_TEXT, at(1_000)), claudeUserLine(RELAYED_TEXT, at(4 * 60_000))]);
+  const [relay, operator] = renderAll(relayFirst, relayEvidence);
+  expect(relay).toContain("internal");
+  expect(relay).toContain("reviewer");
+  expect(operator).toContain("bg-user");
+  expect(operator).not.toContain("internal");
+  /* Mirrored: the operator said it first, the relay repeated it. */
+  const operatorFirst = claudeItems([claudeUserLine(RELAYED_TEXT, at(-4 * 60_000)), claudeUserLine(RELAYED_TEXT, at(1_000))]);
+  const [earlier, later] = renderAll(operatorFirst, relayEvidence);
+  expect(earlier).toContain("bg-user");
+  expect(earlier).not.toContain("internal");
+  expect(later).toContain("internal");
+});
+
+test("two identical rows — a relay and the operator's own message — resolve by settlement time on codex", () => {
+  setLocale("en");
+  const relayEvidence: Evidence = { occurrences: [occurrence(RELAYED_TEXT, at(0), { origin: "agent", senderRole: "reviewer" })] };
+  const relayFirst = codexItems([
+    codexUserLine(RELAYED_TEXT, at(1_000)),
+    codexEventLine(RELAYED_TEXT, at(1_100)),
+    codexUserLine(RELAYED_TEXT, at(4 * 60_000)),
+    codexEventLine(RELAYED_TEXT, at(4 * 60_000 + 100)),
+  ]);
+  expect(relayFirst.filter((item) => item.kind === "user")).toHaveLength(2);
+  const [relay, operator] = renderAll(relayFirst, relayEvidence);
+  expect(relay).toContain("internal");
+  expect(relay).toContain("reviewer");
+  expect(operator).toContain("bg-user");
+  expect(operator).not.toContain("internal");
+  const operatorFirst = codexItems([
+    codexUserLine(RELAYED_TEXT, at(-4 * 60_000)),
+    codexUserLine(RELAYED_TEXT, at(1_000)),
+  ]);
+  const [earlier, later] = renderAll(operatorFirst, relayEvidence);
+  expect(earlier).toContain("bg-user");
+  expect(later).toContain("internal");
+});
+
+test("an operator bubble with different text, or one with no evidence at all, never changes", () => {
+  setLocale("en");
+  const evidence: Evidence = { occurrences: [occurrence(RELAYED_TEXT, at(0), { origin: "agent", senderRole: "reviewer" })] };
+  const [html] = renderAll([{ kind: "user", ts: at(500), text: "ship it once the checks pass" }], evidence);
   expect(html).toContain("bg-user");
   expect(html).not.toContain("internal");
+  const [bare] = renderAll([{ kind: "user", ts: at(500), text: RELAYED_TEXT }], {});
+  expect(bare).toContain("bg-user");
 });
 
-test("a delivered row whose ledger id never resolved falls back to the relay text join", () => {
+test("a delivered claude row whose ledger id never resolved falls back to the occurrence join", () => {
   setLocale("en");
   const historicalRelay: Item = {
     kind: "sysmsg",
     label: "system",
     text: RELAYED_TEXT,
-    deliveredMessage: { engineMessageId: ENGINE_MESSAGE_ID, ts: "2026-07-31T09:00:04.000Z" },
+    deliveredMessage: { engineMessageId: ENGINE_MESSAGE_ID, ts: at(2_000) },
   };
-  const html = renderWithProvenance(historicalRelay, {}, RELAYED_EVIDENCE);
+  const html = renderWithProvenance(historicalRelay, {
+    occurrences: [occurrence(RELAYED_TEXT, at(0), { origin: "agent", senderRole: "reviewer" })],
+  });
   expect(html).toContain("internal");
   expect(html).toContain("reviewer");
+});
+
+test("a ledger-resolved relay consumes its occurrence, so an identical operator message keeps its bubble", () => {
+  setLocale("en");
+  const structuredRelay: Item = {
+    kind: "sysmsg",
+    label: "system",
+    text: RELAYED_TEXT,
+    deliveredMessage: { engineMessageId: ENGINE_MESSAGE_ID, ts: at(1_000) },
+  };
+  const operatorRepeat: Item = { kind: "user", ts: at(3 * 60_000), text: RELAYED_TEXT };
+  const [relay, operator] = renderAll([structuredRelay, operatorRepeat], {
+    messages: { [ENGINE_MESSAGE_ID]: { origin: "agent", senderRole: "reviewer" } },
+    occurrences: [occurrence(RELAYED_TEXT, at(0), { origin: "agent", senderRole: "reviewer" })],
+  });
+  expect(relay).toContain("internal");
+  expect(operator).toContain("bg-user");
+  expect(operator).not.toContain("internal");
 });

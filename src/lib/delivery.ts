@@ -12,6 +12,7 @@ import { transcriptLiveOwnership, type TranscriptLiveOwnership } from "@/lib/sca
 import { procBackend } from "@/lib/proc";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
+import { structuredContent } from "@/lib/runtime/structuredContent";
 import type { RuntimeOperationReceipt } from "@/lib/runtime/contracts";
 import { detectBlockingGate, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import type { FileEntry } from "@/lib/types";
@@ -628,13 +629,26 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     if (deliveryFence(conversation) === "held" && requestLocalPayload) return failure("request-local delivery waits for migration completion", 409);
     let queued;
     try {
+      const heldText = textBytes > 32_000 ? "" : text;
+      /* #1117: the digest is the only content evidence a delivered record
+         keeps (its text is blanked at settlement), and it is what joins a
+         legacy paste to its transcript row. Stamped at admission so the
+         record carries it whatever path settles it. */
+      let contentDigest: string | null = null;
+      if (heldText) {
+        try {
+          contentDigest = structuredContent(heldText, []).contentDigest;
+        } catch {
+          contentDigest = null;
+        }
+      }
       queued = registry.holdDelivery(
         conversation.id,
-        textBytes > 32_000 ? "" : text,
+        heldText,
         message.clientMessageId ?? null,
         images.length ? "ephemeral-images" : textBytes > 32_000 ? "ephemeral-text" : "text",
         [],
-        null,
+        contentDigest,
         message.origin ? { origin: message.origin } : {},
       );
     } catch (error) {

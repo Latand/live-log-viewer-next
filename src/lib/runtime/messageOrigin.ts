@@ -12,7 +12,7 @@
  *
  * Scaffold rows carry NO origin: absence means "no delivery evidence", and the
  * feed keeps rendering such rows exactly as before. Classification must never
- * guess, so parsing drops anything it cannot validate rather than coercing it.
+ * guess, so parsing drops anything it cannot validate; nothing is coerced.
  *
  * Pure and dependency-free on purpose: the Codex marker decode runs in the
  * browser feed parser, so this module must not pull in Node-only helpers.
@@ -40,6 +40,21 @@ export interface DeliveredMessageProvenance {
   /** Carried through for operator rows so the bubble renders the same
       selected-card badge the composer showed at submission (#844). */
   selectedContext?: SelectedContextRef;
+}
+
+/**
+ * One delivered message's occurrence evidence: the join for deliveries that
+ * leave no per-row identity — a legacy tmux paste on either engine, a flow
+ * relay, a pre-#1117 structured send. `textDigest` is the registry's content
+ * digest of the delivered text (see `messageTextDigest`) and `deliveredAt`
+ * its settlement time, so the feed can attach the evidence to exactly ONE
+ * transcript row: the nearest-in-time row carrying the same text. The time is
+ * what makes the join occurrence-specific — an operator's own message that
+ * happens to repeat a relay's text stays the operator's.
+ */
+export interface DeliveredMessageOccurrence extends DeliveredMessageProvenance {
+  textDigest: string;
+  deliveredAt: string;
 }
 
 /** Same grammar as the other opaque marker tokens: no whitespace, no `>`. */

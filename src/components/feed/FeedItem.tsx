@@ -29,21 +29,22 @@ import { McpCallCard } from "../runtime/McpCallCard";
  * Resolves a row with delivery evidence (#1117). A delivered Claude system row
  * joins the ledger by engine message id — operator evidence becomes the
  * operator's own bubble, agent evidence the internal card naming the sender
- * role — and falls back to the flow-relay text join for pre-#1117 structured
- * relays. A plain user bubble (a legacy tmux paste on either engine) becomes
- * the internal card only when the flow store proves its exact text was a
- * relayed round. No evidence — no provider, unknown id, scaffold row, the
- * operator's own words — keeps the row untouched.
+ * role — and otherwise the occurrence join (pre-#1117 structured relays). A
+ * plain user bubble (a legacy tmux paste on either engine) becomes the
+ * internal card only when a settled agent delivery is joined to THIS row —
+ * same text, nearest its settlement time — so an operator's own message that
+ * repeats a relay's words stays the operator's. No evidence — no provider,
+ * unknown id, scaffold row, the operator's own words — keeps the row untouched.
  */
 function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
   if (item.kind === "user") {
     /* A selected-context capture exists only on operator composer sends. */
     if (item.selectedContext) return item;
-    const relayed = provenance.byText(item.text);
-    return relayed?.origin === "agent" ? internalCard(item.ts, item.text, relayed.senderRole) : item;
+    const resolved = provenance.forItem(item);
+    return resolved?.origin === "agent" ? internalCard(item.ts, item.text, resolved.senderRole) : item;
   }
   if (item.kind !== "sysmsg" || !item.deliveredMessage) return item;
-  const resolved = provenance.byId(item.deliveredMessage.engineMessageId) ?? provenance.byText(item.text);
+  const resolved = provenance.forItem(item);
   if (resolved?.origin === "operator") {
     return {
       kind: "user",
