@@ -577,7 +577,7 @@ function failQueuedPinnedSpawn(
 
 async function actuateQueuedPinnedSpawn(
   registry: AgentRegistry,
-  client: RuntimeHostClient,
+  client: RuntimeHostClient | null,
   receipt: SpawnReceipt,
   options: StructuredSpawnRecoveryOptions,
 ): Promise<SpawnReceipt> {
@@ -652,6 +652,7 @@ async function actuateQueuedPinnedSpawn(
         registry.markSpawnPathPending(receipt.launchId);
       }
     } else {
+      if (!client) throw new Error("structured spawn runtime host is unavailable");
       response = await (options.spawnStructuredConversation ?? spawnStructuredConversation)({
         engine: receipt.engine,
         receipt: admissionClaim.receipt,
@@ -691,7 +692,7 @@ async function actuateQueuedPinnedSpawn(
       });
     }
   }
-  if (response?.path && fs.existsSync(response.path)) {
+  if (response?.path && client && fs.existsSync(response.path)) {
     try {
       await (options.publishFilesRevision ?? publishFilesRevision)(client);
     } catch (error) {
@@ -719,7 +720,7 @@ async function actuateQueuedPinnedSpawn(
     follows the ordinary setup bound and cannot become immortal. */
 export async function terminalizeStaleStructuredSpawns(
   registry: AgentRegistry,
-  client: RuntimeHostClient,
+  client: RuntimeHostClient | null,
   options: StructuredSpawnRecoveryOptions & {
     reconcile?: typeof reconcileStructuredSpawnReplay;
   } = {},
@@ -738,6 +739,7 @@ export async function terminalizeStaleStructuredSpawns(
     const queued = queuedPinnedSpawnForReceipt(receipt);
     if (queued) {
       if (Date.parse(queued.retryAt) > now()) continue;
+      if (receipt.transport === "structured" && !client) continue;
       examined += 1;
       try {
         const supersededReason = supersededQueuedSpawnReason(snapshot, receipt);
@@ -754,9 +756,32 @@ export async function terminalizeStaleStructuredSpawns(
       }
       continue;
     }
-    if (receipt.transport !== "structured") continue;
     const createdMs = Date.parse(receipt.createdAt);
     if (!Number.isFinite(createdMs) || now() - createdMs < timeoutMs) continue;
+    if (receipt.transport === "tmux") {
+      const ownerlessPreSettlement = receipt.state === "starting"
+        && !receipt.key
+        && !receipt.pane
+        && !receipt.admissionOwner;
+      if (!ownerlessPreSettlement) continue;
+      examined += 1;
+      try {
+        registry.failSpawn(
+          receipt.launchId,
+          `tmux spawn interrupted before durable queue publication or pane binding: ${receipt.launchId}`,
+        );
+        const failed = registry.readOnlySnapshot().receipts[receipt.launchId];
+        if (failed?.state === "failed" || failed?.state === "conflicted") terminalized.push(receipt.launchId);
+      } catch (error) {
+        console.error("[reaper] stale tmux spawn reconciliation failed", {
+          launchId: receipt.launchId,
+          error,
+        });
+      }
+      continue;
+    }
+    if (receipt.transport !== "structured") continue;
+    if (!client) continue;
     examined += 1;
     try {
       const reconciled = await reconcile(receipt.launchId, registry, client, { now, timeoutMs });

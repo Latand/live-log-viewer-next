@@ -168,6 +168,75 @@ test.each(["missing", "corrupt"] as const)("a %s queued payload cannot keep an o
   });
 });
 
+test.each(["missing", "corrupt"] as const)("a %s tmux queue payload cannot keep an ownerless receipt alive past the setup bound", async (condition) => {
+  const store = registry();
+  const retryAt = new Date(Date.now() + 60 * 60_000).toISOString();
+  const begun = store.beginSpawnRequest({
+    engine: "claude",
+    cwd: "/repo",
+    transport: "tmux",
+    accountId: "account-a",
+    accountPin: true,
+    clientAttemptId: `partial_tmux_queue_${condition}_20260824`,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected tmux receipt creation");
+  if (condition === "corrupt") {
+    store.queuePinnedSpawn(begun.receipt.launchId, {
+      version: 1,
+      retryAt,
+      accountId: "account-a",
+      locale: "en",
+      spec: {
+        engine: "claude",
+        command: "claude",
+        cwd: "/repo",
+        windowName: "queued-pin",
+        launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      },
+      ["prompt"]: "continue",
+      imageRefs: [],
+      parentArtifactPath: null,
+      pipelineSourceConversationId: null,
+    }, `Pinned account quota is exhausted — queued until ${retryAt}`);
+    const raw = JSON.parse(fs.readFileSync(store.filename, "utf8")) as {
+      receipts: Record<string, { queuedPinnedSpawn?: unknown }>;
+    };
+    raw.receipts[begun.receipt.launchId]!.queuedPinnedSpawn = {
+      version: 1,
+      retryAt,
+      accountId: "account-a",
+      locale: "en",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(raw));
+  }
+
+  const restarted = new AgentRegistry(store.filename, undefined, undefined, { sqliteMode: "off" });
+  expect(restarted.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    transport: "tmux",
+    state: "starting",
+    admissionOwner: null,
+    queuedPinnedSpawn: null,
+  });
+
+  const beforeBound = await terminalizeStaleStructuredSpawns(restarted, null, {
+    now: () => Date.parse(begun.receipt.createdAt) + STALE_STRUCTURED_SPAWN_TIMEOUT_MS - 1,
+  });
+  expect(beforeBound).toEqual({ examined: 0, terminalized: [], recovered: [] });
+
+  const result = await terminalizeStaleStructuredSpawns(restarted, null, { now: AGED });
+  expect(result).toEqual({ examined: 1, terminalized: [begun.receipt.launchId], recovered: [] });
+  expect(restarted.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    admissionOwner: null,
+    queuedPinnedSpawn: null,
+    error: `tmux spawn interrupted before durable queue publication or pane binding: ${begun.receipt.launchId}`,
+  });
+
+  expect(await terminalizeStaleStructuredSpawns(restarted, null, { now: AGED }))
+    .toEqual({ examined: 0, terminalized: [], recovered: [] });
+});
+
 test("startup recovery still terminalizes a dead non-queued ownerless receipt", async () => {
   const store = registry();
   const begun = store.beginSpawnRequest({

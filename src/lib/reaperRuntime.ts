@@ -966,17 +966,17 @@ export async function runReaperCycle(options: {
   } catch (error) {
     console.error("[reaper] dead structured-host ownership convergence failed", error);
   }
-  /* Stale structured launch convergence (#334): the reaper cycle is the
-     while-running seam that turns dead-evidence pending receipts terminal, so
-     a permanent spinner no longer waits for a replay POST or a restart. The
-     pass is bounded and idempotent; its failure never blocks the reaper. */
+  /* Stale launch convergence (#334/#926): the reaper cycle is the while-running
+     seam that turns dead-evidence pending receipts terminal and actuates due
+     queued pins. Tmux recovery remains available during an intentional
+     structured-runtime rollback, while structured receipts wait for their
+     required client. The pass is bounded and idempotent; its failure never
+     blocks the reaper. */
   const runtimeClientForSpawns = (options.actuation?.runtimeClient ?? runtimeHostClient)();
-  if (runtimeClientForSpawns) {
-    try {
-      await (options.actuation?.terminalizeStaleSpawns ?? terminalizeStaleStructuredSpawns)(registry, runtimeClientForSpawns);
-    } catch (error) {
-      console.error("[reaper] stale structured spawn convergence failed", error);
-    }
+  try {
+    await (options.actuation?.terminalizeStaleSpawns ?? terminalizeStaleStructuredSpawns)(registry, runtimeClientForSpawns);
+  } catch (error) {
+    console.error("[reaper] stale structured spawn convergence failed", error);
   }
   const state = updateObservationState(options.hosts, now);
   const report = evaluateReaper(await makeInput(registry, options.hosts, options.files, state, now, options.actuation));
