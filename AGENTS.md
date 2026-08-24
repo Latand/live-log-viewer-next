@@ -81,6 +81,16 @@ or absolute home path into any of them, including evidence tables pasted from a
 live investigation. Distinguish accounts as "account A / account B" with their
 plan tier, and keep paths repo-relative or `$HOME`-relative.
 
+One exemption, and only in a trailer: a `Co-Authored-By:` / `Signed-Off-By:`
+whose address has the local part exactly `noreply` or `no-reply` names a tool
+and identifies nobody, so agent attribution stays and the gate passes it
+(`MACHINE_ATTRIBUTION_TRAILER`). It is the standing attribution trailer on
+agent-written commits here — do not strip it, from your own commit or anyone
+else's. The exemption is that narrow on purpose: a GitHub `users.noreply`
+address reads as a no-reply address and is an account handle with a number in
+front of it, and the same address written into prose is not attribution, so
+both are still violations.
+
 `privacy-publication` on CI enforces this with a fingerprint list the repo does
 not carry, so it fails **after** you have pushed. Scrub before the push:
 `bun scripts/privacy-publication-gate.ts --base <merge-base>` locally catches the
