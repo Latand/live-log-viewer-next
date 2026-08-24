@@ -29,7 +29,21 @@ interface ProjectCurationFile extends ProjectCurationSnapshot {
   schemaVersion: 1;
 }
 
-export type CreateProjectFailure = "INVALID_NAME" | "INVALID_ROOT" | "DUPLICATE_PROJECT" | "STORE_ERROR";
+export type CreateProjectFailure =
+  | "INVALID_NAME"
+  | "INVALID_ROOT"
+  /** The root is a plausible absolute path whose directory does not exist yet —
+      the one refusal the client can turn into a "create directory" offer. */
+  | "MISSING_DIRECTORY"
+  | "MKDIR_FAILED"
+  | "DUPLICATE_PROJECT"
+  | "STORE_ERROR";
+
+export interface CreateProjectOptions {
+  /** Create the missing root directory (recursive mkdir) instead of refusing
+      with MISSING_DIRECTORY. Relative paths and file paths still refuse. */
+  createMissingRoot?: boolean;
+}
 
 export type CreateProjectResult =
   | { ok: true; entry: ManualProject }
@@ -156,6 +170,7 @@ export function createManualProject(
   name: string,
   root: string,
   existingProjects: ReadonlySet<string> = new Set(),
+  options: CreateProjectOptions = {},
 ): CreateProjectResult {
   const displayName = name.trim();
   if (!displayName || displayName.length > 80) {
@@ -168,9 +183,22 @@ export function createManualProject(
   let resolved: string;
   try {
     resolved = fs.realpathSync.native(requested);
+  } catch {
+    if (!options.createMissingRoot) {
+      return { ok: false, code: "MISSING_DIRECTORY", message: "directory does not exist" };
+    }
+    try {
+      fs.mkdirSync(requested, { recursive: true });
+      resolved = fs.realpathSync.native(requested);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ok: false, code: "MKDIR_FAILED", message: detail };
+    }
+  }
+  try {
     if (!fs.statSync(resolved).isDirectory()) throw new Error("not a directory");
   } catch {
-    return { ok: false, code: "INVALID_ROOT", message: "directory does not exist" };
+    return { ok: false, code: "INVALID_ROOT", message: "path does not point at a directory" };
   }
   const repositoryRoot = repositoryRootForPath(resolved);
   const identity = (repositoryRoot ? projectIdentityFromRepositoryRoot(repositoryRoot) : null)

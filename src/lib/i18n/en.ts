@@ -90,6 +90,9 @@ export const en = {
   "rail.creating": "Creating…",
   "rail.invalidName": "Enter a project name",
   "rail.invalidRoot": "Directory not found",
+  "rail.missingRoot": "This directory doesn't exist yet",
+  "rail.createRootAndProject": "Create directory and project",
+  "rail.mkdirFailed": "Couldn't create the directory",
   "rail.duplicateProject": "This project already exists",
   "rail.createFailed": "Couldn't create the project",
 
