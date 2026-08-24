@@ -26,14 +26,24 @@ import { SpeakButton } from "./SpeakButton";
 import { McpCallCard } from "../runtime/McpCallCard";
 
 /**
- * Resolves a delivered Claude system row (#1117) with ledger evidence: an
- * operator-authored delivery becomes the operator's own bubble, an inter-agent
- * relay becomes the internal card naming the sender role. No evidence — no
- * provider, unknown id, scaffold row — keeps the system row untouched.
+ * Resolves a row with delivery evidence (#1117). A delivered Claude system row
+ * joins the ledger by engine message id — operator evidence becomes the
+ * operator's own bubble, agent evidence the internal card naming the sender
+ * role — and falls back to the flow-relay text join for pre-#1117 structured
+ * relays. A plain user bubble (a legacy tmux paste on either engine) becomes
+ * the internal card only when the flow store proves its exact text was a
+ * relayed round. No evidence — no provider, unknown id, scaffold row, the
+ * operator's own words — keeps the row untouched.
  */
 function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
+  if (item.kind === "user") {
+    /* A selected-context capture exists only on operator composer sends. */
+    if (item.selectedContext) return item;
+    const relayed = provenance.byText(item.text);
+    return relayed?.origin === "agent" ? internalCard(item.ts, item.text, relayed.senderRole) : item;
+  }
   if (item.kind !== "sysmsg" || !item.deliveredMessage) return item;
-  const resolved = provenance(item.deliveredMessage.engineMessageId);
+  const resolved = provenance.byId(item.deliveredMessage.engineMessageId) ?? provenance.byText(item.text);
   if (resolved?.origin === "operator") {
     return {
       kind: "user",
@@ -42,18 +52,20 @@ function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
       ...(resolved.selectedContext ? { selectedContext: resolved.selectedContext } : {}),
     };
   }
-  if (resolved?.origin === "agent") {
-    return {
-      kind: "tmsg",
-      ts: item.deliveredMessage.ts,
-      dir: "in",
-      peer: resolved.senderRole ?? tr("render.agentPeer"),
-      summary: "",
-      text: item.text,
-      internal: true,
-    };
-  }
+  if (resolved?.origin === "agent") return internalCard(item.deliveredMessage.ts, item.text, resolved.senderRole);
   return item;
+}
+
+function internalCard(ts: unknown, text: string, senderRole: string | undefined): Item {
+  return {
+    kind: "tmsg",
+    ts,
+    dir: "in",
+    peer: senderRole ?? tr("render.agentPeer"),
+    summary: "",
+    text,
+    internal: true,
+  };
 }
 
 /* Memoized: feed items are immutable after buildFeed, so a pane re-render

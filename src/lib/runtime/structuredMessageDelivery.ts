@@ -53,8 +53,9 @@ export interface StructuredMessageRequest {
   selectedContext?: SelectedContextRef;
   /** Message authorship stamped by the admitting surface (#1117): rides the
       durable send effect onto the delivery evidence (Claude ledger record,
-      Codex structured-user marker). A migration hold drops it, like the two
-      fields above — the held command format predates it and stays untouched. */
+      Codex structured-user marker). A migration hold persists it on the held
+      command and replays it at drain time, so a held operator message never
+      resurfaces as a system row nor a held relay as an operator bubble. */
   origin?: MessageOrigin;
 }
 
@@ -196,6 +197,7 @@ function commandInput(request: StructuredMessageRequest) {
     ...(request.kind ? { kind: request.kind } : {}),
     ...(request.policy ? { policy: request.policy } : {}),
     ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
+    ...(request.origin ? { origin: request.origin } : {}),
   };
 }
 
@@ -508,6 +510,9 @@ export async function deliverHeldStructuredMessage(
       contentDigest: content.contentDigest,
       policy: command.policy,
       ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
+      /* #1117: the authorship persisted on the held record survives the
+         migration hold — the drained message re-attributes exactly as admitted. */
+      ...(command.origin ? { origin: command.origin } : {}),
     });
     try {
       await (dependencies.kick ?? kickStructuredDeliveryQueue)();

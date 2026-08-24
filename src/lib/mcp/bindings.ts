@@ -1423,6 +1423,9 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     clientMessageId: deliveryId,
     text: body,
     images: [],
+    /* #1117: a directive relay is inter-agent traffic — the manager's feed
+       names the gateway (or attributed caller role), never the operator. */
+    origin: mcpSenderOrigin(dependencies),
   });
   return {
     directiveId: deliveryId,

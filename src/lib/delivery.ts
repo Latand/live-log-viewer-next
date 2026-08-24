@@ -11,6 +11,7 @@ import { pathAllowed } from "@/lib/scanner/roots";
 import { transcriptLiveOwnership, type TranscriptLiveOwnership } from "@/lib/scanner/transcripts";
 import { procBackend } from "@/lib/proc";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
+import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
 import type { RuntimeOperationReceipt } from "@/lib/runtime/contracts";
 import { detectBlockingGate, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import type { FileEntry } from "@/lib/types";
@@ -537,6 +538,11 @@ export interface ConversationMessage {
   resumeModel?: string | null;
   resumeEffort?: string | null;
   resumeFast?: boolean | null;
+  /** Message authorship stamped by the admitting surface (#1117). Rides the
+      structured enqueue when the conversation recovers structured, and persists
+      on the legacy hold's command so the evidence survives even when the paste
+      itself — engine input this path must not change — cannot carry it. */
+  origin?: MessageOrigin;
 }
 
 interface DeliveryOverrides {
@@ -586,6 +592,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
           clientMessageId: message.clientMessageId,
           text,
           hasImages: images.length > 0,
+          ...(message.origin ? { origin: message.origin } : {}),
         }, {
           registry: () => registry,
         });
@@ -626,6 +633,9 @@ export async function deliverConversationMessage(message: ConversationMessage, o
         textBytes > 32_000 ? "" : text,
         message.clientMessageId ?? null,
         images.length ? "ephemeral-images" : textBytes > 32_000 ? "ephemeral-text" : "text",
+        [],
+        null,
+        message.origin ? { origin: message.origin } : {},
       );
     } catch (error) {
       return failure(error, 409);

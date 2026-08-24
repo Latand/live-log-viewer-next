@@ -26,6 +26,9 @@ export function createMigrationDeliveryPort(
       images: [],
       clientMessageId,
       reservedDeliveryId: delivery.id,
+      /* #1117: the authorship persisted on the held command replays with the
+         message, so a re-routed hold re-attributes exactly as admitted. */
+      ...(delivery.command.origin ? { origin: delivery.command.origin } : {}),
     });
     return migrationDeliveryOutcome(result);
   });

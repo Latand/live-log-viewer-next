@@ -371,11 +371,15 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      loading gates the baseline so an unloaded feed is not mistaken for an
      empty conversation. */
   useToolActivityCues(feed.items, memoryKey, tailPath, tail.linesStart + tail.lines.length, Boolean(file) && !tail.loading);
-  /* Delivered-message authorship (#1117), Claude only: joins the delivery
-     ledger by engine message id server-side and resolves a delivered "system"
-     row into the operator's bubble or the internal relay card at render time.
-     Codex rows carry their authorship in the transcript marker instead. */
-  const provenanceLookup = useDeliveredMessageProvenance(file?.engine === "claude" ? tailPath : null, feed.items);
+  /* Delivered-message authorship (#1117): joins the Claude delivery ledger by
+     engine message id server-side, and the flow store's relayed texts on both
+     engines, resolving a delivered "system" row or a legacy relay paste into
+     the operator's bubble or the internal relay card at render time. Codex
+     structured rows carry their authorship in the transcript marker instead. */
+  const provenanceLookup = useDeliveredMessageProvenance(
+    file?.engine === "claude" || file?.engine === "codex" ? tailPath : null,
+    feed.items,
+  );
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
   const visibleStartIndex = feed.items.length - visibleItems.length;

@@ -123,8 +123,15 @@ const DELIVERED_ROW: Item = {
   deliveredMessage: { engineMessageId: ENGINE_MESSAGE_ID, ts: "2026-07-31T09:00:01.000Z" },
 };
 
-function renderWithProvenance(item: Item, provenance: Record<string, DeliveredMessageProvenance>): string {
-  const lookup: ProvenanceLookup = (id) => (id ? provenance[id] ?? null : null);
+function renderWithProvenance(
+  item: Item,
+  provenance: Record<string, DeliveredMessageProvenance>,
+  relayedTexts: Record<string, DeliveredMessageProvenance> = {},
+): string {
+  const lookup: ProvenanceLookup = {
+    byId: (id) => (id ? provenance[id] ?? null : null),
+    byText: (text) => relayedTexts[text.trim()] ?? null,
+  };
   return renderToStaticMarkup(
     <MessageProvenanceProvider value={lookup}>
       <FeedItem item={item} />
@@ -160,4 +167,64 @@ test("without evidence the delivered row keeps the current system style", () => 
   const resolved = renderWithProvenance(DELIVERED_ROW, {});
   expect(html).toBe(resolved);
   expect(html).not.toContain("bg-user");
+});
+
+/* The flow-relay text join (#1117 round 2): a legacy tmux relay writes only
+   engine input, so its transcript row is a plain user bubble on both engines.
+   The flow store's reconstruction of the relayed text is the evidence that
+   re-attributes it — and only an exact match ever does. */
+
+const RELAYED_TEXT = "Review round findings are below.\n\nP1 — the held command drops its origin.";
+const RELAYED_EVIDENCE: Record<string, DeliveredMessageProvenance> = {
+  [RELAYED_TEXT]: { origin: "agent", senderRole: "reviewer" },
+};
+
+test("a claude legacy relay paste resolves into the internal card through the text join", () => {
+  setLocale("en");
+  const items = claudeItems([JSON.stringify({
+    type: "user",
+    timestamp: "2026-07-31T09:00:02.000Z",
+    message: { role: "user", content: RELAYED_TEXT },
+  })]);
+  const row = items.find((item) => item.kind === "user");
+  expect(row).toBeDefined();
+  const html = renderWithProvenance(row!, {}, RELAYED_EVIDENCE);
+  expect(html).toContain("internal");
+  expect(html).toContain("reviewer");
+  expect(html).not.toContain("bg-user");
+});
+
+test("a codex legacy relay paste resolves into the internal card through the text join", () => {
+  setLocale("en");
+  const items = codexItems([codexUserLine(RELAYED_TEXT)]);
+  const row = items.find((item) => item.kind === "user");
+  expect(row).toBeDefined();
+  const html = renderWithProvenance(row!, {}, RELAYED_EVIDENCE);
+  expect(html).toContain("internal");
+  expect(html).toContain("reviewer");
+  expect(html).not.toContain("bg-user");
+});
+
+test("an operator bubble with different text never matches the relay evidence", () => {
+  setLocale("en");
+  const html = renderWithProvenance(
+    { kind: "user", ts: "2026-07-31T09:00:03.000Z", text: "ship it once the checks pass" },
+    {},
+    RELAYED_EVIDENCE,
+  );
+  expect(html).toContain("bg-user");
+  expect(html).not.toContain("internal");
+});
+
+test("a delivered row whose ledger id never resolved falls back to the relay text join", () => {
+  setLocale("en");
+  const historicalRelay: Item = {
+    kind: "sysmsg",
+    label: "system",
+    text: RELAYED_TEXT,
+    deliveredMessage: { engineMessageId: ENGINE_MESSAGE_ID, ts: "2026-07-31T09:00:04.000Z" },
+  };
+  const html = renderWithProvenance(historicalRelay, {}, RELAYED_EVIDENCE);
+  expect(html).toContain("internal");
+  expect(html).toContain("reviewer");
 });

@@ -57,6 +57,7 @@ import {
 } from "./registryBackendIdentity";
 import { SqliteAgentRegistryStore, type SqliteRegistrySnapshot } from "./sqliteRegistryStore";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
+import { parseMessageOrigin } from "@/lib/runtime/messageOrigin";
 import { assertStructuredTextEnvelope, parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 
 export type AgentHostStatus = "starting" | "live" | "idle" | "handoff" | "unhosted" | "dead";
@@ -1397,6 +1398,11 @@ function canonicalHeldDeliveryCommand(
       : "interrupt-active",
   };
   if (value?.turnId === null || typeof value?.turnId === "string") command.turnId = value.turnId;
+  /* #1117: authorship rides the held record so a migration replay keeps it.
+     Re-validated on every normalization — a corrupt persisted origin drops
+     rather than replaying as a forged attribution. */
+  const origin = parseMessageOrigin(value?.origin);
+  if (origin) command.origin = origin;
   return command;
 }
 
