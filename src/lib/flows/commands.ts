@@ -226,6 +226,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
       return identity ? { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null } : null;
     })(),
     kickoffDelivery: null,
+    hostClaim: null,
     rounds: [],
     createdAt: isoNow(),
     closedAt: null,

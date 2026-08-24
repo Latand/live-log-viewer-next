@@ -6,8 +6,8 @@ import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
 import { accountManager } from "@/lib/accounts/manager";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
-import { agentRegistry, type AgentRegistry, type SpawnBeginResult, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
-import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
+import { agentRegistry, type AgentRegistry, type RegistryConversation, type SpawnBeginResult, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
@@ -106,6 +106,7 @@ function cloneFlows(flows: Flow[]): Flow[] {
       implementer: { ...flow.roles.implementer },
       reviewer: { ...flow.roles.reviewer },
     },
+    hostClaim: flow.hostClaim ? { ...flow.hostClaim } : null,
     reviewerFallback: flow.reviewerFallback ? { ...flow.reviewerFallback } : null,
     rounds: flow.rounds.map((round) => ({
       ...round,
@@ -294,6 +295,28 @@ function currentConversationPath(conversationId: string | null | undefined, fall
   return agentRegistry().canonicalPath(fallback);
 }
 
+function safeAccountRef(accountId: string | null | undefined): NonNullable<Flow["hostClaim"]>["accountRef"] {
+  if (!accountId) return "unknown";
+  if (accountId === "default") return "default";
+  return `managed:${crypto.createHash("sha256").update(accountId).digest("hex").slice(0, 12)}`;
+}
+
+function rememberImplementerHostClaim(flow: Flow, conversation: RegistryConversation | null): void {
+  const generation = conversation?.generations.at(-1);
+  if (!conversation || !generation) return;
+  flow.hostClaim = {
+    sessionKey: sessionKeyId({ engine: conversation.engine, sessionId: generation.id }),
+    accountRef: safeAccountRef(generation.accountId ?? conversation.pinnedAccountId ?? null),
+  };
+}
+
+function claimFailureDetail(flow: Flow, detail: string): string {
+  if (!flow.hostClaim || !/structured (?:resume )?host claim is unavailable|structured host ownership is unavailable/i.test(detail)) {
+    return detail;
+  }
+  return `structured host claim ${flow.hostClaim.sessionKey} on account ${flow.hostClaim.accountRef} failed: ${detail}`;
+}
+
 export interface RelayDeliveryOverrides {
   recover?: typeof recoverDeadStructuredConversation;
   enqueueStructured?: typeof enqueueStructuredMessage;
@@ -337,10 +360,17 @@ export async function sendToImplementer(
     ? registry.conversation(flow.implementerConversationId as `conversation_${string}`)
     : registry.conversationForPath(entry.path);
   if (conversation) {
-    const recovered = await (overrides.recover ?? recoverDeadStructuredConversation)(
-      { path: entry.path, conversationId: conversation.id },
-      { registry },
-    );
+    rememberImplementerHostClaim(flow, conversation);
+    let recovered;
+    try {
+      recovered = await (overrides.recover ?? recoverDeadStructuredConversation)(
+        { path: entry.path, conversationId: conversation.id },
+        { registry },
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(claimFailureDetail(flow, detail), { cause: error });
+    }
     if (recovered) {
       overrides.onTransportSelected?.("structured");
       const structured = await (overrides.enqueueStructured ?? enqueueStructuredMessage)(
@@ -357,10 +387,11 @@ export async function sendToImplementer(
         if (structured.transportUncertain || structured.receipt?.status === "uncertain") {
           throw new StructuredRelayDeliveryUncertainError(structured.error);
         }
-        throw new Error(structured.error);
+        throw new Error(claimFailureDetail(flow, structured.error));
       }
       return recovered.path;
     }
+    flow.hostClaim = null;
   }
   /* A restart leaves an uncertain send window. The structured queue dedupes
      the stable client-message id above; legacy pane delivery has no comparable
