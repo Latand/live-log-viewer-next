@@ -2,13 +2,14 @@ import { accountForSpawn, activeCodexAccountId, codexAccountsMutationLocked, cod
 import { activeClaudeAccountId, claudeAccountForSpawn, claudeAccountsMutationLocked, claudeHomeOwningTranscript, claudeManagedEnvironment, CorruptClaudeAccountsError, createManagedClaudeAccount, listClaudeAccounts, setActiveClaudeAccount, UnknownClaudeAccountError } from "./claude";
 import { claudeLoginSupervisor, LIVE_CLAUDE_LOGIN_PHASES } from "./claudeLogin";
 import { managedCodexRuntime } from "./codexRuntime";
-import type { AccountManager, AccountSummary } from "./contracts";
+import type { AccountContext, AccountManager, AccountSummary } from "./contracts";
 import { unavailableLimits } from "./contracts";
 import { withAccountMutationLockAsync } from "./accountMutation";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { selectHeadlessAccount } from "./headlessSelection";
 import { selectHealthyClaudeAccount } from "./spawnHealth";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
+import { classifySpawnAccountAdmission, type SpawnAccountAdmission } from "@/lib/agent/accountLiveness";
 
 function contextForSpawn(engine: "claude" | "codex", requested?: string | null) {
   if (engine === "claude") { const item = claudeAccountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(item.home) : withoutWakatimeCredential(process.env) }; }
@@ -16,13 +17,50 @@ function contextForSpawn(engine: "claude" | "codex", requested?: string | null) 
 }
 
 /** Viewer-visible spawn admission performs a fresh Claude OAuth health pass. */
-export async function resolveHealthySpawnAccount(engine: "claude" | "codex", requested?: string | null) {
-  const routed = requested ?? agentRegistry().engineRouting(engine).activeAccountId ?? undefined;
-  if (engine === "codex") return contextForSpawn(engine, routed);
+export type HealthySpawnAccountResolution = AccountContext & {
+  admission?: SpawnAccountAdmission;
+  requestedAdmission?: SpawnAccountAdmission;
+};
+
+export async function resolveHealthySpawnAccount(
+  engine: "claude" | "codex",
+  requested?: string | null,
+): Promise<HealthySpawnAccountResolution> {
+  const active = agentRegistry().engineRouting(engine).activeAccountId ?? undefined;
+  const routed = requested ?? active;
+  const missingRequested = classifySpawnAccountAdmission({
+    enabled: false,
+    authentication: "unknown",
+    limits: "unknown",
+    stale: false,
+    retryAt: null,
+  });
+  if (engine === "codex") {
+    try {
+      return contextForSpawn(engine, routed);
+    } catch (error) {
+      if (requested === undefined || requested === null || !(error instanceof UnknownAccountError)) throw error;
+      return { ...contextForSpawn(engine, active), requestedAdmission: missingRequested };
+    }
+  }
   const accounts = listClaudeAccounts();
-  if (routed && !accounts.some((account) => account.id === routed)) throw new UnknownClaudeAccountError(routed);
-  const selected = await selectHealthyClaudeAccount(accounts, routed);
-  return contextForSpawn(engine, selected.id);
+  const requestedExists = requested === undefined
+    || requested === null
+    || accounts.some((account) => account.id === requested);
+  const selected = await selectHealthyClaudeAccount(
+    accounts,
+    requestedExists ? routed : active,
+    undefined,
+    requested !== undefined && requested !== null && requestedExists,
+    active,
+  );
+  return {
+    ...contextForSpawn(engine, selected.account.id),
+    admission: selected.admission,
+    ...(requested !== undefined && requested !== null && !requestedExists
+      ? { requestedAdmission: missingRequested }
+      : selected.requestedAdmission ? { requestedAdmission: selected.requestedAdmission } : {}),
+  };
 }
 
 function summary(engine: "claude" | "codex", id: string): AccountSummary {

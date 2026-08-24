@@ -10,6 +10,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import {
   STALE_STRUCTURED_SPAWN_TIMEOUT_MS,
+  recoverPendingStructuredSpawns,
   reconcileStructuredSpawnReplay,
   terminalizeStaleStructuredSpawns,
 } from "./structuredSpawn";
@@ -100,6 +101,164 @@ test("a stale dead-evidence structured launch converges to durable retry-safe fa
   const after = store.snapshot();
   expect(Object.keys(after.receipts)).toHaveLength(receiptCount);
   expect(Object.keys(after.conversations)).toHaveLength(conversationCount);
+});
+
+test.each(["missing", "corrupt"] as const)("a %s queued payload cannot keep an ownerless receipt alive past the setup bound", async (condition) => {
+  const store = registry();
+  const retryAt = new Date(Date.now() + 60 * 60_000).toISOString();
+  const begun = store.beginSpawnRequest({
+    engine: "claude",
+    cwd: "/repo",
+    transport: "structured",
+    accountId: "account-a",
+    accountPin: true,
+    clientAttemptId: `partial_queue_${condition}_20260824`,
+    launchProfile: emptyLaunchProfile({
+      cwd: "/repo",
+      title: `Pinned account quota is exhausted — queued until ${retryAt}`,
+    }),
+  });
+  if (begun.kind !== "created" || !begun.receipt.admissionOwner) throw new Error("expected queued receipt creation");
+  if (condition === "corrupt") {
+    store.queuePinnedSpawn(begun.receipt.launchId, {
+      version: 1,
+      retryAt,
+      accountId: "account-a",
+      locale: "en",
+      spec: {
+        engine: "claude",
+        command: "claude",
+        cwd: "/repo",
+        windowName: "queued-pin",
+        launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      },
+      ["prompt"]: "continue",
+      imageRefs: [],
+      parentArtifactPath: null,
+      pipelineSourceConversationId: null,
+    }, `Pinned account quota is exhausted — queued until ${retryAt}`);
+  }
+  store.releaseStartingStructuredSpawn(begun.receipt.launchId, begun.receipt.admissionOwner);
+  if (condition === "corrupt") {
+    const raw = JSON.parse(fs.readFileSync(store.filename, "utf8")) as {
+      receipts: Record<string, { queuedPinnedSpawn?: unknown }>;
+    };
+    raw.receipts[begun.receipt.launchId]!.queuedPinnedSpawn = {
+      version: 1,
+      retryAt,
+      accountId: "account-a",
+      locale: "en",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(raw));
+  }
+
+  const restarted = new AgentRegistry(store.filename, undefined, undefined, { sqliteMode: "off" });
+  expect(restarted.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "starting",
+    admissionOwner: null,
+    queuedPinnedSpawn: null,
+  });
+
+  const result = await terminalizeStaleStructuredSpawns(restarted, DEAD_RUNTIME_CLIENT, { now: AGED });
+
+  expect(result).toEqual({ examined: 1, terminalized: [begun.receipt.launchId], recovered: [] });
+  expect(restarted.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    queuedPinnedSpawn: null,
+  });
+});
+
+test.each(["missing", "corrupt"] as const)("a %s tmux queue payload cannot keep an ownerless receipt alive past the setup bound", async (condition) => {
+  const store = registry();
+  const retryAt = new Date(Date.now() + 60 * 60_000).toISOString();
+  const begun = store.beginSpawnRequest({
+    engine: "claude",
+    cwd: "/repo",
+    transport: "tmux",
+    accountId: "account-a",
+    accountPin: true,
+    clientAttemptId: `partial_tmux_queue_${condition}_20260824`,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created") throw new Error("expected tmux receipt creation");
+  if (condition === "corrupt") {
+    store.queuePinnedSpawn(begun.receipt.launchId, {
+      version: 1,
+      retryAt,
+      accountId: "account-a",
+      locale: "en",
+      spec: {
+        engine: "claude",
+        command: "claude",
+        cwd: "/repo",
+        windowName: "queued-pin",
+        launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      },
+      ["prompt"]: "continue",
+      imageRefs: [],
+      parentArtifactPath: null,
+      pipelineSourceConversationId: null,
+    }, `Pinned account quota is exhausted — queued until ${retryAt}`);
+    const raw = JSON.parse(fs.readFileSync(store.filename, "utf8")) as {
+      receipts: Record<string, { queuedPinnedSpawn?: unknown }>;
+    };
+    raw.receipts[begun.receipt.launchId]!.queuedPinnedSpawn = {
+      version: 1,
+      retryAt,
+      accountId: "account-a",
+      locale: "en",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(raw));
+  }
+
+  const restarted = new AgentRegistry(store.filename, undefined, undefined, { sqliteMode: "off" });
+  expect(restarted.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    transport: "tmux",
+    state: "starting",
+    admissionOwner: null,
+    queuedPinnedSpawn: null,
+  });
+
+  const beforeBound = await terminalizeStaleStructuredSpawns(restarted, null, {
+    now: () => Date.parse(begun.receipt.createdAt) + STALE_STRUCTURED_SPAWN_TIMEOUT_MS - 1,
+  });
+  expect(beforeBound).toEqual({ examined: 0, terminalized: [], recovered: [] });
+
+  const result = await terminalizeStaleStructuredSpawns(restarted, null, { now: AGED });
+  expect(result).toEqual({ examined: 1, terminalized: [begun.receipt.launchId], recovered: [] });
+  expect(restarted.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    admissionOwner: null,
+    queuedPinnedSpawn: null,
+    error: `tmux spawn interrupted before durable queue publication or pane binding: ${begun.receipt.launchId}`,
+  });
+
+  expect(await terminalizeStaleStructuredSpawns(restarted, null, { now: AGED }))
+    .toEqual({ examined: 0, terminalized: [], recovered: [] });
+});
+
+test("startup recovery still terminalizes a dead non-queued ownerless receipt", async () => {
+  const store = registry();
+  const begun = store.beginSpawnRequest({
+    engine: "claude",
+    cwd: "/repo",
+    transport: "structured",
+    accountId: "account-a",
+    accountPin: true,
+    clientAttemptId: "non_queued_ownerless_20260824",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+  });
+  if (begun.kind !== "created" || !begun.receipt.admissionOwner) throw new Error("expected ownerless receipt setup");
+  store.releaseStartingStructuredSpawn(begun.receipt.launchId, begun.receipt.admissionOwner);
+
+  const restarted = new AgentRegistry(store.filename, undefined, undefined, { sqliteMode: "off" });
+  await recoverPendingStructuredSpawns(restarted, DEAD_RUNTIME_CLIENT);
+
+  expect(restarted.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    queuedPinnedSpawn: null,
+    error: `structured spawn interrupted before runtime admission: ${begun.receipt.launchId}`,
+  });
 });
 
 test.each(["codex", "claude"] as const)("an overdue %s placeholder still fails when runtime effect history is unavailable", async (engine) => {

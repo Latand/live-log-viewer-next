@@ -19,6 +19,13 @@ describe("translation parity between en and uk", () => {
   });
 });
 
+describe("degraded account pin copy (#926)", () => {
+  test("fallback launches explain the degraded guarantee in both locales", () => {
+    expect(translate("en", "spawnCard.pinUnavailableFallback")).toBe("Launched on another account — pin unavailable");
+    expect(translate("uk", "spawnCard.pinUnavailableFallback")).toBe("Запущено на іншому акаунті — pin недоступний");
+  });
+});
+
 describe("background music copy (#732)", () => {
   const keys = ["sound.ambientViewer", "sound.ambient", "sound.ambientVolume", "sound.ambientHint"] as const;
 
