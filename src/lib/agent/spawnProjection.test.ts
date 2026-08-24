@@ -10,6 +10,8 @@ import type { FileEntry } from "@/lib/types";
 import { AgentRegistry } from "./registry";
 import { preallocatedStructuredSpawnCards, projectLaunchConversations } from "./spawnProjection";
 
+const SETTLED_SESSION_ID = "019f7b8a-" + "9f75-7dc0-b231-17f7eadd7fe0";
+
 function scannedFile(pathname: string): FileEntry {
   return {
     path: pathname,
@@ -43,38 +45,177 @@ function observeArtifact(registry: AgentRegistry, artifactPath: string, cwd: str
   }]);
 }
 
-test("a settled artifact stays projected across restart until inventory observes it", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-scan-lag-"));
-  const filename = path.join(directory, "agent-registry.json");
-  const artifactPath = path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe0.jsonl");
+function settledLaunch(directory: string, artifactPath: string) {
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: directory,
+    transport: "structured",
+    accountId: "work",
+    clientAttemptId: "scan_lag_20260717_a1",
+    requestDigest: "c".repeat(64),
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+  });
+  if (begun.kind !== "created") throw new Error("expected structured launch creation");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: SETTLED_SESSION_ID },
+    artifactPath,
+    cwd: directory,
+    accountId: "work",
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  return {
+    registry,
+    launchId: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    createdMs: Date.parse(begun.receipt.createdAt),
+  };
+}
+
+test("issue 1108: a readable registry generation retires its placeholder in the same projection and preserves identity", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1108-readable-generation-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "scan lag" })}\n`);
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
-    const begun = registry.beginSpawnRequest({
-      engine: "codex",
-      cwd: directory,
-      transport: "structured",
-      accountId: "work",
-      clientAttemptId: "scan_lag_20260717_a1",
-      requestDigest: "c".repeat(64),
-      launchProfile: emptyLaunchProfile({ cwd: directory }),
-    });
-    if (begun.kind !== "created") throw new Error("expected structured launch creation");
-    registry.settleSpawn(begun.receipt.launchId, {
-      key: { engine: "codex", sessionId: "019f7b8a-" + "9f75-7dc0-b231-17f7eadd7fe0" },
-      artifactPath,
-      cwd: directory,
-      accountId: "work",
-      launchProfile: emptyLaunchProfile({ cwd: directory }),
-      status: "unhosted",
-      host: null,
-      claimEpoch: 0,
-      claimOwner: null,
-      pendingAction: null,
-    });
+    const launch = settledLaunch(directory, artifactPath);
+    observeArtifact(launch.registry, artifactPath, directory);
 
-    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
-    expect(preallocatedStructuredSpawnCards([], restarted.snapshot())).toHaveLength(1);
+    const projection = projectLaunchConversations([], launch.registry.snapshot(), launch.createdMs + 1_000);
+    expect(projection.cards).toHaveLength(1);
+    expect(projection.cards[0]).toMatchObject({
+      path: artifactPath,
+      conversationId: launch.conversationId,
+      generation: 1,
+      activity: "recent",
+      activityReason: "structured_spawn_recovered",
+    });
+    expect(projection.cards[0]!.spawn).toBeUndefined();
+    expect(projection.facts.get(artifactPath)).toMatchObject({
+      conversationId: launch.conversationId,
+      generation: 1,
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 1108: a known generation whose file is missing keeps its placeholder", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1108-missing-generation-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  try {
+    const launch = settledLaunch(directory, artifactPath);
+
+    const projection = projectLaunchConversations([], launch.registry.snapshot(), launch.createdMs + 1_000);
+    expect(projection.cards).toEqual([
+      expect.objectContaining({
+        path: `spawn:${launch.launchId}`,
+        conversationId: launch.conversationId,
+      }),
+    ]);
+    expect(projection.facts.size).toBe(0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 1108: projection probes one authoritative path at most once per placeholder", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1108-bounded-probe-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  try {
+    const launch = settledLaunch(directory, artifactPath);
+    let probes = 0;
+
+    const projection = projectLaunchConversations(
+      [],
+      launch.registry.snapshot(),
+      launch.createdMs + 1_000,
+      (pathname) => {
+        probes += 1;
+        expect(pathname).toBe(artifactPath);
+        return false;
+      },
+    );
+    expect(probes).toBe(1);
+    expect(projection.cards[0]!.path).toBe(`spawn:${launch.launchId}`);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 1108: a readable runtime entry path materializes before a generation is registered", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1108-runtime-artifact-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  try {
+    fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "runtime path" })}\n`);
+    const launch = settledLaunch(directory, artifactPath);
+    const snapshot = launch.registry.snapshot();
+    const receipt = snapshot.receipts[launch.launchId]!;
+    expect(receipt.key).not.toBeNull();
+    expect(snapshot.entries[`${receipt.key!.engine}:${receipt.key!.sessionId}`]?.artifactPath).toBe(artifactPath);
+    snapshot.conversations[launch.conversationId]!.generations = [];
+    receipt.artifactPath = null;
+
+    const projection = projectLaunchConversations([], snapshot, launch.createdMs + 1_000);
+    expect(projection.cards).toEqual([
+      expect.objectContaining({
+        path: artifactPath,
+        conversationId: launch.conversationId,
+      }),
+    ]);
+    expect(projection.cards[0]!.spawn).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 1108: a known generation flips from placeholder to transcript when the file appears", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1108-later-generation-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  try {
+    const launch = settledLaunch(directory, artifactPath);
+    const snapshot = launch.registry.snapshot();
+
+    expect(projectLaunchConversations([], snapshot, launch.createdMs + 1_000).cards[0]!.path)
+      .toBe(`spawn:${launch.launchId}`);
+    fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "now readable" })}\n`);
+
+    const materialized = projectLaunchConversations([], snapshot, launch.createdMs + 2_000);
+    expect(materialized.cards.map((entry) => entry.path)).toEqual([artifactPath]);
+    expect(materialized.cards[0]!.conversationId).toBe(launch.conversationId);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 1108: scanner adoption replaces the synthesized transcript without duplicate rows", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1108-scanner-adoption-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  try {
+    fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "indexed later" })}\n`);
+    const launch = settledLaunch(directory, artifactPath);
+    const snapshot = launch.registry.snapshot();
+    expect(projectLaunchConversations([], snapshot, launch.createdMs + 1_000).cards.map((entry) => entry.path))
+      .toEqual([artifactPath]);
+
+    const scanned = scannedFile(artifactPath);
+    let probes = 0;
+    const indexed = projectLaunchConversations(
+      [scanned],
+      snapshot,
+      launch.createdMs + 2_000,
+      () => {
+        probes += 1;
+        return true;
+      },
+    );
+    expect([scanned, ...indexed.cards].map((entry) => entry.path)).toEqual([artifactPath]);
+    expect(indexed.facts.has(artifactPath)).toBe(true);
+    expect(probes).toBe(0);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -297,7 +438,7 @@ test("issue 614: a transcript-less launch projects the queued prompt as the firs
   }
 });
 
-test("issue 614: a materialized launch whose transcript a scoped scan omits keeps its window until the live conversation is in the response", () => {
+test("issues 614 and 1108: a readable transcript omitted by a scoped scan keeps the window on its real path", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-614-pre-adoption-continuity-"));
   const artifactPath = path.join(directory, "019f8dbe_e6cc_9e62_40df_06fb8f88b8a1.jsonl");
   try {
@@ -325,13 +466,14 @@ test("issue 614: a materialized launch whose transcript a scoped scan omits keep
     const snapshot = registry.snapshot();
     expect(snapshot.receipts[begun.receipt.launchId]?.artifactLifecycle).toBe("materialized");
 
-    /* The #614 vanish: inventory materialized the transcript, but the canonical
-       project poll that the operator is watching has not carried it yet. The
-       window must NOT blink out — the launch keeps its window while the
-       transcript still exists on disk and the launch is recent. */
+    /* Inventory materialized the transcript while the canonical project poll
+       still omitted it. The launch keeps one stable window and advances that
+       window to the readable transcript path during the active adoption grace. */
     const gap = projectLaunchConversations([], snapshot, createdMs + 17_000);
     expect(gap.cards).toHaveLength(1);
-    expect(gap.cards[0]!).toMatchObject({ path: `spawn:${begun.receipt.launchId}` });
+    expect(gap.cards[0]!).toMatchObject({ path: artifactPath, conversationId: begun.receipt.conversationId });
+    expect(gap.cards[0]!.spawn).toBeUndefined();
+    expect(gap.facts.get(artifactPath)).toMatchObject({ state: "recovered", initialMessage: "delivered" });
 
     /* The receipt-to-transcript handoff in ONE response: the live transcript
        arrives, the launch folds into that single window as transient facts, and
@@ -400,10 +542,15 @@ test("issue 615 HIGH1: the launch prompt projects from the durable display paylo
 
     const scanLag = projectLaunchConversations([], snapshot, createdMs + 20_000);
     expect(scanLag.cards).toHaveLength(1);
-    expect(scanLag.cards[0]!.spawn).toMatchObject({ prompt: "LLV615_RAW_PROMPT", promptImages: 2, promptEcho: "scaffold\n\nLLV615_RAW_PROMPT" });
-    /* The delivered receipt time is projected so the client can settle the launch
-       bubble even when the transcript echo never matches (issue #648). */
-    const deliveredAt = scanLag.cards[0]!.spawn!.deliveredAt;
+    expect(scanLag.cards[0]!).toMatchObject({ path: artifactPath, conversationId: begun.receipt.conversationId });
+    const scanLagFacts = scanLag.facts.get(artifactPath)!;
+    expect(scanLagFacts).toMatchObject({ state: "recovered" });
+    expect(scanLagFacts.prompt).toBeUndefined();
+    expect(scanLagFacts.promptEcho).toBeUndefined();
+    expect(scanLagFacts.promptImages).toBeUndefined();
+    /* The delivered receipt time remains available after the readable transcript
+       path takes over the window (issue #648). */
+    const deliveredAt = scanLagFacts.deliveredAt;
     expect(typeof deliveredAt).toBe("number");
     expect(Number.isFinite(deliveredAt)).toBe(true);
 

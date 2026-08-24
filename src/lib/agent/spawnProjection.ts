@@ -149,30 +149,111 @@ function launchFactsWithoutPrompt(spawn: StructuredSpawnCardState): StructuredSp
   return facts;
 }
 
+type ArtifactProbeResult = Pick<fs.Stats, "mtimeMs" | "size"> | boolean | null;
+
+type MaterializedEntry = {
+  entry: FileEntry | null;
+  projected: boolean;
+  artifactPresent: boolean;
+};
+
+/** One authoritative artifact path for this launch. The exact registered
+    generation wins, followed by the runtime registry entry and receipt path.
+    The newest conversation generation covers legacy receipts whose native key
+    was never persisted. Selecting once bounds projection to one disk probe. */
+function authoritativeArtifactPath(
+  snapshot: RegistryFile,
+  receipt: SpawnReceipt,
+): string | null {
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
+  const conversationId = lookup.canonicalConversationId(receipt.conversationId);
+  const generations = lookup.conversation(conversationId)?.generations ?? [];
+  const exactGeneration = receipt.key
+    ? generations.find((generation) => generation.id === receipt.key?.sessionId)
+    : undefined;
+  const runtimeEntry = receipt.key
+    ? snapshot.entries[`${receipt.key.engine}:${receipt.key.sessionId}`]
+    : undefined;
+  return exactGeneration?.path
+    ?? runtimeEntry?.artifactPath
+    ?? receipt.artifactPath
+    ?? generations.at(-1)?.path
+    ?? null;
+}
+
+/** Minimal transcript identity used during scanner lag. Scanner-derived fields
+    replace these values when its row arrives; conversation identity, generation,
+    launch activity, project placement, and lineage remain stable throughout. */
+function projectedTranscriptEntry(
+  snapshot: RegistryFile,
+  receipt: SpawnReceipt,
+  spawn: StructuredSpawnCardState,
+  scannedPaths: ReadonlySet<string>,
+  nowMs: number,
+  artifactPath: string,
+  probe: ArtifactProbeResult,
+): FileEntry {
+  const entry = spawnCard(snapshot, receipt, spawn, scannedPaths, nowMs);
+  entry.path = artifactPath;
+  entry.name = path.basename(artifactPath);
+  delete entry.spawn;
+  if (probe && typeof probe === "object") {
+    entry.mtime = probe.mtimeMs / 1000;
+    entry.size = probe.size;
+  }
+  return entry;
+}
+
 /** The scanned transcript entry that already represents a launch's conversation.
     A `spawn:` placeholder is never itself an answer here — it IS the projection
     this lookup decides against. Resolution runs off the durable conversation
     record (its generations, newest first) so it works before `/api/files`
-    annotates `conversationId` onto scanned entries, with the receipt's own
-    artifact path and an already-annotated id as fallbacks. */
+    annotates `conversationId` onto scanned entries. During scanner lag, one
+    readable-file probe creates the same transcript identity immediately. */
 function materializedEntry(
   byPath: ReadonlyMap<string, FileEntry>,
   files: readonly FileEntry[],
   snapshot: RegistryFile,
   receipt: SpawnReceipt,
-): FileEntry | null {
+  spawn: StructuredSpawnCardState,
+  scannedPaths: ReadonlySet<string>,
+  nowMs: number,
+  artifactProbe: (pathname: string) => ArtifactProbeResult,
+): MaterializedEntry {
   const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
   const conversationId = lookup.canonicalConversationId(receipt.conversationId);
   const generations = lookup.conversation(conversationId)?.generations ?? [];
+  const artifactPath = authoritativeArtifactPath(snapshot, receipt);
+  if (artifactPath && !isSpawnPlaceholderPath(artifactPath)) {
+    const scanned = byPath.get(artifactPath);
+    if (scanned && !isSpawnPlaceholderPath(scanned.path)) {
+      return { entry: scanned, projected: false, artifactPresent: true };
+    }
+    const probe = artifactProbe(artifactPath);
+    if (probe) {
+      const projectsTranscript = receipt.artifactLifecycle === "pending" || withinAdoptionGrace(receipt, nowMs);
+      if (!projectsTranscript) return { entry: null, projected: false, artifactPresent: true };
+      return {
+        entry: projectedTranscriptEntry(snapshot, receipt, spawn, scannedPaths, nowMs, artifactPath, probe),
+        projected: true,
+        artifactPresent: true,
+      };
+    }
+  }
   for (let index = generations.length - 1; index >= 0; index -= 1) {
     const candidate = byPath.get(generations[index]!.path);
-    if (candidate && !isSpawnPlaceholderPath(candidate.path)) return candidate;
+    if (candidate && !isSpawnPlaceholderPath(candidate.path)) {
+      return { entry: candidate, projected: false, artifactPresent: false };
+    }
   }
   if (receipt.artifactPath) {
     const candidate = byPath.get(receipt.artifactPath);
-    if (candidate && !isSpawnPlaceholderPath(candidate.path)) return candidate;
+    if (candidate && !isSpawnPlaceholderPath(candidate.path)) {
+      return { entry: candidate, projected: false, artifactPresent: false };
+    }
   }
-  return files.find((file) => file.conversationId === conversationId && !isSpawnPlaceholderPath(file.path)) ?? null;
+  const annotated = files.find((file) => file.conversationId === conversationId && !isSpawnPlaceholderPath(file.path)) ?? null;
+  return { entry: annotated, projected: false, artifactPresent: false };
 }
 
 /** A projected launch placeholder path (`spawn:<launchId>`). */
@@ -252,15 +333,15 @@ function withinAdoptionGrace(receipt: SpawnReceipt, nowMs: number): boolean {
   return !Number.isFinite(createdMs) || nowMs - createdMs < TERMINAL_SPAWN_RECENT_MS;
 }
 
-/** Disk existence of a materialized artifact, the discriminator between the
-    #614 pre-adoption gap (the transcript exists but this scan omitted it — keep
-    the window) and a deleted transcript (gone — retire the window). Injected so
-    the projection stays a deterministic read model in tests. */
-function artifactOnDisk(pathname: string): boolean {
+/** One stat plus a read-access check verifies the authoritative artifact and
+    captures the minimal metadata for its temporary transcript row. */
+function readableArtifact(pathname: string): ArtifactProbeResult {
   try {
-    return fs.existsSync(pathname);
+    const stat = fs.statSync(pathname);
+    fs.accessSync(pathname, fs.constants.R_OK);
+    return stat.isFile() ? { mtimeMs: stat.mtimeMs, size: stat.size } : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -271,8 +352,8 @@ function artifactOnDisk(pathname: string): boolean {
  * - `facts` — the live transcript already represents this conversation, so the
  *   launch contributes transient status chips INSIDE that conversation window.
  *   It never projects a second board entry.
- * - `cards` — nothing has materialized yet, so the launch itself projects the
- *   conversation window in its earliest state.
+ * - `cards` — projection-owned rows: the launch placeholder while no readable
+ *   artifact exists, then a minimal real-path row until the scanner carries it.
  * - `routes` — `spawn:<launchId>` → canonical conversation id, so a refresh or
  *   a copied launch deep link resolves to the live conversation for as long as
  *   the receipt is board history at all.
@@ -289,7 +370,7 @@ export function projectLaunchConversations(
   files: readonly FileEntry[],
   snapshot: RegistryFile,
   nowMs = Date.now(),
-  artifactExists: (pathname: string) => boolean = artifactOnDisk,
+  artifactProbe: (pathname: string) => ArtifactProbeResult = readableArtifact,
 ): LaunchProjection {
   const byPath = new Map(files.map((file) => [file.path, file]));
   const scannedPaths = new Set(byPath.keys());
@@ -306,9 +387,21 @@ export function projectLaunchConversations(
        Retirement happens ONLY here — when the adopted live conversation is
        available in the SAME response — so the window never blinks out before its
        transcript reaches the view. */
-    const live = materializedEntry(byPath, files, snapshot, receipt);
-    if (live) {
-      if (transientLaunchFact(spawn, receipt.createdAt, nowMs)) facts.set(live.path, launchFactsWithoutPrompt(spawn));
+    const materialized = materializedEntry(
+      byPath,
+      files,
+      snapshot,
+      receipt,
+      spawn,
+      scannedPaths,
+      nowMs,
+      artifactProbe,
+    );
+    if (materialized.entry) {
+      if (materialized.projected) cards.push(materialized.entry);
+      if (transientLaunchFact(spawn, receipt.createdAt, nowMs)) {
+        facts.set(materialized.entry.path, launchFactsWithoutPrompt(spawn));
+      }
       continue;
     }
     /* No live transcript in this payload: the launch still owns the window
@@ -321,8 +414,7 @@ export function projectLaunchConversations(
        of resurrecting a phantom placeholder. A still-`pending` launch always
        projects — inventory has never materialized its artifact. */
     if (receipt.artifactLifecycle !== "pending") {
-      const present = Boolean(receipt.artifactPath && artifactExists(receipt.artifactPath));
-      if (!present || !withinAdoptionGrace(receipt, nowMs)) continue;
+      if (!materialized.artifactPresent || !withinAdoptionGrace(receipt, nowMs)) continue;
     }
     cards.push(spawnCard(snapshot, receipt, spawn, scannedPaths, nowMs));
   }
