@@ -329,10 +329,11 @@ export interface RelayDeliveryOverrides {
   onTransportSelected?: (transport: RelayDeliveryTransport) => void;
 }
 
-/** The durable structured-delivery identity of a round's relay. Exported so a
-    test can address the exact reservation the delivery journal settles. */
-export function relayClientMessageId(flow: Flow): string {
-  const round = flow.rounds?.at(-1);
+/** The durable structured-delivery identity of a round's relay — the current
+    round's by default, or any settled round's when given, so provenance can
+    name the reservation each round's relay settled under (#1117). Exported so
+    a test can address the exact reservation the delivery journal settles. */
+export function relayClientMessageId(flow: Flow, round: Round | undefined = flow.rounds?.at(-1)): string {
   const deliveryAttempt = round?.relayDeliveryAttempt ?? 0;
   const identity = `${flow.id}:${round?.n ?? "legacy"}:${round?.reviewerBindingId ?? "legacy"}`
     + (deliveryAttempt > 0 ? `:retry:${deliveryAttempt}` : "");

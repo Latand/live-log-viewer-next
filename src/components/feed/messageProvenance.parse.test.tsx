@@ -232,6 +232,26 @@ test("a legacy operator send keeps the operator's bubble on both engines", () =>
   }
 });
 
+test("an over-32k agent-origin delivery — whose record keeps only the digest — renders as the internal card on both engines", () => {
+  setLocale("en");
+  /* Past the 32,000-byte envelope bound the legacy hold blanks its text and
+     keeps the digest of what was sent; the row's own digest must meet it.
+     Real prose, so the parser's blob heuristic still sees a message row. */
+  const largeRelay = ["Findings, in full:", ...Array.from({ length: 600 }, () => "P1 — the held record keeps no digest past the envelope bound.")].join("\n");
+  expect(new TextEncoder().encode(largeRelay).length).toBeGreaterThan(32_000);
+  const evidence: Evidence = { occurrences: [occurrence(largeRelay, at(0), { origin: "agent", senderRole: "orchestrator" })] };
+  for (const items of [
+    claudeItems([claudeUserLine(largeRelay, at(1_000))]),
+    codexItems([codexUserLine(largeRelay, at(1_000)), codexEventLine(largeRelay, at(1_200))]),
+  ]) {
+    expect(items.filter((item) => item.kind === "user")).toHaveLength(1);
+    const [html] = renderAll(items, evidence);
+    expect(html).toContain("internal");
+    expect(html).toContain("orchestrator");
+    expect(html).not.toContain("bg-user");
+  }
+});
+
 test("two identical rows — a relay and the operator's own message — resolve by settlement time on claude", () => {
   setLocale("en");
   const relayEvidence: Evidence = { occurrences: [occurrence(RELAYED_TEXT, at(0), { origin: "agent", senderRole: "reviewer" })] };

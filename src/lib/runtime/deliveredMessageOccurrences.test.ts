@@ -64,11 +64,12 @@ function snapshot(deliveries: HeldDelivery[]): RegistryFile {
   } as unknown as RegistryFile;
 }
 
-test("a delivered, stamped record projects its digest, settlement time, and sender", () => {
+test("a delivered, stamped record projects its digest, settlement time, sender, and client-message identity", () => {
   const occurrences = heldDeliveryOccurrences(TRANSCRIPT, snapshot([
     delivery({ id: "d-mandate" }),
     delivery({
       id: "d-operator",
+      clientMessageId: "composer-7",
       contentDigest: OPERATOR_DIGEST,
       deliveredAt: "2026-08-24T09:05:00.000Z",
       command: { operationId: "d-operator", kind: "send", policy: "queue", origin: { kind: "operator" } },
@@ -76,7 +77,7 @@ test("a delivered, stamped record projects its digest, settlement time, and send
   ]));
   expect(occurrences).toEqual([
     { textDigest: MANDATE_DIGEST, deliveredAt: "2026-08-24T09:00:01.000Z", origin: "agent", senderRole: "orchestrator" },
-    { textDigest: OPERATOR_DIGEST, deliveredAt: "2026-08-24T09:05:00.000Z", origin: "operator" },
+    { textDigest: OPERATOR_DIGEST, deliveredAt: "2026-08-24T09:05:00.000Z", origin: "operator", clientMessageId: "composer-7" },
   ]);
 });
 
@@ -112,24 +113,76 @@ const RELAY: DeliveredMessageOccurrence = {
   senderRole: "reviewer",
 };
 
-test("a flow relay the registry also settled counts once; a relay it never saw is added", () => {
+/** The identity a structured relay reserves its registry record under. */
+const STRUCTURED_RELAY_ID = "flow_relay_round2";
+
+function relayRecord(overrides: Partial<HeldDelivery> & { id: string }): HeldDelivery {
+  return delivery({
+    contentDigest: RELAY_DIGEST,
+    deliveredAt: "2026-08-24T09:10:04.000Z",
+    command: { operationId: overrides.id, kind: "send", policy: "queue", origin: { kind: "agent", role: "reviewer" } },
+    ...overrides,
+  });
+}
+
+test("one structured relay in both stores is one occurrence, joined by the round's identity; a relay the registry never reserved is added", () => {
   const registrySnapshot = () => snapshot([
-    delivery({
-      id: "d-structured-relay",
-      contentDigest: RELAY_DIGEST,
-      deliveredAt: "2026-08-24T09:10:04.000Z",
-      command: { operationId: "d-structured-relay", kind: "send", policy: "queue", origin: { kind: "agent", role: "reviewer" } },
-    }),
+    relayRecord({ id: "d-structured-relay", clientMessageId: STRUCTURED_RELAY_ID }),
   ]);
-  const legacyRelay: DeliveredMessageOccurrence = { ...RELAY, deliveredAt: "2026-08-24T11:00:00.000Z" };
+  const structuredRelay: DeliveredMessageOccurrence = { ...RELAY, clientMessageId: STRUCTURED_RELAY_ID };
+  const legacyRelay: DeliveredMessageOccurrence = { ...RELAY, deliveredAt: "2026-08-24T11:00:00.000Z", clientMessageId: "flow_relay_round3" };
   const occurrences = deliveredMessageOccurrences(TRANSCRIPT, {
     registrySnapshot,
-    relayOccurrences: () => [legacyRelay, RELAY],
+    relayOccurrences: () => [legacyRelay, structuredRelay],
   });
+  /* The registry's settlement wins for the shared delivery; the identity
+     itself never reaches the wire. */
   expect(occurrences).toEqual([
     { textDigest: RELAY_DIGEST, deliveredAt: "2026-08-24T09:10:04.000Z", origin: "agent", senderRole: "reviewer" },
-    legacyRelay,
+    { textDigest: RELAY_DIGEST, deliveredAt: "2026-08-24T11:00:00.000Z", origin: "agent", senderRole: "reviewer" },
   ]);
+});
+
+test("an operator message and a legacy relay with identical text within ten minutes are two occurrences", () => {
+  /* The operator repeated the relay's words four minutes after it landed.
+     Text and time agree, the delivery identities differ, and only a shared
+     identity may collapse two records into one. */
+  const registrySnapshot = () => snapshot([
+    delivery({
+      id: "d-operator-repeat",
+      clientMessageId: "composer-1",
+      contentDigest: RELAY_DIGEST,
+      deliveredAt: "2026-08-24T09:14:00.000Z",
+      command: { operationId: "d-operator-repeat", kind: "send", policy: "queue", origin: { kind: "operator" } },
+    }),
+  ]);
+  const legacyRelay: DeliveredMessageOccurrence = { ...RELAY, clientMessageId: STRUCTURED_RELAY_ID };
+  expect(deliveredMessageOccurrences(TRANSCRIPT, { registrySnapshot, relayOccurrences: () => [legacyRelay] })).toEqual([
+    { textDigest: RELAY_DIGEST, deliveredAt: "2026-08-24T09:10:00.000Z", origin: "agent", senderRole: "reviewer" },
+    { textDigest: RELAY_DIGEST, deliveredAt: "2026-08-24T09:14:00.000Z", origin: "operator" },
+  ]);
+  /* Neither side naming an identity is the all-legacy case: still two. */
+  const unnamedOperator = () => snapshot([
+    delivery({
+      id: "d-operator-unnamed",
+      contentDigest: RELAY_DIGEST,
+      deliveredAt: "2026-08-24T09:14:00.000Z",
+      command: { operationId: "d-operator-unnamed", kind: "send", policy: "queue", origin: { kind: "operator" } },
+    }),
+  ]);
+  expect(deliveredMessageOccurrences(TRANSCRIPT, { registrySnapshot: unnamedOperator, relayOccurrences: () => [RELAY] })).toHaveLength(2);
+});
+
+test("a pre-#1117 structured round, whose registry record carries no origin stamp, still surfaces through the flow store", () => {
+  const registrySnapshot = () => snapshot([
+    relayRecord({
+      id: "d-unstamped-relay",
+      clientMessageId: STRUCTURED_RELAY_ID,
+      command: { operationId: "d-unstamped-relay", kind: "send", policy: "queue" },
+    }),
+  ]);
+  const structuredRelay: DeliveredMessageOccurrence = { ...RELAY, clientMessageId: STRUCTURED_RELAY_ID };
+  expect(deliveredMessageOccurrences(TRANSCRIPT, { registrySnapshot, relayOccurrences: () => [structuredRelay] })).toEqual([RELAY]);
 });
 
 test("each source degrades to absence on its own, and the result is settlement-ordered", () => {

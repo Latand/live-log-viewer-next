@@ -55,6 +55,12 @@ export interface DeliveredMessageProvenance {
 export interface DeliveredMessageOccurrence extends DeliveredMessageProvenance {
   textDigest: string;
   deliveredAt: string;
+  /** The delivery's stable client-message id, when its transport reserved one
+      (a structured send, a flow round's relay). Server-side join key only: two
+      evidence stores that recorded the same delivery agree on it, so their
+      occurrences collapse to one before serialization. Stripped from the
+      wire shape. */
+  clientMessageId?: string;
 }
 
 /** Same grammar as the other opaque marker tokens: no whitespace, no `>`. */

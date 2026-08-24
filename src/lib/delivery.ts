@@ -632,15 +632,15 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       const heldText = textBytes > 32_000 ? "" : text;
       /* #1117: the digest is the only content evidence a delivered record
          keeps (its text is blanked at settlement), and it is what joins a
-         legacy paste to its transcript row. Stamped at admission so the
-         record carries it whatever path settles it. */
+         legacy paste to its transcript row. Stamped at admission from the
+         text actually delivered — before an oversized payload is blanked
+         from the record — so an over-bound agent relay still projects; the
+         plaintext itself stays request-local. */
       let contentDigest: string | null = null;
-      if (heldText) {
-        try {
-          contentDigest = structuredContent(heldText, []).contentDigest;
-        } catch {
-          contentDigest = null;
-        }
+      try {
+        contentDigest = structuredContent(text, []).contentDigest;
+      } catch {
+        contentDigest = null;
       }
       queued = registry.holdDelivery(
         conversation.id,

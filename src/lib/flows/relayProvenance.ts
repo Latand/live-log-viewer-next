@@ -3,6 +3,7 @@ import fs from "node:fs";
 import type { DeliveredMessageOccurrence } from "@/lib/runtime/messageOrigin";
 import { messageTextDigest } from "@/lib/runtime/messageTextDigest";
 
+import { relayClientMessageId } from "./engine";
 import { relayPrompt } from "./prompts";
 import { loadFlows } from "./store";
 import type { Flow } from "./types";
@@ -16,6 +17,11 @@ import type { Flow } from "./types";
  * its settled `relayDelivery` — so the exact relayed text can be reconstructed
  * and its digest joined, together with the settlement time, to the ONE
  * transcript row that echoes that delivery.
+ *
+ * Each occurrence also names the round's own relay identity — the client-
+ * message id a structured relay reserves its registry record under — so the
+ * projector can tell a relay the registry also settled (one delivery, two
+ * stores) from one it never saw, without comparing text or time.
  *
  * Absence stays honest: an unreadable findings artifact or an unsettled round
  * contributes nothing, and an unmatched row keeps today's rendering.
@@ -57,6 +63,7 @@ export function flowRelayedMessageOccurrences(
           deliveredAt: delivery.deliveredAt,
           origin: "agent",
           senderRole: "reviewer",
+          clientMessageId: relayClientMessageId(flow, round),
         });
       } catch {
         /* A pruned findings artifact loses only this round's attribution. */

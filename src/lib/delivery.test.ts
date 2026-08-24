@@ -9,6 +9,8 @@ import { emptyLaunchProfile } from "./accounts/migration/contracts";
 import { drainHeldDeliveries } from "./accounts/migration/coordinator";
 import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, reconfigureConversation, resumeConversation, type DeliveryFailure } from "./delivery";
 import type { RuntimeHostClient } from "./runtime/client";
+import { heldDeliveryOccurrences } from "./runtime/deliveredMessageOccurrences";
+import { messageTextDigest } from "./runtime/messageTextDigest";
 import { recoverDeadStructuredConversation } from "./runtime/structuredRecovery";
 import type { FileEntry } from "./types";
 import { TmuxDeliveryUncertainError } from "./tmux";
@@ -770,6 +772,56 @@ test("large text uses a request-local reservation and still reaches ordinary del
   expect(outcome.ok).toBe(true);
   expect(delivered).toBe(text);
   expect(registry.holdDelivery(conversation.id, "", "large-text", "ephemeral-text")).toMatchObject({ state: "delivered", text: "" });
+});
+
+test("an over-32k agent-origin delivery keeps the digest of the delivered text, so it still projects as internal on both engines (#1117)", async () => {
+  type Overrides = NonNullable<Parameters<typeof deliverConversationMessage>[1]>;
+  for (const engine of ["claude", "codex"] as const) {
+    const registry = new AgentRegistry(path.join(SANDBOX, `${engine}-large-relay-registry.json`));
+    setAgentRegistryForTests(registry);
+    const pathname = path.join(SANDBOX, `${engine}-large-relay-fixture.jsonl`);
+    fs.writeFileSync(pathname, "");
+    const conversation = registry.ensureConversation(engine, pathname, "default");
+    /* Over the 32,000-byte envelope bound: the held record blanks this text
+       and keeps only a digest, which must be the digest of what was sent. */
+    const text = `Findings for the ${engine} worker, in full:\n${"x".repeat(32_000)}`;
+    const clientMessageId = `${engine}-large-relay`;
+    let delivered = "";
+
+    const outcome = await deliverConversationMessage({
+      pid: 1, path: pathname, conversationId: conversation.id, text, images: [], clientMessageId,
+      origin: { kind: "agent", role: "orchestrator" },
+    }, {
+      recover: async () => null,
+      pathAllowed: () => true,
+      listFiles: async () => [{ root: `${engine}-sessions`, path: pathname, project: "p", mtime: 0, size: 0 } as unknown as FileEntry],
+      resumeSpecFor: (() => ({ command: "resume", transcript: pathname, launchProfile: emptyLaunchProfile() })) as unknown as Overrides["resumeSpecFor"],
+      deliver: async ({ payload }: { payload: string }) => {
+        delivered = payload;
+        return { ok: true as const, outcome: "resumed" as const, target: "%7" };
+      },
+    });
+
+    expect(outcome).toMatchObject({ ok: true });
+    /* Engine input is untouched: the full text went to the host. */
+    expect(delivered).toBe(text);
+    const snapshot = registry.readOnlySnapshot();
+    const record = Object.values(snapshot.heldDeliveries).find((item) => item.clientMessageId === clientMessageId);
+    expect(record).toMatchObject({
+      state: "delivered",
+      payloadKind: "ephemeral-text",
+      text: "",
+      contentDigest: messageTextDigest(text),
+      command: { origin: { kind: "agent", role: "orchestrator" } },
+    });
+    expect(heldDeliveryOccurrences(pathname, snapshot)).toEqual([{
+      textDigest: messageTextDigest(text),
+      deliveredAt: record!.deliveredAt!,
+      origin: "agent",
+      senderRole: "orchestrator",
+      clientMessageId,
+    }]);
+  }
 });
 
 test("ordinary delivery on the active account skips the lazy-migration registry write", async () => {
