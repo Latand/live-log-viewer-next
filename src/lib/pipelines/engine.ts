@@ -1167,6 +1167,18 @@ const TERMINAL_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
   "approved", "done_comment", "needs_decision", "closed",
 ]);
 const REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX = "review flow host claim retry: ";
+const REVIEW_FLOW_RELAY_RETRY_PREFIX = "review flow relay retry: ";
+
+function reviewFlowRetryDetail(flow: Flow): string | null {
+  if (flow.state !== "relaying" || !flow.stateDetail?.includes("retrying automatically")) return null;
+  const claimFailure = flow.hostClaim
+    ? `structured host claim ${flow.hostClaim.sessionKey} on account ${flow.hostClaim.accountRef} failed:`
+    : null;
+  const prefix = claimFailure && flow.stateDetail.includes(claimFailure)
+    ? REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX
+    : REVIEW_FLOW_RELAY_RETRY_PREFIX;
+  return `${prefix}${flow.stateDetail}`;
+}
 
 function flowSourceUpdatedAt(flow: Flow): string | null {
   const values = [flow.createdAt, flow.closedAt];
@@ -2042,14 +2054,13 @@ async function tickReviewStage(
     attempt.reviewHeadSha = capturedReviewHead;
     persist();
   }
-  const hostClaimRetryDetail = flow.state === "relaying"
-    && flow.hostClaim
-    && flow.stateDetail?.includes("retrying automatically")
-    ? `${REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX}${flow.stateDetail}`
-    : null;
-  if (hostClaimRetryDetail) {
-    pipeline.stateDetail = hostClaimRetryDetail;
-  } else if (pipeline.stateDetail?.startsWith(REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX)) {
+  const retryDetail = reviewFlowRetryDetail(flow);
+  if (retryDetail) {
+    pipeline.stateDetail = retryDetail;
+  } else if (
+    pipeline.stateDetail?.startsWith(REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX)
+    || pipeline.stateDetail?.startsWith(REVIEW_FLOW_RELAY_RETRY_PREFIX)
+  ) {
     pipeline.stateDetail = null;
   }
   if (flow.state === "approved") {

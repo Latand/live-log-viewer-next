@@ -3303,6 +3303,35 @@ test("a review-flow host claim retry keeps the stage running with the safe claim
   expect(loadPipelines()[0]).toMatchObject({ state: "running", stateDetail: null });
 });
 
+test("an accepted-but-unsettled relay retry is not mislabeled as a host-claim failure (#921, #1065)", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+
+  const flow = h.flows.get("flow-1")!;
+  flow.hostClaim = {
+    sessionKey: `codex:${["189f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-")}`,
+    accountRef: "managed:fc164f825080",
+  };
+  flow.state = "relaying";
+  flow.stateDetail = "relay delivery failed; retrying automatically (1/3): structured relay was accepted but never settled in the delivery journal";
+
+  await tickPipelines([], h.ports);
+
+  expect(loadPipelines()[0]).toMatchObject({
+    state: "running",
+    stateDetail: `review flow relay retry: ${flow.stateDetail}`,
+  });
+  expect(loadPipelines()[0]!.stateDetail).not.toContain("host claim retry");
+});
+
 test("a bound review flow paused while relaying resumes without operator action", async () => {
   const h = harness();
   const stages = [
@@ -3384,7 +3413,7 @@ test("a bound review flow paused while relaying resumes without operator action"
   expect(loadPipelines()[0]).toMatchObject({ state: "running", stateDetail: null });
 });
 
-test("a parked review stage settles from the latest of ten completed flow verdicts (#921)", async () => {
+test("a parked review stage ingests ten verdicts across three attempts exactly once (#921)", async () => {
   const h = harness();
   const stages = [
     { id: "build", kind: "run", prompt: "build", next: "review" },
@@ -3396,67 +3425,105 @@ test("a parked review stage settles from the latest of ten completed flow verdic
   await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
   await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
 
-  const flow = h.flows.get("flow-1")!;
   const claim = {
     sessionKey: `codex:${["279f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-")}`,
     accountRef: "managed:fc164f825080",
   } as const;
-  flow.hostClaim = claim;
-  flow.state = "paused";
-  flow.pausedState = "relaying";
-  flow.stateDetail = `structured host claim ${claim.sessionKey} on account ${claim.accountRef} failed: structured resume host claim is unavailable`;
-  await tickPipelines([], h.ports);
-  expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision" });
-
-  const flowDir = path.join(process.env.LLV_STATE_DIR!, "flows", flow.id);
   const privateWorktree = path.join(process.env.LLV_STATE_DIR!, "private-worktree");
-  fs.mkdirSync(flowDir, { recursive: true });
-  flow.cwd = privateWorktree;
-  flow.rounds = Array.from({ length: 10 }, (_, index) => {
-    const n = index + 1;
-    const findingsPath = path.join(flowDir, `round-${n}-review.md`);
-    const content = n === 10
-      ? [
-          "VERDICT: REQUEST_CHANGES",
-          "",
-          "### Finding 1",
-          "- **Severity:** High",
-          `- **File:** ${path.join(privateWorktree, "src/lib/claim.ts")}`,
-          "- **Line:** 42",
-          "- **Title:** Claim failure stays invisible",
-          "- **Explanation:** Surface the completed verdict on the stage.",
-          "",
-          "### Finding 2",
-          "- **Severity:** Medium",
-          "- **File:** src/lib/flows/state.ts",
-          "- **Line:** 17",
-          "- **Title:** Round count is stale",
-          "- **Explanation:** Keep the latest completed round authoritative.",
-          "",
-        ].join("\n")
-      : `VERDICT: REQUEST_CHANGES\n\nRound ${n} requested changes.\n`;
-    fs.writeFileSync(findingsPath, content);
-    return {
-      n,
-      verdict: "REQUEST_CHANGES",
-      findingsCount: n === 10 ? 2 : 1,
-      findingsPath,
-      reviewHeadSha: ORIGIN_MAIN_SHA,
-      reviewedAt: `2026-08-06T${String(4 + n).padStart(2, "0")}:19:00.000Z`,
-      terminalAt: `2026-08-06T${String(4 + n).padStart(2, "0")}:19:00.000Z`,
-      reviewerPath: `/codex/reviewer-${n}.jsonl`,
-      reviewerConversationId: `conversation_reviewer_${n}`,
-    } as never;
-  });
+  let completedRounds = 0;
+  const populateRounds = (flow: Flow, count: number): void => {
+    const flowDir = path.join(process.env.LLV_STATE_DIR!, "flows", flow.id);
+    fs.mkdirSync(flowDir, { recursive: true });
+    flow.cwd = privateWorktree;
+    flow.hostClaim = claim;
+    flow.rounds = Array.from({ length: count }, (_, index) => {
+      const n = index + 1;
+      completedRounds += 1;
+      const findingsPath = path.join(flowDir, `round-${n}-review.md`);
+      const content = completedRounds === 10
+        ? [
+            "VERDICT: REQUEST_CHANGES",
+            "",
+            "### Finding 1",
+            "- **Severity:** High",
+            `- **File:** ${path.join(privateWorktree, "src/lib/claim.ts")}`,
+            "- **Line:** 42",
+            "- **Title:** Claim failure stays invisible",
+            "- **Explanation:** Surface the completed verdict on the stage.",
+            "",
+            "### Finding 2",
+            "- **Severity:** Medium",
+            "- **File:** src/lib/flows/state.ts",
+            "- **Line:** 17",
+            "- **Title:** Round count is stale",
+            "- **Explanation:** Keep the latest completed round authoritative.",
+            "",
+          ].join("\n")
+        : `VERDICT: REQUEST_CHANGES\n\nCompleted review ${completedRounds} requested changes.\n`;
+      fs.writeFileSync(findingsPath, content);
+      const reviewedAt = `2026-08-06T${String(4 + completedRounds).padStart(2, "0")}:19:00.000Z`;
+      return {
+        n,
+        verdict: "REQUEST_CHANGES",
+        findingsCount: completedRounds === 10 ? 2 : 1,
+        findingsPath,
+        reviewHeadSha: ORIGIN_MAIN_SHA,
+        reviewedAt,
+        terminalAt: reviewedAt,
+        reviewerPath: `/codex/${flow.id}-reviewer-${n}.jsonl`,
+        reviewerConversationId: `conversation_${flow.id}_reviewer_${n}`,
+      } as never;
+    });
+  };
+  const parkAndRetry = async (flow: Flow, rounds: number): Promise<void> => {
+    populateRounds(flow, rounds);
+    flow.state = "done_comment";
+    flow.stateDetail = null;
+    await tickPipelines([entry(flow.rounds.at(-1)!.reviewerPath!)], h.ports);
+    expect(loadPipelines()[0]).toMatchObject({ state: "needs_decision" });
+    await patchPipeline(loadPipelines()[0]!.id, { action: "retry-stage" }, h.ports);
+    await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  };
+
+  await parkAndRetry(h.flows.get("flow-1")!, 2);
+  await parkAndRetry(h.flows.get("flow-2")!, 3);
+
+  const flow = h.flows.get("flow-3")!;
+  populateRounds(flow, 5);
+  expect(completedRounds).toBe(10);
   flow.state = "needs_decision";
   flow.pausedState = null;
   flow.stateDetail = `relay delivery failed after 3 automatic retries: structured host claim ${claim.sessionKey} on account ${claim.accountRef} failed: structured resume host claim is unavailable`;
 
-  await tickPipelines([entry("/codex/reviewer-10.jsonl")], h.ports);
+  /* Exercise the read-side projection before the controller consumes the same
+     terminal generation. Its write must remain compatible with the later
+     one-shot verdict settlement. */
+  const projected = structuredClone(loadPipelines()[0]!);
+  expect(reconcileEmbeddedReviewFlows(
+    [projected],
+    [...h.flows.values()],
+    "2026-08-06T15:20:00.000Z",
+  )).toBe(true);
+  savePipelines([projected]);
+
+  await tickPipelines([entry(flow.rounds.at(-1)!.reviewerPath!)], h.ports);
+  expect(loadPipelines()[0]).toMatchObject({
+    state: "needs_decision",
+    stateDetail: expect.stringContaining("review loop ended in needs_decision"),
+  });
+
+  const raced = await Promise.all([
+    tickPipelines([entry(flow.rounds.at(-1)!.reviewerPath!)], h.ports),
+    tickPipelines([entry(flow.rounds.at(-1)!.reviewerPath!)], h.ports),
+  ]);
+  expect(raced.filter((result) => result.changed)).toHaveLength(1);
 
   const settled = loadPipelines()[0]!;
-  const attempt = settled.runs[1]!.attempts[0]!;
+  const reviewAttempts = settled.runs[1]!.attempts;
+  const attempt = reviewAttempts[2]!;
   expect(settled).toMatchObject({ state: "needs_decision" });
+  expect(reviewAttempts).toHaveLength(3);
+  expect(reviewAttempts.map((candidate) => candidate.reviewFlowSync?.roundCount)).toEqual([2, 3, 5]);
   expect(attempt).toMatchObject({
     state: "failed",
     completedAt: expect.any(String),
@@ -3469,14 +3536,19 @@ test("a parked review stage settles from the latest of ten completed flow verdic
       ],
     },
     reviewFlowSync: {
-      roundCount: 10,
+      roundCount: 5,
       verdict: "REQUEST_CHANGES",
       hostClaim: claim,
     },
   });
   expect(settled.stateDetail).toBe(flow.stateDetail);
-  expect(attempt.output).toContain("Review flow round 10: REQUEST_CHANGES");
+  expect(attempt.output).toContain("Review flow round 5: REQUEST_CHANGES");
   expect(JSON.stringify(attempt)).not.toContain(privateWorktree);
+
+  const stableSettlement = JSON.stringify(loadPipelines()[0]);
+  const repeated = await tickPipelines([entry(flow.rounds.at(-1)!.reviewerPath!)], h.ports);
+  expect(repeated.changed).toBe(false);
+  expect(JSON.stringify(loadPipelines()[0])).toBe(stableSettlement);
 });
 
 test("an operator pause during relay stays paused across pipeline reconciliation", async () => {
