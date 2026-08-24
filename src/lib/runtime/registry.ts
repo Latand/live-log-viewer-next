@@ -449,8 +449,14 @@ export async function adoptCodexRegistryHosts(
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
+        const current = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];
+        if (!current?.structuredHost || !shouldAdopt(current)) return;
         const claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
         if (!claimed?.structuredHost) return;
+        if (!shouldAdopt(claimed)) {
+          registry.releaseStructuredHostClaim(entry.key, claimed.claimOwner!, claimed.claimEpoch);
+          return;
+        }
         try {
           const host = await CodexAppServerHost.adopt(entry.key.sessionId, {
             ...optionsFor(claimed),
@@ -512,17 +518,28 @@ export async function adoptClaudeRegistryHosts(
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
+        const eligible = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];
+        if (!eligible?.structuredHost || !shouldAdopt(eligible)) return;
         let claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
         if (!claimed) {
           const current = registry.readOnlySnapshot().entries[`claude:${entry.key.sessionId}`];
           const orphan = current?.structuredHost?.kind === "claude-broker"
             ? current.structuredHost.process
             : null;
-          if (orphan && await terminateVerifiedClaudeOrphan(orphan, current?.claimOwner ?? null)) {
+          if (orphan
+            && current
+            && shouldAdopt(current)
+            && await terminateVerifiedClaudeOrphan(orphan, current.claimOwner ?? null)) {
+            const retry = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];
+            if (!retry?.structuredHost || !shouldAdopt(retry)) return;
             claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
           }
         }
         if (!claimed?.structuredHost) return;
+        if (!shouldAdopt(claimed)) {
+          registry.releaseStructuredHostClaim(entry.key, claimed.claimOwner!, claimed.claimEpoch);
+          return;
+        }
         try {
           const host = await ClaudeStreamBrokerHost.adopt(entry.key.sessionId, {
             ...optionsFor(claimed),

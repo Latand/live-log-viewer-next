@@ -6,7 +6,12 @@ import { expect, spyOn, test } from "bun:test";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
 import { AgentRegistry } from "@/lib/agent/registry";
-import { activeOrchestratorSeats, beginOrchestratorSeatIntent, completeOrchestratorSeatIntent } from "@/lib/orchestrator/seats";
+import {
+  activeOrchestratorSeats,
+  beginOrchestratorSeatIntent,
+  completeOrchestratorSeatIntent,
+  type OrchestratorSeat,
+} from "@/lib/orchestrator/seats";
 import { procBackend } from "@/lib/proc";
 import { turnStateFromRecords } from "@/lib/scanner/activity";
 import { RuntimeJournal } from "@/runtime-host/journal";
@@ -1100,6 +1105,28 @@ async function startupAdoptionAttempts(
   return attempts;
 }
 
+function activeSeat(
+  project: string,
+  seatEpoch: number,
+  conversationId: string,
+  artifactPath: string,
+  predecessorConversationId: string | null = null,
+): OrchestratorSeat {
+  return {
+    project,
+    seatEpoch,
+    conversationId,
+    path: artifactPath,
+    mandate: "run the checkpoint loop",
+    promptVersion: null,
+    predecessorConversationId,
+    state: "active",
+    intent: { clientRequestId: `seat-${project}-${seatEpoch}`, mode: "existing", launchId: null, error: null },
+    designatedAt: "2026-08-24T00:00:00.000Z",
+    activatedAt: "2026-08-24T00:00:01.000Z",
+  };
+}
+
 test("SQLite startup releases a completed stage host claim with pending delivery after its recorded process dies", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-dead-stage-owner-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, {
@@ -1486,6 +1513,169 @@ test("viewer boot re-hosts previously hosted orchestrator seats and nudges each 
     expect([...ledgers.values()].flatMap((ledger) => ledger.writes)).toHaveLength(2);
     expect(adoptionAttempts).not.toContain(`codex:${deadSeatSessionId}`);
     expect(adoptionAttempts).not.toContain(`claude:${ordinarySessionId}`);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test.each(["dead", "unhosted", "rotated"] as const)(
+  "viewer boot skips an orchestrator seat that becomes %s during startup",
+  async (transition) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-orchestrator-${transition}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+    const client = runtimeJournalClient(journal);
+    const sessionId = "25300000-0000-0000-0000-000000000011";
+    const replacementSessionId = "25300000-0000-0000-0000-000000000012";
+    const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+      sessionId,
+      status: "live",
+      turn: "terminal",
+    });
+    const originalEntry = registry.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+    registry.upsert({
+      ...originalEntry,
+      structuredHost: {
+        ...originalEntry.structuredHost!,
+        process: { pid: 2_000_000_011, startIdentity: "pre-restart-seat" },
+      },
+    });
+    const replacement = addStructuredRestartConversation(registry, directory, {
+      sessionId: replacementSessionId,
+      status: "dead",
+      turn: "terminal",
+    }).conversation;
+    const seat = activeSeat("seat-race", 11, conversation.id, artifactPath);
+    let seats: OrchestratorSeat[] = [seat];
+    const adoptionAttempts: string[] = [];
+    const ledger = createFakeDeliveryLedger();
+
+    try {
+      await adoptStructuredHostsAtStartup({
+        registry,
+        client,
+        orchestratorSeats: () => seats,
+        refreshTranscriptState: async () => {
+          if (transition === "rotated") {
+            seats = [activeSeat(
+              seat.project,
+              seat.seatEpoch + 1,
+              replacement.id,
+              replacement.generations.at(-1)!.path,
+              conversation.id,
+            )];
+            return;
+          }
+          const current = registry.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+          registry.upsert({ ...current, status: transition });
+        },
+        adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+          const entry = received.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+          if (!shouldAdopt(entry)) return [];
+          adoptionAttempts.push(`codex:${sessionId}`);
+          const processIdentity = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+          const claimed = received.claimStructuredHost(entry.key, processIdentity, { allowUnhosted: true });
+          if (!claimed?.structuredHost || !claimed.claimOwner) throw new Error("seat host claim was unavailable");
+          const persisted = received.setStructuredHostClaimed(entry.key, {
+            ...claimed.structuredHost,
+            endpoint: "fake:invalidated-seat",
+            process: processIdentity,
+          }, "idle", claimed.claimOwner, claimed.claimEpoch);
+          if (!persisted) throw new Error("seat host claim was lost");
+          const host = Object.assign(new FakeEngineHost(ledger), { onStateChange: () => () => {} });
+          return [{ key: entry.key, host: host as never }];
+        },
+        adoptClaude: async () => [],
+      });
+
+      expect(adoptionAttempts).toEqual([]);
+      expect(ledger.writes).toEqual([]);
+      expect(journal.snapshot().sessions.flatMap((session) => session.recentReceipts)
+        .filter((receipt) => receipt.idempotencyKey.startsWith("orchestrator-restart-recovery-"))).toEqual([]);
+    } finally {
+      await bindStructuredDeliveryQueue([], { registry, client: null });
+      journal.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("startup retry releases a retained orchestrator host after seat rotation", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-orchestrator-retry-rotation-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const sessionId = "25300000-0000-0000-0000-000000000021";
+  const replacementSessionId = "25300000-0000-0000-0000-000000000022";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "restart-interrupted-turn",
+  });
+  const replacement = addStructuredRestartConversation(registry, directory, {
+    sessionId: replacementSessionId,
+    status: "dead",
+    turn: "terminal",
+  }).conversation;
+  const seat = activeSeat("seat-retry-race", 21, conversation.id, artifactPath);
+  let seats = [seat];
+  let adoptionAttempts = 0;
+  let releaseCalls = 0;
+  let failClaudeAdoption = true;
+  const ledger = createFakeDeliveryLedger();
+  const host = Object.assign(new FakeEngineHost(ledger), {
+    onStateChange: () => () => {},
+    release: async () => { releaseCalls += 1; },
+  });
+  const dependencies: StructuredStartupDependencies = {
+    registry,
+    client,
+    orchestratorSeats: () => seats,
+    refreshTranscriptState: async () => {},
+    adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+      const entry = received.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+      if (adoptionAttempts > 0 || !shouldAdopt(entry)) return [];
+      adoptionAttempts += 1;
+      const processIdentity = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+      const claimed = received.claimStructuredHost(entry.key, processIdentity, { allowUnhosted: true });
+      if (!claimed?.structuredHost || !claimed.claimOwner) throw new Error("seat host claim was unavailable");
+      const persisted = received.setStructuredHostClaimed(entry.key, {
+        ...claimed.structuredHost,
+        endpoint: "fake:retained-orchestrator",
+        process: processIdentity,
+      }, "live", claimed.claimOwner, claimed.claimEpoch);
+      if (!persisted) throw new Error("seat host claim was lost");
+      return [{ key: entry.key, host: host as never }];
+    },
+    adoptClaude: async () => {
+      if (!failClaudeAdoption) return [];
+      failClaudeAdoption = false;
+      throw new RuntimeHostUnavailableError("runtime failed after orchestrator adoption");
+    },
+  };
+
+  try {
+    await expect(adoptStructuredHostsAtStartup(dependencies)).rejects.toThrow(
+      "runtime failed after orchestrator adoption",
+    );
+    expect(adoptionAttempts).toBe(1);
+    seats = [activeSeat(
+      seat.project,
+      seat.seatEpoch + 1,
+      replacement.id,
+      replacement.generations.at(-1)!.path,
+      conversation.id,
+    )];
+
+    expect(await adoptStructuredHostsAtStartup(dependencies)).toEqual([]);
+    expect(adoptionAttempts).toBe(1);
+    expect(releaseCalls).toBe(1);
+    expect(ledger.writes).toEqual([]);
+    expect(journal.snapshot().sessions.flatMap((session) => session.recentReceipts)
+      .filter((receipt) => receipt.idempotencyKey.startsWith("orchestrator-restart-recovery-"))).toEqual([]);
   } finally {
     await bindStructuredDeliveryQueue([], { registry, client: null });
     journal.close();
