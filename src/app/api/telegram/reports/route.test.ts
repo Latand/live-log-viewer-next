@@ -40,7 +40,9 @@ const ports: ReportRunnerPorts = {
     async pageChats() { return []; },
     async lastMessageAt() { return "2026-08-21T09:00:00.000Z"; },
   }),
+  migrateIdentity: async () => {},
   spawn: async () => ({ status: 202, body: { conversationId: "conversation_report", launchId: "launch_report", ok: true } }),
+  reportRunConversation: async () => null,
   conversationLive: async () => true,
   log: () => {},
 };

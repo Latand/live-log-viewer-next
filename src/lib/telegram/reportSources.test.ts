@@ -28,6 +28,8 @@ class FakeTelegram implements TelegramReadPort {
   maxConcurrent = 0;
   /** What the connector's incoming feed recorded, newest first (#1091). */
   feed: FeedDialog[] = [];
+  /** Set to model a connector that is running no feed to read. */
+  feedFailure: Error | null = null;
   constructor(
     private readonly chats: TelegramChatSummary[],
     private readonly dates: Record<string, string | null>,
@@ -38,7 +40,12 @@ class FakeTelegram implements TelegramReadPort {
   }
   async feedDialogs(input: { sinceMs: number }): Promise<FeedDialog[]> {
     this.calls.push(`feedDialogs:${input.sinceMs}`);
-    return this.track(() => this.feed.filter((row) => Date.parse(row.lastMessageAt) >= input.sinceMs));
+    return this.track(() => {
+      /* The production port throws when the connector is running no feed at
+         all, or when its file cannot be read safely (#1091). */
+      if (this.feedFailure) throw this.feedFailure;
+      return this.feed.filter((row) => Date.parse(row.lastMessageAt) >= input.sinceMs);
+    });
   }
   async listChats(input: { kind: "user" | "group"; limit: number }): Promise<TelegramChatSummary[]> {
     this.calls.push(`listChats:${input.kind}:${input.limit}`);
@@ -251,6 +258,25 @@ test("a feed the connector never wrote leaves the walk exactly as it was", async
   expect(plan.privateDialogs.map((row) => row.id)).toEqual(["401"]);
   expect(plan.feedDialogs).toBe(0);
   expect(plan.probes).toBe(1);
+});
+
+test("a connector with no feed fails the plan instead of walking alone", async () => {
+  /* The regression this guards: a connector adopted from a Viewer generation
+     that predates the feed answers `incoming_feed_status` with a path it will
+     never write. Reading that as "the feed saw nothing" would put the run back
+     on the bounded probe walk over a list ordered by pins — silently handing
+     the operator a report that omits whatever sits past the budget, which is
+     the v1 defect #1091 replaced. The run fails instead, and nothing is read
+     after the failure. */
+  const port = new FakeTelegram([dialog("501", "Dialog A")], { "501": "2026-08-20T15:00:00.000Z" });
+  port.feedFailure = new Error("Telegram incoming feed is unavailable");
+
+  await expect(planReportSources(port, { ...WINDOW, groups: [], promptVersion: "v1" })).rejects.toThrow(/feed/i);
+  expect(port.calls).toEqual([`feedDialogs:${Date.parse(WINDOW.windowStart)}`]);
+
+  /* The GROUP picker is untouched by it: choosing sources is not a report run,
+     and it reads no feed. */
+  expect((await listReportGroups(port)).length).toBe(0);
 });
 
 test("a group below the connector's pre-filter ceiling is still selectable", async () => {

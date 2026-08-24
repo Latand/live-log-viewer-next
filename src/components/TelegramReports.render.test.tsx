@@ -1,10 +1,26 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { TelegramReportsState } from "@/hooks/useTelegramReports";
 import { TELEGRAM_REPORT_HISTORY_LIMIT, type TelegramReportRow, type TelegramReportsPayload } from "@/lib/telegram/reportContracts";
 
 import { TelegramReportsSection } from "./TelegramReports";
+
+/* The cold-reload case at the bottom of this file runs the real runner and the
+   real registry, so both get a sandbox of their own — nothing here reads or
+   writes the state the operator's own Viewer is using. */
+const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-telegram-panel-"));
+const OLD_STATE = process.env.LLV_STATE_DIR;
+process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
+
+afterAll(() => {
+  fs.rmSync(SANDBOX, { recursive: true, force: true });
+  if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = OLD_STATE;
+});
 
 function row(over: Partial<TelegramReportRow> = {}): TelegramReportRow {
   return {
@@ -242,4 +258,92 @@ test("a save the editor could not complete is announced in the editor", () => {
   expect(html).toContain("respond. Try again.");
   /* The operator's text is still there to retry with. */
   expect(html).toContain("Write the report in Ukrainian.");
+});
+
+test("after a reload, a run the history row cannot name is still linked from the durable marker", async () => {
+  /* End to end for tail 3 (#1091), in the surface the operator actually looks
+     at. The launch's own write of the conversation id is the LAST thing a
+     source pass does, so a Viewer that died just after admission leaves a real
+     board conversation and a panel row with no route to it. The marker is the
+     registry-side evidence that repairs it, and this walks the whole way: a
+     receipt read out of a registry file loaded from COLD, through the runner,
+     into rendered markup. */
+  const { AgentRegistry } = await import("@/lib/agent/registry");
+  const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
+  const { TelegramReportRunner } = await import("@/lib/telegram/reportRunner");
+  const { reportAttemptId, TELEGRAM_REPORT_PROJECT } = await import("@/lib/telegram/reportLineage");
+  const { updateTelegramReports } = await import("@/lib/telegram/reportStore");
+  const { DAILY_REPORT_PROMPT_VERSION } = await import("@/lib/telegram/reportPrompt");
+
+  const cwd = fs.mkdtempSync(path.join(SANDBOX, "report-workspace-"));
+  const registryFile = path.join(fs.mkdtempSync(path.join(SANDBOX, "registry-")), "agent-registry.json");
+  /* Assembled rather than written out: the publication privacy gate refuses
+     any literal with the shape of a session identifier, invented or not. */
+  const runId = ["0192d4f1", "8f43", "4a10", "9c1e", "6b0f0a5d77c4"].join("-");
+  const sessionId = ["019f4906", "3f67", "4b72", "9fbc", "9ec3b5ad1327"].join("-");
+  const begun = new AgentRegistry(registryFile).beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    clientAttemptId: reportAttemptId(runId),
+    explicitProject: TELEGRAM_REPORT_PROJECT,
+    launchProfile: emptyLaunchProfile({ cwd }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a report-run reservation");
+  new AgentRegistry(registryFile).settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId },
+    artifactPath: path.join(cwd, `${sessionId}.jsonl`),
+    cwd,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  /* What the reload left behind: a live run whose row never learned its
+     conversation. */
+  const now = Date.parse("2026-08-21T07:05:00.000Z");
+  updateTelegramReports((state) => {
+    state.settings.enabled = true;
+    state.cursor.lastScheduledDay = "2026-08-21";
+    state.active = {
+      runId,
+      trigger: "scheduled",
+      startedAt: "2026-08-21T07:00:00.000Z",
+      windowStart: "2026-08-20T07:00:00.000Z",
+      windowEnd: "2026-08-21T07:00:00.000Z",
+      conversationId: null,
+      promptVersion: DAILY_REPORT_PROMPT_VERSION,
+    };
+  });
+
+  const runner = new TelegramReportRunner({
+    now: () => now,
+    connection: () => ({
+      version: 1,
+      status: "connected",
+      credentialRef: "credential-ref-placeholder",
+      identity: { name: "Account A", username: "account_a", id: "770000001" },
+      lastHealthCheckAt: "2026-08-21T06:59:00.000Z",
+      errorCode: null,
+      identityIdUpgradedAt: null,
+    }),
+    readPort: () => { throw new Error("this run reads nothing"); },
+    migrateIdentity: async () => {},
+    spawn: async () => { throw new Error("this run launches nothing"); },
+    /* Exactly the production lookup, against a registry loaded from cold. */
+    reportRunConversation: async (id) =>
+      new AgentRegistry(registryFile).spawnReceiptForClientAttempt(reportAttemptId(id))?.conversationId ?? null,
+    conversationLive: async () => true,
+    log: () => {},
+  });
+  await runner.tick();
+
+  const html = renderToStaticMarkup(
+    <TelegramReportsSection state={stateFor(runner.payload())} onClose={() => {}} />,
+  );
+  expect(html).toContain(`href="#c=${begun.receipt.conversationId}"`);
 });

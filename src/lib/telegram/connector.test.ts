@@ -36,10 +36,13 @@ const READ_ONLY: ConnectorProbe = {
   ],
 };
 
-function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?: boolean; owned?: boolean; recordFails?: boolean } = {}) {
+function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?: boolean; owned?: boolean; recordFails?: boolean; runsFeed?: boolean } = {}) {
   const calls = { spawns: 0, probes: 0, stops: 0, records: 0, kills: [] as Array<NodeJS.Signals | undefined>, probeTokens: [] as string[] };
   let clock = 0;
   let owned = options.owned ?? false;
+  /* A record written by this Viewer generation names the feed file (#1091);
+     `runsFeed: false` models the record a pre-feed generation left behind. */
+  let runsFeed = options.runsFeed ?? true;
   const ports: TelegramConnectorPorts = {
     spawn: () => {
       calls.spawns += 1;
@@ -54,11 +57,13 @@ function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?:
     sleep: async () => { clock += 10_000; },
     now: () => clock,
     ownsProcess: () => owned,
+    runsFeed: () => runsFeed,
     stop: () => { calls.stops += 1; owned = false; },
     recordProcess: () => {
       calls.records += 1;
       if (options.recordFails) return false;
       owned = true;
+      runsFeed = true;
       return true;
     },
   };
@@ -210,6 +215,23 @@ test("an allowlisted foreign listener is never adopted", async () => {
   expect(calls.stops).toBeGreaterThanOrEqual(2);
 });
 
+test("a listening connector that runs no feed is replaced, not adopted (#1091)", async () => {
+  /* The tail's own regression: a connector spawned by a Viewer generation that
+     predates the feed is a perfectly good read surface, so it was adopted
+     happily — and it records no activity at all, which sends the report's
+     dialog discovery back to a bounded walk over a list ordered by pins. It is
+     ineligible now: stopped and replaced, once, and the replacement records
+     the feed it was launched with. */
+  const { ports, calls } = fakePorts([READ_ONLY], { owned: true, runsFeed: false });
+
+  const result = await ensureTelegramConnector(CONNECTOR_SESSION, ports);
+
+  expect(result).toEqual({ ok: true, url: telegramMcpUrl() });
+  expect(calls.spawns).toBe(1);
+  expect(calls.stops).toBeGreaterThanOrEqual(1);
+  expect(calls.records).toBe(1);
+});
+
 test("a credential-generation mismatch stops the old record before spawning", async () => {
   const { ports, calls } = fakePorts([READ_ONLY], { owned: false });
   const result = await ensureTelegramConnector(CONNECTOR_SESSION, ports);
@@ -224,6 +246,7 @@ test("concurrent Viewer generations serialize adoption and spawn one recorded co
   let records = 0;
   const ports: TelegramConnectorPorts = {
     ownsProcess: () => owned,
+    runsFeed: () => true,
     stop: async () => { await Promise.resolve(); owned = false; },
     spawn: () => {
       spawns += 1;
@@ -267,6 +290,7 @@ test("an older failed readiness probe cannot stop a newer credential generation"
   const ports: TelegramConnectorPorts = {
     ownsProcess: (candidate) => binding?.credentialRef === candidate.credentialRef
       && binding.connectorToken === candidate.connectorToken,
+    runsFeed: () => true,
     stop: () => { stops += 1; binding = null; },
     spawn: () => { spawns += 1; return { pid: process.pid, kill: () => true }; },
     recordProcess: (_child, _spec, candidate) => { binding = { ...candidate }; return true; },
@@ -317,6 +341,7 @@ test("stop invalidates an in-flight connector operation", async () => {
     sleep: async () => {},
     now: () => 0,
     ownsProcess: () => true,
+    runsFeed: () => true,
     beginOperation: () => {
       const current = ++generation;
       return () => current === generation;
@@ -345,6 +370,7 @@ test("a stalled readiness probe is bounded and terminates the spawned child", as
     sleep: async () => {},
     now: () => 0,
     ownsProcess: () => owned,
+    runsFeed: () => owned,
     recordProcess: () => { owned = true; return true; },
     stop: () => { owned = false; child.kill("SIGTERM"); },
     probeTimeoutMs: 10,
@@ -387,10 +413,15 @@ test("stop waits through SIGKILL escalation until a TERM-resistant connector exi
     expect(childPid).toBeGreaterThan(1);
     const pidFile = path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json");
     const recorded = JSON.parse(fs.readFileSync(pidFile, "utf8")) as {
-      pid: number; identity: string; credentialRef: string; connectorTokenSha256: string;
+      pid: number; identity: string; credentialRef: string; connectorTokenSha256: string; feedFile?: string;
     };
     expect(recorded.pid).toBe(childPid);
     expect(recorded.credentialRef).toBe(CONNECTOR_SESSION.credentialRef);
+    /* The feed is child ENVIRONMENT, so the record is the only durable proof
+       that this process runs one — and it is what a later Viewer generation
+       checks before adopting it (#1091). */
+    const { telegramIncomingFeedPath } = await import("./packaging");
+    expect(recorded.feedFile).toBe(telegramIncomingFeedPath());
     expect(recorded.connectorTokenSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(fs.readFileSync(pidFile, "utf8")).not.toContain(CONNECTOR_SESSION.connectorToken);
 

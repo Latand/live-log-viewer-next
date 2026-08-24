@@ -102,10 +102,41 @@ function feedInstant(value: unknown): number | null {
  *
  * A feed that has never been written (no incoming message since the connector
  * started) is not an error: it is an account with nothing to report from this
- * source, and the caller's own candidate walk still runs.
+ * source, and the caller's own candidate walk still runs. A file that exists
+ * but cannot be read through the owner-only fence THROWS, because that is a
+ * feed whose contents are unknown rather than empty.
  */
 export function readFeedDialogsSince(feedFile: string | null, sinceMs: number): FeedDialog[] {
   if (!feedFile) return [];
   const text = readSafeTailText(feedFile, MAX_FEED_TAIL_BYTES);
   return text === null ? [] : feedDialogsSince(text, sinceMs);
+}
+
+/**
+ * The feed file an `incoming_feed_status` answer describes, or `null` when
+ * that connector is not running one (#1091).
+ *
+ * Two states count as running, and the difference matters:
+ *
+ *  - `enabled` — the consumer task is up and appending settled bursts;
+ *  - `autostart_pending` — the connector was launched with the feed armed and
+ *    starts it from the handler of the first incoming message. The burst that
+ *    triggers the start is recorded before the start and is written too, so a
+ *    pending feed has lost nothing; it simply has had nothing to write.
+ *
+ * Everything else is a connector that will never record anything — one adopted
+ * from a Viewer generation that predates the feed, above all — and answering
+ * `null` for it is what stops the report from silently falling back to the
+ * bounded probe walk that #1091 exists to replace.
+ */
+export function activeFeedFile(statusText: string): string | null {
+  let parsed: { enabled?: unknown; feed_file?: unknown; autostart_pending?: unknown };
+  try {
+    parsed = JSON.parse(statusText) as typeof parsed;
+  } catch {
+    return null;
+  }
+  const running = parsed?.enabled === true || parsed?.autostart_pending === true;
+  const file = typeof parsed?.feed_file === "string" ? parsed.feed_file.trim() : "";
+  return running && file ? file : null;
 }

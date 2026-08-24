@@ -7,7 +7,7 @@ const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-telegram-feed-"));
 const OLD_STATE = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
-const { feedDialogsSince, readFeedDialogsSince, MAX_FEED_TAIL_BYTES } = await import("./reportFeed");
+const { activeFeedFile, feedDialogsSince, readFeedDialogsSince, MAX_FEED_TAIL_BYTES } = await import("./reportFeed");
 const { ensureTelegramStateDir } = await import("./sessionStore");
 
 /**
@@ -113,4 +113,36 @@ test("a feed file readable by anyone else is refused, not read", () => {
   /* It names the operator's correspondents, so it lives under the same
      owner-only fence as the credential beside it. */
   expect(() => readFeedDialogsSince(feedFile, WINDOW_START)).toThrow(/unsafe/i);
+});
+
+/** What the connector's `incoming_feed_status` answers, invented. */
+function status(fields: Record<string, unknown>): string {
+  return JSON.stringify({
+    feed_file: "/state/telegram/incoming_feed.jsonl",
+    settle_ms: 6000,
+    watch_command: "tail -n 0 -F /state/telegram/incoming_feed.jsonl",
+    autostart_pending: false,
+    enabled: false,
+    ...fields,
+  });
+}
+
+test("a running feed and an armed one both name their file; nothing else does", () => {
+  /* The connector starts its feed from the handler of the FIRST incoming
+     message, so `autostart_pending` is the ordinary state of a connector that
+     has been up since before anybody wrote to the operator — and it has lost
+     nothing, because the burst that starts the feed is recorded before the
+     start and written with it. */
+  expect(activeFeedFile(status({ enabled: true }))).toBe("/state/telegram/incoming_feed.jsonl");
+  expect(activeFeedFile(status({ autostart_pending: true }))).toBe("/state/telegram/incoming_feed.jsonl");
+
+  /* Neither running nor armed: a connector adopted from a Viewer generation
+     that predates the feed. It answers with a path it will never write, which
+     is precisely the answer that must not read as an empty feed (#1091). */
+  expect(activeFeedFile(status({}))).toBeNull();
+  expect(activeFeedFile(status({ enabled: true, feed_file: "" }))).toBeNull();
+  expect(activeFeedFile(status({ enabled: "yes" }))).toBeNull();
+  /* A connector too old to have the tool at all answers with a sentence. */
+  expect(activeFeedFile("Unknown tool: incoming_feed_status")).toBeNull();
+  expect(activeFeedFile("")).toBeNull();
 });

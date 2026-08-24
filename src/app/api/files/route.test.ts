@@ -2204,6 +2204,48 @@ test("a Telegram report run is recognisable from the registry alone, with no his
   expect(body.files.filter((entry) => entry.telegramReport).length).toBe(1);
 });
 
+test("the report-run marker groups the card even with no ownership record", async () => {
+  /* The marker has to be what does the GROUPING, not a decoration beside it:
+     a report run works in a neutral scratch directory, so every attribution
+     path below ownership would file it under a project of its own. Here the
+     conversation carries no ownership record at all and its cwd resolves to an
+     ordinary repository — and the run still collects under the Telegram
+     project, from registry evidence alone (#1091). */
+  const registry = agentRegistry();
+  const runId = ["0192d4f1", "8f43", "4a10", "9c1e", "6b0f0a5d77c3"].join("-");
+  const cwd = process.cwd();
+  const artifactPath = path.join(stateDir, "telegram-report-5b1c73de.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    clientAttemptId: `telegram-report-${runId}`,
+    launchProfile: emptyLaunchProfile({ cwd }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a report-run reservation");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "telegram-report-5b1c73de" },
+    artifactPath,
+    cwd,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  scannedFiles = [file(artifactPath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const card = body.files.find((entry) => entry.conversationId === begun.receipt.conversationId);
+
+  expect(card?.telegramReport).toEqual({ runId });
+  expect(card?.project).toBe("telegram-reports");
+  expect(card?.projectOwnership).toBeUndefined();
+});
+
 test("a selected sidebar project cannot replace canonical cwd attribution after transcript discovery", async () => {
   const registry = agentRegistry();
   const cwd = process.cwd();

@@ -1,7 +1,7 @@
 import { readTelegramSession } from "./sessionStore";
 import { telegramMcpUrl } from "./packaging";
 import { validTelegramAccountId, type TelegramAccountIdentity } from "./contracts";
-import { readFeedDialogsSince, type FeedDialog } from "./reportFeed";
+import { activeFeedFile, readFeedDialogsSince, type FeedDialog } from "./reportFeed";
 import type { TelegramReportGroup } from "./reportContracts";
 
 /**
@@ -20,6 +20,14 @@ import type { TelegramReportGroup } from "./reportContracts";
  * generation started, has no feed line. So the walk still runs, over the
  * candidates the feed has not already accounted for, and still decides by
  * LAST MESSAGE DATE — never by position.
+ *
+ * The walk is a SUPPLEMENT and never a substitute. A run whose connector is
+ * not running a feed at all fails (`sources_failed`) instead of quietly
+ * walking alone: the walk is bounded by a probe budget over a list ordered by
+ * pins and folders, so falling back to it silently would hand the operator a
+ * report that omits whatever sat past the budget and say nothing about it —
+ * the v1 defect this issue exists to end. The supervisor keeps that rare:
+ * a connector without the feed is not adopted (`connector.ts`).
  *
  * The connector's chat listing is NOT ordered by recency — it follows pinned
  * and folder order, proven on the live connector by a dialog whose last
@@ -71,8 +79,10 @@ export interface TelegramReadPort {
       account. */
   getMe(): Promise<TelegramAccountIdentity | null>;
   /** Private dialogs the connector's incoming feed recorded as active at or
-      after `sinceMs`, newest first (#1091). Empty when the feed is off or has
-      seen nothing — never an error, because the walk below still runs. */
+      after `sinceMs`, newest first (#1091). Empty when the feed is running and
+      has seen nothing; THROWS when the connector is not running one at all, or
+      when its file cannot be read safely — a report whose recency source is
+      missing is a failed run, not a quietly narrower one. */
   feedDialogs(input: { sinceMs: number }): Promise<FeedDialog[]>;
   /** One bounded page of chats of a kind, in whatever order the connector
       returns them — the caller must not treat it as recency. */
@@ -337,22 +347,30 @@ export function connectorReadPort(): TelegramReadPort {
       };
     },
     async feedDialogs(input) {
-      /* Two reads, in this order, never overlapping: ask the connector where
-         its feed is, then read that file locally. The status call is the
-         issue's own contract — a connector adopted from an older generation
-         answers with the path IT is writing, which is the file that actually
-         holds the account's activity. */
+      /* Two reads, in this order, never overlapping: ask the connector whether
+         it is running a feed and where, then read that file locally. The
+         status call is the issue's own contract, and it answers with the path
+         THIS connector is writing, which is the file that actually holds the
+         account's activity.
+
+         A connector that is not running a feed — one adopted from a Viewer
+         generation that predates it above all — and a feed file that exists
+         but cannot be read through the owner-only fence are both FAILURES here,
+         not empty answers. Returning nothing would put the run back on the
+         bounded probe walk alone, silently, which is the exact defect #1091
+         replaced: the operator would get a report that quietly omits whatever
+         sat past the probe budget. The failure settles the run `sources_failed`
+         instead, and the connector is re-ensured (with the feed) by the next
+         health check. */
       try {
-        const status = JSON.parse(toolText(await call("incoming_feed_status", {}))) as { feed_file?: unknown };
-        const feedFile = typeof status?.feed_file === "string" && status.feed_file ? status.feed_file : null;
-        return readFeedDialogsSince(feedFile, input.sinceMs);
+        const feedFile = activeFeedFile(toolText(await call("incoming_feed_status", {})));
+        if (feedFile) return readFeedDialogsSince(feedFile, input.sinceMs);
       } catch {
-        /* A feed that cannot be located or read is not a failed run: the
-           candidate walk still covers the account, exactly as it did before the
-           feed existed. A connector that is actually down fails the walk next,
-           which is where a run SHOULD fail. */
-        return [];
+        /* Falls through to the one sanitized sentence below. */
       }
+      /* One fixed sentence: the upstream error may carry connector text, and
+         nothing from it belongs in a caught-and-logged failure. */
+      throw new Error("Telegram incoming feed is unavailable");
     },
     async listChats(input) {
       const result = await call("list_chats", { chat_type: input.kind, limit: Math.min(input.limit, CHAT_PAGE_LIMIT) });
