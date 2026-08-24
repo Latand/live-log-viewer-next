@@ -541,11 +541,17 @@ test("pause holds the phase; resume returns to it", async () => {
   const wf = createWf(harness.ports);
   await tickWorkflows([], harness.ports);
   const paused = await patchWorkflow(wf.id, { action: "pause" }, harness.ports);
-  expect(paused.workflow?.state).toBe("paused");
+  expect(paused.workflow).toMatchObject({ state: "paused", stateDetail: "paused by operator" });
   await tickWorkflows([], harness.ports); // parked: the tick leaves it alone
   expect(load(wf.id).state).toBe("paused");
   const resumed = await patchWorkflow(wf.id, { action: "resume" }, harness.ports);
-  expect(resumed.workflow?.state).toBe("implementing");
+  expect(resumed.workflow).toMatchObject({ state: "implementing", stateDetail: "resumed by operator" });
+
+  const actor = { kind: "agent" as const, role: "builder", conversationId: "conversation_builder" };
+  const agentPause = await patchWorkflow(wf.id, { action: "pause" }, harness.ports, actor);
+  expect(agentPause.workflow).toMatchObject({ state: "paused", stateDetail: "paused by builder conversation_builder" });
+  const agentResume = await patchWorkflow(wf.id, { action: "resume" }, harness.ports, actor);
+  expect(agentResume.workflow).toMatchObject({ state: "implementing", stateDetail: "resumed by builder conversation_builder" });
 });
 
 test("close stops the embedded flow and keeps worktree state on the record", async () => {

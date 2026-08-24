@@ -76,13 +76,23 @@ test("resuming a known legacy pre-actuation relay failure clears its stale check
 
   const resumed = patchFlow("f1", { action: "resume" }).flow!;
 
-  expect(resumed).toMatchObject({ state: "relaying", pausedState: null, stateDetail: null });
+  expect(resumed).toMatchObject({ state: "relaying", pausedState: null, stateDetail: "resumed by operator" });
   expect(resumed.rounds[0]).toMatchObject({
     relayStartedAt: null,
     relayDeliveryTransport: null,
     relayRetryAt: null,
     relayRetryRequiresIdempotency: false,
   });
+});
+
+test("pause and resume accept a calling agent identity (#1121)", () => {
+  seed({ state: "reviewing" });
+  const actor = { kind: "agent" as const, role: "reviewer", conversationId: "conversation_reviewer" };
+
+  const paused = patchFlow("f1", { action: "pause" }, actor).flow!;
+  expect(paused).toMatchObject({ state: "paused", stateDetail: "paused by reviewer conversation_reviewer" });
+  const resumed = patchFlow("f1", { action: "resume" }, actor).flow!;
+  expect(resumed).toMatchObject({ state: "reviewing", stateDetail: "resumed by reviewer conversation_reviewer" });
 });
 
 test("set-roles rejects a reviewer config the CLI cannot launch (issue #118 Finding 3)", () => {

@@ -59,6 +59,7 @@ import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import { PIPELINE_LIST_DEFAULT_LIMIT, projectPipelineListRows } from "@/lib/pipelines/listProjection";
 import { findPipelineRecord, loadPipelinesForList } from "@/lib/pipelines/store";
 import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
+import type { PauseResumeActor } from "@/lib/pauseResumeActor";
 import { listFiles } from "@/lib/scanner";
 import { describe, projectForCwd, reprojectFileDescription } from "@/lib/scanner/describe";
 import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
@@ -340,6 +341,16 @@ export function callerAttributionFrom(
 function attributionOf(dependencies: ViewerMcpDomainDependencies): CallerAttribution {
   return dependencies.callerAttribution?.()
     ?? callerAttributionFrom(dependencies.attentionAuthority(), () => false);
+}
+
+/** MCP mutations always remain agent-attributed, including an unidentified caller. */
+function pauseResumeActorOf(dependencies: ViewerMcpDomainDependencies): PauseResumeActor {
+  const attribution = attributionOf(dependencies);
+  return {
+    kind: "agent",
+    role: attribution.role ?? (attribution.kind === "manager" ? "orchestrator" : attribution.kind === "gateway" ? "gateway" : null),
+    conversationId: attribution.conversationId,
+  };
 }
 
 /**
@@ -690,7 +701,9 @@ async function pipelineAction(args: McpToolArgs, dependencies: ViewerMcpDomainDe
   const pipelineId = required(args, "pipelineId");
   const action = required(args, "action") as PipelineAction;
   const request = withoutKeys(args, ["pipelineId", "clientRequestId"]);
-  const result = await dependencies.patchPipeline(pipelineId, request as PatchPipelineRequest);
+  const result = action === "pause" || action === "resume"
+    ? await dependencies.patchPipeline(pipelineId, request as PatchPipelineRequest, undefined, pauseResumeActorOf(dependencies))
+    : await dependencies.patchPipeline(pipelineId, request as PatchPipelineRequest);
   if (!result.pipeline) {
     const message = result.error ?? "could not update pipeline";
     /* A refused close carries the hosts it stopped and the one it could not
@@ -1734,7 +1747,9 @@ async function flowAction(args: McpToolArgs, dependencies: ViewerMcpDomainDepend
     ? await dependencies.cancelRound(flowId)
     : action === "close"
       ? await dependencies.closeFlow(flowId)
-      : dependencies.patchFlow(flowId, request);
+      : action === "pause" || action === "resume"
+        ? dependencies.patchFlow(flowId, request, pauseResumeActorOf(dependencies))
+        : dependencies.patchFlow(flowId, request);
   if (!result.flow) throw new Error(result.error ?? "could not update flow");
   const operationId = mcpOperationId("flow_action", requestId(args));
   return redactPayload({ flowId, flow: result.flow, ...mutationReceipt(operationId) });
