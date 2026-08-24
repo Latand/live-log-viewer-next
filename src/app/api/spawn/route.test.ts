@@ -372,7 +372,7 @@ test("queued pin recovery atomically refreshes a moved retry deadline and its ca
     launchProfile: emptyLaunchProfile({ cwd }),
   });
   if (begun.kind !== "created") throw new Error("expected queued receipt creation");
-  store.queuePinnedStructuredSpawn(begun.receipt.launchId, {
+  store.queuePinnedSpawn(begun.receipt.launchId, {
     version: 1,
     retryAt: initialRetryAt,
     accountId: "account-a",
@@ -505,13 +505,15 @@ test("a queued payload write failure terminalizes without publishing a deadline-
   }
 });
 
-test("a retry-at pin gates tmux before any host starts", async () => {
+test("a retry-at tmux pin survives restart and actuates exactly once after its deadline", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-tmux-retry-"));
-  const store = new AgentRegistry(path.join(cwd, "agent-registry.json"));
+  const registryFile = path.join(cwd, "agent-registry.json");
+  let store = new AgentRegistry(registryFile);
   const retryAt = new Date(Date.now() + 60_000).toISOString();
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
   process.env.LLV_SPAWN_TRANSPORT = "tmux";
   let tmuxStarts = 0;
+  let pinAdmissible = false;
   try {
     const account = {
       engine: "claude" as const,
@@ -545,6 +547,9 @@ test("a retry-at pin gates tmux before any host starts", async () => {
         },
       }),
       resolveSpawnAccount: () => account,
+      resolvePinnedSpawnAdmission: async () => pinAdmissible
+        ? { kind: "admissible" as const, basis: "current" as const, stale: false, retryAt: null }
+        : { kind: "retry-at" as const, reason: "hard-limit" as const, stale: false, retryAt },
       spawnTmuxAgent: async () => {
         tmuxStarts += 1;
         throw new Error("tmux must stay gated");
@@ -559,7 +564,62 @@ test("a retry-at pin gates tmux before any host starts", async () => {
       accountPin: true,
       transport: "tmux",
       state: "starting",
+      queuedPinnedSpawn: { retryAt, accountId: "account-a", prompt: "continue" },
     });
+
+    store = new AgentRegistry(registryFile);
+    const recoveryClient = {
+      effectBatch: async () => [],
+      operationStatus: async () => null,
+      snapshot: async () => ({ revision: 0, sessions: [] }),
+      transitionOperation: async () => null,
+    } as unknown as RuntimeHostClient;
+    const recover = async (now: number) => await terminalizeStaleStructuredSpawns(store, recoveryClient, {
+      now: () => now,
+      resolveSpawnAccount: () => account,
+      resolvePinnedSpawnAdmission: async () => pinAdmissible
+        ? { kind: "admissible" as const, basis: "current" as const, stale: false, retryAt: null }
+        : { kind: "retry-at" as const, reason: "hard-limit" as const, stale: false, retryAt },
+      spawnTmuxAgent: async (_spec, payload, receipt) => {
+        tmuxStarts += 1;
+        expect(payload).toBe("continue");
+        if (!receipt) throw new Error("queued recovery must reuse its durable receipt");
+        const binding = {
+          endpoint: "/test-tmux",
+          server: { pid: 9, startIdentity: "9:server" },
+          paneId: "%9",
+          panePid: { pid: 99, startIdentity: "99:pane" },
+          target: "agents:9.0",
+        };
+        const host = {
+          kind: "tmux" as const,
+          ...binding,
+          windowName: "queued-pin",
+          agent: { pid: 100, startIdentity: "100:agent" },
+          argv: ["claude"],
+        };
+        store.bindSpawnPane(receipt.launchId, binding);
+        store.markSpawnHostVerified(receipt.launchId, host);
+        store.markSpawnPromptDelivered(receipt.launchId);
+        return { paneId: binding.paneId, display: binding.target, panePid: binding.panePid.pid, host, receipt };
+      },
+    });
+
+    await recover(Date.parse(retryAt) - 1);
+    expect(tmuxStarts).toBe(0);
+    pinAdmissible = true;
+    await Promise.all([recover(Date.parse(retryAt) + 1), recover(Date.parse(retryAt) + 1)]);
+    expect(tmuxStarts).toBe(1);
+    expect(store.spawnReceiptForClientAttempt("account_pin_tmux_retry_20260823")).toMatchObject({
+      accountId: "account-a",
+      accountPin: true,
+      transport: "tmux",
+      state: "path-pending",
+      queuedPinnedSpawn: null,
+      admissionOwner: null,
+    });
+    await recover(Date.parse(retryAt) + 2);
+    expect(tmuxStarts).toBe(1);
   } finally {
     if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previousTransport;

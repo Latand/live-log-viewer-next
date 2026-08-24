@@ -22,6 +22,7 @@ import { fetchClaudeLimits } from "@/lib/limits";
 import { procBackend } from "@/lib/proc";
 import { signalProcessGroup } from "@/lib/processGroup";
 import { hasUserAuthoredMessage } from "@/lib/session/reader";
+import { buildImagePayload, deleteInboxImages, spawnAgentWithPrompt } from "@/lib/tmux";
 import { hardenedRedact } from "@/lib/view/compactText";
 
 import { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
@@ -32,7 +33,7 @@ import { runtimeSettingsCapability, type RuntimeOperationResult, type RuntimeSes
 import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
 import { publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "./structuredDeliveryController";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
-import { runtimeImageCapability } from "./runtimeImageStore";
+import { runtimeImageCapability, runtimeImageStore } from "./runtimeImageStore";
 import { publishFilesRevision } from "./filesRevision";
 import { parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "./structuredContent";
 
@@ -534,11 +535,14 @@ export const STALE_STRUCTURED_SPAWN_ACTUATION_CAP = 50;
 
 function queuedPinnedSpawnForReceipt(receipt: SpawnReceipt): NonNullable<SpawnReceipt["queuedPinnedSpawn"]> | null {
   const queued = receipt.queuedPinnedSpawn;
-  return receipt.transport === "structured"
+  const recoverableTransportState = receipt.transport === "structured"
+    ? receipt.state === "starting" && !receipt.key && !receipt.pane
+    : receipt.transport === "tmux"
+      && !receipt.key
+      && ((receipt.state === "starting" && !receipt.pane)
+        || ((receipt.state === "pane-bound" || receipt.state === "host-verified") && Boolean(receipt.pane)));
+  return recoverableTransportState
     && receipt.purpose === "launch"
-    && receipt.state === "starting"
-    && !receipt.key
-    && !receipt.pane
     && receipt.accountPin
     && Boolean(receipt.accountId)
     && queued?.accountId === receipt.accountId
@@ -555,7 +559,20 @@ export interface StructuredSpawnRecoveryOptions {
   resolveSpawnAccount?: (engine: "claude" | "codex", accountId: string | null) => AccountContext;
   resolvePinnedSpawnAdmission?: (engine: "claude" | "codex", account: AccountContext) => Promise<SpawnAccountAdmission>;
   spawnStructuredConversation?: typeof spawnStructuredConversation;
+  spawnTmuxAgent?: typeof spawnAgentWithPrompt;
   publishFilesRevision?: typeof publishFilesRevision;
+}
+
+function failQueuedPinnedSpawn(
+  registry: AgentRegistry,
+  receipt: SpawnReceipt,
+  reason: string,
+): SpawnReceipt {
+  if (receipt.transport === "structured") {
+    return registry.failStructuredSpawn(receipt.launchId, reason).receipt ?? receipt;
+  }
+  registry.failSpawn(receipt.launchId, reason);
+  return registry.readOnlySnapshot().receipts[receipt.launchId] ?? receipt;
 }
 
 async function actuateQueuedPinnedSpawn(
@@ -567,14 +584,13 @@ async function actuateQueuedPinnedSpawn(
   const queued = queuedPinnedSpawnForReceipt(receipt);
   const currentTime = (options.now ?? Date.now)();
   if (!queued || Date.parse(queued.retryAt) > currentTime) return receipt;
-  const admissionClaim = registry.claimStartingStructuredSpawn(receipt.launchId);
+  const admissionClaim = receipt.transport === "tmux"
+    ? registry.claimTmuxSpawnActuation(receipt.launchId)
+    : registry.claimStartingStructuredSpawn(receipt.launchId);
   if (!admissionClaim.claimed || !admissionClaim.receipt.admissionOwner) return admissionClaim.receipt;
   const claimedQueue = queuedPinnedSpawnForReceipt(admissionClaim.receipt);
   if (!claimedQueue) {
-    return registry.failStructuredSpawn(
-      receipt.launchId,
-      "queued pinned spawn lost its durable admission payload",
-    ).receipt ?? admissionClaim.receipt;
+    return failQueuedPinnedSpawn(registry, admissionClaim.receipt, "queued pinned spawn lost its durable admission payload");
   }
   let account: AccountContext;
   let admission: SpawnAccountAdmission;
@@ -584,56 +600,86 @@ async function actuateQueuedPinnedSpawn(
     if (account.engine !== receipt.engine || account.accountId !== claimedQueue.accountId) {
       throw new Error("queued pinned spawn resolved a different account");
     }
-    admission = await (options.resolvePinnedSpawnAdmission ?? resolvePinnedSpawnAdmission)(receipt.engine, account);
+    admission = receipt.transport === "tmux" && Boolean(admissionClaim.receipt.pane)
+      ? { kind: "admissible", basis: "current", stale: false, retryAt: null }
+      : await (options.resolvePinnedSpawnAdmission ?? resolvePinnedSpawnAdmission)(receipt.engine, account);
   } catch (error) {
-    return registry.failStructuredSpawn(
-      receipt.launchId,
-      structuredSpawnFailureReason(error),
-    ).receipt ?? admissionClaim.receipt;
+    return failQueuedPinnedSpawn(registry, admissionClaim.receipt, structuredSpawnFailureReason(error));
   }
   if (admission.kind === "retry-at") {
     const nextRetryMs = Date.parse(admission.retryAt);
     if (!Number.isFinite(nextRetryMs) || nextRetryMs <= currentTime) {
-      return registry.failStructuredSpawn(
-        receipt.launchId,
-        "pinned account retry deadline did not advance",
-      ).receipt ?? admissionClaim.receipt;
+      return failQueuedPinnedSpawn(registry, admissionClaim.receipt, "pinned account retry deadline did not advance");
     }
     const nextRetryAt = new Date(nextRetryMs).toISOString();
-    const refreshed = registry.queuePinnedStructuredSpawn(receipt.launchId, {
+    const refreshed = registry.queuePinnedSpawn(receipt.launchId, {
       ...claimedQueue,
       retryAt: nextRetryAt,
     }, queuedPinnedSpawnTitle(claimedQueue.locale, nextRetryAt));
     return refreshed.admissionOwner
-      ? registry.releaseStartingStructuredSpawn(refreshed.launchId, refreshed.admissionOwner).receipt
+      ? registry.releaseSpawnActuation(refreshed.launchId, refreshed.admissionOwner).receipt
       : refreshed;
   }
   if (admission.kind === "unavailable") {
-    return registry.failStructuredSpawn(
-      receipt.launchId,
-      `pinned account is unavailable: ${admission.reason}`,
-    ).receipt ?? admissionClaim.receipt;
-  }
-  let response: SpawnResponse;
-  try {
-    response = await (options.spawnStructuredConversation ?? spawnStructuredConversation)({
-      engine: receipt.engine,
-      receipt: admissionClaim.receipt,
-      spec: claimedQueue.spec,
-      account,
-      ["prompt"]: claimedQueue.prompt,
-      imageRefs: claimedQueue.imageRefs,
+    return failQueuedPinnedSpawn(
       registry,
-      client,
-    });
+      admissionClaim.receipt,
+      `pinned account is unavailable: ${admission.reason}`,
+    );
+  }
+  let response: SpawnResponse | null = null;
+  let tmuxImagePaths: string[] = [];
+  try {
+    if (receipt.transport === "tmux") {
+      const images = claimedQueue.imageRefs.length
+        ? (() => {
+            const imageStore = runtimeImageStore();
+            return claimedQueue.imageRefs.map((ref) => ({
+              base64: imageStore.read(ref).toString("base64"),
+              mime: ref.mime,
+            }));
+          })()
+        : [];
+      const bundle = buildImagePayload(claimedQueue.prompt, images);
+      tmuxImagePaths = bundle.imagePaths;
+      await (options.spawnTmuxAgent ?? spawnAgentWithPrompt)(
+        claimedQueue.spec,
+        bundle.payload,
+        admissionClaim.receipt,
+      );
+      const launched = registry.readOnlySnapshot().receipts[receipt.launchId];
+      if (launched?.state === "prompt-delivered" || launched?.state === "host-verified") {
+        registry.markSpawnPathPending(receipt.launchId);
+      }
+    } else {
+      response = await (options.spawnStructuredConversation ?? spawnStructuredConversation)({
+        engine: receipt.engine,
+        receipt: admissionClaim.receipt,
+        spec: claimedQueue.spec,
+        account,
+        ["prompt"]: claimedQueue.prompt,
+        imageRefs: claimedQueue.imageRefs,
+        registry,
+        client,
+      });
+    }
   } catch (error) {
+    if (receipt.transport === "tmux") {
+      registry.failSpawn(receipt.launchId, structuredSpawnFailureReason(error));
+      const failed = registry.readOnlySnapshot().receipts[receipt.launchId] ?? admissionClaim.receipt;
+      if (!failed.pane) deleteInboxImages(tmuxImagePaths);
+      if (failed.queuedPinnedSpawn && failed.admissionOwner) {
+        return registry.releaseSpawnActuation(failed.launchId, failed.admissionOwner).receipt;
+      }
+      return failed;
+    }
     const current = registry.readOnlySnapshot().receipts[receipt.launchId];
     if (current?.queuedPinnedSpawn && current.admissionOwner) {
-      registry.releaseStartingStructuredSpawn(current.launchId, current.admissionOwner);
+      registry.releaseSpawnActuation(current.launchId, current.admissionOwner);
     }
     throw error;
   }
-  if (claimedQueue.parentArtifactPath && response.path) {
+  if (claimedQueue.parentArtifactPath && response?.path) {
     try {
       rememberHandoffChild(response.path, claimedQueue.parentArtifactPath);
       persistHandoffLineage();
@@ -645,7 +691,7 @@ async function actuateQueuedPinnedSpawn(
       });
     }
   }
-  if (response.path && fs.existsSync(response.path)) {
+  if (response?.path && fs.existsSync(response.path)) {
     try {
       await (options.publishFilesRevision ?? publishFilesRevision)(client);
     } catch (error) {
@@ -688,7 +734,6 @@ export async function terminalizeStaleStructuredSpawns(
   let examined = 0;
   for (const receipt of Object.values(snapshot.receipts)) {
     if (examined >= actuationCap) break;
-    if (receipt.transport !== "structured") continue;
     if (receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") continue;
     const queued = queuedPinnedSpawnForReceipt(receipt);
     if (queued) {
@@ -697,9 +742,9 @@ export async function terminalizeStaleStructuredSpawns(
       try {
         const supersededReason = supersededQueuedSpawnReason(snapshot, receipt);
         const recoveredReceipt = supersededReason
-          ? registry.failStructuredSpawn(receipt.launchId, supersededReason).receipt ?? receipt
+          ? failQueuedPinnedSpawn(registry, receipt, supersededReason)
           : await actuateQueuedPinnedSpawn(registry, client, receipt, options);
-        if (recoveredReceipt.state === "failed") terminalized.push(receipt.launchId);
+        if (recoveredReceipt.state === "failed" || recoveredReceipt.state === "conflicted") terminalized.push(receipt.launchId);
         else if (recoveredReceipt.state === "completed") recovered.push(receipt.launchId);
       } catch (error) {
         console.error("[reaper] queued pinned spawn recovery failed", {
@@ -709,6 +754,7 @@ export async function terminalizeStaleStructuredSpawns(
       }
       continue;
     }
+    if (receipt.transport !== "structured") continue;
     const createdMs = Date.parse(receipt.createdAt);
     if (!Number.isFinite(createdMs) || now() - createdMs < timeoutMs) continue;
     examined += 1;

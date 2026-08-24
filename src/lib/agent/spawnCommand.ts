@@ -618,10 +618,23 @@ export async function executeSpawnRequest(
     const queuedTitle = queuedUntil
       ? queuedPinnedSpawnTitle(prefersUkrainian(req) ? "uk" : "en", queuedUntil)
       : null;
-    let pinTitle: string | null = null;
-    if (queuedTitle && transport === "tmux") pinTitle = queuedTitle;
-    else if (pinFallback) pinTitle = pinFallbackTitle(req);
+    const pinTitle = pinFallback ? pinFallbackTitle(req) : null;
     const spec = specForAccount(account, pinTitle);
+    const prepareTmuxSpawn = (): void => {
+      if (engine !== "claude" || transport !== "tmux") return;
+      const profileId = path.basename(spec.transcript ?? "", ".jsonl");
+      if (isManagedClaudeHome(account.home)) prepareManagedClaudeSpawnHome(account.home, cwd);
+      applyClaudeSpawnPolicy(account.home, {
+        allowSubagents: body.allowSubagents === true,
+        baseSettingsPath: isManagedClaudeHome(account.home) ? claudeSettingsPath() : null,
+        profileId,
+        cwd,
+        mcpServers: grantedServers,
+        mcpStatePath: account.kind === "managed"
+          ? path.join(account.home, ".claude.json")
+          : path.join(path.dirname(account.home), ".claude.json"),
+      });
+    };
     /* The receipt keeps the caller's requested account as durable routing
        authority. The separate account context below owns this generation's
        actual launch, so a degraded fallback cannot silently rebind the pin. */
@@ -637,7 +650,7 @@ export async function executeSpawnRequest(
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
     if (begun.kind === "created") launchId = begun.receipt.launchId;
     let queuedReceipt = begun.receipt;
-    if (queuedUntil && queuedTitle && requestedAccountId && transport === "structured") {
+    if (queuedUntil && queuedTitle && requestedAccountId) {
       const existingQueue = begun.receipt.queuedPinnedSpawn;
       let queuedImageRefs: StructuredImageRef[];
       if (existingQueue) {
@@ -646,7 +659,7 @@ export async function executeSpawnRequest(
         try { queuedImageRefs = dependencies.storeImages(images); }
         catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
       }
-      queuedReceipt = registry.queuePinnedStructuredSpawn(begun.receipt.launchId, {
+      queuedReceipt = registry.queuePinnedSpawn(begun.receipt.launchId, {
         version: 1,
         retryAt: queuedUntil,
         accountId: requestedAccountId,
@@ -820,8 +833,9 @@ export async function executeSpawnRequest(
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
     if (queuedUntil) {
+      prepareTmuxSpawn();
       const releasedQueuedReceipt = queuedReceipt.admissionOwner
-        ? registry.releaseStartingStructuredSpawn(queuedReceipt.launchId, queuedReceipt.admissionOwner).receipt
+        ? registry.releaseSpawnActuation(queuedReceipt.launchId, queuedReceipt.admissionOwner).receipt
         : queuedReceipt;
       return NextResponse.json(
         spawnResponseForReceipt(releasedQueuedReceipt, releasedQueuedReceipt.artifactPath, {
@@ -831,20 +845,7 @@ export async function executeSpawnRequest(
         { status: 202 },
       );
     }
-    if (engine === "claude" && transport === "tmux") {
-      const profileId = path.basename(spec.transcript ?? "", ".jsonl");
-      if (isManagedClaudeHome(account.home)) prepareManagedClaudeSpawnHome(account.home, cwd);
-      applyClaudeSpawnPolicy(account.home, {
-        allowSubagents: body.allowSubagents === true,
-        baseSettingsPath: isManagedClaudeHome(account.home) ? claudeSettingsPath() : null,
-        profileId,
-        cwd,
-        mcpServers: grantedServers,
-        mcpStatePath: account.kind === "managed"
-          ? path.join(account.home, ".claude.json")
-          : path.join(path.dirname(account.home), ".claude.json"),
-      });
-    }
+    prepareTmuxSpawn();
     if (transport === "structured") {
       const runtimeClient = dependencies.runtimeHostClient();
       if (!runtimeClient) throw new Error("structured spawn runtime host is unavailable");

@@ -120,7 +120,7 @@ test.each(["missing", "corrupt"] as const)("a %s queued payload cannot keep an o
   });
   if (begun.kind !== "created" || !begun.receipt.admissionOwner) throw new Error("expected queued receipt creation");
   if (condition === "corrupt") {
-    store.queuePinnedStructuredSpawn(begun.receipt.launchId, {
+    store.queuePinnedSpawn(begun.receipt.launchId, {
       version: 1,
       retryAt,
       accountId: "account-a",

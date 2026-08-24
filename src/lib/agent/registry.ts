@@ -228,7 +228,7 @@ export interface SpawnReceipt {
       operator/UI launch path; successor and resume receipts never inherit it. The
       projection stops emitting it in the response that adopts the live transcript. */
   launchDisplay: { prompt: string; images: number; echo: string } | null;
-  /** A structured pinned launch that has not reached account admission yet.
+  /** A pinned launch that has not reached account admission yet.
       Null is also the safe normalization of a partial/corrupt legacy write. */
   queuedPinnedSpawn: QueuedPinnedSpawn | null;
   /** Cross-process CAS fence acquired before a failed launch is retried. */
@@ -3855,7 +3855,7 @@ export class AgentRegistry {
       including the card's deadline copy. A crash can therefore expose either
       the prior complete queue or the next complete queue, never a title-only
       receipt that pretends to be recoverable. */
-  queuePinnedStructuredSpawn(
+  queuePinnedSpawn(
     launchId: string,
     queued: QueuedPinnedSpawn,
     queuedTitle: string,
@@ -3865,7 +3865,7 @@ export class AgentRegistry {
       if (!receipt) throw new Error("unknown spawn receipt");
       const normalized = normalizeQueuedPinnedSpawn(queued, this.mcpGrantPolicy);
       if (!normalized
-        || receipt.transport !== "structured"
+        || (receipt.transport !== "structured" && receipt.transport !== "tmux")
         || receipt.state !== "starting"
         || receipt.key
         || receipt.pane
@@ -3893,6 +3893,31 @@ export class AgentRegistry {
       the persisted pane identity. */
   claimTmuxSpawnActuation(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
     return this.claimSpawnActuation(launchId, "tmux");
+  }
+
+  /** Compare-and-set release for either transport's pre-settlement actuation
+      claim. Tmux recovery may already own a durable pane; releasing that exact
+      owner lets the next reaper tick resume the same pane without allocating a
+      second host. */
+  releaseSpawnActuation(launchId: string, owner: ProcessIdentity): { released: boolean; receipt: SpawnReceipt } {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      const unbound = receipt.state === "starting" && !receipt.key && !receipt.pane;
+      const recoverableTmuxPane = receipt.transport === "tmux"
+        && (receipt.state === "pane-bound" || receipt.state === "host-verified")
+        && !receipt.key
+        && Boolean(receipt.pane);
+      if ((receipt.transport !== "structured" && receipt.transport !== "tmux")
+        || (!unbound && !recoverableTmuxPane)
+        || !receipt.admissionOwner
+        || receipt.admissionOwner.pid !== owner.pid
+        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        return { released: false, receipt: clone(receipt) };
+      }
+      receipt.admissionOwner = null;
+      return { released: true, receipt: clone(receipt) };
+    });
   }
 
   /** Compare-and-set release of a starting structured admission: only the
@@ -4000,7 +4025,17 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt) throw new Error("unknown spawn receipt");
-      if (receipt.verifiedHost && (receipt.state === "host-verified" || receipt.state === "pane-bound" || receipt.state === "starting")) receipt.state = "prompt-delivered";
+      if (receipt.verifiedHost && (receipt.state === "host-verified" || receipt.state === "pane-bound" || receipt.state === "starting")) {
+        receipt.state = "prompt-delivered";
+        if (receipt.transport === "tmux" && receipt.queuedPinnedSpawn) {
+          receipt.launchProfile = emptyLaunchProfile(
+            receipt.queuedPinnedSpawn.spec.launchProfile,
+            this.mcpGrantPolicy,
+          );
+          receipt.queuedPinnedSpawn = null;
+          receipt.admissionOwner = null;
+        }
+      }
       return clone(receipt);
     });
   }
@@ -4482,6 +4517,13 @@ export class AgentRegistry {
       receipt.state = receipt.pane ? "conflicted" : "failed";
       receipt.error = error;
       if (receipt.state === "conflicted") receipt.verifiedHost = null;
+      if ((receipt.state === "failed" || receipt.state === "conflicted") && receipt.queuedPinnedSpawn) {
+        receipt.launchProfile = emptyLaunchProfile(
+          receipt.queuedPinnedSpawn.spec.launchProfile,
+          this.mcpGrantPolicy,
+        );
+        receipt.queuedPinnedSpawn = null;
+      }
       /* A promote/admission race can fail through this pre-identity path with a
          held or assigned attempts-zero initial delivery. Converge it in the
          same transaction instead of waiting for the reaper. */
@@ -4524,7 +4566,13 @@ export class AgentRegistry {
       }
       receipt.state = "failed";
       receipt.error = error;
-      receipt.queuedPinnedSpawn = null;
+      if (receipt.queuedPinnedSpawn) {
+        receipt.launchProfile = emptyLaunchProfile(
+          receipt.queuedPinnedSpawn.spec.launchProfile,
+          this.mcpGrantPolicy,
+        );
+        receipt.queuedPinnedSpawn = null;
+      }
       /* A structured spawn that fails can never deliver its initial message, so
          its still-`held` `spawn_<launchId>` reservation is terminalized in the
          same transaction (issue #653) rather than left as an eternal owed
