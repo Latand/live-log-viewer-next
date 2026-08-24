@@ -29,7 +29,6 @@ import {
 import { procBackend } from "@/lib/proc";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { reconcileDeadStructuredRegistryHosts } from "@/lib/runtime/registry";
-import { reconcileStaleSpawnsHeldByLiveOwners } from "@/lib/runtime/staleSpawnOwner";
 import { terminalizeStaleStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { listFiles } from "@/lib/scanner";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
@@ -816,7 +815,6 @@ export interface ReaperActuationOverrides {
   saveFlows?: typeof saveFlows;
   now?: () => number;
   runtimeClient?: typeof runtimeHostClient;
-  reconcileLiveOwnerSpawns?: typeof reconcileStaleSpawnsHeldByLiveOwners;
   terminalizeStaleSpawns?: typeof terminalizeStaleStructuredSpawns;
 }
 
@@ -974,12 +972,6 @@ export async function runReaperCycle(options: {
      pass is bounded and idempotent; its failure never blocks the reaper. */
   const runtimeClientForSpawns = (options.actuation?.runtimeClient ?? runtimeHostClient)();
   if (runtimeClientForSpawns) {
-    try {
-      await (options.actuation?.reconcileLiveOwnerSpawns
-        ?? reconcileStaleSpawnsHeldByLiveOwners)(registry, runtimeClientForSpawns);
-    } catch (error) {
-      console.error("[reaper] terminal structured spawn owner convergence failed", error);
-    }
     try {
       await (options.actuation?.terminalizeStaleSpawns ?? terminalizeStaleStructuredSpawns)(registry, runtimeClientForSpawns);
     } catch (error) {

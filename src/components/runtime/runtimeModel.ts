@@ -26,7 +26,7 @@ import type { RuntimePendingReconfigure, RuntimeSettingsCapability, ViewerDeploy
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 import {
   appendRuntimeLiveTurnDelta,
-  completeRuntimeLiveTurnItem,
+  projectRuntimeLiveTurnItem,
   type RuntimeLiveTurn,
 } from "@/lib/runtime/liveTurn";
 import {
@@ -541,19 +541,26 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
         item?: unknown;
         voiceResponse?: { responseId?: unknown; text?: unknown };
       };
-      if (p.phase !== "completed") break;
+      /* Tool activity projects from both lifecycle phases (issue #1100): a
+         Codex `started` item is a running tool row, its `completed` item the
+         finish; Claude carries calls and results as completed items only.
+         Assistant prose still settles on `completed` alone. */
+      if (p.phase !== "completed" && p.phase !== "started") break;
+      const phase = p.phase;
       updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => {
         const turnId = p.turnId ?? s.activeTurnId ?? "unknown";
         const voiceResponse = p.voiceResponse;
         return {
           ...s,
-          liveTurn: completeRuntimeLiveTurnItem(
+          liveTurn: projectRuntimeLiveTurnItem(
             s.liveTurn,
             turnId,
             p.item,
+            phase,
             env.occurredAt ?? env.recordedAt ?? null,
           ),
-          voiceDeliveries: typeof voiceResponse?.responseId === "string"
+          voiceDeliveries: phase === "completed"
+            && typeof voiceResponse?.responseId === "string"
             && typeof voiceResponse.text === "string"
             ? appendVoiceResponse(s.voiceDeliveries, turnId, {
               responseId: voiceResponse.responseId,

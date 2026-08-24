@@ -217,6 +217,16 @@ export interface SpawnReceipt {
   retryClaim?: { claimId: string; claimedAt: string };
 }
 
+interface StructuredSpawnFailureClaim {
+  claimed: boolean;
+  receipt: SpawnReceipt | null;
+  cleanup: {
+    key: SessionKey;
+    process: ProcessIdentity | null;
+    releaseRegisteredHost: boolean;
+  } | null;
+}
+
 export interface SpawnLineageEdge {
   childConversationId: ViewerConversationId;
   parentConversationId: ViewerConversationId;
@@ -4394,10 +4404,17 @@ export class AgentRegistry {
     return this.mutate((file) => terminalizeFailedSpawnDeliveriesInFile(file));
   }
 
-  failStructuredSpawn(launchId: string, error: string): void {
-    this.mutate((file) => {
+  /** Atomically claims terminal failure and returns only the host identity this
+      launch still owns. External cleanup must act solely on this evidence: a
+      completed receipt or a newer same-key operation wins the transaction and
+      leaves its host untouched. */
+  failStructuredSpawn(launchId: string, error: string): StructuredSpawnFailureClaim {
+    return this.mutate((file) => {
       const receipt = file.receipts[launchId];
-      if (!receipt || receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") return;
+      if (!receipt) return { claimed: false, receipt: null, cleanup: null };
+      if (receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") {
+        return { claimed: false, receipt: clone(receipt), cleanup: null };
+      }
       receipt.state = "failed";
       receipt.error = error;
       /* A structured spawn that fails can never deliver its initial message, so
@@ -4405,11 +4422,27 @@ export class AgentRegistry {
          same transaction (issue #653) rather than left as an eternal owed
          delivery. */
       terminalizeFailedSpawnDeliveriesInFile(file);
-      if (!receipt.key || !receipt.artifactPath) return;
+      if (!receipt.key || !receipt.artifactPath) {
+        return { claimed: true, receipt: clone(receipt), cleanup: null };
+      }
       const entry = file.entries[sessionKeyId(receipt.key)];
-      if (!entry || entry.artifactPath !== receipt.artifactPath) return;
+      if (!entry || entry.artifactPath !== receipt.artifactPath) {
+        return { claimed: true, receipt: clone(receipt), cleanup: null };
+      }
       if (typeof entry.structuredHostOperationId === "string"
-        && entry.structuredHostOperationId !== launchId) return;
+        && entry.structuredHostOperationId !== launchId) {
+        return { claimed: true, receipt: clone(receipt), cleanup: null };
+      }
+      const releaseRegisteredHost = entry.structuredHostOperationId === launchId;
+      const legacyOwner = entry.structuredHostOperationId == null && entry.pendingAction === "spawn";
+      if (!releaseRegisteredHost && !legacyOwner) {
+        return { claimed: true, receipt: clone(receipt), cleanup: null };
+      }
+      const cleanup = {
+        key: clone(receipt.key),
+        process: clone(entry.structuredHost?.process ?? null),
+        releaseRegisteredHost,
+      };
       const preservesResumeCursor = receipt.purpose === "resume-successor"
         && receipt.resumeSourcePath === receipt.artifactPath
         && (entry.structuredHost?.eventCursor ?? 0) > 0;
@@ -4437,6 +4470,7 @@ export class AgentRegistry {
       entry.pendingAction = null;
       entry.updatedAt = now();
       advanceMigrationScopeRevision(file, receipt.key.engine, readinessBefore, changedHostPaths);
+      return { claimed: true, receipt: clone(receipt), cleanup };
     });
   }
 
