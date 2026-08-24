@@ -52,6 +52,8 @@ import { runtimeImageCapability } from "@/lib/runtime/runtimeImageStore";
 export class RuntimeJournalFault extends Error {}
 
 export const RUNTIME_SNAPSHOT_INACTIVE_SESSION_LIMIT = 128;
+export const RUNTIME_SNAPSHOT_TERMINAL_DEPLOYMENT_LIMIT = 50;
+export const RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 type EventRow = {
   seq: number;
@@ -725,23 +727,23 @@ export class RuntimeJournal {
         filesRevision: Number(this.meta("files_revision")),
         sessions: this.snapshotSessionValues().map((session) => ({
           ...session,
-          // A terminal host has no live stream to resume. The durable entity
-          // retains its audit state while the browser snapshot drops transient
-          // text that can otherwise dominate every reconnect frame.
-          ...((session.host === "dead" || session.host === "unhosted")
-            ? { liveTurn: null }
-            : {}),
+          // Only a running turn has live text to resume. Re-normalizing here
+          // also caps legacy rows to the 64 KiB UTF-8 tail; omittedChars is the
+          // explicit marker that lets consumers disclose the clipped prefix.
+          liveTurn: session.turn === "running"
+            ? normalizeRuntimeLiveTurn(session.liveTurn)
+            : null,
           recentReceipts: visibleReceipts(session.recentReceipts).map(runtimePresentationReceipt),
         })),
         attentions: this.entityValues<RuntimeAttention>("attention"),
         recentOperations: visibleReceipts(
           this.recentEntityValues<RuntimeOperationReceipt>("operation", 100),
         ).map(runtimePresentationReceipt),
-        edges: this.entityValues<RuntimeEdge>("edge"),
+        edges: this.snapshotEdgeValues(),
         flows: this.scopedValues<RuntimeSnapshot["flows"][number]["value"]>("flow"),
         workflows: this.scopedValues<RuntimeSnapshot["workflows"][number]["value"]>("workflow"),
         tasks: this.scopedValues<RuntimeSnapshot["tasks"][number]["value"]>("task"),
-        deployments: this.entityValues<ViewerDeploymentStatus>("deployment"),
+        deployments: this.snapshotDeploymentValues(),
       };
       this.db.exec("COMMIT");
       return snapshot;
@@ -1961,6 +1963,50 @@ export class RuntimeJournal {
     return [...active, ...inactive]
       .map((row) => JSON.parse(row.state_json) as RuntimeSession)
       .sort((left, right) => left.conversationId.localeCompare(right.conversationId));
+  }
+
+  private snapshotEdgeValues(): RuntimeEdge[] {
+    const cutoff = this.now() - RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS;
+    const terminalSessions = new Map(this.db.query<{
+      id: string;
+      last_changed_at: number | null;
+    }, [string, string, string]>(`
+      SELECT session.id, event.created_at AS last_changed_at
+      FROM entities AS session
+      LEFT JOIN events AS event ON event.seq = session.checkpoint_seq
+      WHERE session.kind = ?
+        AND json_extract(session.state_json, '$.host') IN (?, ?)
+    `).all("session", "dead", "unhosted").map((row) => [row.id, row.last_changed_at]));
+
+    return this.entityValues<RuntimeEdge>("edge").filter((edge) => {
+      if (!terminalSessions.has(edge.childConversationId)) return true;
+      const edgeCreatedAt = Date.parse(edge.createdAt);
+      // Compacted legacy sessions have no event row left for checkpoint_seq;
+      // their immutable lineage edge is the remaining durable age evidence.
+      const lastChangedAt = terminalSessions.get(edge.childConversationId)
+        ?? (Number.isFinite(edgeCreatedAt) ? edgeCreatedAt : null);
+      return lastChangedAt === null || lastChangedAt >= cutoff;
+    });
+  }
+
+  private snapshotDeploymentValues(): ViewerDeploymentStatus[] {
+    const nonTerminal = this.db.query<{ state_json: string }, [string]>(`
+      SELECT state_json
+      FROM entities
+      WHERE kind = ?
+        AND COALESCE(json_extract(state_json, '$.terminal'), 0) != 1
+    `).all("deployment");
+    const terminal = this.db.query<{ state_json: string }, [string, number]>(`
+      SELECT state_json
+      FROM entities
+      WHERE kind = ?
+        AND json_extract(state_json, '$.terminal') = 1
+      ORDER BY checkpoint_seq DESC, id DESC
+      LIMIT ?
+    `).all("deployment", RUNTIME_SNAPSHOT_TERMINAL_DEPLOYMENT_LIMIT);
+    return [...nonTerminal, ...terminal]
+      .map((row) => JSON.parse(row.state_json) as ViewerDeploymentStatus)
+      .sort((left, right) => left.deploymentId.localeCompare(right.deploymentId));
   }
 
   private recentEntityValues<T>(kind: string, limit: number): T[] {
