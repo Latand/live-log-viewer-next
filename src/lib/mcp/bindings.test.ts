@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { applyBoardCommand } from "@/lib/board/command";
 import { boardFor, mutateBoard, patchBoard } from "@/lib/board/store";
 import { DeadlineExceededError } from "@/lib/deadline";
 import { CORPUS_BODY_MARKERS, pipelineCorpus } from "@/lib/pipelines/fixtures/corpus";
@@ -880,6 +881,8 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
     id,
     generations: paths.map((pathname) => ({ path: pathname, launchProfile })),
     continuityPaths: [],
+    abandonedContinuityPaths: [],
+    migration: null,
     projectOwnership: {
       project,
       source: "operator",
@@ -887,12 +890,13 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
       operationId: `ownership_${id}`,
     },
   });
-  const registrySnapshot = {
+  const emptyRegistrySnapshot = new AgentRegistry(path.join(sandbox, "agent-registry.json")).readOnlySnapshot();
+  const registrySnapshot: typeof emptyRegistrySnapshot = {
+    ...emptyRegistrySnapshot,
     conversations: {
-      conversation_current: conversation("conversation_current", [predecessorPath, currentPath]),
-      conversation_deleted_ghost: conversation("conversation_deleted_ghost", [deletedGhostPath]),
+      conversation_current: conversation("conversation_current", [predecessorPath, currentPath]) as never,
+      conversation_deleted_ghost: conversation("conversation_deleted_ghost", [deletedGhostPath]) as never,
     },
-    conversationAliases: {},
     receipts: {
       launch_fixture_placeholder: {
         launchId: "launch_fixture_placeholder",
@@ -901,10 +905,8 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
         explicitProject: project,
         cwd: "/fixtures/fixture-project",
         launchProfile,
-      },
+      } as never,
     },
-    lineageEdges: {},
-    memberships: {},
   };
   let runtimeCalls = 0;
   let scanCalls = 0;
@@ -915,10 +917,11 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
       throw new Error("ghost archiving must not require a transcript scan");
     },
     boardFor: (key: string) => boardFor(key, boardFile),
-    patchBoard: (key: string, revision: number, patch: Parameters<typeof patchBoard>[2]) =>
-      patchBoard(key, revision, patch, boardFile),
-    mutateBoard: (key: string, revision: number, mutations: Parameters<typeof mutateBoard>[2]) =>
-      mutateBoard(key, revision, mutations, boardFile),
+    applyBoardCommand: (input: unknown, snapshot: typeof registrySnapshot) => applyBoardCommand(input, {
+      registrySnapshot: () => snapshot,
+      patchBoard: (key, revision, patch) => patchBoard(key, revision, patch, boardFile),
+      mutateBoard: (key, revision, mutations) => mutateBoard(key, revision, mutations, boardFile),
+    }),
     applyConversationAction: async () => {
       runtimeCalls += 1;
       throw new Error("archive must not enter runtime conversation control");
@@ -932,7 +935,7 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
       { conversationId: "conversation_current" },
       { transcriptPath: deletedGhostPath },
       { transcriptPath: spawnPath },
-      { conversationId: "conversation_current" },
+      { transcriptPath: predecessorPath },
     ],
   });
 
@@ -949,6 +952,7 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
   });
   expect(boardFor(project, boardFile)).toMatchObject({
     revision: 1,
+    pathAliases: {},
     prefs: { hidden: [currentPath, deletedGhostPath, spawnPath] },
   });
   expect(boardFor(project, boardFile).prefs.hidden).not.toContain(predecessorPath);
@@ -957,7 +961,7 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
     clientRequestId: "archive-ghosts-again",
     action: "archive",
     targets: [
-      { conversationId: "conversation_current" },
+      { transcriptPath: predecessorPath },
       { transcriptPath: deletedGhostPath },
       { transcriptPath: spawnPath },
     ],
@@ -983,7 +987,7 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
   });
   expect(restored).toMatchObject({
     outcomes: [
-      { outcome: "unarchived" },
+      { conversationId: "conversation_current", transcriptPath: currentPath, outcome: "unarchived" },
       { outcome: "unarchived" },
       { outcome: "unarchived" },
       { project: null, outcome: "not-found" },

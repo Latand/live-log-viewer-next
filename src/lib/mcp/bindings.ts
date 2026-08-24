@@ -27,7 +27,8 @@ import {
   isGeometricTarget,
 } from "@/lib/attention/targets";
 import type { AttentionRequestV1, FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
-import { boardFor, mutateBoard, patchBoard } from "@/lib/board/store";
+import { applyBoardCommand } from "@/lib/board/command";
+import { boardFor } from "@/lib/board/store";
 import { applyConversationAction } from "@/lib/conversation/actions";
 import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
@@ -238,8 +239,7 @@ export interface ViewerMcpDomainDependencies {
   completedFileScan(options?: Parameters<typeof completedFileScan>[0]): ReturnType<typeof completedFileScan>;
   registrySnapshot(): RegistrySnapshot;
   boardFor(project: string): ReturnType<typeof boardFor>;
-  patchBoard: typeof patchBoard;
-  mutateBoard: typeof mutateBoard;
+  applyBoardCommand(input: unknown, snapshot: RegistrySnapshot): ReturnType<typeof applyBoardCommand>;
   getFlowsWithPresets(): ReturnType<typeof getFlowsWithPresets>;
   patchFlow: typeof patchFlow;
   cancelRound: typeof cancelRound;
@@ -432,8 +432,7 @@ export const productionDomainDependencies: ViewerMcpDomainDependencies = {
   completedFileScan,
   registrySnapshot: () => agentRegistry().readOnlySnapshot(),
   boardFor,
-  patchBoard,
-  mutateBoard,
+  applyBoardCommand: (input, snapshot) => applyBoardCommand(input, { registrySnapshot: () => snapshot }),
   getFlowsWithPresets,
   patchFlow,
   cancelRound,
@@ -2026,9 +2025,8 @@ function resolveArchiveTargetFromRegistry(
   const receipt = pathReceipt ?? (conversationId ? latestReceiptForConversation(snapshot, conversationId) : null);
   if (requestedConversationId && !conversation && !receipt) return null;
 
-  const transcriptPath = requestedConversationId
-    ? conversation?.generations.at(-1)?.path ?? (receipt ? `spawn:${receipt.launchId}` : "")
-    : input.transcriptPath;
+  const transcriptPath = conversation?.generations.at(-1)?.path
+    ?? (requestedConversationId && receipt ? `spawn:${receipt.launchId}` : input.transcriptPath);
   if (!transcriptPath) return null;
   const project = projectForArchiveTarget(conversation, receipt);
   if (!project) return null;
@@ -2066,17 +2064,25 @@ function writeArchivePlacement(
   project: string,
   action: "archive" | "unarchive",
   paths: readonly string[],
+  snapshot: RegistrySnapshot,
   dependencies: ViewerMcpDomainDependencies,
 ): ReturnType<typeof boardFor> {
   let board = dependencies.boardFor(project);
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    const result = action === "archive"
-      ? dependencies.patchBoard(project, board.revision, { hidden: [...paths] })
-      : dependencies.mutateBoard(project, board.revision, paths.map((pathname) => ({
-          kind: "restore" as const,
-          path: pathname,
-          placement: "auto" as const,
-        })));
+    const result = dependencies.applyBoardCommand({
+      schemaVersion: 1,
+      project,
+      baseRevision: board.revision,
+      ...(action === "archive"
+        ? { patch: { hidden: [...paths] } }
+        : {
+            mutations: paths.map((pathname) => ({
+              kind: "restore" as const,
+              path: pathname,
+              placement: "auto" as const,
+            })),
+          }),
+    }, snapshot);
     if (result.ok) return result.board;
     board = result.board;
   }
@@ -2146,7 +2152,7 @@ async function archiveConversationAction(
       };
     }
     if (changedPaths.length > 0) {
-      writeArchivePlacement(project, action, [...new Set(changedPaths)], dependencies);
+      writeArchivePlacement(project, action, [...new Set(changedPaths)], snapshot, dependencies);
       projectsTouched.push(project);
     }
   }
