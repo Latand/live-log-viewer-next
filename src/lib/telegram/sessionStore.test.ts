@@ -162,9 +162,10 @@ test("connection status round-trips and never carries the session string", () =>
     version: 1,
     status: "connected",
     credentialRef: "ref-1",
-    identity: { name: "Account A", username: "account_a" },
+    identity: { name: "Account A", username: "account_a", id: "770000001" },
     lastHealthCheckAt: "2026-08-20T10:00:00.000Z",
     errorCode: null,
+    identityIdUpgradedAt: null,
   });
   const read = readTelegramConnection();
   expect(read.status).toBe("connected");

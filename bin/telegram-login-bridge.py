@@ -86,7 +86,18 @@ async def acquire_session_lock(client: TelegramClient) -> SessionLock:
 
 def identity_of(user) -> dict:
     name = " ".join(part for part in [user.first_name, user.last_name] if part) or "Telegram account"
-    return {"name": name, "username": user.username or None}
+    # The numeric account id (issue #1091): names and handles are the operator's
+    # to change at any moment, so the id is what "the same account" means to the
+    # report-run verifier. A string, because a Telegram id is a 64-bit integer.
+    # Read defensively: an authorization that produced an entity without an id
+    # is still an authorization, and losing the login over a grouping field
+    # would be a far worse failure than reporting no id.
+    account_id = getattr(user, "id", None)
+    return {
+        "name": name,
+        "username": user.username or None,
+        "id": str(account_id) if isinstance(account_id, int) else None,
+    }
 
 
 async def read_stdin_line() -> dict | None:

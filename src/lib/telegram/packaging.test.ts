@@ -352,6 +352,7 @@ test("health and logout bridges acquire the vendored session lock before connect
     "from .sessions import StringSession",
     "class User:",
     "    first_name, last_name, username = 'Account', 'A', None",
+    "    id = 770000001",
     "class TelegramClient:",
     "    def __init__(self, session, *args, **kwargs): self.session = session",
     "    async def connect(self):",
@@ -376,7 +377,13 @@ test("health and logout bridges acquire the vendored session lock before connect
     stderr: "pipe",
   });
   expect(result.exitCode).toBe(0);
-  expect(JSON.parse(result.stdout.toString())).toMatchObject({ event: "health", status: "connected" });
+  /* The health event carries the numeric account id the verifier compares
+     (#1091), as a string so a 64-bit id survives JSON. */
+  expect(JSON.parse(result.stdout.toString())).toMatchObject({
+    event: "health",
+    status: "connected",
+    identity: { name: "Account A", username: null, id: "770000001" },
+  });
 
   const logout = Bun.spawnSync({
     cmd: [python!, path.resolve(import.meta.dir, "..", "..", "..", "bin", "telegram-login-bridge.py"), "logout"],

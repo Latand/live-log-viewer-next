@@ -21,6 +21,7 @@ import {
   scheduledRunDue,
   slotInstant,
 } from "./reportSchedule";
+import { reportAttemptId, TELEGRAM_REPORT_PROJECT } from "./reportLineage";
 import { connectorReadPort, planReportSources, type TelegramReadPort } from "./reportSources";
 import { launchReportConversation, type ReportSpawnInput, type ReportSpawnResult } from "./reportSpawn";
 import {
@@ -114,7 +115,7 @@ export const productionReportRunnerPorts: ReportRunnerPorts = {
   now: Date.now,
   connection: () => {
     try { return readTelegramConnection(); }
-    catch { return { version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "session_unsafe" }; }
+    catch { return { version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "session_unsafe", identityIdUpgradedAt: null }; }
   },
   readPort: connectorReadPort,
   spawn: launchReportConversation,
@@ -342,11 +343,14 @@ export class TelegramReportRunner {
           model: CODEX_SOL_MODEL,
           effort: "medium",
           cwd: reportWorkspaceDir(),
-          /* The durable marker that ties this conversation to this run, both
-             ways: the receipt carries it, and the history row carries the
-             conversation the receipt produced. No `src`, `parent` or role — see
-             the note on lineage at the bottom of this file. */
+          /* The durable report-run marker (#1091), in the two fields the
+             ordinary spawn path already makes durable: the receipt's attempt
+             id spells the run id, and explicit project ownership is what the
+             board groups the card by. Still no `src`, `parent` or role — see
+             `reportLineage.ts` for why a lineage parent would revoke the run's
+             own connector grant. */
           clientAttemptId: reportAttemptId(runId),
+          project: TELEGRAM_REPORT_PROJECT,
           ["prompt"]: prompt,
         },
         /* The grant is decided by the report session class, inside admission,
@@ -536,51 +540,39 @@ function comparableName(value: string): string {
 /**
  * Whether the connector is logged into the account this report belongs to.
  *
- * The evidence is the identity Connect recorded — display name and public
- * handle — because that is what the operator's connection carries; the
- * connector's `get_me` is asked for the same two fields.
+ * THE NUMERIC ACCOUNT ID DECIDES (issue #1091). It is the only field of an
+ * account that the operator cannot change, so when both sides carry one, that
+ * comparison is the whole answer: equal ids are the same account whatever the
+ * account is called today, and different ids are a different account even when
+ * it has taken the same display name — which is exactly the impersonation the
+ * name comparison alone could not see.
  *
- * AGREEMENT ON EITHER field is enough, and that is deliberate. Both fields are
- * the operator's to change at any moment, and the recorded copy is only
- * refreshed by a health check, so demanding that both agree would end every
- * report with `account-mismatch` the day the operator renamed themselves or
- * took a new @handle — a silently dead feature, which is a worse failure than
- * the one this check exists to catch. A genuinely different account agrees on
- * neither. A connection with NO comparable field cannot be verified against
- * anything, so it fails closed.
+ * The name/handle rule below survives for ONE case: a connection enrolled
+ * before the id was recorded, whose one-time migration has not run yet (see
+ * `recordedIdentityAfterHealthCheck`). Falling back keeps those connections
+ * reporting instead of failing every run until the operator reconnects, and
+ * once the id is recorded the fallback is never consulted again.
+ *
+ * In that fallback, agreement on EITHER field is enough, deliberately: both are
+ * the operator's to change at any moment and the recorded copy only refreshes
+ * on a health check, so demanding both would end every report with
+ * `account-mismatch` the day they took a new @handle — a silently dead feature,
+ * which is a worse failure than the one this check exists to catch. A
+ * genuinely different account agrees on neither, and a connection with nothing
+ * comparable fails closed.
  */
 export function sameTelegramAccount(
-  live: { name: string; username: string | null } | null,
-  recorded: { name: string; username: string | null } | null,
+  live: { name: string; username: string | null; id?: string | null } | null,
+  recorded: { name: string; username: string | null; id?: string | null } | null,
 ): boolean {
   if (!live || !recorded) return false;
+  if (live.id && recorded.id) return live.id === recorded.id;
   const liveName = comparableName(live.name);
   const recordedName = comparableName(recorded.name);
   if (liveName && recordedName && liveName === recordedName) return true;
   const liveHandle = (live.username ?? "").trim().toLowerCase();
   const recordedHandle = (recorded.username ?? "").trim().toLowerCase();
   return Boolean(liveHandle) && liveHandle === recordedHandle;
-}
-
-/**
- * The durable identity the launch carries into the registry (issue #1086).
- *
- * `clientAttemptId` is the spawn lane's own replay key: it is written on the
- * receipt, resolvable through `spawnReceiptForClientAttempt`, and it survives a
- * restart. Together with the `conversationId` the history row keeps, it is the
- * two-way link between a report row and the board conversation that produced
- * it.
- *
- * A lineage PARENT is deliberately not used, and the reason is mechanical: the
- * registry re-decides every stored MCP grant from the row's own evidence
- * (`mcpServersForStoredSession` at `registry.ts`, `decideStoredGrant` in
- * `mcpAllowlist.ts`), and a `parentConversationId` classifies the row as
- * delegated, whose grant is the baseline. A report run given a parent would
- * therefore lose `telegram` at the moment its receipt is written. It is also
- * true rather than convenient: no conversation spawns the 10:00 report.
- */
-export function reportAttemptId(runId: string): string {
-  return `telegram-report-${runId}`;
 }
 
 function activeRow(active: NonNullable<ReturnType<typeof readTelegramReports>["active"]>): TelegramReportRow {

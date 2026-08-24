@@ -155,6 +155,12 @@ export interface FileEntry {
       A Viewer root carries `viewer` provenance even though it has no parent
       edge. Unattributed external roots stay undefined. */
   spawnOrigin?: "viewer" | "engine";
+  /** Durable report-run marker (issue #1091): this conversation is the Telegram
+      Daily Report run with THIS run id, read from the launch receipt the
+      registry keeps. It survives a registry reload with no Daily Reports
+      history file present, which is what lets the board group the runs under
+      the Telegram panel and lets a run be re-linked to its stored report. */
+  telegramReport?: { runId: string };
   /** Unix seconds. */
   mtime: number;
   size: number;

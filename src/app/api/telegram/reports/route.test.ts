@@ -13,6 +13,7 @@ const { GET, POST } = await import("./route");
 const { TelegramReportRunner, setTelegramReportRunnerForTests } = await import("@/lib/telegram/reportRunner");
 const { readTelegramReports, saveReportText, updateTelegramReports } = await import("@/lib/telegram/reportStore");
 const { DEFAULT_DAILY_REPORT_PROMPT } = await import("@/lib/telegram/reportPrompt");
+const { localDayKey } = await import("@/lib/telegram/reportSchedule");
 
 import type { ReportRunnerPorts } from "@/lib/telegram/reportRunner";
 import type { TelegramReportsPayload } from "@/lib/telegram/reportContracts";
@@ -23,9 +24,10 @@ const CONNECTED: StoredTelegramConnection = {
   version: 1,
   status: "connected",
   credentialRef: "credential-ref-placeholder",
-  identity: { name: "Account A", username: "account_a" },
+  identity: { name: "Account A", username: "account_a", id: "770000001" },
   lastHealthCheckAt: "2026-08-21T11:59:00.000Z",
   errorCode: null,
+  identityIdUpgradedAt: null,
 };
 
 const ports: ReportRunnerPorts = {
@@ -33,6 +35,7 @@ const ports: ReportRunnerPorts = {
   connection: () => CONNECTED,
   readPort: () => ({
     async getMe() { return CONNECTED.identity; },
+    async feedDialogs() { return []; },
     async listChats() { return [{ id: "101", kind: "user" as const, title: "Dialog A", username: null, unread: 0 }]; },
     async pageChats() { return []; },
     async lastMessageAt() { return "2026-08-21T09:00:00.000Z"; },
@@ -112,16 +115,21 @@ test("saving settings validates the time and never fires a run for a slot alread
   const invalid = await POST(post({ action: "settings", settings: { enabled: true, time: "25:00", groups: [] } }));
   expect(invalid.status).toBe(400);
 
+  /* A midnight slot has passed at every hour of every day, so this asserts the
+     rule rather than the clock the suite happens to run on: the route stamps
+     the day from `Date.now()` (a request has no fake clock to inject), and an
+     expectation pinned to one date was a test that could only pass on the day
+     it was written. */
   const saved = await POST(post({
     action: "settings",
-    settings: { enabled: true, time: "10:00", groups: [{ id: "-1001", title: "Team room", mode: "light" }] },
+    settings: { enabled: true, time: "00:00", groups: [{ id: "-1001", title: "Team room", mode: "light" }] },
   }));
   expect(saved.status).toBe(200);
   const state = readTelegramReports();
-  expect(state.settings).toEqual({ enabled: true, time: "10:00", groups: [{ id: "-1001", title: "Team room", mode: "light" }] });
-  /* Enabling at 15:00 with a 10:00 slot stamps the day: the first scheduled
+  expect(state.settings).toEqual({ enabled: true, time: "00:00", groups: [{ id: "-1001", title: "Team room", mode: "light" }] });
+  /* Enabling after today's slot has passed stamps the day: the first scheduled
      report is tomorrow's, not one fired on the spot. */
-  expect(state.cursor.lastScheduledDay).toBe("2026-08-21");
+  expect(state.cursor.lastScheduledDay).toBe(localDayKey(Date.now()));
   expect(readTelegramReports().active).toBeNull();
 });
 

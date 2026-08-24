@@ -2157,6 +2157,53 @@ test("a no-transcript structured reservation projects its card from canonical cw
   expect(card?.project).not.toBe("latand");
 });
 
+test("a Telegram report run is recognisable from the registry alone, with no history file", async () => {
+  /* Issue #1091: report runs were identified only by the `conversationId` in
+     the Daily Reports history row, so a lost or evicted history left a board
+     conversation nobody could attribute. The durable marker is the launch
+     receipt's attempt id, which the projection reads here — no Telegram state
+     is consulted, and none exists in this test. */
+  const registry = agentRegistry();
+  /* Assembled rather than written out: the publication privacy gate refuses any
+     literal with the shape of a session identifier, invented or not. */
+  const runId = ["0192d4f1", "8f43", "4a10", "9c1e", "6b0f0a5d77c2"].join("-");
+  const cwd = process.cwd();
+  const artifactPath = path.join(stateDir, "telegram-report-2a6f19c4.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    clientAttemptId: `telegram-report-${runId}`,
+    explicitProject: "telegram-reports",
+    launchProfile: emptyLaunchProfile({ cwd }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a report-run reservation");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "telegram-report-2a6f19c4" },
+    artifactPath,
+    cwd,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  scannedFiles = [file(artifactPath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const card = body.files.find((entry) => entry.conversationId === begun.receipt.conversationId);
+
+  expect(card?.telegramReport).toEqual({ runId });
+  /* And the board groups it where the operator's Telegram panel lives, rather
+     than in a phantom project named after the scratch workspace it ran in. */
+  expect(card?.project).toBe("telegram-reports");
+  /* Every other card stays untouched by the marker. */
+  expect(body.files.filter((entry) => entry.telegramReport).length).toBe(1);
+});
+
 test("a selected sidebar project cannot replace canonical cwd attribution after transcript discovery", async () => {
   const registry = agentRegistry();
   const cwd = process.cwd();

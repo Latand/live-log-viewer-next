@@ -1,17 +1,31 @@
 import { readTelegramSession } from "./sessionStore";
 import { telegramMcpUrl } from "./packaging";
-import type { TelegramIdentity } from "./contracts";
+import { validTelegramAccountId, type TelegramAccountIdentity } from "./contracts";
+import { readFeedDialogsSince, type FeedDialog } from "./reportFeed";
 import type { TelegramReportGroup } from "./reportContracts";
 
 /**
- * Source discovery for a Daily Report run (issue #1086).
+ * Source discovery for a Daily Report run (issues #1086, #1091).
+ *
+ * THE FEED IS THE SOURCE OF "ACTIVE SINCE THE LAST RUN". The connector records
+ * every settled incoming private burst to its event feed the moment it happens
+ * (`reportFeed.ts`), so the dialogs a report is about are read from that file,
+ * in one bounded pass, with no dependence on any list order at all. A dialog
+ * ranked dead last by the connector's chat listing is exactly as visible as the
+ * first one.
+ *
+ * The candidate WALK survives behind it, because the feed knows only what
+ * arrived while the connector was running and listening: a dialog where the
+ * operator did the writing, or one that was active before this connector
+ * generation started, has no feed line. So the walk still runs, over the
+ * candidates the feed has not already accounted for, and still decides by
+ * LAST MESSAGE DATE — never by position.
  *
  * The connector's chat listing is NOT ordered by recency — it follows pinned
  * and folder order, proven on the live connector by a dialog whose last
  * message was 16 h old being absent from the first page while one last active
- * six weeks earlier ranked second. So a run cannot take "the first N chats"
- * as "the active chats": every candidate's LAST MESSAGE DATE decides, and the
- * listing is used only to enumerate candidates.
+ * six weeks earlier ranked second. So the listing is used only to enumerate
+ * candidates.
  *
  * Enumeration cannot stop at one page either. `list_chats` applies its 100-chat
  * ceiling to the dialog list BEFORE the `chat_type` filter, so an operator with
@@ -19,17 +33,20 @@ import type { TelegramReportGroup } from "./reportContracts";
  * not exist for this run. `get_chats` pages the same list (ids and titles only,
  * `page` 1..10), so candidates come from `list_chats` for the typed head and
  * from bounded `get_chats` pages beyond it, where a POSITIVE marked id is what
- * identifies a private dialog.
+ * identifies a private dialog. The operator's GROUP picker walks the same paged
+ * list for the same reason (#1091): a group below the ceiling could not be
+ * chosen as a source at all while only the typed head was offered.
  *
  * The probing is deliberately dull: one single-message read per candidate,
  * sequentially. The connector died once under three concurrent 120-message
- * reads, so nothing here runs in parallel and nothing asks for more than one
- * message at a time. ONE bound keeps that honest on a large account —
- * {@link MAX_PROBES} probes for the whole run — and every candidate inside it
- * is probed. An earlier revision also stopped after a run of consecutive stale
- * candidates, which was a recency assumption about a list this module opens by
- * saying is not ordered by recency: a dialog answered an hour ago, sitting
- * below a block of dormant ones, was silently dropped from the report.
+ * reads, so NOTHING here runs in parallel — not the feed read, not the
+ * listings, not the probes — and nothing asks for more than one message at a
+ * time. ONE bound keeps that honest on a large account — {@link MAX_PROBES}
+ * probes for the whole run — and every candidate inside it is probed. An
+ * earlier revision also stopped after a run of consecutive stale candidates,
+ * which was a recency assumption about a list this module opens by saying is
+ * not ordered by recency: a dialog answered an hour ago, sitting below a block
+ * of dormant ones, was silently dropped from the report.
  *
  * The resulting plan is written to owner-only state and READ by the run from
  * there — it never travels through the prompt — because it names the
@@ -49,9 +66,14 @@ export type TelegramChatSummary = {
 
 export interface TelegramReadPort {
   /** The account the connector is actually logged in as, sanitized to the
-      same two fields Connect records. `null` when the connector answered
-      something that is not an account. */
-  getMe(): Promise<TelegramIdentity | null>;
+      fields Connect records — including the numeric id the verifier compares
+      (#1091). `null` when the connector answered something that is not an
+      account. */
+  getMe(): Promise<TelegramAccountIdentity | null>;
+  /** Private dialogs the connector's incoming feed recorded as active at or
+      after `sinceMs`, newest first (#1091). Empty when the feed is off or has
+      seen nothing — never an error, because the walk below still runs. */
+  feedDialogs(input: { sinceMs: number }): Promise<FeedDialog[]>;
   /** One bounded page of chats of a kind, in whatever order the connector
       returns them — the caller must not treat it as recency. */
   listChats(input: { kind: TelegramChatKind; limit: number }): Promise<TelegramChatSummary[]>;
@@ -90,10 +112,14 @@ export type ReportSourcePlan = {
   groups: TelegramReportGroup[];
   /** How many single-message probes the plan cost, for the run log. */
   probes: number;
+  /** How many of the plan's dialogs the incoming feed supplied — the ones no
+      list order and no probe budget could have hidden (#1091). */
+  feedDialogs: number;
   /** Whether more active dialogs existed than the plan carries. */
   truncated: boolean;
   /** Whether the walk ran out of probe budget before it ran out of
-      candidates, so the plan is a bounded view rather than a complete one. */
+      candidates, so the plan is a bounded view rather than a complete one.
+      Dialogs the feed supplied are unaffected by it either way. */
   probeBudgetExhausted: boolean;
 };
 
@@ -149,21 +175,34 @@ async function candidateDialogs(port: TelegramReadPort): Promise<Array<{ id: str
 /**
  * Builds the source plan for one window.
  *
- * Private dialogs: every candidate whose last message falls inside the window,
- * newest first, capped. The walk probes candidates in list order and stops
- * only at the probe budget, so a dialog's POSITION in the list never decides
- * whether it is looked at — only its last-message date decides whether it is
- * carried. Groups: exactly what the operator picked, with their full/light
- * flag — a group is a source because the operator said so, never because it
- * was busy.
+ * Private dialogs come from two passes, in this order and never in parallel:
+ *
+ *  1. THE FEED — every dialog it recorded as active inside the window. These
+ *     cost no probe and depend on no list order, so an active dialog ranked
+ *     last by the connector is in the plan regardless of what the walk reaches.
+ *  2. THE WALK — every remaining candidate, probed in list order until the
+ *     probe budget runs out, carried when its last message falls in the window.
+ *     Position never decides whether a dialog is LOOKED at; the date decides
+ *     whether it is CARRIED.
+ *
+ * Groups are exactly what the operator picked, with their full/light flag — a
+ * group is a source because the operator said so, never because it was busy.
  */
 export async function planReportSources(
   port: TelegramReadPort,
   input: { windowStart: string; windowEnd: string; groups: readonly TelegramReportGroup[]; promptVersion: string },
 ): Promise<ReportSourcePlan> {
   const windowStart = Date.parse(input.windowStart);
-  const candidates = await candidateDialogs(port);
+  const fromFeed = await port.feedDialogs({ sinceMs: windowStart });
   const active: ReportSourceDialog[] = [];
+  const carried = new Set<string>();
+  for (const dialog of fromFeed) {
+    if (carried.has(dialog.id)) continue;
+    carried.add(dialog.id);
+    active.push({ id: dialog.id, title: dialog.title, lastMessageAt: dialog.lastMessageAt });
+  }
+  /* Sequential on purpose: see the module comment. */
+  const candidates = (await candidateDialogs(port)).filter((chat) => !carried.has(chat.id));
   let probes = 0;
   for (const chat of candidates) {
     if (probes >= MAX_PROBES) break;
@@ -183,9 +222,48 @@ export async function planReportSources(
     privateDialogs: active.slice(0, MAX_PRIVATE_DIALOGS),
     groups: input.groups.map((group) => ({ ...group })),
     probes,
+    feedDialogs: carried.size,
     truncated: active.length > MAX_PRIVATE_DIALOGS,
     probeBudgetExhausted: probes >= MAX_PROBES && candidates.length > probes,
   };
+}
+
+/**
+ * The groups the operator can choose as report sources (#1091).
+ *
+ * The typed listing alone was one pre-filtered page: `list_chats` takes its 100
+ * dialogs of every kind first and filters by `chat_type` afterwards, so an
+ * operator whose first hundred dialogs are private chats was offered NO groups
+ * at all and could not pick the room they meet in every day. The paged raw list
+ * is the way past that ceiling, exactly as it is for dialogs — and it carries
+ * no kind, so a negative marked id (a group or a channel, never a private
+ * dialog) is what qualifies a row there. The operator picks; the Viewer does
+ * not guess which rooms matter.
+ *
+ * Bounded and sequential like everything else here: one typed listing plus at
+ * most {@link MAX_CHAT_PAGES} pages, never two at once.
+ */
+export async function listReportGroups(port: TelegramReadPort): Promise<Array<{ id: string; title: string }>> {
+  const typed = await port.listChats({ kind: "group", limit: CHAT_PAGE_LIMIT });
+  const seen = new Set<string>();
+  const groups: Array<{ id: string; title: string }> = [];
+  for (const chat of typed) {
+    if (seen.has(chat.id)) continue;
+    seen.add(chat.id);
+    groups.push({ id: chat.id, title: chat.title });
+  }
+  for (let page = 1; page <= MAX_CHAT_PAGES; page += 1) {
+    /* Sequential on purpose: see the module comment. */
+    const rows = await port.pageChats({ page, pageSize: CHAT_PAGE_LIMIT });
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      if (seen.has(row.id) || isPrivateChatId(row.id)) continue;
+      seen.add(row.id);
+      groups.push(row);
+    }
+    if (rows.length < CHAT_PAGE_LIMIT) break;
+  }
+  return groups;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -246,11 +324,35 @@ export function connectorReadPort(): TelegramReadPort {
   return {
     async getMe() {
       /* `get_me` answers with the entity object itself rather than the
-         `{"results": []}` envelope the listings use. */
-      const parsed = JSON.parse(toolText(await call("get_me", {}))) as { name?: unknown; username?: unknown };
+         `{"results": []}` envelope the listings use. Its `id` is the marked
+         id, which for a user IS the account id (#1091). */
+      const parsed = JSON.parse(toolText(await call("get_me", {}))) as { id?: unknown; name?: unknown; username?: unknown };
       const name = typeof parsed?.name === "string" ? parsed.name.trim() : "";
-      if (!name) return null;
-      return { name, username: typeof parsed.username === "string" && parsed.username ? parsed.username : null };
+      const id = validTelegramAccountId(parsed?.id);
+      if (!name && !id) return null;
+      return {
+        name,
+        username: typeof parsed.username === "string" && parsed.username ? parsed.username : null,
+        id,
+      };
+    },
+    async feedDialogs(input) {
+      /* Two reads, in this order, never overlapping: ask the connector where
+         its feed is, then read that file locally. The status call is the
+         issue's own contract — a connector adopted from an older generation
+         answers with the path IT is writing, which is the file that actually
+         holds the account's activity. */
+      try {
+        const status = JSON.parse(toolText(await call("incoming_feed_status", {}))) as { feed_file?: unknown };
+        const feedFile = typeof status?.feed_file === "string" && status.feed_file ? status.feed_file : null;
+        return readFeedDialogsSince(feedFile, input.sinceMs);
+      } catch {
+        /* A feed that cannot be located or read is not a failed run: the
+           candidate walk still covers the account, exactly as it did before the
+           feed existed. A connector that is actually down fails the walk next,
+           which is where a run SHOULD fail. */
+        return [];
+      }
     },
     async listChats(input) {
       const result = await call("list_chats", { chat_type: input.kind, limit: Math.min(input.limit, CHAT_PAGE_LIMIT) });

@@ -67,6 +67,22 @@ export function telegramVenvDir(): string {
   return statePath("telegram", "venv");
 }
 
+/**
+ * The connector's incoming-event feed (issue #1091).
+ *
+ * The feed is an append-only JSONL record of settled incoming private bursts —
+ * the only source that says which dialogs were ACTIVE, in real time, without
+ * walking a chat list whose order is pins and folders. A Daily Report run's
+ * private-dialog discovery reads it, so it is pinned beside the credential
+ * rather than left at the connector's XDG default: it names the operator's
+ * correspondents, so it belongs inside the 0700 telegram directory under the
+ * same owner-only fence as everything else this feature stores. The connector
+ * creates it 0600 itself.
+ */
+export function telegramIncomingFeedPath(): string {
+  return statePath("telegram", "incoming_feed.jsonl");
+}
+
 /** The provisioner's writable staging copy of the vendored tree (#1084): the
     packaged tree can sit on a read-only filesystem, while the runtime's
     supply-chain guard requires a source checkout and the server writes its
@@ -244,6 +260,16 @@ export function connectorLaunchSpec(input: { sessionString: string; connectorTok
       TELEGRAM_API_HASH: input.credentials.apiHash,
       TELEGRAM_SESSION_STRING: input.sessionString,
       TELEGRAM_EXPOSED_TOOLS: "read-only",
+      /* Run the incoming feed (#1091). Without it the connector records
+         activity nowhere, and private-dialog discovery is back to guessing
+         from a chat list that is not ordered by recency. The feed CONSUMES
+         settled bursts, which upstream documents as mutually exclusive with a
+         blocking `wait_for_settled_message`: an agent watching one chat may
+         miss a burst the feed already took. That is the trade this connector
+         makes — it is the Viewer's own, and the durable daily record is worth
+         more than one blocking wait. */
+      TELEGRAM_EVENT_FEED: "1",
+      TELEGRAM_EVENT_FEED_FILE: telegramIncomingFeedPath(),
       LLV_TELEGRAM_MCP_TOKEN: input.connectorToken,
       LLV_TELEGRAM_VENDOR_DIR: vendor,
       MCP_TRANSPORT: "http",

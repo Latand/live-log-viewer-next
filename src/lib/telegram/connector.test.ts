@@ -184,6 +184,23 @@ test("the launch env — not this test's env — carries the session; argv never
   expect(spec.args).toEqual([expect.stringContaining("telegram-mcp-server.py")]);
 });
 
+test("the connector runs its incoming feed, beside the credential (#1091)", async () => {
+  const { connectorLaunchSpec, telegramIncomingFeedPath } = await import("./packaging");
+  const spec = connectorLaunchSpec({
+    sessionString: PLACEHOLDER_SESSION,
+    connectorToken: CONNECTOR_SESSION.connectorToken,
+    credentials: { apiId: "12345", apiHash: "0123456789abcdef0123456789abcdef" },
+  });
+  /* Without this the connector records activity nowhere and a report's
+     private-dialog discovery is back to guessing from a chat list that is not
+     ordered by recency. */
+  expect(spec.env.TELEGRAM_EVENT_FEED).toBe("1");
+  /* The feed names the operator's correspondents, so it lives inside the 0700
+     telegram directory rather than at the connector's XDG default. */
+  expect(spec.env.TELEGRAM_EVENT_FEED_FILE).toBe(telegramIncomingFeedPath());
+  expect(telegramIncomingFeedPath()).toBe(path.join(process.env.LLV_STATE_DIR!, "telegram", "incoming_feed.jsonl"));
+});
+
 test("an allowlisted foreign listener is never adopted", async () => {
   const foreign: ConnectorProbe = { ...READ_ONLY, serverName: "telegram" };
   const { ports, calls } = fakePorts([foreign]);

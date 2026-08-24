@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 
 import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentEvent, type TelegramEnrollmentHandle } from "./adapter";
 import { ensureTelegramConnector, stopTelegramConnector, type ConnectorEnsureResult } from "./connector";
-import type { TelegramErrorCode, TelegramIdentity, TelegramStatusPayload } from "./contracts";
+import type { TelegramAccountIdentity, TelegramErrorCode, TelegramStatusPayload } from "./contracts";
 import { registerTelegramHosts, unregisterTelegramHosts, type TelegramHostRegistrationResult } from "./hostRegistration";
 import { telegramApiCredentials } from "./packaging";
 import {
@@ -145,7 +145,7 @@ export class TelegramConnectionService {
       connection = readTelegramConnection();
     } catch (error) {
       if (!(error instanceof UnsafeTelegramSessionError)) throw error;
-      return this.payloadFor({ version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "session_unsafe" });
+      return this.payloadFor({ version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "session_unsafe", identityIdUpgradedAt: null });
     }
     return this.payloadFor(connection);
   }
@@ -154,7 +154,11 @@ export class TelegramConnectionService {
     return {
       phase: connection.status,
       login: null,
-      identity: connection.identity,
+      /* The recorded numeric account id (#1091) stays server-side: the panel
+         renders a name and a handle, and nothing outside the verifier has a
+         use for the id. Projecting the two public fields explicitly is what
+         keeps a later field added to the stored identity from leaking. */
+      identity: connection.identity ? { name: connection.identity.name, username: connection.identity.username } : null,
       credentialRef: connection.credentialRef,
       lastHealthCheckAt: connection.lastHealthCheckAt,
       error: connection.status === "error" && connection.errorCode ? { code: connection.errorCode } : null,
@@ -171,7 +175,7 @@ export class TelegramConnectionService {
       try {
         const connection = readTelegramConnection();
         if (connection.status === "error" && connection.errorCode === "credentials_missing") {
-          writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null });
+          writeTelegramConnection({ version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null, identityIdUpgradedAt: null });
         }
       } catch { /* an unsafe session keeps its explicit-deletion contract */ }
     }
@@ -242,7 +246,7 @@ export class TelegramConnectionService {
       EVERY failure — refusal, timeout, thrown error — lands in an explicit
       error state over the preserved session. Cancellation invalidates the
       generation and removes a credential that authorization already wrote. */
-  private async completeEnrollment(operation: LiveLogin, sessionString: string, identity: TelegramIdentity, generation: number): Promise<void> {
+  private async completeEnrollment(operation: LiveLogin, sessionString: string, identity: TelegramAccountIdentity, generation: number): Promise<void> {
     let stored: StoredTelegramSession;
     try {
       stored = saveTelegramSession(sessionString);
@@ -261,12 +265,12 @@ export class TelegramConnectionService {
     if (!this.lifecycleIsCurrent(generation) || this.login !== operation) return;
     this.login = null;
     if (!connector.ok) {
-      writeTelegramConnection({ version: 1, status: "error", credentialRef: stored.credentialRef, identity, lastHealthCheckAt: null, errorCode: connector.code });
+      writeTelegramConnection({ version: 1, status: "error", credentialRef: stored.credentialRef, identity, lastHealthCheckAt: null, errorCode: connector.code, identityIdUpgradedAt: null });
       return;
     }
     if (!this.registerVerifiedHosts()) {
       await this.cleanupFailedRegistration();
-      writeTelegramConnection({ version: 1, status: "error", credentialRef: stored.credentialRef, identity, lastHealthCheckAt: null, errorCode: "host_registration_failed" });
+      writeTelegramConnection({ version: 1, status: "error", credentialRef: stored.credentialRef, identity, lastHealthCheckAt: null, errorCode: "host_registration_failed", identityIdUpgradedAt: null });
       return;
     }
     writeTelegramConnection({
@@ -276,6 +280,7 @@ export class TelegramConnectionService {
       identity,
       lastHealthCheckAt: new Date(this.ports.now()).toISOString(),
       errorCode: null,
+      identityIdUpgradedAt: null,
     });
   }
 
@@ -311,6 +316,7 @@ export class TelegramConnectionService {
           identity: null,
           lastHealthCheckAt: null,
           errorCode: connectorStopped ? null : "connector_failed",
+          identityIdUpgradedAt: null,
         });
       } else {
         this.recordError("session_unsafe");
@@ -329,7 +335,7 @@ export class TelegramConnectionService {
     try {
       return readTelegramConnection();
     } catch {
-      return { version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null };
+      return { version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null, identityIdUpgradedAt: null };
     }
   }
 
@@ -410,6 +416,7 @@ export class TelegramConnectionService {
           identity: null,
           lastHealthCheckAt: null,
           errorCode: connectorStopped ? null : "connector_failed",
+          identityIdUpgradedAt: null,
         });
       }
       return;
@@ -437,23 +444,27 @@ export class TelegramConnectionService {
         connector = { ok: false, code: "connector_failed" };
       }
       if (!this.lifecycleIsCurrent(generation)) return;
+      /* The account answered, so this is the read the id migration is owed —
+         whether or not the connector or host registration behind it succeeds
+         (#1091). */
+      const recorded = recordedIdentityAfterHealthCheck(connection, result.identity, checkedAt);
       if (!connector.ok) {
-        writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: connector.code });
+        writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, ...recorded, lastHealthCheckAt: checkedAt, errorCode: connector.code });
         return;
       }
       if (!this.registerVerifiedHosts()) {
         await this.cleanupFailedRegistration();
-        writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: "host_registration_failed" });
+        writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, ...recorded, lastHealthCheckAt: checkedAt, errorCode: "host_registration_failed" });
         return;
       }
-      writeTelegramConnection({ version: 1, status: "connected", credentialRef: session.credentialRef, identity: result.identity, lastHealthCheckAt: checkedAt, errorCode: null });
+      writeTelegramConnection({ version: 1, status: "connected", credentialRef: session.credentialRef, ...recorded, lastHealthCheckAt: checkedAt, errorCode: null });
       return;
     }
     if (result.status === "expired") {
-      writeTelegramConnection({ version: 1, status: "expired", credentialRef: session.credentialRef, identity: connection.identity, lastHealthCheckAt: checkedAt, errorCode: null });
+      writeTelegramConnection({ version: 1, status: "expired", credentialRef: session.credentialRef, identity: connection.identity, lastHealthCheckAt: checkedAt, errorCode: null, identityIdUpgradedAt: connection.identityIdUpgradedAt });
       return;
     }
-    writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: connection.identity, lastHealthCheckAt: checkedAt, errorCode: result.code });
+    writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: connection.identity, lastHealthCheckAt: checkedAt, errorCode: result.code, identityIdUpgradedAt: connection.identityIdUpgradedAt });
   }
 
   /** Remote logout. Success removes the local session too; failure PRESERVES
@@ -514,6 +525,37 @@ export class TelegramConnectionService {
     const connectorStopped = await this.teardownConnectorAndHosts();
     this.deleteCredentialsAndPublishDisconnected(connectorStopped);
   }
+}
+
+/**
+ * The identity a health check records, and the one-time id migration (#1091).
+ *
+ * A connection enrolled before the numeric account id existed carries a name
+ * and a handle only, and the report-run verifier has nothing durable to compare
+ * against. The health check is where that is repaired: it already re-reads the
+ * account through the login bridge, so the id arrives with it, is persisted,
+ * and the record is stamped as migrated — ONCE. The stamp is set whether or not
+ * an id actually came back, so a bridge too old to report one is not re-probed
+ * on every health check for the rest of the connection's life.
+ *
+ * A recorded id also STICKS: a later read that carries no id (an older bridge
+ * on a downgraded install) leaves the stored id alone rather than erasing it,
+ * because erasing it would quietly demote the verifier back to comparing names
+ * — the exact failure #1091 exists to end. A read that carries a DIFFERENT id
+ * wins, because the bridge speaks for the session and the session is the
+ * account.
+ */
+export function recordedIdentityAfterHealthCheck(
+  previous: StoredTelegramConnection,
+  fresh: TelegramAccountIdentity,
+  checkedAt: string,
+): { identity: TelegramAccountIdentity; identityIdUpgradedAt: string | null } {
+  const recordedId = previous.identity?.id ?? null;
+  const migrationOwed = previous.identity !== null && recordedId === null;
+  return {
+    identity: { ...fresh, id: fresh.id ?? recordedId },
+    identityIdUpgradedAt: previous.identityIdUpgradedAt ?? (migrationOwed ? checkedAt : null),
+  };
 }
 
 /* One service per process, across route bundles. */

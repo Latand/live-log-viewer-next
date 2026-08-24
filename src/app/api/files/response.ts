@@ -31,6 +31,7 @@ import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { loadTasks } from "@/lib/tasks/store";
 import { projectSupersededTaskHandoffs } from "@/lib/tasks/supersedence";
+import { reportRunIdFromAttemptId } from "@/lib/telegram/reportLineage";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { cachedLimitsProvenance } from "@/lib/limits";
@@ -356,8 +357,15 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      provenance even when the root has no parent edge. Computed once per
      response so the per-file projection stays O(1). */
   const receiptOwnedConversationIds = new Set<string>();
+  /* The durable Telegram report-run marker (issue #1091) rides on the same
+     receipts: the attempt id spells the run id, so a report run is recognisable
+     from registry storage alone — no Daily Reports history file involved. */
+  const telegramReportRuns = new Map<string, string>();
   for (const receipt of Object.values(registrySnapshot.receipts)) {
-    receiptOwnedConversationIds.add(conversationLookup.canonicalConversationId(receipt.conversationId));
+    const conversationId = conversationLookup.canonicalConversationId(receipt.conversationId);
+    receiptOwnedConversationIds.add(conversationId);
+    const reportRunId = reportRunIdFromAttemptId(receipt.clientAttemptId);
+    if (reportRunId) telegramReportRuns.set(conversationId, reportRunId);
   }
   traceStep("receipt-owners");
   /* Supersedence lineage (issue #383): the reverse edge map gives each chain
@@ -485,6 +493,8 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       } else if (durableEdge?.source === "viewer-spawn" || receiptOwnedConversationIds.has(conversation.id)) {
         file.spawnOrigin = "viewer";
       }
+      const telegramReportRunId = telegramReportRuns.get(conversation.id);
+      if (telegramReportRunId) file.telegramReport = { runId: telegramReportRunId };
       const memberships = registrySnapshot.memberships[conversation.id] ?? [];
       if (durableEdge || memberships.length) {
         file.durableLineage = {

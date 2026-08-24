@@ -22,7 +22,7 @@ import type { StoredTelegramConnection } from "./sessionStore";
 import type { TelegramChatSummary, TelegramReadPort } from "./reportSources";
 
 const NOW = Date.parse("2026-08-21T07:00:00.000Z"); // 10:00 Kyiv, Friday
-const IDENTITY = { name: "Account A", username: "account_a" };
+const IDENTITY = { name: "Account A", username: "account_a", id: "770000001" };
 
 const CONNECTED: StoredTelegramConnection = {
   version: 1,
@@ -31,6 +31,7 @@ const CONNECTED: StoredTelegramConnection = {
   identity: IDENTITY,
   lastHealthCheckAt: "2026-08-21T06:59:00.000Z",
   errorCode: null,
+  identityIdUpgradedAt: null,
 };
 
 class FakePorts implements ReportRunnerPorts {
@@ -38,9 +39,11 @@ class FakePorts implements ReportRunnerPorts {
   connectionState: StoredTelegramConnection = { ...CONNECTED };
   /** What the connector's own `get_me` answers, which is what the Viewer
       verifies the recorded identity against. */
-  liveIdentity: { name: string; username: string | null } | null = { ...IDENTITY };
+  liveIdentity: { name: string; username: string | null; id: string | null } | null = { ...IDENTITY };
   getMeError: Error | null = null;
   chats: TelegramChatSummary[] = [{ id: "101", kind: "user", title: "Dialog A", username: null, unread: 2 }];
+  /** What the connector's incoming feed recorded as active (#1091). */
+  feed: Array<{ id: string; title: string; lastMessageAt: string }> = [];
   lastMessage: string | null = "2026-08-21T05:00:00.000Z";
   listChatsError: Error | null = null;
   /** Holds the source pass open, to model a run still being planned. */
@@ -65,6 +68,10 @@ class FakePorts implements ReportRunnerPorts {
         this.reads.push("getMe");
         if (this.getMeError) throw this.getMeError;
         return this.liveIdentity;
+      },
+      feedDialogs: async () => {
+        this.reads.push("feedDialogs");
+        return this.feed;
       },
       listChats: async () => {
         this.reads.push("listChats");
@@ -135,6 +142,9 @@ test("Run now launches a board-visible Codex conversation holding exactly viewer
   expect(body.parentConversationId).toBeUndefined();
   expect(body.src).toBeUndefined();
   expect(body.clientAttemptId).toBe(`telegram-report-${launched.ok ? launched.runId : ""}`);
+  /* The other half of the durable marker (#1091): explicit project ownership,
+     which is what the board groups the run's card by. */
+  expect(body.project).toBe("telegram-reports");
   expect(String(body.cwd)).toContain("report-workspace");
 
   const prompt = String(body.prompt);
@@ -198,7 +208,7 @@ test("a get_me mismatch ends the run before any chat is read, with no report and
   enableReports();
   /* The connector is logged into somebody else — a re-login to a second
      account, a session swapped underneath the Viewer. */
-  ports.liveIdentity = { name: "Account B", username: "account_b" };
+  ports.liveIdentity = { name: "Account B", username: "account_b", id: "770000002" };
   const runner = new TelegramReportRunner(ports);
   await runner.runNow();
   await runner.settled();
@@ -215,15 +225,19 @@ test("a get_me mismatch ends the run before any chat is read, with no report and
   expect(file.cursor.unreportedSinceAt).toBe(new Date(NOW - 24 * 3_600_000).toISOString());
 });
 
-test("an operator who renamed themselves or took a new handle still gets their report", async () => {
-  /* Both recorded fields are the operator's to change at any moment, and the
-     recorded copy only refreshes on a health check. Demanding that both agree
-     would end every report `account-mismatch` the day they picked a new
+test("a pre-#1091 connection with no recorded id still reports through a rename", async () => {
+  /* The name/handle rule survives for exactly one case: a connection enrolled
+     before the numeric id was recorded, whose one-time migration has not run
+     yet. Both recorded fields are the operator's to change at any moment and
+     the recorded copy only refreshes on a health check, so demanding that both
+     agree would end every report `account-mismatch` the day they picked a new
      @handle — a silently dead feature. Agreement on either field is the same
      account. */
+  const legacy = { ...IDENTITY, id: null };
   const renamed = new FakePorts();
   enableReports();
-  renamed.liveIdentity = { name: IDENTITY.name, username: "account_a_backup" };
+  renamed.connectionState = { ...CONNECTED, identity: legacy };
+  renamed.liveIdentity = { name: IDENTITY.name, username: "account_a_backup", id: IDENTITY.id };
   const afterHandleChange = new TelegramReportRunner(renamed);
   await afterHandleChange.runNow();
   await afterHandleChange.settled();
@@ -233,11 +247,39 @@ test("an operator who renamed themselves or took a new handle still gets their r
   fs.rmSync(path.join(SANDBOX, "state"), { recursive: true, force: true });
   enableReports();
   const displayName = new FakePorts();
-  displayName.liveIdentity = { name: "Account A (away until Monday)", username: IDENTITY.username };
+  displayName.connectionState = { ...CONNECTED, identity: legacy };
+  displayName.liveIdentity = { name: "Account A (away until Monday)", username: IDENTITY.username, id: IDENTITY.id };
   const afterNameChange = new TelegramReportRunner(displayName);
   await afterNameChange.runNow();
   await afterNameChange.settled();
   expect(displayName.spawns.length).toBe(1);
+});
+
+test("the recorded id decides: a full rename passes, a same-named stranger does not", async () => {
+  /* The defect #1091 names. A second account that took the operator's display
+     name and handle passed the v1 check, while the operator changing BOTH of
+     their own fields failed it. The numeric id is the one field of an account
+     nobody can hand themselves, so when both sides carry one it is the whole
+     answer. */
+  const renamed = new FakePorts();
+  enableReports();
+  renamed.liveIdentity = { name: "Somebody Else Entirely", username: "another_handle", id: IDENTITY.id };
+  const sameAccount = new TelegramReportRunner(renamed);
+  await sameAccount.runNow();
+  await sameAccount.settled();
+  expect(renamed.spawns.length).toBe(1);
+
+  fs.rmSync(path.join(SANDBOX, "state"), { recursive: true, force: true });
+  enableReports();
+  const impostor = new FakePorts();
+  impostor.liveIdentity = { name: IDENTITY.name, username: IDENTITY.username, id: "770000009" };
+  const otherAccount = new TelegramReportRunner(impostor);
+  await otherAccount.runNow();
+  await otherAccount.settled();
+  expect(impostor.spawns.length).toBe(0);
+  expect(impostor.reads).toEqual(["getMe"]);
+  const history = otherAccount.payload().history;
+  expect(history[0]).toMatchObject({ status: "account-mismatch", conversationId: null, hasReport: false });
 });
 
 test("the connector's sanitized spelling of a name is the same account", async () => {
@@ -250,9 +292,9 @@ test("the connector's sanitized spelling of a name is the same account", async (
   enableReports();
   ports.connectionState = {
     ...CONNECTED,
-    identity: { name: "Account\u200b A ", username: null },
+    identity: { name: "Account\u200b A ", username: null, id: null },
   };
-  ports.liveIdentity = { name: "Account A", username: null };
+  ports.liveIdentity = { name: "Account A", username: null, id: "770000001" };
   const runner = new TelegramReportRunner(ports);
   await runner.runNow();
   await runner.settled();
@@ -438,7 +480,7 @@ test("a disconnected account cannot run a report, and its stored reports are cle
   expect(readTelegramReports().history.length).toBe(1);
 
   /* Log out / delete local session: no status, no credential. */
-  ports.connectionState = { version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null };
+  ports.connectionState = { version: 1, status: "disconnected", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: null, identityIdUpgradedAt: null };
   await runner.tick();
   const cleared = readTelegramReports();
   expect(cleared.history).toEqual([]);

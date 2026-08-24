@@ -6,7 +6,7 @@ import { readValidatedTelegramSessionFiles } from "../../../bin/telegram-session
 
 import { statePath } from "@/lib/configDir";
 
-import type { TelegramErrorCode, TelegramIdentity } from "./contracts";
+import { validTelegramAccountId, type TelegramAccountIdentity, type TelegramErrorCode } from "./contracts";
 
 /**
  * Owner-only persistence for the Telegram credential (issue #1059).
@@ -50,9 +50,14 @@ export type StoredTelegramConnection = {
   version: 1;
   status: TelegramConnectionStatus;
   credentialRef: string | null;
-  identity: TelegramIdentity | null;
+  identity: TelegramAccountIdentity | null;
   lastHealthCheckAt: string | null;
   errorCode: TelegramErrorCode | null;
+  /** When the pre-#1091 identity on this record was re-read to recover its
+      numeric account id (issue #1091). Set the first time that upgrade runs,
+      whether or not an id came back, so the migration happens ONCE per
+      connection instead of on every health check. */
+  identityIdUpgradedAt: string | null;
 };
 
 export class UnsafeTelegramSessionError extends Error {
@@ -175,6 +180,40 @@ export function readSafeText(pathname: string): string | null {
   return fs.readFileSync(pathname, "utf8");
 }
 
+/**
+ * The last {@link maxBytes} of an owner-only APPEND-ONLY file, whole lines
+ * only (issue #1091).
+ *
+ * The connector's incoming feed grows for as long as the account receives
+ * messages and nothing rotates it, so the Viewer must never read it whole. The
+ * read is bounded from the END — that is where the recent bursts are — and the
+ * first (possibly truncated) line of the window is dropped, so a partial JSON
+ * line is never handed to a parser.
+ */
+export function readSafeTailText(pathname: string, maxBytes: number): string | null {
+  if (ensureTelegramStateDir(false) === null) return null;
+  try {
+    assertSafeSecretFile(pathname);
+  } catch (error) {
+    if (error instanceof UnsafeTelegramSessionError) throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const handle = fs.openSync(pathname, "r");
+  try {
+    const size = fs.fstatSync(handle).size;
+    const length = Math.min(size, Math.max(0, maxBytes));
+    const buffer = Buffer.alloc(length);
+    fs.readSync(handle, buffer, 0, length, size - length);
+    const text = buffer.toString("utf8");
+    if (length >= size) return text;
+    const firstBreak = text.indexOf("\n");
+    return firstBreak === -1 ? "" : text.slice(firstBreak + 1);
+  } finally {
+    fs.closeSync(handle);
+  }
+}
+
 function safeFileExists(pathname: string): boolean {
   try {
     assertSafeSecretFile(pathname);
@@ -277,7 +316,21 @@ const DISCONNECTED: StoredTelegramConnection = {
   identity: null,
   lastHealthCheckAt: null,
   errorCode: null,
+  identityIdUpgradedAt: null,
 };
+
+/** A stored identity, with a pre-#1091 record (no `id`) read as an identity
+    whose id is simply unknown rather than as no identity at all. */
+function readIdentity(value: unknown): TelegramAccountIdentity | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Partial<TelegramAccountIdentity>;
+  if (typeof row.name !== "string") return null;
+  return {
+    name: row.name,
+    username: typeof row.username === "string" ? row.username : null,
+    id: validTelegramAccountId(row.id),
+  };
+}
 
 export function readTelegramConnection(): StoredTelegramConnection {
   const parsed = readSafeJson(telegramConnectionPath());
@@ -288,11 +341,10 @@ export function readTelegramConnection(): StoredTelegramConnection {
     version: 1,
     status: row.status as TelegramConnectionStatus,
     credentialRef: typeof row.credentialRef === "string" ? row.credentialRef : null,
-    identity: row.identity && typeof row.identity === "object" && typeof (row.identity as TelegramIdentity).name === "string"
-      ? { name: (row.identity as TelegramIdentity).name, username: (row.identity as TelegramIdentity).username ?? null }
-      : null,
+    identity: readIdentity(row.identity),
     lastHealthCheckAt: typeof row.lastHealthCheckAt === "string" ? row.lastHealthCheckAt : null,
     errorCode: typeof row.errorCode === "string" ? row.errorCode as TelegramErrorCode : null,
+    identityIdUpgradedAt: typeof row.identityIdUpgradedAt === "string" ? row.identityIdUpgradedAt : null,
   };
 }
 
