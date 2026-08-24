@@ -394,10 +394,7 @@ export async function executeOrchestratorSeatRequest(
       clientMessageId: `orchmandate_${clientRequestId}`,
       /* On a pending replay the ORIGINAL intent's mandate is what completes:
          a retry that recomposed its text must not deliver a second variant. */
-      text: orchestratorMandateForDelivery(
-        begun.kind === "replay" ? begun.seat.mandate : mandate,
-        begun.kind === "replay" ? begun.seat.promptVersion : promptVersion,
-      ),
+      text: orchestratorMandateForDelivery(begun.kind === "replay" ? begun.seat.mandate : mandate),
     });
     if (!delivery.ok) {
       const error = delivery.error ?? "mandate delivery failed";
@@ -456,10 +453,7 @@ export async function executeOrchestratorSeatRequest(
   /* A pending replay spawns the ORIGINAL intent's mandate: the spawn receipt is
      matched by clientAttemptId AND request digest, so a recomposed retry would
      otherwise conflict with its own first attempt. */
-  const spawnMandate = orchestratorMandateForDelivery(
-    begun.kind === "replay" ? begun.seat.mandate : mandate,
-    begun.kind === "replay" ? begun.seat.promptVersion : promptVersion,
-  );
+  const spawnMandate = orchestratorMandateForDelivery(begun.kind === "replay" ? begun.seat.mandate : mandate);
 
   const spawnFields = ["engine", "model", "cwd", "effort", "fast", "accountId", "images", "roleParams", "allowSubagents"] as const;
   const cwd = resolveOrchestratorCwd(project, rawBody.cwd);

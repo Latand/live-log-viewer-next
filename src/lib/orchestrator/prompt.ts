@@ -95,11 +95,11 @@ YOU decide when to deploy, and you execute it yourself. Your authority is your d
 - Replacing manual spawns is a non-goal: the user's own agents keep working; you coordinate, you do not take over.
 - Re-derive board state per turn from bounded snapshots rather than accumulating it in context.`;
 
-/** Every seat receives the initial-status contract. The versioned default owns
-    it directly; bespoke and older mandates receive it as delivery scaffold
-    without changing the mandate stored on the seat. */
-export function orchestratorMandateForDelivery(mandate: string, promptVersion: number | null): string {
-  return promptVersion === ORCHESTRATOR_PROMPT_VERSION
+/** Every seat receives the initial-status contract. Delivery checks the text
+    itself because caller-edited mandates may retain the current prompt version.
+    The stored mandate stays raw, and retries append the directive at most once. */
+export function orchestratorMandateForDelivery(mandate: string): string {
+  return mandate.includes(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)
     ? mandate
     : `${mandate}\n\n${ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE}`;
 }

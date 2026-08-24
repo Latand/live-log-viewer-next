@@ -3,6 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE,
+  ORCHESTRATOR_PROMPT_VERSION,
+  ORCHESTRATOR_SYSTEM_PROMPT,
+} from "./prompt";
 import { setRetireManagerForTests } from "./retire";
 import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
 import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor } from "./seats";
@@ -122,6 +127,25 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(pending).toBeNull();
 });
 
+test("a caller-edited current-version mandate receives the status directive without changing stored text", async () => {
+  const { deps, recorded } = dependencies();
+  const mandate = "custom current-version mandate";
+  const result = await executeOrchestratorSeatRequest({
+    ...spawnRequest("req_00000021"),
+    mandate,
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+  }, deps);
+
+  expect(result.status).toBe(200);
+  const delivered = String(recorded.spawns[0]!.prompt);
+  expect(delivered).toStartWith(mandate);
+  expect(delivered.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({
+    mandate,
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+  });
+});
+
 test("an admitted asynchronous spawn activates the seat from its durable conversation id", async () => {
   const { deps } = dependencies({
     spawn: async () => ({
@@ -212,11 +236,12 @@ test("a completed request replayed by its key spawns and delivers NOTHING a seco
   expect(recorded.deliveries).toHaveLength(0);
 });
 
-test("selecting an EXISTING conversation delivers the mandate without spawning a duplicate", async () => {
+test("selecting an EXISTING conversation delivers a caller-edited current-version mandate once", async () => {
   const { deps, recorded } = dependencies();
   const result = await executeOrchestratorSeatRequest({
     project: "proj-a",
     mandate: "updated mandate",
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
     clientRequestId: "req_00000002",
     conversationId: OLD_ID,
   }, deps);
@@ -228,8 +253,12 @@ test("selecting an EXISTING conversation delivers the mandate without spawning a
     clientMessageId: "orchmandate_req_00000002",
   });
   expect(recorded.deliveries[0]!.text).toStartWith("updated mandate");
-  expect(recorded.deliveries[0]!.text).toContain("all mandate missions are complete; standing by");
-  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(OLD_ID);
+  expect(recorded.deliveries[0]!.text.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({
+    conversationId: OLD_ID,
+    mandate: "updated mandate",
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+  });
 });
 
 test("a replayed adoption keeps its original target during an ABA-shaped retry", async () => {
@@ -389,6 +418,37 @@ test("rotation composes a bounded handoff, switches designation atomically, and 
   expect(retiredHosts).toEqual([]);
 });
 
+test("a current-version rotation override receives one directive while its stored mandate stays raw", async () => {
+  const seeded = dependencies();
+  await executeOrchestratorSeatRequest({
+    ...spawnRequest("req_00000022"),
+    mandate: ORCHESTRATOR_SYSTEM_PROMPT,
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+  }, seeded.deps);
+
+  const successor = "conversation_66666666-6666-4666-8666-666666666666";
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successor, path: "/tmp/successor-override.jsonl" } };
+    },
+  });
+  const result = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000023",
+    mandate: "rotation override mandate",
+  }, deps);
+
+  expect(result.status).toBe(200);
+  const delivered = String(recorded.spawns[0]!.prompt);
+  expect(delivered).toStartWith("rotation override mandate");
+  expect(delivered.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
+  const active = orchestratorSeatFor("proj-a").active;
+  expect(active).toMatchObject({ conversationId: successor, promptVersion: ORCHESTRATOR_PROMPT_VERSION });
+  expect(active?.mandate).toStartWith("rotation override mandate");
+  expect(active?.mandate).not.toContain(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE);
+});
+
 test("an adoption racing an in-flight rotation is refused while the rotation keeps one durable successor", async () => {
   const seeded = dependencies();
   await executeOrchestratorSeatRequest(spawnRequest("req_00000020"), seeded.deps);
@@ -469,6 +529,7 @@ test("a pending replay completes with the ORIGINAL mandate, not a recomposed one
   const prompts = recorded.spawns.map((body) => String(body.prompt));
   expect(prompts[0]).toBe(prompts[1]);
   expect(prompts[0]).toStartWith("own the board");
+  expect(prompts[0]!.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
   expect(prompts[0]).not.toContain("recomposed differently");
 });
 
