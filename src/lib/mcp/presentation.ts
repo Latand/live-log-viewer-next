@@ -303,6 +303,8 @@ export function describeMcpCall(
       resume: "Resuming",
       compact: "Compacting",
       "dialog-key": "Answering dialog in",
+      archive: "Archiving",
+      unarchive: "Unarchiving",
     };
     const verb = verbs[action] ?? "Controlling";
     return {

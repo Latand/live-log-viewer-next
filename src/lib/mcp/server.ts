@@ -1629,12 +1629,12 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan.",
   deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
-  board_snapshot: "Read a bounded, redacted snapshot of the Viewer board and durable placement.",
+  board_snapshot: "Read a bounded, redacted snapshot of the Viewer board, durable placement, and the selected project's hidden conversation count.",
   list_flows: "List durable implement-review flows.",
   get_flow: "Read one implement-review flow by durable id.",
   flow_action: "Apply a supported action to an implement-review flow.",
   list_pipelines: "List durable pipelines as bounded board cards: id, task, project, branch/worktree, state and stateDetail, cursor stage, task links, and a per-stage summary (role, engine, attempt count, latest attempt's state and verdict). Deliberately carries no bodies — the spec, stage prompts, role scaffolds and every attempt's input/output transcript are read with get_pipeline, which still returns the whole record. hasSpec tells you a spec exists; long free text is truncated.",
-  conversation_action: "Interrupt, kill, resume, compact, or answer a dialog for a Viewer conversation. Names the conversation by id, transcript path, or the selected-card reference the operator's turn carried — the last resolves directly, with no operator_snapshot call.",
+  conversation_action: "Control or archive Viewer conversations. interrupt, kill, resume, compact, and dialog-key accept one conversation by id, transcript path, or selected-card reference. archive and unarchive also accept up to 100 targets; they update the existing board hidden placement without requiring a live host or readable transcript. A conversationId resolves server-side to its current generation path. Archive execution requires the operator root or a designated orchestrator seat and retains conversation_action's existing cross-project reach.",
   operator_snapshot: "Read the bounded, secret-redacted Viewer state currently visible to the operator.",
   list_tasks: "List durable board tasks.",
   get_task: "Read one durable board task.",
@@ -1665,6 +1665,14 @@ const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key
    that pinned today's fields would reject tomorrow's evidence at the door. */
 const selectedContextSchema = z.union([z.string().min(1), z.record(z.string(), z.unknown())]).optional()
   .describe("Selected-card reference from the operator's turn (the `ctx=` marker token, or the decoded object). Resolves the conversation through a bounded identity lookup — no operator_snapshot needed.");
+const conversationArchiveTargetSchema = z.object({
+  conversationId: z.string().min(1).optional()
+    .describe("Durable Viewer conversation id. Resolves to the current generation path."),
+  transcriptPath: z.string().min(1).optional()
+    .describe("Exact board transcript path, including a spawn:<launchId> placeholder."),
+}).strict().refine((target) => Boolean(target.conversationId || target.transcriptPath), {
+  message: "conversationId or transcriptPath is required",
+});
 const entityIdSchema = z.string().min(1);
 const snapshotStringSchema = z.string()
   .min(MIN_SNAPSHOT_STRING_LENGTH)
@@ -1926,10 +1934,14 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   }).passthrough(),
   conversation_action: z.object({
     clientRequestId: clientRequestIdSchema,
-    conversationId: z.string().optional(),
-    transcriptPath: z.string().optional(),
+    conversationId: z.string().optional()
+      .describe("Durable Viewer conversation id. Archive actions resolve it to the current generation path."),
+    transcriptPath: z.string().optional()
+      .describe("Exact transcript or spawn:<launchId> board path."),
     selectedContext: selectedContextSchema,
-    action: z.enum(["interrupt", "kill", "resume", "compact", "dialog-key"]),
+    targets: z.array(conversationArchiveTargetSchema).min(1).max(100).optional()
+      .describe("Archive/unarchive list form. Cannot be combined with the single-target fields."),
+    action: z.enum(["interrupt", "kill", "resume", "compact", "dialog-key", "archive", "unarchive"]),
     key: z.enum(["1", "2", "3", "4", "5", "6", "7", "8", "9", "Tab", "Enter", "Escape"]).optional(),
     label: z.string().optional(),
     question: z.string().optional(),

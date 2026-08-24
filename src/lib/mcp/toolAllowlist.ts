@@ -21,6 +21,9 @@ import type { McpToolArgs, McpToolName } from "./server";
  *  - DEPLOY EXECUTION. Only the designated orchestrator seat executes
  *    `deploy_exact_sha`; that authority is derived and refused in the deploy
  *    binding itself, from the same server-attributed identity chain.
+ *  - BOARD ARCHIVING. `conversation_action archive|unarchive` is admitted only
+ *    for the operator root and a durably designated orchestrator seat. The
+ *    action retains conversation_action's existing cross-project reach.
  *
  * The exact-SHA deploy contract, idempotency keys, typed-target validation,
  * receipts and redaction are all enforced in their own layers and are
@@ -90,16 +93,15 @@ export function mcpCallerIdentity(
 }
 
 /**
- * Whether this call is permitted. Everything is allowed for every agent
- * session; the one exception is the health-probe credential's bounded reads.
- * Nothing in the ARGUMENTS is consulted — a permit decision reads identity and
- * tool name only, so no caller can talk its way past this. Refusals carry a
- * code the MCP failure envelope surfaces verbatim, so a refused caller learns
- * what to do instead of retrying into a wall.
+ * Whether this call is permitted. Agent sessions retain the full surface;
+ * archive execution additionally requires the operator root or a designated
+ * orchestrator identity. The health-probe credential remains bounded to its
+ * two reads. Refusals carry a code the MCP failure envelope surfaces verbatim.
  */
 export function permitMcpTool(
   identity: McpCallerIdentity,
   toolName: McpToolName,
+  args: McpToolArgs = {},
 ): McpToolVerdict {
   if (identity.kind === "health-probe") {
     return HEALTH_PROBE_TOOL_SET.has(toolName)
@@ -109,6 +111,17 @@ export function permitMcpTool(
         code: "tool_not_permitted",
         error: `${toolName} is outside the managed MCP health-probe surface.`,
       };
+  }
+  if (toolName === "conversation_action" && (args.action === "archive" || args.action === "unarchive")) {
+    const authorized = identity.kind === "unrestricted" && identity.reason === "manager"
+      || identity.kind === "restricted" && identity.reason === "gateway";
+    if (!authorized) {
+      return {
+        allowed: false,
+        code: "tool_not_permitted",
+        error: "conversation archive actions require the operator root or a designated orchestrator seat",
+      };
+    }
   }
   return ALLOWED;
 }
@@ -187,6 +200,6 @@ export interface McpToolPolicy {
     server. */
 export function mcpToolPolicy(identity: () => McpCallerIdentity): McpToolPolicy {
   return {
-    permit: (toolName) => permitMcpTool(identity(), toolName),
+    permit: (toolName, args) => permitMcpTool(identity(), toolName, args),
   };
 }

@@ -12,11 +12,9 @@ import {
 } from "./toolAllowlist";
 
 /*
- * B+ item 1: the full Viewer MCP surface is present and callable in EVERY
- * agent session. Classification — gateway, worker, manager, unidentified —
- * labels origins; it never makes a tool disappear and it gates no operation
- * here. Deploy authority is derived in the deploy binding itself, from the
- * same server-attributed identity chain (#795).
+ * B+ item 1: the full Viewer MCP surface is present in every agent session.
+ * Archive execution is the scoped operation-level exception: root and a
+ * durably designated orchestrator seat may change board visibility.
  */
 
 const MANAGER_CONVERSATION = "conversation_manager";
@@ -45,6 +43,30 @@ test("every session classification holds the FULL tool surface — enumerated ov
 test("the gateway may message ANY conversation — role no longer restricts recipients", () => {
   const gateway = mcpCallerIdentity({ kind: "root", conversationId: "conversation_root" });
   expect(permitMcpTool(gateway, "send_message").allowed).toBe(true);
+});
+
+test("archive and unarchive admit only root or a durably designated orchestrator", () => {
+  const archiveArgs = { action: "archive" };
+  const root = mcpCallerIdentity({ kind: "root", conversationId: "conversation_root" });
+  const manager = mcpCallerIdentity(
+    { kind: "worker", conversationId: MANAGER_CONVERSATION, role: "builder" },
+    MANAGER,
+  );
+  const worker = mcpCallerIdentity({ kind: "worker", conversationId: "conversation_builder", role: "builder" }, MANAGER);
+  const unidentified = mcpCallerIdentity({ kind: "unidentified" }, MANAGER);
+
+  expect(permitMcpTool(root, "conversation_action", archiveArgs).allowed).toBe(true);
+  expect(permitMcpTool(manager, "conversation_action", archiveArgs).allowed).toBe(true);
+  expect(permitMcpTool(manager, "conversation_action", { action: "unarchive" }).allowed).toBe(true);
+  expect(permitMcpTool(worker, "conversation_action", archiveArgs)).toMatchObject({
+    allowed: false,
+    code: "tool_not_permitted",
+  });
+  expect(permitMcpTool(unidentified, "conversation_action", archiveArgs)).toMatchObject({
+    allowed: false,
+    code: "tool_not_permitted",
+  });
+  expect(permitMcpTool(worker, "conversation_action", { action: "kill" }).allowed).toBe(true);
 });
 
 test("host health admission reaches exactly the two deployment reads and no agent action", () => {

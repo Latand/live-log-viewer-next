@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { boardFor, mutateBoard, patchBoard } from "@/lib/board/store";
 import { DeadlineExceededError } from "@/lib/deadline";
 import { CORPUS_BODY_MARKERS, pipelineCorpus } from "@/lib/pipelines/fixtures/corpus";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -601,7 +602,7 @@ test("board_snapshot returns an inert bounded board projection with durable line
         conversation_worker: [{ kind: "pipeline", containerId: "pipeline_608", role: "builder" }],
       },
     }),
-    boardFor: () => ({ schemaVersion: 1, revision: 7, updatedAt: "2026-07-23T00:00:00.000Z", prefs: { manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false } }),
+    boardFor: () => ({ schemaVersion: 1, revision: 7, updatedAt: "2026-07-23T00:00:00.000Z", prefs: { manual: [], hidden: ["/sessions/hidden-a.jsonl", "/sessions/hidden-b.jsonl"], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false } }),
     noteWrite: () => { writes += 1; },
   } as never);
 
@@ -614,6 +615,7 @@ test("board_snapshot returns an inert bounded board projection with durable line
 
   expect(result).toMatchObject({
     count: 1,
+    hiddenCount: 2,
     board: { revision: 7 },
     conversations: [{
       conversationId: "conversation_worker",
@@ -857,6 +859,156 @@ test("conversation_action delegates to the ownership-fenced conversation command
     operationId,
     receipt: { operationId, status: "queued" },
   });
+});
+
+test("conversation_action archives current generations, deleted ghosts, and spawn placeholders through board placement", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-"));
+  sandboxes.push(sandbox);
+  const boardFile = path.join(sandbox, "board.json");
+  const project = "fixture-owned-project";
+  const predecessorPath = "/fixtures/fixture-project/predecessor.jsonl";
+  const currentPath = "/fixtures/fixture-project/current.jsonl";
+  const deletedGhostPath = "/fixtures/fixture-project/deleted-ghost.jsonl";
+  const spawnPath = "spawn:launch_fixture_placeholder";
+  const launchProfile = {
+    cwd: "/fixtures/fixture-project",
+    project,
+    model: null,
+    effort: null,
+  };
+  const conversation = (id: string, paths: string[]) => ({
+    id,
+    generations: paths.map((pathname) => ({ path: pathname, launchProfile })),
+    continuityPaths: [],
+    projectOwnership: {
+      project,
+      source: "operator",
+      setAt: "2026-08-24T08:00:00.000Z",
+      operationId: `ownership_${id}`,
+    },
+  });
+  const registrySnapshot = {
+    conversations: {
+      conversation_current: conversation("conversation_current", [predecessorPath, currentPath]),
+      conversation_deleted_ghost: conversation("conversation_deleted_ghost", [deletedGhostPath]),
+    },
+    conversationAliases: {},
+    receipts: {
+      launch_fixture_placeholder: {
+        launchId: "launch_fixture_placeholder",
+        conversationId: "conversation_spawn_placeholder",
+        createdAt: "2026-08-24T08:05:00.000Z",
+        explicitProject: project,
+        cwd: "/fixtures/fixture-project",
+        launchProfile,
+      },
+    },
+    lineageEdges: {},
+    memberships: {},
+  };
+  let runtimeCalls = 0;
+  let scanCalls = 0;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => registrySnapshot,
+    completedFileScan: async () => {
+      scanCalls += 1;
+      throw new Error("ghost archiving must not require a transcript scan");
+    },
+    boardFor: (key: string) => boardFor(key, boardFile),
+    patchBoard: (key: string, revision: number, patch: Parameters<typeof patchBoard>[2]) =>
+      patchBoard(key, revision, patch, boardFile),
+    mutateBoard: (key: string, revision: number, mutations: Parameters<typeof mutateBoard>[2]) =>
+      mutateBoard(key, revision, mutations, boardFile),
+    applyConversationAction: async () => {
+      runtimeCalls += 1;
+      throw new Error("archive must not enter runtime conversation control");
+    },
+  } as never);
+
+  const first = await bindings.conversation_action({
+    clientRequestId: "archive-ghosts-first",
+    action: "archive",
+    targets: [
+      { conversationId: "conversation_current" },
+      { transcriptPath: deletedGhostPath },
+      { transcriptPath: spawnPath },
+      { conversationId: "conversation_current" },
+    ],
+  });
+
+  expect(first).toMatchObject({
+    action: "archive",
+    project,
+    projectsTouched: [project],
+    outcomes: [
+      { conversationId: "conversation_current", transcriptPath: currentPath, project, outcome: "archived" },
+      { conversationId: "conversation_deleted_ghost", transcriptPath: deletedGhostPath, project, outcome: "archived" },
+      { conversationId: "conversation_spawn_placeholder", transcriptPath: spawnPath, project, outcome: "archived" },
+      { conversationId: "conversation_current", transcriptPath: currentPath, project, outcome: "already-archived" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 1,
+    prefs: { hidden: [currentPath, deletedGhostPath, spawnPath] },
+  });
+  expect(boardFor(project, boardFile).prefs.hidden).not.toContain(predecessorPath);
+
+  const replayByContent = await bindings.conversation_action({
+    clientRequestId: "archive-ghosts-again",
+    action: "archive",
+    targets: [
+      { conversationId: "conversation_current" },
+      { transcriptPath: deletedGhostPath },
+      { transcriptPath: spawnPath },
+    ],
+  });
+  expect(replayByContent).toMatchObject({
+    outcomes: [
+      { outcome: "already-archived" },
+      { outcome: "already-archived" },
+      { outcome: "already-archived" },
+    ],
+  });
+  expect(boardFor(project, boardFile).revision).toBe(1);
+
+  const restored = await bindings.conversation_action({
+    clientRequestId: "unarchive-ghosts",
+    action: "unarchive",
+    targets: [
+      { conversationId: "conversation_current" },
+      { transcriptPath: deletedGhostPath },
+      { transcriptPath: spawnPath },
+      { transcriptPath: "/fixtures/fixture-project/unknown.jsonl" },
+    ],
+  });
+  expect(restored).toMatchObject({
+    outcomes: [
+      { outcome: "unarchived" },
+      { outcome: "unarchived" },
+      { outcome: "unarchived" },
+      { project: null, outcome: "not-found" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+  expect(runtimeCalls).toBe(0);
+  expect(scanCalls).toBe(1);
+});
+
+test("conversation_action refuses archive batches above 100 before reading board or runtime state", async () => {
+  let reads = 0;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => { reads += 1; return {} as never; },
+    boardFor: () => { reads += 1; return {} as never; },
+    applyConversationAction: async () => { reads += 1; return {} as never; },
+  } as never);
+  const targets = Array.from({ length: 101 }, (_, index) => ({ transcriptPath: `/fixtures/project/session-${index}.jsonl` }));
+
+  await expect(bindings.conversation_action({
+    clientRequestId: "archive-too-many",
+    action: "archive",
+    targets,
+  })).rejects.toThrow("targets supports at most 100 conversations per call");
+  expect(reads).toBe(0);
 });
 
 test("conversation_migration delegates to the revision-fenced migration command with a stable receipt", async () => {
