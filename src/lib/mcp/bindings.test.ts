@@ -1003,6 +1003,11 @@ test("conversation_action archives every generation from either target form and 
   expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
   fs.rmSync(boardFile);
 
+  expect(mutateBoard(project, 0, [{
+    kind: "remap-paths",
+    pairs: [{ from: earlierPath, to: currentPath }],
+  }], boardFile)).toMatchObject({ ok: true, applied: true });
+
   const byExactEarlierPath = await bindings.conversation_action({
     clientRequestId: "archive-resumed-by-earlier-path",
     action: "archive",
@@ -1017,9 +1022,21 @@ test("conversation_action archives every generation from either target form and 
     }],
   });
   expect(boardFor(project, boardFile)).toMatchObject({
-    revision: 1,
+    revision: 2,
+    pathAliases: { [earlierPath]: currentPath },
     prefs: { hidden: [earlierPath, currentPath] },
   });
+
+  const repeatedByExactEarlierPath = await bindings.conversation_action({
+    clientRequestId: "archive-resumed-by-earlier-path-again",
+    action: "archive",
+    transcriptPath: earlierPath,
+  });
+  expect(repeatedByExactEarlierPath).toMatchObject({
+    projectsTouched: [],
+    outcomes: [{ transcriptPath: earlierPath, paths: [], outcome: "already-archived" }],
+  });
+  expect(boardFor(project, boardFile).revision).toBe(2);
 
   const restoredByExactEarlierPath = await bindings.conversation_action({
     clientRequestId: "unarchive-resumed-by-earlier-path",
@@ -1029,7 +1046,7 @@ test("conversation_action archives every generation from either target form and 
   expect(restoredByExactEarlierPath).toMatchObject({
     outcomes: [{ transcriptPath: earlierPath, paths: [earlierPath, currentPath], outcome: "unarchived" }],
   });
-  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 3, prefs: { hidden: [] } });
   fs.rmSync(boardFile);
 
   expect(patchBoard(project, 0, { hidden: [currentPath] }, boardFile)).toMatchObject({ ok: true, applied: true });
@@ -1187,7 +1204,7 @@ test("conversation_action archives ghosts and reconciles interrupted receipts wi
       { conversationId: "conversation_current", transcriptPath: currentPath, paths: [predecessorPath, currentPath], project, outcome: "archived" },
       { conversationId: "conversation_deleted_ghost", transcriptPath: deletedGhostPath, paths: [deletedGhostPath], project, outcome: "archived" },
       { conversationId: "conversation_spawn_placeholder", transcriptPath: spawnPath, paths: [spawnPath], project, outcome: "archived" },
-      { conversationId: "conversation_current", transcriptPath: predecessorPath, paths: [predecessorPath, currentPath], project, outcome: "archived" },
+      { conversationId: "conversation_current", transcriptPath: predecessorPath, paths: [], project, outcome: "already-archived" },
       { conversationId: null, transcriptPath: unknownPath, paths: [], project: null, outcome: "resolution-failed" },
     ],
   });
@@ -1280,7 +1297,7 @@ test("conversation_action archives ghosts and reconciles interrupted receipts wi
   expect(scanCalls).toBe(4);
 });
 
-test("conversation_action reports archive outcomes from the pre-write board during concurrent matching writes", async () => {
+test("conversation_action attributes archive outcomes only to paths written by its board command", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-race-"));
   sandboxes.push(sandbox);
   const boardFile = path.join(sandbox, "board.json");
@@ -1335,7 +1352,7 @@ test("conversation_action reports archive outcomes from the pre-write board duri
   });
   expect(archived).toMatchObject({
     projectsTouched: [],
-    outcomes: [{ transcriptPath, paths: [transcriptPath], project, outcome: "archived" }],
+    outcomes: [{ transcriptPath, paths: [], project, outcome: "already-archived" }],
   });
   expect(boardFor(project, boardFile)).toMatchObject({ revision: 1, prefs: { hidden: [transcriptPath] } });
 
@@ -1346,7 +1363,7 @@ test("conversation_action reports archive outcomes from the pre-write board duri
   });
   expect(unarchived).toMatchObject({
     projectsTouched: [],
-    outcomes: [{ transcriptPath, paths: [transcriptPath], project, outcome: "unarchived" }],
+    outcomes: [{ transcriptPath, paths: [], project, outcome: "not-found" }],
   });
   expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
   expect(commandCalls).toBe(2);

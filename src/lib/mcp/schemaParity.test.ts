@@ -314,7 +314,7 @@ test("conversation_action publishes full-generation archive outcomes and the 100
     expect(action?.enum).toEqual(expect.arrayContaining(["archive", "unarchive"]));
     expect(tool?.description).toContain("every registered generation path");
     expect(tool?.description).toContain("preserving an exact transcriptPath");
-    expect(tool?.description).toContain("outcome lists the paths changed from the pre-write board");
+    expect(tool?.description).toContain("outcome lists the paths actually written by this call");
     expect(tool?.description).toContain("full expanded set was already hidden");
     expect(tool?.description).toContain("readable transcript");
     expect(targets?.maxItems).toBe(100);

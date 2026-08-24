@@ -2133,36 +2133,21 @@ function resolveArchiveTargetFromFiles(
   };
 }
 
-function canonicalBoardPath(board: ReturnType<typeof boardFor>, pathname: string): string {
-  let current = pathname;
-  const seen = new Set<string>();
-  while (board.pathAliases?.[current] !== undefined) {
-    if (seen.has(current)) throw new Error("board path alias cycle");
-    seen.add(current);
-    current = board.pathAliases[current]!;
-  }
-  return current;
-}
-
 function writeArchivePlacement(
   project: string,
   action: "archive" | "unarchive",
   paths: readonly string[],
   snapshot: RegistrySnapshot,
   dependencies: ViewerMcpDomainDependencies,
-): {
-  boardBefore: ReturnType<typeof boardFor>;
-  appliedPaths: ReadonlySet<string>;
-} {
+): { appliedPaths: ReadonlySet<string> } {
   let board = dependencies.boardFor(project);
-  const boardBefore = board;
   const appliedPaths = new Set<string>();
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    const pendingPaths = [...new Set(paths.map((pathname) => canonicalBoardPath(board, pathname)))]
+    const pendingPaths = [...new Set(paths)]
       .filter((pathname) => action === "archive"
         ? !board.prefs.hidden.includes(pathname)
         : board.prefs.hidden.includes(pathname));
-    if (pendingPaths.length === 0) return { boardBefore, appliedPaths };
+    if (pendingPaths.length === 0) return { appliedPaths };
 
     const result = dependencies.applyBoardCommand({
       schemaVersion: 1,
@@ -2180,8 +2165,8 @@ function writeArchivePlacement(
     }, snapshot);
     board = result.board;
     if (result.ok && result.applied) {
-      for (const pathname of pendingPaths) appliedPaths.add(canonicalBoardPath(board, pathname));
-      return { boardBefore, appliedPaths };
+      for (const pathname of pendingPaths) appliedPaths.add(pathname);
+      return { appliedPaths };
     }
   }
   throw new Error(`board state changed repeatedly while ${action === "archive" ? "archiving" : "unarchiving"} conversations`);
@@ -2218,13 +2203,12 @@ async function archiveConversationAction(
         dependencies,
       );
       if (write.appliedPaths.size > 0) projectsTouched.add(project);
+      const attributedPaths = new Set<string>();
       for (const { index, target } of projectMembers) {
-        const paths = target.transcriptPaths.filter((pathname) => {
-          const canonicalPath = canonicalBoardPath(write.boardBefore, pathname);
-          return action === "archive"
-            ? !write.boardBefore.prefs.hidden.includes(canonicalPath)
-            : write.boardBefore.prefs.hidden.includes(canonicalPath);
-        });
+        const paths = target.transcriptPaths.filter((pathname) => (
+          write.appliedPaths.has(pathname) && !attributedPaths.has(pathname)
+        ));
+        for (const pathname of paths) attributedPaths.add(pathname);
         outcomes[index] = {
           conversationId: target.conversationId,
           transcriptPath: target.transcriptPath,

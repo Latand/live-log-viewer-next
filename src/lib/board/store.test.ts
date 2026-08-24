@@ -287,6 +287,22 @@ describe("board store", () => {
       expanded: [paths[2]],
     });
   });
+  test("hidden patches preserve an exact alias source alongside its canonical target", () => {
+    const file = temporaryFile();
+    const project = "archive-exact-alias";
+    const earlier = "/sessions/earlier.jsonl";
+    const current = "/sessions/current.jsonl";
+    mutateBoard(project, 0, [{ kind: "remap-paths", pairs: [{ from: earlier, to: current }] }], file);
+
+    expect(patchBoard(project, 1, { hidden: [earlier, current] }, file)).toMatchObject({
+      ok: true,
+      applied: true,
+      board: {
+        pathAliases: { [earlier]: current },
+        prefs: { hidden: [earlier, current] },
+      },
+    });
+  });
   test("project placement transfer carries continuity aliases with manual placement", () => {
     const file = temporaryFile();
     const source = "/predecessor";

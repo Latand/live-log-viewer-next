@@ -231,11 +231,22 @@ function applyLegacyPatch(current: BoardProjectStateV1, patch: BoardPatch): Boar
   const hidden = patch.hidden === undefined
     ? current.prefs.hidden
     : [...new Set([...current.prefs.hidden, ...patch.hidden])];
-  return applyBoardMutations({
+  const reduced = applyBoardMutations({
     ...current,
     explicitManual: patch.manual === undefined ? current.explicitManual : patch.manual,
     prefs: { ...current.prefs, ...patch, hidden },
   }, []);
+  if (patch.hidden === undefined) return reduced;
+  /* Archive callers persist every concrete generation spelling. Normalization
+     still contributes canonical aliases so both scanned rows and folded cards
+     remain hidden, while the exact requested path survives in durable prefs. */
+  return {
+    ...reduced,
+    prefs: {
+      ...reduced.prefs,
+      hidden: [...new Set([...hidden, ...reduced.prefs.hidden])],
+    },
+  };
 }
 
 function sameReduced(left: BoardProjectStateV1, right: BoardProjectStateV1): boolean {
