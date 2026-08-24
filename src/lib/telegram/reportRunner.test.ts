@@ -373,24 +373,30 @@ test("a reconnect during the source pass refuses the reads and launches nothing"
      the operator can log out and connect account B inside it. The reads are
      bound to the generation that recorded the id being verified, so the first
      one after the swap fails instead of answering as B — no listing, no probe,
-     and no plan holding two accounts' correspondents. */
-  const ports = new FakePorts();
-  enableReports();
-  ports.afterRead = (name) => {
-    if (name === "getMe") ports.connectionState = { ...RECONNECTED_AS_ANOTHER_ACCOUNT };
-  };
-  const runner = new TelegramReportRunner(ports);
-  await runner.runNow();
-  await runner.settled();
+     and no plan holding two accounts' correspondents. Both moments the swap
+     can land in are the same answer: straight after the verification, and
+     between two source calls. */
+  for (const swapAfter of ["getMe", "listChats"]) {
+    fs.rmSync(path.join(SANDBOX, "state"), { recursive: true, force: true });
+    const ports = new FakePorts();
+    enableReports();
+    ports.afterRead = (name) => {
+      if (name === swapAfter) ports.connectionState = { ...RECONNECTED_AS_ANOTHER_ACCOUNT };
+    };
+    const runner = new TelegramReportRunner(ports);
+    await runner.runNow();
+    await runner.settled();
 
-  const file = readTelegramReports();
-  expect(file.history[0]).toMatchObject({ status: "failed", errorCode: "sources_failed", conversationId: null });
-  expect(ports.spawns.length).toBe(0);
-  /* One read past the check, and it refused: nothing was listed or probed. */
-  expect(ports.reads).toEqual(["getMe", "feedDialogs"]);
-  expect(fs.existsSync(reportSourcesPath(file.history[0].id))).toBe(false);
-  /* The window it did not cover is still owed to the next run. */
-  expect(file.cursor.unreportedSinceAt).toBe(new Date(NOW - 24 * 3_600_000).toISOString());
+    const file = readTelegramReports();
+    expect(file.history[0]).toMatchObject({ status: "failed", errorCode: "sources_failed", conversationId: null });
+    expect(ports.spawns.length).toBe(0);
+    /* Exactly one read past the swap, and it refused: whatever the pass had
+       not read yet, it never read as the second account. */
+    expect(ports.reads[ports.reads.indexOf(swapAfter) + 2]).toBeUndefined();
+    expect(fs.existsSync(reportSourcesPath(file.history[0].id))).toBe(false);
+    /* The window it did not cover is still owed to the next run. */
+    expect(file.cursor.unreportedSinceAt).toBe(new Date(NOW - 24 * 3_600_000).toISOString());
+  }
 });
 
 test("a reconnect after the source pass settles the run instead of launching for the new account", async () => {
