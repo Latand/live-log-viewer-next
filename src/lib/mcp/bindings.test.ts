@@ -637,15 +637,16 @@ test("flow tools read durable flows and return a stable action receipt", async (
     { id: "flow_closed", project: "viewer", state: "closed", closedAt: "2026-07-23T01:00:00.000Z" },
     { id: "flow_other", project: "other", state: "waiting_ready", closedAt: null },
   ];
-  const actions: Array<{ id: string; action: string }> = [];
+  const actions: Array<{ id: string; action: string; actor: unknown }> = [];
   const bindings = viewerMcpBindings(undefined, undefined, {
     getFlowsWithPresets: () => ({ flows, presets: [] }),
-    patchFlow: (id: string, request: { action: string }) => {
-      actions.push({ id, action: request.action });
+    patchFlow: (id: string, request: { action: string }, actor: unknown) => {
+      actions.push({ id, action: request.action, actor });
       return { flow: { ...flows[0], id, state: "paused" } };
     },
     cancelRound: async () => ({ flow: flows[0] }),
     closeFlow: async () => ({ flow: flows[0] }),
+    callerAttribution: () => ({ kind: "agent", conversationId: "conversation_reviewer", role: "reviewer" }),
   } as never);
 
   expect(await bindings.list_flows({ clientRequestId: "list-flows", project: "viewer" })).toMatchObject({
@@ -665,7 +666,11 @@ test("flow tools read durable flows and return a stable action receipt", async (
   });
   expect(actionOperationId).toMatch(/^mcp_flow_action_[0-9a-f]{24}$/);
   expect((actionResult.receipt as { operationId: string }).operationId).toBe(actionOperationId);
-  expect(actions).toEqual([{ id: "flow_open", action: "pause" }]);
+  expect(actions).toEqual([{
+    id: "flow_open",
+    action: "pause",
+    actor: { kind: "agent", role: "reviewer", conversationId: "conversation_reviewer" },
+  }]);
 });
 
 test("list_pipelines applies project, state, and closed filters to the durable registry", async () => {
@@ -904,10 +909,15 @@ test("a refused pipeline close exposes its host report through MCP, not only pro
     stillRunning: [{ stageId: "build", attempt: 2, conversationId: "conversation_build", agentPath: null, paneId: "%7", error: "structured runtime host is unavailable" }],
     worktree: { dir: "/repo-pipeline-1", uncommitted: ["notes.md"], truncated: false },
   };
+  let pauseActor: unknown;
   const bindings = viewerMcpBindings(undefined, undefined, {
-    patchPipeline: async (_id: string, request: { action?: string }) => (request.action === "close"
-      ? { error: "could not stop stage build attempt 2 (conversation_build): structured runtime host is unavailable", status: 409, close }
-      : { pipeline: { id: "pipeline_1", state: "paused" } }),
+    patchPipeline: async (_id: string, request: { action?: string }, _ports: unknown, actor: unknown) => {
+      if (request.action === "pause") pauseActor = actor;
+      return request.action === "close"
+        ? { error: "could not stop stage build attempt 2 (conversation_build): structured runtime host is unavailable", status: 409, close }
+        : { pipeline: { id: "pipeline_1", state: "paused" } };
+    },
+    callerAttribution: () => ({ kind: "manager", conversationId: "conversation_orchestrator", role: "orchestrator" }),
   } as never);
   const results = new Map<string, McpToolResult>();
   const service = createMcpToolService(bindings, {
@@ -937,6 +947,7 @@ test("a refused pipeline close exposes its host report through MCP, not only pro
   });
   expect(paused).toMatchObject({ ok: true, pipelineId: "pipeline_1" });
   expect((paused as { details?: unknown }).details).toBeUndefined();
+  expect(pauseActor).toEqual({ kind: "agent", role: "orchestrator", conversationId: "conversation_orchestrator" });
 });
 
 test("agent_activity reports the liveness snapshot and journals the stalls it finds (#645)", async () => {
