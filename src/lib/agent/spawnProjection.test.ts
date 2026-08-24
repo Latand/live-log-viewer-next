@@ -5,6 +5,7 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { activityVerdict } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
 
 import { AgentRegistry } from "./registry";
@@ -283,6 +284,44 @@ test("issue 1108: scanner adoption replaces the synthesized transcript without d
     });
     expect(indexed.facts.has(artifactPath)).toBe(true);
     expect(probes).toBe(0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 1108 review: stale terminal turn evidence yields to an artifact changed before scanner adoption", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1108-stale-turn-evidence-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  const observedAtMs = Date.now();
+  try {
+    fs.writeFileSync(artifactPath, [
+      JSON.stringify({ type: "event_msg", payload: { type: "task_started" } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }),
+      "",
+    ].join("\n"));
+    fs.utimesSync(artifactPath, new Date(observedAtMs - 1_000), new Date(observedAtMs - 1_000));
+    const launch = settledLaunch(directory, artifactPath);
+    launch.registry.reconcileConversations([{
+      engine: "codex",
+      path: artifactPath,
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      turn: { state: "terminal", source: "lifecycle", terminalAt: new Date(observedAtMs - 1_000).toISOString() },
+      observedAt: new Date(observedAtMs).toISOString(),
+    }]);
+
+    fs.appendFileSync(artifactPath, `${JSON.stringify({ type: "event_msg", payload: { type: "task_started" } })}\n`);
+    const changedMtimeMs = observedAtMs + 1_000;
+    fs.utimesSync(artifactPath, new Date(changedMtimeMs), new Date(changedMtimeMs));
+    const stat = fs.statSync(artifactPath);
+    const scanner = activityVerdict("codex-sessions", artifactPath, stat.mtimeMs / 1_000, stat.size);
+    expect(scanner).toMatchObject({ state: "live", reason: "jsonl_turn_open" });
+
+    const projected = projectLaunchConversations([], launch.registry.snapshot(), changedMtimeMs + 1_000).cards[0]!;
+    expect(projected).toMatchObject({
+      activity: scanner.state,
+      activityReason: "mtime_fresh",
+    });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

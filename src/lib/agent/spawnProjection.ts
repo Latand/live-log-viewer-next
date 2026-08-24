@@ -184,13 +184,20 @@ function authoritativeArtifactPath(
 function scannerCompatibleActivity(
   snapshot: RegistryFile,
   receipt: SpawnReceipt,
-  mtime: number,
+  mtimeMs: number,
   nowMs: number,
 ): Pick<FileEntry, "activity" | "activityReason"> {
   const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
   const conversationId = lookup.canonicalConversationId(receipt.conversationId);
-  const turn = lookup.conversation(conversationId)?.turn;
-  const age = nowMs / 1_000 - mtime;
+  const observedTurn = lookup.conversation(conversationId)?.turn;
+  const turnObservedAtMs = Date.parse(observedTurn?.observedAt ?? "");
+  /* Conversation turn state can lag an actively growing artifact between
+     inventory passes. Reuse it only when its observation covers this stat;
+     otherwise the scanner's mtime tiers are the shared bounded fallback. */
+  const turn = Number.isFinite(turnObservedAtMs) && turnObservedAtMs >= Math.trunc(mtimeMs)
+    ? observedTurn
+    : null;
+  const age = (nowMs - mtimeMs) / 1_000;
   if (turn?.state === "busy") {
     return age < 180
       ? { activity: "live", activityReason: "jsonl_turn_open" }
@@ -226,7 +233,7 @@ function projectedTranscriptEntry(
   if (probe && typeof probe === "object") {
     entry.mtime = probe.mtimeMs / 1000;
     entry.size = probe.size;
-    Object.assign(entry, scannerCompatibleActivity(snapshot, receipt, entry.mtime, nowMs));
+    Object.assign(entry, scannerCompatibleActivity(snapshot, receipt, probe.mtimeMs, nowMs));
   }
   return entry;
 }
