@@ -91,14 +91,72 @@ test("issue 1108: a readable registry generation retires its placeholder in the 
       path: artifactPath,
       conversationId: launch.conversationId,
       generation: 1,
-      activity: "recent",
-      activityReason: "structured_spawn_recovered",
+      activity: "live",
+      activityReason: "mtime_fresh",
     });
     expect(projection.cards[0]!.spawn).toBeUndefined();
     expect(projection.facts.get(artifactPath)).toMatchObject({
       conversationId: launch.conversationId,
       generation: 1,
     });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 1108 review: a keyed receipt never adopts an uncorrelated conversation generation", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1108-key-mismatch-"));
+  const priorPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  try {
+    fs.writeFileSync(priorPath, `${JSON.stringify({ type: "user", message: "prior generation" })}\n`);
+    const launch = settledLaunch(directory, priorPath);
+    const snapshot = launch.registry.snapshot();
+    const receipt = snapshot.receipts[launch.launchId]!;
+    receipt.key = { engine: "codex", sessionId: "different-session" };
+    receipt.artifactPath = null;
+
+    const projection = projectLaunchConversations([scannedFile(priorPath)], snapshot, launch.createdMs + 1_000);
+    expect(projection.cards).toEqual([
+      expect.objectContaining({
+        path: `spawn:${launch.launchId}`,
+        conversationId: launch.conversationId,
+      }),
+    ]);
+    expect(projection.facts.size).toBe(0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 1108 review: an unbound launch against an existing conversation keeps its placeholder", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1108-unbound-existing-"));
+  const priorPath = path.join(directory, "prior-generation.jsonl");
+  try {
+    fs.writeFileSync(priorPath, `${JSON.stringify({ type: "user", message: "prior generation" })}\n`);
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const existing = registry.ensureConversation("codex", priorPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      conversationId: existing.id,
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+
+    const projection = projectLaunchConversations(
+      [scannedFile(priorPath)],
+      registry.snapshot(),
+      Date.parse(begun.receipt.createdAt) + 1_000,
+    );
+    expect(projection.cards).toEqual([
+      expect.objectContaining({
+        path: `spawn:${begun.receipt.launchId}`,
+        conversationId: existing.id,
+      }),
+    ]);
+    expect(projection.facts.size).toBe(0);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -199,10 +257,15 @@ test("issue 1108: scanner adoption replaces the synthesized transcript without d
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "indexed later" })}\n`);
     const launch = settledLaunch(directory, artifactPath);
     const snapshot = launch.registry.snapshot();
-    expect(projectLaunchConversations([], snapshot, launch.createdMs + 1_000).cards.map((entry) => entry.path))
-      .toEqual([artifactPath]);
+    const synthesized = projectLaunchConversations([], snapshot, launch.createdMs + 1_000).cards;
+    expect(synthesized.map((entry) => entry.path)).toEqual([artifactPath]);
+    expect(synthesized[0]).toMatchObject({ activity: "live", activityReason: "mtime_fresh" });
 
     const scanned = scannedFile(artifactPath);
+    scanned.mtime = synthesized[0]!.mtime;
+    scanned.size = synthesized[0]!.size;
+    scanned.activity = "live";
+    scanned.activityReason = "mtime_fresh";
     let probes = 0;
     const indexed = projectLaunchConversations(
       [scanned],
@@ -214,6 +277,10 @@ test("issue 1108: scanner adoption replaces the synthesized transcript without d
       },
     );
     expect([scanned, ...indexed.cards].map((entry) => entry.path)).toEqual([artifactPath]);
+    expect(scanned).toMatchObject({
+      activity: synthesized[0]!.activity,
+      activityReason: synthesized[0]!.activityReason,
+    });
     expect(indexed.facts.has(artifactPath)).toBe(true);
     expect(probes).toBe(0);
   } finally {

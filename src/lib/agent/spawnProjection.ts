@@ -159,8 +159,9 @@ type MaterializedEntry = {
 
 /** One authoritative artifact path for this launch. The exact registered
     generation wins, followed by the runtime registry entry and receipt path.
-    The newest conversation generation covers legacy receipts whose native key
-    was never persisted. Selecting once bounds projection to one disk probe. */
+    Every candidate is correlated to this receipt; an unrelated newest
+    conversation generation can never retire a fresh placeholder. Selecting
+    once bounds projection to one disk probe. */
 function authoritativeArtifactPath(
   snapshot: RegistryFile,
   receipt: SpawnReceipt,
@@ -177,8 +178,33 @@ function authoritativeArtifactPath(
   return exactGeneration?.path
     ?? runtimeEntry?.artifactPath
     ?? receipt.artifactPath
-    ?? generations.at(-1)?.path
     ?? null;
+}
+
+function scannerCompatibleActivity(
+  snapshot: RegistryFile,
+  receipt: SpawnReceipt,
+  mtime: number,
+  nowMs: number,
+): Pick<FileEntry, "activity" | "activityReason"> {
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
+  const conversationId = lookup.canonicalConversationId(receipt.conversationId);
+  const turn = lookup.conversation(conversationId)?.turn;
+  const age = nowMs / 1_000 - mtime;
+  if (turn?.state === "busy") {
+    return age < 180
+      ? { activity: "live", activityReason: "jsonl_turn_open" }
+      : { activity: "stalled", activityReason: "jsonl_turn_stalled" };
+  }
+  if (turn?.state === "terminal") {
+    return {
+      activity: age < 900 ? "recent" : "idle",
+      activityReason: "jsonl_turn_completed",
+    };
+  }
+  if (age < 20) return { activity: "live", activityReason: "mtime_fresh" };
+  if (age < 900) return { activity: "recent", activityReason: "mtime_recent" };
+  return { activity: "idle", activityReason: "mtime_old" };
 }
 
 /** Minimal transcript identity used during scanner lag. Scanner-derived fields
@@ -200,19 +226,17 @@ function projectedTranscriptEntry(
   if (probe && typeof probe === "object") {
     entry.mtime = probe.mtimeMs / 1000;
     entry.size = probe.size;
+    Object.assign(entry, scannerCompatibleActivity(snapshot, receipt, entry.mtime, nowMs));
   }
   return entry;
 }
 
-/** The scanned transcript entry that already represents a launch's conversation.
-    A `spawn:` placeholder is never itself an answer here — it IS the projection
-    this lookup decides against. Resolution runs off the durable conversation
-    record (its generations, newest first) so it works before `/api/files`
-    annotates `conversationId` onto scanned entries. During scanner lag, one
-    readable-file probe creates the same transcript identity immediately. */
+/** The receipt-correlated transcript entry for a launch. A `spawn:` placeholder
+    is never itself an answer here. A scanned row wins when its path matches the
+    receipt's authoritative evidence; during scanner lag, one readable-file
+    probe creates the same transcript identity immediately. */
 function materializedEntry(
   byPath: ReadonlyMap<string, FileEntry>,
-  files: readonly FileEntry[],
   snapshot: RegistryFile,
   receipt: SpawnReceipt,
   spawn: StructuredSpawnCardState,
@@ -220,9 +244,6 @@ function materializedEntry(
   nowMs: number,
   artifactProbe: (pathname: string) => ArtifactProbeResult,
 ): MaterializedEntry {
-  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
-  const conversationId = lookup.canonicalConversationId(receipt.conversationId);
-  const generations = lookup.conversation(conversationId)?.generations ?? [];
   const artifactPath = authoritativeArtifactPath(snapshot, receipt);
   if (artifactPath && !isSpawnPlaceholderPath(artifactPath)) {
     const scanned = byPath.get(artifactPath);
@@ -240,20 +261,7 @@ function materializedEntry(
       };
     }
   }
-  for (let index = generations.length - 1; index >= 0; index -= 1) {
-    const candidate = byPath.get(generations[index]!.path);
-    if (candidate && !isSpawnPlaceholderPath(candidate.path)) {
-      return { entry: candidate, projected: false, artifactPresent: false };
-    }
-  }
-  if (receipt.artifactPath) {
-    const candidate = byPath.get(receipt.artifactPath);
-    if (candidate && !isSpawnPlaceholderPath(candidate.path)) {
-      return { entry: candidate, projected: false, artifactPresent: false };
-    }
-  }
-  const annotated = files.find((file) => file.conversationId === conversationId && !isSpawnPlaceholderPath(file.path)) ?? null;
-  return { entry: annotated, projected: false, artifactPresent: false };
+  return { entry: null, projected: false, artifactPresent: false };
 }
 
 /** A projected launch placeholder path (`spawn:<launchId>`). */
@@ -389,7 +397,6 @@ export function projectLaunchConversations(
        transcript reaches the view. */
     const materialized = materializedEntry(
       byPath,
-      files,
       snapshot,
       receipt,
       spawn,
