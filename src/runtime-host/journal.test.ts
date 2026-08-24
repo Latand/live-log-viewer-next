@@ -522,6 +522,11 @@ test("send operations converge by idempotency key and persist one receipt and ef
   expect(journal.snapshot().sessions[0]?.recentReceipts).toHaveLength(1);
   expect(() => journal.executeOperation({ ...command, text: "different" })).toThrow("idempotency key already belongs to another request");
   expect(() => journal.executeOperation({ ...command, idempotencyKey: "send-key-two" })).toThrow("operationId already belongs to another request");
+  /* #1117: authorship is server-derived metadata — caller attribution can
+     lawfully differ between a call and its replay — so a changed origin must
+     replay, never conflict. */
+  expect(journal.executeOperation({ ...command, origin: { kind: "agent" as const, role: "reviewer" } }))
+    .toEqual({ ...first, replayed: true });
   journal.close();
 });
 

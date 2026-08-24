@@ -376,6 +376,10 @@ export class RuntimeJournal {
     const operationId = command.operationId?.trim() || newOperationId();
     const requestValue = { ...command } as Record<string, unknown>;
     delete requestValue.operationId;
+    /* #1117: authorship is server-derived metadata (caller attribution can
+       lawfully differ between a call and its replay), so it must never turn a
+       legitimate idempotent replay into a request-hash conflict. */
+    delete requestValue.origin;
     if (command.kind === "answer") requestValue.resolution = { sha256: createHash("sha256").update(stableJson(command.resolution)).digest("hex") };
     const requestJson = stableJson(requestValue);
     const requestHash = createHash("sha256").update(requestJson).digest("hex");

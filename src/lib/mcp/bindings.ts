@@ -70,6 +70,7 @@ import { adoptLiveRootSession, conversationRole, liveRootSession, type RootSessi
 import { listRoles, resolveSpawnRole } from "@/lib/roles/registry";
 import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
+import { messageOriginRole, type MessageOrigin } from "@/lib/runtime/messageOrigin";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
 import {
   SELECTED_TAIL_MAX_BYTES,
@@ -341,7 +342,7 @@ export function callerAttributionFrom(
   };
 }
 
-function attributionOf(dependencies: ViewerMcpDomainDependencies): CallerAttribution {
+function attributionOf(dependencies: Pick<ViewerMcpDomainDependencies, "callerAttribution" | "attentionAuthority">): CallerAttribution {
   return dependencies.callerAttribution?.()
     ?? callerAttributionFrom(dependencies.attentionAuthority(), () => false);
 }
@@ -354,6 +355,32 @@ function pauseResumeActorOf(dependencies: ViewerMcpDomainDependencies): PauseRes
     role: attribution.role ?? (attribution.kind === "manager" ? "orchestrator" : attribution.kind === "gateway" ? "gateway" : null),
     conversationId: attribution.conversationId,
   };
+}
+
+/**
+ * Message authorship for a send issued through this MCP server (#1117): every
+ * MCP caller is an agent, and the role is the server's own attribution — never
+ * a caller claim. Attribution reads process ancestry, so a fault there costs
+ * only the role, not the send.
+ */
+function mcpSenderOrigin(
+  dependencies: Partial<Pick<ViewerMcpDomainDependencies, "callerAttribution" | "attentionAuthority">>,
+): MessageOrigin {
+  let attribution: CallerAttribution | null = null;
+  try {
+    attribution = dependencies.callerAttribution?.()
+      ?? (dependencies.attentionAuthority
+        ? callerAttributionFrom(dependencies.attentionAuthority(), () => false)
+        : null);
+  } catch {
+    attribution = null;
+  }
+  const role = attribution?.kind === "manager"
+    ? "orchestrator"
+    : attribution?.kind === "gateway"
+      ? "gateway"
+      : messageOriginRole(attribution?.role);
+  return { kind: "agent", ...(role ? { role } : {}) };
 }
 
 /**
@@ -628,7 +655,8 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies)
 async function sendMessage(
   args: McpToolArgs,
   control: ViewerControlDependencies,
-  dependencies: Pick<ViewerMcpDomainDependencies, "registrySnapshot">,
+  dependencies: Pick<ViewerMcpDomainDependencies, "registrySnapshot"> &
+    Partial<Pick<ViewerMcpDomainDependencies, "callerAttribution" | "attentionAuthority">>,
 ): Promise<McpToolPayload> {
   const conversationId = text(args.conversationId);
   const transcriptPath = text(args.transcriptPath) || text(args.path);
@@ -641,6 +669,9 @@ async function sendMessage(
     clientMessageId: requestId(args),
     text: message,
     images: [],
+    /* #1117: an MCP send is inter-agent traffic by definition; the sender role
+       is the server's own caller attribution, so the feed can say WHO relayed. */
+    origin: mcpSenderOrigin(dependencies),
   });
   /* The registry's OWN lookup over the projection this call already holds (#845),
      rather than a local reimplementation of it. The alias walk is multi-hop and
@@ -1409,6 +1440,9 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     clientMessageId: deliveryId,
     text: body,
     images: [],
+    /* #1117: a directive relay is inter-agent traffic — the manager's feed
+       names the gateway (or attributed caller role), never the operator. */
+    origin: mcpSenderOrigin(dependencies),
   });
   return {
     directiveId: deliveryId,
@@ -1593,7 +1627,11 @@ async function createOrchestrator(args: McpToolArgs, control: ViewerControlDepen
  * their idempotency keys from this call's, so a retry replays instead of
  * duplicating, and the response says which path ran.
  */
-async function sendMessageToOrchestrator(args: McpToolArgs, control: ViewerControlDependencies): Promise<McpToolPayload> {
+async function sendMessageToOrchestrator(
+  args: McpToolArgs,
+  control: ViewerControlDependencies,
+  dependencies: Partial<Pick<ViewerMcpDomainDependencies, "callerAttribution" | "attentionAuthority">> = {},
+): Promise<McpToolPayload> {
   const project = canonicalOrchestratorProject(required(args, "project"));
   const message = requiredMessageText(args);
   const key = requestId(args);
@@ -1619,6 +1657,7 @@ async function sendMessageToOrchestrator(args: McpToolArgs, control: ViewerContr
     clientMessageId: key,
     text: message,
     images: [],
+    origin: mcpSenderOrigin(dependencies),
   });
   return redactPayload({
     project,
@@ -2754,7 +2793,7 @@ export function viewerMcpBindings(
     bridge_directive: (args) => bridgeDirective(args, controlDependencies, domainDependencies),
     get_orchestrator: (args) => getOrchestrator(args, domainDependencies),
     create_orchestrator: (args) => createOrchestrator(args, controlDependencies),
-    send_message_to_orchestrator: (args) => sendMessageToOrchestrator(args, controlDependencies),
+    send_message_to_orchestrator: (args) => sendMessageToOrchestrator(args, controlDependencies, domainDependencies),
     rotate_orchestrator: (args) => rotateOrchestrator(args, controlDependencies),
   };
 }

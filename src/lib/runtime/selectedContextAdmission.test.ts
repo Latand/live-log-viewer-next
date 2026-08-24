@@ -150,5 +150,6 @@ test("the record the host writes carries the reference on the canonical marker",
     structured: true,
     contentDigest: null,
     selectedContext: REFERENCE,
+    origin: null,
   });
 });

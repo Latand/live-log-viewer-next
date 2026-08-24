@@ -1,5 +1,6 @@
 import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selection/selectedContext";
 
+import { parseMessageOrigin, type MessageOrigin } from "./messageOrigin";
 import type { RuntimeSendSettings } from "./contracts";
 import type { CompactCapableHost, DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import { hostSupportsCompact, StructuredCompactError } from "./engineHost";
@@ -60,6 +61,8 @@ interface SendEffect {
   /** #844: the selected-card reference the operator submitted with. Replayed
       from the durable payload, never re-read from a live view. */
   selectedContext?: SelectedContextRef;
+  /** #1117: authorship stamped at admission, replayed from the durable payload. */
+  origin?: MessageOrigin;
   eventSeq: number;
 }
 
@@ -166,6 +169,7 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
   /* A malformed reference drops the same way malformed settings do: the
      message must never be stranded by its own provenance. */
   const selectedContext = parseSelectedContextRef(effect.payload.selectedContext);
+  const origin = parseMessageOrigin(effect.payload.origin);
   return {
     operationId,
     conversationId,
@@ -177,6 +181,7 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
     ...(policy ? { policy } : {}),
     ...(runtime ? { runtime } : {}),
     ...(selectedContext ? { selectedContext } : {}),
+    ...(origin ? { origin } : {}),
   };
 }
 
@@ -505,6 +510,7 @@ export class StructuredDeliveryQueue {
         expectedTurnId: effect.policy === "interrupt-active" ? null : deliveryFence,
         ...(effect.runtime ? { runtime: effect.runtime } : {}),
         ...(effect.selectedContext ? { selectedContext: effect.selectedContext } : {}),
+        ...(effect.origin ? { origin: effect.origin } : {}),
       };
       await this.port.transition(
         effect.operationId,
