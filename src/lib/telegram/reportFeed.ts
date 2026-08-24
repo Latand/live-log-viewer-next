@@ -1,4 +1,4 @@
-import { readSafeTailText } from "./sessionStore";
+import { readSafeTailUntil, telegramIncomingFeedPath } from "./sessionStore";
 
 /**
  * The connector's incoming event feed, as a Daily Report source (issue #1091).
@@ -14,9 +14,12 @@ import { readSafeTailText } from "./sessionStore";
  *
  * Two properties this module is built around:
  *
- *  - the file is APPEND-ONLY and nothing rotates it, so it is read from the END
- *    with a byte bound. A day's activity is kilobytes; the bound only decides
- *    how far back a first run after a long silence can see.
+ *  - the file is APPEND-ONLY and stamped as it is written, so it is read from
+ *    the END, backward, until a burst OLDER than the window proves the window
+ *    is fully in hand. A day's activity is kilobytes, so that is one step for
+ *    any ordinary account; the total bound only decides when a feed is so
+ *    large that the window cannot be covered at all, which FAILS the source
+ *    pass rather than answering with the part that happened to fit.
  *  - the file is written by the connector under the same owner-only fence as
  *    the credential (0600, same uid), and it is read through that fence, so a
  *    feed replaced by another user's file is refused rather than believed.
@@ -26,9 +29,15 @@ import { readSafeTailText } from "./sessionStore";
  * title and truncated, never interpreted.
  */
 
-/** How far back from the end of the feed one read looks. Each line is ~150
-    bytes, so this is thousands of bursts — far past any report window. */
-export const MAX_FEED_TAIL_BYTES = 512 * 1024;
+/** One backward step. Each line is ~150 bytes, so a single step is thousands
+    of bursts — for nearly every account, the whole window in one read. */
+export const FEED_CHUNK_BYTES = 512 * 1024;
+/** The ceiling on ONE feed read, across all its steps. Past this the window is
+    reported as uncovered instead of silently truncated: a single dialog
+    bursting all day can push the morning arbitrarily far back, and the dialog
+    that then falls out is exactly the one a bounded probe walk cannot recover
+    either (#1091). */
+export const MAX_FEED_SCAN_BYTES = 8 * 1024 * 1024;
 
 /** A title longer than this is not a name. */
 const MAX_TITLE_LENGTH = 120;
@@ -102,14 +111,45 @@ function feedInstant(value: unknown): number | null {
  *
  * A feed that has never been written (no incoming message since the connector
  * started) is not an error: it is an account with nothing to report from this
- * source, and the caller's own candidate walk still runs. A file that exists
- * but cannot be read through the owner-only fence THROWS, because that is a
- * feed whose contents are unknown rather than empty.
+ * source, and the caller's own candidate walk still runs. Two states DO throw,
+ * because both are a feed whose contents are unknown rather than empty:
+ *
+ *  - a file that exists but fails the owner-only fence;
+ *  - a file whose window the scan could not reach the far side of inside
+ *    {@link MAX_FEED_SCAN_BYTES}. Answering with the tail that fit would be the
+ *    silent omission this module exists to end — the dialogs it dropped are the
+ *    OLDEST in the window, and the walk behind it is bounded by a probe budget
+ *    over a list ordered by pins, so it cannot be relied on to find them.
  */
 export function readFeedDialogsSince(feedFile: string | null, sinceMs: number): FeedDialog[] {
   if (!feedFile) return [];
-  const text = readSafeTailText(feedFile, MAX_FEED_TAIL_BYTES);
-  return text === null ? [] : feedDialogsSince(text, sinceMs);
+  const tail = readSafeTailUntil(
+    feedFile,
+    { chunkBytes: FEED_CHUNK_BYTES, maxBytes: MAX_FEED_SCAN_BYTES },
+    (chunkText) => feedCrossesBefore(chunkText, sinceMs),
+  );
+  if (tail === null) return [];
+  if (!tail.complete) throw new Error("Telegram incoming feed is larger than one report read");
+  return feedDialogsSince(tail.text, sinceMs);
+}
+
+/** Whether a chunk of the feed holds a burst OLDER than the window. The feed
+    is append-only and stamped as it is written, so one such line is proof that
+    everything before it is older too — which is what lets the backward scan
+    stop instead of reading a file that only ever grows. */
+function feedCrossesBefore(chunkText: string, sinceMs: number): boolean {
+  for (const line of chunkText.split("\n")) {
+    if (!line.trim()) continue;
+    let parsed: FeedLine;
+    try {
+      parsed = JSON.parse(line) as FeedLine;
+    } catch {
+      continue;
+    }
+    const at = feedInstant(parsed.ts);
+    if (at !== null && at < sinceMs) return true;
+  }
+  return false;
 }
 
 /**
@@ -139,4 +179,20 @@ export function activeFeedFile(statusText: string): string | null {
   const running = parsed?.enabled === true || parsed?.autostart_pending === true;
   const file = typeof parsed?.feed_file === "string" ? parsed.feed_file.trim() : "";
   return running && file ? file : null;
+}
+
+/**
+ * The feed file a run may read: the one THIS credential generation's connector
+ * reports it is writing, and nothing else (#1091).
+ *
+ * The feed is named for its credential generation, so a status answer pointing
+ * anywhere else is a listener from another account's generation — and its
+ * recent bursts, adopted as the current account's active dialogs, would put one
+ * operator's correspondents into another's report after the id check had
+ * already passed. Refused as no feed at all, which fails the source pass.
+ */
+export function scopedFeedFile(statusText: string, credentialRef: string | null): string | null {
+  if (!credentialRef) return null;
+  const reported = activeFeedFile(statusText);
+  return reported !== null && reported === telegramIncomingFeedPath(credentialRef) ? reported : null;
 }

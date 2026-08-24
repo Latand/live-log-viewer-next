@@ -127,6 +127,59 @@ export function ensureTelegramStateDir(create = true): string | null {
   return dir;
 }
 
+const INCOMING_FEED_SCOPE_LENGTH = 16;
+/** Every feed name this Viewer has ever written, including the pre-#1091
+    unscoped one, so the credential boundary can sweep them all. */
+const INCOMING_FEED_NAME = new RegExp(`^incoming_feed(-[0-9a-f]{${INCOMING_FEED_SCOPE_LENGTH}})?\\.jsonl$`);
+
+/**
+ * The connector's incoming-event feed for ONE credential generation (#1091).
+ *
+ * The feed is an append-only JSONL record of settled incoming private bursts —
+ * the only source that says which dialogs were ACTIVE, in real time, without
+ * walking a chat list whose order is pins and folders. It lives beside the
+ * credential rather than at the connector's XDG default because it names the
+ * operator's correspondents: same 0700 directory, same owner-only fence, and
+ * the connector creates it 0600 itself.
+ *
+ * The name carries the CREDENTIAL GENERATION, and that is the point. One
+ * shared file outlives a disconnect, so an account whose bursts it recorded
+ * yesterday would still be in it when a DIFFERENT account connects tomorrow —
+ * and that second account's report, having passed its own id check, would
+ * discover the first account's dialogs as its own active sources. A generation
+ * cannot read another generation's feed because it cannot name the file. The
+ * suffix is a digest rather than the ref itself: it keeps a value read from
+ * disk out of a constructed path, and a digest is always a fixed run of hex.
+ */
+export function telegramIncomingFeedPath(credentialRef: string): string {
+  const scope = crypto.createHash("sha256").update(credentialRef).digest("hex").slice(0, INCOMING_FEED_SCOPE_LENGTH);
+  return statePath(DIR_NAME, `incoming_feed-${scope}.jsonl`);
+}
+
+/**
+ * Drops every credential generation's feed.
+ *
+ * Disconnect is the credential boundary and the connector is already stopped
+ * by the time it is reached, so nothing is mid-write: the account is being
+ * forgotten, and a file naming its correspondents does not outlive it. Each
+ * removal is independent, because one stubborn file must never be able to
+ * block the credential deletion that follows it.
+ */
+function removeIncomingFeeds(): void {
+  const directory = ensureTelegramStateDir(false);
+  if (directory === null) return;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !INCOMING_FEED_NAME.test(entry.name)) continue;
+    try { fs.rmSync(path.join(directory, entry.name), { force: true }); } catch { /* best effort */ }
+  }
+}
+
 /* Exported for the Daily Report store (#1086), which persists settings,
    history and report text in the same directory under the same fence — one
    owner-only write path for everything the connector owns. */
@@ -180,17 +233,43 @@ export function readSafeText(pathname: string): string | null {
   return fs.readFileSync(pathname, "utf8");
 }
 
+/** What one backward tail read found, and whether it reached far enough back
+    to answer the caller's question (issue #1091). */
+export type SafeTail = {
+  /** Whole lines only: a truncated head line is never handed to a parser. */
+  text: string;
+  /** `true` when the scan included the start of the file or `reached` accepted
+      a chunk, so everything the caller asked about is inside `text`. `false` is
+      a tail that ran out of budget first — an UNKNOWN answer, never a complete
+      one. */
+  complete: boolean;
+};
+
 /**
- * The last {@link maxBytes} of an owner-only APPEND-ONLY file, whole lines
- * only (issue #1091).
+ * An owner-only APPEND-ONLY file, read BACKWARD from its end in `chunkBytes`
+ * steps until `reached` accepts a chunk, the start of the file is included, or
+ * `maxBytes` have been read (issue #1091).
  *
  * The connector's incoming feed grows for as long as the account receives
- * messages and nothing rotates it, so the Viewer must never read it whole. The
- * read is bounded from the END — that is where the recent bursts are — and the
- * first (possibly truncated) line of the window is dropped, so a partial JSON
- * line is never handed to a parser.
+ * messages and nothing rotates it, so the Viewer must never read it whole —
+ * but a FIXED tail was a silent lie. One dialog bursting all day pushes the
+ * morning past any constant bound, and a report that then discovers only what
+ * the constant happened to keep omits a dialog the operator answered without
+ * saying so. The caller supplies the horizon instead: the scan keeps stepping
+ * back until `reached` sees a line older than the window, and `complete` says
+ * whether it got there before the budget ran out. Both bounds still hold, so a
+ * feed of any size costs a fixed ceiling of I/O.
+ *
+ * `reached` is called with one chunk's whole lines, oldest-first order
+ * preserved. A chunk boundary can split a line or a multi-byte character; the
+ * split head line is dropped before the predicate sees it, which can only ever
+ * make it answer "not yet" one line early.
  */
-export function readSafeTailText(pathname: string, maxBytes: number): string | null {
+export function readSafeTailUntil(
+  pathname: string,
+  bounds: { chunkBytes: number; maxBytes: number },
+  reached: (chunkText: string) => boolean,
+): SafeTail | null {
   if (ensureTelegramStateDir(false) === null) return null;
   try {
     assertSafeSecretFile(pathname);
@@ -199,16 +278,36 @@ export function readSafeTailText(pathname: string, maxBytes: number): string | n
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
+  const chunkBytes = Math.max(1, Math.trunc(bounds.chunkBytes));
+  const maxBytes = Math.max(0, Math.trunc(bounds.maxBytes));
   const handle = fs.openSync(pathname, "r");
   try {
     const size = fs.fstatSync(handle).size;
-    const length = Math.min(size, Math.max(0, maxBytes));
-    const buffer = Buffer.alloc(length);
-    fs.readSync(handle, buffer, 0, length, size - length);
-    const text = buffer.toString("utf8");
-    if (length >= size) return text;
+    const chunks: Buffer[] = [];
+    let start = size;
+    let read = 0;
+    let crossed = false;
+    while (start > 0 && read < maxBytes) {
+      const length = Math.min(chunkBytes, start, maxBytes - read);
+      const buffer = Buffer.alloc(length);
+      fs.readSync(handle, buffer, 0, length, start - length);
+      chunks.unshift(buffer);
+      start -= length;
+      read += length;
+      if (start === 0) break;
+      const chunkText = buffer.toString("utf8");
+      const chunkBreak = chunkText.indexOf("\n");
+      if (chunkBreak !== -1 && reached(chunkText.slice(chunkBreak + 1))) {
+        crossed = true;
+        break;
+      }
+    }
+    /* Decoded after concatenation so a character split across two chunks
+       survives; only the predicate ever sees a chunk on its own. */
+    const text = Buffer.concat(chunks).toString("utf8");
+    if (start === 0) return { text, complete: true };
     const firstBreak = text.indexOf("\n");
-    return firstBreak === -1 ? "" : text.slice(firstBreak + 1);
+    return { text: firstBreak === -1 ? "" : text.slice(firstBreak + 1), complete: crossed };
   } finally {
     fs.closeSync(handle);
   }
@@ -304,6 +403,11 @@ export function readTelegramSession(): StoredTelegramSession | null {
 
 export function deleteTelegramSession(): void {
   if (ensureTelegramStateDir(false) === null) return;
+  /* The incoming feed goes with the credential that produced it (#1091): the
+     connector is stopped by this point, and what it recorded names the
+     departing account's correspondents. Swept FIRST so a refused credential
+     removal below cannot leave that record behind. */
+  removeIncomingFeeds();
   const paths = [telegramSessionPath(), telegramConnectorTokenPath()];
   const existing = paths.filter((pathname) => safeFileExists(pathname));
   for (const pathname of existing) fs.rmSync(pathname);

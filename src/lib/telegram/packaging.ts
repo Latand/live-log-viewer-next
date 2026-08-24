@@ -7,7 +7,7 @@ import path from "node:path";
 import { configFilePath, stateDir, statePath } from "@/lib/configDir";
 import { withFileTransaction } from "@/lib/state/fileTransaction";
 
-import { ensureTelegramStateDir } from "./sessionStore";
+import { ensureTelegramStateDir, telegramIncomingFeedPath } from "./sessionStore";
 
 /**
  * Packaging of the pinned Telegram MCP connector (issue #1059).
@@ -65,22 +65,6 @@ export function vendoredConnectorDir(): string {
 
 export function telegramVenvDir(): string {
   return statePath("telegram", "venv");
-}
-
-/**
- * The connector's incoming-event feed (issue #1091).
- *
- * The feed is an append-only JSONL record of settled incoming private bursts —
- * the only source that says which dialogs were ACTIVE, in real time, without
- * walking a chat list whose order is pins and folders. A Daily Report run's
- * private-dialog discovery reads it, so it is pinned beside the credential
- * rather than left at the connector's XDG default: it names the operator's
- * correspondents, so it belongs inside the 0700 telegram directory under the
- * same owner-only fence as everything else this feature stores. The connector
- * creates it 0600 itself.
- */
-export function telegramIncomingFeedPath(): string {
-  return statePath("telegram", "incoming_feed.jsonl");
 }
 
 /** The provisioner's writable staging copy of the vendored tree (#1084): the
@@ -248,7 +232,7 @@ export function ensureConnectorProvisioned(): Promise<boolean> {
     The session string travels ONLY as child environment (the upstream
     contract) — never as an argument, so it cannot surface in process listings,
     transcripts, or the activity journal. */
-export function connectorLaunchSpec(input: { sessionString: string; connectorToken: string; credentials: TelegramApiCredentials }): ProcessSpec {
+export function connectorLaunchSpec(input: { credentialRef: string; sessionString: string; connectorToken: string; credentials: TelegramApiCredentials }): ProcessSpec {
   const vendor = stagedConnectorSourceDir();
   return {
     command: telegramVenvPython(),
@@ -269,7 +253,7 @@ export function connectorLaunchSpec(input: { sessionString: string; connectorTok
          makes — it is the Viewer's own, and the durable daily record is worth
          more than one blocking wait. */
       TELEGRAM_EVENT_FEED: "1",
-      TELEGRAM_EVENT_FEED_FILE: telegramIncomingFeedPath(),
+      TELEGRAM_EVENT_FEED_FILE: telegramIncomingFeedPath(input.credentialRef),
       LLV_TELEGRAM_MCP_TOKEN: input.connectorToken,
       LLV_TELEGRAM_VENDOR_DIR: vendor,
       MCP_TRANSPORT: "http",

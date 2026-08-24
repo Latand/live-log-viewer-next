@@ -1,7 +1,7 @@
 import { readTelegramSession } from "./sessionStore";
 import { telegramMcpUrl } from "./packaging";
 import { validTelegramAccountId, type TelegramAccountIdentity } from "./contracts";
-import { activeFeedFile, readFeedDialogsSince, type FeedDialog } from "./reportFeed";
+import { readFeedDialogsSince, scopedFeedFile, type FeedDialog } from "./reportFeed";
 import type { TelegramReportGroup } from "./reportContracts";
 
 /**
@@ -354,23 +354,30 @@ export function connectorReadPort(): TelegramReadPort {
          account's activity.
 
          A connector that is not running a feed — one adopted from a Viewer
-         generation that predates it above all — and a feed file that exists
-         but cannot be read through the owner-only fence are both FAILURES here,
-         not empty answers. Returning nothing would put the run back on the
-         bounded probe walk alone, silently, which is the exact defect #1091
-         replaced: the operator would get a report that quietly omits whatever
-         sat past the probe budget. The failure settles the run `sources_failed`
-         instead, and the connector is re-ensured (with the feed) by the next
-         health check. */
+         generation that predates it above all — a connector writing a feed
+         that belongs to a DIFFERENT credential generation, and a feed file
+         that exists but cannot be read through the owner-only fence are all
+         FAILURES here, not empty answers. Returning nothing would put the run
+         back on the bounded probe walk alone, silently, which is the exact
+         defect #1091 replaced: the operator would get a report that quietly
+         omits whatever sat past the probe budget. The failure settles the
+         run `sources_failed` instead, and the connector is re-ensured (with
+         the feed) by the next health check. */
+      let feedFile: string | null = null;
       try {
-        const feedFile = activeFeedFile(toolText(await call("incoming_feed_status", {})));
-        if (feedFile) return readFeedDialogsSince(feedFile, input.sinceMs);
+        const session = readTelegramSession();
+        feedFile = scopedFeedFile(toolText(await call("incoming_feed_status", {})), session?.credentialRef ?? null);
       } catch {
         /* Falls through to the one sanitized sentence below. */
       }
       /* One fixed sentence: the upstream error may carry connector text, and
          nothing from it belongs in a caught-and-logged failure. */
-      throw new Error("Telegram incoming feed is unavailable");
+      if (!feedFile) throw new Error("Telegram incoming feed is unavailable");
+      /* Outside the catch on purpose: the file read's own refusals — an
+         owner-only fence failure, a window too large for one bounded read —
+         are already sanitized, and each says something different about why the
+         run has no recency source. */
+      return readFeedDialogsSince(feedFile, input.sinceMs);
     },
     async listChats(input) {
       const result = await call("list_chats", { chat_type: input.kind, limit: Math.min(input.limit, CHAT_PAGE_LIMIT) });

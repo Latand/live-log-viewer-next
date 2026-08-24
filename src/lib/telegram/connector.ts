@@ -7,8 +7,8 @@ import { procBackend } from "@/lib/proc";
 import { withFileTransaction } from "@/lib/state/fileTransaction";
 
 import type { TelegramErrorCode } from "./contracts";
-import { connectorLaunchSpec, telegramApiCredentials, telegramIncomingFeedPath, telegramMcpServerPath, telegramMcpUrl, telegramVenvPython, type ProcessSpec } from "./packaging";
-import { ensureTelegramStateDir, type StoredTelegramSession } from "./sessionStore";
+import { connectorLaunchSpec, telegramApiCredentials, telegramMcpServerPath, telegramMcpUrl, telegramVenvPython, type ProcessSpec } from "./packaging";
+import { ensureTelegramStateDir, telegramIncomingFeedPath, type StoredTelegramSession } from "./sessionStore";
 
 /**
  * Supervisor for the ONE shared loopback connector process (issue #1059).
@@ -79,7 +79,7 @@ export interface TelegramConnectorPorts {
   ownsProcess?(binding: ConnectorBinding): boolean;
   /** Whether the recorded process is the generation that runs the incoming
       event feed the Daily Report reads (#1091). */
-  runsFeed?(): boolean;
+  runsFeed?(binding: ConnectorBinding): boolean;
   recordProcess?(child: ConnectorChild, spec: ProcessSpec, binding: ConnectorBinding): boolean;
   stop?(): Promise<void> | void;
   beginOperation?(): () => boolean;
@@ -246,10 +246,14 @@ function connectorArgvMatches(record: ConnectorRecord): boolean {
  * exactly why it had to be caught: its `incoming_feed_status` reports a feed
  * that will never start, and the report's dialog discovery would fall back to
  * a bounded walk over a list that is not ordered by recency.
+ *
+ * The comparison is against THIS credential generation's feed, so a listener
+ * still writing a previous account's file is ineligible on the same evidence
+ * as a listener writing none.
  */
-function recordedConnectorRunsFeed(): boolean {
+function recordedConnectorRunsFeed(binding: ConnectorBinding): boolean {
   const record = readConnectorRecord();
-  return record?.feedFile === telegramIncomingFeedPath();
+  return record?.feedFile === telegramIncomingFeedPath(binding.credentialRef);
 }
 
 function ownsRecordedConnector(binding: ConnectorBinding): boolean {
@@ -427,7 +431,7 @@ export async function ensureTelegramConnector(
   const runsFeed = ports.runsFeed ?? recordedConnectorRunsFeed;
   let isCurrent = ports.beginOperation?.() ?? (() => true);
   const prepared = await withConnectorSupervisorLock(async (): Promise<ConnectorEnsureResult | "spawned"> => {
-    if (ownsProcess(binding) && runsFeed()) {
+    if (ownsProcess(binding) && runsFeed(binding)) {
       const adopted = await verifiedProbe(url, session.connectorToken, ports);
       if (!isCurrent()) return { ok: false, code: "connector_failed" };
       if (adopted && adopted !== "timeout") {
@@ -447,7 +451,7 @@ export async function ensureTelegramConnector(
     isCurrent = ports.beginOperation?.() ?? (() => true);
     const credentials = telegramApiCredentials();
     if (!credentials) return { ok: false, code: "credentials_missing" };
-    const spec = connectorLaunchSpec({ sessionString: session.sessionString, connectorToken: session.connectorToken, credentials });
+    const spec = connectorLaunchSpec({ credentialRef: session.credentialRef, sessionString: session.sessionString, connectorToken: session.connectorToken, credentials });
     if (!isCurrent()) return { ok: false, code: "connector_failed" };
     const child = ports.spawn(spec);
     if (!child) return { ok: false, code: "connector_failed" };

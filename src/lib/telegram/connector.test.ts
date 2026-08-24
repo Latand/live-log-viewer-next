@@ -175,6 +175,7 @@ test("a spawn failure reports connector_failed without probing forever", async (
 test("the launch env — not this test's env — carries the session; argv never does", async () => {
   const { connectorLaunchSpec } = await import("./packaging");
   const spec = connectorLaunchSpec({
+    credentialRef: CONNECTOR_SESSION.credentialRef,
     sessionString: PLACEHOLDER_SESSION,
     connectorToken: CONNECTOR_SESSION.connectorToken,
     credentials: { apiId: "12345", apiHash: "0123456789abcdef0123456789abcdef" },
@@ -190,20 +191,30 @@ test("the launch env — not this test's env — carries the session; argv never
 });
 
 test("the connector runs its incoming feed, beside the credential (#1091)", async () => {
-  const { connectorLaunchSpec, telegramIncomingFeedPath } = await import("./packaging");
-  const spec = connectorLaunchSpec({
+  const { connectorLaunchSpec } = await import("./packaging");
+  const { telegramIncomingFeedPath } = await import("./sessionStore");
+  const launch = (credentialRef: string) => connectorLaunchSpec({
+    credentialRef,
     sessionString: PLACEHOLDER_SESSION,
     connectorToken: CONNECTOR_SESSION.connectorToken,
     credentials: { apiId: "12345", apiHash: "0123456789abcdef0123456789abcdef" },
   });
+  const spec = launch(CONNECTOR_SESSION.credentialRef);
   /* Without this the connector records activity nowhere and a report's
      private-dialog discovery is back to guessing from a chat list that is not
      ordered by recency. */
   expect(spec.env.TELEGRAM_EVENT_FEED).toBe("1");
   /* The feed names the operator's correspondents, so it lives inside the 0700
      telegram directory rather than at the connector's XDG default. */
-  expect(spec.env.TELEGRAM_EVENT_FEED_FILE).toBe(telegramIncomingFeedPath());
-  expect(telegramIncomingFeedPath()).toBe(path.join(process.env.LLV_STATE_DIR!, "telegram", "incoming_feed.jsonl"));
+  expect(spec.env.TELEGRAM_EVENT_FEED_FILE).toBe(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef));
+  /* Named for the credential GENERATION, and by a digest of it rather than
+     the ref itself, so no value read from disk is ever spliced into a path. */
+  expect(path.dirname(spec.env.TELEGRAM_EVENT_FEED_FILE!)).toBe(path.join(process.env.LLV_STATE_DIR!, "telegram"));
+  expect(path.basename(spec.env.TELEGRAM_EVENT_FEED_FILE!)).toMatch(/^incoming_feed-[0-9a-f]{16}\.jsonl$/);
+  expect(spec.env.TELEGRAM_EVENT_FEED_FILE).not.toContain(CONNECTOR_SESSION.credentialRef);
+  /* A second account's connector writes a different file, so nothing it
+     records can be read as the first account's activity (#1091). */
+  expect(launch("credential-generation-b").env.TELEGRAM_EVENT_FEED_FILE).not.toBe(spec.env.TELEGRAM_EVENT_FEED_FILE);
 });
 
 test("an allowlisted foreign listener is never adopted", async () => {
@@ -230,6 +241,55 @@ test("a listening connector that runs no feed is replaced, not adopted (#1091)",
   expect(calls.spawns).toBe(1);
   expect(calls.stops).toBeGreaterThanOrEqual(1);
   expect(calls.records).toBe(1);
+});
+
+/** A connector record of the shape the supervisor writes, so the REAL feed
+    eligibility check has something to read. Nothing here is a live process:
+    the check reads the record only. */
+async function writeConnectorRecord(feedFile: string): Promise<void> {
+  fs.writeFileSync(
+    path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json"),
+    JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      identity: "start-token-placeholder",
+      credentialRef: CONNECTOR_SESSION.credentialRef,
+      connectorTokenSha256: "f".repeat(64),
+      command: (await import("./packaging")).telegramVenvPython(),
+      entrypoint: (await import("./packaging")).telegramMcpServerPath(),
+      feedFile,
+    }),
+    { mode: 0o600 },
+  );
+}
+
+test("a listener writing another credential generation's feed is not adopted (#1091)", async () => {
+  const { telegramIncomingFeedPath } = await import("./sessionStore");
+  /* The operator disconnected one account and connected another. A listener
+     left writing the FIRST generation's feed would hand the second account
+     the first one's recent dialogs as its own active sources — after the id
+     check had already passed. The record names the file, so the mismatch is
+     visible without probing anything. */
+  await writeConnectorRecord(telegramIncomingFeedPath("credential-generation-of-another-account"));
+  const stale = fakePorts([READ_ONLY], { owned: true });
+  delete stale.ports.runsFeed;
+
+  const replaced = await ensureTelegramConnector(CONNECTOR_SESSION, stale.ports);
+
+  expect(replaced).toEqual({ ok: true, url: telegramMcpUrl() });
+  expect(stale.calls.spawns).toBe(1);
+  expect(stale.calls.stops).toBeGreaterThanOrEqual(1);
+
+  /* The same record naming THIS generation's feed is adopted, so the refusal
+     above is the feed scope and not the check refusing everything. */
+  await writeConnectorRecord(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef));
+  const current = fakePorts([READ_ONLY], { owned: true });
+  delete current.ports.runsFeed;
+
+  const adopted = await ensureTelegramConnector(CONNECTOR_SESSION, current.ports);
+
+  expect(adopted).toEqual({ ok: true, url: telegramMcpUrl() });
+  expect(current.calls.spawns).toBe(0);
 });
 
 test("a credential-generation mismatch stops the old record before spawning", async () => {
@@ -420,8 +480,8 @@ test("stop waits through SIGKILL escalation until a TERM-resistant connector exi
     /* The feed is child ENVIRONMENT, so the record is the only durable proof
        that this process runs one — and it is what a later Viewer generation
        checks before adopting it (#1091). */
-    const { telegramIncomingFeedPath } = await import("./packaging");
-    expect(recorded.feedFile).toBe(telegramIncomingFeedPath());
+    const { telegramIncomingFeedPath } = await import("./sessionStore");
+    expect(recorded.feedFile).toBe(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef));
     expect(recorded.connectorTokenSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(fs.readFileSync(pidFile, "utf8")).not.toContain(CONNECTOR_SESSION.connectorToken);
 
