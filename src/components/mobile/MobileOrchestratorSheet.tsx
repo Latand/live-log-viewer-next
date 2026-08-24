@@ -12,7 +12,7 @@ import { useLocale, type MessageKey } from "@/lib/i18n";
 import { ORCHESTRATOR_SPAWN_CONFIG, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import type { FileEntry } from "@/lib/types";
 
-import type { OrchestratorPanelState, RotationHint, SeatTransition } from "../orchestrator/seatState";
+import { orchestratorQuietBannerEligible, type OrchestratorPanelState, type RotationHint, type SeatTransition } from "../orchestrator/seatState";
 import { readSeatDraftField, writeSeatDraftField } from "./orchestratorDraftStorage";
 import { ROW_STATE_LABEL, ROW_TONE, orchestratorRowView } from "./orchestratorRowState";
 
@@ -357,7 +357,7 @@ function LiveView({ state, file }: { state: Extract<OrchestratorPanelState, { ki
       </div>
       {state.transition ? <TransitionCard transition={state.transition} /> : null}
       {state.rotation ? <RotationCard rotation={state.rotation} /> : null}
-      {state.liveness === "stalled" ? <Note tone="warning">{t("orchPanel.stalled")}</Note> : null}
+      {orchestratorQuietBannerEligible(state, file) ? <Note tone="warning">{t("orchPanel.stalled")}</Note> : null}
       {state.liveness === "resumable" ? <Note tone="quiet">{t("orchPanel.resumable")}</Note> : null}
       {file ? (
         <p className="text-ui leading-4 text-muted">{t("orchMobile.liveHint")}</p>

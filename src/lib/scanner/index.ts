@@ -13,7 +13,7 @@ import { tickWorkflows } from "../workflows/engine";
 import { activityVerdict, transcriptTurnResult } from "./activity";
 import type { ConversationCatalogEntry } from "./conversationCatalog";
 import { ctxFor } from "./context";
-import { lastTurnFor } from "./turnDuration";
+import { lastAssistantMessageAtFor, lastTurnFor } from "./turnDuration";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
 import { entryEffort, entryEffortResult, entryFast } from "./effort";
 import { linkEntries } from "./links";
@@ -313,6 +313,7 @@ async function listFilesInternal(
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
     entry.lastTurn = lastTurnFor(entry);
+    entry.lastAssistantMessageAt = lastAssistantMessageAtFor(entry);
     entry.pendingWakeup = pendingWakeupFor(entry);
     pendingQuestionFor(entry);
   });

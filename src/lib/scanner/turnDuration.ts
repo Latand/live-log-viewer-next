@@ -10,12 +10,13 @@ type RecordLike = Record<string, unknown>;
 // v5: meta/command user records no longer open windows (issue #406) — persisted
 // v4 boundaries could start before the real initiating prompt.
 const turnBoundaryCache = globalCache<[number, number, TurnBoundary | null]>("last-turn-v5");
-const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>("recent-turn-windows-v2");
+const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>("recent-turn-windows-v3");
 
 export interface RecentTurnWindows {
   windows: TurnBoundary[];
   operatorActionsAtMs?: number[];
   unprovenancedUserActionsAtMs?: number[];
+  assistantMessagesAtMs?: number[];
   prefixTruncated: boolean;
   complete: boolean;
 }
@@ -24,6 +25,28 @@ function parseMillis(value: unknown): number | null {
   if (typeof value !== "string") return null;
   const millis = Date.parse(value);
   return Number.isFinite(millis) ? millis : null;
+}
+
+/** A real assistant message the conversation renders as prose. Tool-only
+    records are activity without an acknowledgment, and Claude's synthetic
+    no-op is deliberately invisible in the feed. */
+function visibleAssistantMessage(record: RecordLike, codex: boolean): boolean {
+  if (codex) {
+    const payload = recordValue(record.payload) ?? {};
+    const type = stringValue(payload.type);
+    if (type === "agent_message") return (stringValue(payload.message) ?? "").trim().length > 0;
+    if (type !== "message" || payload.role !== "assistant") return false;
+    return recordsValue(payload.content).some(
+      (part) => (stringValue(part.text) ?? stringValue(part.output_text) ?? "").trim().length > 0,
+    );
+  }
+  if (record.type !== "assistant" || record.isApiErrorMessage === true) return false;
+  const message = recordValue(record.message) ?? {};
+  if (stringValue(message.model) === "<synthetic>") return false;
+  if (typeof message.content === "string") return message.content.trim().length > 0;
+  return recordsValue(message.content).some(
+    (part) => part.type === "text" && (stringValue(part.text) ?? "").trim().length > 0,
+  );
 }
 
 /** True when a transcript record is a prompt that opens a turn — a human or
@@ -166,12 +189,14 @@ export function recentTurnWindowsFromRecords(records: RecordLike[], codex: boole
 export function recentTurnActivityFromRecords(
   records: RecordLike[],
   codex: boolean,
-): Pick<RecentTurnWindows, "windows" | "operatorActionsAtMs" | "unprovenancedUserActionsAtMs"> {
+): Pick<RecentTurnWindows, "windows" | "operatorActionsAtMs" | "unprovenancedUserActionsAtMs" | "assistantMessagesAtMs"> {
   const operatorActions = new Set<number>();
   const unprovenancedUserActions = new Set<number>();
+  const assistantMessages = new Set<number>();
   for (const record of records) {
     const atMs = parseMillis(record.timestamp);
     if (atMs === null) continue;
+    if (visibleAssistantMessage(record, codex)) assistantMessages.add(atMs);
     if (codex) {
       const payload = recordValue(record.payload) ?? {};
       let text = "";
@@ -199,6 +224,7 @@ export function recentTurnActivityFromRecords(
     windows: recentTurnWindowsFromRecords(records, codex),
     operatorActionsAtMs: [...operatorActions].sort((left, right) => left - right),
     unprovenancedUserActionsAtMs: [...unprovenancedUserActions].sort((left, right) => left - right),
+    assistantMessagesAtMs: [...assistantMessages].sort((left, right) => left - right),
   };
 }
 
@@ -239,4 +265,15 @@ export function lastTurnFor(entry: FileEntry): TurnBoundary | null {
   const boundary = recent.windows.at(-1) ?? null;
   if (recent.complete) turnBoundaryCache.set(entry.path, [entry.size, mtimeMs, boundary]);
   return boundary;
+}
+
+/** Newest visible assistant acknowledgment carried by the same bounded,
+    identity-keyed read as {@link lastTurnFor}. */
+export function lastAssistantMessageAtFor(entry: FileEntry): number | null | undefined {
+  const conversationRoot = entry.root === "claude-projects" || entry.root === "codex-sessions";
+  if (!conversationRoot || !entry.path.endsWith(".jsonl")) return null;
+  const recent = recentTurnWindowsFor(entry);
+  const last = recent.assistantMessagesAtMs?.at(-1);
+  if (typeof last === "number") return last;
+  return recent.prefixTruncated ? undefined : null;
 }
