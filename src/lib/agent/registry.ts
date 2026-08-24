@@ -34,7 +34,7 @@ import {
   STOPPED_MIGRATION_DELIVERY_REASON,
 } from "@/lib/accounts/migration/intentLiveness";
 
-import type { AgentEngine } from "./cli";
+import type { AgentEngine, ResumeSpec } from "./cli";
 import { mcpServersForStoredSession, reboundAssembledMcpGrants, reboundEntryMcpGrant, reboundStoredMcpGrants, type McpGrantPolicy } from "./mcpAllowlist";
 import { liveAccountConversationIds, type AccountLivenessOptions } from "./accountLiveness";
 import { loadSpawnNestingPolicy } from "./nestingPolicy";
@@ -138,11 +138,26 @@ export interface AgentRegistryEntry {
   updatedAt: string;
 }
 
+/** Complete durable input for an explicit-account launch waiting on a known
+    quota reset. Keeping the payload and retry deadline in one object lets the
+    registry publish or replace the queue atomically with its card copy. */
+export interface QueuedPinnedSpawn {
+  version: 1;
+  retryAt: string;
+  accountId: string;
+  locale: "en" | "uk";
+  spec: ResumeSpec & { launchProfile: LaunchProfile };
+  "prompt": string;
+  imageRefs: StructuredImageRef[];
+  parentArtifactPath: string | null;
+  pipelineSourceConversationId: ViewerConversationId | null;
+}
+
 export interface SpawnReceipt {
   launchId: string;
   /** Client-owned idempotency key. Legacy callers leave this null. */
   clientAttemptId: string | null;
-  /** SHA-256 of the public launch shape. Prompt/image contents never persist. */
+  /** SHA-256 of the public launch shape. Prompt/image contents never enter this identity field. */
   requestDigest: string | null;
   /** Launch transport fixed when the idempotent reservation is created. */
   transport: "tmux" | "structured" | null;
@@ -213,6 +228,9 @@ export interface SpawnReceipt {
       operator/UI launch path; successor and resume receipts never inherit it. The
       projection stops emitting it in the response that adopts the live transcript. */
   launchDisplay: { prompt: string; images: number; echo: string } | null;
+  /** A pinned launch that has not reached account admission yet.
+      Null is also the safe normalization of a partial/corrupt legacy write. */
+  queuedPinnedSpawn: QueuedPinnedSpawn | null;
   /** Cross-process CAS fence acquired before a failed launch is retried. */
   retryClaim?: { claimId: string; claimedAt: string };
 }
@@ -2376,6 +2394,54 @@ function receiptLaunchProfile(value: SpawnReceipt, policy?: McpGrantPolicy): Lau
   return emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }, policy);
 }
 
+function normalizeQueuedPinnedSpawn(value: unknown, policy?: McpGrantPolicy): QueuedPinnedSpawn | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<QueuedPinnedSpawn>;
+  const spec = candidate.spec as Partial<ResumeSpec> | undefined;
+  const retryAt = typeof candidate.retryAt === "string" ? Date.parse(candidate.retryAt) : Number.NaN;
+  const imageRefs = parseStructuredImageRefs(candidate.imageRefs ?? [], 16);
+  if (candidate.version !== 1
+    || !Number.isFinite(retryAt)
+    || typeof candidate.accountId !== "string"
+    || !candidate.accountId
+    || (candidate.locale !== "en" && candidate.locale !== "uk")
+    || !spec
+    || (spec.engine !== "claude" && spec.engine !== "codex")
+    || typeof spec.command !== "string"
+    || typeof spec.cwd !== "string"
+    || typeof spec.windowName !== "string"
+    || !spec.launchProfile
+    || typeof candidate.prompt !== "string"
+    || !imageRefs) return null;
+  try {
+    assertStructuredTextEnvelope(candidate.prompt);
+  } catch {
+    return null;
+  }
+  return {
+    version: 1,
+    retryAt: new Date(retryAt).toISOString(),
+    accountId: candidate.accountId,
+    locale: candidate.locale,
+    spec: {
+      command: spec.command,
+      cwd: spec.cwd,
+      windowName: spec.windowName,
+      engine: spec.engine,
+      ...(typeof spec.transcript === "string" ? { transcript: spec.transcript } : {}),
+      ...(spec.printMode === true ? { printMode: true as const } : {}),
+      launchProfile: emptyLaunchProfile(spec.launchProfile, policy),
+    },
+    ["prompt"]: candidate.prompt,
+    imageRefs,
+    parentArtifactPath: typeof candidate.parentArtifactPath === "string" ? candidate.parentArtifactPath : null,
+    pipelineSourceConversationId: typeof candidate.pipelineSourceConversationId === "string"
+      && candidate.pipelineSourceConversationId.startsWith("conversation_")
+      ? candidate.pipelineSourceConversationId as ViewerConversationId
+      : null,
+  };
+}
+
 function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnReceipt {
   const state = value.state === "completed" || value.state === "failed" || value.state === "pane-bound" || value.state === "host-verified" || value.state === "prompt-delivered" || value.state === "path-pending" || value.state === "conflicted"
     ? value.state
@@ -2438,6 +2504,7 @@ function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnRe
     launchProfile: receiptLaunchProfile(value, policy),
     explicitProject: validExplicitProject(value.explicitProject),
     launchDisplay: normalizeLaunchDisplay(value.launchDisplay),
+    queuedPinnedSpawn: normalizeQueuedPinnedSpawn(value.queuedPinnedSpawn, policy),
     ...(value.retryClaim
       && typeof value.retryClaim.claimId === "string"
       && typeof value.retryClaim.claimedAt === "string"
@@ -3712,6 +3779,7 @@ export class AgentRegistry {
         launchProfile: profile,
         explicitProject,
         launchDisplay: normalizeLaunchDisplay(input.launchDisplay),
+        queuedPinnedSpawn: null,
       };
       file.receipts[receipt.launchId] = receipt;
       /* A rejected launch persists exactly one terminal receipt: no lineage
@@ -3783,6 +3851,37 @@ export class AgentRegistry {
     });
   }
 
+  /** Atomically publishes or refreshes every durable part of a queued pin,
+      including the card's deadline copy. A crash can therefore expose either
+      the prior complete queue or the next complete queue, never a title-only
+      receipt that pretends to be recoverable. */
+  queuePinnedSpawn(
+    launchId: string,
+    queued: QueuedPinnedSpawn,
+    queuedTitle: string,
+  ): SpawnReceipt {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      const normalized = normalizeQueuedPinnedSpawn(queued, this.mcpGrantPolicy);
+      if (!normalized
+        || (receipt.transport !== "structured" && receipt.transport !== "tmux")
+        || receipt.state !== "starting"
+        || receipt.key
+        || receipt.pane
+        || !receipt.accountPin
+        || !receipt.accountId
+        || normalized.accountId !== receipt.accountId
+        || normalized.spec.engine !== receipt.engine
+        || normalized.spec.cwd !== receipt.cwd) {
+        throw new Error("queued pinned spawn payload conflicts with its durable receipt");
+      }
+      receipt.queuedPinnedSpawn = normalized;
+      receipt.launchProfile = emptyLaunchProfile({ ...receipt.launchProfile, title: queuedTitle }, this.mcpGrantPolicy);
+      return clone(receipt);
+    });
+  }
+
   /** Atomically adopts a structured receipt whose pre-host owner exited.
       A live owner keeps responsibility for its process-local deferred work. */
   claimStartingStructuredSpawn(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
@@ -3794,6 +3893,31 @@ export class AgentRegistry {
       the persisted pane identity. */
   claimTmuxSpawnActuation(launchId: string): { claimed: boolean; receipt: SpawnReceipt } {
     return this.claimSpawnActuation(launchId, "tmux");
+  }
+
+  /** Compare-and-set release for either transport's pre-settlement actuation
+      claim. Tmux recovery may already own a durable pane; releasing that exact
+      owner lets the next reaper tick resume the same pane without allocating a
+      second host. */
+  releaseSpawnActuation(launchId: string, owner: ProcessIdentity): { released: boolean; receipt: SpawnReceipt } {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      const unbound = receipt.state === "starting" && !receipt.key && !receipt.pane;
+      const recoverableTmuxPane = receipt.transport === "tmux"
+        && (receipt.state === "pane-bound" || receipt.state === "host-verified")
+        && !receipt.key
+        && Boolean(receipt.pane);
+      if ((receipt.transport !== "structured" && receipt.transport !== "tmux")
+        || (!unbound && !recoverableTmuxPane)
+        || !receipt.admissionOwner
+        || receipt.admissionOwner.pid !== owner.pid
+        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        return { released: false, receipt: clone(receipt) };
+      }
+      receipt.admissionOwner = null;
+      return { released: true, receipt: clone(receipt) };
+    });
   }
 
   /** Compare-and-set release of a starting structured admission: only the
@@ -3901,7 +4025,17 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt) throw new Error("unknown spawn receipt");
-      if (receipt.verifiedHost && (receipt.state === "host-verified" || receipt.state === "pane-bound" || receipt.state === "starting")) receipt.state = "prompt-delivered";
+      if (receipt.verifiedHost && (receipt.state === "host-verified" || receipt.state === "pane-bound" || receipt.state === "starting")) {
+        receipt.state = "prompt-delivered";
+        if (receipt.transport === "tmux" && receipt.queuedPinnedSpawn) {
+          receipt.launchProfile = emptyLaunchProfile(
+            receipt.queuedPinnedSpawn.spec.launchProfile,
+            this.mcpGrantPolicy,
+          );
+          receipt.queuedPinnedSpawn = null;
+          receipt.admissionOwner = null;
+        }
+      }
       return clone(receipt);
     });
   }
@@ -4035,6 +4169,14 @@ export class AgentRegistry {
     if (occupied && occupied.artifactPath !== entry.artifactPath
       && (!prior || sessionKeyId(prior.key) !== sessionKeyId(entry.key))
       && !replacesOwnedGeneration) return conflict("spawn_artifact_conflict");
+
+    if (receipt.queuedPinnedSpawn) {
+      receipt.launchProfile = emptyLaunchProfile(
+        receipt.queuedPinnedSpawn.spec.launchProfile,
+        this.mcpGrantPolicy,
+      );
+      receipt.queuedPinnedSpawn = null;
+    }
 
     const createdAt = now();
     const conversation = existingConversation ?? {
@@ -4375,6 +4517,13 @@ export class AgentRegistry {
       receipt.state = receipt.pane ? "conflicted" : "failed";
       receipt.error = error;
       if (receipt.state === "conflicted") receipt.verifiedHost = null;
+      if ((receipt.state === "failed" || receipt.state === "conflicted") && receipt.queuedPinnedSpawn) {
+        receipt.launchProfile = emptyLaunchProfile(
+          receipt.queuedPinnedSpawn.spec.launchProfile,
+          this.mcpGrantPolicy,
+        );
+        receipt.queuedPinnedSpawn = null;
+      }
       /* A promote/admission race can fail through this pre-identity path with a
          held or assigned attempts-zero initial delivery. Converge it in the
          same transaction instead of waiting for the reaper. */
@@ -4417,6 +4566,13 @@ export class AgentRegistry {
       }
       receipt.state = "failed";
       receipt.error = error;
+      if (receipt.queuedPinnedSpawn) {
+        receipt.launchProfile = emptyLaunchProfile(
+          receipt.queuedPinnedSpawn.spec.launchProfile,
+          this.mcpGrantPolicy,
+        );
+        receipt.queuedPinnedSpawn = null;
+      }
       /* A structured spawn that fails can never deliver its initial message, so
          its still-`held` `spawn_<launchId>` reservation is terminalized in the
          same transaction (issue #653) rather than left as an eternal owed

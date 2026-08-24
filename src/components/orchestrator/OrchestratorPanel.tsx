@@ -25,6 +25,7 @@ import { OrchestratorConversation } from "./OrchestratorConversation";
 import {
   deriveOrchestratorPanelState,
   deriveRotateDraftState,
+  orchestratorQuietBannerEligible,
   seatRequestSettled,
   type OrchestratorPanelState,
   type OrchestratorSeatStatus,
@@ -357,7 +358,7 @@ export function OrchestratorPanel({
           {state.rotation ? <RotationBanner rotation={state.rotation} /> : null}
           {rotating ? null : (
             <>
-              {state.liveness === "stalled" ? (
+              {orchestratorQuietBannerEligible(state, file) ? (
                 <p className="shrink-0 border-b border-border bg-warning-soft px-3 py-1.5 text-ui text-warning" role="status">
                   {t("orchPanel.stalled")}
                 </p>

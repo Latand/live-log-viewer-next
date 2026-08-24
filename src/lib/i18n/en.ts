@@ -90,6 +90,9 @@ export const en = {
   "rail.creating": "Creating…",
   "rail.invalidName": "Enter a project name",
   "rail.invalidRoot": "Directory not found",
+  "rail.missingRoot": "This directory doesn't exist yet",
+  "rail.createRootAndProject": "Create directory and project",
+  "rail.mkdirFailed": "Couldn't create the directory",
   "rail.duplicateProject": "This project already exists",
   "rail.createFailed": "Couldn't create the project",
 
@@ -471,6 +474,8 @@ export const en = {
   "spawnCard.initial.delivered": "Initial message: delivered",
   "spawnCard.initial.failed": "Initial message: failed",
   "spawnCard.retrySafe": "This launch is closed. You can start a new attempt.",
+  "spawnCard.pinUnavailableFallback": "Launched on another account — pin unavailable",
+  "spawnCard.pinUnavailableQueued": "Pinned account quota is exhausted — queued until {retryAt}",
   "spawnCard.launch": "Launch {id}",
   "spawnChip.starting": "Starting",
   "spawnChip.binding": "Binding host",

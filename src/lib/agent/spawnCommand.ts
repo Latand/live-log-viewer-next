@@ -6,7 +6,8 @@ import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import { accountManager, resolveHealthySpawnAccount } from "@/lib/accounts/manager";
+import type { AccountContext } from "@/lib/accounts/contracts";
+import { accountManager, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
@@ -32,13 +33,15 @@ import { publishFilesRevision } from "@/lib/runtime/filesRevision";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
 import { assertStructuredTextEnvelope, type StructuredImageRef } from "@/lib/runtime/structuredContent";
-import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
+import { queuedPinnedSpawnTitle, reconcileStructuredSpawnReplay, resolvePinnedSpawnAdmission, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "@/lib/pipelines/engine";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
+import { en } from "@/lib/i18n/en";
+import { uk } from "@/lib/i18n/uk";
 import type { ApiError } from "@/lib/types";
 
 import { sourceCwdStatus } from "@/app/api/spawn/sourceCwd";
@@ -47,17 +50,35 @@ import { spawnAccountErrorResponse } from "@/app/api/spawn/accountError";
 
 const SUGGEST_SCAN_LIMIT = 80;
 const SUGGEST_MAX = 10;
+const PIN_FALLBACK_TITLE_EN = en["spawnCard.pinUnavailableFallback"];
+const PIN_FALLBACK_TITLE_UK_MESSAGE = uk["spawnCard.pinUnavailableFallback"];
+const PIN_FALLBACK_TITLE_UK = typeof PIN_FALLBACK_TITLE_UK_MESSAGE === "string"
+  ? PIN_FALLBACK_TITLE_UK_MESSAGE
+  : PIN_FALLBACK_TITLE_EN;
+
+function prefersUkrainian(req: Pick<NextRequest, "headers">): boolean {
+  const language = req.headers.get("accept-language")?.trim().toLowerCase() ?? "";
+  return language === "uk" || language.startsWith("uk-");
+}
+
+function pinFallbackTitle(req: Pick<NextRequest, "headers">): string {
+  return prefersUkrainian(req)
+    ? PIN_FALLBACK_TITLE_UK
+    : PIN_FALLBACK_TITLE_EN;
+}
 
 export interface SpawnCommandDependencies {
   registry: typeof agentRegistry;
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
   resolveSpawnAccount: typeof accountManager.resolveSpawn;
+  resolvePinnedSpawnAdmission?: typeof resolvePinnedSpawnAdmission;
   runtimeHostClient: typeof runtimeHostClient;
   publishFilesRevision?: typeof publishFilesRevision;
   spawnStructuredConversation: typeof spawnStructuredConversation;
   assertStructuredRuntime: typeof assertDarwinStructuredRuntime;
   defer(work: () => Promise<void>): void;
   storeImages(images: readonly RuntimeImageUpload[]): StructuredImageRef[];
+  spawnTmuxAgent?: typeof spawnAgentWithPrompt;
   adoptPipelineAttemptFromSource?: typeof adoptPipelineAttemptFromSource;
   pipelineAttemptTargetForSource?: typeof pipelineAttemptTargetForSource;
   /**
@@ -86,6 +107,7 @@ export const productionSpawnCommandDependencies: SpawnCommandDependencies = {
   registry: agentRegistry,
   resolveHealthySpawnAccount,
   resolveSpawnAccount: (engine, accountId) => accountManager.resolveSpawn(engine, accountId),
+  resolvePinnedSpawnAdmission,
   runtimeHostClient,
   publishFilesRevision,
   spawnStructuredConversation,
@@ -428,12 +450,13 @@ export async function executeSpawnRequest(
       accountId: string,
       launchProfile: ReturnType<typeof emptyLaunchProfile>,
       requestDigest: string,
+      accountPin = body.accountId !== undefined,
     ): SpawnRequest => ({
       engine,
       cwd,
       transport,
       accountId,
-      accountPin: body.accountId !== undefined,
+      accountPin,
       parentConversationId,
       parentSource,
       parentSessionKey,
@@ -506,52 +529,175 @@ export async function executeSpawnRequest(
         structured: transport === "structured",
       }));
     };
-    let account;
+    if (existingAttempt
+      && body.accountId !== undefined
+      && existingAttempt.accountPin
+      && (existingAttempt.state === "failed" || existingAttempt.state === "conflicted")) {
+      return terminalizePinnedAccountFailure(
+        new Error(existingAttempt.error ?? "the requested account is not available for this launch"),
+      );
+    }
+    const requestedAccountId = typeof body.accountId === "string" ? body.accountId : null;
+    let account: HealthySpawnAccountResolution;
     try {
-      account = existingAttempt && body.accountId === undefined && existingAttempt.accountId !== null
+      account = existingAttempt && existingAttempt.accountId !== null && !(existingAttempt.accountPin && requestedAccountId)
         ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
         : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
     } catch (error) {
       if (body.accountId === undefined) throw error;
-      return terminalizePinnedAccountFailure(error);
+      if (engine === "claude" && requestedAccountId) {
+        try {
+          const pinned = dependencies.resolveSpawnAccount(engine, requestedAccountId);
+          const admission = await (dependencies.resolvePinnedSpawnAdmission ?? resolvePinnedSpawnAdmission)(engine, pinned);
+          if (admission.kind === "retry-at" || admission.kind === "admissible") {
+            account = { ...pinned, admission, requestedAdmission: admission };
+          } else {
+            return terminalizePinnedAccountFailure(error);
+          }
+        } catch {
+          return terminalizePinnedAccountFailure(error);
+        }
+      } else {
+        return terminalizePinnedAccountFailure(error);
+      }
     }
-    if (body.accountId !== undefined && account.accountId !== body.accountId) {
-      return terminalizePinnedAccountFailure(new Error("the requested account is not available for this launch"));
+    const requestedRetryAt = requestedAccountId && account.requestedAdmission?.kind === "retry-at"
+      ? account.requestedAdmission.retryAt
+      : null;
+    const retryDeadline = requestedRetryAt ? Date.parse(requestedRetryAt) : Number.NaN;
+    const queuedUntil = Number.isFinite(retryDeadline) && retryDeadline > Date.now()
+      ? new Date(retryDeadline).toISOString()
+      : null;
+    if (queuedUntil && requestedAccountId) {
+      account = dependencies.resolveSpawnAccount(engine, requestedAccountId);
     }
-    const digest = requestDigestForAccount(account.accountId);
-    const specBase = freshSpecFor(engine, cwd, {
-      model: selectedModel.model,
-      effort: reasoning.effort,
-      fast: reasoning.fast,
-      codexHome: engine === "codex" ? account.home : null,
-      claudeConfigDir: engine === "claude" ? account.home : null,
-      claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
-      allowSubagents: body.allowSubagents === true,
-      mcpServers: grantedServers,
-      deferClaudeSpawnPolicy: true,
-    });
-    const permissionMode = engine === "claude" && transport === "structured"
-      ? structuredClaudePermissionMode(specBase.launchProfile?.permissionMode, {
-        agentInitiated,
-        operatorAuthenticated: authenticatedCaller?.kind === "operator",
-        roleSpawn: Boolean(role.value),
-      })
-      : specBase.launchProfile?.permissionMode;
-    const spec = {
-      ...specBase,
-      launchProfile: emptyLaunchProfile({
-        ...(specBase.launchProfile ?? {}),
-        cwd,
-        parentConversationId,
+    const pinFallback = Boolean(requestedAccountId && !queuedUntil && account.accountId !== requestedAccountId);
+    /* Idempotency binds the caller's requested account even when policy
+       degrades that pin to a fallback account. A replay can therefore recover
+       the admitted fallback while a changed pin still conflicts. */
+    const digest = requestDigestForAccount(
+      typeof body.accountId === "string" ? body.accountId : account.accountId,
+    );
+    const specForAccount = (
+      launchAccount: HealthySpawnAccountResolution,
+      title: string | null,
+    ) => {
+      const specBase = freshSpecFor(engine, cwd, {
+        model: selectedModel.model,
+        effort: reasoning.effort,
+        fast: reasoning.fast,
+        codexHome: engine === "codex" ? launchAccount.home : null,
+        claudeConfigDir: engine === "claude" ? launchAccount.home : null,
+        claudeProjectsDir: engine === "claude" ? launchAccount.transcriptRoot : null,
         allowSubagents: body.allowSubagents === true,
         mcpServers: grantedServers,
-        plugins,
-        permissionMode,
-        ...(explicitProject ? { project: explicitProject } : {}),
-      }),
+        deferClaudeSpawnPolicy: true,
+      });
+      const permissionMode = engine === "claude" && transport === "structured"
+        ? structuredClaudePermissionMode(specBase.launchProfile?.permissionMode, {
+          agentInitiated,
+          operatorAuthenticated: authenticatedCaller?.kind === "operator",
+          roleSpawn: Boolean(role.value),
+        })
+        : specBase.launchProfile?.permissionMode;
+      return {
+        ...specBase,
+        launchProfile: emptyLaunchProfile({
+          ...(specBase.launchProfile ?? {}),
+          cwd,
+          parentConversationId,
+          allowSubagents: body.allowSubagents === true,
+          mcpServers: grantedServers,
+          plugins,
+          permissionMode,
+          ...(title ? { title } : {}),
+          ...(explicitProject ? { project: explicitProject } : {}),
+        }),
+      };
     };
-    const begun = registry.beginSpawnRequest(canonicalSpawnRequest(account.accountId, spec.launchProfile, digest));
+    const queuedTitle = queuedUntil
+      ? queuedPinnedSpawnTitle(prefersUkrainian(req) ? "uk" : "en", queuedUntil)
+      : null;
+    const pinTitle = pinFallback ? pinFallbackTitle(req) : null;
+    const spec = specForAccount(account, pinTitle);
+    const prepareTmuxSpawn = (): void => {
+      if (engine !== "claude" || transport !== "tmux") return;
+      const profileId = path.basename(spec.transcript ?? "", ".jsonl");
+      if (isManagedClaudeHome(account.home)) prepareManagedClaudeSpawnHome(account.home, cwd);
+      applyClaudeSpawnPolicy(account.home, {
+        allowSubagents: body.allowSubagents === true,
+        baseSettingsPath: isManagedClaudeHome(account.home) ? claudeSettingsPath() : null,
+        profileId,
+        cwd,
+        mcpServers: grantedServers,
+        mcpStatePath: account.kind === "managed"
+          ? path.join(account.home, ".claude.json")
+          : path.join(path.dirname(account.home), ".claude.json"),
+      });
+    };
+    /* The receipt keeps the caller's requested account as durable routing
+       authority. The separate account context below owns this generation's
+       actual launch, so a degraded fallback cannot silently rebind the pin. */
+    const receiptAccountId = pinFallback && typeof body.accountId === "string"
+      ? body.accountId
+      : account.accountId;
+    const begun = registry.beginSpawnRequest(canonicalSpawnRequest(
+      receiptAccountId,
+      spec.launchProfile,
+      digest,
+      existingAttempt?.accountPin ?? (body.accountId !== undefined),
+    ));
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
+    if (begun.kind === "created") launchId = begun.receipt.launchId;
+    let queuedReceipt = begun.receipt;
+    if (queuedUntil && queuedTitle && requestedAccountId) {
+      const existingQueue = begun.receipt.queuedPinnedSpawn;
+      let queuedImageRefs: StructuredImageRef[];
+      if (existingQueue) {
+        queuedImageRefs = existingQueue.imageRefs;
+      } else {
+        try { queuedImageRefs = dependencies.storeImages(images); }
+        catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
+      }
+      queuedReceipt = registry.queuePinnedSpawn(begun.receipt.launchId, {
+        version: 1,
+        retryAt: queuedUntil,
+        accountId: requestedAccountId,
+        locale: prefersUkrainian(req) ? "uk" : "en",
+        spec,
+        ["prompt"]: prompt,
+        imageRefs: queuedImageRefs,
+        parentArtifactPath,
+        pipelineSourceConversationId,
+      }, queuedTitle);
+    }
+    const recordActualLaunchAccount = (
+      receipt: typeof begun.receipt,
+      actualAccountId: string,
+      agentPath: string | null,
+    ): void => {
+      if (!agentPath || receipt.accountId === actualAccountId) return;
+      const snapshot = registry.readOnlySnapshot();
+      const materialized = snapshot.receipts[receipt.launchId];
+      if (!materialized?.key || materialized.artifactPath !== agentPath) return;
+      const entry = snapshot.entries[sessionKeyId(materialized.key)];
+      const conversation = snapshot.conversations[materialized.conversationId];
+      if (!entry || !conversation) return;
+      registry.reconcileConversations([{
+        engine: materialized.engine,
+        path: agentPath,
+        accountId: actualAccountId,
+        launchProfile: materialized.launchProfile,
+        turn: {
+          state: conversation.turn.state,
+          source: conversation.turn.source,
+          terminalAt: conversation.turn.terminalAt,
+        },
+        expectedTurnObservedAt: conversation.turn.observedAt,
+        observedAt: new Date().toISOString(),
+      }]);
+      registry.upsert({ ...entry, accountId: actualAccountId });
+    };
     const adoptMaterializedAttempt = async (receipt: typeof begun.receipt, agentPath: string): Promise<void> => {
       if (!pipelineSourceConversationId || !dependencies.adoptPipelineAttemptFromSource) return;
       const materialized = registry.readOnlySnapshot().receipts[receipt.launchId] ?? receipt;
@@ -596,6 +742,7 @@ export async function executeSpawnRequest(
             registry,
             client: runtimeClient,
           });
+          recordActualLaunchAccount(receipt, account.accountId, response.path);
         } catch (error) {
           console.error("[spawn] structured launch failed", {
             launchId: receipt.launchId,
@@ -648,13 +795,13 @@ export async function executeSpawnRequest(
       });
     };
     if (begun.kind === "replay") {
-      const structured = begun.receipt.transport === "structured"
-        || (begun.receipt.transport === null
-          && Boolean(begun.receipt.key && registry.readOnlySnapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost));
-      let receipt = begun.receipt;
+      const structured = queuedReceipt.transport === "structured"
+        || (queuedReceipt.transport === null
+          && Boolean(queuedReceipt.key && registry.readOnlySnapshot().entries[sessionKeyId(queuedReceipt.key)]?.structuredHost));
+      let receipt = queuedReceipt;
       let initialMessage: SpawnResponse["initialMessage"] | undefined;
       const runtimeClient = structured ? dependencies.runtimeHostClient() : null;
-      if (runtimeClient) {
+      if (runtimeClient && !queuedUntil) {
         try {
           const reconciled = await reconcileStructuredSpawnReplay(receipt.launchId, registry, runtimeClient);
           receipt = reconciled;
@@ -679,24 +826,26 @@ export async function executeSpawnRequest(
         }
       }
       if (receipt.artifactPath) await adoptMaterializedAttempt(receipt, receipt.artifactPath);
-      const response = spawnResponseForReceipt(receipt, receipt.artifactPath, { structured, initialMessage });
+      const response = spawnResponseForReceipt(receipt, receipt.artifactPath, {
+        structured,
+        initialMessage: queuedUntil ? "queued" : initialMessage,
+      });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
-    launchId = begun.receipt.launchId;
-    if (engine === "claude" && transport === "tmux") {
-      const profileId = path.basename(spec.transcript ?? "", ".jsonl");
-      if (isManagedClaudeHome(account.home)) prepareManagedClaudeSpawnHome(account.home, cwd);
-      applyClaudeSpawnPolicy(account.home, {
-        allowSubagents: body.allowSubagents === true,
-        baseSettingsPath: isManagedClaudeHome(account.home) ? claudeSettingsPath() : null,
-        profileId,
-        cwd,
-        mcpServers: grantedServers,
-        mcpStatePath: account.kind === "managed"
-          ? path.join(account.home, ".claude.json")
-          : path.join(path.dirname(account.home), ".claude.json"),
-      });
+    if (queuedUntil) {
+      prepareTmuxSpawn();
+      const releasedQueuedReceipt = queuedReceipt.admissionOwner
+        ? registry.releaseSpawnActuation(queuedReceipt.launchId, queuedReceipt.admissionOwner).receipt
+        : queuedReceipt;
+      return NextResponse.json(
+        spawnResponseForReceipt(releasedQueuedReceipt, releasedQueuedReceipt.artifactPath, {
+          structured: transport === "structured",
+          initialMessage: "queued",
+        }),
+        { status: 202 },
+      );
     }
+    prepareTmuxSpawn();
     if (transport === "structured") {
       const runtimeClient = dependencies.runtimeHostClient();
       if (!runtimeClient) throw new Error("structured spawn runtime host is unavailable");
@@ -705,7 +854,9 @@ export async function executeSpawnRequest(
       catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
       deferStructuredSpawn(begun.receipt, runtimeClient, imageRefs);
       return NextResponse.json(
-        spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured: true }),
+        spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, {
+          structured: true,
+        }),
         { status: 202 },
       );
     }
@@ -732,7 +883,7 @@ export async function executeSpawnRequest(
       }
     }
     const startedAtMs = Date.now();
-    const pane = await spawnAgentWithPrompt(spec, bundle.payload, begun.receipt);
+    const pane = await (dependencies.spawnTmuxAgent ?? spawnAgentWithPrompt)(spec, bundle.payload, begun.receipt);
     const childPath = await resolveSpawnedTranscriptPath({
       engine,
       knownTranscript: spec.transcript ?? null,
@@ -763,6 +914,7 @@ export async function executeSpawnRequest(
       pendingAction: "spawn",
     });
     if (settled.kind === "conflict") return NextResponse.json(spawnResponseForReceipt(settled.receipt));
+    recordActualLaunchAccount(settled.receipt, account.accountId, childPath);
     await adoptMaterializedAttempt(settled.receipt, childPath);
     if (runtimeClient && operationId) {
       try {
@@ -792,9 +944,9 @@ export async function executeSpawnRequest(
     }
     return NextResponse.json(spawnResponseForReceipt(settled.receipt, childPath));
   } catch (error) {
-    const receipt = launchId ? agentRegistry().readOnlySnapshot().receipts[launchId] : null;
+    const receipt = launchId ? registry.readOnlySnapshot().receipts[launchId] : null;
     if (!receipt || receipt.pane === null) {
-      if (receipt) agentRegistry().failSpawn(receipt.launchId, "spawn failed before pane binding");
+      if (receipt) registry.failSpawn(receipt.launchId, "spawn failed before pane binding");
       deleteInboxImages(imagePaths);
     }
     if (error instanceof SpawnParentError) return NextResponse.json({ error: error.message }, { status: error.status });
@@ -807,8 +959,8 @@ export async function executeSpawnRequest(
     const accountError = spawnAccountErrorResponse(error);
     if (accountError) return accountError;
     if (receipt?.pane) {
-      if (receipt.state === "prompt-delivered" || receipt.state === "host-verified") agentRegistry().markSpawnPathPending(receipt.launchId);
-      const recovered = agentRegistry().readOnlySnapshot().receipts[receipt.launchId];
+      if (receipt.state === "prompt-delivered" || receipt.state === "host-verified") registry.markSpawnPathPending(receipt.launchId);
+      const recovered = registry.readOnlySnapshot().receipts[receipt.launchId];
       if (recovered) return NextResponse.json(spawnResponseForReceipt(recovered, recovered.artifactPath));
     }
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });

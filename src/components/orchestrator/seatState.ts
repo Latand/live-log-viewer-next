@@ -226,6 +226,27 @@ export function deriveOrchestratorPanelState(input: {
   return { kind: "draft", vacated: Boolean(status.seat) && !status.exists };
 }
 
+/** The warning is eligible only after the mandate has produced a visible
+    assistant message and a later turn has gone quiet. While the mandate is
+    still awaiting its first visible status, or the current turn already
+    contains that status, the operator-action warning stays hidden. */
+export function orchestratorQuietBannerEligible(
+  state: OrchestratorPanelState,
+  file: FileEntry | null,
+): boolean {
+  if (state.kind !== "live" || state.liveness !== "stalled" || !file) return false;
+  const turn = file.lastTurn;
+  if (!turn || turn.endedAt !== null) return true;
+  const assistantAt = file.lastAssistantMessageAt;
+  if (typeof assistantAt === "number" && assistantAt >= turn.startedAt) return false;
+
+  const designatedAt = Date.parse(state.seat.designatedAt);
+  const mandateStillAwaitsStatus = Number.isFinite(designatedAt)
+    && turn.startedAt >= designatedAt
+    && (assistantAt === null || (typeof assistantAt === "number" && assistantAt < designatedAt));
+  return !mandateStillAwaitsStatus;
+}
+
 /**
  * A client-side failure outranks the durable read only while the read has not
  * caught up with it: the server's own record is the truth as soon as it shows

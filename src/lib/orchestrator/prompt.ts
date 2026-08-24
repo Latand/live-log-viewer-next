@@ -13,7 +13,8 @@
  * a walk of validation errors. v6 (#1016) adds the third way of reaching the
  * operator — their screen: when to move it, and the target shapes to move it with,
  * so a seat steers attention to the work instead of describing where to look. v7
- * starts requested pipelines by default and reserves drafts for explicit requests. */
+ * starts requested pipelines by default and reserves drafts for explicit requests.
+ * v8 requires a visible first-turn status, including the completed-mandate case. */
 
 /** Initial draft values. The operator may choose any engine, model, account, and
     effort the shared launch controls support before creating the project seat. */
@@ -29,9 +30,16 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
     `ORCHESTRATOR_SYSTEM_PROMPT`: seats record the version their mandate was
     based on, and `get_orchestrator` reports it so a stale incumbent is visible
     without diffing prompts. */
-export const ORCHESTRATOR_PROMPT_VERSION = 7;
+export const ORCHESTRATOR_PROMPT_VERSION = 8;
+
+/** Appended to bespoke and stale mandates at delivery time; the current
+    versioned default already contains it. */
+export const ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE = `## Initial visible status
+Your first turn after receiving this mandate must produce a visible assistant status in this conversation. When work remains, inventory the mandate missions and state your plan in that status. When every mission is already complete, reply exactly: "all mandate missions are complete; standing by". A generic continuation nudge never replaces or suppresses this first visible status.`;
 
 export const ORCHESTRATOR_SYSTEM_PROMPT = `You are the viewer's built-in Manager (issues #182, #691) — the agent that owns the board and runs the whole conveyor through the viewer's own HTTP API and MCP tools. You never act outside them.
+
+${ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE}
 
 ## Two channels to the operator
 The operator talks to whoever they want, you included. When they write in your own conversation, answer them there — directly, plainly, helpfully, in your own voice, at whatever length the question deserves. That channel is sanctioned and first-class: what you write in it reaches them, and a question they put to you is yours to answer.
@@ -86,3 +94,12 @@ YOU decide when to deploy, and you execute it yourself. Your authority is your d
 - The llv-conveyor skill in this checkout is your playbook; follow its spawn-auth notes for agent-initiated calls.
 - Replacing manual spawns is a non-goal: the user's own agents keep working; you coordinate, you do not take over.
 - Re-derive board state per turn from bounded snapshots rather than accumulating it in context.`;
+
+/** Every seat receives the initial-status contract. Delivery checks the text
+    itself because caller-edited mandates may retain the current prompt version.
+    The stored mandate stays raw, and retries append the directive at most once. */
+export function orchestratorMandateForDelivery(mandate: string): string {
+  return mandate.includes(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)
+    ? mandate
+    : `${mandate}\n\n${ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE}`;
+}

@@ -217,6 +217,13 @@ export interface FileEntry {
       and the card meta row parks the run length in a tooltip. Absent when no
       turn boundary can be derived from the transcript tail (issue #231). */
   lastTurn?: TurnBoundary | null;
+  /** Timestamp of the newest visible assistant message in the transcript tail,
+      in Unix epoch milliseconds. Synthetic no-op records and tool-only
+      assistant records do not count: this is acknowledgment evidence the
+      operator could actually see. Null means the complete scanned tail carried
+      no such message; absent means the derivation has not run or a truncated
+      prefix prevents that conclusion. */
+  lastAssistantMessageAt?: number | null;
   /** Best-effort TUI scrape fallback for prompts without a transcript protocol. */
   waitingInput: WaitingInput | null;
   /** Live pane wall or fresh structured account exhaustion. */
