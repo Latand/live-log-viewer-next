@@ -20,7 +20,12 @@ import { productionLivenessSources } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 
 import { defaultMcpSpawnRoleParams, viewerMcpBindings } from "./bindings";
-import { createMcpToolService, MemoryMcpReceiptStore, type McpToolResult } from "./server";
+import {
+  createMcpToolService,
+  MemoryMcpReceiptStore,
+  type McpReceiptStore,
+  type McpToolResult,
+} from "./server";
 
 const sandboxes: string[] = [];
 const originalStateDir = process.env.LLV_STATE_DIR;
@@ -862,7 +867,7 @@ test("conversation_action delegates to the ownership-fenced conversation command
   });
 });
 
-test("conversation_action archives current generations, deleted ghosts, and spawn placeholders through board placement", async () => {
+test("conversation_action archives ghosts and reconciles interrupted receipts without another board revision", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-"));
   sandboxes.push(sandbox);
   const boardFile = path.join(sandbox, "board.json");
@@ -872,6 +877,24 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
   const deletedGhostPath = "/fixtures/fixture-project/deleted-ghost.jsonl";
   const spawnPath = "spawn:launch_fixture_placeholder";
   const unknownPath = "/fixtures/fixture-project/unknown.jsonl";
+  const interruptedReceiptStore = (expectedKey: string): { store: McpReceiptStore; completed: McpToolResult[] } => {
+    const completed: McpToolResult[] = [];
+    return {
+      completed,
+      store: {
+        claim: (key) => {
+          expect(key).toBe(expectedKey);
+          return completed[0]
+            ? { kind: "replay", result: completed[0] }
+            : { kind: "pending", unfinishedAgeMs: 4_000 };
+        },
+        complete: (key, _digest, result) => {
+          expect(key).toBe(expectedKey);
+          completed.push(result);
+        },
+      },
+    };
+  };
   const launchProfile = {
     cwd: "/fixtures/fixture-project",
     project,
@@ -915,7 +938,7 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
     registrySnapshot: () => registrySnapshot,
     completedFileScan: async () => {
       scanCalls += 1;
-      expect(boardFor(project, boardFile).prefs.hidden).toEqual(scanCalls === 1
+      expect(boardFor(project, boardFile).prefs.hidden).toEqual(scanCalls <= 2
         ? [currentPath, deletedGhostPath, spawnPath]
         : []);
       throw new Error("ghost archiving must not require a transcript scan");
@@ -932,7 +955,7 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
     },
   } as never);
 
-  const first = await bindings.conversation_action({
+  const archiveArgs = {
     clientRequestId: "archive-ghosts-first",
     action: "archive",
     targets: [
@@ -942,7 +965,8 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
       { transcriptPath: predecessorPath },
       { transcriptPath: unknownPath },
     ],
-  });
+  };
+  const first = await bindings.conversation_action(archiveArgs);
 
   expect(first).toMatchObject({
     action: "archive",
@@ -963,6 +987,31 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
   });
   expect(boardFor(project, boardFile).prefs.hidden).not.toContain(predecessorPath);
 
+  const interruptedArchive = interruptedReceiptStore("conversation_action:archive-ghosts-first");
+  const archiveRecovery = createMcpToolService(bindings, interruptedArchive.store);
+  const recoveredArchive = await archiveRecovery.callTool("conversation_action", archiveArgs);
+  expect(recoveredArchive).toMatchObject({
+    ok: true,
+    projectsTouched: [],
+    outcomes: [
+      { transcriptPath: currentPath, outcome: "already-archived" },
+      { transcriptPath: deletedGhostPath, outcome: "already-archived" },
+      { transcriptPath: spawnPath, outcome: "already-archived" },
+      { transcriptPath: currentPath, outcome: "already-archived" },
+      { transcriptPath: unknownPath, outcome: "resolution-failed" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 1,
+    prefs: { hidden: [currentPath, deletedGhostPath, spawnPath] },
+  });
+  expect(interruptedArchive.completed).toEqual([recoveredArchive]);
+  expect(await archiveRecovery.callTool("conversation_action", archiveArgs)).toEqual({
+    ...recoveredArchive,
+    replayed: true,
+  });
+  expect(boardFor(project, boardFile).revision).toBe(1);
+
   const replayByContent = await bindings.conversation_action({
     clientRequestId: "archive-ghosts-again",
     action: "archive",
@@ -981,7 +1030,7 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
   });
   expect(boardFor(project, boardFile).revision).toBe(1);
 
-  const restored = await bindings.conversation_action({
+  const unarchiveArgs = {
     clientRequestId: "unarchive-ghosts",
     action: "unarchive",
     targets: [
@@ -990,7 +1039,8 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
       { transcriptPath: spawnPath },
       { transcriptPath: unknownPath },
     ],
-  });
+  };
+  const restored = await bindings.conversation_action(unarchiveArgs);
   expect(restored).toMatchObject({
     outcomes: [
       { conversationId: "conversation_current", transcriptPath: currentPath, outcome: "unarchived" },
@@ -1000,8 +1050,24 @@ test("conversation_action archives current generations, deleted ghosts, and spaw
     ],
   });
   expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+
+  const interruptedUnarchive = interruptedReceiptStore("conversation_action:unarchive-ghosts");
+  const unarchiveRecovery = createMcpToolService(bindings, interruptedUnarchive.store);
+  const recoveredUnarchive = await unarchiveRecovery.callTool("conversation_action", unarchiveArgs);
+  expect(recoveredUnarchive).toMatchObject({
+    ok: true,
+    projectsTouched: [],
+    outcomes: [
+      { transcriptPath: currentPath, outcome: "not-found" },
+      { transcriptPath: deletedGhostPath, outcome: "not-found" },
+      { transcriptPath: spawnPath, outcome: "not-found" },
+      { transcriptPath: unknownPath, outcome: "resolution-failed" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+  expect(interruptedUnarchive.completed).toEqual([recoveredUnarchive]);
   expect(runtimeCalls).toBe(0);
-  expect(scanCalls).toBe(2);
+  expect(scanCalls).toBe(4);
 });
 
 test("conversation_action attributes archive outcomes only when its board command applied", async () => {

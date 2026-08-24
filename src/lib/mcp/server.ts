@@ -108,7 +108,7 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
 ]);
 
 /**
- * Tools whose binding is idempotent over its own durable state, so a claim the
+ * Calls whose binding is idempotent over its own durable state, so a claim the
  * previous process never settled is RECONCILED by re-running the binding
  * rather than answered `call_interrupted` forever (#873 review, finding 3).
  *
@@ -119,10 +119,21 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
  * permanent dead end becomes the deterministic answer to what actually
  * happened. The digest check above still refuses a same-id call with
  * different arguments.
+ *
+ * Archive and unarchive qualify at the action level: board hidden placement is
+ * content-idempotent, so a retry after the board write converges without
+ * another revision. Other conversation actions still require live runtime
+ * ownership and remain outside interrupted recovery.
  */
 const INTERRUPTED_RECOVERABLE_TOOLS: ReadonlySet<McpToolName> = new Set<McpToolName>([
   "request_attention",
 ]);
+
+function interruptedCallIsRecoverable(toolName: McpToolName, args: McpToolArgs): boolean {
+  if (INTERRUPTED_RECOVERABLE_TOOLS.has(toolName)) return true;
+  if (toolName !== "conversation_action") return false;
+  return args.action === "archive" || args.action === "unarchive";
+}
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
 export type McpToolPayload = Record<string, unknown>;
@@ -1530,7 +1541,7 @@ export function createMcpToolService(
           outcome = "conflict";
           return failure(toolName, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
         }
-        if (claim.kind === "pending" && !INTERRUPTED_RECOVERABLE_TOOLS.has(typedTool)) {
+        if (claim.kind === "pending" && !interruptedCallIsRecoverable(typedTool, effectiveArgs)) {
           outcome = "pending";
           unfinishedAgeMs = claim.unfinishedAgeMs;
           return failure(toolName, requestId, "call_interrupted", "The previous MCP process ended before this call completed", true, true);
