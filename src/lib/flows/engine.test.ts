@@ -1413,17 +1413,17 @@ test("a definitive structured journal rejection retries with a fresh identity an
   const journal = new RuntimeJournal(path.join(process.env.LLV_STATE_DIR!, "relay-retry-runtime.sqlite"), { structuredHosts: true });
   const registry = agentRegistry();
   const sessionId = ["079f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-");
-  const implementer = writeCodexEntry("relay-retry-implementer.jsonl", {
+  const implementer = writeCodexEntry(`relay-retry-${sessionId}.jsonl`, {
     id: sessionId,
     cwd: "/repo",
   }, Date.now() / 1_000);
-  const conversation = registry.ensureConversation("codex", implementer.path, null);
+  const conversation = registry.ensureConversation("codex", implementer.path, "account-a");
   const launchProfile = emptyLaunchProfile({ cwd: "/repo" });
   registry.upsert({
     key: { engine: "codex", sessionId },
     artifactPath: implementer.path,
     cwd: "/repo",
-    accountId: null,
+    accountId: "account-a",
     launchProfile,
     status: "idle",
     host: null,
@@ -1504,23 +1504,33 @@ test("a definitive structured journal rejection retries with a fresh identity an
   try {
     await tickFlows([implementer]);
     const retrying = loadFlows()[0]!;
+    const retryDetail = retrying.stateDetail ?? "";
+    const accountRef = retrying.hostClaim?.accountRef ?? "";
     expect(retrying).toMatchObject({
       state: "relaying",
       pausedState: null,
       stateDetail: expect.stringContaining("retrying automatically (1/3)"),
+      hostClaim: {
+        sessionKey: `codex:${sessionId}`,
+        accountRef: expect.stringMatching(/^managed:[0-9a-f]{12}$/),
+      },
       rounds: [{
         relayRetryCount: 1,
         relayDeliveryAttempt: 1,
         relayRetryAt: expect.any(String),
         relayStartedAt: null,
         relayedAt: null,
-        error: "structured resume host claim is unavailable",
+        error: expect.stringContaining(`structured host claim codex:${sessionId}`),
       }],
     });
+    expect(retryDetail.includes(`structured host claim codex:${sessionId}`)).toBe(true);
+    expect(retryDetail.includes(accountRef)).toBe(true);
+    expect(retryDetail.includes("account-a")).toBe(false);
     expect(commands).toHaveLength(1);
 
-    Object.assign(retrying.rounds[0]!, { relayRetryAt: "2026-08-05T20:47:08.000Z" });
-    saveFlows([retrying]);
+    const readyToRetry = loadFlows()[0]!;
+    Object.assign(readyToRetry.rounds[0]!, { relayRetryAt: "2026-08-05T20:47:08.000Z" });
+    saveFlows([readyToRetry]);
     await tickFlows([implementer]);
 
     expect(commands).toHaveLength(2);
@@ -1547,6 +1557,72 @@ test("a definitive structured journal rejection retries with a fresh identity an
   } finally {
     restoreDelivery();
     journal.close();
+  }
+});
+
+test("a deterministic structured host claim failure exhausts bounded retries with the same safe claim identity (#921)", async () => {
+  const registry = agentRegistry();
+  const sessionId = ["179f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-");
+  const implementer = writeCodexEntry(`claim-exhaustion-${sessionId}.jsonl`, {
+    id: sessionId,
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const conversation = registry.ensureConversation("codex", implementer.path, "account-a");
+  let sends = 0;
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, entries, text, options) => sendToImplementer(flow, entries, text, {
+    ...options,
+    recover: async () => {
+      sends += 1;
+      throw new Error("structured resume host claim is unavailable");
+    },
+    enqueueStructured: async () => { throw new Error("claim failure reached delivery actuation"); },
+  }));
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "claim-exhaustion-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nRepair the deterministic claim failure.\n");
+  saveFlows([raceFlow({
+    id: "flow-claim-exhaustion",
+    implementerPath: implementer.path,
+    implementerConversationId: conversation.id,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-06T14:19:00.000Z",
+      terminalAt: "2026-08-06T14:19:00.000Z",
+    }],
+  })]);
+
+  try {
+    for (let failure = 1; failure <= 4; failure += 1) {
+      await tickFlows([implementer]);
+      const current = loadFlows()[0]!;
+      const accountRef = current.hostClaim?.accountRef ?? "";
+      const expectedClaim = `structured host claim codex:${sessionId} on account ${accountRef}`;
+      expect(current.hostClaim?.sessionKey).toBe(`codex:${sessionId}`);
+      expect(accountRef).toMatch(/^managed:[0-9a-f]{12}$/);
+      expect((current.stateDetail ?? "").includes(expectedClaim)).toBe(true);
+      expect((current.stateDetail ?? "").includes("account-a")).toBe(false);
+      if (failure <= 3) {
+        expect(current).toMatchObject({
+          state: "relaying",
+          rounds: [{ relayRetryCount: failure, relayRetryAt: expect.any(String) }],
+        });
+        const readyToRetry = loadFlows()[0]!;
+        readyToRetry.rounds[0]!.relayRetryAt = "2026-08-06T14:19:01.000Z";
+        saveFlows([readyToRetry]);
+      } else {
+        expect(current).toMatchObject({
+          state: "needs_decision",
+          stateDetail: expect.stringContaining("relay delivery failed after 3 automatic retries"),
+          rounds: [{ relayRetryCount: 3, relayRetryAt: null, error: expect.stringContaining(expectedClaim) }],
+        });
+      }
+    }
+    expect(sends).toBe(4);
+  } finally {
+    restoreDelivery();
   }
 });
 

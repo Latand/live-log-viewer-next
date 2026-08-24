@@ -12,11 +12,13 @@ import { transcriptAllowed } from "@/lib/agent/spawnParent";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, isRecoverableLegacyRelayFailurePause, patchFlow } from "@/lib/flows/commands";
-import { lastAssistantMessage } from "@/lib/flows/findings";
+import { lastAssistantMessage, readFindingsFile } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
+import { redactBounded } from "@/lib/monitor/redact";
+import { parseReview, type ReviewFinding } from "@/lib/review";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { loadTasks } from "@/lib/tasks/store";
@@ -1164,6 +1166,7 @@ function attachReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow): voi
 const TERMINAL_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
   "approved", "done_comment", "needs_decision", "closed",
 ]);
+const REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX = "review flow host claim retry: ";
 
 function flowSourceUpdatedAt(flow: Flow): string | null {
   const values = [flow.createdAt, flow.closedAt];
@@ -1190,6 +1193,7 @@ function synchronizeReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow,
     verdict: round?.verdict ?? null,
     relayState: flow.state,
     terminalState: TERMINAL_REVIEW_FLOW_STATES.has(flow.state) ? flow.state : null,
+    hostClaim: flow.hostClaim ?? null,
     sourceUpdatedAt,
   };
   const generation = crypto.createHash("sha256").update(JSON.stringify({
@@ -2038,6 +2042,16 @@ async function tickReviewStage(
     attempt.reviewHeadSha = capturedReviewHead;
     persist();
   }
+  const hostClaimRetryDetail = flow.state === "relaying"
+    && flow.hostClaim
+    && flow.stateDetail?.includes("retrying automatically")
+    ? `${REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX}${flow.stateDetail}`
+    : null;
+  if (hostClaimRetryDetail) {
+    pipeline.stateDetail = hostClaimRetryDetail;
+  } else if (pipeline.stateDetail?.startsWith(REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX)) {
+    pipeline.stateDetail = null;
+  }
   if (flow.state === "approved") {
     const fenceError = reviewHeadFenceError(pipeline, attempt, ports);
     if (fenceError) {
@@ -2144,7 +2158,53 @@ function terminalReviewFlowError(flow: Flow): string | null {
   return `review loop ended in ${flow.state}: ${flow.stateDetail ?? "operator decision required"}`;
 }
 
-function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boolean {
+function safeFlowFinding(flow: Flow, finding: ReviewFinding): string {
+  const rawFile = finding.file?.trim() ?? "";
+  let safeFile = rawFile;
+  if (rawFile && path.isAbsolute(rawFile)) {
+    const relative = path.relative(flow.cwd, rawFile);
+    safeFile = relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+      ? relative
+      : path.basename(rawFile);
+  }
+  const location = safeFile
+    ? `${redactBounded(safeFile, 400)}${finding.line ? `:${finding.line}` : ""}`
+    : finding.line ? `line ${finding.line}` : "";
+  return [finding.severity, location, redactBounded(finding.title, 400)]
+    .filter(Boolean)
+    .join(" — ");
+}
+
+/** Terminal flow evidence can outlive the stage-side relay that launched it.
+    Parse the latest completed artifact through the flow's canonical parser,
+    then adapt it to the pipeline verdict interface so normal settlement owns
+    fail-edge routing and the board receives structured findings. */
+function terminalFlowStageVerdict(flow: Flow): ParsedStageVerdict | null {
+  if (flow.state !== "needs_decision" && flow.state !== "done_comment" && flow.state !== "closed") return null;
+  const round = flow.rounds.findLast((candidate) => candidate.verdict !== null);
+  if (!round?.findingsPath || round.verdict === "APPROVE") return null;
+  const parsed = readFindingsFile(round);
+  if (!parsed || parsed.verdict !== round.verdict) return null;
+  const review = parseReview(parsed.content, round.reviewedAt);
+  const reviewFindings = (review?.findings ?? []).map((finding) => safeFlowFinding(flow, finding));
+  const findings = [
+    ...(flow.stateDetail ? [redactBounded(flow.stateDetail, 2_000)] : []),
+    ...reviewFindings,
+  ].slice(0, 50);
+  if (reviewFindings.length === 0 && findings.length < 50) {
+    findings.push(`Review flow round ${round.n} returned ${parsed.verdict}; open the round artifact for details.`);
+  }
+  return {
+    verdict: {
+      status: parsed.verdict === "REQUEST_CHANGES" ? "fail" : "needs_decision",
+      findings,
+      confidence: 1,
+    },
+    output: `Review flow round ${round.n}: ${parsed.verdict}\n\n${findings.map((finding) => `- ${finding}`).join("\n")}`,
+  };
+}
+
+function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts, persist: () => void): boolean {
   if (pipeline.state !== "needs_decision") return false;
   const stage = currentStage(pipeline);
   if (stage?.kind !== "review-loop") return false;
@@ -2157,6 +2217,12 @@ function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boo
     || !flow
     || !RECONCILABLE_REVIEW_FLOW_STATES.has(flow.state)
   ) return false;
+  const flowVerdict = terminalFlowStageVerdict(flow);
+  if (flowVerdict) {
+    synchronizeReviewFlowAttempt(attempt, flow, ports.now());
+    settleStageVerdict(pipeline, stage, attempt, flowVerdict, ports, persist);
+    return true;
+  }
   if (flow.state === "paused") {
     if (!isRecoverableLegacyRelayFailurePause(flow)) return false;
     const resumed = ports.patchFlow(flow.id, "resume");
@@ -2425,7 +2491,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persistPipeline) || pipelineChanged;
         pipelineChanged = reconcileParkedVerdictMiss(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
-        pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
+        pipelineChanged = reconcileBoundReviewFlow(pipeline, ports, persistPipeline) || pipelineChanged;
         pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileTerminalStageHosts(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {

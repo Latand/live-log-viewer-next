@@ -35,6 +35,14 @@ export type ViewerFlowDelivery = {
   deliveredAt: string;
 };
 
+/** Safe durable address of the structured implementer host a flow tried to
+    claim. Managed account ids are label-derived, so the public flow record
+    carries only a stable digest instead of the raw id. */
+export type FlowHostClaim = {
+  sessionKey: string;
+  accountRef: "default" | "unknown" | `managed:${string}`;
+};
+
 export type RelayDeliveryTransport = "structured" | "legacy";
 
 export type FlowBlock = {
@@ -173,6 +181,8 @@ export type Flow = {
   mergeEvidence?: FlowMergeEvidence | null;
   /** Exact transcript generation that received the Viewer-generated kickoff. */
   kickoffDelivery?: ViewerFlowDelivery | null;
+  /** Latest structured implementer-host claim selected by kickoff or relay. */
+  hostClaim?: FlowHostClaim | null;
   rounds: Round[];
   createdAt: string;
   closedAt: string | null;

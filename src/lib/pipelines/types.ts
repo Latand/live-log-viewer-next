@@ -149,6 +149,7 @@ export type PipelineStageAttempt = {
     verdict: import("@/lib/flows/types").ReviewVerdict | null;
     relayState: import("@/lib/flows/types").FlowState;
     terminalState: import("@/lib/flows/types").FlowState | null;
+    hostClaim?: import("@/lib/flows/types").FlowHostClaim | null;
     synchronizedAt: string;
     sourceUpdatedAt: string | null;
     lagMs: number | null;
