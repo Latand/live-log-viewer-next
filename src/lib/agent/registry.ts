@@ -31,6 +31,7 @@ import {
   MIGRATION_DELIVERY_CANCELLATION_PREFIX,
   migrationIntentCanEnroll,
   ROLLED_BACK_MIGRATION_DELIVERY_REASON,
+  rolledBackMigrationOwnsDelivery,
   STOPPED_MIGRATION_DELIVERY_REASON,
 } from "@/lib/accounts/migration/intentLiveness";
 
@@ -908,6 +909,24 @@ function terminalizeHeldDelivery(
   syncDeliveryOperationOwnerState(file, delivery);
 }
 
+function terminalizeRolledBackMigrationDelivery(
+  file: RegistryFile,
+  deliveryId: string,
+  intentId: string,
+  reason: string,
+): HeldDelivery | null {
+  const delivery = file.heldDeliveries[deliveryId];
+  if (!delivery || !["held", "assigned", "delivery-uncertain"].includes(delivery.state)) return null;
+  const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+  const migration = conversation?.migration;
+  if (!migration
+    || migration.phase !== "rolled-back"
+    || migration.intentId !== intentId
+    || !rolledBackMigrationOwnsDelivery(delivery, migration.updatedAt)) return null;
+  terminalizeHeldDelivery(file, delivery, reason);
+  return clone(delivery);
+}
+
 function reconfigureMigrationRequestId(owner: { operationId: string; revision: number }): string {
   return `reconfigure:${owner.operationId}:${owner.revision}`;
 }
@@ -1752,7 +1771,6 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
   }
   const deliveredGroups = new Map<ViewerConversationId, HeldDelivery[]>();
   const failedGroups = new Map<ViewerConversationId, HeldDelivery[]>();
-  const cancelledFailures: HeldDelivery[] = [];
   for (const delivery of Object.values(file.heldDeliveries)) {
     const canonicalId = resolveConversationAlias(file, delivery.conversationId);
     if (onlyConversationId && canonicalId !== resolveConversationAlias(file, onlyConversationId)) continue;
@@ -1762,27 +1780,13 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
       group.push(delivery);
       deliveredGroups.set(canonicalId, group);
     } else if (delivery.state === "failed"
-      && delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX)) {
-      /* Migration cancellations arrive in bursts larger than the failed cap,
-         so they skip the per-conversation cap to keep the whole burst
-         auditable — but they age out with the shared retention window (#972);
-         exempting them from the TTL too let the records accumulate forever.
-         Same-operation replay dedup survives their compaction through
-         `deliveryOperationOwners`. */
-      cancelledFailures.push(delivery);
-    } else if (delivery.state === "failed") {
+      && !delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX)) {
       const group = failedGroups.get(canonicalId) ?? [];
       group.push(delivery);
       failedGroups.set(canonicalId, group);
     }
   }
   let removed = 0;
-  for (const delivery of cancelledFailures) {
-    if (terminalDeliveryExpired(delivery, nowMs)) {
-      delete file.heldDeliveries[delivery.id];
-      removed += 1;
-    }
-  }
   for (const groups of [deliveredGroups, failedGroups]) {
     for (const [conversationId, deliveries] of groups) {
       const kept: HeldDelivery[] = [];
@@ -5860,6 +5864,15 @@ export class AgentRegistry {
           }
           if (conversation.migration?.intentId !== id || conversation.migration.phase === "committed") continue;
           queueAbandonedMigrationCleanup(file, conversation, intent.updatedAt);
+          if (conversation.migration.phase === "rolled-back") {
+            /* Preserve the original rollback window. A later intent timeout may
+               settle only deliveries still provably owned by that window. */
+            for (const delivery of Object.values(file.heldDeliveries)) {
+              if (resolveConversationAlias(file, delivery.conversationId) !== conversation.id) continue;
+              terminalizeRolledBackMigrationDelivery(file, delivery.id, id, stoppedDeliveryReason);
+            }
+            continue;
+          }
           conversation.migration = { ...conversation.migration, phase: "rolled-back", error: null, errorCode: null, updatedAt: intent.updatedAt };
           terminalizeCancelledMigrationDeliveries(file, conversation, stoppedDeliveryReason.slice(0, 240));
         }
@@ -6110,6 +6123,13 @@ export class AgentRegistry {
     });
   }
 
+  /** Atomically fences rollback ownership against the current reservation and
+      migration row. A concurrent exact resend updates `assignedAt` before this
+      mutation and therefore cannot be cancelled from an older snapshot. */
+  terminalizeRolledBackMigrationDelivery(id: string, intentId: string, reason: string): HeldDelivery | null {
+    return this.mutate((file) => terminalizeRolledBackMigrationDelivery(file, id, intentId, reason));
+  }
+
   compactDeliveryReservations(): number {
     return this.mutate((file) => compactDeliveryReservations(file, undefined, this.now()));
   }
@@ -6356,20 +6376,23 @@ export class AgentRegistry {
     });
   }
 
-  /** Disarms rolled-back residue (#972). A rolled-back block is settled state:
-      once the hygiene sweep has terminalized the deliveries the dead migration
-      owned, keeping the block makes every later sweep and coordinator drain
-      match the conversation again and cancel messages the migration never
-      owned. Clearing is conditional on the phase and intent still matching so
-      a concurrent re-enrollment is never destroyed. */
-  clearRolledBackConversationMigration(id: ViewerConversationId, intentId: string): void {
-    this.mutate((file) => {
+  /** Disarms rolled-back residue (#972) after its delivery fence is no longer
+      needed. Phase, intent, and pending-delivery checks share one mutation so
+      neither a concurrent re-enrollment nor a freshly admitted delivery can be
+      exposed to the coordinator's no-migration orphan cleanup. */
+  clearRolledBackConversationMigration(id: ViewerConversationId, intentId: string): boolean {
+    return this.mutate((file) => {
       const conversation = file.conversations[resolveConversationAlias(file, id)];
       const migration = conversation?.migration;
-      if (!conversation || !migration || migration.phase !== "rolled-back" || migration.intentId !== intentId) return;
+      if (!conversation || !migration || migration.phase !== "rolled-back" || migration.intentId !== intentId) return false;
+      const hasPendingDelivery = Object.values(file.heldDeliveries).some((delivery) =>
+        resolveConversationAlias(file, delivery.conversationId) === conversation.id
+        && ["held", "assigned", "delivery-uncertain"].includes(delivery.state));
+      if (hasPendingDelivery) return false;
       conversation.migration = null;
       conversation.updatedAt = now();
       file.conversationRevision[conversation.engine] += 1;
+      return true;
     });
   }
 }

@@ -2612,7 +2612,7 @@ describe("durable account migration coordinator", () => {
       },
     }, store);
 
-    expect(delivered).toEqual([]);
+    expect(delivered).toEqual(["post-rollback-assigned"]);
     expect(store.snapshot().heldDeliveries["owned-by-rollback"]).toMatchObject({
       state: "failed",
       attempts: 0,
@@ -2620,11 +2620,66 @@ describe("durable account migration coordinator", () => {
       deliveredAt: null,
       error: expect.stringContaining("rolled back"),
     });
-    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "assigned", attempts: 0, error: null });
+    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "delivered", attempts: 1, error: null });
     expect(store.snapshot().heldDeliveries["held-after-rollback"]).toMatchObject({ state: "held", attempts: 0, error: null });
   });
 
-  test("a delivery sent after a rollback survives repeated reconciliation and the hygiene sweep (issue 972)", async () => {
+  test("reconciliation spares the same reservation reauthorized after rollback (issue 972)", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/rolled-back-reauthorized.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/rolled-back-reauthorized.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "rolled-back-reauthorized",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const original = store.holdDelivery(conversation.id, "send again", "rolled-back-reauthorized");
+    const revision = store.conversation(conversation.id)!.migration!.revision;
+    store.rollbackConversationMigration(conversation.id, revision);
+    const reauthorized = store.holdDelivery(conversation.id, "send again", "rolled-back-reauthorized");
+
+    await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+
+    expect(reauthorized.id).toBe(original.id);
+    expect(store.snapshot().heldDeliveries[reauthorized.id]).toMatchObject({
+      state: "delivered",
+      attempts: 1,
+      error: null,
+    });
+  });
+
+  test("reconciliation rechecks rollback ownership after reading pending deliveries (issue 972)", async () => {
+    const { store, conversation } = rolledBackResidue(
+      "/rolled-back-reauthorized-race.jsonl",
+      "rolled-back-reauthorized-race",
+    );
+    const pendingDeliveries = store.pendingDeliveries.bind(store);
+    let reauthorizedId: string | null = null;
+    store.pendingDeliveries = (conversationId) => {
+      const pending = pendingDeliveries(conversationId);
+      if (!reauthorizedId && pending.some((item) => item.id === "owned-by-rollback")) {
+        reauthorizedId = store.holdDelivery(
+          conversation.id,
+          "fixture payload",
+          "owned-by-rollback",
+        ).id;
+      }
+      return pending;
+    };
+
+    await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+
+    expect(reauthorizedId).toBe("owned-by-rollback");
+    expect(store.snapshot().heldDeliveries[reauthorizedId!]).toMatchObject({
+      state: "delivered",
+      attempts: 1,
+      error: null,
+    });
+  });
+
+  test("post-rollback deliveries survive coordinator, settling sweep, and the next coordinator tick (issue 972)", async () => {
     const { store, conversation } = rolledBackResidue("/rolled-back-repeat.jsonl", "rolled-back-repeat");
     const assigned = store.holdDelivery(conversation.id, "sent after the rollback", "post-rollback-repeat");
     const port = { async deliver() { return "delivered" as const; } };
@@ -2632,9 +2687,10 @@ describe("durable account migration coordinator", () => {
     await reconcileMigrations(provider([]), port, store);
     await reconcileMigrations(provider([]), port, store);
     terminalizeStaleUndeliverableHeldDeliveries(store);
+    await reconcileMigrations(provider([]), port, store);
 
-    expect(store.conversation(conversation.id)?.migration).toBeNull();
-    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "assigned", attempts: 0, error: null });
+    expect(store.conversation(conversation.id)?.migration).toMatchObject({ phase: "rolled-back" });
+    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "delivered", attempts: 1, error: null });
     expect(store.snapshot().heldDeliveries["held-after-rollback"]).toMatchObject({ state: "held", attempts: 0, error: null });
   });
 
@@ -2652,8 +2708,8 @@ describe("durable account migration coordinator", () => {
       },
     }, store);
 
-    expect(delivered).toEqual([]);
-    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "assigned", attempts: 0, error: null });
+    expect(delivered).toEqual(["post-rollback-reaper-first"]);
+    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "delivered", attempts: 1, error: null });
     expect(store.snapshot().heldDeliveries["held-after-rollback"]).toMatchObject({ state: "held", attempts: 0, error: null });
   });
 

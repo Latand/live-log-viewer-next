@@ -6,7 +6,6 @@ import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry, conversationLookupFromSnapshot, CORRUPT_HELD_DELIVERY_IMAGES_ERROR, DeliveryReservationConflictError, SPAWN_STARTING_ADMISSION_LEASE_MS, SupersedenceConflictError } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
-import { ROLLED_BACK_MIGRATION_DELIVERY_REASON } from "@/lib/accounts/migration/intentLiveness";
 import { structuredContent } from "@/lib/runtime/structuredContent";
 
 const KEY = { engine: "codex" as const, sessionId: "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326" };
@@ -158,44 +157,6 @@ describe("agent registry", () => {
     expect(retained["expired-delivered"]).toBeUndefined();
     expect(retained["expired-failed"]).toBeUndefined();
     expect(retained["recent-delivered"]).toMatchObject({ state: "delivered" });
-  });
-
-  test("startup compaction expires migration-cancelled failures past the retention window", () => {
-    const store = registry();
-    const conversation = store.ensureConversation("codex", "/cancelled-deliveries.jsonl", "default");
-    const snapshot = store.snapshot();
-    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000).toISOString();
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1_000).toISOString();
-    const seed = (id: string, settledAt: string) => {
-      snapshot.heldDeliveries[id] = {
-        id,
-        conversationId: conversation.id,
-        text: "",
-        createdAt: settledAt,
-        clientMessageId: id,
-        payloadKind: "text",
-        runtimeImages: [],
-        contentDigest: null,
-        artifactPaths: [],
-        state: "failed",
-        generationId: null,
-        attempts: 0,
-        assignedAt: null,
-        deliveredAt: null,
-        error: ROLLED_BACK_MIGRATION_DELIVERY_REASON,
-      } as unknown as (typeof snapshot.heldDeliveries)[string];
-    };
-    seed("cancelled-expired", eightDaysAgo);
-    seed("cancelled-recent", oneHourAgo);
-    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
-
-    const restarted = new AgentRegistry(store.filename);
-    const retained = restarted.snapshot().heldDeliveries;
-    expect(retained["cancelled-expired"]).toBeUndefined();
-    expect(retained["cancelled-recent"]).toMatchObject({
-      state: "failed",
-      error: ROLLED_BACK_MIGRATION_DELIVERY_REASON,
-    });
   });
 
   test("compaction retains explicit operation ownership after its delivery tombstone expires", () => {

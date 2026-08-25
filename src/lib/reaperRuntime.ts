@@ -885,24 +885,25 @@ export function terminalizeStaleUndeliverableHeldDeliveries(
     const owned = Object.values(snapshot.conversations)
       .filter((conversation) => conversation.migration?.intentId === intent.id);
     const ids = unsettledDeliveryIdsForIntent(snapshot, intent.id);
-    /* A rolled-back migration owns only the deliveries that already existed
-       when it rolled back (#972): its rollback stamped `migration.updatedAt`,
-       so anything created afterwards is a fresh message the settled migration
-       has no claim on and must never be cancelled by its residue. */
-    const rolledBackAt = new Map<RegistryConversation["id"], number>();
+    /* A rolled-back migration owns only deliveries whose latest admission was
+       inside its drain window (#972). A resend can reuse an older reservation,
+       so `createdAt` alone does not prove ownership. */
+    const rolledBackConversationIds = new Set<RegistryConversation["id"]>();
     for (const conversation of owned) {
       if (conversation.migration?.phase !== "rolled-back") continue;
-      rolledBackAt.set(conversation.id, Date.parse(conversation.migration.updatedAt));
+      rolledBackConversationIds.add(conversation.id);
     }
     let activeIds = ids.filter((id) => {
       const delivery = snapshot.heldDeliveries[id];
       if (!delivery) return true;
-      const cutoff = rolledBackAt.get(delivery.conversationId);
-      if (cutoff === undefined) return true;
-      const createdAt = Date.parse(delivery.createdAt);
-      if (!Number.isFinite(cutoff) || (Number.isFinite(createdAt) && createdAt > cutoff)) return true;
-      const settled = registry.terminalizeHeldDelivery(id, ROLLED_BACK_MIGRATION_DELIVERY_REASON);
-      if (settled.state === "failed") terminalized.add(id);
+      if (!rolledBackConversationIds.has(delivery.conversationId)) return true;
+      const settled = registry.terminalizeRolledBackMigrationDelivery(
+        id,
+        intent.id,
+        ROLLED_BACK_MIGRATION_DELIVERY_REASON,
+      );
+      if (!settled) return true;
+      terminalized.add(id);
       return false;
     });
     /* Once its intent is settled and its owned deliveries are terminal, the
@@ -910,9 +911,9 @@ export function terminalizeStaleUndeliverableHeldDeliveries(
        hygiene pass that would otherwise keep matching this conversation. A
        still-draining intent keeps the block so the drain's own bookkeeping
        (progress accounting, per-conversation opt-out) stays intact; the
-       createdAt cutoff above already protects new messages meanwhile. */
+       atomic ownership fence above already protects new messages meanwhile. */
     if (intent.state !== "draining") {
-      for (const conversationId of rolledBackAt.keys()) {
+      for (const conversationId of rolledBackConversationIds) {
         registry.clearRolledBackConversationMigration(conversationId, intent.id);
       }
       continue;
