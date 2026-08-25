@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { ConversationCatalogEntry } from "./conversationCatalog";
-import { ExpiredConversationCatalogCursorError, loadConversationCatalogPage, paginateConversationCatalog } from "./conversationCatalog";
+import { catalogEntryToFileEntry, ExpiredConversationCatalogCursorError, loadConversationCatalogPage, paginateConversationCatalog } from "./conversationCatalog";
 import { schemeWindowConfig, selectSchemeWindow } from "./schemeWindow";
 
 function entry(index: number, project = "viewer"): ConversationCatalogEntry {
@@ -122,4 +122,12 @@ test("scheme project and card caps are independently configurable", () => {
     projectCap: 3,
     cardsPerProject: 7,
   });
+});
+
+test("a fresh transcript never reads idle in list rows — activity carries the scanner's mtime tier (#1038 review)", () => {
+  const nowMs = 1_780_000_000_000;
+  const fresh = catalogEntryToFileEntry({ ...entry(1), mtime: nowMs / 1000 - 60 }, nowMs);
+  const aged = catalogEntryToFileEntry({ ...entry(2), mtime: nowMs / 1000 - 3_600 }, nowMs);
+  expect(fresh.activity).toBe("recent");
+  expect(aged.activity).toBe("idle");
 });

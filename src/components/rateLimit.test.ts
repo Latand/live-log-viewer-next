@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import { translate } from "@/lib/i18n";
 
-import { windowLabel } from "./rateLimit";
+import { formatResetEta, windowLabel } from "./rateLimit";
 
 const en = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) => translate("en", key, params);
 const uk = (key: Parameters<typeof translate>[1], params?: Record<string, string | number>) => translate("uk", key, params);
@@ -40,4 +40,12 @@ test("other declared lengths are spelled out in the reader's units", () => {
   expect(windowLabel(uk, "session", 45)).toBe("45 хв");
   expect(windowLabel(uk, "weekly", 43_200)).toBe("30 д");
   expect(windowLabel(uk, "session", 10_080)).toBe("Тиждень");
+});
+
+test("reset ETAs round upward at minute, hour, and day scales", () => {
+  const now = 1_800_000_000;
+  expect(formatResetEta(now + 61, now)).toBe("in 2m");
+  expect(formatResetEta(now + 5_401, now)).toBe("in 2h");
+  expect(formatResetEta(now + 4 * 86_400 + 4 * 3_600, now)).toBe("in 5d");
+  expect(formatResetEta(now + 4 * 86_400 + 20 * 3_600, now)).toBe("in 5d");
 });

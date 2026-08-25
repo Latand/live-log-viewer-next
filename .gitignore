@@ -70,3 +70,8 @@ docs/screenshots/issue-499/geometry.list
 # privacy-manifest hash the publication gate requires).
 evidence/**/*.html
 evidence/**/*.png
+
+# issue-1086 UI captures: browser renders are not byte-deterministic, so they
+# carry no privacy-manifest provenance and stay out of the commit. Regenerate
+# with `bun run build && bun evidence/issue-1086/drive.ts`.
+/.artifacts/

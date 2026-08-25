@@ -155,6 +155,12 @@ export interface FileEntry {
       A Viewer root carries `viewer` provenance even though it has no parent
       edge. Unattributed external roots stay undefined. */
   spawnOrigin?: "viewer" | "engine";
+  /** Durable report-run marker (issue #1091): this conversation is the Telegram
+      Daily Report run with THIS run id, read from the launch receipt the
+      registry keeps. It survives a registry reload with no Daily Reports
+      history file present, which is what lets the board group the runs under
+      the Telegram panel and lets a run be re-linked to its stored report. */
+  telegramReport?: { runId: string };
   /** Unix seconds. */
   mtime: number;
   size: number;
@@ -211,6 +217,13 @@ export interface FileEntry {
       and the card meta row parks the run length in a tooltip. Absent when no
       turn boundary can be derived from the transcript tail (issue #231). */
   lastTurn?: TurnBoundary | null;
+  /** Timestamp of the newest visible assistant message in the transcript tail,
+      in Unix epoch milliseconds. Synthetic no-op records and tool-only
+      assistant records do not count: this is acknowledgment evidence the
+      operator could actually see. Null means the complete scanned tail carried
+      no such message; absent means the derivation has not run or a truncated
+      prefix prevents that conclusion. */
+  lastAssistantMessageAt?: number | null;
   /** Best-effort TUI scrape fallback for prompts without a transcript protocol. */
   waitingInput: WaitingInput | null;
   /** Live pane wall or fresh structured account exhaustion. */
@@ -526,9 +539,16 @@ export interface ApiError {
   successorConversationId?: string;
 }
 
+export type LimitsSource = "live" | "transcript" | "cache" | "unavailable";
+export type LimitWindowSource = LimitsSource | "account";
+
 /** One rate-limit window (5h session or weekly) of an engine subscription. */
 export interface LimitWindow {
   usedPercent: number;
+  /** Unix seconds of this window's selected observation after reconciliation. */
+  observedAt?: number | null;
+  /** Selected origin for this window after per-window reconciliation. */
+  source?: LimitWindowSource;
   /** Unix seconds when the window resets, or null when unknown. */
   resetsAt: number | null;
   /** The window's own length in minutes as the provider declared it (Codex
@@ -543,15 +563,15 @@ export interface EngineLimits {
   session: LimitWindow | null;
   weekly: LimitWindow | null;
   plan: string | null;
-  /** Unix seconds when the numbers were captured. Codex limits come from the
-      newest session transcript, so they can lag behind; null = fetched live. */
+  /** Unix seconds of the oldest selected window observation. Null means the
+      provider supplied no observation clock. */
   capturedAt: number | null;
 }
 
 /** Origin and freshness are independent for each engine. Reasons are safe for
     display/logging and never contain credential material. */
 export interface LimitsProvenance {
-  source: "live" | "transcript" | "cache" | "unavailable";
+  source: LimitsSource;
   reason: string | null;
   staleSince: string | null;
   /** ISO timestamp for the next provider refresh after a failed read. */

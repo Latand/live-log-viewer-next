@@ -3,10 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE,
+  ORCHESTRATOR_PROMPT_VERSION,
+  ORCHESTRATOR_SYSTEM_PROMPT,
+} from "./prompt";
 import { setRetireManagerForTests } from "./retire";
 import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
 import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor } from "./seats";
-import { readOrchestratorRecord } from "./store";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
@@ -41,11 +45,10 @@ const OLD_ID = "conversation_44444444-4444-4444-8444-444444444444";
 interface Recorded {
   spawns: Record<string, unknown>[];
   deliveries: { conversationId: string; clientMessageId: string; text: string }[];
-  legacySyncs: { conversationId: string }[];
 }
 
 function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps: SeatCommandDependencies; recorded: Recorded } {
-  const recorded: Recorded = { spawns: [], deliveries: [], legacySyncs: [] };
+  const recorded: Recorded = { spawns: [], deliveries: [] };
   const deps: SeatCommandDependencies = {
     spawn: async (body) => {
       recorded.spawns.push(body);
@@ -62,7 +65,6 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
       cwd: "/workspace",
       project: "proj-a",
     }),
-    syncLegacyRecord: (input) => { recorded.legacySyncs.push({ conversationId: input.conversationId }); },
     projectTasks: () => [],
     launchSettlement: () => ({ kind: "unknown" }),
     now: () => AT,
@@ -115,14 +117,33 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(recorded.spawns[0]).toMatchObject({
     role: "orchestrator",
     project: "proj-a",
-    ["prompt"]: "own the board",
     clientAttemptId: "req_00000001",
   });
+  expect(String(recorded.spawns[0]!.prompt)).toStartWith("own the board");
+  expect(String(recorded.spawns[0]!.prompt)).toContain("all mandate missions are complete; standing by");
   const { active, pending } = orchestratorSeatFor("proj-a");
   expect(active?.conversationId).toBe(NEW_ID);
   expect(active?.mandate).toBe("own the board");
   expect(pending).toBeNull();
-  expect(recorded.legacySyncs).toEqual([{ conversationId: NEW_ID }]);
+});
+
+test("a caller-edited current-version mandate receives the status directive without changing stored text", async () => {
+  const { deps, recorded } = dependencies();
+  const mandate = "custom current-version mandate";
+  const result = await executeOrchestratorSeatRequest({
+    ...spawnRequest("req_00000021"),
+    mandate,
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+  }, deps);
+
+  expect(result.status).toBe(200);
+  const delivered = String(recorded.spawns[0]!.prompt);
+  expect(delivered).toStartWith(mandate);
+  expect(delivered.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({
+    mandate,
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+  });
 });
 
 test("an admitted asynchronous spawn activates the seat from its durable conversation id", async () => {
@@ -176,8 +197,8 @@ test("a restarted caller replays the accepted launch from the durable seat recei
   expect(recorded.spawns).toEqual([]);
 });
 
-test("a failed spawn leaves NEITHER half: no active seat, no legacy record, a recoverable pending intent", async () => {
-  const { deps, recorded } = dependencies({
+test("a failed spawn leaves no active seat and keeps a recoverable pending intent", async () => {
+  const { deps } = dependencies({
     spawn: async () => ({ status: 400, body: { error: "directory does not exist" } }),
   });
   const result = await executeOrchestratorSeatRequest(spawnRequest(), deps);
@@ -185,8 +206,6 @@ test("a failed spawn leaves NEITHER half: no active seat, no legacy record, a re
   const { active, pending } = orchestratorSeatFor("proj-a");
   expect(active).toBeNull();
   expect(pending?.intent.error).toBe("directory does not exist");
-  expect(recorded.legacySyncs).toEqual([]);
-  expect(readOrchestratorRecord()).toBeNull();
 });
 
 test("a retry after a failed spawn replays the SAME clientAttemptId and completes exactly once", async () => {
@@ -217,22 +236,29 @@ test("a completed request replayed by its key spawns and delivers NOTHING a seco
   expect(recorded.deliveries).toHaveLength(0);
 });
 
-test("selecting an EXISTING conversation delivers the mandate without spawning a duplicate", async () => {
+test("selecting an EXISTING conversation delivers a caller-edited current-version mandate once", async () => {
   const { deps, recorded } = dependencies();
   const result = await executeOrchestratorSeatRequest({
     project: "proj-a",
     mandate: "updated mandate",
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
     clientRequestId: "req_00000002",
     conversationId: OLD_ID,
   }, deps);
   expect(result.status).toBe(200);
   expect(recorded.spawns).toHaveLength(0);
-  expect(recorded.deliveries).toEqual([{
+  expect(recorded.deliveries).toHaveLength(1);
+  expect(recorded.deliveries[0]).toMatchObject({
     conversationId: OLD_ID,
     clientMessageId: "orchmandate_req_00000002",
-    text: "updated mandate",
-  }]);
-  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(OLD_ID);
+  });
+  expect(recorded.deliveries[0]!.text).toStartWith("updated mandate");
+  expect(recorded.deliveries[0]!.text.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({
+    conversationId: OLD_ID,
+    mandate: "updated mandate",
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+  });
 });
 
 test("a replayed adoption keeps its original target during an ABA-shaped retry", async () => {
@@ -274,7 +300,7 @@ test("a replayed adoption keeps its original target during an ABA-shaped retry",
 test("a failed delivery keeps the incumbent seated and reports a recoverable state", async () => {
   const { deps } = dependencies();
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
-  const { deps: failing, recorded } = dependencies({
+  const { deps: failing } = dependencies({
     deliver: async () => ({ ok: false, error: "host is dead" }),
   });
   const result = await executeOrchestratorSeatRequest({
@@ -287,7 +313,6 @@ test("a failed delivery keeps the incumbent seated and reports a recoverable sta
   expect(result.body.code).toBe("mandate_delivery_failed");
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
   expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe("host is dead");
-  expect(recorded.legacySyncs).toEqual([]);
 });
 
 test("AXIS 1/2 SEPARATION: replacement revokes MANAGER-LEVEL authority only — the predecessor's session is never touched", async () => {
@@ -378,6 +403,7 @@ test("rotation composes a bounded handoff, switches designation atomically, and 
   expect(spawnedPrompt).toContain(NEW_ID);
   expect(spawnedPrompt).toContain("[doing] Ship the handoff (task_1)");
   expect(spawnedPrompt).toContain("Prioritize the review queue.");
+  expect(spawnedPrompt).toContain("all mandate missions are complete; standing by");
 
   const { active } = orchestratorSeatFor("proj-a");
   expect(active?.conversationId).toBe(SUCCESSOR);
@@ -390,6 +416,37 @@ test("rotation composes a bounded handoff, switches designation atomically, and 
     successorConversationId: SUCCESSOR,
   })]);
   expect(retiredHosts).toEqual([]);
+});
+
+test("a current-version rotation override receives one directive while its stored mandate stays raw", async () => {
+  const seeded = dependencies();
+  await executeOrchestratorSeatRequest({
+    ...spawnRequest("req_00000022"),
+    mandate: ORCHESTRATOR_SYSTEM_PROMPT,
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+  }, seeded.deps);
+
+  const successor = "conversation_66666666-6666-4666-8666-666666666666";
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successor, path: "/tmp/successor-override.jsonl" } };
+    },
+  });
+  const result = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000023",
+    mandate: "rotation override mandate",
+  }, deps);
+
+  expect(result.status).toBe(200);
+  const delivered = String(recorded.spawns[0]!.prompt);
+  expect(delivered).toStartWith("rotation override mandate");
+  expect(delivered.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
+  const active = orchestratorSeatFor("proj-a").active;
+  expect(active).toMatchObject({ conversationId: successor, promptVersion: ORCHESTRATOR_PROMPT_VERSION });
+  expect(active?.mandate).toStartWith("rotation override mandate");
+  expect(active?.mandate).not.toContain(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE);
 });
 
 test("an adoption racing an in-flight rotation is refused while the rotation keeps one durable successor", async () => {
@@ -469,7 +526,11 @@ test("a pending replay completes with the ORIGINAL mandate, not a recomposed one
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
   /* The retry recomposes a different mandate; the durable intent's text wins. */
   await executeOrchestratorSeatRequest({ ...spawnRequest(), mandate: "recomposed differently" }, deps);
-  expect(recorded.spawns.map((body) => body.prompt)).toEqual(["own the board", "own the board"]);
+  const prompts = recorded.spawns.map((body) => String(body.prompt));
+  expect(prompts[0]).toBe(prompts[1]);
+  expect(prompts[0]).toStartWith("own the board");
+  expect(prompts[0]!.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
+  expect(prompts[0]).not.toContain("recomposed differently");
 });
 
 test("rotation preserves the requested effort end to end into the successor spawn body", async () => {
@@ -485,6 +546,35 @@ test("rotation preserves the requested effort end to end into the successor spaw
   expect(rotated.status).toBe(200);
   expect(recorded.spawns).toHaveLength(2);
   expect(recorded.spawns[1]).toMatchObject({ effort: "medium" });
+});
+
+test("rotation preserves the requested Codex speed end to end into the successor spawn body", async () => {
+  const { deps, recorded } = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000031",
+    fast: true,
+  }, deps);
+
+  expect(rotated.status).toBe(200);
+  expect(recorded.spawns).toHaveLength(2);
+  expect(recorded.spawns[1]).toMatchObject({ fast: true });
+});
+
+test("rotation leaves the successor speed unset when the caller does not request one", async () => {
+  const { deps, recorded } = dependencies();
+  await executeOrchestratorSeatRequest(spawnRequest(), deps);
+
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000032",
+  }, deps);
+
+  expect(rotated.status).toBe(200);
+  expect(recorded.spawns).toHaveLength(2);
+  expect(recorded.spawns[1]).not.toHaveProperty("fast");
 });
 
 test("the stuck shape from #878: an errored pending intent no longer blocks rotation and stays readable in history", async () => {
@@ -602,6 +692,22 @@ test("validation refuses a missing project, empty mandate, and malformed request
   expect((await executeOrchestratorSeatRequest({ project: "proj-a", mandate: "m", clientRequestId: "no" }, deps)).status).toBe(400);
 });
 
+test("spawn-mode seat creation rejects an explicit model outside the engine catalog before intent or spawn", async () => {
+  const { deps, recorded } = dependencies();
+  const result = await executeOrchestratorSeatRequest({
+    ...spawnRequest(),
+    engine: "codex",
+    model: "gpt-5.6-codex",
+  }, deps);
+
+  expect(result).toEqual({
+    status: 400,
+    body: { error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna" },
+  });
+  expect(recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a")).toMatchObject({ active: null, pending: null });
+});
+
 /* Issue #903: a spawn falling back to the server's own working directory
    minted seats in /app — outside every scanner root — that held authority
    while permanently inert. */
@@ -657,4 +763,21 @@ test("rotation without a cwd continues in the predecessor's checkout", async () 
     if (previous === undefined) delete process.env.LLV_ORCHESTRATOR_CWD;
     else process.env.LLV_ORCHESTRATOR_CWD = previous;
   }
+});
+
+test("rotation rejects an explicit successor model outside the engine catalog before spawning", async () => {
+  const { deps, recorded } = dependencies();
+  expect((await executeOrchestratorSeatRequest(spawnRequest("req_00000205"), deps)).status).toBe(200);
+
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00000206",
+    engine: "claude",
+    model: "claude-fable-5",
+  }, deps);
+
+  expect(rotated.status).toBe(400);
+  expect(rotated.body.error).toBe("invalid claude model id \"claude-fable-5\"; valid claude model ids: opus, fable, sonnet, haiku");
+  expect(recorded.spawns).toHaveLength(1);
+  expect(orchestratorSeatFor("proj-a")).toMatchObject({ active: { conversationId: NEW_ID }, pending: null });
 });

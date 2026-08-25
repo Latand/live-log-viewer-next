@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import { createCuePlayer, type CueStartRequest, type CueTransport } from "./cuePlayer";
-import { cueAsset, type AudioCue } from "./cues";
+import { cueAsset, cueAssetAll, type AudioCue } from "./cues";
 
 /** A transport that records what it was asked to play and can refuse, the way a
     locked audio graph does. */
@@ -183,10 +183,14 @@ describe("the loudness hierarchy", () => {
     expect(gainOf("viewer-mcp")).toBe(gainOf("tool-tick"));
     /* And every cue plays its own bundled master, at the tier gain — nothing
        re-levels the file itself. */
-    expect(sink.started.map((request) => request.src)).toEqual([
+    const started = sink.started.map((request) => request.src);
+    expect(started.slice(0, 5)).toEqual([
       cueAsset("attention"), cueAsset("failure"), cueAsset("launch"),
-      cueAsset("success"), cueAsset("viewer-mcp"), cueAsset("tool-tick"),
+      cueAsset("success"), cueAsset("viewer-mcp"),
     ]);
+    /* tool-tick draws a random slice of one master take; any registered
+       variant is that cue's own bundled file. */
+    expect(cueAssetAll("tool-tick")).toContain(started[5]);
   });
 
   test("the device volume scales every tier and keeps the ordering", () => {

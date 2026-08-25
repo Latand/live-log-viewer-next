@@ -1,6 +1,7 @@
 import type { AgentEngine } from "@/lib/agent/cli";
 import { grantedMcpServers, type McpGrantPolicy } from "@/lib/agent/mcpAllowlist";
 import { grantedPlugins } from "@/lib/agent/pluginAllowlist";
+import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
 import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
 import type { AgentGoal, AgentPlan, EngineLimits, LimitsProvenance } from "@/lib/types";
 
@@ -267,6 +268,12 @@ export interface HeldDeliveryCommand {
   kind: "send" | "steer";
   policy: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
+  /** Message authorship stamped at admission (#1117), persisted on the held
+      record so a migration-held delivery replays with the same attribution.
+      Excluded from the request digest: a replay that gains or loses the stamp
+      is the same logical message, never a conflict, and records written before
+      the field existed stay compatible. */
+  origin?: MessageOrigin;
 }
 
 export interface HeldDeliveryCommandInput {
@@ -274,6 +281,7 @@ export interface HeldDeliveryCommandInput {
   kind?: HeldDeliveryCommand["kind"];
   policy?: HeldDeliveryCommand["policy"];
   turnId?: string | null;
+  origin?: MessageOrigin;
 }
 
 export interface HeldDelivery {

@@ -8,7 +8,7 @@ import { useLogTail } from "@/hooks/useLogTail";
 import { useRuntimeSessionForConversation } from "@/hooks/useRuntime";
 import { useToolActivityCues } from "@/hooks/useToolActivityCues";
 import { accountIdFromPath } from "@/lib/accounts/badge";
-import { conversationIdentity } from "@/lib/accounts/identity";
+import { conversationIdentity, isLaunchPlaceholder } from "@/lib/accounts/identity";
 import { activeCardMigration, cardMigrationState, migrationHoldsDelivery, migrationTargetName } from "@/lib/accounts/migration";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -36,6 +36,7 @@ import {
 } from "./conversation/outbox";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
 import { FeedItem } from "./feed/FeedItem";
+import { MessageProvenanceProvider, useDeliveredMessageProvenance } from "./feed/messageProvenance";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
 import { BoundedLru } from "./feed/scrollMemory";
 import { ConversationAttention } from "./runtime/ConversationAttention";
@@ -192,9 +193,29 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      own state across polls: glued to the live tail, or released by the user.
      A remount inherits the transcript's remembered state. */
   const [magnet, setMagnetState] = useState(() => (memoryKey ? (scrollMemory.get(memoryKey)?.magnet ?? follow) : follow));
+  /* The transcript the tail reads (issue #1100): while the board still
+     projects the launch placeholder `spawn:<launchId>` — a path nothing can
+     read — the matching runtime session already names the canonical artifact
+     its host writes, so the SAME tail reads that path from the first turn on.
+     The canonical rows attach as soon as the file has lines, and the live
+     overlay (prose + tool rows from the host stream) yields to them row by row
+     through the identity claims, exactly as after the flip. One subscription
+     either way: when the board flips the card to the artifact the path is
+     unchanged, so nothing re-subscribes, re-parses or resets the reader's
+     position. A placeholder whose host has not named an artifact yet still
+     reads nothing; the late flip itself stays the board's concern (#1108).
+     Conversation identity (`memoryKey`: outbox, claims, scroll memory) keeps
+     keying on the card; only the transcript-stream state below keys on
+     `tailPath`. */
+  const launchArtifactPath = file && isLaunchPlaceholder(file) ? runtimeSession?.artifactPath ?? null : null;
+  const tailFile = useMemo<FileEntry | null>(
+    () => (file && launchArtifactPath ? { ...file, path: launchArtifactPath } : file),
+    [file, launchArtifactPath],
+  );
+  const tailPath = tailFile?.path ?? null;
   /* Released reader must never lose lines above the viewport: the tail cap
      applies only while the magnet holds the bottom in view anyway. */
-  const tail = useLogTail(file, paused, magnet ? (compact ? TAIL_CAP : FOCUS_CAP) : 0);
+  const tail = useLogTail(tailFile, paused, magnet ? (compact ? TAIL_CAP : FOCUS_CAP) : 0);
   const scroller = useRef<HTMLDivElement | null>(null);
   const content = useRef<HTMLDivElement | null>(null);
   const anchorRef = useRef<{ top: number; height: number } | null>(null);
@@ -212,7 +233,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const glueAtRef = useRef(0);
   const restoreInitializedPathRef = useRef<string | null>(null);
   const pendingRestoreRef = useRef<PendingRestore | null>(null);
-  const filePathRef = useRef(file?.path ?? null);
+  const filePathRef = useRef(tailPath);
   const controlledFollowRef = useRef(follow);
 
   const setMagnet = (value: boolean, withPulse = false) => {
@@ -278,7 +299,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   };
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => setVisibleCount(initialCount), [file?.path, initialCount]);
+  useEffect(() => setVisibleCount(initialCount), [tailPath, initialCount]);
   /* Same instance, new transcript: pick up that transcript's remembered state. */
   useEffect(() => {
     if (!memoryKey) return;
@@ -288,7 +309,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
        
       setMagnetState(remembered);
     }
-  }, [file?.path, memoryKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tailPath, memoryKey]); // eslint-disable-line react-hooks/exhaustive-deps
   /* External Follow transitions from the focus header drive the same magnet.
      A compact pane's constant true value leaves remount memory authoritative. */
   useEffect(() => {
@@ -336,7 +357,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const session: FeedSession | null = useMemo(
     () => (file ? createFeedSession({ engine: file.engine, fmt: file.fmt, showSvc, lineFilter: lf }) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [file?.path, file?.engine, file?.fmt, showSvc, lf, locale],
+    [tailPath, file?.engine, file?.fmt, showSvc, lf, locale],
   );
   const feed = useMemo(
     () => (file && session ? session.feed(tail.lines, tail.linesStart, file.activity === "live") : EMPTY_FEED),
@@ -349,7 +370,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      stay silent. The window end anchors "newly appended" to the tail stream;
      loading gates the baseline so an unloaded feed is not mistaken for an
      empty conversation. */
-  useToolActivityCues(feed.items, memoryKey, file?.path ?? null, tail.linesStart + tail.lines.length, Boolean(file) && !tail.loading);
+  useToolActivityCues(feed.items, memoryKey, tailPath, tail.linesStart + tail.lines.length, Boolean(file) && !tail.loading);
+  /* Delivered-message authorship (#1117): joins the Claude delivery ledger by
+     engine message id server-side, and on both engines joins each settled
+     delivery occurrence (registry receipt or flow round: content digest,
+     settlement time, sender) to the one row nearest it, resolving a delivered
+     "system" row or a legacy paste into the operator's bubble or the internal
+     relay card at render time. Codex structured rows carry their authorship in
+     the transcript marker instead. */
+  const provenanceLookup = useDeliveredMessageProvenance(
+    file?.engine === "claude" || file?.engine === "codex" ? tailPath : null,
+    feed.items,
+  );
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
   const visibleStartIndex = feed.items.length - visibleItems.length;
@@ -371,10 +403,10 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   }, [tail.error, tail.size, tail.tickTime, file, onStatus]);
 
   useLayoutEffect(() => {
-    filePathRef.current = file?.path ?? null;
+    filePathRef.current = tailPath;
     restoreInitializedPathRef.current = null;
     pendingRestoreRef.current = null;
-  }, [file?.path]);
+  }, [tailPath]);
 
   /* Older history grows the content above the viewport; keep what the user
      was reading in place by compensating the scroll offset. */
@@ -401,11 +433,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     /* First non-empty render of a released pane after a remount: stage the
        remembered distance from the tail for immediate and resize retries. */
     let initializedRestore = false;
-    if (file && len && restoreInitializedPathRef.current !== file.path) {
-      restoreInitializedPathRef.current = file.path;
+    if (tailPath && len && restoreInitializedPathRef.current !== tailPath) {
+      restoreInitializedPathRef.current = tailPath;
       const remembered = memoryKey ? scrollMemory.get(memoryKey) : undefined;
       pendingRestoreRef.current = !magnet && remembered && (remembered.fromBottom > 0 || remembered.anchor)
-        ? { path: file.path, ...remembered, applied: false }
+        ? { path: tailPath, ...remembered, applied: false }
         : null;
       initializedRestore = true;
     }
@@ -444,7 +476,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const canRevealOlder = hiddenLocal > 0 || tail.hasMore;
 
   const lastItem = feed.items.at(-1)?.item;
-  const working: { icon: LucideIcon; label: string } =
+  const transcriptWorking: { icon: LucideIcon; label: string } =
     lastItem?.kind === "tool" && lastItem.status === "run"
       ? { icon: Wrench, label: t("feed.running", { tool: (lastItem.command ?? lastItem.summary).split(/[\s:·]/, 1)[0] || t("feed.tool") }) }
       : lastItem?.kind === "think"
@@ -456,7 +488,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     setMagnet(true, true);
   };
 
-  const transcriptGeneration = file?.path ?? null;
+  const transcriptGeneration = tailPath;
   /* Optimistic bubbles retire on their OWN transcript echo (round-1 P1#4,
      round-2 finding 2): a bubble disappears the moment ITS echo lands, resolved
      causally by occurrence count. A user text that appears twice is two echoes
@@ -464,12 +496,15 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      visible. The counts carry that occurrence information. */
   /* The launch's own first message identity (issue #648): a structured / MCP
      spawn journals its first user record with SDK / agent provenance, so the
-     transcript parser renders it as a SYSTEM row, not a `user` bubble — the
+     transcript parser CLASSIFIES it as a system row, not a `user` item — the
      echo-text retirement path would never see it. Its text is still the launch
      prompt's transcript echo, so treat a system-row row that matches a
      launch-owned bubble's own text (raw draft OR scaffolded echo) as that
      bubble's echo. Derived from the outbox so it survives adoption (which strips
-     the launch prompt fields from the server projection). */
+     the launch prompt fields from the server projection). Since #1117 the
+     RENDERER may resolve that same row into the operator's bubble or an
+     internal relay card from delivery evidence; the parse-level kind — what
+     everything here keys on — is unchanged. */
   const launchEchoKeys = useMemo(() => {
     const keys = new Set<string>();
     for (const entry of outbox) {
@@ -486,9 +521,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     return feed.items.flatMap(({ anchorKey, key, item }) => {
       const text = "text" in item ? item.text : "";
       if (!text.trim()) return [];
-      /* A genuine user bubble is always an echo; a non-user row only echoes the
-         launch when it exactly carries a launch-owned bubble's own identity. */
-      if (item.kind !== "user" && !launchEchoKeys.has(text.trim())) return [];
+      /* A genuine user bubble is always an echo, and so is a delivered
+         structured message (#1117): the system-kind row carrying a ledger join
+         identity IS the send's transcript echo, whatever the renderer resolves
+         it into. Any other non-user row only echoes the launch when it exactly
+         carries a launch-owned bubble's own identity. */
+      const deliveredEcho = item.kind === "sysmsg" && Boolean(item.deliveredMessage);
+      if (item.kind !== "user" && !deliveredEcho && !launchEchoKeys.has(text.trim())) return [];
       return [{ generation: transcriptGeneration, id: anchorKey ?? `key:${key}`, text }];
     });
   }, [feed.items, transcriptGeneration, launchEchoKeys]);
@@ -535,7 +574,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   }, [memoryKey, launch?.launchId, launch?.prompt, launch?.promptImages, launch?.promptAt, launch?.promptEcho, launch?.initialMessage, launch?.deliveredAt, launch?.error, launchOwner, launchOwnsThisPane]);
   /* Settle the launch bubble from the delivery receipt the server projects
      (issue #648), independent of any transcript echo. A structured / MCP spawn's
-     first message is journaled as a system row (SDK / agent provenance), so echo
+     first message is journaled with SDK / agent provenance and parses as a
+     system-kind row (#1117 resolves its VISUAL at render time), so echo
      retirement can never fire; the delivered receipt is the proof the prompt
      reached the agent. It settles the bubble to `delivered` with the receipt time
      as `settledAt`, so it retires on the delivered TTL instead of spinning on
@@ -579,14 +619,32 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     ? visibleOutbox(outbox, transcriptEchoCounts, nowMs(), paneLaunchOwner, newestTranscriptAtMs)
     : [];
   useEffect(() => {
-    if (!memoryKey || !file) return;
-    adoptCanonicalAssistantClaims(file.path, memoryKey);
+    if (!memoryKey || !tailPath) return;
+    adoptCanonicalAssistantClaims(tailPath, memoryKey);
     publishCanonicalAssistantClaims(memoryKey, feed.items);
-  }, [file, memoryKey, feed.items]);
+  }, [tailPath, memoryKey, feed.items]);
   const visibleLiveTurnItems = useMemo(
     () => visibleRuntimeLiveTurnItems(runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn),
     [runtimeLiveTurn, feed.items, assistantClaims, runtimeTurn],
   );
+  /* The status bar names the tool that is running NOW: a live tool row from the
+     structured host (issue #1100) is newer than anything the transcript window
+     shows, so it wins over the transcript's last row while it is still running.
+     Calls run in parallel, so the newest row may already have settled while an
+     earlier one is still going — the newest RUNNING row is the one named. */
+  const liveRunningTool = visibleLiveTurnItems.findLast((item) => item.tool?.status === "run")?.tool;
+  const working: { icon: LucideIcon; label: string } = liveRunningTool
+    ? {
+      icon: Wrench,
+      label: t("feed.running", {
+        tool: (typeof liveRunningTool.args.command === "string"
+          ? liveRunningTool.args.command
+          : typeof liveRunningTool.args.cmd === "string"
+            ? liveRunningTool.args.cmd
+            : liveRunningTool.name).split(/[\s:·]/, 1)[0] || t("feed.tool"),
+      }),
+    }
+    : transcriptWorking;
   /* Anything the window shows below the transcript. While it is present an
      empty transcript is not "no output" — it is a conversation mid-launch. */
   const windowTail = visibleLiveTurnItems.length > 0 || pendingOutbox.length > 0 || Boolean(launch);
@@ -600,6 +658,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
 
   return (
     <RawLineProvider value={getRawLine}>
+    <MessageProvenanceProvider value={provenanceLookup}>
     <div className="flex min-h-0 flex-1 flex-col">
     {/* The pill anchors to the scroller wrapper — NOT the pane column — so the
         pinned status bar below is structurally outside its overlay area. */}
@@ -653,7 +712,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             rememberScroll(memoryKey, {
               magnet: magnetRef.current,
               fromBottom: Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop),
-              anchor: magnetRef.current ? null : viewportAnchor(el, file.path),
+              anchor: magnetRef.current ? null : viewportAnchor(el, tailPath ?? file.path),
             });
           }
           if (el.scrollTop < 120 && canRevealOlder && !tail.loadingOlder && !tail.loading) revealOlder();
@@ -789,6 +848,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       <TurnStatusBar file={file} workingLabel={working.label} workingIcon={working.icon} compact={compact} />
     ) : null}
     </div>
+    </MessageProvenanceProvider>
     </RawLineProvider>
   );
 }

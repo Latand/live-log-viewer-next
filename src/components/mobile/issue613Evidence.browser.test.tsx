@@ -18,6 +18,13 @@ import type { BoardTask } from "@/lib/tasks/types";
  * create and «more» menus) pushed the document to 422px — a 32px horizontal
  * page scroll, with the «More actions» trigger hanging off the right edge.
  *
+ * It also holds the budget for everything added since. Fitting is necessary but
+ * not sufficient: a row can fit at 390px and still be useless, because the ONE
+ * elastic cell absorbs every overrun. Global search as a SIXTH 44px target
+ * measured here at a 25px project name — «l…» — so this now asserts a readable
+ * floor for that cell, and search's slot came from folding undo into the «⋯»
+ * menu (issue #1054 review).
+ *
  * The header now fits BY CONSTRUCTION: every always-mounted control is a fixed
  * 44px target, the ONE elastic cell is the project name (the filler beside it is
  * an empty spacer that collapses to nothing first, and the attention pill holds
@@ -149,6 +156,7 @@ const dashboardProps = () => ({
   catalogKnown: true, catalogConversationCount: 1,
   projectCwd: "/repo", onArchive: () => {}, onUnarchive: () => {},
   onMenu: () => {},
+  onOpenSearch: () => {},
   attention: attentionBadge,
 });
 
@@ -198,6 +206,7 @@ interface Geometry {
   headerClientWidth: number;
   controls: Box[];
   titleText: string;
+  titleWidth: number;
   /* The focused conversation's own header (BranchPane) inside the same phone. */
   paneControls: Box[];
   paneHeaderScrollWidth: number;
@@ -237,6 +246,7 @@ async function measure(inner: string, key: string): Promise<Geometry> {
       headerClientWidth: header?.clientWidth ?? -1,
       controls: collect(header),
       titleText: title?.textContent ?? "",
+      titleWidth: title?.getBoundingClientRect().width ?? -1,
       paneControls: collect(paneHeader),
       paneHeaderScrollWidth: paneHeader?.scrollWidth ?? -1,
       paneHeaderClientWidth: paneHeader?.clientWidth ?? -1,
@@ -291,16 +301,24 @@ test("issue 613: the populated phone header fits a 390px viewport with every con
     expect(control.width).toBeGreaterThanOrEqual(44);
   }
   const labels = closed.controls.map((control) => control.label);
-  for (const key of ["dash.openProjects", "board.undo", "dash.hiddenShelf", "dash.createMenu", "dash.moreMenu"] as const) {
+  for (const key of ["dash.openProjects", "search.openMobile", "dash.hiddenShelf", "dash.createMenu", "dash.moreMenu"] as const) {
     expect(labels.some((label) => label.startsWith(translate("en", key).slice(0, 12)))).toBe(true);
   }
+  /* Five targets, not six: undo folded into the «⋯» menu when search arrived. */
+  expect(closed.controls.filter((control) => control.label !== ATTENTION_LABEL)).toHaveLength(5);
+  expect(labels.some((label) => label.startsWith(translate("en", "board.undo").slice(0, 12)))).toBe(false);
   /* The attention-queue badge is an action, so a full row must not squeeze it
      out of existence — it is no longer elastic (before #613 it rode the
      flex-1 filler and collapsed to zero px here). */
   expect(labels).toContain(ATTENTION_LABEL);
 
-  /* The long project name truncates instead of pushing the row wide. */
+  /* The long project name truncates instead of pushing the row wide — and is
+     still READABLE while doing it. The budget's own arithmetic leaves it ~73px
+     on a fully populated 390px row; a sixth 44px target cut that to 25px, which
+     renders as a single letter and an ellipsis. 60px is the floor that keeps a
+     name a name. */
   expect(closed.titleText.length).toBeGreaterThan(0);
+  expect(closed.titleWidth).toBeGreaterThanOrEqual(60);
 
   /* The focused conversation's own header sits in the same 390px: its long
      title truncates and every pane control (rename, details, favorite, delete,
@@ -320,6 +338,8 @@ test("issue 613: the populated phone header fits a 390px viewport with every con
   const openLabels = opened.controls.map((control) => control.label);
   expect(openLabels).toContain(translate("en", "dash.viewSchemeMenu"));
   expect(openLabels).toContain(translate("en", "dash.viewListMenu"));
+  /* And neither is board undo: it is one tap away in the same menu. */
+  expect(openLabels).toContain(translate("en", "board.undo"));
   expect(opened.scrollWidth).toBeLessThanOrEqual(390);
   for (const control of opened.controls) {
     expect(control.left).toBeGreaterThanOrEqual(0);

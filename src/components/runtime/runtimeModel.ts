@@ -26,7 +26,7 @@ import type { RuntimePendingReconfigure, RuntimeSettingsCapability, ViewerDeploy
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 import {
   appendRuntimeLiveTurnDelta,
-  completeRuntimeLiveTurnItem,
+  projectRuntimeLiveTurnItem,
   type RuntimeLiveTurn,
 } from "@/lib/runtime/liveTurn";
 import {
@@ -541,19 +541,26 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
         item?: unknown;
         voiceResponse?: { responseId?: unknown; text?: unknown };
       };
-      if (p.phase !== "completed") break;
+      /* Tool activity projects from both lifecycle phases (issue #1100): a
+         Codex `started` item is a running tool row, its `completed` item the
+         finish; Claude carries calls and results as completed items only.
+         Assistant prose still settles on `completed` alone. */
+      if (p.phase !== "completed" && p.phase !== "started") break;
+      const phase = p.phase;
       updateSession(store, p.conversationId ?? env.scope.id, revision, (s) => {
         const turnId = p.turnId ?? s.activeTurnId ?? "unknown";
         const voiceResponse = p.voiceResponse;
         return {
           ...s,
-          liveTurn: completeRuntimeLiveTurnItem(
+          liveTurn: projectRuntimeLiveTurnItem(
             s.liveTurn,
             turnId,
             p.item,
+            phase,
             env.occurredAt ?? env.recordedAt ?? null,
           ),
-          voiceDeliveries: typeof voiceResponse?.responseId === "string"
+          voiceDeliveries: phase === "completed"
+            && typeof voiceResponse?.responseId === "string"
             && typeof voiceResponse.text === "string"
             ? appendVoiceResponse(s.voiceDeliveries, turnId, {
               responseId: voiceResponse.responseId,
@@ -624,14 +631,18 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
       break;
     }
     case "attention-resolved": {
-      const p = env.payload as { attentionId: string; conversationId?: string; state?: AttentionState };
-      const existing = store.attentions[p.attentionId];
+      const p = env.payload as { attentionId?: string; id?: string; conversationId?: string; state?: AttentionState };
+      /* Engine-host projections carried the attention id only as `id` before
+         #765; accept both so replayed ledger events still retire the card. */
+      const attentionId = p.attentionId ?? p.id;
+      if (!attentionId) break;
+      const existing = store.attentions[attentionId];
       if (existing) {
-        store.attentions = { ...store.attentions, [p.attentionId]: { ...existing, state: p.state ?? "resolved", unowned: false } };
+        store.attentions = { ...store.attentions, [attentionId]: { ...existing, state: p.state ?? "resolved", unowned: false } };
       }
       const convId = p.conversationId ?? existing?.conversationId;
       if (convId) {
-        updateSession(store, convId, revision, (s) => ({ ...s, attentionIds: s.attentionIds.filter((id) => id !== p.attentionId) }));
+        updateSession(store, convId, revision, (s) => ({ ...s, attentionIds: s.attentionIds.filter((id) => id !== attentionId) }));
       }
       break;
     }

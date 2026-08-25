@@ -973,6 +973,12 @@ export interface TmuxComposerProps {
       is attempted while it is set, so no /api/tmux request can fire against an
       as-yet-unclassified host. */
   sendBlockedReason?: string | null;
+  /** This surface is the operator's conversation WINDOW, not an incidental card
+      of the same conversation, so the one hoisted composer belongs here even
+      while a board card for it is also on screen (the orchestrator dock, #977).
+      Without it the two surfaces would be ordinary competing places and a board
+      remount could take the form out from under the operator. */
+  primaryPlace?: boolean;
 }
 
 /**
@@ -998,19 +1004,19 @@ export function TmuxComposer(props: TmuxComposerProps) {
   );
   const cardId = conversationIdentity(props.file);
   if (!hostMounted || !cardId.startsWith("conversation_")) return <TmuxComposerCore {...props} />;
-  return <VoiceComposerCardSlot cardId={cardId} composerProps={props} />;
+  return <VoiceComposerCardSlot cardId={cardId} composerProps={props} primary={props.primaryPlace === true} />;
 }
 
 /** The card's half of the hoist: a place (a `display: contents` div the host
     portals the form into) and the props the composer needs, republished every
     render because `file` is a fresh snapshot each board poll. */
-function VoiceComposerCardSlot({ cardId, composerProps }: { cardId: string; composerProps: TmuxComposerProps }) {
+function VoiceComposerCardSlot({ cardId, composerProps, primary }: { cardId: string; composerProps: TmuxComposerProps; primary: boolean }) {
   const publishNode = useCallback(
     (node: HTMLDivElement | null) => {
       if (!node) return undefined;
-      return publishVoiceComposerCardNode(cardId, node);
+      return publishVoiceComposerCardNode(cardId, node, primary);
     },
-    [cardId],
+    [cardId, primary],
   );
   useEffect(() => {
     publishVoiceComposerCardProps(cardId, {
@@ -1733,12 +1739,12 @@ export function TmuxComposerCore({
        replay, exactly like the bridge prelude above; empty whenever the operator
        is simply looking at this conversation itself.
 
-       SCOPED TO THE MANAGER'S IDENTITY, not to a capability. `voiceEnabled` is
+       SCOPED TO THE MANAGER'S IDENTITY. `voiceEnabled` is
        true of every hosted codex-app-server conversation, so gating on it
        prepended the operator's view to unrelated workers' turns. The one thing
-       that names the manager is the designation record (`managerIdentity`), so
-       that is what is asked, per dispatch and cached. */
-    const viewerPrelude = replayGeneration || !(await isDesignatedManagerConversation(cardId))
+       that names the manager is the project's active seat (`managerIdentity`),
+       queried per dispatch and cached. */
+    const viewerPrelude = replayGeneration || !(await isDesignatedManagerConversation(cardId, file.project))
       ? ""
       : viewerContextPrelude({ path: file.path, project: file.project });
     const composedText = viewerPrelude ? `${viewerPrelude}\n${requestedText}` : requestedText;
@@ -1949,6 +1955,9 @@ export function TmuxComposerCore({
               idempotencyKey: clientMessageId,
               clientMessageId,
               images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
+              /* #1117: the composer is the operator's own surface; the
+                 structured branch above is stamped server-side by /api/runtime/send. */
+              origin: { kind: "operator" },
               /* The "on resume" profile (issue #241 §4): when this send reopens a
                  finished root conversation, boot it with the model/effort the
                  strip's picker saved. Ignored for a live pane or a subagent relay. */

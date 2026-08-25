@@ -39,6 +39,11 @@ const claudeAssistantTool = (timestamp: string) => ({
   timestamp,
   message: { role: "assistant", stop_reason: null, content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] },
 });
+const claudeSyntheticNoOp = (timestamp: string) => ({
+  type: "assistant",
+  timestamp,
+  message: { role: "assistant", model: "<synthetic>", stop_reason: null, content: [{ type: "text", text: "No response requested." }] },
+});
 const claudeInterrupt = (timestamp: string, extra: Record<string, unknown> = { interruptedMessageId: "msg-1" }) => ({
   type: "user",
   timestamp,
@@ -92,10 +97,28 @@ describe("lastTurnFromRecords — Claude", () => {
 
     expect(result.operatorActionsAtMs).toEqual([ms("2026-07-14T07:03:00.000Z")]);
     expect(result.unprovenancedUserActionsAtMs).toEqual([ms("2026-07-14T07:00:00.000Z")]);
+    expect(result.assistantMessagesAtMs).toEqual([
+      ms("2026-07-14T07:00:05.000Z"),
+      ms("2026-07-14T07:05:00.000Z"),
+    ]);
     expect(result.windows).toEqual([{
       startedAt: ms("2026-07-14T07:00:00.000Z"),
       endedAt: ms("2026-07-14T07:05:00.000Z"),
     }]);
+  });
+
+  test("tracks visible assistant acknowledgements and excludes tool-only and synthetic no-op records", () => {
+    const result = recentTurnActivityFromRecords(
+      [
+        claudeUser("2026-07-14T10:00:00.000Z", "mandate"),
+        claudeAssistantTool("2026-07-14T10:00:01.000Z"),
+        claudeAssistantOpen("2026-07-14T10:00:02.000Z"),
+        claudeSyntheticNoOp("2026-07-14T10:00:03.000Z"),
+      ],
+      false,
+    );
+
+    expect(result.assistantMessagesAtMs).toEqual([ms("2026-07-14T10:00:02.000Z")]);
   });
 
   test("enumerates every completed turn in chronological order", () => {
@@ -475,6 +498,20 @@ describe("lastTurnFromRecords — Codex", () => {
     expect(result.unprovenancedUserActionsAtMs).toEqual([]);
   });
 
+  test("tracks a visible Codex assistant message in the current turn", () => {
+    const result = recentTurnActivityFromRecords(
+      [
+        codexUser("2026-07-14T10:00:00.000Z", "mandate"),
+        codexTaskStarted("2026-07-14T10:00:01.000Z"),
+        codexToolCall("2026-07-14T10:00:02.000Z", "c1"),
+        codexAgentMessage("2026-07-14T10:00:03.000Z"),
+      ],
+      true,
+    );
+
+    expect(result.assistantMessagesAtMs).toEqual([ms("2026-07-14T10:00:03.000Z")]);
+  });
+
   test("enumerates completed turns followed by the final open turn", () => {
     expect(recentTurnWindowsFromRecords(
       [
@@ -598,6 +635,10 @@ test("a truncated transcript prefix reports the gap and never fabricates a turn 
       complete: true,
       operatorActionsAtMs: [],
       unprovenancedUserActionsAtMs: [ms("2026-07-14T10:00:00.000Z")],
+      assistantMessagesAtMs: [
+        ms("2026-07-14T08:01:00.000Z"),
+        ms("2026-07-14T10:01:00.000Z"),
+      ],
       windows: [{
         startedAt: ms("2026-07-14T10:00:00.000Z"),
         endedAt: ms("2026-07-14T10:01:00.000Z"),

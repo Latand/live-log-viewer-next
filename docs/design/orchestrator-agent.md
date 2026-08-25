@@ -12,50 +12,42 @@ orchestrator's on-scheme node placement lands with that work).
 
 ## Chat surface
 
-**Placement**: a persistent button in the overview board header
-(`OverviewBoard.tsx`), next to the board title — the board is the one screen
-every session starts on, so the orchestrator is always one tap away. On the
-phone the same header row hosts it with a ≥44px tap target.
+**Placement**: a project-scoped dock in the left sidebar, between the project
+rail and the board. It follows the selected project while the project rail stays
+visible. Mobile uses the project's pinned orchestrator row and standard focus
+view.
 
-**What opens**: the orchestrator is a *normal viewer conversation* — a Claude
-session spawned into a tmux pane, whose transcript renders through the existing
-conversation surface (`BranchPane` → `LogFeed` + `TmuxComposer`). No bespoke
-chat widget: the button resolves the orchestrator conversation and navigates to
-its canonical deep link (`#c=<conversationId>`), which `Viewer.tsx` already
-knows how to resolve, pin, and open. Reusing the pane means images, dictation,
-composer relays, activity states, and attention all work day one.
+**What opens**: the orchestrator is a *normal viewer conversation*. Its
+transcript renders through the existing `LogFeed` + `TmuxComposer` surface in
+the dock. Reusing the conversation surface carries images, dictation, composer
+relays, activity states, and attention into the panel.
 
-**Persistence / single instance**: a small state record
-(`state/orchestrator.json`, via `statePath`) stores the orchestrator's
-`conversationId` + transcript path. The button's flow:
+**Persistence / per-project seat**: `state/orchestrator-seats.json` stores one
+active seat per canonical project, plus pending intents, revocations, and
+rotation history. The sidebar flow:
 
-1. `GET /api/orchestrator` → `{ record, exists, defaultCwd }`.
-2. Record exists and its transcript is still on disk → navigate to
-   `#c=<conversationId>` (Viewer resumes the same conversation — this is what
-   survives viewer restarts).
-3. No record (or transcript deleted) → `POST /api/spawn` with the orchestrator
-   preset (below), then `POST /api/orchestrator` to adopt the new conversation.
-   Adoption is first-write-wins: if another tab adopted a different
-   conversation meanwhile, the server returns the canonical record and the
-   button navigates there instead.
+1. `GET /api/orchestrator/seat?project=…` reads the project's active and pending
+   seats.
+2. A live active seat opens its conversation in the project's dock panel.
+3. An empty or closed seat renders the draft controls. Confirm sends the edited
+   mandate and selected engine/model/account to `POST /api/orchestrator/seat`.
+4. Rotation sends the successor draft to `POST /api/orchestrator/rotate`; seat
+   activation revokes the predecessor and links both conversations.
 
 ## Runtime identity
 
-- **Engine/model/effort**: Claude **Fable**, reasoning **low** (issue default;
-  configurable later via the role registry overrides). Fable-low keeps the
-  always-on brain cheap; it escalates by *spawning* higher-effort workers, not
-  by thinking harder itself.
+- **Engine/model/effort/account**: initialized from the shared launch defaults
+  and editable in the project draft before creation or rotation. Both engines
+  and every option supported by the ordinary draft controls remain available.
 - **Role preset**: the `orchestrator` role from the #35 registry
   (`src/lib/roles/defaults.ts`), `mode: standard`. The spawn route prepends the
-  role scaffold; the button appends the built-in system prompt
+  role scaffold; the seat command delivers the built-in system prompt
   (`src/lib/orchestrator/prompt.ts`) that encodes the conveyor rules and the
   draft-only contract.
-- **Working directory**: the viewer's own checkout (`process.cwd()` of the
-  server, reported by `GET /api/orchestrator` as `defaultCwd`) — the
-  orchestrator lives inside the viewer and finds the `llv-conveyor` skill
-  there.
-- **Spawn path**: the browser POSTs `/api/spawn` same-origin, i.e. an
-  authenticated Viewer operator spawn (#212) — no capability header needed.
+- **Working directory**: the selected project's canonical root, resolved by the
+  seat command. The draft exposes no cwd field.
+- **Spawn path**: the browser posts the draft to `/api/orchestrator/seat`; the
+  seat command persists the intent before invoking the ordinary spawn path.
   Once running, the orchestrator's *own* API calls are agent-initiated and
   follow the #212/#213 spawn-capability rules encoded in its prompt.
 
@@ -112,39 +104,32 @@ spawned workers appear with lineage edges under the orchestrator node, flows
 show rounds, drafts sit on the scheme awaiting Start. Later phases add the
 dedicated scheme node (#183) and push notifications for decision points.
 
-## Implemented in this PR (minimal slice)
+## Current implementation
 
-- `src/lib/orchestrator/prompt.ts` — spawn config (fable/low/`orchestrator`
-  role) + system prompt with conveyor rules and the draft-only contract.
-- `src/lib/orchestrator/store.ts` — the single-instance record
-  (`state/orchestrator.json`), first-write-wins adoption, replace-when-deleted.
-- `src/app/api/orchestrator/route.ts` — `GET` (record + liveness + default
-  cwd), `POST` (adopt).
-- `src/components/OrchestratorChatButton.tsx` — the board-header button:
-  resolve → (spawn + adopt) → navigate to `#c=…`. en+uk strings, 44px tap
-  target on mobile, tokens only.
-- Wired into `OverviewBoard.tsx`.
+- `src/lib/orchestrator/prompt.ts` — versioned default mandate with conveyor
+  rules and the draft-only contract.
+- `src/lib/orchestrator/seats.ts` — per-project active seats, durable pending
+  intents, revocations, and rotation lineage.
+- `src/app/api/orchestrator/seat/route.ts` and
+  `src/app/api/orchestrator/rotate/route.ts` — project-scoped create, status,
+  and rotation entry points.
+- `src/components/orchestrator/OrchestratorPanel.tsx` — project dock with draft,
+  live conversation, liveness, error, and rotation states.
 
 ## Follow-up issues (out of scope here)
 
-1. **Durable claim lock for spawn races** — a pending-claim token with TTL in
-   the orchestrator store so two tabs pressing the button concurrently cannot
-   spawn two panes (today the loser's pane is visible and killable, but it is
-   an orphan).
-2. **Resume-on-restart** — supervisor-side check that re-attaches or respawns
+1. **Resume-on-restart** — supervisor-side check that re-attaches or respawns
    the orchestrator session (`claude --resume`) after a viewer/host restart,
-   instead of waiting for the next button press.
-3. **On-scheme presence** — the orchestrator as a first-class node on the
+   instead of waiting for the next panel open.
+2. **On-scheme presence** — the orchestrator as a first-class node on the
    scheme (wedge-in placement near the viewed area or a reserved spot), its
    spawned agents/pipelines visually linked; coordinate with #183 semantic
    zoom.
-4. **Configurable identity** — surface model/effort/mode overrides through the
-   role-registry overrides UI instead of the hardcoded fable/low.
-5. **Spawn capability for its own children (#213)** — once the orchestrator
+3. **Spawn capability for its own children (#213)** — once the orchestrator
    holds `LLV_SPAWN_CAPABILITY`, drop the same-origin-header workaround from
    the conveyor skill and prompt.
-6. **All-projects task sync** — the triage loop that watches every project,
+4. **All-projects task sync** — the triage loop that watches every project,
    creates GitHub issues, and binds them to pipelines (requirement 3 of #182)
    — needs the #189 draft flow plus task-card write APIs exercised end to end.
-7. **Orchestrator health surface** — board indicator when the orchestrator
+5. **Orchestrator health surface** — board indicator when the orchestrator
    pane died or its transcript went stale, with a one-tap respawn.

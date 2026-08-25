@@ -10,6 +10,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
+import { saveTelegramSession, TELEGRAM_CONNECTOR_TOKEN_ENV } from "@/lib/telegram/sessionStore";
 
 import {
   claudeCliAuthStatus,
@@ -28,6 +29,7 @@ import {
   bindClaudeHostPersistence,
   demoteSkippedStructuredRegistryHosts,
   startClaudeStructuredHost,
+  structuredHostsEnabled,
 } from "./registry";
 
 class MemoryEventStore implements RuntimeEventStore {
@@ -168,6 +170,46 @@ const IMAGE_REF: StructuredImageRef = {
 };
 
 describe("ClaudeStreamBrokerHost", () => {
+  test("structured Claude loads Telegram auth only for the granted root host", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-telegram-grant-"));
+    const previousState = process.env.LLV_STATE_DIR;
+    process.env.LLV_STATE_DIR = path.join(directory, "state");
+    try {
+      const stored = saveTelegramSession("1ApWapzMBu4placeholder-not-a-real-session");
+      const rootChild = new FakeClaude(new RecordingDeliveryLedger());
+      const rootCapture: { options?: SpawnOptionsWithoutStdio } = {};
+      const root = await ClaudeStreamBrokerHost.start({
+        cwd: "/repo",
+        mcpServers: ["viewer", "telegram"],
+        env: { NODE_ENV: "test", [TELEGRAM_CONNECTOR_TOKEN_ENV]: "B".repeat(43) },
+        eventStore: new MemoryEventStore(),
+        deliveryLedger: new RecordingDeliveryLedger(),
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+        spawnProcess: fakeSpawn(rootChild, rootCapture),
+      });
+      expect(rootCapture.options?.env?.[TELEGRAM_CONNECTOR_TOKEN_ENV]).toBe(stored.connectorToken);
+      await root.release();
+
+      const delegatedChild = new FakeClaude(new RecordingDeliveryLedger());
+      const delegatedCapture: { options?: SpawnOptionsWithoutStdio } = {};
+      const delegated = await ClaudeStreamBrokerHost.start({
+        cwd: "/repo",
+        mcpServers: ["viewer"],
+        env: { NODE_ENV: "test", [TELEGRAM_CONNECTOR_TOKEN_ENV]: stored.connectorToken },
+        eventStore: new MemoryEventStore(),
+        deliveryLedger: new RecordingDeliveryLedger(),
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+        spawnProcess: fakeSpawn(delegatedChild, delegatedCapture),
+      });
+      expect(delegatedCapture.options?.env?.[TELEGRAM_CONNECTOR_TOKEN_ENV]).toBeUndefined();
+      await delegated.release();
+    } finally {
+      if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+      else process.env.LLV_STATE_DIR = previousState;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("structured Claude hosts launch with an exclusive native MCP allowlist", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-structured-mcp-"));
     fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
@@ -351,6 +393,26 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(await nextEvent(late)).toEqual({ kind: "delta", turnId: "delivery-one", text: "done", seq: 4 });
     expect((await host.health()).account).toEqual({ type: "claude.ai", planType: "max" });
     await host.release();
+  });
+
+  test("forwards GitHub config only for read-only scratch hosts", async () => {
+    for (const forwardGitHubConfig of [false, true]) {
+      const child = new FakeClaude(new RecordingDeliveryLedger());
+      const captured: { options?: SpawnOptionsWithoutStdio } = {};
+      const host = await ClaudeStreamBrokerHost.start({
+        cwd: "/repo",
+        env: { NODE_ENV: "test", GH_CONFIG_DIR: "/shared/config/gh" },
+        forwardGitHubConfig,
+        eventStore: new MemoryEventStore(),
+        deliveryLedger: new RecordingDeliveryLedger(),
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+        spawnProcess: fakeSpawn(child, captured),
+      });
+      expect(captured.options?.env?.GH_CONFIG_DIR).toBe(
+        forwardGitHubConfig ? "/shared/config/gh" : undefined,
+      );
+      await host.release();
+    }
   });
 
   test("read-only hosts deny mutation and native sub-agent tools", async () => {
@@ -1278,6 +1340,46 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test("a turn ending retires the question it left unanswered (#765)", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      requestTimeoutMs: 1_000,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: fakeSpawn(child, {}),
+    });
+
+    const receipt = host.send({ id: "turn-one", text: "go" });
+    await Bun.sleep(0);
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "user-one", message: { role: "user", content: [{ type: "text", text: "go" }] } });
+    expect(await receipt).toEqual({ outcome: "turn-started", turnId: "turn-one" });
+
+    child.emitJson({ type: "control_request", request_id: "question-open", request: { subtype: "can_use_tool", tool_name: "AskUserQuestion", input: { questions: [{ question: "Continue?" }] } } });
+    await Bun.sleep(0);
+    expect((await host.health()).pendingAttention).toEqual(["question-open"]);
+
+    const events = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
+    const unconfirmedAnswer = host.answer("question-open", { behavior: "deny" });
+    /* The operator interrupted instead of answering: Claude cuts the turn with
+       a bare `result` and never sends `control_cancel_request` for the
+       question it abandoned. The request died with the turn, so the broker
+       must retire it — this is the card that used to stay pinned forever. */
+    child.emitJson({ type: "result", subtype: "interrupted", session_id: host.identity.sessionId });
+    await expect(unconfirmedAnswer).rejects.toThrow("expired with its turn");
+    expect(await nextEvent(events)).toMatchObject({ kind: "turn-ended", turnId: "turn-one", status: "interrupted" });
+    expect(await nextEvent(events)).toMatchObject({
+      kind: "attention-resolved",
+      id: "question-open",
+      resolution: "turn-ended",
+    });
+    expect((await host.health()).pendingAttention).toEqual([]);
+    expect((await host.health()).status).toBe("idle");
+    await host.release();
+  });
+
   test("does not repeat a completed assistant message after partial deltas", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);
@@ -1305,6 +1407,59 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test("issue 1100: a tool-result user message keeps only the call identity and outcome on the wire", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    const sent = host.send({ id: "tools", text: "run it" });
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "tools-user", message: { role: "user", content: [{ type: "text", text: "run it" }] } });
+    await sent;
+    const events = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
+    child.emitJson({
+      type: "assistant",
+      session_id: host.identity.sessionId,
+      uuid: "tools-call",
+      message: { role: "assistant", content: [
+        { type: "tool_use", id: "toolu_ok", name: "Read", input: { file_path: "/repo/a.ts" } },
+        { type: "tool_use", id: "toolu_bad", name: "Bash", input: { command: "exit 1" } },
+      ] },
+    });
+    child.emitJson({
+      type: "user",
+      session_id: host.identity.sessionId,
+      uuid: "tools-results",
+      message: { role: "user", content: [
+        { type: "tool_result", tool_use_id: "toolu_ok", content: [{ type: "text", text: "secret-looking file body" }] },
+        { type: "tool_result", tool_use_id: "toolu_bad", is_error: true, content: "exit code 1" },
+      ] },
+    });
+    child.emitJson({ type: "result", subtype: "success", session_id: host.identity.sessionId });
+    /* The call record passes through whole (the live turn projects its tool_use blocks). */
+    expect(await nextEvent(events)).toMatchObject({
+      kind: "item",
+      phase: "completed",
+      item: { type: "assistant", uuid: "tools-call", message: { content: [{ type: "tool_use", id: "toolu_ok" }, { type: "tool_use", id: "toolu_bad" }] } },
+    });
+    /* The result record carries identity + outcome only: no result body crosses. */
+    const results = await nextEvent(events);
+    expect(results).toMatchObject({ kind: "item", phase: "completed", item: { type: "user", uuid: "tools-results" } });
+    const content = ((results as { item: { message: { content: unknown[] } } }).item.message.content);
+    expect(content).toEqual([
+      { type: "tool_result", tool_use_id: "toolu_ok" },
+      { type: "tool_result", tool_use_id: "toolu_bad", is_error: true },
+    ]);
+    expect(JSON.stringify(results)).not.toContain("secret-looking");
+    expect(await nextEvent(events)).toMatchObject({ kind: "turn-ended", status: "completed" });
+    await host.release();
+  });
+
   test("requires subscription OAuth before spawning", async () => {
     let spawned = false;
     await expect(ClaudeStreamBrokerHost.start({
@@ -1318,23 +1473,42 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(spawned).toBeFalse();
   });
 
-  test("requires the exact structured-host opt-in before start", async () => {
-    const ledger = new RecordingDeliveryLedger();
-    const child = new FakeClaude(ledger);
-    const options = {
-      cwd: "/repo",
-      deliveryLedger: ledger,
-      eventStore: new MemoryEventStore(),
-      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
-      readTranscript: () => [],
-      spawnProcess: fakeSpawn(child, {}),
+  test("keeps structured hosting enabled unless the rollback switch is explicit", async () => {
+    const freshStart = () => {
+      const ledger = new RecordingDeliveryLedger();
+      const child = new FakeClaude(ledger);
+      return {
+        child,
+        options: {
+          cwd: "/repo",
+          deliveryLedger: ledger,
+          eventStore: new MemoryEventStore(),
+          readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+          readTranscript: () => [],
+          spawnProcess: fakeSpawn(child, {}),
+        },
+      };
     };
-    await expect(startClaudeStructuredHost(options, { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "true" }))
-      .rejects.toThrow("structured hosts are disabled");
-    expect(child.sessionId).toBe("");
-    const host = await startClaudeStructuredHost(options, { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" });
-    expect(child.sessionId).toBe(host.identity.sessionId);
-    await host.release();
+
+    for (const rollback of ["0", "false", "off", "no"]) {
+      const env = { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: rollback } as const;
+      expect(structuredHostsEnabled(env)).toBeFalse();
+      const { child, options } = freshStart();
+      await expect(startClaudeStructuredHost(options, env)).rejects.toThrow("structured hosts are disabled");
+      expect(child.sessionId).toBe("");
+    }
+
+    for (const env of [
+      { NODE_ENV: "test" },
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "true" },
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
+    ] as const) {
+      expect(structuredHostsEnabled(env)).toBeTrue();
+      const { child, options } = freshStart();
+      const host = await startClaudeStructuredHost(options, env);
+      expect(child.sessionId).toBe(host.identity.sessionId);
+      await host.release();
+    }
   });
 
   test("boot adoption resumes claimed Claude rows and persists broker columns", async () => {

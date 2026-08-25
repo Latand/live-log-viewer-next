@@ -3,7 +3,9 @@ import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
+import { FOCUS_TARGET_SHAPES } from "@/lib/attention/targets";
 import { listRoles, resolveRole } from "@/lib/roles/registry";
+import { ROLE_IDS } from "@/lib/roles/types";
 import {
   MAX_SCOPE_PATHS,
   MAX_SNAPSHOT_CHARS_PER_CONVERSATION,
@@ -84,6 +86,7 @@ function boundedArgs(
       roleParams: {},
     });
   }
+  if (toolName === "search_transcripts") args.query = "fixture";
   return args;
 }
 
@@ -95,6 +98,43 @@ function valueAtPath(target: Record<string, unknown>, path: readonly string[]): 
   }
   return value;
 }
+
+test("agent_activity preserves additive provider throttle fields through the MCP protocol", async () => {
+  const retryAt = "2026-08-23T09:12:00.000Z";
+  await withProtocolClient(inertBindings({
+    agent_activity: async () => ({
+      count: 1,
+      stalledCount: 0,
+      conversations: [{
+        conversationId: "conversation_provider_throttled",
+        lifecycle: "waiting",
+        reason: "provider_throttled",
+        retryAt,
+        host: { state: "alive", kind: "structured" },
+      }],
+    }),
+  }), async (client) => {
+    const result = await client.callTool({
+      name: "agent_activity",
+      arguments: { clientRequestId: "activity-provider-throttle-parity", liveOnly: true },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      toolName: "agent_activity",
+      count: 1,
+      stalledCount: 0,
+      conversations: [{
+        conversationId: "conversation_provider_throttled",
+        lifecycle: "waiting",
+        reason: "provider_throttled",
+        retryAt,
+        host: { state: "alive", kind: "structured" },
+      }],
+    });
+  });
+});
 
 test("every harmless bounded MCP numeric clamps, coerces, and defaults before its binding", async () => {
   const calls = new Map<McpToolName, Record<string, unknown>[]>();
@@ -249,6 +289,84 @@ test("get_conversation listTools publishes every bounded tail target", async () 
     }
     expect(tool?.description).toContain("validated pinned reader");
     expect(tailSchema?.description).toContain("validated pinned reader");
+  });
+});
+
+test("conversation_action publishes full-generation archive outcomes and the 100-target bound", async () => {
+  let calls = 0;
+  await withProtocolClient(inertBindings({
+    conversation_action: async () => {
+      calls += 1;
+      return {
+        action: "archive",
+        outcomes: [{ outcome: "archived", paths: ["/fixtures/project/earlier.jsonl", "/fixtures/project/current.jsonl"] }],
+      };
+    },
+  }), async (client) => {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "conversation_action");
+    const action = tool?.inputSchema.properties?.action as { enum?: string[] } | undefined;
+    const targets = tool?.inputSchema.properties?.targets as {
+      maxItems?: number;
+      items?: { properties?: Record<string, { description?: string }> };
+    } | undefined;
+
+    expect(action?.enum).toEqual(expect.arrayContaining(["archive", "unarchive"]));
+    expect(tool?.description).toContain("every registered generation path");
+    expect(tool?.description).toContain("preserving an exact transcriptPath");
+    expect(tool?.description).toContain("outcome lists the paths actually written by this call");
+    expect(tool?.description).toContain("full expanded set was already hidden");
+    expect(tool?.description).toContain("readable transcript");
+    expect(targets?.maxItems).toBe(100);
+    expect(Object.keys(targets?.items?.properties ?? {})).toEqual(expect.arrayContaining([
+      "conversationId",
+      "transcriptPath",
+    ]));
+    expect(targets?.items?.properties?.conversationId?.description).toContain("every registered generation path");
+    expect(targets?.items?.properties?.transcriptPath?.description).toContain("preserve it");
+
+    const archived = await client.callTool({
+      name: "conversation_action",
+      arguments: {
+        clientRequestId: "archive-schema-paths",
+        action: "archive",
+        conversationId: "conversation_fixture",
+      },
+    });
+    expect(archived.structuredContent).toMatchObject({
+      outcomes: [{ outcome: "archived", paths: ["/fixtures/project/earlier.jsonl", "/fixtures/project/current.jsonl"] }],
+    });
+
+    const result = await client.callTool({
+      name: "conversation_action",
+      arguments: {
+        clientRequestId: "archive-schema-overflow",
+        action: "archive",
+        targets: Array.from({ length: 101 }, (_, index) => ({ transcriptPath: `/fixtures/project/session-${index}.jsonl` })),
+      },
+    });
+    expect(result.isError).toBe(true);
+  });
+  expect(calls).toBe(1);
+});
+
+test("search_transcripts publishes its body-query, project, cursor, and bounded page schema", async () => {
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "search_transcripts");
+
+    expect(tool?.description).toContain("message bodies");
+    expect(tool?.inputSchema.required).toEqual(expect.arrayContaining(["clientRequestId", "query"]));
+    expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual(expect.arrayContaining([
+      "clientRequestId",
+      "query",
+      "project",
+      "cursor",
+      "limit",
+    ]));
+    expect(tool?.inputSchema.properties?.limit).toMatchObject({
+      description: expect.stringContaining("Integer 1..100"),
+    });
   });
 });
 
@@ -475,4 +593,147 @@ test("every generated operator_snapshot schema combination is admitted by reques
     });
   }
   expect(accepted).toBeGreaterThan(1_000);
+});
+
+/* #1026 — `stages: array of objects` with no field documentation cost a fresh
+   caller seven sequential rejections to learn the stage contract. The published
+   tool definition now carries that contract: every field the engine accepts,
+   and the rules a JSONSchema cannot express in the description. */
+test("create_pipeline publishes the stage contract in its tool definition", async () => {
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "create_pipeline");
+    const stages = tool?.inputSchema.properties?.stages as {
+      items?: { properties?: Record<string, { description?: string; enum?: string[]; properties?: Record<string, { enum?: string[] }> }> };
+    } | undefined;
+    const stage = stages?.items?.properties;
+
+    expect(Object.keys(stage ?? {}).sort()).toEqual([
+      "access", "effort", "engine", "id", "kind", "model", "next", "onFail", "prompt", "role",
+    ]);
+    expect(stage?.kind?.enum).toEqual(["run", "review-loop"]);
+    expect(stage?.engine?.enum).toEqual(["claude", "codex"]);
+    expect(stage?.role?.properties?.roleId?.enum).toEqual([...ROLE_IDS]);
+    /* The two rules the reported walk actually turned on. */
+    expect(stage?.next?.description).toContain("DEFAULTS TO null");
+    expect(stage?.role?.description).toContain("Runtime overrides do not go here");
+    for (const [field, expected] of [
+      ["id", "unique within the pipeline"],
+      ["prompt", "role scaffold"],
+      ["onFail", "may not define one"],
+      ["model", "inherit the role default"],
+      ["access", "always read-only"],
+    ] as const) {
+      expect(stage?.[field]?.description).toContain(expected);
+    }
+
+    /* Reachability, the draft baseRef rule and the review-loop runtime default
+       are graph-level facts no per-field schema can carry. */
+    expect(tool?.description).toContain("pass-reachable from a run stage");
+    expect(tool?.description).toContain("`next` defaults to null");
+    expect(tool?.description).toContain("must also pass `baseRef`");
+    expect(tool?.description).toContain("always read-only");
+    expect(tool?.description).toContain("Codex");
+    expect(tool?.description).toContain("every violated constraint");
+    expect(tool?.description).toContain("normalized to the shared Claude transcript store");
+  });
+});
+
+/* The published schema must never be stricter than the engine: a stage shape
+   the engine accepts has to survive the protocol boundary unchanged. */
+test("create_pipeline admits the stage shapes the engine accepts", () => {
+  const schema = TOOL_INPUT_SCHEMAS.create_pipeline;
+  const accepted = [
+    { id: "build", kind: "run", "prompt": "Implement." },
+    { id: "build", kind: "run", "prompt": "Implement.", next: null, onFail: null, role: { roleId: "builder" } },
+    {
+      id: "review-1", kind: "review-loop", "prompt": "Review.", next: null,
+      role: { roleId: "reviewer", params: { diffSource: "branch", rounds: 3 } },
+      engine: "codex", model: null, effort: null, access: "read-only",
+    },
+    { id: "build", kind: "run", "prompt": "Implement.", next: "review-1", onFail: { to: "build", maxRounds: 3 }, engine: "claude", model: "opus", effort: "high" },
+    /* The engine trims before it checks, so padding it accepts must not be
+       refused at the protocol boundary. */
+    { id: " build ", kind: "run", "prompt": " Implement. " },
+  ];
+  for (const stage of accepted) {
+    const parsed = schema.safeParse({ clientRequestId: "stage-shape", task: "t", repoDir: "/repo", stages: [stage] });
+    expect(parsed.success).toBe(true);
+    expect((parsed.data as { stages: unknown[] } | undefined)?.stages[0]).toEqual(stage);
+  }
+  /* Runtime overrides inside role are refused by the engine and by the schema. */
+  expect(schema.safeParse({
+    clientRequestId: "stage-shape-role-override", task: "t", repoDir: "/repo",
+    stages: [{ id: "build", kind: "run", "prompt": "Implement.", role: { roleId: "builder", engine: "codex" } }],
+  }).success).toBe(false);
+});
+
+/* #1016 — `target` was a free-form record with a prose list of kind names, so
+   the discriminator and every per-kind field lived only in the TypeScript type:
+   five plausible guesses in a row were rejected by one undifferentiated
+   sentence. The tool definition now publishes the union itself. */
+test("request_attention publishes the per-kind target schema in its tool definition", async () => {
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "request_attention");
+    const target = tool?.inputSchema.properties?.target as {
+      oneOf?: { properties?: Record<string, { const?: string; description?: string }>; required?: string[] }[];
+    } | undefined;
+    const branches = new Map((target?.oneOf ?? []).map(
+      (branch) => [branch.properties?.kind?.const, branch] as const,
+    ));
+
+    /* One branch per kind, in the table's own order — a real oneOf, not a hint. */
+    expect([...branches.keys()]).toEqual(FOCUS_TARGET_SHAPES.map((shape) => shape.kind));
+    for (const [kind, required] of [
+      ["conversation", ["kind"]],
+      ["pipeline", ["kind", "pipelineId"]],
+      ["stage", ["kind", "pipelineId", "stageId"]],
+      ["flowRound", ["kind", "flowId", "round"]],
+      ["task", ["kind", "taskId"]],
+      ["draft", ["kind", "draftId"]],
+      ["region", ["kind", "project", "rect"]],
+      ["point", ["kind", "project", "x", "y"]],
+    ] as const) {
+      expect([kind, branches.get(kind)?.required?.slice().sort()]).toEqual([kind, [...required].sort()]);
+    }
+    /* The conversation branch carries BOTH accepted input forms: the durable id
+       the rest of this surface speaks, and the transcript path the record
+       stores. Neither is required alone, which is why the binding — not the
+       protocol boundary — answers a conversation target naming neither. */
+    const conversation = branches.get("conversation")?.properties;
+    expect(conversation?.conversationId?.description).toContain("survives resume and migration");
+    expect(conversation?.path?.description).toContain("supply at least one");
+
+    /* One pasteable example per kind, on the definition a caller reads first. */
+    for (const shape of FOCUS_TARGET_SHAPES) expect(tool?.description).toContain(shape.example);
+    expect(tool?.description).toContain("A rejected target names the kind it read and the fields that kind expects");
+  });
+});
+
+/* The published union must never be stricter than the record's own validator,
+   or a target the server would have accepted dies at the protocol boundary
+   without ever reaching the error that explains targets. */
+test("request_attention admits every target shape the attention record accepts", () => {
+  const schema = TOOL_INPUT_SCHEMAS.request_attention;
+  const accepted = [
+    ...FOCUS_TARGET_SHAPES.map((shape) => JSON.parse(shape.example) as Record<string, unknown>),
+    { kind: "conversation", path: "/tmp/session.jsonl" },
+    /* Both forms together, and the extra keys `isFocusTarget` has always
+       tolerated: every call that works today keeps working. */
+    { kind: "conversation", path: "/tmp/session.jsonl", conversationId: "conversation_9f2c", note: "kept" },
+    { kind: "flowRound", flowId: "flow_9f2c", round: 0 },
+    { kind: "region", project: "demo", rect: { x: -10, y: -10, w: 0, h: 0 } },
+    { kind: "point", project: "demo", x: -1.5, y: 2.5, zoom: 0.25 },
+  ];
+  for (const target of accepted) {
+    const parsed = schema.safeParse({ clientRequestId: "target-shape", target, reason: "Look at this." });
+    expect([target.kind, parsed.success]).toEqual([target.kind, true]);
+    expect((parsed.data as { target: unknown } | undefined)?.target).toEqual(target);
+  }
+  /* An unknown kind never resolves to a branch, so the discriminator is the one
+     thing the boundary does refuse — naming the kinds it knows. */
+  const refused = schema.safeParse({ clientRequestId: "target-shape", target: { kind: "elsewhere" }, reason: "Look." });
+  expect(refused.success).toBe(false);
+  expect(JSON.stringify(refused.error?.issues)).toContain("conversation");
 });

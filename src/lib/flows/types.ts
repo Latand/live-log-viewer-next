@@ -35,6 +35,14 @@ export type ViewerFlowDelivery = {
   deliveredAt: string;
 };
 
+/** Safe durable address of the structured implementer host a flow tried to
+    claim. Managed account ids are label-derived, so the public flow record
+    carries only a stable digest instead of the raw id. */
+export type FlowHostClaim = {
+  sessionKey: string;
+  accountRef: "default" | "unknown" | `managed:${string}`;
+};
+
 export type RelayDeliveryTransport = "structured" | "legacy";
 
 export type FlowBlock = {
@@ -121,8 +129,17 @@ export type Round = {
   /** A prior process may have delivered this relay; retries must use the
       structured queue's stable client-message identity. */
   relayRetryRequiresIdempotency?: boolean;
-  /** Exact transcript generation that received Viewer-generated findings. */
+  /** Exact transcript generation that received Viewer-generated findings.
+      Written ONLY from durable settlement evidence (#1065): a structured relay
+      is recorded here after the delivery journal reports the message delivered,
+      never from the transport's optimistic accept. */
   relayDelivery?: ViewerFlowDelivery | null;
+  /** A structured relay the transport accepted whose delivery journal
+      settlement has not landed yet (#1065). While this is set the round is
+      UNDELIVERED: the flow stays in `relaying`, and if the journal stays silent
+      past the settlement window the bounded relay retry re-sends under the same
+      idempotent client-message identity. */
+  relayPendingSettlement?: { path: string; since: string } | null;
   reviewedAt: string | null; // verdict detected
   /** Reviewer process reached a verdict or terminal error. */
   terminalAt?: string | null;
@@ -164,6 +181,8 @@ export type Flow = {
   mergeEvidence?: FlowMergeEvidence | null;
   /** Exact transcript generation that received the Viewer-generated kickoff. */
   kickoffDelivery?: ViewerFlowDelivery | null;
+  /** Latest structured implementer-host claim selected by kickoff or relay. */
+  hostClaim?: FlowHostClaim | null;
   rounds: Round[];
   createdAt: string;
   closedAt: string | null;

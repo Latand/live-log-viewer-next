@@ -5,10 +5,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { agentRegistry } from "@/lib/agent/registry";
 import { requireOperatorAuthority, setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import { beginOrchestratorSeatIntent, completeOrchestratorSeatIntent, orchestratorSeatFor } from "@/lib/orchestrator/seats";
-import { replaceOrchestratorIncumbent } from "@/lib/orchestrator/store";
 import { persistProjectAliases } from "@/lib/projects/aliases";
 
 import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
@@ -117,15 +117,20 @@ test("crossing the rotation threshold changes WORDS ONLY: prominent advisory, ze
     type: "assistant",
     message: { usage: { input_tokens: 600_000, cache_read_input_tokens: 50_000 } },
   }) + "\n", "utf8");
-  seatActive("proj-a", SEATED_ID, transcript);
-  /* The incumbent's engine/model as activation records them — Opus-class, so
-     the reference policy (1M window, 500k threshold) applies. */
-  replaceOrchestratorIncumbent({ conversationId: SEATED_ID, path: transcript, createdAt: AT, engine: "claude", model: "opus" });
+  const begun = agentRegistry().beginSpawnRequest({
+    engine: "claude",
+    cwd: sandbox,
+    clientAttemptId: "seed_0000001",
+    launchProfile: { model: "opus" },
+  });
+  seatActive("proj-a", begun.receipt.conversationId, transcript);
   const before = JSON.stringify(orchestratorSeatFor("proj-a"));
 
   const { posts, control } = controlStub();
   const result = await bindingsWith(control).get_orchestrator({ clientRequestId: "get-hot", project: "proj-a" }) as Record<string, unknown>;
 
+  expect(result.engine).toBe("claude");
+  expect(result.model).toBe("opus");
   const rotation = result.rotation as { level: string; advisory: string | null; reasons: string[] };
   expect(rotation.level).toBe("strongly_recommend");
   expect(rotation.advisory).toBe("STRONGLY_RECOMMEND_ROTATION");
@@ -191,6 +196,19 @@ test("create_orchestrator posts the versioned approved default mandate through t
   expect(result).toMatchObject({ conversationId: SEATED_ID, transcriptPath: "/tmp/o.jsonl" });
 });
 
+test("create_orchestrator rejects an explicit fresh-launch model outside the engine catalog before posting", async () => {
+  const { posts, control } = controlStub();
+
+  await expect(bindingsWith(control).create_orchestrator({
+    clientRequestId: "create-invalid-model",
+    project: "proj-a",
+    engine: "claude",
+    model: "claude-fable-5",
+  })).rejects.toThrow("invalid claude model id \"claude-fable-5\"; valid claude model ids: opus, fable, sonnet, haiku");
+
+  expect(posts).toEqual([]);
+});
+
 test("create_orchestrator adopts an eligible existing conversation through the seat route", async () => {
   const { posts, control } = controlStub({
     "/api/orchestrator/seat": { ok: true, conversationId: SEATED_ID, path: "/tmp/o.jsonl", seat: { conversationId: SEATED_ID }, state: "settled" },
@@ -200,6 +218,7 @@ test("create_orchestrator adopts an eligible existing conversation through the s
     clientRequestId: "adopt-01",
     project: "proj-a",
     conversationId: SEATED_ID,
+    model: "historical-provider-model",
   });
 
   expect(posts).toHaveLength(1);
@@ -207,6 +226,7 @@ test("create_orchestrator adopts an eligible existing conversation through the s
   expect(posts[0]!.body).toMatchObject({
     project: "proj-a",
     conversationId: SEATED_ID,
+    model: "historical-provider-model",
     clientRequestId: "adopt-01",
   });
   expect(result).toMatchObject({ conversationId: SEATED_ID, transcriptPath: "/tmp/o.jsonl" });

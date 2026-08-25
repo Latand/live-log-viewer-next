@@ -178,6 +178,18 @@ export function describeMcpCall(
     };
   }
 
+  if (toolName === "search_transcripts") {
+    const query = compact(string(args.query));
+    const total = typeof result.total === "number" ? `${result.total} matches` : "";
+    return {
+      icon: "conversation",
+      verb: "Searching",
+      title: `Searching transcripts${query ? `: ${query}` : ""}`,
+      subtitle: replaySubtitle(result, total),
+      links: [],
+    };
+  }
+
   if (toolName === "get_conversation") {
     const conversationId = string(result.conversationId) || string(args.conversationId);
     const transcriptPath = string(result.transcriptPath) || string(args.transcriptPath);
@@ -291,6 +303,8 @@ export function describeMcpCall(
       resume: "Resuming",
       compact: "Compacting",
       "dialog-key": "Answering dialog in",
+      archive: "Archiving",
+      unarchive: "Unarchiving",
     };
     const verb = verbs[action] ?? "Controlling";
     return {

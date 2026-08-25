@@ -2,16 +2,17 @@ import crypto from "node:crypto";
 import path from "node:path";
 
 import { isEngineEffort } from "@/lib/agent/efforts";
-import { isCodexLaunchModel, normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import { validateLaunchModel } from "@/lib/agent/models";
 import { agentRegistry } from "@/lib/agent/registry";
 import { headCwd } from "@/lib/agent/transcript";
 import { livePaneTarget } from "@/lib/delivery";
+import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { isShellCommand } from "@/lib/status";
 import { killPane, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
-import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
+import { isoNow, lastRound, newRound, relayJournalSettlement, sendToImplementer } from "./engine";
 import { clearHeadlessReviewArtifacts, forgetHeadlessReview, stopHeadlessReviewAndWait } from "./exec";
 import { resolveBaseRef, resolveFlowMergeIdentity } from "./git";
 import { kickoffPrompt } from "./prompts";
@@ -21,7 +22,7 @@ import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } fro
 /**
  * User-facing flow commands: creating a flow from an HTTP request and the
  * PATCH actions (pause/resume/advance/retry/extend/close). The poller-driven
- * transitions live in engine.ts; these are the transitions a human triggers.
+ * transitions live in engine.ts; these are the transitions an external caller triggers.
  */
 
 function validateRole(value: unknown): RoleConfig | null {
@@ -41,32 +42,39 @@ function validateRole(value: unknown): RoleConfig | null {
  * model/effort blank out to the engine default. Returns null on an invalid
  * engine so the caller can 400 instead of silently keeping the old value.
  */
-export function applyRoleOverride(current: RoleConfig, patch: unknown): RoleConfig | null {
-  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return null;
+function roleOverrideFromRequest(
+  current: RoleConfig,
+  patch: unknown,
+): { role: RoleConfig } | { error: string } {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return { error: "invalid reviewer role override" };
   const p = patch as Partial<RoleConfig>;
   const next: RoleConfig = { ...current };
   if (p.engine !== undefined) {
-    if (p.engine !== "claude" && p.engine !== "codex") return null;
+    if (p.engine !== "claude" && p.engine !== "codex") return { error: "invalid reviewer role override" };
     next.engine = p.engine;
   }
   if (p.model !== undefined) {
-    if (p.model !== null && typeof p.model !== "string") return null;
+    if (p.model !== null && typeof p.model !== "string") return { error: "invalid reviewer role override" };
     next.model = typeof p.model === "string" && p.model.trim() ? p.model.trim() : null;
   }
   if (p.effort !== undefined) {
-    if (p.effort !== null && typeof p.effort !== "string") return null;
+    if (p.effort !== null && typeof p.effort !== "string") return { error: "invalid reviewer role override" };
     next.effort = typeof p.effort === "string" && p.effort.trim() ? p.effort.trim() : null;
   }
-  /* Validate the MERGED config through the canonical launch validators, not just
-     primitive shapes (issue #118 Finding 3): a claude+gpt / codex+fable / bad
-     effort combination must be rejected here rather than persisting and failing at
-     the next reviewer launch. */
+  /* This override controls a future reviewer launch. Frozen round snapshots do
+     not pass through here when they resume or replay. */
   if (next.model) {
-    if (next.engine === "claude" && !normalizeClaudeLaunchModel(next.model)) return null;
-    if (next.engine === "codex" && !isCodexLaunchModel(next.model)) return null;
+    const validation = validateLaunchModel(next.engine, next.model);
+    if ("error" in validation) return validation;
+    next.model = validation.model;
   }
-  if (next.effort && !isEngineEffort(next.engine, next.effort)) return null;
-  return next;
+  if (next.effort && !isEngineEffort(next.engine, next.effort)) return { error: "invalid reviewer role override" };
+  return { role: next };
+}
+
+export function applyRoleOverride(current: RoleConfig, patch: unknown): RoleConfig | null {
+  const result = roleOverrideFromRequest(current, patch);
+  return "role" in result ? result.role : null;
 }
 
 export function rolesFromRequest(req: CreateFlowRequest): Record<"implementer" | "reviewer", RoleConfig> | null {
@@ -103,6 +111,18 @@ export function isRecoverableLegacyRelayFailurePause(flow: Flow): boolean {
     && LEGACY_PRE_ACTUATION_RELAY_FAILURES.has(flow.stateDetail);
 }
 
+/**
+ * A round whose structured relay was recorded delivered without the delivery
+ * journal ever corroborating it (#1065). Only a structured relay can be judged
+ * this way: legacy tmux delivery writes no journal, so its rounds keep the
+ * transport-level settlement they were recorded under.
+ */
+function isUncorroboratedStructuredRelay(flow: Flow, round: Round): boolean {
+  return round.relayDeliveryTransport === "structured"
+    && round.relayedAt != null
+    && relayJournalSettlement(flow) === null;
+}
+
 export function normalizeFlowSpec(value: unknown): { ok: true; spec?: string } | { ok: false } {
   if (value === undefined) return { ok: true };
   if (typeof value !== "string") return { ok: false };
@@ -128,6 +148,11 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   }
   const roles = rolesFromRequest(req);
   if (!roles) return { error: "invalid flow roles or preset", status: 400 };
+  if (roles.reviewer.model) {
+    const validation = validateLaunchModel(roles.reviewer.engine, roles.reviewer.model);
+    if ("error" in validation) return { error: validation.error, status: 400 };
+    roles.reviewer.model = validation.model;
+  }
   const registry = agentRegistry();
   const requestedConversationId = req.implementerConversationId?.startsWith("conversation_")
     ? req.implementerConversationId as `conversation_${string}`
@@ -202,6 +227,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
       return identity ? { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null } : null;
     })(),
     kickoffDelivery: null,
+    hostClaim: null,
     rounds: [],
     createdAt: isoNow(),
     closedAt: null,
@@ -363,7 +389,11 @@ export async function closeFlow(id: string): Promise<{
   });
 }
 
-export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; error?: string; status?: number } {
+export function patchFlow(
+  id: string,
+  req: PatchFlowRequest,
+  actor: PauseResumeActor | null = OPERATOR_PAUSE_RESUME_ACTOR,
+): { flow?: Flow; error?: string; status?: number } {
   const flows = loadFlows();
   const flow = flows.find((item) => item.id === id);
   if (!flow) return { error: "flow not found", status: 404 };
@@ -372,7 +402,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     if (flow.state !== "paused" && flow.state !== "closed") {
       flow.pausedState = flow.state;
       flow.state = "paused";
-      flow.stateDetail = "paused by user";
+      flow.stateDetail = pauseResumeDetail("paused", actor);
     }
   } else if (req.action === "resume") {
     if (flow.state === "paused") {
@@ -384,7 +414,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       }
       flow.state = flow.pausedState && flow.pausedState !== "paused" ? flow.pausedState : "waiting_ready";
       flow.pausedState = null;
-      flow.stateDetail = null;
+      flow.stateDetail = pauseResumeDetail("resumed", actor);
     }
   } else if (req.action === "set-mode") {
     if (req.mode !== "auto" && req.mode !== "manual") return { error: "mode must be auto or manual", status: 400 };
@@ -404,6 +434,23 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       if (note !== undefined && round) round.readyNote = note;
       flow.state = "spawning";
     } else if (flow.state === "relay_pending") {
+      flow.state = "relaying";
+    } else if (flow.state === "fixing" && round && isUncorroboratedStructuredRelay(flow, round)) {
+      /* #1065 recovery: the round claims a delivered relay the delivery journal
+         never corroborated, so the implementer is waiting on a verdict it never
+         received and the flow would sit in `fixing` forever. Advance hands the
+         round back to the existing relay path under the idempotent
+         client-message identity — a delivery that lands late still dedupes. */
+      Object.assign(round, {
+        relayDelivery: null,
+        relayedAt: null,
+        relayPendingSettlement: null,
+        relayStartedAt: null,
+        relayRetryCount: 0,
+        relayRetryAt: null,
+        relayRetryRequiresIdempotency: true,
+        error: null,
+      });
       flow.state = "relaying";
     } else {
       return { error: "flow cannot advance from its current state", status: 409 };
@@ -489,8 +536,9 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
        reseated in place, so it is not overridable here (see PatchFlowRequest). */
     const patch = req.roles && typeof req.roles === "object" && !Array.isArray(req.roles) ? req.roles.reviewer : undefined;
     if (patch === undefined) return { error: "reviewer role override is required", status: 400 };
-    const merged = applyRoleOverride(flow.roles.reviewer, patch);
-    if (!merged) return { error: "invalid reviewer role override", status: 400 };
+    const override = roleOverrideFromRequest(flow.roles.reviewer, patch);
+    if ("error" in override) return { error: override.error, status: 400 };
+    const merged = override.role;
     flow.roles = { ...flow.roles, reviewer: merged };
     /* Manual mode parks a created-but-unspawned round at spawn_pending with its
        role already frozen (newRound/retry snapshot it). The override must reach

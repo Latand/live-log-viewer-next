@@ -11,6 +11,8 @@ import { pathAllowed } from "@/lib/scanner/roots";
 import { transcriptLiveOwnership, type TranscriptLiveOwnership } from "@/lib/scanner/transcripts";
 import { procBackend } from "@/lib/proc";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
+import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
+import { structuredContent } from "@/lib/runtime/structuredContent";
 import type { RuntimeOperationReceipt } from "@/lib/runtime/contracts";
 import { detectBlockingGate, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import type { FileEntry } from "@/lib/types";
@@ -537,6 +539,11 @@ export interface ConversationMessage {
   resumeModel?: string | null;
   resumeEffort?: string | null;
   resumeFast?: boolean | null;
+  /** Message authorship stamped by the admitting surface (#1117). Rides the
+      structured enqueue when the conversation recovers structured, and persists
+      on the legacy hold's command so the evidence survives even when the paste
+      itself — engine input this path must not change — cannot carry it. */
+  origin?: MessageOrigin;
 }
 
 interface DeliveryOverrides {
@@ -586,6 +593,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
           clientMessageId: message.clientMessageId,
           text,
           hasImages: images.length > 0,
+          ...(message.origin ? { origin: message.origin } : {}),
         }, {
           registry: () => registry,
         });
@@ -621,11 +629,27 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     if (deliveryFence(conversation) === "held" && requestLocalPayload) return failure("request-local delivery waits for migration completion", 409);
     let queued;
     try {
+      const heldText = textBytes > 32_000 ? "" : text;
+      /* #1117: the digest is the only content evidence a delivered record
+         keeps (its text is blanked at settlement), and it is what joins a
+         legacy paste to its transcript row. Stamped at admission from the
+         text actually delivered — before an oversized payload is blanked
+         from the record — so an over-bound agent relay still projects; the
+         plaintext itself stays request-local. */
+      let contentDigest: string | null = null;
+      try {
+        contentDigest = structuredContent(text, []).contentDigest;
+      } catch {
+        contentDigest = null;
+      }
       queued = registry.holdDelivery(
         conversation.id,
-        textBytes > 32_000 ? "" : text,
+        heldText,
         message.clientMessageId ?? null,
         images.length ? "ephemeral-images" : textBytes > 32_000 ? "ephemeral-text" : "text",
+        [],
+        contentDigest,
+        message.origin ? { origin: message.origin } : {},
       );
     } catch (error) {
       return failure(error, 409);

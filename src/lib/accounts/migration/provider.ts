@@ -20,7 +20,7 @@ import { bindClaudeHostPersistence, bindCodexHostPersistence, structuredHostsEna
 import { cleanupTmuxHostIfMatches, forgetResumePaneIfMatches, spawnAgentWithPrompt, verifyTmuxHostEvidence, type TmuxHostCleanupResult } from "@/lib/tmux";
 
 import type { LaunchProfile, ProviderReceipt, SuccessorProviderPort } from "./contracts";
-import { hashValidatedHistory, HistorySecurityError, safeCopyHistory, validateHistorySource } from "./safeHistoryCopy";
+import { hashValidatedHistory, HistorySecurityError, MigrationTargetUnavailableError, safeCopyHistory, validateHistorySource } from "./safeHistoryCopy";
 
 interface StructuredHostPublicationInput {
   receipt: ProviderReceipt;
@@ -909,7 +909,7 @@ function isSharedClaudeTranscriptRoot(transcriptRoot: string): boolean {
 function ensureTargetRoot(account: AccountContext): void {
   const home = fs.lstatSync(account.home);
   if (!home.isDirectory() || home.isSymbolicLink() || (process.getuid && home.uid !== process.getuid()) || (home.mode & 0o022) !== 0) {
-    throw new Error("target account home failed safety checks");
+    throw new MigrationTargetUnavailableError("unsafe-home", "target account home failed safety checks");
   }
   if (path.dirname(path.resolve(account.transcriptRoot)) !== path.resolve(account.home)
     && !(account.engine === "claude" && isSharedClaudeTranscriptRoot(account.transcriptRoot))) {
@@ -996,7 +996,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     ensureTargetRoot(target);
     if (input.engine === "claude") {
       const status = await this.dependencies.claudeStatus(target.home);
-      if (!status.loggedIn) throw new Error("target Claude account is not authenticated");
+      if (!status.loggedIn) throw new MigrationTargetUnavailableError("not-authenticated", "target Claude account is not authenticated");
       assertClaudeTranscript(receipt, target);
       const host = claudeTmuxHostFromReceipt(receipt);
       const registry = this.dependencies.registry ?? agentRegistry();
@@ -1012,7 +1012,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       const account = await client.readAccount();
       // Authenticated ChatGPT responses carry requiresOpenaiAuth=true because
       // the field describes the active provider's credential requirement.
-      if (!account.account) throw new Error("target Codex account is not authenticated");
+      if (!account.account) throw new MigrationTargetUnavailableError("not-authenticated", "target Codex account is not authenticated");
       const thread = await client.readThread(receipt.nativeId);
       if (thread.id !== receipt.nativeId) throw new Error("target Codex thread identity does not match");
     } finally { client.close(); }
@@ -1137,7 +1137,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     assertLeaseOwned: () => void,
   ): Promise<ProviderReceipt> {
     const status = await this.dependencies.claudeStatus(target.home);
-    if (!status.loggedIn) throw new Error("target Claude account is not authenticated");
+    if (!status.loggedIn) throw new MigrationTargetUnavailableError("not-authenticated", "target Claude account is not authenticated");
     const history = hashValidatedHistory(sourcePath, source.transcriptRoot);
     const nativeId = candidateUuid(operationId);
     const spec = claudeSuccessorSpecFor({ sourcePath, candidateId: nativeId, targetHome: target.home, targetProjectsDir: target.transcriptRoot, profile });
@@ -1393,7 +1393,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const targetClient = await this.dependencies.startCodex(target.home);
     try {
       const account = await targetClient.readAccount();
-      if (!account.account) throw new Error("target Codex account is not authenticated");
+      if (!account.account) throw new MigrationTargetUnavailableError("not-authenticated", "target Codex account is not authenticated");
       assertLeaseOwned();
       const approvalPolicy = profile.permissionMode && ["never", "on-request", "untrusted"].includes(profile.permissionMode)
         ? profile.permissionMode

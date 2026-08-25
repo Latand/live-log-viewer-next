@@ -8,11 +8,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+import { FOCUS_TARGET_SHAPES } from "@/lib/attention/targets";
 import { statePath } from "@/lib/configDir";
 import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { DEFAULT_STALL_AFTER_MS } from "@/lib/lifecycle/liveness";
 import { PIPELINE_LIST_DEFAULT_LIMIT, PIPELINE_LIST_MAX_LIMIT } from "@/lib/pipelines/listProjection";
-import { PIPELINE_ACTIONS } from "@/lib/pipelines/types";
+import {
+  DEFAULT_FAIL_EDGE_ROUNDS,
+  MAX_FAIL_EDGE_ROUNDS,
+  MAX_PIPELINE_STAGES,
+  MAX_STAGE_PROMPT_LENGTH,
+  MIN_STARTED_PIPELINE_STAGES,
+} from "@/lib/pipelines/limits";
+import { PIPELINE_ACTIONS, PIPELINE_DISALLOWED_ROLE_IDS } from "@/lib/pipelines/types";
 import { procBackend } from "@/lib/proc";
 import { ROLE_IDS, type RoleId } from "@/lib/roles/types";
 import { SELECTED_TAIL_MAX_LINES } from "@/lib/selection/resolve";
@@ -34,6 +42,7 @@ export const MCP_TOOL_NAMES = [
   "pipeline_action",
   "link_task_to_pipeline",
   "list_conversations",
+  "search_transcripts",
   "get_conversation",
   "deploy_exact_sha",
   "get_pipeline",
@@ -99,7 +108,7 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
 ]);
 
 /**
- * Tools whose binding is idempotent over its own durable state, so a claim the
+ * Calls whose binding is idempotent over its own durable state, so a claim the
  * previous process never settled is RECONCILED by re-running the binding
  * rather than answered `call_interrupted` forever (#873 review, finding 3).
  *
@@ -110,10 +119,21 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
  * permanent dead end becomes the deterministic answer to what actually
  * happened. The digest check above still refuses a same-id call with
  * different arguments.
+ *
+ * Archive and unarchive qualify at the action level: board hidden placement is
+ * content-idempotent, so a retry after the board write converges without
+ * another revision. Other conversation actions still require live runtime
+ * ownership and remain outside interrupted recovery.
  */
 const INTERRUPTED_RECOVERABLE_TOOLS: ReadonlySet<McpToolName> = new Set<McpToolName>([
   "request_attention",
 ]);
+
+function interruptedCallIsRecoverable(toolName: McpToolName, args: McpToolArgs): boolean {
+  if (INTERRUPTED_RECOVERABLE_TOOLS.has(toolName)) return true;
+  if (toolName !== "conversation_action") return false;
+  return args.action === "archive" || args.action === "unarchive";
+}
 
 export type McpToolArgs = Record<string, unknown> & { clientRequestId?: unknown };
 export type McpToolPayload = Record<string, unknown>;
@@ -148,6 +168,9 @@ export const MCP_BOUNDED_NUMERIC_ARGS: Partial<Record<McpToolName, readonly McpB
   ],
   list_conversations: [
     { path: ["limit"], min: 1, max: 100, fallback: 50 },
+  ],
+  search_transcripts: [
+    { path: ["limit"], min: 1, max: 100, fallback: 20 },
   ],
   get_conversation: [
     { path: ["maxRecords"], min: 1, max: 500, fallback: 100 },
@@ -1518,7 +1541,7 @@ export function createMcpToolService(
           outcome = "conflict";
           return failure(toolName, requestId, "idempotency_conflict", "clientRequestId was already used with different arguments", false, true);
         }
-        if (claim.kind === "pending" && !INTERRUPTED_RECOVERABLE_TOOLS.has(typedTool)) {
+        if (claim.kind === "pending" && !interruptedCallIsRecoverable(typedTool, effectiveArgs)) {
           outcome = "pending";
           unfinishedAgeMs = claim.unfinishedAgeMs;
           return failure(toolName, requestId, "call_interrupted", "The previous MCP process ended before this call completed", true, true);
@@ -1601,28 +1624,42 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   send_message: "Deliver a message to a Viewer conversation through its registered runtime host.",
   create_task: "Create a durable board task.",
   update_task: "Update a durable board task.",
-  create_pipeline: "Create a Viewer pipeline through the pipeline engine.",
+  create_pipeline: [
+    "Create a Viewer pipeline through the pipeline engine: a stage graph of agent conversations run in one worktree.",
+    "Stages are a graph, not a list: each stage names its pass successor with `next` (a stage id, or null to end the chain), and a run stage may name a fail successor with `onFail`. `next` defaults to null, so a plan whose stages never set it is a set of disconnected stages, not a chain.",
+    "A review-loop stage reviews the session of the run stage that reaches it, so it must be pass-reachable from a run stage through `next` edges — array order alone reaches nothing. review-loop stages are always read-only, may not define `onFail`, and take their engine/model/effort from their role (the registry reviewer preset runs on Codex) unless the stage overrides them.",
+    "Runtime overrides (engine, model, effort, access) belong on the stage; `role` carries only `roleId` and its `params`.",
+    "autoStart:false creates a draft the operator starts from the board; a draft that pins `baseBranch` must also pass `baseRef` (a draft is not provisioned, so the caller resolves the SHA).",
+    "`src` is the creator's transcript path: a native ~/.claude/projects path is normalized to the shared Claude transcript store when the mirrored file exists there.",
+    "An invalid call is answered once with every violated constraint, each naming its field and expected shape.",
+  ].join(" "),
   pipeline_action: "Apply a supported action to an existing pipeline.",
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
+  search_transcripts: "Search indexed user and assistant message bodies across every scanned transcript store. Returns match snippets with speaker, timestamp, transcript path and byte offset; project is optional, and empty pages include corpus statistics. Queries never read transcript files.",
   get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan.",
   deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
-  board_snapshot: "Read a bounded, redacted snapshot of the Viewer board and durable placement.",
+  board_snapshot: "Read a bounded, redacted snapshot of the Viewer board, durable placement, and the selected project's hidden conversation count.",
   list_flows: "List durable implement-review flows.",
   get_flow: "Read one implement-review flow by durable id.",
   flow_action: "Apply a supported action to an implement-review flow.",
   list_pipelines: "List durable pipelines as bounded board cards: id, task, project, branch/worktree, state and stateDetail, cursor stage, task links, and a per-stage summary (role, engine, attempt count, latest attempt's state and verdict). Deliberately carries no bodies — the spec, stage prompts, role scaffolds and every attempt's input/output transcript are read with get_pipeline, which still returns the whole record. hasSpec tells you a spec exists; long free text is truncated.",
-  conversation_action: "Interrupt, kill, resume, compact, or answer a dialog for a Viewer conversation. Names the conversation by id, transcript path, or the selected-card reference the operator's turn carried — the last resolves directly, with no operator_snapshot call.",
+  conversation_action: "Control or archive Viewer conversations. interrupt, kill, resume, compact, and dialog-key accept one conversation by id, transcript path, or selected-card reference. archive and unarchive also accept up to 100 targets; they update the existing board hidden placement without requiring a live host or readable transcript. Each archive or unarchive target expands to every registered generation path while preserving an exact transcriptPath and a spawn:<launchId> placeholder. Each per-target outcome lists the paths actually written by this call; already-archived means the full expanded set was already hidden. Archive execution requires the operator root or a designated orchestrator seat and retains conversation_action's existing cross-project reach.",
   operator_snapshot: "Read the bounded, secret-redacted Viewer state currently visible to the operator.",
   list_tasks: "List durable board tasks.",
   get_task: "Read one durable board task.",
   deployment_status: "Read Viewer deployment or runtime operation status, or list recent deployments.",
   resources: "Read system and Viewer-owned agent resource usage.",
   conversation_migration: "Reseat, retry, or roll back a conversation account migration.",
-  agent_activity: "Read agent liveness: last transcript record, turn state, whether the host is alive or gone, and how long a stalled conversation has been silent.",
+  agent_activity: "Read agent liveness: last transcript record, turn state, host state, provider-throttle retry time, and confirmed stalls.",
   lifecycle_events: "Query the durable lifecycle event journal by lineage and cursor, or poll a bounded relay digest of what changed since the last one.",
-  request_attention: "Move the operator's one active Viewer to a typed target immediately and verify the arrival — no confirmation prompt, no pending offer. Execution is gated on server-derived authority: only the operator's root/gateway session or the target project's designated orchestrator seat may direct it; workers and unidentified callers are refused (ATTENTION_NOT_PERMITTED) with nothing recorded. The latest-interaction active view is chosen deterministically (down to the one executing browser tab); success is returned only after that view's camera/focus actually landed, and a missing view, lost target, or timeout is an explicit bounded failure. Durably attributed to the calling session, idempotent by clientRequestId across restarts, and the operator keeps a one-action Return control that restores exactly where they were.",
+  request_attention: [
+    "Move the operator's one active Viewer to a typed target immediately and verify the arrival — no confirmation prompt, no pending offer. Execution is gated on server-derived authority: only the operator's root/gateway session or the target project's designated orchestrator seat may direct it; workers and unidentified callers are refused (ATTENTION_NOT_PERMITTED) with nothing recorded. The latest-interaction active view is chosen deterministically (down to the one executing browser tab); success is returned only after that view's camera/focus actually landed, and a missing view, lost target, or timeout is an explicit bounded failure. Durably attributed to the calling session, idempotent by clientRequestId across restarts, and the operator keeps a one-action Return control that restores exactly where they were.",
+    `Targets are typed and discriminated by \`kind\`, one shape per kind: ${FOCUS_TARGET_SHAPES.map((shape) => `${shape.kind} — ${shape.example}`).join("; ")}.`,
+    "A conversation target takes either its durable conversationId (resolved server-side to that conversation's current transcript, and the form to prefer because it survives resume and migration) or that transcript's path.",
+    "A draft target also needs the top-level project argument; region and point accept intent \"show\" only. A rejected target names the kind it read and the fields that kind expects.",
+  ].join(" "),
   bridge_report: "Append one bounded report to the durable bridge log for the voice gateway to relay. Callable from any session; the origin is labeled server-side and a non-orchestrator report is visibly attributed to its own session.",
   bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
   get_orchestrator: "Read a project's designated orchestrator: designation, health and activity, model and prompt version, transcript size, message/tool/compaction counts, context usage against its model's configured window (clearly labelled when estimated), predecessor lineage, and a bounded rotation recommendation — STRONGLY_RECOMMEND_ROTATION once usage reaches the configured threshold. Words only: it never rotates, creates, or interrupts anything itself.",
@@ -1639,6 +1676,14 @@ const clientRequestIdSchema = z.string().min(1).describe("Stable idempotency key
    that pinned today's fields would reject tomorrow's evidence at the door. */
 const selectedContextSchema = z.union([z.string().min(1), z.record(z.string(), z.unknown())]).optional()
   .describe("Selected-card reference from the operator's turn (the `ctx=` marker token, or the decoded object). Resolves the conversation through a bounded identity lookup — no operator_snapshot needed.");
+const conversationArchiveTargetSchema = z.object({
+  conversationId: z.string().min(1).optional()
+    .describe("Durable Viewer conversation id. Archive and unarchive actions expand it to every registered generation path."),
+  transcriptPath: z.string().min(1).optional()
+    .describe("Exact board transcript path, including a spawn:<launchId> placeholder. Archive and unarchive actions preserve it and add every generation of the resolved conversation."),
+}).strict().refine((target) => Boolean(target.conversationId || target.transcriptPath), {
+  message: "conversationId or transcriptPath is required",
+});
 const entityIdSchema = z.string().min(1);
 const snapshotStringSchema = z.string()
   .min(MIN_SNAPSHOT_STRING_LENGTH)
@@ -1657,6 +1702,104 @@ const snapshotScopeSchema = z.discriminatedUnion("kind", [
     paths: snapshotPathsSchema,
   }).strict(),
 ]);
+
+/* #1026: the stage contract, published rather than discovered. A caller that
+   composed stages from `array of objects` alone learned id, kind, role shape,
+   the runtime-override seam and the `next` edges through seven sequential
+   rejections. Everything the engine's normalizer accepts is declared here; the
+   object stays open (`passthrough`) and the semantic rules — id uniqueness,
+   edge targets, review-loop reachability, role parameter values — stay with the
+   engine, which now answers with all of them at once. */
+const pipelineStageSchema = z.object({
+  /* Bounds here stay exactly as wide as the engine's: it trims before it
+     checks, so a padded id it accepts must not be refused at the door. */
+  id: z.string().regex(/^\s*[A-Za-z0-9_-]{1,64}\s*$/u)
+    .describe("Stage id, unique within the pipeline: 1–64 characters of A–Z a–z 0–9 _ - (surrounding whitespace is trimmed). Referenced by next and onFail."),
+  kind: z.enum(["run", "review-loop"])
+    .describe("run: an agent conversation that does the work. review-loop: a read-only review of the run stage whose next chain reaches it."),
+  "prompt": z.string().min(1)
+    .describe(`Instruction for this stage's agent, appended to its role scaffold. Up to ${MAX_STAGE_PROMPT_LENGTH} characters once trimmed.`),
+  next: z.string().nullable().optional()
+    .describe("Pass successor: the id of the stage this one hands to when it passes, or null to end the chain. DEFAULTS TO null — without it nothing follows this stage, and a review-loop nothing points at is rejected as unreachable."),
+  onFail: z.object({
+    to: z.string().describe("Stage id this stage returns to on a fail verdict."),
+    maxRounds: z.number().int().min(1).max(MAX_FAIL_EDGE_ROUNDS).optional()
+      .describe(`Rounds this fail loop may run before the pipeline parks (default ${DEFAULT_FAIL_EDGE_ROUNDS}).`),
+  }).nullable().optional()
+    .describe("Fail successor for a run stage. A review-loop stage may not define one — it recovers through its own review flow."),
+  role: z.object({
+    roleId: z.enum(ROLE_IDS)
+      .describe(`Role preset from the shared registry; it supplies the stage's prompt scaffold and its default engine/model/effort. ${PIPELINE_DISALLOWED_ROLE_IDS.join(", ")} is refused inside a pipeline (it needs an interactive deploy confirmation).`),
+    params: z.record(z.string(), z.union([z.string(), z.number()])).optional()
+      .describe("Values for the role's declared parameters, substituted into its scaffold. Only the role's own keys, validated against the registry."),
+  }).strict().optional()
+    .describe("Role reference ONLY. Runtime overrides do not go here — put engine/model/effort/access on the stage itself."),
+  engine: z.enum(["claude", "codex"]).optional()
+    .describe("Stage-level engine override; defaults to the role's registry engine."),
+  model: z.string().nullable().optional()
+    .describe("Stage-level model override, or null to inherit the role default. Must be a model the stage engine supports."),
+  effort: z.string().nullable().optional()
+    .describe("Stage-level effort override, or null to inherit the role default. Must be an effort the stage engine supports."),
+  access: z.enum(["read-only", "read-write"]).optional()
+    .describe("Stage-level access override. A review-loop stage is always read-only."),
+}).passthrough();
+
+/* #1016: the typed target contract, published rather than guessed. `target` was
+   declared as a free-form record with a prose list of kind names, so the
+   discriminator and every per-kind field lived only in `FocusTarget` — five
+   plausible guesses in a row were rejected with one undifferentiated sentence.
+   Each branch here is exactly as wide as `isFocusTarget`, and each stays open
+   (`passthrough`) so the binding, not the protocol boundary, answers a
+   mis-shaped target with the sentence that names the way through. The
+   conversation branch is the one that carries two accepted forms, so both its
+   fields are optional here and the binding requires one of them. */
+const focusTargetSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("conversation"),
+    conversationId: z.string().min(1).optional()
+      .describe('Durable "conversation_…" id, resolved server-side to that conversation\'s current transcript. The form to prefer: it survives resume and migration, which a path does not.'),
+    path: z.string().min(1).optional()
+      .describe("Transcript .jsonl path of the conversation. Accepted alongside conversationId; supply at least one."),
+  }).passthrough().describe("A conversation card, named by durable id or by transcript path."),
+  z.object({
+    kind: z.literal("pipeline"),
+    pipelineId: z.string().min(1).describe("Pipeline id; the request frames that pipeline's group on the board."),
+  }).passthrough(),
+  z.object({
+    kind: z.literal("stage"),
+    pipelineId: z.string().min(1).describe("Pipeline the stage belongs to."),
+    stageId: z.string().min(1).describe("Stage id within that pipeline. Resolves to the stage slot before it materializes and to the running agent's conversation afterwards."),
+  }).passthrough(),
+  z.object({
+    kind: z.literal("flowRound"),
+    flowId: z.string().min(1).describe("Review flow id; the request frames that flow's deck."),
+    round: z.number().int().min(0).describe("Round number within the flow, from 0."),
+  }).passthrough(),
+  z.object({
+    kind: z.literal("task"),
+    taskId: z.string().min(1).describe("Board task id."),
+  }).passthrough(),
+  z.object({
+    kind: z.literal("draft"),
+    draftId: z.string().min(1).describe("Board draft id. A draft exists only on the operator's canvas, so this target also needs the top-level project argument."),
+  }).passthrough(),
+  z.object({
+    kind: z.literal("region"),
+    project: z.string().min(1).describe("Project whose board the rect is in."),
+    rect: z.object({
+      x: z.number(), y: z.number(),
+      w: z.number().min(0), h: z.number().min(0),
+    }).passthrough().describe("World-space box, in the board's own geometry."),
+  }).passthrough().describe("A board area. Geometric targets accept intent \"show\" only."),
+  z.object({
+    kind: z.literal("point"),
+    project: z.string().min(1).describe("Project whose board the point is in."),
+    x: z.number(), y: z.number(),
+    zoom: z.number().gt(0).optional().describe("Optional explicit zoom; otherwise the point frames a card's worth of context around itself."),
+  }).passthrough().describe("A board coordinate. Geometric targets accept intent \"show\" only."),
+]).describe(
+  `Typed focus target, discriminated by "kind": ${FOCUS_TARGET_SHAPES.map((shape) => `${shape.kind} — ${shape.example}`).join("; ")}.`,
+);
 
 function boundedNumericInput(toolName: McpToolName, fieldPath: string): z.ZodType {
   const spec = MCP_BOUNDED_NUMERIC_ARGS[toolName]?.find((candidate) => candidate.path.join(".") === fieldPath);
@@ -1712,14 +1855,16 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   }).passthrough(),
   create_pipeline: z.object({
     clientRequestId: clientRequestIdSchema,
-    task: z.string().min(1),
-    spec: z.string().optional(),
-    repoDir: z.string().min(1),
-    baseBranch: z.string().optional(),
-    baseRef: z.string().optional(),
-    stages: z.array(z.record(z.string(), z.unknown())),
-    src: z.string().optional(),
-    autoStart: z.boolean().optional(),
+    task: z.string().min(1).describe("Board title for the pipeline."),
+    spec: z.string().optional().describe("Acceptance criteria shared by every stage."),
+    repoDir: z.string().min(1).describe("Absolute path of the existing git repository the pipeline worktree is cut from."),
+    baseBranch: z.string().optional().describe("Branch the worktree is based on. A draft that pins this must also pass baseRef."),
+    baseRef: z.string().optional().describe("Commit the pipeline is pinned to. Required when a draft (autoStart:false) pins baseBranch — resolve the SHA yourself."),
+    stages: z.array(pipelineStageSchema).describe(
+      `Stage graph, 0–${MAX_PIPELINE_STAGES} stages (a started pipeline needs at least ${MIN_STARTED_PIPELINE_STAGES}). Stages run in the order the next edges chain them, not array order; every review-loop must be pass-reachable from a run stage.`,
+    ),
+    src: z.string().optional().describe("Creator transcript path (.jsonl) under the shared Claude transcript store or a Codex sessions root; a native ~/.claude/projects path is normalized to its shared-store mirror when that file exists."),
+    autoStart: z.boolean().optional().describe("false creates a draft for the operator to start from the board."),
   }).passthrough(),
   pipeline_action: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1737,6 +1882,13 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     project: z.string().optional(),
     query: z.string().optional(),
     limit: boundedNumericInput("list_conversations", "limit"),
+  }).passthrough(),
+  search_transcripts: z.object({
+    clientRequestId: clientRequestIdSchema,
+    query: z.string().trim().min(1).describe("Terms to match in indexed user and assistant message bodies."),
+    project: z.string().trim().min(1).optional().describe("Canonical project key. Omit to search every indexed project."),
+    cursor: z.string().min(1).optional().describe("Opaque cursor returned by the preceding page for this query and project."),
+    limit: boundedNumericInput("search_transcripts", "limit"),
   }).passthrough(),
   get_conversation: z.object({
     clientRequestId: clientRequestIdSchema,
@@ -1793,10 +1945,14 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   }).passthrough(),
   conversation_action: z.object({
     clientRequestId: clientRequestIdSchema,
-    conversationId: z.string().optional(),
-    transcriptPath: z.string().optional(),
+    conversationId: z.string().optional()
+      .describe("Durable Viewer conversation id. Archive and unarchive actions expand it to every registered generation path."),
+    transcriptPath: z.string().optional()
+      .describe("Exact transcript or spawn:<launchId> board path. Archive and unarchive actions preserve it and add every generation of the resolved conversation."),
     selectedContext: selectedContextSchema,
-    action: z.enum(["interrupt", "kill", "resume", "compact", "dialog-key"]),
+    targets: z.array(conversationArchiveTargetSchema).min(1).max(100).optional()
+      .describe("Archive/unarchive list form. Cannot be combined with the single-target fields."),
+    action: z.enum(["interrupt", "kill", "resume", "compact", "dialog-key", "archive", "unarchive"]),
     key: z.enum(["1", "2", "3", "4", "5", "6", "7", "8", "9", "Tab", "Enter", "Escape"]).optional(),
     label: z.string().optional(),
     question: z.string().optional(),
@@ -1880,7 +2036,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   }).passthrough(),
   request_attention: z.object({
     clientRequestId: clientRequestIdSchema,
-    target: z.record(z.string(), z.unknown()).describe("Typed focus target: conversation | pipeline | stage | flowRound | task | draft | region | point."),
+    target: focusTargetSchema,
     reason: z.string().min(1).describe("One operator-safe sentence saying why it is worth looking at. Never the target's contents."),
     intent: z.enum(["show", "open"]).optional().describe("show frames and highlights; open also opens the target's own surface. Default show."),
     zoom: z.enum(["inspect", "situate"]).optional(),

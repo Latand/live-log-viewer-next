@@ -2,7 +2,7 @@
  * WHOSE turns carry the operator's view.
  *
  * The viewer-context prelude ("the operator is looking at: project …") belongs to
- * the Viewer-global manager and to nothing else. Its first version was gated on
+ * the active manager seat for the conversation's project. Its first version was gated on
  * `voiceEnabled`, a CAPABILITY shared by every hosted codex-app-server
  * conversation, so an ordinary hosted worker's turns silently carried the
  * operator's current project, focused conversation and selection too.
@@ -108,14 +108,14 @@ function fileFor(conversationId: string, name: string): FileEntry {
   } as FileEntry;
 }
 
-/** The designation record names the manager and nobody else. */
+/** The active project seat names the manager and nobody else. */
 function stubFetch(): void {
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     const json = (value: unknown) =>
       new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
-    if (url === "/api/orchestrator") {
-      return json({ record: { conversationId: MANAGER, path: "/manager_prelude.jsonl" }, exists: true, defaultCwd: "/repo" });
+    if (url === "/api/orchestrator/seat?project=viewer") {
+      return json({ seat: { conversationId: MANAGER }, pending: null, exists: true });
     }
     if (url === "/api/runtime/send") {
       const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
@@ -192,15 +192,41 @@ test("an equally voice-capable worker's turn carries nothing of the operator's v
   expect(sentTexts[0]).not.toContain("other-project");
 });
 
+test("a rotated seat scopes the prelude to the successor and revokes the predecessor", async () => {
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+    const json = (value: unknown) =>
+      new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+    if (url === "/api/orchestrator/seat?project=viewer") {
+      return json({
+        seat: { conversationId: WORKER, predecessorConversationId: MANAGER, seatEpoch: 2 },
+        pending: null,
+        exists: true,
+      });
+    }
+    if (url === "/api/runtime/send") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+      sentTexts.push(body.text ?? "");
+      return json({ operationId: "op-1", receipt: { status: "delivered", operationId: "op-1" } });
+    }
+    return json({});
+  }) as unknown as typeof fetch;
+
+  await sendThrough(fileFor(MANAGER, "manager_prelude"), "predecessor turn");
+  await sendThrough(fileFor(WORKER, "worker_prelude"), "successor turn");
+
+  expect(sentTexts[0]).toBe("predecessor turn");
+  expect(sentTexts[1]).toContain("[viewer context — the operator is looking at:");
+  expect(sentTexts[1]!.endsWith("successor turn")).toBe(true);
+});
+
 test("no designated manager means no conversation gets the prelude", async () => {
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     const json = (value: unknown) =>
       new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
-    /* The record's transcript is gone: nothing is the manager until a successor
-       is adopted, so nothing may carry the operator's view. */
-    if (url === "/api/orchestrator") {
-      return json({ record: { conversationId: MANAGER, path: "/manager_prelude.jsonl" }, exists: false, defaultCwd: "/repo" });
+    if (url === "/api/orchestrator/seat?project=viewer") {
+      return json({ seat: null, pending: null, exists: false });
     }
     if (url === "/api/runtime/send") {
       sentTexts.push((JSON.parse(String(init?.body ?? "{}")) as { text?: string }).text ?? "");

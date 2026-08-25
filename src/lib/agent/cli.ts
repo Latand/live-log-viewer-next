@@ -7,6 +7,8 @@ import path from "node:path";
 import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from "@/lib/accounts/codex";
 import { claudeSettingsPath, claudeTranscriptOwnership, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
 import { isUnderClaudeSubagentsDir } from "@/lib/scanner/claudeNative";
+import { telegramSessionReaderPath } from "@/lib/telegram/packaging";
+import { TELEGRAM_CONNECTOR_TOKEN_ENV, telegramSessionPath } from "@/lib/telegram/sessionStore";
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
 import { grantedMcpServers } from "./mcpAllowlist";
@@ -111,7 +113,7 @@ export function withSpawnCapability(spec: ResumeSpec, capability: string): Resum
   if (!/^[A-Za-z0-9_-]{43}$/.test(capability)) throw new Error("Viewer spawn capability is invalid");
   return {
     ...spec,
-    command: `env ${VIEWER_SPAWN_CAPABILITY_ENV}=${shellQuote(capability)} ${spec.command}`,
+    command: `( ${VIEWER_SPAWN_CAPABILITY_ENV}=${shellQuote(capability)}; export ${VIEWER_SPAWN_CAPABILITY_ENV}; ${spec.command} )`,
   };
 }
 
@@ -137,7 +139,32 @@ export interface FreshSpecOptions {
 }
 
 const CLAUDE_SHADOWED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "VERTEXAI_PROJECT", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "LLV_TOKEN"];
-export function claudeEnvPrefix(home: string): string { return `env ${CLAUDE_SHADOWED_ENV.map((key) => `-u ${key}`).join(" ")} CLAUDE_CONFIG_DIR=${shellQuote(home)}`; }
+
+function telegramTokenAssignment(mcpServers: readonly string[]): string {
+  if (!mcpServers.includes("telegram")) return "";
+  const command = [process.execPath, telegramSessionReaderPath(), path.dirname(telegramSessionPath())].map(shellQuote).join(" ");
+  return `unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `
+    + `if ${TELEGRAM_CONNECTOR_TOKEN_ENV}="$(${command} 2>/dev/null)" `
+    + `&& [ "\${#${TELEGRAM_CONNECTOR_TOKEN_ENV}}" -eq 43 ]; then export ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `
+    + `else unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; fi; `;
+}
+
+function telegramScopedCommand(command: string, mcpServers: readonly string[]): string {
+  const tokenPrelude = mcpServers.includes("telegram")
+    ? telegramTokenAssignment(mcpServers)
+    : `unset ${TELEGRAM_CONNECTOR_TOKEN_ENV}; `;
+  return `( ${tokenPrelude}${command} )`;
+}
+
+export function claudeEnvPrefix(home: string, mcpServers: readonly string[] = []): string {
+  const unsets = mcpServers.includes("telegram") ? CLAUDE_SHADOWED_ENV : [...CLAUDE_SHADOWED_ENV, TELEGRAM_CONNECTOR_TOKEN_ENV];
+  return `env ${unsets.map((key) => `-u ${key}`).join(" ")} CLAUDE_CONFIG_DIR=${shellQuote(home)}`;
+}
+
+function codexEnvPrefix(home: string, mcpServers: readonly string[]): string {
+  const tokenUnset = mcpServers.includes("telegram") ? "" : ` -u ${TELEGRAM_CONNECTOR_TOKEN_ENV}`;
+  return `env -u LLV_TOKEN${tokenUnset} CODEX_HOME=${shellQuote(home)}`;
+}
 
 export interface ResumeSpecOptions {
   model?: string | null;
@@ -269,7 +296,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     else args.push("--strict-mcp-config");
     const command = args.map(shellQuote).join(" ");
     return {
-      command: managed ? `${claudeEnvPrefix(options.claudeConfigDir!)} ${command}` : command,
+      command: telegramScopedCommand(managed ? `${claudeEnvPrefix(options.claudeConfigDir!, mcpServers)} ${command}` : command, mcpServers),
       cwd,
       windowName: "claude-new",
       engine: "claude",
@@ -307,7 +334,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
   if (!options.allowSubagents) args.push("--disable", "multi_agent");
   const command = args.map(shellQuote).join(" ");
   return {
-    command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
+    command: telegramScopedCommand(`${codexEnvPrefix(home, mcpServers)} ${command}`, mcpServers),
     cwd,
     windowName: "codex-new",
     engine: "codex",
@@ -375,7 +402,7 @@ export function claudeSuccessorSpecFor(input: {
   });
   pushClaudePolicyArgs(args, policy);
   return {
-    command: `${claudeEnvPrefix(input.targetHome)} ${args.map(shellQuote).join(" ")}`,
+    command: telegramScopedCommand(`${claudeEnvPrefix(input.targetHome, input.profile.mcpServers)} ${args.map(shellQuote).join(" ")}`, input.profile.mcpServers),
     cwd,
     windowName: "claude-migration-successor",
     engine: "claude",
@@ -485,7 +512,7 @@ export function resumeSpecForSession(
     args.push("--resume", sessionId);
     const command = args.map(shellQuote).join(" ");
     return {
-      command: managed ? `${claudeEnvPrefix(home)} ${command}` : command,
+      command: telegramScopedCommand(managed ? `${claudeEnvPrefix(home, mcpServers)} ${command}` : command, mcpServers),
       cwd,
       windowName: "claude-resume",
       engine: "claude",
@@ -505,7 +532,7 @@ export function resumeSpecForSession(
   if (!options.allowSubagents) command += " --disable multi_agent";
   command += ` resume ${sessionId}`;
   return {
-    command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
+    command: telegramScopedCommand(`${codexEnvPrefix(home, mcpServers)} ${command}`, mcpServers),
     cwd,
     windowName: "codex-resume",
     engine: "codex",

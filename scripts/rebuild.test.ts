@@ -17,9 +17,19 @@ function fixture() {
   const home = path.join(root, "home");
   const capture = path.join(root, "request.json");
   const args = path.join(root, "request.args");
+  const gitArgs = path.join(root, "git.args");
   fs.mkdirSync(bin);
   fs.mkdirSync(path.join(home, ".config", "agent-log-viewer"), { recursive: true });
   fs.writeFileSync(path.join(home, ".config", "agent-log-viewer", "service.env"), "");
+  /* The canonical main tip is read machine-to-machine (#1033); the stub stands
+     in for the network so the test asserts what the script posts. */
+  const git = path.join(bin, "git");
+  fs.writeFileSync(git, `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" >> "$LLV_TEST_GIT_ARGS"
+if [ -n "\${LLV_TEST_LS_REMOTE_FAILS:-}" ]; then exit 128; fi
+printf '%s' "\${LLV_TEST_LS_REMOTE:-}"
+`, { mode: 0o755 });
   const curl = path.join(bin, "curl");
   fs.writeFileSync(curl, `#!/usr/bin/env bash
 set -euo pipefail
@@ -42,10 +52,19 @@ else
   printf '{"phase":"succeeded","terminal":true}'
 fi
 `, { mode: 0o755 });
-  return { root, bin, home, capture, args };
+  return { root, bin, home, capture, args, gitArgs };
 }
 
-function runRebuild(idempotencyKey: string, setup: ReturnType<typeof fixture>, revision?: string) {
+const CANONICAL_REMOTE = "https://canonical.invalid/live-log-viewer-next.git";
+const MAIN_TIP = "b".repeat(40);
+
+function runRebuild(
+  idempotencyKey: string,
+  setup: ReturnType<typeof fixture>,
+  revision?: string,
+  options: { lsRemote?: string | null } = {},
+) {
+  const lsRemote = options.lsRemote === undefined ? `${MAIN_TIP}\trefs/heads/main\n` : options.lsRemote;
   return Bun.spawnSync(["bash", rebuildScript, ...(revision ? [revision] : [])], {
     cwd: setup.root,
     env: {
@@ -56,6 +75,9 @@ function runRebuild(idempotencyKey: string, setup: ReturnType<typeof fixture>, r
       LLV_DEPLOY_IDEMPOTENCY_KEY: idempotencyKey,
       LLV_TEST_CAPTURE: setup.capture,
       LLV_TEST_ARGS: setup.args,
+      LLV_TEST_GIT_ARGS: setup.gitArgs,
+      LLV_VIEWER_CANONICAL_REMOTE: CANONICAL_REMOTE,
+      ...(lsRemote === null ? { LLV_TEST_LS_REMOTE_FAILS: "1" } : { LLV_TEST_LS_REMOTE: lsRemote }),
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -101,10 +123,63 @@ test("rebuild serializes a quoted 200-character idempotency key as JSON", () => 
 
   expect(result.exitCode).toBe(0);
   expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({
-    revision: "origin/main",
+    revision: MAIN_TIP,
     idempotencyKey,
   });
 });
+
+test("a bare rebuild reads the canonical main tip itself and posts the resolved SHA", () => {
+  const setup = fixture();
+  const result = runRebuild("refless-deploy", setup);
+
+  expect(result.exitCode).toBe(0);
+  expect(fs.readFileSync(setup.gitArgs, "utf8").split("\n").filter(Boolean)).toEqual([
+    "ls-remote",
+    CANONICAL_REMOTE,
+    "refs/heads/main",
+  ]);
+  expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({
+    revision: MAIN_TIP,
+    idempotencyKey: "refless-deploy",
+  });
+  expect(result.stdout.toString()).toContain(`resolved refs/heads/main at ${CANONICAL_REMOTE}: ${MAIN_TIP}`);
+});
+
+test("an explicit origin/main argument resolves the same way as a bare invocation", () => {
+  const setup = fixture();
+  const result = runRebuild("explicit-origin-main", setup, "origin/main");
+
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({
+    revision: MAIN_TIP,
+    idempotencyKey: "explicit-origin-main",
+  });
+});
+
+test("a pinned SHA deploy never consults the remote", () => {
+  const setup = fixture();
+  const revision = "c".repeat(40);
+  const result = runRebuild("pinned-sha", setup, revision);
+
+  expect(result.exitCode).toBe(0);
+  expect(fs.existsSync(setup.gitArgs)).toBe(false);
+  expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({ revision, idempotencyKey: "pinned-sha" });
+});
+
+for (const [name, lsRemote] of [
+  ["the remote is unreachable", null],
+  ["the branch is absent", ""],
+  ["the tip is not a full SHA", "not-a-sha\trefs/heads/main\n"],
+] as const) {
+  test(`rebuild refuses to deploy when ${name}`, () => {
+    const setup = fixture();
+    const result = runRebuild("unresolvable-main", setup, undefined, { lsRemote });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain(CANONICAL_REMOTE);
+    expect(fs.existsSync(setup.capture)).toBe(false);
+  });
+}
 
 test("rebuild rejects an idempotency key above the coordinator limit", () => {
   const setup = fixture();

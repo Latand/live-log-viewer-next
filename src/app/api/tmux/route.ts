@@ -14,6 +14,7 @@ import { completedFileScan } from "@/lib/scanner/scanCache";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { parseMessageOrigin } from "@/lib/runtime/messageOrigin";
 import { materializeStructuredTerminal } from "@/lib/runtime/structuredTerminal";
 import { dispatchStructuredControl } from "@/lib/runtime/structuredControls";
 import {
@@ -263,6 +264,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     return NextResponse.json({ error: "empty message" }, { status: 400 });
   }
 
+  /* #1117: message authorship declared by the caller — the in-process MCP
+     bindings stamp their sends `agent` with the server-attributed sender role.
+     Validated, never defaulted: a send without it stays unattributed. */
+  const origin = parseMessageOrigin((body as { origin?: unknown }).origin);
+
   if (structuredHostsEnabled()) {
     const { enqueueStructuredMessage } = await import("@/lib/runtime/structuredMessageDelivery");
     const structured = await enqueueStructuredMessage({
@@ -271,6 +277,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
       text: text.trim(),
       images,
+      ...(origin ? { origin } : {}),
     });
     if (structured) {
       const { status, ...response } = structured.ok ? { ...structured, status: 200 } : structured;
@@ -285,6 +292,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
     text,
     images,
+    ...(origin ? { origin } : {}),
     // The "on resume" profile (issue #241 §4): honored only when this send
     // reopens a finished conversation; a live pane ignores it.
     ...(typeof body.model === "string" ? { resumeModel: body.model } : {}),

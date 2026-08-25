@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2 } from "lucide-react";
+import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2, Search, Undo2 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
@@ -24,6 +24,7 @@ import { createFocusEdgeGate } from "./focusRequestEdge";
 import { TaskStrip } from "./BranchPane";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, resolveSystemDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { OrchestratorPanelToggle } from "./orchestrator/OrchestratorPanelToggle";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { reviewerCloseMutations } from "./reviewerAutoClose";
 import { directReviewFlows, isDirectReviewFlow } from "./flows/directReviewGroups";
@@ -49,6 +50,7 @@ import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflo
 import { TaskPanel } from "./tasks/TaskPanel";
 import { pushTaskToast, TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
+import { MobileOrchestratorRow } from "./mobile/MobileOrchestratorRow";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { CatalogFailureNotice } from "./CatalogFailureNotice";
@@ -108,8 +110,11 @@ interface Props {
   openNonce: number;
   /** Attention-queue jump: glide the board to this node and ring it. The nonce
       re-flashes repeated jumps to the same path; prefs stay untouched — a
-      read-only jump must not mutate manual column state. */
-  focusRequest?: { path: string; nonce: number } | null;
+      read-only jump must not mutate manual column state.
+      `catalog` marks the RESOLVER's opens — a global-search selection, an `#f=`
+      / `#c=` deep link, a catalog row — which name one conversation and must
+      land on it (see `openedConversation` below). */
+  focusRequest?: { path: string; nonce: number; catalog?: boolean } | null;
   /** Put this node in the layout and DO NOT move the camera to it. The focus
       handoff frames its own destination through the board controller, so the
       card only has to exist; arming the glide channel too would race that move
@@ -125,9 +130,18 @@ interface Props {
   onUnarchive: (project: string) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
   onMenu?: () => void;
+  /** Opens the global message search (issue #1054) — the same affordance the
+      overview header carries, so the search is one target away from anywhere. */
+  onOpenSearch?: () => void;
   /** Mobile shell: the attention badge lives in the header row instead of the
       fixed corner, so it never covers the header's own controls. */
   attention?: React.ReactNode;
+  /** Desktop shell: the per-project orchestrator dock's toggle (PRD #976
+      decision 6). The dock itself is pushed into the Viewer layout beside the
+      board, so the header only owns the switch; absent (phone, or no shell
+      wiring) the button does not render. */
+  orchestratorPanelOpen?: boolean;
+  onToggleOrchestratorPanel?: () => void;
   /** Dashboard-local navigation and focus (switchboard/quiet-list opens,
       drafts, pipeline and task jumps) supersede any unresolved deep-link
       intent held above; the Viewer cancels its pending hash here. */
@@ -337,7 +351,10 @@ function ProjectDashboardView({
   onArchive,
   onUnarchive,
   onMenu,
+  onOpenSearch,
   attention,
+  orchestratorPanelOpen = false,
+  onToggleOrchestratorPanel,
   onUserNavigate,
   onOpenCatalogFile,
   onCloseFile,
@@ -437,6 +454,17 @@ function ProjectDashboardView({
      reload — the queue can route to its quietest members while the manual
      column state stays untouched. */
   const [ephemeral, setEphemeral] = useState<string[]>([]);
+  /* The conversation a RESOLVER open just landed (issue #1054 review): a global
+     search selection, an `#f=`/`#c=` deep link, a catalog row. Such an open
+     names one conversation, so the board must show that conversation — but a
+     saved «Список» preference won the view resolution below and answered with
+     the catalog list instead: no card, no composer, and the operator was
+     dropped back on the very surface they searched to leave. "Find, open,
+     continue" stopped at open. Holding the path here forces the conversation
+     surface for that landing on both form factors, WITHOUT writing the durable
+     preference — the operator's saved view returns with one tap on the
+     Схема/Список control, which is what clears this. */
+  const [openedConversation, setOpenedConversation] = useState<string | null>(null);
   /* Wall clock for the worker auto-collapse idle window (issue #112). Starts at
      0 so the server render and first client render agree (no hydration skew);
      the first tick lands the real time, and reviewer verdicts collapse without
@@ -881,6 +909,9 @@ function ProjectDashboardView({
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     setEphemeral([]);
+    /* Another project is another board with its own saved view: the landing
+       that forced this one's conversation surface does not travel with it. */
+    setOpenedConversation(null);
   }, [project]);
 
   /* An attention jump rides the same channel as switchboard opens: the ref is
@@ -906,6 +937,11 @@ function ProjectDashboardView({
       || compactPipelinePaths.has(focusRequest.path);
     if (!placeable || !focusEdge.current.consume(focusRequest)) return;
     const { path } = focusRequest;
+    /* Armed on the same edge that performs the move, so the override is exactly
+       as one-shot as the navigation: a poll re-running this effect observes a
+       consumed nonce and cannot re-force the view after the operator has gone
+       back to their list. */
+    if (focusRequest.catalog) setOpenedConversation(path);
     pendingFocusRef.current = path;
     setEphemeral((prev) => compactPipelinePaths.has(path)
       ? replaceCompactPipelineEphemeral(prev, path, pipelines, deckFlows, files)
@@ -1016,7 +1052,13 @@ function ProjectDashboardView({
     sessionStorage.setItem(draftsKey(project), JSON.stringify(next));
   };
 
-  const chooseEmptyView = (next: ProjectView) => board.setViewMode(next);
+  /* The operator picking a face is the authority again: it retires the landing
+     override above, so «Список» goes back to the list even while the board is
+     standing on a conversation a search opened. */
+  const chooseEmptyView = (next: ProjectView) => {
+    setOpenedConversation(null);
+    board.setViewMode(next);
+  };
 
   /* randomUUID needs a secure context; LAN http access gets the fallback. */
   const newDraftId = () =>
@@ -1129,6 +1171,10 @@ function ProjectDashboardView({
   };
 
   const closeNode = (path: string) => {
+    /* Closing the conversation a search/deep-link landed on ends that landing,
+       so the saved view is the authority again — the same retirement the
+       Схема/Список control performs, from the other end of the gesture. */
+    if (path === openedConversation) setOpenedConversation(null);
     /* Record the close in the undo log before applying it, capturing the current
        title for the undo tooltip. Redo replays through `applyClose` directly, so
        it never re-records and the log stays a single linear trail. */
@@ -1427,7 +1473,13 @@ function ProjectDashboardView({
     originOf: spawnerRootOf,
   });
   const listAvailable = catalogKnown || historyRows.length > 0;
-  const projectView = resolveProjectView({
+  /* A landing from the resolver outranks the saved preference for as long as it
+     stands (see `openedConversation`). It cannot conjure a surface that has
+     nothing to show: with no scheme available the branches below fall back to
+     the list exactly as before, and the landing's own node is what makes the
+     scheme available in the first place. */
+  const landedOnConversation = openedConversation !== null && schemeAvailable;
+  const projectView = landedOnConversation ? "scheme" : resolveProjectView({
     preferredView: board.prefs.viewMode,
     hasNodes,
     hasArchiveNodes,
@@ -1513,17 +1565,23 @@ function ProjectDashboardView({
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       {/* The phone header fits 390px BY CONSTRUCTION (issue #613, where it
           measured 422px and hung «More actions» off the screen). Its budget: at
-          most five fixed 44px targets (projects, undo, shelf, create, more) plus
-          the bounded attention pill — ~326px with the gaps and padding — and the
-          project name as the ONE elastic cell, which truncates into whatever is
-          left. 390px is the narrowest viewport this layout supports — a fully
-          populated row leaves the name ~73px there, ~43px at 360px, a sliver at
-          320px, and at 280px the fixed targets alone overflow the row by ~29px.
-          That collapse below 390px is a documented limit, not a defect: a
-          narrower phone would need a further fold into the «⋯» menu. Any control
-          added later either fits the budget as a 44px target or folds into that
-          menu, the way the scheme/list switch did — and the way «Keep screen
-          awake» does (issue #712). */}
+          most FIVE fixed 44px targets (projects, search, shelf, create, more)
+          plus the bounded attention pill — ~326px with the gaps and padding —
+          and the project name as the ONE elastic cell, which truncates into
+          whatever is left. 390px is the narrowest viewport this layout supports
+          — a fully populated row leaves the name ~73px there, ~43px at 360px, a
+          sliver at 320px, and at 280px the fixed targets alone overflow the row
+          by ~29px. That collapse below 390px is a documented limit, not a
+          defect: a narrower phone would need a further fold into the «⋯» menu.
+          Any control added later either fits the budget as a 44px target or
+          folds into that menu, the way the scheme/list switch did — and the way
+          «Keep screen awake» does (issue #712).
+          Global search (issue #1054) is the fifth target, and it kept the count
+          at five by folding the one it displaced: undo joined the redo already
+          in the «⋯» menu. It rode the row as a SIXTH target for one round and
+          the measured cost was exact — the project name fell to 25px, an
+          unreadable stub, which is why the count is a budget and not a habit.
+          issue613Evidence.browser.test.tsx now measures that name width. */}
       <div
         data-testid={isMobile ? "mobile-project-header" : undefined}
         className={
@@ -1551,15 +1609,19 @@ function ProjectDashboardView({
             held its 45vw and pushed «More actions» off a 390px screen instead).
             Desktop keeps its natural width. */}
         <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 max-w-[45vw]" : ""}`} title={projectName}>{projectName}</h1>
-        <BoardHistoryControls
-          canUndo={history.canUndo}
-          canRedo={history.canRedo}
-          undoEntry={history.undoEntry}
-          redoEntry={history.redoEntry}
-          onUndo={onUndo}
-          onRedo={onRedo}
-          isMobile={isMobile}
-        />
+        {/* Desktop only. On the phone the whole history island — undo and redo
+            together — rides the «⋯» menu, which is how search bought its 44px
+            slot without breaking the budget above (issue #1054 review). */}
+        {!isMobile ? (
+          <BoardHistoryControls
+            canUndo={history.canUndo}
+            canRedo={history.canRedo}
+            undoEntry={history.undoEntry}
+            redoEntry={history.redoEntry}
+            onUndo={onUndo}
+            onRedo={onRedo}
+          />
+        ) : null}
         {isMobile ? (
           <>
             {/* Toolbar folds to a single row (findings 1, 7): all create actions
@@ -1572,6 +1634,21 @@ function ProjectDashboardView({
                 natural width (issue #419 finding 2). It collapses to nothing
                 first, before the name starts truncating. */}
             <span aria-hidden className="min-w-0 flex-1" />
+            {/* Global message search (issue #1054). It spends one of the
+                header's 44px slots rather than folding into «⋯», because the
+                requirement it serves is speed — the operator types and gets
+                their own message back. */}
+            {onOpenSearch ? (
+              <button
+                type="button"
+                data-testid="dash-search"
+                aria-label={t("search.openMobile")}
+                onClick={onOpenSearch}
+                className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <Search className="h-5 w-5" aria-hidden />
+              </button>
+            ) : null}
             {/* The attention queue badge is an ACTION (it opens the queue), not
                 decoration, so it holds its own bounded pill width — riding the
                 elastic filler squeezed it to zero px at 390px, which hid it
@@ -1631,11 +1708,28 @@ function ProjectDashboardView({
                       <span aria-hidden className="my-0.5 h-px shrink-0 bg-border" />
                     </>
                   ) : null}
-                  {/* Redo lives here on mobile — the header shows only a single
-                      undo button, so its counterpart rides the «⋯» menu (and
-                      Ctrl+Shift+Z), shown only while a redo is possible. */}
-                  {history.canRedo ? (
-                    <HeaderMenuItem icon={<Redo2 className="h-4 w-4" aria-hidden />} label={t("board.redo")} onSelect={() => { close(); onRedo(); }} />
+                  {/* Board history lives here on the phone, both directions
+                      together. Undo held a 44px slot in the row until the global
+                      search button needed one (issue #1054 review): the row's
+                      budget is five targets, and the rule the header comment
+                      states is that a later control either fits it or folds into
+                      this menu. Undo folded — it is the corrective half of a
+                      gesture the operator just made, one tap away here beside
+                      the redo that already lived in this menu, while search is
+                      the surface the operator reaches for cold. Each item shows
+                      only while that direction is possible. */}
+                  {history.canUndo || history.canRedo ? (
+                    <>
+                      <div role="group" aria-label={t("board.historyGroup")} className="flex flex-col gap-0.5">
+                        {history.canUndo ? (
+                          <HeaderMenuItem icon={<Undo2 className="h-4 w-4" aria-hidden />} label={t("board.undo")} onSelect={() => { close(); onUndo(); }} />
+                        ) : null}
+                        {history.canRedo ? (
+                          <HeaderMenuItem icon={<Redo2 className="h-4 w-4" aria-hidden />} label={t("board.redo")} onSelect={() => { close(); onRedo(); }} />
+                        ) : null}
+                      </div>
+                      <span aria-hidden className="my-0.5 h-px shrink-0 bg-border" />
+                    </>
                   ) : null}
                   <div className="flex min-h-11 items-center gap-2 px-1.5"><span className="text-[13px] font-semibold text-primary">{t("dash.soundMenu")}</span><SoundToggle /></div>
                   {/* Device-local comfort settings sit together here. «Keep
@@ -1687,12 +1781,33 @@ function ProjectDashboardView({
               <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
             )}
             <DeleteProjectButton project={project} files={projectFiles} available={catalogKnown} />
+            {/* One elastic cell absorbs the slack so the whole control cluster
+                stays right-aligned — the same rule the phone header follows. */}
+            <span aria-hidden className="min-w-0 flex-1" />
+            {onOpenSearch ? (
+              <button
+                type="button"
+                data-testid="dash-search"
+                aria-label={t("search.open")}
+                title={t("search.open")}
+                onClick={onOpenSearch}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <Search className="h-4 w-4" aria-hidden />
+              </button>
+            ) : null}
+            {/* The orchestrator dock's switch opens the left-hand column: first
+                in the right-aligned control cluster, because the panel it opens
+                is the leftmost thing on screen (PRD #976 decision 6). */}
+            {onToggleOrchestratorPanel ? (
+              <OrchestratorPanelToggle open={orchestratorPanelOpen} onToggle={onToggleOrchestratorPanel} />
+            ) : null}
             <button
               type="button"
               onClick={toggleTaskPanel}
               aria-pressed={taskPanelOpen}
               aria-label={t("tasks.panelToggleAria")}
-              className={`ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              className={`flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                 taskPanelOpen ? "border-accent/45 bg-accent/10 text-accent" : "border-border bg-card text-primary hover:border-accent/45 hover:text-accent"
               }`}
             >
@@ -1780,15 +1895,38 @@ function ProjectDashboardView({
               taskSheetNonce={taskSheetNonce}
               trayApi={trayApi}
             />
-          ) : listAvailable ? (
-            <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
           ) : (
-            <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
-              <div>
-                <div className="text-[13.5px] font-semibold text-muted">{t("dash.emptyTitle")}</div>
-                <div className="mt-0.5 text-[12px] text-muted">{t("dash.emptyHint")}</div>
+            /* The phone has THREE leaves and the pin belongs in all of them
+               (PRD #976 decision 5). The focus view carries it inside its own
+               strip; the catalog list and the empty project get the same row,
+               from the same seat projection, in the same kind of slot — its own
+               strip above the leaf, outside whatever the leaf scrolls. So the
+               catalog's ordering, its search box, and a project with nothing in
+               it yet all keep the orchestrator first and reachable, and an
+               operator who lives in Список is not the one operator who cannot
+               create one. Exactly one row exists at a time: this branch and the
+               focus view above it are alternatives. */
+            <>
+              <div className="flex shrink-0 items-stretch border-b border-border bg-card" data-testid="mobile-orchestrator-slot">
+                <MobileOrchestratorRow
+                  project={project}
+                  projectName={projectName}
+                  files={files}
+                  onOpenConversation={openFullCatalogFile}
+                />
+                <span aria-hidden className="min-w-0 flex-1" />
               </div>
-            </div>
+              {listAvailable ? (
+                <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
+              ) : (
+                <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
+                  <div>
+                    <div className="text-[13.5px] font-semibold text-muted">{t("dash.emptyTitle")}</div>
+                    <div className="mt-0.5 text-[12px] text-muted">{t("dash.emptyHint")}</div>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </>
       ) : (

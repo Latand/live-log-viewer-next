@@ -11,9 +11,11 @@ import type { ResumeSpec } from "@/lib/agent/cli";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { procBackend } from "@/lib/proc";
+import { resolveSpawnRole } from "@/lib/roles/registry";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
+import { terminalClaudeExitReason } from "./claudeStreamBrokerHost";
 import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppServerHost";
 import { StructuredHostAdoptionCleanupError, type DeliveryReceipt, type HostState, type QueueEntry, type RuntimeEvent } from "./engineHost";
 import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./structuredDeliveryController";
@@ -21,7 +23,7 @@ import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
-import { INITIAL_MESSAGE_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
+import { INITIAL_MESSAGE_TIMEOUT_MS, STALE_STRUCTURED_SPAWN_TIMEOUT_MS, STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudeLaunchForm, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
 import { structuredContentDigest } from "./structuredContent";
 
@@ -488,7 +490,7 @@ test("completed replay preserves its live structured host ownership", async () =
   expect(released).toBe(0);
 });
 
-test.each(["codex", "claude"] as const)("%s replay keeps a live registering spawn pending beyond the receipt timeout", async (engine) => {
+test.each(["codex", "claude"] as const)("%s replay terminalizes a live registering spawn at the receipt timeout", async (engine) => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `registering-replay-${engine}-${id}`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -556,35 +558,23 @@ test.each(["codex", "claude"] as const)("%s replay keeps a live registering spaw
   let released = 0;
 
   const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
-    now: () => Date.parse(begun.receipt.createdAt) + INITIAL_MESSAGE_TIMEOUT_MS,
+    now: () => Date.parse(begun.receipt.createdAt) + STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS,
     releaseHost: async () => { released += 1; return true; },
   });
 
   expect(reconciled).toMatchObject({
-    state: "path-pending",
-    initialMessage: "pending",
+    state: "failed",
+    initialMessage: "failed",
     key,
     artifactPath,
-    error: null,
+    error: `structured spawn durable setup remained incomplete for ${STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS}ms`,
   });
   expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
-    status: "starting",
-    pendingAction: "spawn",
-    claimOwner: claimed.claimOwner,
-    structuredHost: {
-      process: { pid: process.pid, startIdentity: `${engine}-registering` },
-      writerClaimEpoch: claimed.claimEpoch,
-    },
+    status: "dead",
+    pendingAction: null,
+    claimOwner: null,
+    structuredHost: null,
   });
-  expect(released).toBe(0);
-
-  registry.releaseStructuredHostClaim(key, claimed.claimOwner, claimed.claimEpoch);
-  const abandoned = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
-    now: () => Date.parse(begun.receipt.createdAt) + INITIAL_MESSAGE_TIMEOUT_MS,
-    releaseHost: async () => { released += 1; return true; },
-  });
-
-  expect(abandoned).toMatchObject({ state: "failed", initialMessage: "failed" });
   expect(released).toBe(1);
 });
 
@@ -646,7 +636,7 @@ test("replay measures the delivery timeout from initial-message admission", asyn
   expect(released).toBe(0);
 });
 
-test.each(["hosted", "recovering"] as const)("a matching %s session keeps its queued first message recoverable at the timeout threshold", async (host) => {
+test.each(["hosted", "recovering"] as const)("a matching %s session fails its queued first message at the timeout threshold", async (host) => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `${host}-queued-threshold-${id}`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -695,10 +685,72 @@ test.each(["hosted", "recovering"] as const)("a matching %s session keeps its qu
   let released = 0;
 
   const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
-    now: () => admittedAt + INITIAL_MESSAGE_TIMEOUT_MS,
+    now: () => admittedAt + STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS,
     releaseHost: async () => { released += 1; return true; },
   });
 
+  expect(reconciled).toMatchObject({
+    state: "failed",
+    initialMessage: "failed",
+    error: `structured spawn durable setup remained incomplete for ${STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS}ms`,
+  });
+  expect(released).toBe(1);
+});
+
+test.each(["registering", "hosted", "recovering"] as const)("a healthy slow %s launch survives ordinary replay during the cold-start window", async (host) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `${host}-cold-start-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const key = { engine: "codex" as const, sessionId: id };
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "work",
+    status: "starting",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  const admittedAt = Date.parse(begun.receipt.createdAt);
+  const client = {
+    snapshot: async () => ({
+      sessions: [{
+        conversationId: begun.receipt.conversationId,
+        sessionKey: key,
+        cwd,
+        artifactPath,
+        host,
+      }],
+    }),
+    operationStatus: async (operationId: string) => operationId === `spawn_message_${begun.receipt.launchId}` ? {
+      receipt: {
+        operationId,
+        idempotencyKey: `spawn_${begun.receipt.launchId}`,
+        conversationId: begun.receipt.conversationId,
+        kind: "send" as const,
+        status: "queued" as const,
+        at: new Date(admittedAt).toISOString(),
+        revision: 1,
+      },
+      replayed: true,
+    } : null,
+  } as unknown as RuntimeHostClient;
+  let released = 0;
+
+  const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
+    now: () => admittedAt + 60_000,
+    releaseHost: async () => { released += 1; return true; },
+  });
+
+  expect(STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS).toBeGreaterThan(60_000);
   expect(reconciled).toMatchObject({ state: "path-pending", initialMessage: "queued", error: null });
   expect(released).toBe(0);
 });
@@ -3113,6 +3165,379 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
   });
 });
 
+function prepareReviewerIncidentState(
+  registry: AgentRegistry,
+  engine: "codex" | "claude",
+  cwd: string,
+  model: string,
+) {
+  const reviewedPath = path.join(cwd, "reviewed.jsonl");
+  fs.writeFileSync(reviewedPath, [
+    JSON.stringify({ type: "user", message: { role: "user", content: "implement the fixture" } }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: "first turn complete" } }),
+    JSON.stringify({ type: "user", message: { role: "user", content: "apply the queued relay" } }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: "second turn complete" } }),
+  ].join("\n") + "\n");
+  const accountId = `${engine}-subscription`;
+  const launchProfile = emptyLaunchProfile({ cwd, model });
+  const reviewed = registry.ensureConversation(engine, reviewedPath, accountId);
+  registry.reconcileConversations([{
+    engine,
+    path: reviewedPath,
+    accountId,
+    launchProfile,
+    turn: { state: "terminal", source: "assistant", terminalAt: "2026-08-18T15:48:00.000Z" },
+    observedAt: "2026-08-18T15:48:00.000Z",
+  }]);
+  const relay = registry.holdDelivery(
+    reviewed.id,
+    "review the delivered relay",
+    "reviewer-trigger-relay",
+    "text",
+    [],
+    null,
+    { operationId: "reviewer-trigger-relay-operation" },
+  );
+  expect(registry.beginDeliveryAttempt(relay.id, reviewed.generations.at(-1)!.id)).not.toBeNull();
+  registry.recordDeliveryOutcome(relay.id, "delivered");
+  const reviewerRole = resolveSpawnRole({
+    role: "reviewer",
+    roleParams: { diffSource: "origin/main...HEAD", lens: "correctness" },
+    engine,
+    model,
+  });
+  if (!reviewerRole.ok || !reviewerRole.value) throw new Error("reviewer role scaffold was unavailable");
+  const prompt = `${reviewerRole.value.scaffold}\n\nreview the implementer diff`;
+  const begun = registry.beginSpawnRequest({
+    engine,
+    cwd,
+    transport: "structured",
+    accountId,
+    parentConversationId: reviewed.id,
+    role: "reviewer",
+    reviewsConversationId: reviewed.id,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("reviewer spawn receipt was unavailable");
+  return { accountId, begun, launchProfile, prompt, relay, reviewed };
+}
+
+/* Retained incident evidence shows the failed reviewers reached staged host
+   identity before a runtime request timeout, while later builders against the
+   same reviewed conversation completed. This controlled regression proves the
+   second-turn/delivered-relay state itself traverses the healthy publication
+   path; the separate #1074 regression below isolates the shared stalled append. */
+test.each(["codex", "claude"] as const)("issue 1031: a %s reviewer launches after the implementer second turn and delivered relay", async (engine) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `reviewer-trigger-${engine}-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const model = engine === "codex" ? "gpt-5.6-sol" : "opus";
+  const fixture = prepareReviewerIncidentState(registry, engine, cwd, model);
+  expect(registry.conversation(fixture.reviewed.id)?.turn.state).toBe("terminal");
+  expect(registry.snapshot().heldDeliveries[fixture.relay.id]).toMatchObject({ state: "delivered", attempts: 1 });
+  const host = new RoundTripHost(engine, artifactPath, id);
+  await bindStructuredDeliveryQueue([], { registry, client, deferStartupWork: true });
+
+  const response = await spawnStructuredConversation({
+    engine,
+    receipt: fixture.begun.receipt,
+    spec: { command: engine, cwd, windowName: "reviewer", engine, transcript: artifactPath, launchProfile: fixture.launchProfile },
+    account: { engine, accountId: fixture.accountId, kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    "prompt": fixture.prompt,
+    registry,
+    client,
+  }, {
+    startHost: async () => host,
+    bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+      const state = await runningHost.health();
+      targetRegistry.setStructuredHostClaimed(key, {
+        kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+        endpoint: state.endpoint,
+        process: { pid: process.pid, startIdentity: "test-process" },
+        eventCursor: state.eventCursor,
+        protocolVersion: state.protocolVersion,
+        writerClaimEpoch: claimEpoch,
+        activeTurnRef: state.activeTurnRef,
+        pendingAttention: state.pendingAttention,
+        activeFlags: state.activeFlags,
+      }, "idle", claimOwner, claimEpoch);
+      return () => {};
+    },
+    processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+  });
+
+  expect(response).toMatchObject({ launched: true, state: "settled", initialMessage: "delivered", path: artifactPath });
+  expect(host.sent.map((entry) => entry.text)).toEqual([fixture.prompt]);
+  expect(registry.snapshot().receipts[fixture.begun.receipt.launchId]).toMatchObject({
+    state: "completed",
+    agentRole: "reviewer",
+    error: null,
+  });
+  expect(registry.snapshot().lineageEdges[fixture.begun.receipt.conversationId]).toMatchObject({
+    kind: "review",
+    role: "reviewer",
+    reviewsConversationId: fixture.reviewed.id,
+  });
+  journal.close();
+});
+
+test.each(["codex", "claude"] as const)("issue 1074: a %s host start that outlives the setup deadline is fenced", async (engine) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `late-host-start-${engine}-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const accountId = `${engine}-subscription`;
+  const model = engine === "codex" ? "gpt-5.6-sol" : "opus";
+  const launchProfile = emptyLaunchProfile({ cwd, model });
+  const begun = registry.beginSpawnRequest({
+    engine,
+    cwd,
+    transport: "structured",
+    accountId,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("generic spawn receipt was unavailable");
+  const host = new RoundTripHost(engine, artifactPath, id);
+  const releaseStart = deferred();
+  let bindCalls = 0;
+  let publishCalls = 0;
+
+  const spawning = spawnStructuredConversation({
+    engine,
+    receipt: begun.receipt,
+    spec: { command: engine, cwd, windowName: "generic", engine, transcript: artifactPath, launchProfile },
+    account: { engine, accountId, kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    "prompt": "start the generic host",
+    registry,
+    client,
+  }, {
+    startHost: async () => {
+      await releaseStart.promise;
+      return host;
+    },
+    bindHost: async () => {
+      bindCalls += 1;
+      return () => {};
+    },
+    publishHost: async () => {
+      publishCalls += 1;
+      return async () => {};
+    },
+    processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+    durableSetupTimeoutMs: 20,
+  });
+
+  await expect(spawning).rejects.toThrow("structured spawn durable host setup timed out after 20ms");
+  const failed = registry.snapshot().receipts[begun.receipt.launchId]!;
+  expect(failed).toMatchObject({
+    state: "failed",
+    key: null,
+    artifactPath: null,
+    error: "structured spawn durable host setup timed out after 20ms",
+  });
+  expect(spawnResponseForReceipt(failed, failed.artifactPath, { structured: true })).toMatchObject({
+    state: "failed",
+    retrySafe: true,
+    initialMessage: "failed",
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId))
+    .toMatchObject({ host: "dead", turn: "idle", activeTurnId: null });
+  expect(journal.operationResult(begun.receipt.launchId)?.receipt).toMatchObject({
+    status: "failed",
+    reason: "structured spawn durable host setup timed out after 20ms",
+  });
+  expect(bindCalls).toBe(0);
+  expect(publishCalls).toBe(0);
+
+  releaseStart.resolve();
+  await waitFor(() => host.releaseCount === 1);
+  expect(host.releaseCount).toBe(1);
+  expect(bindCalls).toBe(0);
+  expect(publishCalls).toBe(0);
+  expect(registry.snapshot().entries[`${engine}:${id}`]).toBeUndefined();
+  expect(hasStructuredDeliveryHost({ engine, sessionId: id })).toBe(false);
+  journal.close();
+});
+
+test.each(["codex", "claude"] as const)("issue 1074: a %s launch fails when shared runtime publication never settles", async (engine) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `generic-durable-setup-${engine}-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const durableClient = runtimeClient(journal);
+  const publicationStarted = deferred();
+  const releasePublication = deferred();
+  let appendCalls = 0;
+  const client = {
+    ...durableClient,
+    append: async (...args: Parameters<RuntimeHostClient["append"]>) => {
+      appendCalls += 1;
+      if (appendCalls === 1) {
+        publicationStarted.resolve();
+        await releasePublication.promise;
+      }
+      return await durableClient.append(...args);
+    },
+  } as RuntimeHostClient;
+  const accountId = `${engine}-subscription`;
+  const model = engine === "codex" ? "gpt-5.6-sol" : "opus";
+  const launchProfile = emptyLaunchProfile({ cwd, model });
+  const begun = registry.beginSpawnRequest({
+    engine,
+    cwd,
+    transport: "structured",
+    accountId,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("generic spawn receipt was unavailable");
+  expect(begun.receipt.agentRole).toBeNull();
+  const host = new RoundTripHost(engine, artifactPath, id);
+  await bindStructuredDeliveryQueue([], { registry, client, deferStartupWork: true });
+
+  const spawning = spawnStructuredConversation({
+    engine,
+    receipt: begun.receipt,
+    spec: { command: engine, cwd, windowName: "generic", engine, transcript: artifactPath, launchProfile },
+    account: { engine, accountId, kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    "prompt": "start the generic host",
+    registry,
+    client,
+  }, {
+    startHost: async () => host,
+    bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+      const state = await runningHost.health();
+      targetRegistry.setStructuredHostClaimed(key, {
+        kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+        endpoint: state.endpoint,
+        process: { pid: process.pid, startIdentity: "test-process" },
+        eventCursor: state.eventCursor,
+        protocolVersion: state.protocolVersion,
+        writerClaimEpoch: claimEpoch,
+        activeTurnRef: state.activeTurnRef,
+        pendingAttention: state.pendingAttention,
+        activeFlags: state.activeFlags,
+      }, "idle", claimOwner, claimEpoch);
+      return () => {};
+    },
+    deliverFirst: async () => {},
+    processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+    durableSetupTimeoutMs: 20,
+  });
+  await publicationStarted.promise;
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "path-pending",
+    agentRole: null,
+  });
+  expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
+    status: "idle",
+    pendingAction: "spawn",
+    structuredHostOperationId: begun.receipt.launchId,
+    structuredHost: {
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      process: { pid: process.pid, startIdentity: "test-process" },
+    },
+  });
+  expect((await durableClient.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("queued");
+  expect(fs.existsSync(artifactPath)).toBe(false);
+  await expect(spawning).rejects.toThrow("structured spawn durable host setup timed out after 20ms");
+
+  expect(host.releaseCount).toBe(1);
+  const failed = registry.snapshot().receipts[begun.receipt.launchId]!;
+  expect(failed).toMatchObject({
+    state: "failed",
+    agentRole: null,
+    error: "structured spawn durable host setup timed out after 20ms",
+  });
+  expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
+    status: "dead",
+    pendingAction: null,
+    structuredHost: null,
+  });
+  expect(spawnResponseForReceipt(failed, failed.artifactPath, { structured: true })).toMatchObject({
+    state: "failed",
+    retrySafe: true,
+    initialMessage: "failed",
+  });
+  expect((await durableClient.operationStatus(begun.receipt.launchId))?.receipt).toMatchObject({
+    status: "failed",
+    reason: "structured spawn durable host setup timed out after 20ms",
+  });
+  releasePublication.resolve();
+  await waitFor(() => appendCalls >= 3);
+  expect(hasStructuredDeliveryHost({ engine, sessionId: id })).toBe(false);
+  journal.close();
+});
+
+test("issue 1074: startup reconciliation recovers an overdue materialized placeholder", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `startup-materialized-placeholder-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  fs.writeFileSync(artifactPath, JSON.stringify({
+    type: "event_msg",
+    payload: { type: "user_message", message: "late startup message" },
+  }) + "\n");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    launchProfile: emptyLaunchProfile({ cwd }),
+  });
+  if (begun.kind !== "created") throw new Error("stale startup receipt was unavailable");
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: id },
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "dead",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "codex-subscription",
+    launchProfile: emptyLaunchProfile({ cwd }),
+    turn: { state: "busy", source: "assistant", terminalAt: null },
+    observedAt: begun.receipt.createdAt,
+  }]);
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "path-pending",
+    artifactLifecycle: "materialized",
+  });
+  const client = {
+    effectBatch: async () => [],
+    operationStatus: async () => null,
+    snapshot: async () => ({ sessions: [] }),
+  } as unknown as RuntimeHostClient;
+
+  await recoverPendingStructuredSpawns(registry, client, {
+    now: () => Date.parse(begun.receipt.createdAt) + STALE_STRUCTURED_SPAWN_TIMEOUT_MS + 60_000,
+  });
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "completed",
+    artifactLifecycle: "materialized",
+    completionMode: "route-recovered",
+    error: null,
+  });
+});
+
 test("startup recovery finalizes a staged spawn without duplicating its admitted first message", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `recovery-${id}`);
@@ -4388,4 +4813,403 @@ test("issue 367: a post-kill relaunch that exhausts admission never leaves a liv
   expect(reconciled.initialMessage).toBe("failed");
   expect(reconciled.state).toBe("failed");
   journal.close();
+});
+
+/** A Claude child that exited terminally: the CLI printed its diagnostic and
+    died before the broker could deliver anything (issue #1071). */
+class TerminallyExitedClaudeHost extends RoundTripHost {
+  override async health(): Promise<HostState> {
+    return { ...(await super.health()), status: "dead" };
+  }
+
+  terminalExitReason(): string | null {
+    return terminalClaudeExitReason("No conversation found with session ID: <redacted>");
+  }
+}
+
+test("issue 1071: a retried fresh launch keeps its pre-allocated id until the session exists", () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `never-created-${sessionId}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const launchProfile = emptyLaunchProfile({ cwd });
+  const conversation = registry.ensureConversation("claude", artifactPath, "claude-subscription");
+  const begun = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "claude-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const spec: ResumeSpec = { command: "claude", cwd, windowName: "resume", engine: "claude", transcript: artifactPath, launchProfile };
+
+  /* The first execution was lost, so the pre-allocated id names no session:
+     the CLI never wrote a transcript for it. The retry re-runs the fresh form
+     under the SAME id instead of resuming something the CLI would refuse. */
+  expect(structuredClaudeLaunchForm({ receipt: begun.receipt, registry, spec }))
+    .toEqual({ kind: "fresh", sessionId });
+
+  /* A broker that opened and died inside the promote window leaves an event
+     cursor on the registry row — its own idle emit, not proof that Claude
+     created the session. A missing transcript still means a fresh launch. */
+  registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key: { engine: "claude", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "claude-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 1,
+      protocolVersion: null,
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  expect(structuredClaudeLaunchForm({ receipt: begun.receipt, registry, spec }))
+    .toEqual({ kind: "fresh", sessionId });
+
+  fs.writeFileSync(artifactPath, "");
+  expect(structuredClaudeLaunchForm({ receipt: begun.receipt, registry, spec }))
+    .toEqual({ kind: "resume", sessionId });
+});
+
+test("issue 1071: a terminal CLI exit fails the launch receipt instead of leaving it queued", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `terminal-exit-${sessionId}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd });
+  const host = new TerminallyExitedClaudeHost("claude", artifactPath, sessionId);
+  const begun = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "claude-subscription",
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+
+  try {
+    await expect(spawnStructuredConversation({
+      engine: "claude",
+      receipt: begun.receipt,
+      spec: { command: "claude", cwd, windowName: "terminal", engine: "claude", transcript: artifactPath, launchProfile },
+      account: { engine: "claude", accountId: "claude-subscription", kind: "legacy", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+      "prompt": "build the stage",
+      registry,
+      client,
+    }, {
+      startHost: async () => host,
+      bindHost: async () => () => {},
+      publishHost: async () => async () => {},
+      deliverFirst: async () => {
+        throw new StructuredInitialMessageTimeoutError(
+          `structured initial message remained queued for ${INITIAL_MESSAGE_TIMEOUT_MS}ms`,
+        );
+      },
+      processIdentity: () => ({ pid: process.pid, startIdentity: "terminal-exit-host" }),
+    })).rejects.toThrow("no conversation with this session id");
+
+    const failed = registry.snapshot().receipts[begun.receipt.launchId]!;
+    expect(failed.state).toBe("failed");
+    expect(failed.error).toContain("no conversation with this session id");
+    /* The caller reads a terminal, retry-safe receipt and can resubmit. */
+    expect(spawnResponseForReceipt(failed, failed.artifactPath, { structured: true }))
+      .toMatchObject({ state: "failed", initialMessage: "failed", retrySafe: true });
+    expect((await client.operationStatus(begun.receipt.launchId))?.receipt)
+      .toMatchObject({ status: "failed", reason: expect.stringContaining("no conversation with this session id") });
+  } finally {
+    journal.close();
+  }
+});
+
+test("issue 1071: startup fails a queued launch its replacement already superseded", async () => {
+  const staleSessionId = crypto.randomUUID();
+  const independentSessionId = crypto.randomUUID();
+  const freshSessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `superseded-${staleSessionId}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd });
+  const structuredHost = (process: { pid: number; startIdentity: string } | null) => ({
+    kind: "claude-broker" as const,
+    endpoint: process ? "stdio:live" : "stdio:released",
+    process,
+    eventCursor: 0,
+    protocolVersion: null,
+    writerClaimEpoch: 0,
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+  });
+
+  /* The launch the previous generation accepted: an identity was staged, the
+     engine session was never created, and its runtime operation is queued. */
+  const stale = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "claude-subscription",
+    role: "builder",
+    requestDigest: "digest-build-the-stage",
+    launchProfile,
+  });
+  if (stale.kind !== "created") throw new Error("queued spawn receipt was unavailable");
+  registry.stageStructuredSpawn(stale.receipt.launchId, {
+    key: { engine: "claude", sessionId: staleSessionId },
+    artifactPath: path.join(cwd, `${staleSessionId}.jsonl`),
+    cwd,
+    accountId: "claude-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: structuredHost(null),
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  await client.command({
+    kind: "spawn",
+    operationId: stale.receipt.launchId,
+    idempotencyKey: stale.receipt.launchId,
+    conversationId: stale.receipt.conversationId,
+    engine: "claude",
+    cwd,
+    "prompt": "build the stage",
+    accountId: "claude-subscription",
+    parentConversationId: null,
+  });
+  expect((await client.operationStatus(stale.receipt.launchId))?.receipt.status).toBe("queued");
+
+  /* An independent launch into the same worktree under the same role: its
+     request identity differs, so it replaces nothing and must survive. */
+  const independent = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "claude-subscription",
+    role: "builder",
+    requestDigest: "digest-review-the-stage",
+    launchProfile,
+  });
+  if (independent.kind !== "created") throw new Error("independent spawn receipt was unavailable");
+  registry.stageStructuredSpawn(independent.receipt.launchId, {
+    key: { engine: "claude", sessionId: independentSessionId },
+    artifactPath: path.join(cwd, `${independentSessionId}.jsonl`),
+    cwd,
+    accountId: "claude-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: structuredHost(null),
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+
+  /* The operator's resubmission of the SAME launch under a fresh idempotency
+     key — same request digest — now running. */
+  const fresh = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "claude-subscription",
+    role: "builder",
+    requestDigest: "digest-build-the-stage",
+    launchProfile,
+  });
+  if (fresh.kind !== "created") throw new Error("replacement spawn receipt was unavailable");
+  registry.stageStructuredSpawn(fresh.receipt.launchId, {
+    key: { engine: "claude", sessionId: freshSessionId },
+    artifactPath: path.join(cwd, `${freshSessionId}.jsonl`),
+    cwd,
+    accountId: "claude-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: structuredHost({ pid: process.pid, startIdentity: "fresh-builder" }),
+    claimEpoch: 1,
+    claimOwner: "structured-claim:fresh-builder",
+    pendingAction: "spawn",
+  });
+  expect(registry.finalizeStructuredSpawn(fresh.receipt.launchId).kind).toBe("settled");
+
+  /* The stale receipt's admission owner is this very process, which is alive
+     for the whole test: a promote overlaps the generations, so replacement
+     evidence has to outrank a live owner or the duplicate survives (#1071). */
+  expect(registry.snapshot().receipts[stale.receipt.launchId]!.admissionOwner?.pid).toBe(process.pid);
+
+  try {
+    await recoverPendingStructuredSpawns(registry, client);
+
+    const superseded = registry.snapshot().receipts[stale.receipt.launchId]!;
+    expect(superseded.state).toBe("failed");
+    expect(superseded.error).toContain("superseded by a newer launch");
+    expect((await client.operationStatus(stale.receipt.launchId))?.receipt)
+      .toMatchObject({ status: "failed", reason: expect.stringContaining("superseded by a newer launch") });
+    /* The running replacement is never touched by the re-validation pass. */
+    expect(registry.snapshot().receipts[fresh.receipt.launchId]!.state).toBe("completed");
+    /* Neither is the independent launch that merely shares the worktree. */
+    const survivor = registry.snapshot().receipts[independent.receipt.launchId]!;
+    expect(survivor.error ?? "").not.toContain("superseded");
+    expect(survivor.state).not.toBe("failed");
+  } finally {
+    journal.close();
+  }
+});
+
+test("issue 1071: a stage retry supersedes its queued predecessor even though its request digest differs", async () => {
+  const attempt1SessionId = crypto.randomUUID();
+  const attempt2SessionId = crypto.randomUUID();
+  const independentSessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `stage-retry-${attempt1SessionId}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd });
+  const structuredHost = (process: { pid: number; startIdentity: string } | null) => ({
+    kind: "claude-broker" as const,
+    endpoint: process ? "stdio:live" : "stdio:released",
+    process,
+    eventCursor: 0,
+    protocolVersion: null,
+    writerClaimEpoch: 0,
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+  });
+
+  /* Attempt 1: the stage launch the previous generation accepted, staged but
+     never hosted, its runtime operation still queued. */
+  const attempt1 = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "claude-subscription",
+    role: "builder",
+    requestDigest: "digest-stage-attempt-1",
+    launchProfile,
+  });
+  if (attempt1.kind !== "created") throw new Error("attempt 1 receipt was unavailable");
+  registry.stageStructuredSpawn(attempt1.receipt.launchId, {
+    key: { engine: "claude", sessionId: attempt1SessionId },
+    artifactPath: path.join(cwd, `${attempt1SessionId}.jsonl`),
+    cwd,
+    accountId: "claude-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: structuredHost(null),
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  await client.command({
+    kind: "spawn",
+    operationId: attempt1.receipt.launchId,
+    idempotencyKey: attempt1.receipt.launchId,
+    conversationId: attempt1.receipt.conversationId,
+    engine: "claude",
+    cwd,
+    "prompt": "run the stage",
+    accountId: "claude-subscription",
+    parentConversationId: null,
+  });
+  expect((await client.operationStatus(attempt1.receipt.launchId))?.receipt.status).toBe("queued");
+
+  /* An unrelated launch into the same worktree under the same role: it names
+     no predecessor and shares no digest, so it must survive untouched. */
+  const independent = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "claude-subscription",
+    role: "builder",
+    requestDigest: "digest-independent-stage",
+    launchProfile,
+  });
+  if (independent.kind !== "created") throw new Error("independent receipt was unavailable");
+  registry.stageStructuredSpawn(independent.receipt.launchId, {
+    key: { engine: "claude", sessionId: independentSessionId },
+    artifactPath: path.join(cwd, `${independentSessionId}.jsonl`),
+    cwd,
+    accountId: "claude-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: structuredHost(null),
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+
+  /* Attempt 2: the stage retry. It names attempt 1 as the conversation it
+     terminally retires, and because that name is folded into the launch shape
+     its request digest is NOT attempt 1's — the explicit edge is the only
+     evidence that links the two. */
+  const attempt2 = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "claude-subscription",
+    role: "builder",
+    requestDigest: "digest-stage-attempt-2",
+    supersedes: attempt1.receipt.conversationId,
+    supersedesReason: "stage-retry",
+    launchProfile,
+  });
+  if (attempt2.kind !== "created") throw new Error("attempt 2 receipt was unavailable");
+  expect(attempt2.receipt.requestDigest).not.toBe(attempt1.receipt.requestDigest);
+  expect(attempt2.receipt.supersedes?.conversationId).toBe(attempt1.receipt.conversationId);
+  registry.stageStructuredSpawn(attempt2.receipt.launchId, {
+    key: { engine: "claude", sessionId: attempt2SessionId },
+    artifactPath: path.join(cwd, `${attempt2SessionId}.jsonl`),
+    cwd,
+    accountId: "claude-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: structuredHost({ pid: process.pid, startIdentity: "stage-retry-builder" }),
+    claimEpoch: 1,
+    claimOwner: "structured-claim:stage-retry-builder",
+    pendingAction: "spawn",
+  });
+  expect(registry.finalizeStructuredSpawn(attempt2.receipt.launchId).kind).toBe("settled");
+
+  try {
+    await recoverPendingStructuredSpawns(registry, client);
+
+    const retired = registry.snapshot().receipts[attempt1.receipt.launchId]!;
+    expect(retired.state).toBe("failed");
+    expect(retired.error).toContain("superseded by a newer launch");
+    expect((await client.operationStatus(attempt1.receipt.launchId))?.receipt)
+      .toMatchObject({ status: "failed", reason: expect.stringContaining("superseded by a newer launch") });
+    expect(registry.snapshot().receipts[attempt2.receipt.launchId]!.state).toBe("completed");
+    const survivor = registry.snapshot().receipts[independent.receipt.launchId]!;
+    expect(survivor.error ?? "").not.toContain("superseded");
+    expect(survivor.state).not.toBe("failed");
+  } finally {
+    journal.close();
+  }
 });

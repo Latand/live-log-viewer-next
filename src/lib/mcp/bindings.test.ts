@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { applyBoardCommand } from "@/lib/board/command";
+import { boardFor, mutateBoard, patchBoard } from "@/lib/board/store";
 import { DeadlineExceededError } from "@/lib/deadline";
 import { CORPUS_BODY_MARKERS, pipelineCorpus } from "@/lib/pipelines/fixtures/corpus";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -12,11 +14,18 @@ import type { RoleDefinition } from "@/lib/roles/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import type { CompletedGenerationRead } from "@/lib/lifecycle/inventorySelection";
 import { queryLifecycleEvents } from "@/lib/lifecycle/journal";
+import { productionLivenessSources } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 
 import { defaultMcpSpawnRoleParams, viewerMcpBindings } from "./bindings";
-import { createMcpToolService, MemoryMcpReceiptStore, type McpToolResult } from "./server";
+import {
+  createMcpToolService,
+  MemoryMcpReceiptStore,
+  type McpReceiptStore,
+  type McpToolResult,
+} from "./server";
 
 const sandboxes: string[] = [];
 const originalStateDir = process.env.LLV_STATE_DIR;
@@ -27,6 +36,73 @@ afterEach(() => {
   else process.env.LLV_STATE_DIR = originalStateDir;
   for (const sandbox of sandboxes.splice(0)) fs.rmSync(sandbox, { recursive: true, force: true });
 });
+
+function bulkArchiveFixture(
+  conversationCount: number,
+  generationsPerConversation: number,
+  beforeApply?: (input: unknown, call: number, boardFile: string, project: string) => void,
+) {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-bulk-"));
+  sandboxes.push(sandbox);
+  const boardFile = path.join(sandbox, "board.json");
+  const project = "fixture-bulk-archive-project";
+  const conversationIds = Array.from(
+    { length: conversationCount },
+    (_, index) => `conversation_bulk_${index}`,
+  );
+  const pathsByTarget = conversationIds.map((_, conversationIndex) => Array.from(
+    { length: generationsPerConversation },
+    (_, generationIndex) => `/fixtures/bulk-archive/conversation-${conversationIndex}/generation-${generationIndex}.jsonl`,
+  ));
+  const launchProfile = {
+    cwd: "/fixtures/bulk-archive",
+    project,
+    model: null,
+    effort: null,
+  };
+  const emptyRegistrySnapshot = new AgentRegistry(path.join(sandbox, "agent-registry.json")).readOnlySnapshot();
+  const registrySnapshot: typeof emptyRegistrySnapshot = {
+    ...emptyRegistrySnapshot,
+    conversations: Object.fromEntries(conversationIds.map((conversationId, index) => [conversationId, {
+      id: conversationId,
+      generations: pathsByTarget[index]!.map((pathname) => ({ path: pathname, launchProfile })),
+      continuityPaths: [],
+      abandonedContinuityPaths: [],
+      migration: null,
+      projectOwnership: {
+        project,
+        source: "operator",
+        setAt: "2026-08-24T08:00:00.000Z",
+        operationId: `ownership_${conversationId}`,
+      },
+    } as never])),
+  };
+  let commandCalls = 0;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => registrySnapshot,
+    completedFileScan: async () => {
+      throw new Error("registered bulk archiving must not scan transcripts");
+    },
+    boardFor: (key: string) => boardFor(key, boardFile),
+    applyBoardCommand: (input: unknown, snapshot: typeof registrySnapshot) => {
+      commandCalls += 1;
+      beforeApply?.(input, commandCalls, boardFile, project);
+      return applyBoardCommand(input, {
+        registrySnapshot: () => snapshot,
+        patchBoard: (key, revision, patch) => patchBoard(key, revision, patch, boardFile),
+        mutateBoard: (key, revision, mutations) => mutateBoard(key, revision, mutations, boardFile),
+      });
+    },
+  } as never);
+  return {
+    bindings,
+    boardFile,
+    project,
+    targets: conversationIds.map((conversationId) => ({ conversationId })),
+    pathsByTarget,
+    allPaths: pathsByTarget.flat(),
+  };
+}
 
 test("spawn_agent reaches spawn validation through the operator admission lane", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-binding-spawn-"));
@@ -50,6 +126,37 @@ test("spawn_agent reaches spawn validation through the operator admission lane",
   expect(requests.map((request) => request.pathname)).toEqual(["/api/spawn", "/api/spawn"]);
   expect(requests.every((request) => Boolean(request.headers?.["x-llv-spawn-capability"]))).toBe(true);
   expect(fs.readFileSync(path.join(sandbox, "operator-spawn-capability"), "utf8").trim()).toMatch(/^[A-Za-z0-9_-]{43}$/);
+});
+
+test("spawn_agent rejects an explicit model outside the engine catalog before control-plane admission", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const spawnAgent = viewerMcpBindings(undefined, {
+    post: async (_pathname, body) => {
+      requests.push(body);
+      return {};
+    },
+  }).spawn_agent;
+
+  const refusal = await spawnAgent({
+    clientRequestId: "mcp-invalid-model",
+    engine: "codex",
+    model: "gpt-5.6-codex",
+    cwd: "/repo",
+    ["prompt"]: "probe",
+  }).then(
+    () => null,
+    (error: unknown) => error as Error & { details?: { violations?: Array<{ field: string; message: string; expected: string }> } },
+  );
+
+  const message = "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna";
+  expect(refusal?.name).toBe("McpToolRefusal");
+  expect(refusal?.message).toBe(message);
+  expect(refusal?.details?.violations).toEqual([{
+    field: "model",
+    message,
+    expected: "one of: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
+  }]);
+  expect(requests).toEqual([]);
 });
 
 test("spawn_agent derives required role params from the prompt and preserves supplied params", async () => {
@@ -568,7 +675,7 @@ test("board_snapshot returns an inert bounded board projection with durable line
         conversation_worker: [{ kind: "pipeline", containerId: "pipeline_608", role: "builder" }],
       },
     }),
-    boardFor: () => ({ schemaVersion: 1, revision: 7, updatedAt: "2026-07-23T00:00:00.000Z", prefs: { manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false } }),
+    boardFor: () => ({ schemaVersion: 1, revision: 7, updatedAt: "2026-07-23T00:00:00.000Z", prefs: { manual: [], hidden: ["/sessions/hidden-a.jsonl", "/sessions/hidden-b.jsonl"], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false } }),
     noteWrite: () => { writes += 1; },
   } as never);
 
@@ -581,6 +688,7 @@ test("board_snapshot returns an inert bounded board projection with durable line
 
   expect(result).toMatchObject({
     count: 1,
+    hiddenCount: 2,
     board: { revision: 7 },
     conversations: [{
       conversationId: "conversation_worker",
@@ -604,15 +712,16 @@ test("flow tools read durable flows and return a stable action receipt", async (
     { id: "flow_closed", project: "viewer", state: "closed", closedAt: "2026-07-23T01:00:00.000Z" },
     { id: "flow_other", project: "other", state: "waiting_ready", closedAt: null },
   ];
-  const actions: Array<{ id: string; action: string }> = [];
+  const actions: Array<{ id: string; action: string; actor: unknown }> = [];
   const bindings = viewerMcpBindings(undefined, undefined, {
     getFlowsWithPresets: () => ({ flows, presets: [] }),
-    patchFlow: (id: string, request: { action: string }) => {
-      actions.push({ id, action: request.action });
+    patchFlow: (id: string, request: { action: string }, actor: unknown) => {
+      actions.push({ id, action: request.action, actor });
       return { flow: { ...flows[0], id, state: "paused" } };
     },
     cancelRound: async () => ({ flow: flows[0] }),
     closeFlow: async () => ({ flow: flows[0] }),
+    callerAttribution: () => ({ kind: "agent", conversationId: "conversation_reviewer", role: "reviewer" }),
   } as never);
 
   expect(await bindings.list_flows({ clientRequestId: "list-flows", project: "viewer" })).toMatchObject({
@@ -632,7 +741,11 @@ test("flow tools read durable flows and return a stable action receipt", async (
   });
   expect(actionOperationId).toMatch(/^mcp_flow_action_[0-9a-f]{24}$/);
   expect((actionResult.receipt as { operationId: string }).operationId).toBe(actionOperationId);
-  expect(actions).toEqual([{ id: "flow_open", action: "pause" }]);
+  expect(actions).toEqual([{
+    id: "flow_open",
+    action: "pause",
+    actor: { kind: "agent", role: "reviewer", conversationId: "conversation_reviewer" },
+  }]);
 });
 
 test("list_pipelines applies project, state, and closed filters to the durable registry", async () => {
@@ -826,6 +939,639 @@ test("conversation_action delegates to the ownership-fenced conversation command
   });
 });
 
+test("conversation_action archives every generation from either target form and unarchives symmetrically", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-generations-"));
+  sandboxes.push(sandbox);
+  const boardFile = path.join(sandbox, "board.json");
+  const project = "fixture-generation-project";
+  const earlierPath = "/fixtures/codex/raw-sessions/2026/08/rollout-earlier.jsonl";
+  const currentPath = "/fixtures/codex/accounts/account-a/sessions/2026/08/rollout-current.jsonl";
+  const pendingPath = "/fixtures/codex/accounts/account-a/sessions/2026/08/rollout-pending.jsonl";
+  const pendingSpawnPath = "spawn:launch_pending_generation";
+  const emptyRegistrySnapshot = new AgentRegistry(path.join(sandbox, "agent-registry.json")).readOnlySnapshot();
+  const registrySnapshot: typeof emptyRegistrySnapshot = {
+    ...emptyRegistrySnapshot,
+    conversations: {
+      conversation_resumed: {
+        id: "conversation_resumed",
+        generations: [earlierPath, currentPath].map((pathname) => ({
+          path: pathname,
+          launchProfile: {
+            cwd: "/fixtures/generation-project",
+            project,
+            model: null,
+            effort: null,
+          },
+        })),
+        continuityPaths: [],
+        abandonedContinuityPaths: [],
+        migration: null,
+        projectOwnership: {
+          project,
+          source: "operator",
+          setAt: "2026-08-24T08:00:00.000Z",
+          operationId: "ownership_conversation_resumed",
+        },
+      } as never,
+      conversation_pending: {
+        id: "conversation_pending",
+        generations: [{
+          path: pendingPath,
+          launchProfile: {
+            cwd: "/fixtures/generation-project",
+            project,
+            model: null,
+            effort: null,
+          },
+        }],
+        continuityPaths: [],
+        abandonedContinuityPaths: [],
+        migration: null,
+        projectOwnership: {
+          project,
+          source: "operator",
+          setAt: "2026-08-24T08:01:00.000Z",
+          operationId: "ownership_conversation_pending",
+        },
+      } as never,
+    },
+    receipts: {
+      launch_pending_generation: {
+        launchId: "launch_pending_generation",
+        conversationId: "conversation_pending",
+        createdAt: "2026-08-24T08:02:00.000Z",
+        artifactLifecycle: "pending",
+        transport: "structured",
+        purpose: "launch",
+        explicitProject: project,
+        cwd: "/fixtures/generation-project",
+        launchProfile: {
+          cwd: "/fixtures/generation-project",
+          project,
+          model: null,
+          effort: null,
+        },
+      } as never,
+    },
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => registrySnapshot,
+    completedFileScan: async () => {
+      throw new Error("registered generation archiving must not scan transcripts");
+    },
+    boardFor: (key: string) => boardFor(key, boardFile),
+    applyBoardCommand: (input: unknown, snapshot: typeof registrySnapshot) => applyBoardCommand(input, {
+      registrySnapshot: () => snapshot,
+      patchBoard: (key, revision, patch) => patchBoard(key, revision, patch, boardFile),
+      mutateBoard: (key, revision, mutations) => mutateBoard(key, revision, mutations, boardFile),
+    }),
+  } as never);
+
+  const byId = await bindings.conversation_action({
+    clientRequestId: "archive-resumed-by-id",
+    action: "archive",
+    conversationId: "conversation_resumed",
+  });
+  expect(byId).toMatchObject({
+    projectsTouched: [project],
+    outcomes: [{
+      conversationId: "conversation_resumed",
+      transcriptPath: currentPath,
+      paths: [earlierPath, currentPath],
+      project,
+      outcome: "archived",
+    }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 1,
+    prefs: { hidden: [earlierPath, currentPath] },
+  });
+
+  const repeated = await bindings.conversation_action({
+    clientRequestId: "archive-resumed-by-id-again",
+    action: "archive",
+    conversationId: "conversation_resumed",
+  });
+  expect(repeated).toMatchObject({
+    projectsTouched: [],
+    outcomes: [{ transcriptPath: currentPath, paths: [], outcome: "already-archived" }],
+  });
+  expect(boardFor(project, boardFile).revision).toBe(1);
+
+  const restoredById = await bindings.conversation_action({
+    clientRequestId: "unarchive-resumed-by-id",
+    action: "unarchive",
+    conversationId: "conversation_resumed",
+  });
+  expect(restoredById).toMatchObject({
+    projectsTouched: [project],
+    outcomes: [{ transcriptPath: currentPath, paths: [earlierPath, currentPath], outcome: "unarchived" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+  fs.rmSync(boardFile);
+
+  expect(mutateBoard(project, 0, [{
+    kind: "remap-paths",
+    pairs: [{ from: earlierPath, to: currentPath }],
+  }], boardFile)).toMatchObject({ ok: true, applied: true });
+
+  const byExactEarlierPath = await bindings.conversation_action({
+    clientRequestId: "archive-resumed-by-earlier-path",
+    action: "archive",
+    transcriptPath: earlierPath,
+  });
+  expect(byExactEarlierPath).toMatchObject({
+    outcomes: [{
+      conversationId: "conversation_resumed",
+      transcriptPath: earlierPath,
+      paths: [earlierPath, currentPath],
+      outcome: "archived",
+    }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 2,
+    pathAliases: { [earlierPath]: currentPath },
+    prefs: { hidden: [earlierPath, currentPath] },
+  });
+
+  expect(mutateBoard(project, 2, [{ kind: "set-presentation", taskPanelOpen: true }], boardFile)).toMatchObject({
+    ok: true,
+    applied: true,
+    board: {
+      pathAliases: { [earlierPath]: currentPath },
+      prefs: { hidden: [earlierPath, currentPath], taskPanelOpen: true },
+    },
+  });
+
+  const repeatedByExactEarlierPath = await bindings.conversation_action({
+    clientRequestId: "archive-resumed-by-earlier-path-again",
+    action: "archive",
+    transcriptPath: earlierPath,
+  });
+  expect(repeatedByExactEarlierPath).toMatchObject({
+    projectsTouched: [],
+    outcomes: [{ transcriptPath: earlierPath, paths: [], outcome: "already-archived" }],
+  });
+  expect(boardFor(project, boardFile).revision).toBe(3);
+
+  const restoredByExactEarlierPath = await bindings.conversation_action({
+    clientRequestId: "unarchive-resumed-by-earlier-path",
+    action: "unarchive",
+    transcriptPath: earlierPath,
+  });
+  expect(restoredByExactEarlierPath).toMatchObject({
+    outcomes: [{ transcriptPath: earlierPath, paths: [earlierPath, currentPath], outcome: "unarchived" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 4,
+    prefs: { hidden: [], taskPanelOpen: true },
+  });
+  fs.rmSync(boardFile);
+
+  expect(patchBoard(project, 0, { hidden: [currentPath] }, boardFile)).toMatchObject({ ok: true, applied: true });
+  const repairedPartialArchive = await bindings.conversation_action({
+    clientRequestId: "archive-resumed-partial-hidden",
+    action: "archive",
+    conversationId: "conversation_resumed",
+  });
+  expect(repairedPartialArchive).toMatchObject({
+    projectsTouched: [project],
+    outcomes: [{ transcriptPath: currentPath, paths: [earlierPath], outcome: "archived" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 2,
+    prefs: { hidden: [currentPath, earlierPath] },
+  });
+
+  const pendingPlaceholder = await bindings.conversation_action({
+    clientRequestId: "archive-pending-placeholder-by-id",
+    action: "archive",
+    conversationId: "conversation_pending",
+  });
+  expect(pendingPlaceholder).toMatchObject({
+    outcomes: [{
+      transcriptPath: pendingPath,
+      paths: [pendingPath, pendingSpawnPath],
+      outcome: "archived",
+    }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 3,
+    prefs: { hidden: [currentPath, earlierPath, pendingPath, pendingSpawnPath] },
+  });
+
+  const restoredPendingPlaceholder = await bindings.conversation_action({
+    clientRequestId: "unarchive-pending-placeholder-by-id",
+    action: "unarchive",
+    conversationId: "conversation_pending",
+  });
+  expect(restoredPendingPlaceholder).toMatchObject({
+    outcomes: [{ paths: [pendingPath, pendingSpawnPath], outcome: "unarchived" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 4,
+    prefs: { hidden: [currentPath, earlierPath] },
+  });
+});
+
+test("conversation_action archives ghosts and reconciles interrupted receipts without another board revision", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-"));
+  sandboxes.push(sandbox);
+  const boardFile = path.join(sandbox, "board.json");
+  const project = "fixture-owned-project";
+  const predecessorPath = "/fixtures/fixture-project/predecessor.jsonl";
+  const currentPath = "/fixtures/fixture-project/current.jsonl";
+  const deletedGhostPath = "/fixtures/fixture-project/deleted-ghost.jsonl";
+  const spawnPath = "spawn:launch_fixture_placeholder";
+  const unknownPath = "/fixtures/fixture-project/unknown.jsonl";
+  const interruptedReceiptStore = (expectedKey: string): { store: McpReceiptStore; completed: McpToolResult[] } => {
+    const completed: McpToolResult[] = [];
+    return {
+      completed,
+      store: {
+        claim: (key) => {
+          expect(key).toBe(expectedKey);
+          return completed[0]
+            ? { kind: "replay", result: completed[0] }
+            : { kind: "pending", unfinishedAgeMs: 4_000 };
+        },
+        complete: (key, _digest, result) => {
+          expect(key).toBe(expectedKey);
+          completed.push(result);
+        },
+      },
+    };
+  };
+  const launchProfile = {
+    cwd: "/fixtures/fixture-project",
+    project,
+    model: null,
+    effort: null,
+  };
+  const conversation = (id: string, paths: string[]) => ({
+    id,
+    generations: paths.map((pathname) => ({ path: pathname, launchProfile })),
+    continuityPaths: [],
+    abandonedContinuityPaths: [],
+    migration: null,
+    projectOwnership: {
+      project,
+      source: "operator",
+      setAt: "2026-08-24T08:00:00.000Z",
+      operationId: `ownership_${id}`,
+    },
+  });
+  const emptyRegistrySnapshot = new AgentRegistry(path.join(sandbox, "agent-registry.json")).readOnlySnapshot();
+  const registrySnapshot: typeof emptyRegistrySnapshot = {
+    ...emptyRegistrySnapshot,
+    conversations: {
+      conversation_current: conversation("conversation_current", [predecessorPath, currentPath]) as never,
+      conversation_deleted_ghost: conversation("conversation_deleted_ghost", [deletedGhostPath]) as never,
+    },
+    receipts: {
+      launch_fixture_placeholder: {
+        launchId: "launch_fixture_placeholder",
+        conversationId: "conversation_spawn_placeholder",
+        createdAt: "2026-08-24T08:05:00.000Z",
+        explicitProject: project,
+        cwd: "/fixtures/fixture-project",
+        launchProfile,
+      } as never,
+    },
+  };
+  let runtimeCalls = 0;
+  let scanCalls = 0;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => registrySnapshot,
+    completedFileScan: async () => {
+      scanCalls += 1;
+      expect(boardFor(project, boardFile).prefs.hidden).toEqual(scanCalls <= 2
+        ? [predecessorPath, currentPath, deletedGhostPath, spawnPath]
+        : []);
+      throw new Error("ghost archiving must not require a transcript scan");
+    },
+    boardFor: (key: string) => boardFor(key, boardFile),
+    applyBoardCommand: (input: unknown, snapshot: typeof registrySnapshot) => applyBoardCommand(input, {
+      registrySnapshot: () => snapshot,
+      patchBoard: (key, revision, patch) => patchBoard(key, revision, patch, boardFile),
+      mutateBoard: (key, revision, mutations) => mutateBoard(key, revision, mutations, boardFile),
+    }),
+    applyConversationAction: async () => {
+      runtimeCalls += 1;
+      throw new Error("archive must not enter runtime conversation control");
+    },
+  } as never);
+
+  const archiveArgs = {
+    clientRequestId: "archive-ghosts-first",
+    action: "archive",
+    targets: [
+      { conversationId: "conversation_current" },
+      { transcriptPath: deletedGhostPath },
+      { transcriptPath: spawnPath },
+      { transcriptPath: predecessorPath },
+      { transcriptPath: unknownPath },
+    ],
+  };
+  const first = await bindings.conversation_action(archiveArgs);
+
+  expect(first).toMatchObject({
+    action: "archive",
+    project,
+    projectsTouched: [project],
+    outcomes: [
+      { conversationId: "conversation_current", transcriptPath: currentPath, paths: [predecessorPath, currentPath], project, outcome: "archived" },
+      { conversationId: "conversation_deleted_ghost", transcriptPath: deletedGhostPath, paths: [deletedGhostPath], project, outcome: "archived" },
+      { conversationId: "conversation_spawn_placeholder", transcriptPath: spawnPath, paths: [spawnPath], project, outcome: "archived" },
+      { conversationId: "conversation_current", transcriptPath: predecessorPath, paths: [], project, outcome: "already-archived" },
+      { conversationId: null, transcriptPath: unknownPath, paths: [], project: null, outcome: "resolution-failed" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 1,
+    pathAliases: {},
+    prefs: { hidden: [predecessorPath, currentPath, deletedGhostPath, spawnPath] },
+  });
+
+  const interruptedArchive = interruptedReceiptStore("conversation_action:archive-ghosts-first");
+  const archiveRecovery = createMcpToolService(bindings, interruptedArchive.store);
+  const recoveredArchive = await archiveRecovery.callTool("conversation_action", archiveArgs);
+  expect(recoveredArchive).toMatchObject({
+    ok: true,
+    projectsTouched: [],
+    outcomes: [
+      { transcriptPath: currentPath, paths: [], outcome: "already-archived" },
+      { transcriptPath: deletedGhostPath, paths: [], outcome: "already-archived" },
+      { transcriptPath: spawnPath, paths: [], outcome: "already-archived" },
+      { transcriptPath: predecessorPath, paths: [], outcome: "already-archived" },
+      { transcriptPath: unknownPath, paths: [], outcome: "resolution-failed" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({
+    revision: 1,
+    prefs: { hidden: [predecessorPath, currentPath, deletedGhostPath, spawnPath] },
+  });
+  expect(interruptedArchive.completed).toEqual([recoveredArchive]);
+  expect(await archiveRecovery.callTool("conversation_action", archiveArgs)).toEqual({
+    ...recoveredArchive,
+    replayed: true,
+  });
+  expect(boardFor(project, boardFile).revision).toBe(1);
+
+  const replayByContent = await bindings.conversation_action({
+    clientRequestId: "archive-ghosts-again",
+    action: "archive",
+    targets: [
+      { transcriptPath: predecessorPath },
+      { transcriptPath: deletedGhostPath },
+      { transcriptPath: spawnPath },
+    ],
+  });
+  expect(replayByContent).toMatchObject({
+    outcomes: [
+      { paths: [], outcome: "already-archived" },
+      { paths: [], outcome: "already-archived" },
+      { paths: [], outcome: "already-archived" },
+    ],
+  });
+  expect(boardFor(project, boardFile).revision).toBe(1);
+
+  const unarchiveArgs = {
+    clientRequestId: "unarchive-ghosts",
+    action: "unarchive",
+    targets: [
+      { conversationId: "conversation_current" },
+      { transcriptPath: deletedGhostPath },
+      { transcriptPath: spawnPath },
+      { transcriptPath: unknownPath },
+    ],
+  };
+  const restored = await bindings.conversation_action(unarchiveArgs);
+  expect(restored).toMatchObject({
+    outcomes: [
+      { conversationId: "conversation_current", transcriptPath: currentPath, paths: [predecessorPath, currentPath], outcome: "unarchived" },
+      { paths: [deletedGhostPath], outcome: "unarchived" },
+      { paths: [spawnPath], outcome: "unarchived" },
+      { paths: [], project: null, outcome: "resolution-failed" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+
+  const interruptedUnarchive = interruptedReceiptStore("conversation_action:unarchive-ghosts");
+  const unarchiveRecovery = createMcpToolService(bindings, interruptedUnarchive.store);
+  const recoveredUnarchive = await unarchiveRecovery.callTool("conversation_action", unarchiveArgs);
+  expect(recoveredUnarchive).toMatchObject({
+    ok: true,
+    projectsTouched: [],
+    outcomes: [
+      { transcriptPath: currentPath, paths: [], outcome: "not-found" },
+      { transcriptPath: deletedGhostPath, paths: [], outcome: "not-found" },
+      { transcriptPath: spawnPath, paths: [], outcome: "not-found" },
+      { transcriptPath: unknownPath, paths: [], outcome: "resolution-failed" },
+    ],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+  expect(interruptedUnarchive.completed).toEqual([recoveredUnarchive]);
+  expect(runtimeCalls).toBe(0);
+  expect(scanCalls).toBe(4);
+});
+
+test("conversation_action attributes archive outcomes only to paths written by its board command", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-archive-race-"));
+  sandboxes.push(sandbox);
+  const boardFile = path.join(sandbox, "board.json");
+  const project = "fixture-concurrent-project";
+  const transcriptPath = "/fixtures/concurrent-project/session.jsonl";
+  const emptyRegistrySnapshot = new AgentRegistry(path.join(sandbox, "agent-registry.json")).readOnlySnapshot();
+  const registrySnapshot: typeof emptyRegistrySnapshot = {
+    ...emptyRegistrySnapshot,
+    conversations: {
+      conversation_concurrent: {
+        id: "conversation_concurrent",
+        generations: [{
+          path: transcriptPath,
+          launchProfile: { cwd: "/fixtures/concurrent-project", project, model: null, effort: null },
+        }],
+        continuityPaths: [],
+        abandonedContinuityPaths: [],
+        migration: null,
+        projectOwnership: {
+          project,
+          source: "operator",
+          setAt: "2026-08-24T08:00:00.000Z",
+          operationId: "ownership_conversation_concurrent",
+        },
+      } as never,
+    },
+  };
+  let commandCalls = 0;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => registrySnapshot,
+    boardFor: (key: string) => boardFor(key, boardFile),
+    applyBoardCommand: (input: unknown, snapshot: typeof registrySnapshot) => {
+      commandCalls += 1;
+      if (commandCalls === 1) {
+        expect(patchBoard(project, 0, { hidden: [transcriptPath] }, boardFile)).toMatchObject({ ok: true, applied: true });
+      } else {
+        expect(mutateBoard(project, 1, [{ kind: "restore", path: transcriptPath, placement: "auto" }], boardFile))
+          .toMatchObject({ ok: true, applied: true });
+      }
+      return applyBoardCommand(input, {
+        registrySnapshot: () => snapshot,
+        patchBoard: (key, revision, patch) => patchBoard(key, revision, patch, boardFile),
+        mutateBoard: (key, revision, mutations) => mutateBoard(key, revision, mutations, boardFile),
+      });
+    },
+  } as never);
+
+  const archived = await bindings.conversation_action({
+    clientRequestId: "archive-concurrent-content",
+    action: "archive",
+    conversationId: "conversation_concurrent",
+  });
+  expect(archived).toMatchObject({
+    projectsTouched: [],
+    outcomes: [{ transcriptPath, paths: [], project, outcome: "already-archived" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 1, prefs: { hidden: [transcriptPath] } });
+
+  const unarchived = await bindings.conversation_action({
+    clientRequestId: "unarchive-concurrent-content",
+    action: "unarchive",
+    conversationId: "conversation_concurrent",
+  });
+  expect(unarchived).toMatchObject({
+    projectsTouched: [],
+    outcomes: [{ transcriptPath, paths: [], project, outcome: "not-found" }],
+  });
+  expect(boardFor(project, boardFile)).toMatchObject({ revision: 2, prefs: { hidden: [] } });
+  expect(commandCalls).toBe(2);
+});
+
+test("conversation_action chunks archive expansions at the board path-list limit", async () => {
+  const fixture = bulkArchiveFixture(86, 6);
+
+  const archived = await fixture.bindings.conversation_action({
+    clientRequestId: "archive-bulk-path-limit",
+    action: "archive",
+    targets: fixture.targets,
+  });
+
+  expect(archived).toMatchObject({
+    projectsTouched: [fixture.project],
+    outcomes: fixture.pathsByTarget.map((paths, index) => ({
+      conversationId: fixture.targets[index]!.conversationId,
+      transcriptPath: paths.at(-1),
+      paths,
+      project: fixture.project,
+      outcome: "archived",
+    })),
+  });
+  expect(boardFor(fixture.project, fixture.boardFile)).toMatchObject({
+    revision: 2,
+    prefs: { hidden: fixture.allPaths },
+  });
+
+  const repeated = await fixture.bindings.conversation_action({
+    clientRequestId: "archive-bulk-path-limit-again",
+    action: "archive",
+    targets: fixture.targets,
+  });
+  expect(repeated).toMatchObject({
+    projectsTouched: [],
+    outcomes: fixture.targets.map(() => ({ paths: [], outcome: "already-archived" })),
+  });
+  expect(boardFor(fixture.project, fixture.boardFile).revision).toBe(2);
+});
+
+test("conversation_action chunks symmetric unarchive at the board mutation limit", async () => {
+  const fixture = bulkArchiveFixture(65, 2);
+  await fixture.bindings.conversation_action({
+    clientRequestId: "archive-bulk-mutation-limit",
+    action: "archive",
+    targets: fixture.targets,
+  });
+
+  const unarchived = await fixture.bindings.conversation_action({
+    clientRequestId: "unarchive-bulk-mutation-limit",
+    action: "unarchive",
+    targets: fixture.targets,
+  });
+
+  expect(unarchived).toMatchObject({
+    projectsTouched: [fixture.project],
+    outcomes: fixture.pathsByTarget.map((paths, index) => ({
+      conversationId: fixture.targets[index]!.conversationId,
+      transcriptPath: paths.at(-1),
+      paths,
+      project: fixture.project,
+      outcome: "unarchived",
+    })),
+  });
+  expect(boardFor(fixture.project, fixture.boardFile)).toMatchObject({
+    revision: 3,
+    prefs: { hidden: [] },
+  });
+
+  const repeated = await fixture.bindings.conversation_action({
+    clientRequestId: "unarchive-bulk-mutation-limit-again",
+    action: "unarchive",
+    targets: fixture.targets,
+  });
+  expect(repeated).toMatchObject({
+    projectsTouched: [],
+    outcomes: fixture.targets.map(() => ({ paths: [], outcome: "not-found" })),
+  });
+  expect(boardFor(fixture.project, fixture.boardFile).revision).toBe(3);
+});
+
+test("conversation_action aggregates only successful chunks across a revision conflict", async () => {
+  const fixture = bulkArchiveFixture(86, 6, (input, call, boardFile, project) => {
+    if (call !== 2) return;
+    const patch = (input as { patch: { hidden: string[] } }).patch;
+    expect(patch.hidden).toEqual(fixture.allPaths.slice(512));
+    expect(patchBoard(project, 1, { hidden: patch.hidden }, boardFile)).toMatchObject({
+      ok: true,
+      applied: true,
+    });
+  });
+
+  const archived = await fixture.bindings.conversation_action({
+    clientRequestId: "archive-bulk-conflict",
+    action: "archive",
+    targets: fixture.targets,
+  });
+
+  expect(archived).toMatchObject({
+    projectsTouched: [fixture.project],
+    outcomes: [
+      ...fixture.pathsByTarget.slice(0, -1).map((paths) => ({ paths, outcome: "archived" })),
+      { paths: fixture.pathsByTarget.at(-1)!.slice(0, 2), outcome: "archived" },
+    ],
+  });
+  expect(boardFor(fixture.project, fixture.boardFile)).toMatchObject({
+    revision: 2,
+    prefs: { hidden: fixture.allPaths },
+  });
+});
+
+test("conversation_action refuses archive batches above 100 before reading board or runtime state", async () => {
+  let reads = 0;
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => { reads += 1; return {} as never; },
+    boardFor: () => { reads += 1; return {} as never; },
+    applyConversationAction: async () => { reads += 1; return {} as never; },
+  } as never);
+  const targets = Array.from({ length: 101 }, (_, index) => ({ transcriptPath: `/fixtures/project/session-${index}.jsonl` }));
+
+  await expect(bindings.conversation_action({
+    clientRequestId: "archive-too-many",
+    action: "archive",
+    targets,
+  })).rejects.toThrow("targets supports at most 100 conversations per call");
+  expect(reads).toBe(0);
+});
+
 test("conversation_migration delegates to the revision-fenced migration command with a stable receipt", async () => {
   const requests: unknown[] = [];
   const bindings = viewerMcpBindings(undefined, undefined, {
@@ -871,10 +1617,15 @@ test("a refused pipeline close exposes its host report through MCP, not only pro
     stillRunning: [{ stageId: "build", attempt: 2, conversationId: "conversation_build", agentPath: null, paneId: "%7", error: "structured runtime host is unavailable" }],
     worktree: { dir: "/repo-pipeline-1", uncommitted: ["notes.md"], truncated: false },
   };
+  let pauseActor: unknown;
   const bindings = viewerMcpBindings(undefined, undefined, {
-    patchPipeline: async (_id: string, request: { action?: string }) => (request.action === "close"
-      ? { error: "could not stop stage build attempt 2 (conversation_build): structured runtime host is unavailable", status: 409, close }
-      : { pipeline: { id: "pipeline_1", state: "paused" } }),
+    patchPipeline: async (_id: string, request: { action?: string }, _ports: unknown, actor: unknown) => {
+      if (request.action === "pause") pauseActor = actor;
+      return request.action === "close"
+        ? { error: "could not stop stage build attempt 2 (conversation_build): structured runtime host is unavailable", status: 409, close }
+        : { pipeline: { id: "pipeline_1", state: "paused" } };
+    },
+    callerAttribution: () => ({ kind: "manager", conversationId: "conversation_orchestrator", role: "orchestrator" }),
   } as never);
   const results = new Map<string, McpToolResult>();
   const service = createMcpToolService(bindings, {
@@ -904,6 +1655,7 @@ test("a refused pipeline close exposes its host report through MCP, not only pro
   });
   expect(paused).toMatchObject({ ok: true, pipelineId: "pipeline_1" });
   expect((paused as { details?: unknown }).details).toBeUndefined();
+  expect(pauseActor).toEqual({ kind: "agent", role: "orchestrator", conversationId: "conversation_orchestrator" });
 });
 
 test("agent_activity reports the liveness snapshot and journals the stalls it finds (#645)", async () => {
@@ -947,6 +1699,231 @@ test("agent_activity reports the liveness snapshot and journals the stalls it fi
   });
   expect(journaled).toHaveLength(1);
 });
+
+test("agent_activity exposes a provider throttle retryAt without journaling a stall", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-provider-throttle-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const now = Date.parse("2026-08-23T09:00:00.000Z");
+  const retryAt = "2026-08-23T09:12:00.000Z";
+  const transcriptPath = "/transcripts/provider-throttled.jsonl";
+  const accountId = "account-a";
+  const journaled: unknown[] = [];
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    livenessSources: () => ({
+      now: () => now,
+      probe: { now: () => now, pidAlive: () => true, processIdentity: () => "host-start" },
+      listFiles: async () => [{
+        path: transcriptPath,
+        project: "viewer",
+        title: "stage agent",
+        engine: "codex",
+        activity: "stalled",
+        activityReason: "jsonl_turn_stalled",
+        mtime: Date.parse("2026-08-23T08:20:00.000Z") / 1000,
+        conversationId: "conversation_provider_throttled",
+      }],
+      registrySnapshot: () => ({
+        entries: {
+          "codex:provider-throttled": {
+            key: { engine: "codex", accountId, sessionId: "provider-throttled" },
+            artifactPath: transcriptPath,
+            cwd: "/repo",
+            accountId,
+            status: "live",
+            host: null,
+            structuredHost: {
+              kind: "codex-app-server",
+              endpoint: "unix:/tmp/host.sock",
+              process: { pid: 42, startIdentity: "host-start" },
+              eventCursor: 0,
+              protocolVersion: null,
+              writerClaimEpoch: 1,
+              activeTurnRef: null,
+              pendingAttention: [],
+              activeFlags: [],
+            },
+            claimEpoch: 1,
+            claimOwner: null,
+            pendingAction: null,
+            updatedAt: "2026-08-23T08:00:00.000Z",
+          },
+        },
+        conversations: {},
+      }),
+      pipelines: () => [],
+      describeTranscript: async () => null,
+      transcriptEvidence: async () => ({ turn: "busy", lastRecordTs: Date.parse("2026-08-23T08:20:00.000Z") }),
+      limitsProvenance: (engine: "claude" | "codex", requestedAccountId: string) => {
+        expect([engine, requestedAccountId]).toEqual(["codex", accountId]);
+        return { source: "cache", reason: "oauth-rate-limited", staleSince: null, retryAt };
+      },
+    }),
+    refreshLifecycleJournal: (input: unknown) => {
+      journaled.push(input);
+      return { appended: 0, skipped: 0, throttled: false };
+    },
+  } as never);
+
+  const result = await bindings.agent_activity({ clientRequestId: "activity-provider-throttle", liveOnly: true });
+
+  expect(result).toMatchObject({ count: 1, stalledCount: 0, journaled: 0 });
+  expect((result.conversations as Array<Record<string, unknown>>)[0]).toMatchObject({
+    lifecycle: "waiting",
+    reason: "provider_throttled",
+    retryAt,
+  });
+  expect(journaled).toHaveLength(1);
+});
+
+/**
+ * #860 — the two bounds the project-scoped liveness read was missing at this
+ * binding: the catalog it reads and the caller's lifetime.
+ */
+function activityRow(overrides: Partial<FileEntry> & { path: string }): FileEntry {
+  return {
+    root: "claude-projects" as FileEntry["root"],
+    name: path.basename(overrides.path),
+    project: "viewer",
+    title: "stage agent",
+    engine: "codex",
+    kind: "session",
+    fmt: "claude" as FileEntry["fmt"],
+    parent: null,
+    mtime: Date.parse("2026-08-22T08:55:00.000Z") / 1000,
+    size: 4096,
+    activity: "idle",
+    activityReason: "mtime_old",
+    proc: null,
+    pid: null,
+    ...overrides,
+  } as FileEntry;
+}
+
+test("project-scoped agent_activity selects from the binding's cached catalog and forces no fresh sweep (#860)", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-activity-catalog-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const now = Date.parse("2026-08-22T09:00:00.000Z");
+  const catalogReads: Array<{ signal?: AbortSignal | null }> = [];
+  let freshSweeps = 0;
+  let handedCatalog: CompletedGenerationRead | null = null;
+  const files = [
+    activityRow({ path: "/corpus/viewer/live.jsonl", activity: "stalled", activityReason: "jsonl_turn_stalled", conversationId: "conversation_selected" }),
+    activityRow({ path: "/corpus/viewer/idle.jsonl" }),
+    activityRow({ path: "/corpus/other/live.jsonl", project: "other", activity: "stalled", activityReason: "jsonl_turn_stalled" }),
+  ];
+  /* The completed generation the board path reads. A fresh whole-corpus sweep
+     would have to come through one of the two counters below. */
+  const cachedCatalogRead: CompletedGenerationRead = async (options) => {
+    catalogReads.push(options ?? {});
+    return {
+      snapshot: { files, projectCatalog: [], complete: true },
+      generation: 11,
+      targetGeneration: 11,
+      cacheStatus: "hit" as const,
+      requestCount: 1,
+      cloneDurationMs: 0,
+    };
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    completedFileScan: cachedCatalogRead,
+    listFiles: async () => { freshSweeps += 1; return files; },
+    /* Production's own selection wiring over whatever catalog read the binding
+       hands in, with only the environment-touching seams stubbed. The fallback
+       keeps a regression here off the real scanner instead of sweeping the
+       machine the test runs on. */
+    livenessSources: (catalog?: { completedFileScan?: CompletedGenerationRead }) => ({
+      ...productionLivenessSources({ completedFileScan: (handedCatalog = catalog?.completedFileScan ?? null) ?? cachedCatalogRead }),
+      now: () => now,
+      probe: { now: () => now, pidAlive: () => false, processIdentity: () => null },
+      registrySnapshot: () => ({ entries: {}, conversations: {} }),
+      pipelines: () => [],
+      describeTranscript: async () => null,
+      transcriptEvidence: async () => ({ turn: "busy", lastRecordTs: Date.parse("2026-08-22T08:40:00.000Z") }),
+      listFiles: async () => { freshSweeps += 1; return files; },
+    }),
+    refreshLifecycleJournal: () => ({ appended: 0, skipped: 0, throttled: false }),
+  } as never);
+
+  const result = await bindings.agent_activity({
+    clientRequestId: "activity-860-catalog",
+    project: "viewer",
+    liveOnly: true,
+    limit: 10,
+  });
+
+  expect(result).toMatchObject({ count: 1 });
+  expect(result.selection).toMatchObject({
+    scope: "project",
+    freshScan: false,
+    generation: 11,
+    cacheStatus: "hit",
+    scanned: 3,
+    matched: 1,
+    selected: 1,
+  });
+  expect((result.conversations as Array<Record<string, unknown>>)[0]).toMatchObject({
+    conversationId: "conversation_selected",
+    project: "viewer",
+  });
+  expect(freshSweeps).toBe(0);
+  expect(catalogReads).toHaveLength(1);
+  /* The catalog the read consumed is the binding's own, so `agent_activity` and
+     `board_snapshot` share one generation. */
+  expect(handedCatalog as CompletedGenerationRead | null).toBe(cachedCatalogRead);
+});
+
+test("agent_activity stops the liveness read at the call deadline instead of hanging the caller (#860)", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-activity-deadline-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  let observed: AbortSignal | null = null;
+  let journalWrites = 0;
+  let entered: () => void = () => {};
+  const reached = new Promise<void>((resolve) => { entered = resolve; });
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    livenessSources: () => ({
+      now: () => Date.now(),
+      probe: { now: () => Date.now(), pidAlive: () => false, processIdentity: () => null },
+      registrySnapshot: () => ({ entries: {}, conversations: {} }),
+      pipelines: () => [],
+      describeTranscript: async () => null,
+      transcriptEvidence: async () => null,
+      /* A cold generation that never publishes — the 70-second shape the issue
+         reported. Only the caller's signal can end this call. */
+      selectInventory: (_request: unknown, options?: { signal?: AbortSignal | null }) => new Promise<never>((_resolve, reject) => {
+        observed = options?.signal ?? null;
+        options?.signal?.addEventListener(
+          "abort",
+          () => { reject(new DOMException("catalog selection cancelled", "AbortError")); },
+          { once: true },
+        );
+        entered();
+      }),
+    }),
+    refreshLifecycleJournal: () => { journalWrites += 1; return { appended: 0, skipped: 0, throttled: false }; },
+  } as never);
+
+  const pending = bindings.agent_activity(
+    { clientRequestId: "activity-860-deadline", project: "viewer", liveOnly: true, limit: 10 },
+    { deadlineAt: Date.now() + 25 },
+  );
+  await reached;
+
+  /* Self-bounded: a regression that ignores the deadline fails this assertion
+     instead of hanging the suite on a call that never returns. */
+  const guard = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => { reject(new Error("agent_activity did not stop at the call deadline")); }, 2_000);
+  });
+  await expect(Promise.race([pending, guard])).rejects.toThrow("catalog selection cancelled");
+  expect(observed).not.toBeNull();
+  expect((observed as unknown as AbortSignal).aborted).toBe(true);
+  expect((observed as unknown as AbortSignal).reason).toBeInstanceOf(DeadlineExceededError);
+  /* Nothing was journaled: the call that no caller is waiting for records no
+     lifecycle evidence either. */
+  expect(journalWrites).toBe(0);
+}, 10_000);
 
 test("lifecycle_events projects the runtime deployment ledger into the journal (#686)", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-deploy-events-"));
@@ -1058,4 +2035,60 @@ test("lifecycle_events queries the journal by lineage and polls the bounded dige
     .rejects.toThrow("subscriberId is required for mode=digest");
   await expect(bindings.lifecycle_events({ clientRequestId: "bad-type", type: "not_a_type" }))
     .rejects.toThrow("unknown lifecycle event type: not_a_type");
+});
+
+/* #1026 — an agent driving the board must not get less than an HTTP caller: a
+   rejected create carries every violated constraint, with its field and the
+   shape that field expects, as structured refusal details. */
+test("create_pipeline refuses with every violated constraint attached", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-binding-pipeline-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const bindings = viewerMcpBindings();
+
+  const refusal = await bindings.create_pipeline({
+    clientRequestId: "create-pipeline-invalid",
+    task: "Batched contract",
+    repoDir: path.join(sandbox, "repo"),
+    src: path.join(sandbox, "creator.jsonl"),
+    stages: [{ id: "build", kind: "implement", prompt: "build" }],
+  }, { signal: undefined, deadlineAt: Date.now() + 30_000 } as never).then(
+    () => null,
+    (error: unknown) => error as Error & { details?: { violations?: Array<{ field: string; expected: string }> } },
+  );
+
+  expect(refusal?.name).toBe("McpToolRefusal");
+  expect(refusal?.details?.violations?.map((violation) => violation.field)).toEqual(["src", "stages[0].kind"]);
+  for (const violation of refusal?.details?.violations ?? []) expect(violation.expected.length).toBeGreaterThan(0);
+  expect(refusal?.message).toContain("stages[0].kind: stage kind must be run or review-loop");
+});
+
+test("create_pipeline batches every invalid stage model with each engine catalog", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-binding-pipeline-models-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const bindings = viewerMcpBindings();
+
+  const refusal = await bindings.create_pipeline({
+    clientRequestId: "create-pipeline-invalid-models",
+    task: "Validate model catalog",
+    repoDir: path.join(sandbox, "repo"),
+    src: path.join(sandbox, "creator.jsonl"),
+    stages: [
+      { id: "build", kind: "run", engine: "codex", model: "gpt-5.6-codex", prompt: "build", next: "review" },
+      { id: "review", kind: "review-loop", engine: "claude", model: "claude-fable-5", prompt: "review", next: null },
+    ],
+  }, { signal: undefined, deadlineAt: Date.now() + 30_000 } as never).then(
+    () => null,
+    (error: unknown) => error as Error & { details?: { violations?: Array<{ field: string; message: string }> } },
+  );
+
+  expect(refusal?.name).toBe("McpToolRefusal");
+  expect(refusal?.details?.violations?.map((violation) => violation.field)).toEqual([
+    "src",
+    "stages[0].model",
+    "stages[1].model",
+  ]);
+  expect(refusal?.message).toContain("valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
+  expect(refusal?.message).toContain("valid claude model ids: opus, fable, sonnet, haiku");
 });

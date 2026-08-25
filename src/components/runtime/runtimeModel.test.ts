@@ -170,12 +170,51 @@ describe("live turn delta buffering", () => {
     expect(store.sessions["conv_a"]?.liveTurn?.items).toHaveLength(2);
   });
 
-  test("a started item leaves the live buffer alone", () => {
+  test("a started non-tool item leaves the live buffer alone", () => {
     let store = installSnapshot(snapshot());
     store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, { conversationId: "conv_a", turnId: "t1" }));
     store = apply(store, env("delta", { type: "session", id: "conv_a" }, 5, { conversationId: "conv_a", turnId: "t1", text: "streaming" }));
     store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, { conversationId: "conv_a", turnId: "t1", phase: "started", item: {} }));
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 7, { conversationId: "conv_a", turnId: "t1", phase: "started", item: { type: "agentMessage", id: "m1", text: "" } }));
     expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("streaming");
+    expect(store.sessions["conv_a"]?.liveTurn?.items).toHaveLength(1);
+  });
+
+  test("issue 1100: a Codex tool item runs on `started`, settles on `completed`, interleaved with prose", () => {
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, { conversationId: "conv_a", turnId: "t1" }));
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 5, {
+      conversationId: "conv_a", turnId: "t1", phase: "started",
+      item: { type: "commandExecution", id: "call_1", command: "bun test", cwd: "/repo", status: "inProgress" },
+    }));
+    expect(store.sessions["conv_a"]?.liveTurn?.items).toEqual([
+      expect.objectContaining({ itemId: "call_1", tool: expect.objectContaining({ name: "shell", status: "run", engine: "codex", args: { cmd: "bun test", workdir: "/repo" } }) }),
+    ]);
+    store = apply(store, env("delta", { type: "session", id: "conv_a" }, 6, { conversationId: "conv_a", turnId: "t1", text: "Tests pass." }));
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 7, {
+      conversationId: "conv_a", turnId: "t1", phase: "completed",
+      item: { type: "commandExecution", id: "call_1", command: "bun test", cwd: "/repo", status: "completed", exitCode: 0 },
+    }));
+    const items = store.sessions["conv_a"]?.liveTurn?.items ?? [];
+    expect(items.map((item) => item.tool ? `tool:${item.tool.status}` : `text:${item.text}`)).toEqual(["tool:ok", "text:Tests pass."]);
+    expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("Tests pass.");
+  });
+
+  test("issue 1100: a Claude assistant item's tool_use blocks become running rows; its tool_result settles them", () => {
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, { conversationId: "conv_a", turnId: "t1" }));
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 5, {
+      conversationId: "conv_a", turnId: "t1", phase: "completed",
+      item: { type: "assistant", uuid: "u-tool", message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "/repo/a.ts" } }] } },
+    }));
+    expect(store.sessions["conv_a"]?.liveTurn?.items).toEqual([
+      expect.objectContaining({ itemId: "toolu_1", phase: "awaiting-echo", tool: expect.objectContaining({ name: "Read", status: "run", engine: "claude" }) }),
+    ]);
+    store = apply(store, env("item", { type: "session", id: "conv_a" }, 6, {
+      conversationId: "conv_a", turnId: "t1", phase: "completed",
+      item: { type: "user", uuid: "u-result", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", is_error: true }] } },
+    }));
+    expect(store.sessions["conv_a"]?.liveTurn?.items?.[0]?.tool?.status).toBe("err");
   });
 
   test("issue 626: authoritative completion replaces streamed prefixes and divergent drafts while empty completion preserves the stream", () => {
@@ -441,6 +480,18 @@ describe("attention", () => {
     store = apply(store, env("attention-resolved", { type: "session", id: "conv_a" }, 5, { attentionId: "a1", conversationId: "conv_a" }));
     expect(store.sessions["conv_a"]?.attentionIds).toEqual([]);
     expect(store.attentions["a1"]?.state).toBe("resolved");
+  });
+
+  test("an engine-host resolution carrying only `id` still retires the card (#765)", () => {
+    /* projectEngineHostEvent payloads named the attention `id` before #765;
+       already-journaled ledgers replay that shape forever, so the reducer
+       accepts it — otherwise a CLI-cancelled question stays pinned as open. */
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("attention", { type: "session", id: "conv_a" }, 4, attention({ id: "a1", conversationId: "conv_a" })));
+    store = apply(store, env("attention-resolved", { type: "session", id: "conv_a" }, 5, { id: "a1", conversationId: "conv_a", state: "cancelled", resolution: "turn-ended" }));
+    expect(store.sessions["conv_a"]?.attentionIds).toEqual([]);
+    expect(store.attentions["a1"]?.state).toBe("cancelled");
+    expect(openAttentions(store, store.sessions["conv_a"]!)).toEqual([]);
   });
 });
 

@@ -5,11 +5,18 @@ import path from "node:path";
 import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
 import { forEachCooperatively, mapCooperatively } from "../cooperative";
 import { sessionProjectProjection } from "../session/titleProjection";
+import { scheduleTranscriptIndex, type TranscriptIndexFeed } from "../search/transcriptFeed";
 import { isClaudeWorkflowBookkeeping } from "./claudeNative";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
 import type { ConversationCatalogEntry } from "./conversationCatalog";
-import { beginProjectCatalogScan, projectCatalogSnapshotFromRaw, type ParsedFileSummary } from "./projectCatalog";
+import {
+  beginProjectCatalogScan,
+  isProjectCatalogScanCurrent,
+  projectCatalogSnapshotFromRaw,
+  type ParsedFileSummary,
+  type ProjectCatalogScanToken,
+} from "./projectCatalog";
 import { projectResolutionStateKey } from "./projectState";
 import { EXTS, ROOTS, scanRootEntries } from "./roots";
 import { selectSchemeWindow } from "./schemeWindow";
@@ -47,6 +54,7 @@ type ResourceScopeSnapshot = {
   projectCatalog: ProjectCatalogEntry[];
   complete: boolean;
 };
+type TranscriptIndexScheduler = (feed: TranscriptIndexFeed) => void;
 const DISCOVERY_DIAGNOSTIC_MS = 60_000;
 let lastDiscoveryDiagnosticAt = Number.NEGATIVE_INFINITY;
 
@@ -167,6 +175,36 @@ function rootEntries(roots: Roots | RootEntries): RootEntries {
 /** Rewrites foreign root forms of a transcript onto the roots this scan walked. */
 function canonicalizerFor(roots: Roots | RootEntries): TranscriptPathCanonicalizer {
   return createTranscriptPathCanonicalizer(rootEntries(roots).map(([, root]) => root));
+}
+
+function transcriptIndexFeed(
+  catalog: readonly ConversationCatalogEntry[],
+  complete: boolean,
+  projectByPath?: ReadonlyMap<string, string>,
+): TranscriptIndexFeed {
+  return {
+    complete,
+    sources: catalog.map((entry) => ({
+      path: entry.path,
+      project: projectByPath?.get(entry.path) ?? entry.project,
+      engine: entry.engine,
+      size: entry.size,
+      mtimeMs: entry.mtime * 1_000,
+    })),
+  };
+}
+
+function publishTranscriptIndexFeed(
+  catalog: readonly ConversationCatalogEntry[],
+  complete: boolean,
+  scanToken: ProjectCatalogScanToken,
+  projectByPath?: ReadonlyMap<string, string>,
+  scheduler?: TranscriptIndexScheduler,
+): void {
+  if (!isProjectCatalogScanCurrent(scanToken)) return;
+  const publish = scheduler
+    ?? (process.env.LLV_FILE_SCANNER_WORKER === "1" ? undefined : scheduleTranscriptIndex);
+  publish?.(transcriptIndexFeed(catalog, complete, projectByPath));
 }
 
 async function discoverRaw(
@@ -510,10 +548,15 @@ export async function discoverFilesWithProjectCatalog(
     hosted?: ReadonlySet<string>;
     resourceBaseline?: ResourceScopeSnapshot;
     onResourceSnapshot?: (snapshot: ResourceScopeSnapshot) => void;
+    /** Carries the uncapped catalog across the file-scanner process boundary. */
+    transportConversationCatalog?: boolean;
+    /** Focused-test seam for observing the non-awaited transcript index feed. */
+    transcriptIndexScheduler?: TranscriptIndexScheduler;
   } = {},
 ): Promise<{
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
+  conversationCatalog?: ConversationCatalogEntry[];
   pinOverlayPaths?: string[];
   complete: boolean;
 }> {
@@ -551,7 +594,26 @@ export async function discoverFilesWithProjectCatalog(
     canonicalizePath,
     canonicalizeTranscriptPaths(options.hosted, canonicalizePath),
   );
-  return { ...entries, projectCatalog, complete: snapshot.complete };
+  publishTranscriptIndexFeed(
+    snapshot.conversationCatalog,
+    snapshot.complete,
+    scanToken,
+    projectByPath,
+    options.transcriptIndexScheduler,
+  );
+  return {
+    ...entries,
+    projectCatalog,
+    ...(options.transportConversationCatalog
+      ? {
+          conversationCatalog: snapshot.conversationCatalog.map((entry) => ({
+            ...entry,
+            project: projectByPath.get(entry.path) ?? entry.project,
+          })),
+        }
+      : {}),
+    complete: snapshot.complete,
+  };
 }
 
 export async function discoverFiles(
@@ -572,7 +634,7 @@ export async function discoverFiles(
     snapshot.projectCatalog,
     canonicalizePath,
   );
-  return (await entriesFromRaw(
+  const entries = await entriesFromRaw(
     discovery.raw,
     projectByPath,
     demote,
@@ -580,7 +642,9 @@ export async function discoverFiles(
     snapshot.summaryByPath,
     canonicalizePath,
     canonicalizeTranscriptPaths(hosted, canonicalizePath),
-  )).files;
+  );
+  publishTranscriptIndexFeed(snapshot.conversationCatalog, snapshot.complete, scanToken, projectByPath);
+  return entries.files;
 }
 
 /** Cold-start fallback for the list/search route. It builds only lightweight
@@ -588,5 +652,6 @@ export async function discoverFiles(
 export async function refreshConversationCatalog(roots: Roots | RootEntries = scanRootEntries()): Promise<void> {
   const scanToken = beginProjectCatalogScan(false);
   const discovery = await discoverRaw(roots, createLimiter(48));
-  await projectCatalogSnapshotFromRaw(discovery.raw, { persist: false, scanToken, complete: discovery.complete });
+  const snapshot = await projectCatalogSnapshotFromRaw(discovery.raw, { persist: false, scanToken, complete: discovery.complete });
+  publishTranscriptIndexFeed(snapshot.conversationCatalog, snapshot.complete, scanToken, snapshot.projectByPath);
 }

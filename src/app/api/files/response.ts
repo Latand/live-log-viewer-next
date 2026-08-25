@@ -6,7 +6,13 @@ import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
 import { pinnedIdentityEntries } from "@/lib/scanner/pinRideAlong";
-import { agentRegistry, readOnlyConversationLookupFromSnapshot, supersedenceChainTail } from "@/lib/agent/registry";
+import { identityAlive, livenessProbe } from "@/lib/agent/accountLiveness";
+import {
+  agentRegistry,
+  readOnlyConversationLookupFromSnapshot,
+  supersedenceChainTail,
+  type AgentRegistryEntry,
+} from "@/lib/agent/registry";
 import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
@@ -25,8 +31,10 @@ import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { loadTasks } from "@/lib/tasks/store";
 import { projectSupersededTaskHandoffs } from "@/lib/tasks/supersedence";
+import { reportRunIdFromAttemptId, TELEGRAM_REPORT_PROJECT } from "@/lib/telegram/reportLineage";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
+import { cachedLimitsProvenance } from "@/lib/limits";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlayLineageProjectAffinity } from "@/lib/session/projectAffinity";
@@ -349,8 +357,15 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      provenance even when the root has no parent edge. Computed once per
      response so the per-file projection stays O(1). */
   const receiptOwnedConversationIds = new Set<string>();
+  /* The durable Telegram report-run marker (issue #1091) rides on the same
+     receipts: the attempt id spells the run id, so a report run is recognisable
+     from registry storage alone — no Daily Reports history file involved. */
+  const telegramReportRuns = new Map<string, string>();
   for (const receipt of Object.values(registrySnapshot.receipts)) {
-    receiptOwnedConversationIds.add(conversationLookup.canonicalConversationId(receipt.conversationId));
+    const conversationId = conversationLookup.canonicalConversationId(receipt.conversationId);
+    receiptOwnedConversationIds.add(conversationId);
+    const reportRunId = reportRunIdFromAttemptId(receipt.clientAttemptId);
+    if (reportRunId) telegramReportRuns.set(conversationId, reportRunId);
   }
   traceStep("receipt-owners");
   /* Supersedence lineage (issue #383): the reverse edge map gives each chain
@@ -458,12 +473,23 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       }
       const profile = latest.launchProfile;
       file.title = profile.title ?? file.title;
-      file.project = resolveProjectAttribution({
+      const telegramReportRunId = telegramReportRuns.get(conversation.id);
+      const attributed = resolveProjectAttribution({
         projectOwnership: conversation.projectOwnership,
         cwd: profile.cwd,
         launchProfileProject: profile.project,
         fallbackProject: file.project,
-      }).project ?? file.project;
+      });
+      /* The durable report-run marker groups the run (#1091). A report run has
+         no repository: it works in a neutral scratch directory, which every
+         path below ownership would read as a project of its own, so the marker
+         is what keeps the runs collected under the Telegram project — from
+         registry evidence alone, with no Daily Reports history file involved.
+         An explicit ownership record still outranks it: an operator who moved
+         the card moved it. */
+      file.project = attributed.source === "ownership" || !telegramReportRunId
+        ? attributed.project ?? file.project
+        : TELEGRAM_REPORT_PROJECT;
       if (conversation.projectOwnership) file.projectOwnership = { ...conversation.projectOwnership };
       file.launchModel = profile.model ?? file.launchModel;
       file.effort = profile.effort ?? file.effort;
@@ -478,6 +504,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       } else if (durableEdge?.source === "viewer-spawn" || receiptOwnedConversationIds.has(conversation.id)) {
         file.spawnOrigin = "viewer";
       }
+      if (telegramReportRunId) file.telegramReport = { runId: telegramReportRunId };
       const memberships = registrySnapshot.memberships[conversation.id] ?? [];
       if (durableEdge || memberships.length) {
         file.durableLineage = {
@@ -701,7 +728,20 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   timings.push(`files-flows;dur=${(performance.now() - flowsStartedAt).toFixed(1)}`);
   markTiming("files-stores");
   const projectsStartedAt = performance.now();
-  const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
+  const hostProbe = livenessProbe();
+  const projected = projectRateLimitReadModel(
+    files,
+    flows,
+    registrySnapshot,
+    Date.now(),
+    cachedLimitsProvenance,
+    (entry) => {
+      const fullEntry = entry as AgentRegistryEntry;
+      return identityAlive(fullEntry.host?.agent, hostProbe)
+        || identityAlive(fullEntry.host?.panePid, hostProbe)
+        || identityAlive(fullEntry.structuredHost?.process, hostProbe);
+    },
+  );
   markTiming("files-project-rate-limits");
   let effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
   const projectAliases = projectAliasSnapshot();
@@ -755,9 +795,12 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     ...workflows.map((workflow) => workflow.project),
     ...tasks.tasks.map((task) => task.project),
   ];
+  /* Explicit project attribution can leave a foreign repository root on a
+     catalog row. Keep roots the scanner resolves back into that project. */
   const projectCwds = Object.fromEntries(
     effectiveProjectCatalog
-      .filter((entry): entry is ProjectCatalogEntry & { projectRoot: string } => Boolean(entry.projectRoot))
+      .filter((entry): entry is ProjectCatalogEntry & { projectRoot: string } =>
+        typeof entry.projectRoot === "string" && projectInfoFromCwd(entry.projectRoot)?.project === entry.project)
       .map((entry) => [entry.project, entry.projectRoot]),
   );
   const missingProjectCwds = [...new Set(visibleProjects)].filter((project) => !projectCwds[project]);

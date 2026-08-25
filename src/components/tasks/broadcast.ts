@@ -15,7 +15,8 @@ export async function tmuxSend(file: FileEntry, text: string, images: BroadcastI
     const res = await fetch("/api/tmux", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pid: file.pid ?? undefined, path: file.path, text, images }),
+      /* #1117: a broadcast is the operator's own message to each target. */
+      body: JSON.stringify({ pid: file.pid ?? undefined, path: file.path, text, images, origin: { kind: "operator" } }),
     });
     const json = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
     if (!res.ok || !json?.ok) return json?.error ?? translate(getLocale(), "common.failedSend");

@@ -10,6 +10,7 @@ import { statePath } from "@/lib/configDir";
 import { WINDOW_SECONDS, clampPercent, mergeSamples, type WindowKey } from "@/lib/burndown";
 import { relabelCachedWindows, routeWindowsByHorizon, SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
 import { historySamples, historySince, recordLimitSample, RETENTION_S } from "@/lib/limitsHistoryStore";
+import { quotaAsEngineLimits, quotaUsesSource, reconcileQuotaReadings } from "@/lib/rateLimit";
 import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type BurndownPayload, type BurndownSeries, type EngineBurndown, type EngineLimits, type LimitSample, type LimitsPayload, type LimitsProvenance, type LimitWindow } from "./types";
 
 /** Resolved at call time (not module load) so LLV_STATE_DIR set after this
@@ -24,15 +25,24 @@ const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const TAIL_BYTES = 192 * 1024;
 /** Newest session files to try before giving up (fresh ones may lack limits). */
 const MAX_FILES = 12;
+/** Date buckets inspected for newly created sessions. Recent history supplies
+    active long-running sessions whose start bucket has aged past this bound. */
+const MAX_RECENT_SESSION_DAYS = 8;
 const CACHE_MS = 30_000;
 const FAILURE_COOLDOWN_MS = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60_000;
 const CODEX_INITIALIZE_TIMEOUT_REASON = "app-server-initialize-timeout";
 
+export { providerThrottleRetryAt, PROVIDER_THROTTLE_GRACE_MS } from "./limitsThrottle";
+
 type EngineName = "claude" | "codex";
 type EngineCacheEntry = {
   at: number;
   data: EngineLimits | null;
+  /** The last reading not derived from a provider rejection. Projections are
+      served from `data`, so polls stay stable, while this keeps the number the
+      projection was computed from recoverable once it expires. */
+  baseData?: EngineLimits | null;
   provenance: LimitsProvenance;
   retryAt?: number | null;
   consecutive429s?: number;
@@ -41,8 +51,13 @@ type EngineCacheEntry = {
 type LimitsCache = { version: 2; engines: Record<EngineName, Record<string, EngineCacheEntry>> };
 export type LimitRead = {
   data: EngineLimits | null;
+  /** The reading `data` would have been without a rejection projected onto it,
+      so what the cache keeps is never itself rejection-derived. */
+  baseData?: EngineLimits | null;
   reason: string | null;
   source: "live" | "transcript" | "unavailable";
+  /** Newest provider rejection even when the readable tail has no quota event. */
+  rejectedAt?: number | null;
   retryAt?: number;
   backoffReason?: typeof CODEX_INITIALIZE_TIMEOUT_REASON;
 };
@@ -79,6 +94,7 @@ function safeCacheEntry(value: unknown): EngineCacheEntry | null {
       (typeof provenance.reason !== "string" && provenance.reason !== null) ||
       (typeof provenance.staleSince !== "string" && provenance.staleSince !== null) ||
       (provenance.retryAt !== undefined && typeof provenance.retryAt !== "string" && provenance.retryAt !== null) ||
+      (entry.baseData !== undefined && entry.baseData !== null && typeof entry.baseData !== "object") ||
       (entry.retryAt !== undefined && entry.retryAt !== null && typeof entry.retryAt !== "number") ||
       (entry.consecutive429s !== undefined && (!Number.isInteger(entry.consecutive429s) || entry.consecutive429s < 0)) ||
       (entry.consecutiveInitializeTimeouts !== undefined && (!Number.isInteger(entry.consecutiveInitializeTimeouts) || entry.consecutiveInitializeTimeouts < 0))) return null;
@@ -98,7 +114,9 @@ function readDiskCache(): LimitsCache {
           // Snapshots written before the horizon fix can carry a weekly window
           // under `session`; relabel on read so a degraded account still shows
           // its number under the horizon that number actually has.
-          if (valid) cache.engines[engine][id] = engine === "codex" ? { ...valid, data: relabelCachedWindows(valid.data) } : valid;
+          if (valid) cache.engines[engine][id] = engine === "codex"
+            ? { ...valid, data: relabelCachedWindows(valid.data), ...(valid.baseData === undefined ? {} : { baseData: relabelCachedWindows(valid.baseData) }) }
+            : valid;
         }
       }
       return cache;
@@ -151,8 +169,20 @@ function lastCache(engine: EngineName, accountId: string): EngineCacheEntry | nu
   return cache().engines[engine][accountId] ?? null;
 }
 
+/** Read-only account provenance for lifecycle/card projections. This never
+    refreshes limits or changes which account is active. */
+export function cachedLimitsProvenance(
+  engine: "claude" | "codex",
+  accountId: string,
+): LimitsProvenance | null {
+  const provenance = lastCache(engine, accountId)?.provenance;
+  return provenance ? { ...provenance } : null;
+}
+
 type ResolvedRead = {
   data: EngineLimits | null;
+  /** What the cache should keep when it differs from what this read serves. */
+  baseData?: EngineLimits | null;
   meta: LimitsProvenance;
   retryAt: number | null;
   consecutive429s: number;
@@ -163,6 +193,7 @@ function remember(engine: EngineName, accountId: string, resolved: ResolvedRead,
   cache().engines[engine][accountId] = {
     at: now,
     data: resolved.data,
+    baseData: resolved.baseData !== undefined ? resolved.baseData : resolved.data,
     provenance: resolved.meta,
     retryAt: resolved.retryAt,
     consecutive429s: resolved.consecutive429s,
@@ -194,6 +225,7 @@ function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSinc
     const retryAt = initializeTimedOut ? now + initializeBackoffMs : null;
     return {
       data: read.data,
+      ...(read.baseData ? { baseData: read.baseData } : {}),
       meta: { source: read.source, reason: read.reason, staleSince: read.reason ? staleSince : null, retryAt: retryAt ? new Date(retryAt).toISOString() : null },
       retryAt,
       consecutive429s: 0,
@@ -207,13 +239,31 @@ function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSinc
     ? Math.min(FAILURE_COOLDOWN_MS * (2 ** (consecutive429s - 1)), MAX_RATE_LIMIT_BACKOFF_MS)
     : FAILURE_COOLDOWN_MS;
   const retryAt = Math.max(now + exponentialMs, read.retryAt ?? 0);
+  // Project from — and fall back to — the last reading that was not itself
+  // derived from a rejection, so a projection never becomes the evidence the
+  // next poll projects from or the number that outlives it.
+  const base = cached?.baseData !== undefined ? cached.baseData : cached?.data ?? null;
+  const cachedRejection = base ? rejectionReading(base, read.rejectedAt) : null;
+  // A rejection projected onto cache does not make the failed probe succeed:
+  // the read keeps the backoff it earned, and the projection is presented only
+  // while the exhaustion it describes is still running.
+  if (cachedRejection && exhaustionRunning(cachedRejection, now / 1000)) {
+    return {
+      data: cachedRejection,
+      meta: { source: "transcript", reason: read.reason, staleSince: null, retryAt: new Date(retryAt).toISOString() },
+      retryAt,
+      consecutive429s,
+      consecutiveInitializeTimeouts,
+      baseData: base,
+    };
+  }
   const meta: LimitsProvenance = {
-    source: cached?.data ? "cache" : "unavailable",
+    source: base ? "cache" : "unavailable",
     reason: read.reason,
     staleSince: cached?.provenance.staleSince ?? staleSince,
     retryAt: new Date(retryAt).toISOString(),
   };
-  return { data: cached?.data ?? null, meta, retryAt, consecutive429s, consecutiveInitializeTimeouts };
+  return { data: base, meta, retryAt, consecutive429s, consecutiveInitializeTimeouts };
 }
 
 function cachedRead(entry: EngineCacheEntry): ResolvedRead {
@@ -278,7 +328,7 @@ export async function readLimits(options: { codexLiveReader?: CodexLiveLimitsRea
   const codexAccount = accountForSpawn();
   const [resolvedClaude, resolvedCodex] = await Promise.all([
     resolveEngineRead("claude", claudeAccount.id, now, clock, () => fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json"), clock)),
-    resolveEngineRead("codex", codexAccount.id, now, clock, () => readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader })),
+    resolveEngineRead("codex", codexAccount.id, now, clock, () => readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader, now: clock })),
   ]);
   return {
     claude: resolvedClaude.data,
@@ -396,27 +446,66 @@ export function mapAppServerRateLimits(rateLimits: AppServerRateLimits, captured
 }
 
 /**
- * Every Codex home receives a fresh structured snapshot from the app-server. The
- * transcript scanner remains a compatibility fallback when that local host is
- * unavailable; its reason keeps old quota data visibly stale.
+ * Every Codex home receives a structured app-server snapshot and a transcript
+ * observation. The two are reconciled per window; an active provider exhaustion
+ * remains authoritative through its reset, while ordinary conflicts use time.
  */
 export async function readCodexLimits(options: {
   account?: Pick<CodexAccount, "id" | "kind" | "home" | "sessionsDir">;
   liveReader?: CodexLiveLimitsReader;
+  now?: () => number;
 } = {}): Promise<LimitRead> {
   const account = options.account ?? accountForSpawn();
+  const clock = options.now ?? Date.now;
+  const transcript = readCodexTranscriptLimits(account.sessionsDir);
   try {
     const rateLimits = await (options.liveReader ?? ((candidate) => managedCodexRuntime().readRateLimits(candidate as CodexAccount)))(account);
-    return { data: mapAppServerRateLimits(rateLimits), reason: null, source: "live" };
+    const observedAt = clock() / 1000;
+    const live = mapAppServerRateLimits(rateLimits, observedAt);
+    // One validated projection, onto the candidate the rejection is about: the
+    // transcript snapshot when it covers the rejection, otherwise the live
+    // window a newer rejection belongs to.
+    const projected = (transcript.data ? rejectionReading(transcript.data, transcript.rejectedAt) : null)
+      ?? rejectionReading(live, transcript.rejectedAt);
+    const transcriptLimits = projected ?? transcript.data;
+    if (!transcriptLimits) return { data: live, reason: null, source: "live" };
+    const reconcile = (limits: EngineLimits) => reconcileQuotaReadings(
+      { limits: live, observedAt: live.capturedAt, stale: false, source: "live" },
+      { limits, observedAt: limits.capturedAt, stale: false, source: "transcript" },
+      observedAt,
+    );
+    const reconciled = reconcile(transcriptLimits);
+    const transcriptWon = quotaUsesSource(reconciled, "transcript");
+    // What this read would have been without the rejection, so the cache keeps
+    // a reading no projection shaped and the number an expired exhaustion
+    // overrode comes back when it expires.
+    const unprojected = projected ? (transcript.data ? quotaAsEngineLimits(reconcile(transcript.data)) : live) : null;
+    return {
+      data: quotaAsEngineLimits(reconciled),
+      ...(unprojected ? { baseData: unprojected } : {}),
+      reason: transcriptWon ? "transcript-reconciled" : null,
+      source: transcriptWon ? "transcript" : "live",
+    };
   } catch (error) {
     const detail = redactAppServerDetail(error instanceof Error ? error.message : String(error));
     const initializeTimedOut = /request timed out:\s*initialize\b/i.test(detail);
     console.warn(`[limits] Codex app-server probe for ${account.id} failed: ${detail}`);
-    const fallback = readCodexTranscriptLimits(account.sessionsDir);
-    if (fallback.data) return {
-      data: fallback.data,
-      reason: "transcript-fallback",
-      source: "transcript",
+    if (transcript.data) {
+      // With no probe to reconcile against, nothing downstream would retire the
+      // projection, so it is served only while the exhaustion it describes is
+      // still running; past that the transcript's own reading is the truth.
+      const projection = rejectionReading(transcript.data, transcript.rejectedAt);
+      const data = projection && exhaustionRunning(projection, clock() / 1000) ? projection : transcript.data;
+      return {
+        data,
+        ...(data === projection ? { baseData: transcript.data } : {}),
+        reason: "transcript-fallback",
+        source: "transcript",
+        ...(initializeTimedOut ? { backoffReason: CODEX_INITIALIZE_TIMEOUT_REASON } : {}),
+      };
+    }
+    if (transcript.rejectedAt !== null && transcript.rejectedAt !== undefined) return {
+      ...transcript,
       ...(initializeTimedOut ? { backoffReason: CODEX_INITIALIZE_TIMEOUT_REASON } : {}),
     };
     return { data: null, reason: initializeTimedOut ? CODEX_INITIALIZE_TIMEOUT_REASON : "app-server-unavailable", source: "unavailable" };
@@ -426,11 +515,23 @@ export async function readCodexLimits(options: {
 /** Compatibility reader for legacy homes and unavailable app-server children. */
 export function readCodexTranscriptLimits(sessionsDir = accountForSpawn().sessionsDir): LimitRead {
   let scanned = 0;
+  let latest: EngineLimits | null = null;
+  let rejectedAt: number | null = null;
   for (const file of latestSessionFiles(sessionsDir)) {
     scanned += 1;
-    const hit = lastRateLimits(file);
-    if (hit) return { data: hit, reason: null, source: "transcript" };
+    const scan = lastRateLimits(file);
+    if (scan.rejectedAt !== null && (rejectedAt === null || scan.rejectedAt > rejectedAt)) rejectedAt = scan.rejectedAt;
+    if (scan.data && (!latest || latest.capturedAt === null || (scan.data.capturedAt !== null && scan.data.capturedAt > latest.capturedAt))) latest = scan.data;
   }
+  if (latest) {
+    // The rejection travels to whichever consumer projects it, so the snapshot
+    // leaves here exactly as the transcript recorded it. A quota event captured
+    // after the rejection is the provider's later word on the same account, so
+    // the rejection stops travelling at that point.
+    const newest = rejectedAt !== null && (latest.capturedAt === null || rejectedAt >= latest.capturedAt) ? rejectedAt : null;
+    return { data: latest, reason: null, source: "transcript", rejectedAt: newest };
+  }
+  if (rejectedAt !== null) return { data: null, reason: "usage-limit-exceeded", source: "transcript", rejectedAt };
   return { data: null, reason: scanned === 0 ? "no codex session files" : `no rate_limits event in newest ${scanned} session files`, source: "unavailable" };
 }
 
@@ -470,8 +571,76 @@ function* sessionFiles(sessionsDir: string, max: number): Generator<{ p: string;
   }
 }
 
-function* latestSessionFiles(sessionsDir: string): Generator<string> {
-  for (const entry of sessionFiles(sessionsDir, MAX_FILES)) yield entry.p;
+function latestDayDirs(sessionsDir: string, max: number): string[] {
+  const dirs: string[] = [];
+  for (const year of listDesc(sessionsDir)) {
+    for (const month of listDesc(path.join(sessionsDir, year))) {
+      for (const day of listDesc(path.join(sessionsDir, year, month))) {
+        dirs.push(path.join(sessionsDir, year, month, day));
+        if (dirs.length >= max) return dirs;
+      }
+    }
+  }
+  return dirs;
+}
+
+function dayDirFromSessionId(sessionsDir: string, sessionId: string): string | null {
+  const match = /^([0-9a-f]{8})-([0-9a-f]{4})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(sessionId);
+  if (!match) return null;
+  const startedAt = Number.parseInt(match[1] + match[2], 16);
+  if (!Number.isFinite(startedAt)) return null;
+  const date = new Date(startedAt);
+  if (Number.isNaN(date.getTime())) return null;
+  return path.join(
+    sessionsDir,
+    String(date.getFullYear()),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  );
+}
+
+/** Recent prompt history is a bounded index of active session ids. It keeps a
+    long-running transcript discoverable after newer start-date buckets exist. */
+function recentHistorySessionFiles(sessionsDir: string): string[] {
+  const text = readTail(path.join(path.dirname(sessionsDir), "history.jsonl"), TAIL_BYTES);
+  if (!text) return [];
+  const files: string[] = [];
+  const seen = new Set<string>();
+  for (const line of text.split("\n").reverse()) {
+    if (!line.includes('"session_id"')) continue;
+    try {
+      const row = JSON.parse(line) as { session_id?: unknown };
+      if (typeof row.session_id !== "string" || seen.has(row.session_id)) continue;
+      seen.add(row.session_id);
+      const dir = dayDirFromSessionId(sessionsDir, row.session_id);
+      if (!dir) continue;
+      const name = listDesc(dir).find((candidate) => candidate.endsWith(`${row.session_id}.jsonl`));
+      if (name) files.push(path.join(dir, name));
+      if (seen.size >= MAX_FILES) break;
+    } catch {
+      /* the first history line can be a partial tail record */
+    }
+  }
+  return files;
+}
+
+function latestSessionFiles(sessionsDir: string): string[] {
+  const candidates = new Set(recentHistorySessionFiles(sessionsDir));
+  for (const dir of latestDayDirs(sessionsDir, MAX_RECENT_SESSION_DAYS)) {
+    for (const name of listDesc(dir).filter((file) => file.endsWith(".jsonl")).slice(0, MAX_FILES)) candidates.add(path.join(dir, name));
+  }
+  const entries: { p: string; m: number }[] = [];
+  for (const p of candidates) {
+    try {
+      entries.push({ p, m: fs.statSync(p).mtimeMs });
+    } catch {
+      /* vanished mid-scan */
+    }
+  }
+  return entries
+    .sort((a, b) => b.m - a.m || b.p.localeCompare(a.p))
+    .slice(0, MAX_FILES)
+    .map((entry) => entry.p);
 }
 
 function readTail(file: string, bytes: number): string | null {
@@ -494,35 +663,115 @@ function readTail(file: string, bytes: number): string | null {
   }
 }
 
-function lastRateLimits(file: string): EngineLimits | null {
+function lastRateLimits(file: string): { data: EngineLimits | null; rejectedAt: number | null } {
   const text = readTail(file, TAIL_BYTES);
-  if (!text) return null;
+  if (!text) return { data: null, rejectedAt: null };
   const lines = text.split("\n");
+  let data: EngineLimits | null = null;
+  let rejectedAt: number | null = null;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
-    if (!line.includes('"rate_limits"')) continue;
+    if (!line.includes('"rate_limits"') && !line.includes("usage_limit_exceeded")) continue;
     try {
-      const row = JSON.parse(line) as { timestamp?: unknown; payload?: { rate_limits?: CodexRateLimits } };
+      const row = JSON.parse(line) as {
+        timestamp?: unknown;
+        payload?: { rate_limits?: CodexRateLimits; codex_error_info?: unknown; error?: { codex_error_info?: unknown } };
+      };
+      const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
+      const capturedAt = Number.isFinite(ts) ? ts / 1000 : null;
+      if (row.payload?.codex_error_info === "usage_limit_exceeded" || row.payload?.error?.codex_error_info === "usage_limit_exceeded") {
+        if (capturedAt !== null && (rejectedAt === null || capturedAt > rejectedAt)) rejectedAt = capturedAt;
+        continue;
+      }
       const rl = row.payload?.rate_limits;
       if (!rl) continue;
-      const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
-      const capturedAt = Number.isFinite(ts) ? Math.round(ts / 1000) : null;
       const routed = routeWindowsByHorizon(codexWindow(rl.primary, capturedAt), codexWindow(rl.secondary, capturedAt), capturedAt);
       // Codex also emits `rate_limits` events carrying no windows at all (other
       // limit families, e.g. credit balances). They say nothing about the
       // account's quota, so keep looking back for one that does.
       if (!routed.session && !routed.weekly) continue;
-      return {
-        session: routed.session,
-        weekly: routed.weekly,
-        plan: typeof rl.plan_type === "string" ? rl.plan_type : null,
-        capturedAt,
-      };
+      if (!data || data.capturedAt === null || (capturedAt !== null && capturedAt > data.capturedAt)) {
+        data = {
+          session: routed.session,
+          weekly: routed.weekly,
+          plan: typeof rl.plan_type === "string" ? rl.plan_type : null,
+          capturedAt,
+        };
+      }
     } catch {
       /* first line of the tail chunk is usually cut mid-JSON */
     }
   }
-  return null;
+  return { data, rejectedAt };
+}
+
+function governingWindow(limits: EngineLimits): { key: "session" | "weekly"; value: LimitWindow } | null {
+  return (["session", "weekly"] as const)
+    .flatMap((key) => limits[key] ? [{ key, value: limits[key]! }] : [])
+    .sort((left, right) => right.value.usedPercent - left.value.usedPercent || left.key.localeCompare(right.key))[0] ?? null;
+}
+
+/** A rejection is evidence about the quota window that was open when the
+    provider issued it, whose interval is `[resetsAt - windowMinutes, resetsAt]`.
+    Projecting one onto a candidate window it predates would synthesize an
+    exhaustion from a cycle that has since reset and override a truthful live
+    reading, so an out-of-interval rejection is stale evidence. A rejection
+    issued after the candidate's reset belongs to the cycle that opened there —
+    the candidate is simply the older word — and stays usable through that
+    successor's length, with its reset unknown. Each bound the window does not
+    declare — an unknown reset, or a length absent from a snapshot cached before
+    issue #606 — is one the rejection is not tested against, leaving the
+    existing behavior for that side. */
+function rejectionWithinWindow(limits: EngineLimits, rejectedAt: number): boolean {
+  const window = governingWindow(limits)?.value;
+  if (!window) return false;
+  if (window.resetsAt === null) return true;
+  if (typeof window.windowMinutes !== "number") return rejectedAt <= window.resetsAt;
+  const windowSeconds = window.windowMinutes * 60;
+  return rejectedAt >= window.resetsAt - windowSeconds && rejectedAt < window.resetsAt + windowSeconds;
+}
+
+/** The one place a provider rejection becomes a quota reading. Every consumer
+    projects through here, so a rejection is validated against the window it is
+    about exactly once; `null` means this rejection says nothing about the
+    candidate and the candidate stands as read. */
+function rejectionReading(limits: EngineLimits, rejectedAt: number | null | undefined): EngineLimits | null {
+  if (rejectedAt === null || rejectedAt === undefined) return null;
+  if (!rejectionWithinWindow(limits, rejectedAt)) return null;
+  return applyTranscriptRejection(limits, rejectedAt);
+}
+
+/** Whether a projection still describes a running exhaustion at `nowSeconds`:
+    through a reset the provider named, or for one window length when the
+    rejection erased it. A projection past that is history, not the account's
+    current state, and must not be presented as a live transcript reading. */
+function exhaustionRunning(limits: EngineLimits, nowSeconds: number): boolean {
+  const governing = governingWindow(limits);
+  if (!governing || governing.value.usedPercent < 100) return false;
+  const window = governing.value;
+  if (window.resetsAt !== null) return window.resetsAt > nowSeconds;
+  if (window.observedAt === null || window.observedAt === undefined) return true;
+  // A window that declares no length still has the horizon of the key it is
+  // filed under, which is the longest an exhaustion observed in it can run.
+  const windowMinutes = typeof window.windowMinutes === "number"
+    ? window.windowMinutes
+    : governing.key === "weekly" ? WEEKLY_WINDOW_MINUTES : SESSION_WINDOW_MINUTES;
+  return nowSeconds - window.observedAt < windowMinutes * 60;
+}
+
+function applyTranscriptRejection(limits: EngineLimits, rejectedAt: number): EngineLimits {
+  const governing = governingWindow(limits);
+  if (!governing) return limits;
+  const resetsAt = governing.value.resetsAt !== null && governing.value.resetsAt <= rejectedAt
+    ? null
+    : governing.value.resetsAt;
+  const data: EngineLimits = {
+    ...limits,
+    [governing.key]: { ...governing.value, usedPercent: 100, resetsAt, observedAt: rejectedAt, source: "transcript" },
+  };
+  const observed = [data.session?.observedAt, data.weekly?.observedAt]
+    .filter((value): value is number => value !== null && value !== undefined);
+  return { ...data, capturedAt: observed.length ? Math.min(...observed) : rejectedAt };
 }
 
 function codexWindow(w: CodexWindow | undefined, capturedAt: number | null): LimitWindow | null {
@@ -530,7 +779,12 @@ function codexWindow(w: CodexWindow | undefined, capturedAt: number | null): Lim
   let resetsAt: number | null = null;
   if (typeof w.resets_at === "number") resetsAt = w.resets_at;
   else if (typeof w.resets_in_seconds === "number" && capturedAt !== null) resetsAt = capturedAt + w.resets_in_seconds;
-  return { usedPercent: w.used_percent, resetsAt, windowMinutes: typeof w.window_minutes === "number" ? w.window_minutes : null };
+  return {
+    usedPercent: w.used_percent,
+    resetsAt,
+    windowMinutes: typeof w.window_minutes === "number" ? w.window_minutes : null,
+    observedAt: capturedAt,
+  };
 }
 
 /* ----------------------------- Burndown series ----------------------------- */

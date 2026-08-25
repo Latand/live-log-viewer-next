@@ -9,6 +9,7 @@ import { SelectedContextBadge } from "../SelectedContextBadge";
 import { CopyButton } from "./CopyButton";
 import { InboxImageCard } from "./InboxImage";
 import { md, mdBlocks } from "./markdown";
+import { useMessageProvenance, type ProvenanceLookup } from "./messageProvenance";
 import { tr, type Item } from "./parse";
 import { BlobCard } from "./cards/BlobCard";
 import { CmdGroupCard } from "./cards/CmdGroupCard";
@@ -24,10 +25,57 @@ import { WakeupCard } from "./cards/WakeupCard";
 import { SpeakButton } from "./SpeakButton";
 import { McpCallCard } from "../runtime/McpCallCard";
 
+/**
+ * Resolves a row with delivery evidence (#1117). A delivered Claude system row
+ * joins the ledger by engine message id — operator evidence becomes the
+ * operator's own bubble, agent evidence the internal card naming the sender
+ * role — and otherwise the occurrence join (pre-#1117 structured relays). A
+ * plain user bubble (a legacy tmux paste on either engine) becomes the
+ * internal card only when a settled agent delivery is joined to THIS row —
+ * same text, nearest its settlement time — so an operator's own message that
+ * repeats a relay's words stays the operator's. No evidence — no provider,
+ * unknown id, scaffold row, the operator's own words — keeps the row untouched.
+ */
+function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
+  if (item.kind === "user") {
+    /* A selected-context capture exists only on operator composer sends. */
+    if (item.selectedContext) return item;
+    const resolved = provenance.forItem(item);
+    return resolved?.origin === "agent" ? internalCard(item.ts, item.text, resolved.senderRole) : item;
+  }
+  if (item.kind !== "sysmsg" || !item.deliveredMessage) return item;
+  const resolved = provenance.forItem(item);
+  if (resolved?.origin === "operator") {
+    return {
+      kind: "user",
+      ts: item.deliveredMessage.ts,
+      text: item.text,
+      ...(resolved.selectedContext ? { selectedContext: resolved.selectedContext } : {}),
+    };
+  }
+  if (resolved?.origin === "agent") return internalCard(item.deliveredMessage.ts, item.text, resolved.senderRole);
+  return item;
+}
+
+function internalCard(ts: unknown, text: string, senderRole: string | undefined): Item {
+  return {
+    kind: "tmsg",
+    ts,
+    dir: "in",
+    peer: senderRole ?? tr("render.agentPeer"),
+    summary: "",
+    text,
+    internal: true,
+  };
+}
+
 /* Memoized: feed items are immutable after buildFeed, so a pane re-render
    (poll tick, camera state, files refresh) skips re-parsing markdown for
-   every message that did not change. */
-export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item; speakText?: string }) {
+   every message that did not change. The provenance lookup arrives by context,
+   so a resolved map re-renders exactly the memoized consumers. */
+export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: { item: Item; speakText?: string }) {
+  const provenance = useMessageProvenance();
+  const item = resolveDeliveredItem(sourceItem, provenance);
   if (item.kind === "image") return <ImageCard media={item.media} data={item.data} w={item.w} h={item.h} bytes={item.bytes} />;
   if (item.kind === "inbox-image") return <InboxImageCard name={item.name} path={item.path} />;
   if (item.kind === "blob") return <BlobCard bytes={item.bytes} text={item.text} />;
@@ -44,7 +92,15 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
         <div className={`mt-1 flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-full text-white ${cls}`}>
           <AvatarIcon className="h-3.5 w-3.5" aria-hidden />
         </div>
-        <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+        {/* `data-tts-message` / `data-tts-body`: the anchors the read-aloud
+            control uses to find the RENDERED text of this answer, so the
+            karaoke highlight and click-to-seek of #1022 ride over the markdown
+            already on screen instead of re-parsing it. The value is the answer's
+            identity — the engine/timestamp pair `speakableAnswer` groups on —
+            so a control on the first block of a multi-block answer can claim
+            the rest of it and stop at the next answer. The body wrapper is
+            `display: contents`, so it changes no layout. */}
+        <div className="min-w-0 flex-1 whitespace-pre-wrap break-words" data-tts-message={`${item.engine}:${item.ts}`}>
           {/* Issue #698: this cluster used to be `absolute right-0 top-0` over a
               body with no reserved gutter — on a coarse pointer the 44px buttons
               sat permanently at 60% opacity on the first lines of the message,
@@ -58,7 +114,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
               <CopyButton text={item.text} label={tr("feed.copyMd")} className={MESSAGE_ACTION} />
             </span>
           </div>
-          {mdBlocks(item.text)}
+          <div className="contents" data-tts-body>{mdBlocks(item.text)}</div>
         </div>
       </div>
     );
@@ -143,6 +199,14 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
           <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
             <Mail className="h-3.5 w-3.5" aria-hidden />
           </span>
+          {/* #1117: an MCP/structured relay says outright that it is internal
+              traffic, and the peer pill names the sender ROLE, so the operator
+              never mistakes it for their own words or for scaffold. */}
+          {item.internal ? (
+            <span className="rounded-full border border-accent/40 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-accent">
+              {tr("render.internalTag")}
+            </span>
+          ) : null}
           <span className="text-[11px] font-semibold text-muted">{item.dir === "out" ? tr("render.toDir") : tr("render.fromDir")}</span>
           <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-bold text-accent">{item.peer}</span>
           {item.delivery ? (

@@ -10,6 +10,7 @@ import type { TranscriptHost, TranscriptHostSnapshot } from "@/lib/agent/transcr
 import { mutateBoard, setBoardFileForTests } from "@/lib/board/store";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
+import { terminalizeStaleStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 
 import {
   killHeadlessReviewerIfMatches,
@@ -56,6 +57,66 @@ test("runtime cycle enters active mode only for the exact opt-in flag", async ()
     expect((await runReaperCycle({ registry, hosts: [], files: [] })).mode).toBe("dry-run");
     process.env.LLV_REAPER_ENABLED = "1";
     expect((await runReaperCycle({ registry, hosts: [], files: [] })).mode).toBe("active");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the periodic reaper releases a completed conversation's dead structured-host claim", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-dead-structured-owner-"));
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "bbbbbbbb-2222-0222-0222-bbbbbbbbbbbb";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "pipeline-account",
+    launchProfile: profile,
+    turn: { state: "terminal", source: "assistant", terminalAt: "2026-08-14T08:00:00.000Z" },
+    observedAt: "2026-08-14T08:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: "pipeline-account",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:dead-stage-host",
+      process: { pid: 2_000_000_000, startIdentity: "dead-stage-host" },
+      eventCursor: 19,
+      protocolVersion: "v2",
+      writerClaimEpoch: 5,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 5,
+    claimOwner: `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: null })}`,
+    pendingAction: null,
+  });
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [],
+      actuation: { runtimeClient: () => null },
+    });
+
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+    expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+      status: "dead",
+      structuredHost: null,
+      claimOwner: null,
+    });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -2215,43 +2276,167 @@ test("a delivery created during merge revalidation fences the final reap decisio
   }
 });
 
-test("the reaper cycle runs the stale structured spawn convergence pass when a runtime client exists", async () => {
+test("the reaper cycle runs launch convergence with or without a runtime client", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-stale-spawns-"));
   process.env.LLV_STATE_DIR = directory;
   delete process.env.LLV_REAPER_ENABLED;
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const runtimeClient = { snapshot: async () => ({ revision: 0, sessions: [] }) };
   const passes: Array<{ registry: unknown; client: unknown }> = [];
+  let legacyPasses = 0;
 
   try {
     await runReaperCycle({
       registry,
       hosts: [],
       files: [],
-      actuation: {
+      actuation: ({
         runtimeClient: (() => runtimeClient) as never,
+        reconcileLiveOwnerSpawns: async () => {
+          legacyPasses += 1;
+          return { examined: 0, terminalized: [], recovered: [] };
+        },
         terminalizeStaleSpawns: (async (passRegistry: unknown, passClient: unknown) => {
           passes.push({ registry: passRegistry, client: passClient });
           return { examined: 0, terminalized: [], recovered: [] };
         }) as never,
-      },
+      } as never),
     });
     expect(passes).toEqual([{ registry, client: runtimeClient }]);
+    expect(legacyPasses).toBe(0);
 
-    /* No runtime client — the pass never runs and the cycle still completes. */
+    /* Tmux queues still need the pass during a structured-runtime rollback. */
     const report = await runReaperCycle({
       registry,
       hosts: [],
       files: [],
       actuation: {
         runtimeClient: (() => null) as never,
-        terminalizeStaleSpawns: (async () => {
-          throw new Error("must not run without a runtime client");
+        terminalizeStaleSpawns: (async (passRegistry: unknown, passClient: unknown) => {
+          passes.push({ registry: passRegistry, client: passClient });
+          return { examined: 0, terminalized: [], recovered: [] };
         }) as never,
       },
     });
     expect(report.agents).toEqual([]);
-    expect(passes).toHaveLength(1);
+    expect(passes).toEqual([
+      { registry, client: runtimeClient },
+      { registry, client: null },
+    ]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the reaper actuates a due pinned tmux queue exactly once without a runtime client", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-tmux-pin-"));
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registryFile = path.join(directory, "agent-registry.json");
+  let registry = new AgentRegistry(registryFile);
+  const retryAt = new Date(Date.now() + 60_000).toISOString();
+  const begun = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd: directory,
+    transport: "tmux",
+    accountId: "account-a",
+    accountPin: true,
+    clientAttemptId: "reaper_tmux_pin_20260824",
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+  });
+  if (begun.kind !== "created") throw new Error("expected queued tmux receipt");
+  registry.queuePinnedSpawn(begun.receipt.launchId, {
+    version: 1,
+    retryAt,
+    accountId: "account-a",
+    locale: "en",
+    spec: {
+      engine: "claude",
+      command: "claude",
+      cwd: directory,
+      windowName: "queued-pin",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    },
+    ["prompt"]: "continue",
+    imageRefs: [],
+    parentArtifactPath: null,
+    pipelineSourceConversationId: null,
+  }, `Pinned account quota is exhausted — queued until ${retryAt}`);
+  registry = new AgentRegistry(registryFile);
+  let tmuxStarts = 0;
+  const resolvedAccounts: Array<string | null> = [];
+
+  const converge = async (passRegistry: AgentRegistry, client: null) => terminalizeStaleStructuredSpawns(
+    passRegistry,
+    client,
+    {
+      now: () => Date.parse(retryAt) + 1,
+      resolveSpawnAccount: (_engine, accountId) => {
+        resolvedAccounts.push(accountId);
+        return {
+          engine: "claude",
+          accountId: "account-a",
+          kind: "managed",
+          home: path.join(directory, "account-a"),
+          transcriptRoot: path.join(directory, "account-a", "projects"),
+          env: { NODE_ENV: "test" },
+        };
+      },
+      resolvePinnedSpawnAdmission: async () => ({
+        kind: "admissible",
+        basis: "current",
+        stale: false,
+        retryAt: null,
+      }),
+      spawnTmuxAgent: async (_spec, payload, receipt) => {
+        tmuxStarts += 1;
+        expect(payload).toBe("continue");
+        if (!receipt) throw new Error("queued recovery must reuse its durable receipt");
+        const binding = {
+          endpoint: path.join(directory, "tmux.sock"),
+          server: { pid: 9, startIdentity: "9:server" },
+          paneId: "%9",
+          panePid: { pid: 99, startIdentity: "99:pane" },
+          target: "agents:9.0",
+        };
+        const host = {
+          kind: "tmux" as const,
+          ...binding,
+          windowName: "queued-pin",
+          agent: { pid: 100, startIdentity: "100:agent" },
+          argv: ["claude"],
+        };
+        registry.bindSpawnPane(receipt.launchId, binding);
+        registry.markSpawnHostVerified(receipt.launchId, host);
+        registry.markSpawnPromptDelivered(receipt.launchId);
+        return { paneId: binding.paneId, display: binding.target, panePid: binding.panePid.pid, host, receipt };
+      },
+    },
+  );
+
+  try {
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      await runReaperCycle({
+        registry,
+        hosts: [],
+        files: [],
+        actuation: {
+          runtimeClient: () => null,
+          terminalizeStaleSpawns: converge as never,
+        },
+      });
+    }
+
+    expect(tmuxStarts).toBe(1);
+    expect(resolvedAccounts).toEqual(["account-a"]);
+    expect(registry.spawnReceiptForClientAttempt("reaper_tmux_pin_20260824")).toMatchObject({
+      transport: "tmux",
+      accountId: "account-a",
+      accountPin: true,
+      state: "path-pending",
+      queuedPinnedSpawn: null,
+      admissionOwner: null,
+    });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

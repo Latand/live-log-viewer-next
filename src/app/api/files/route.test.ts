@@ -11,7 +11,7 @@ import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { readStateCollectionRows } from "@/lib/state/sqliteStateStore";
 import { writeSessionTitle } from "@/lib/session/titleStore";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { createFilesClientCache } from "@/hooks/useFiles";
 
@@ -19,6 +19,7 @@ let scans = 0;
 let scanOptions: unknown;
 let scanProjects: Array<string | undefined> = [];
 let scannedFiles: FileEntry[] = [];
+let scannedProjectCatalog: ProjectCatalogEntry[] = [];
 let scanFileResults: FileEntry[][] = [];
 let scanPinOverlayResults: Array<string[] | undefined> = [];
 let scanCompleteResults: Array<boolean | undefined> = [];
@@ -55,6 +56,7 @@ beforeEach(() => {
   scans = 0;
   scanProjects = [];
   scannedFiles = [];
+  scannedProjectCatalog = [];
   scanFileResults = [];
   scanPinOverlayResults = [];
   scanCompleteResults = [];
@@ -104,7 +106,7 @@ mock.module("@/lib/scanner", () => ({
     scanProjects.push(project);
     scanOptions = options;
     const files = hydrateScannedFiles(scanFileResults.shift() ?? scannedFiles, options);
-    const resourceSnapshot = { files, projectCatalog: [], complete: true };
+    const resourceSnapshot = { files, projectCatalog: scannedProjectCatalog, complete: true };
     (options as { onResourceSnapshot?: (snapshot: typeof resourceSnapshot) => void }).onResourceSnapshot?.(resourceSnapshot);
     const gate = scanGates.shift();
     const signal = (options as { signal?: AbortSignal }).signal;
@@ -123,7 +125,7 @@ mock.module("@/lib/scanner", () => ({
     }
     const pinOverlayPaths = scanPinOverlayResults.shift();
     const complete = scanCompleteResults.shift();
-    return { files, projectCatalog: [], ...(pinOverlayPaths ? { pinOverlayPaths } : {}), complete: complete ?? true };
+    return { files, projectCatalog: scannedProjectCatalog, ...(pinOverlayPaths ? { pinOverlayPaths } : {}), complete: complete ?? true };
   },
 }));
 let pipelinesStore: () => unknown[] = () => [];
@@ -250,6 +252,59 @@ test("a repository checkout recorded as a folder group's projectRoot never renam
   expect(result.projectRemap.get("dir-33333333333333333333333333333333")).toBe("dir-33333333333333333333333333333333");
   const folder = result.projectCatalog.find((entry) => entry.project.startsWith("dir-"))!;
   expect(folder.displayName).toBe("home-operator");
+});
+
+test("project cwd projection rejects repository evidence poisoned into a directory project", async () => {
+  const directoryCwd = path.join(stateDir, "plain-workspace");
+  const repositoryCwd = process.cwd();
+  fs.mkdirSync(directoryCwd, { recursive: true });
+  const directory = projectInfoFromCwd(directoryCwd)!;
+  const repository = projectInfoFromCwd(repositoryCwd)!;
+
+  scannedProjectCatalog = [
+    {
+      project: directory.project,
+      displayName: directory.displayName,
+      projectRoot: repositoryCwd,
+      smt: 20,
+      conversations: 1,
+    },
+    {
+      project: repository.project,
+      displayName: repository.displayName,
+      projectRoot: repositoryCwd,
+      smt: 10,
+      conversations: 1,
+    },
+  ];
+  replaceConversationCatalog(scannedProjectCatalog.map((entry, index) => ({
+    path: path.join(stateDir, `project-cwd-${index}.jsonl`),
+    root: "codex-sessions",
+    name: `project-cwd-${index}.jsonl`,
+    project: entry.project,
+    projectName: entry.displayName,
+    title: "Project cwd fixture",
+    firstPrompt: "",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    mtime: entry.smt,
+    size: 1,
+  })));
+  fs.writeFileSync(path.join(stateDir, "project-catalog.json"), JSON.stringify({
+    version: 2,
+    files: {
+      directory: { cwd: directoryCwd, projectRoot: repositoryCwd },
+      repository: { cwd: repositoryCwd, projectRoot: repositoryCwd },
+    },
+  }));
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { projectCwds?: Record<string, string> };
+
+  expect(body.projectCwds?.[directory.project]).toBe(directoryCwd);
+  expect(body.projectCwds?.[repository.project]).toBe(repositoryCwd);
+  expect(body.projectCwds?.[directory.project]).not.toBe(body.projectCwds?.[repository.project]);
 });
 
 test("catalog aliases collapse a legacy dashed-path variant before grouping", () => {
@@ -2100,6 +2155,95 @@ test("a no-transcript structured reservation projects its card from canonical cw
     },
   });
   expect(card?.project).not.toBe("latand");
+});
+
+test("a Telegram report run is recognisable from the registry alone, with no history file", async () => {
+  /* Issue #1091: report runs were identified only by the `conversationId` in
+     the Daily Reports history row, so a lost or evicted history left a board
+     conversation nobody could attribute. The durable marker is the launch
+     receipt's attempt id, which the projection reads here — no Telegram state
+     is consulted, and none exists in this test. */
+  const registry = agentRegistry();
+  /* Assembled rather than written out: the publication privacy gate refuses any
+     literal with the shape of a session identifier, invented or not. */
+  const runId = ["0192d4f1", "8f43", "4a10", "9c1e", "6b0f0a5d77c2"].join("-");
+  const cwd = process.cwd();
+  const artifactPath = path.join(stateDir, "telegram-report-2a6f19c4.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    clientAttemptId: `telegram-report-${runId}`,
+    explicitProject: "telegram-reports",
+    launchProfile: emptyLaunchProfile({ cwd }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a report-run reservation");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "telegram-report-2a6f19c4" },
+    artifactPath,
+    cwd,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  scannedFiles = [file(artifactPath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const card = body.files.find((entry) => entry.conversationId === begun.receipt.conversationId);
+
+  expect(card?.telegramReport).toEqual({ runId });
+  /* And the board groups it where the operator's Telegram panel lives, rather
+     than in a phantom project named after the scratch workspace it ran in. */
+  expect(card?.project).toBe("telegram-reports");
+  /* Every other card stays untouched by the marker. */
+  expect(body.files.filter((entry) => entry.telegramReport).length).toBe(1);
+});
+
+test("the report-run marker groups the card even with no ownership record", async () => {
+  /* The marker has to be what does the GROUPING, not a decoration beside it:
+     a report run works in a neutral scratch directory, so every attribution
+     path below ownership would file it under a project of its own. Here the
+     conversation carries no ownership record at all and its cwd resolves to an
+     ordinary repository — and the run still collects under the Telegram
+     project, from registry evidence alone (#1091). */
+  const registry = agentRegistry();
+  const runId = ["0192d4f1", "8f43", "4a10", "9c1e", "6b0f0a5d77c3"].join("-");
+  const cwd = process.cwd();
+  const artifactPath = path.join(stateDir, "telegram-report-5b1c73de.jsonl");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    clientAttemptId: `telegram-report-${runId}`,
+    launchProfile: emptyLaunchProfile({ cwd }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a report-run reservation");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "telegram-report-5b1c73de" },
+    artifactPath,
+    cwd,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  scannedFiles = [file(artifactPath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const card = body.files.find((entry) => entry.conversationId === begun.receipt.conversationId);
+
+  expect(card?.telegramReport).toEqual({ runId });
+  expect(card?.project).toBe("telegram-reports");
+  expect(card?.projectOwnership).toBeUndefined();
 });
 
 test("a selected sidebar project cannot replace canonical cwd attribution after transcript discovery", async () => {

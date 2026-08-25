@@ -92,6 +92,20 @@ export function beginProjectCatalogScan(persist: boolean): ProjectCatalogScanTok
   return { publication, persistence };
 }
 
+export function isProjectCatalogScanCurrent(scanToken: ProjectCatalogScanToken): boolean {
+  return projectCatalogRuntime.__llvProjectCatalogPublicationGeneration === scanToken.publication;
+}
+
+export function publishConversationCatalogForScan(
+  entries: ConversationCatalogEntry[],
+  scanToken: ProjectCatalogScanToken,
+  complete: boolean,
+): boolean {
+  if (!isProjectCatalogScanCurrent(scanToken) || !complete) return false;
+  replaceConversationCatalog(entries);
+  return true;
+}
+
 function catalogPath(): string {
   return statePath(CATALOG_FILE);
 }
@@ -583,10 +597,9 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
       size: file.size,
     });
   });
-  const isCurrentPublication = projectCatalogRuntime.__llvProjectCatalogPublicationGeneration === scanToken.publication;
   const isCurrentPersistence = scanToken.persistence !== null
     && projectCatalogRuntime.__llvProjectCatalogPersistenceGeneration === scanToken.persistence;
-  if (isCurrentPublication && complete) replaceConversationCatalog(conversationCatalog);
+  publishConversationCatalogForScan(conversationCatalog, scanToken, complete);
   if (isCurrentPersistence && persistIndex && complete) {
     let boardHealed = true;
     if (options.persist !== false) {

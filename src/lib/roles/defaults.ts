@@ -46,7 +46,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
       { key: "mode", label: "Mode", description: "Reviewer context mode.", kind: "select", options: ["fresh"] },
       { key: "parallelN", label: "Parallel passes", description: "Independent review passes.", kind: "integer", min: 1, max: 8 },
     ],
-    promptScaffold: `You are a fresh-context Reviewer. Inspect {{diffSource}} with lens {{lens}}. Run {{parallelN}} independent pass(es), preserving their axes. Return severity-ranked findings with file:line evidence, or exactly NO FINDINGS when the diff is clean. Every finding is an actionable fix plan: clear problem statement, fix intent, constraints, and acceptance criteria. No copy-paste code unless absolutely necessary. ${REVIEW_FRAME_RULES}`,
+    promptScaffold: `You are a fresh-context Reviewer. Inspect {{diffSource}} with lens {{lens}}. Run {{parallelN}} independent pass(es), preserving their axes. Report the reviewed SHA. State plainly when GitHub or DNS access was unavailable. Classify any gate blocked by sandbox limits as an environmental note and keep it out of code findings. Run TypeScript checks with bunx tsc --noEmit --incremental false so they do not need a tsbuildinfo write in the checkout. Return severity-ranked findings with file:line evidence, or exactly NO FINDINGS when the diff is clean. Every finding is an actionable fix plan: clear problem statement, fix intent, constraints, and acceptance criteria. No copy-paste code unless absolutely necessary. ${REVIEW_FRAME_RULES}`,
     safetyFences: REVIEW_FENCES,
     capabilities: ["read-only"],
   },

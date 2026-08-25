@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { sessionOriginFor } from "./pluginAllowlist";
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { AgentRegistry, normalizeRegistry, type RegistryFile } from "./registry";
 import { SqliteAgentRegistryStore } from "./sqliteRegistryStore";
@@ -15,8 +16,11 @@ import {
   MCP_GRANT_POLICY,
   defaultMcpServersForOrigin,
   grantedMcpServers,
+  mcpServersForScheduledReport,
+  SCHEDULED_REPORT_SESSION_CLASS,
   mcpServersForSession,
   mcpServersForStoredSession,
+  SCHEDULED_REPORT_MCP_SERVERS,
   normalizeSpawnMcpServers,
   reboundStoredMcpGrants,
   storedSessionOriginFor,
@@ -33,9 +37,9 @@ const WITH_CONNECTOR: McpGrantPolicy = Object.freeze({
   delegated: Object.freeze(["viewer"]),
 });
 
-test("tranche 1 ships no grantable connector beyond the Viewer baseline", () => {
-  expect([...GRANTABLE_MCP_SERVERS]).toEqual(["viewer"]);
-  expect([...MCP_GRANT_POLICY.operatorRoot]).toEqual(["viewer"]);
+test("tranche 2 grants exactly the telegram connector; delegated keeps the Viewer baseline", () => {
+  expect([...GRANTABLE_MCP_SERVERS]).toEqual(["viewer", "telegram"]);
+  expect([...MCP_GRANT_POLICY.operatorRoot]).toEqual(["viewer", "telegram"]);
   expect([...MCP_GRANT_POLICY.delegated]).toEqual(["viewer"]);
 });
 
@@ -61,14 +65,14 @@ test("an MCP server outside the grant bound is rejected, never silently dropped"
   /* Actionable: the caller learns the bound and which name failed, instead of
      receiving a quietly trimmed allowlist it believes it got in full. The
      grantable `viewer` alongside it does not rescue the request. */
-  expect(normalizeSpawnMcpServers(["viewer", "telegram"])).toEqual({
+  expect(normalizeSpawnMcpServers(["viewer", "agent-browser"])).toEqual({
     ok: false,
-    error: "mcpServers may only contain viewer; rejected: telegram",
+    error: "mcpServers may only contain viewer, telegram; rejected: agent-browser",
   });
   expect(normalizeSpawnMcpServers(["*"])).toMatchObject({ ok: false });
   expect(normalizeSpawnMcpServers(["all"])).toMatchObject({ ok: false });
-  /* Every configured server is outside the bound this tranche, whoever asks. */
-  expect(normalizeSpawnMcpServers(["agent-browser"])).toMatchObject({ ok: false });
+  /* The one connector inside the bound (tranche 2) normalizes cleanly. */
+  expect(normalizeSpawnMcpServers(["telegram"])).toEqual({ ok: true, value: ["viewer", "telegram"] });
 });
 
 test("a delegated spawn cannot obtain a grantable connector and keeps its Viewer baseline", () => {
@@ -82,6 +86,66 @@ test("an operator-root spawn receives the grantable connector it requests", () =
   expect(defaultMcpServersForOrigin("operator-root", WITH_CONNECTOR)).toEqual(["viewer", "test-connector"]);
   expect(mcpServersForSession({ origin: "operator-root", requested: ["viewer", "test-connector"] }, WITH_CONNECTOR))
     .toEqual(["viewer", "test-connector"]);
+});
+
+test("#1086: the scheduled-report class receives exactly viewer + telegram while its grant is live", () => {
+  expect([...SCHEDULED_REPORT_MCP_SERVERS]).toEqual(["viewer", "telegram"]);
+  expect(mcpServersForScheduledReport({ grantActive: true })).toEqual(["viewer", "telegram"]);
+  /* Reports off, or Telegram logged out / locally deleted: the run launches
+     with the baseline, so revocation bites without a second revocation path. */
+  expect(mcpServersForScheduledReport({ grantActive: false })).toEqual(["viewer"]);
+});
+
+test("#1086: the report class is capped by the bound and never widens with the operator-root default", () => {
+  /* A policy whose operator root holds a connector the report class does not
+     name: the class still yields only what it names, intersected with the
+     bound — growing the root default cannot widen a report run. */
+  const wider: McpGrantPolicy = Object.freeze({
+    grantable: Object.freeze(["viewer", "test-connector"]),
+    operatorRoot: Object.freeze(["viewer", "test-connector"]),
+    delegated: Object.freeze(["viewer"]),
+  });
+  expect(mcpServersForScheduledReport({ grantActive: true }, wider)).toEqual(["viewer"]);
+});
+
+test("#1086: the report class is not reachable from a spawn request, so delegated sessions gain nothing", () => {
+  /* `sessionOriginFor` — the classifier every /api/spawn request goes through
+     — has only the two origins, so nothing arriving over the API can select
+     the report class; a delegated launch naming telegram still gets the
+     baseline, exactly as before the class existed. */
+  expect(sessionOriginFor({ agentRole: "builder" })).toBe("delegated");
+  expect(mcpServersForSession({ origin: sessionOriginFor({ agentRole: "builder" }), requested: ["viewer", "telegram"] }))
+    .toEqual(["viewer"]);
+  expect(mcpServersForSession({ origin: sessionOriginFor({ parentConversationId: "conversation_parent" }), requested: ["viewer", "telegram"] }))
+    .toEqual(["viewer"]);
+  expect(mcpServersForSession({ origin: sessionOriginFor({ origin: { kind: "agent" } }), requested: ["viewer", "telegram"] }))
+    .toEqual(["viewer"]);
+  /* Not even a body that names the class itself: it is not an origin, and an
+     origin nobody recognises is delegated. */
+  expect(sessionOriginFor({ origin: { kind: SCHEDULED_REPORT_SESSION_CLASS } })).toBe("delegated");
+  expect(mcpServersForSession({
+    origin: SCHEDULED_REPORT_SESSION_CLASS as unknown as ReturnType<typeof sessionOriginFor>,
+    requested: ["viewer", "telegram"],
+  })).toEqual(["viewer"]);
+});
+
+test("#1086: a settled report row is re-decided from its own evidence, not from the class", () => {
+  /* The class is a LAUNCH decision; the durable row is re-decided on every
+     registry read. A report run is a depth-0 root with no parent and no role,
+     so it keeps the grant — and the moment a row carries any delegation
+     evidence it drops to the baseline, which is why the launch carries no
+     lineage parent. */
+  expect(mcpServersForStoredSession({
+    origin: { kind: "operator" },
+    delegationDepth: 0,
+    requested: ["viewer", "telegram"],
+  })).toEqual(["viewer", "telegram"]);
+  expect(mcpServersForStoredSession({
+    origin: { kind: "operator" },
+    delegationDepth: 0,
+    parentConversationId: "conversation_parent",
+    requested: ["viewer", "telegram"],
+  })).toEqual(["viewer"]);
 });
 
 test("an empty selection stays the explicit opt-out and still yields Viewer", () => {
@@ -156,19 +220,21 @@ test("a stored conversation whose delegation depth was erased loses its grant on
 });
 
 test("a launch profile hand-edited to carry an ungranted server is re-bounded at the point of use", () => {
-  expect(grantedMcpServers(["viewer", "telegram", "test-connector"], WITH_CONNECTOR)).toEqual(["viewer", "test-connector"]);
-  expect(grantedMcpServers(["viewer", "telegram"])).toEqual(["viewer"]);
+  expect(grantedMcpServers(["viewer", "slack", "test-connector"], WITH_CONNECTOR)).toEqual(["viewer", "test-connector"]);
+  expect(grantedMcpServers(["viewer", "slack"])).toEqual(["viewer"]);
+  /* The shipped bound (tranche 2) passes telegram through this same gate. */
+  expect(grantedMcpServers(["viewer", "telegram"])).toEqual(["viewer", "telegram"]);
   expect(grantedMcpServers(undefined)).toEqual(["viewer"]);
   /* Durable storage re-bounds the edit as it is written, and every engine's
      enable table is materialized from the re-validated list, never the stored
      one — a profile edited behind the Viewer's back grants nothing. */
-  expect(emptyLaunchProfile({ mcpServers: ["viewer", "telegram"] }).mcpServers).toEqual(["viewer"]);
+  expect(emptyLaunchProfile({ mcpServers: ["viewer", "slack"] }).mcpServers).toEqual(["viewer"]);
   const thread = headlessCodexThreadConfig({
     config: { mcp_servers: { viewer: {}, telegram: {}, "agent-browser": {} } },
   }, false, ["viewer", "telegram", "agent-browser"]) as { mcp_servers: Record<string, { enabled: boolean }> };
   expect(thread.mcp_servers.viewer.enabled).toBe(true);
   expect(thread.mcp_servers["agent-browser"].enabled).toBe(false);
-  expect(thread.mcp_servers.telegram.enabled).toBe(false);
+  expect(thread.mcp_servers.telegram.enabled).toBe(true);
 });
 
 test("durable launch profiles reset each new spawn to Viewer only", () => {

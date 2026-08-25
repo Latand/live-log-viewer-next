@@ -91,7 +91,28 @@ export interface VoiceComposerCardProps {
   sendBlockedReason: string | null;
 }
 
-const composerCardNodes = new Map<string, HTMLElement>();
+/**
+ * Places for one conversation's hoisted composer, oldest first.
+ *
+ * There is exactly ONE composer per conversation, so when several surfaces are
+ * on screen for the same conversation at once — the board card under the
+ * full-window overlay, the board card beside the orchestrator dock (#977) —
+ * they are competing PLACES for it, not competing composers. Keeping the whole
+ * stack instead of the newest node alone is what makes that survivable: the
+ * newest place renders the form, and when it retracts the composer falls back
+ * to the place underneath instead of having nowhere to go.
+ *
+ * `primary` is the explicit override for a surface that is the operator's
+ * conversation window rather than an incidental card of it: it outranks the
+ * stack order, so a board card mounting or remounting later cannot take the
+ * form out of the dock the operator is typing in.
+ */
+interface ComposerPlace {
+  node: HTMLElement;
+  primary: boolean;
+}
+
+const composerCardNodes = new Map<string, ComposerPlace[]>();
 const composerCardProps = new Map<string, VoiceComposerCardProps>();
 
 /** How many `VoiceComposerHost`s are mounted (production: exactly one).
@@ -100,9 +121,20 @@ const composerCardProps = new Map<string, VoiceComposerCardProps>();
     keeps the inline card-scoped composer it always had. */
 let composerHosts = 0;
 
-/** The card's place for the hoisted composer. Returns the retraction. */
-export function publishVoiceComposerCardNode(cardId: string, node: HTMLElement): () => void {
-  return publish(composerCardNodes, cardId, node);
+/** A surface's place for the hoisted composer. Returns the retraction. */
+export function publishVoiceComposerCardNode(cardId: string, node: HTMLElement, primary = false): () => void {
+  const place: ComposerPlace = { node, primary };
+  composerCardNodes.set(cardId, [...(composerCardNodes.get(cardId) ?? []), place]);
+  notify();
+  return () => {
+    const places = composerCardNodes.get(cardId);
+    if (!places) return;
+    const remaining = places.filter((entry) => entry !== place);
+    if (remaining.length === places.length) return;
+    if (remaining.length) composerCardNodes.set(cardId, remaining);
+    else composerCardNodes.delete(cardId);
+    notify();
+  };
 }
 
 /** The card's latest props for the hoisted composer. Kept after the card goes:
@@ -146,8 +178,12 @@ export function getVoiceComposerCardPropsIds(): readonly string[] {
   return [...composerCardProps.keys()];
 }
 
+/** Where this conversation's one composer renders: the newest primary place if
+    any surface claimed that rank, else the newest place published. */
 export function getVoiceComposerCardNode(cardId: string): HTMLElement | null {
-  return composerCardNodes.get(cardId) ?? null;
+  const places = composerCardNodes.get(cardId);
+  if (!places?.length) return null;
+  return (places.findLast((place) => place.primary) ?? places[places.length - 1]!).node;
 }
 
 export function getVoiceComposerCardProps(cardId: string): VoiceComposerCardProps | null {

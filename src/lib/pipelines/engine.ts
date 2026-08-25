@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { accountManager } from "@/lib/accounts/manager";
+import { mirroredClaudeTranscriptPath } from "@/lib/accounts/claude";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type DurableMembershipInput, type TmuxHostEvidence } from "@/lib/agent/registry";
@@ -11,11 +12,14 @@ import { transcriptAllowed } from "@/lib/agent/spawnParent";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, isRecoverableLegacyRelayFailurePause, patchFlow } from "@/lib/flows/commands";
-import { lastAssistantMessage } from "@/lib/flows/findings";
+import { lastAssistantMessage, readFindingsFile } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
+import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
+import { redactBounded } from "@/lib/monitor/redact";
+import { parseReview, type ReviewFinding } from "@/lib/review";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { loadTasks } from "@/lib/tasks/store";
@@ -40,7 +44,8 @@ import {
 } from "./limits";
 import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipelineRepo } from "./preflight";
 import { renderStagePrompt } from "./prompts";
-import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
+import { PIPELINE_ROLE_IDS, pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
+import { pipelineValidationError, type PipelineValidationViolation } from "./validation";
 import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
 import type {
@@ -110,6 +115,8 @@ export type PipelineCloseReport = {
   acknowledged: Array<PipelineStageHostRef & { detail: string }>;
   /** Hosts that survived teardown, so the close cannot claim to be clean. */
   stillRunning: Array<PipelineStageHostRef & { error: string }>;
+  /** Stop failures demoted by durable terminal evidence. */
+  notes: Array<PipelineStageHostRef & { detail: string }>;
   /** Uncommitted stage work preserved in the worktree; null when unprovisioned. */
   worktree: { dir: string; uncommitted: string[]; truncated: boolean; error?: string } | null;
 };
@@ -162,6 +169,10 @@ export interface PipelinePorts {
       merge is a tidy close, not an unreadable worktree. */
   worktreePresent(dir: string): boolean;
   conversationAgentActive(conversationId: string): Promise<boolean | null>;
+  /** Null means hosted, a timestamp means dead/absent since then, and undefined
+      means the registry cannot provide authoritative host evidence. */
+  conversationHostUnavailableSince?(conversationId: string): Promise<string | null | undefined>;
+  sleep?(milliseconds: number): Promise<void>;
   durableTurnEvidence(engine: EffectivePipelineRole["engine"], transcriptPath: string): Promise<StageTurnEvidence | null>;
   headCwd(transcriptPath: string): string | null;
   lastMessage(entry: FileEntry): { text: string; ts: number } | null;
@@ -170,7 +181,7 @@ export interface PipelinePorts {
   conversationIdForPath(pathname: string): string | null;
   pipelineAdoptionCandidates(pipelineId: string): PipelineAdoptionCandidate[];
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
-  patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
+  patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string, actor?: PauseResumeActor | null): { error?: string; status?: number };
   closeFlow(id: string): Promise<{
     flow?: Flow;
     error?: string;
@@ -615,11 +626,29 @@ export function defaultPipelinePorts(): PipelinePorts {
       }
       const session = snapshot.sessions.find((item) => item.conversationId === conversationId);
       if (!session) return null;
-      if (["dead", "unhosted", "conflict"].includes(session.host)) return false;
-      if (session.turn === "idle") return false;
+      if (["dead", "unhosted", "conflict"].includes(session.host)) {
+        /* A host may be adopted again during this controller pass. Do not let
+           affirmative death evidence poison later liveness checks in the tick. */
+        runtimeSnapshot = null;
+        return false;
+      }
       if (session.turn === "running" || session.turn === "interrupt_requested" || session.attentionIds.length > 0) return true;
+      /* A hosted idle turn is an inter-turn state with unknown agent activity. */
       return null;
     },
+    conversationHostUnavailableSince: async (conversationId) => {
+      if (!conversationId.startsWith("conversation_")) return undefined;
+      const current = snapshot();
+      const conversation = current.conversations[conversationId as ViewerConversationId];
+      const generation = conversation?.generations.at(-1);
+      if (!conversation || !generation) return undefined;
+      const key = sessionKeyFromTranscript(conversation.engine, generation.path);
+      if (!key) return undefined;
+      const entry = current.entries[sessionKeyId(key)];
+      if (!entry) return generation.createdAt;
+      return entry.status === "dead" || entry.status === "unhosted" ? entry.updatedAt : null;
+    },
+    sleep: (milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
     durableTurnEvidence: durableStageTurnEvidence,
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
@@ -639,8 +668,8 @@ export function defaultPipelinePorts(): PipelinePorts {
       flowSnapshot = null;
       return result;
     },
-    patchFlow: (id, action, note) => {
-      const result = patchFlow(id, { action, ...(note ? { note } : {}) });
+    patchFlow: (id, action, note, actor = null) => {
+      const result = patchFlow(id, { action, ...(note ? { note } : {}) }, actor);
       flowSnapshot = null;
       return result;
     },
@@ -667,8 +696,15 @@ export function defaultPipelinePorts(): PipelinePorts {
 const spawnsThisProcess = new Set<string>();
 const TERMINAL_STATES = new Set<Pipeline["state"]>(["completed", "closed"]);
 const MISSING_STAGE_VERDICT = "stage completed without a valid final JSON verdict";
+const HISTORICAL_MISSING_STAGE_VERDICT = "historical attempt completed without a valid final JSON verdict";
 const VERDICT_RECOVERY_MAX_CHECKS = 3;
 const VERDICT_RECOVERY_INTERVAL_MS = 30_000;
+/** Matches the production controller's default phase lease. A slow tick may
+    still accept positive evidence; late negative evidence cannot consume recovery. */
+const VERDICT_RECOVERY_ACCOUNTING_BUDGET_MS = 15_000;
+const SPAWN_HANDSHAKE_MAX_ATTEMPTS = 3;
+const SPAWN_HANDSHAKE_RETRY_DELAY_MS = 1_000;
+const DEAD_RUNNING_ATTEMPT_GRACE_MS = 3 * 60_000;
 /** Attempt states that end a round; a pending cursor over one of these queues a
     fresh attempt on the next tick (tickRunStage/tickReviewStage). */
 const TERMINAL_ATTEMPT_STATES = new Set<PipelineStageAttempt["state"]>(["passed", "failed", "needs_decision", "skipped"]);
@@ -698,6 +734,58 @@ function currentAttempt(pipeline: Pipeline, stageId: string): PipelineStageAttem
 function unixMs(value: string | null): number {
   const parsed = value ? Date.parse(value) : 0;
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function verdictFindingPart(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function normalizeVerdictFinding(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const finding = value as Record<string, unknown>;
+  const severity = verdictFindingPart(finding.severity);
+  const file = verdictFindingPart(finding.file);
+  const line = verdictFindingPart(finding.line);
+  const summary = verdictFindingPart(finding.summary);
+  const location = file ? `${file}${line ? `:${line}` : ""}` : line ? `line ${line}` : null;
+  const normalized = [severity, location, summary].filter((part): part is string => Boolean(part));
+  return normalized.length > 0 ? normalized.join(" — ") : value;
+}
+
+/** Reviewer scaffolds naturally produce structured findings. The shared parser
+    still owns fence selection and all verdict validation; this adapter changes
+    only recognized finding objects in its final JSON candidate. */
+function normalizeVerdictFindingObjects(text: string): string {
+  const matches = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  const candidate = matches.at(-1);
+  if (!candidate || candidate.index === undefined) return text;
+  let value: unknown;
+  try {
+    value = JSON.parse(candidate[1] ?? "");
+  } catch {
+    return text;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return text;
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.findings) || !record.findings.some((finding) => finding && typeof finding === "object" && !Array.isArray(finding))) {
+    return text;
+  }
+  const normalized = { ...record, findings: record.findings.map(normalizeVerdictFinding) };
+  const fullCandidate = candidate[0];
+  const rawCandidate = candidate[1] ?? "";
+  const rawOffset = fullCandidate.indexOf(rawCandidate);
+  const payloadStart = candidate.index + rawOffset;
+  return `${text.slice(0, payloadStart)}${JSON.stringify(normalized)}${text.slice(payloadStart + rawCandidate.length)}`;
+}
+
+function parsePipelineStageVerdict(text: string) {
+  return parseStageVerdict(normalizeVerdictFindingObjects(text));
+}
+
+function pipelineStageVerdictRejectionReason(text: string): string {
+  return stageVerdictRejectionReason(normalizeVerdictFindingObjects(text));
 }
 
 function recoveryCheckAt(now: string): string {
@@ -1046,12 +1134,12 @@ async function reconcileHistoricalAttempts(pipeline: Pipeline, entries: FileEntr
         changed = JSON.stringify(attempt) !== before || changed;
         continue;
       }
-      const parsed = parseStageVerdict(durable.message!.text);
+      const parsed = parsePipelineStageVerdict(durable.message!.text);
       attempt.completedAt = new Date(durable.message!.ts).toISOString();
       attempt.output = null;
       if (!parsed) {
         attempt.state = "failed";
-        attempt.error = "historical attempt completed without a valid final JSON verdict";
+        attempt.error = HISTORICAL_MISSING_STAGE_VERDICT;
       } else if ("failureReason" in parsed) {
         attempt.state = "failed";
         attempt.error = parsed.failureReason;
@@ -1079,6 +1167,19 @@ function attachReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow): voi
 const TERMINAL_REVIEW_FLOW_STATES: ReadonlySet<Flow["state"]> = new Set([
   "approved", "done_comment", "needs_decision", "closed",
 ]);
+const REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX = "review flow host claim retry: ";
+const REVIEW_FLOW_RELAY_RETRY_PREFIX = "review flow relay retry: ";
+
+function reviewFlowRetryDetail(flow: Flow): string | null {
+  if (flow.state !== "relaying" || !flow.stateDetail?.includes("retrying automatically")) return null;
+  const claimFailure = flow.hostClaim
+    ? `structured host claim ${flow.hostClaim.sessionKey} on account ${flow.hostClaim.accountRef} failed:`
+    : null;
+  const prefix = claimFailure && flow.stateDetail.includes(claimFailure)
+    ? REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX
+    : REVIEW_FLOW_RELAY_RETRY_PREFIX;
+  return `${prefix}${flow.stateDetail}`;
+}
 
 function flowSourceUpdatedAt(flow: Flow): string | null {
   const values = [flow.createdAt, flow.closedAt];
@@ -1105,6 +1206,7 @@ function synchronizeReviewFlowAttempt(attempt: PipelineStageAttempt, flow: Flow,
     verdict: round?.verdict ?? null,
     relayState: flow.state,
     terminalState: TERMINAL_REVIEW_FLOW_STATES.has(flow.state) ? flow.state : null,
+    hostClaim: flow.hostClaim ?? null,
     sourceUpdatedAt,
   };
   const generation = crypto.createHash("sha256").update(JSON.stringify({
@@ -1219,6 +1321,43 @@ function advancePipeline(pipeline: Pipeline, stage: PipelineStage, ports: Pipeli
   pipeline.pausedState = null;
 }
 
+function keepPassedStageUnpublished(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  detail: string,
+): void {
+  const message = `passed but unpublished: ${detail}`;
+  attempt.error = message;
+  pipeline.state = "running";
+  pipeline.stateDetail = message;
+}
+
+/** A terminal pass cannot close until its accepted revision is remotely
+    durable. The pass receipt stays terminal and the committing cursor becomes
+    a publication retry seam, so later ticks never rerun or reset stage work. */
+function retryTerminalStagePublication(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt,
+  ports: PipelinePorts,
+): void {
+  const published = publishPipelineBranch(pipeline, ports.exec, {
+    acceptedSha: pipeline.lastPassedCommit,
+    publishedSha: pipeline.publishedCommit ?? null,
+  });
+  if (!published.ok) {
+    park(pipeline, `publishing the passed stage: ${published.error}`, attempt);
+    return;
+  }
+  if (published.remote === "unreachable") {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+    return;
+  }
+  pipeline.publishedCommit = published.remote === "published" ? published.sha : null;
+  attempt.error = null;
+  advancePipeline(pipeline, stage, ports, attempt);
+}
+
 /** Attempts of the fail edge's target that this stage's fail edge activated —
     the derived (never stored) loop budget, so counts cannot drift from the
     durable evidence. */
@@ -1238,6 +1377,35 @@ function failEdgeInput(parsed: ParsedStageVerdict): string | null {
     : "";
   const combined = [parsed.output, findings].filter(Boolean).join("\n\n").trim();
   return combined || null;
+}
+
+function routeFailedAttempt(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt,
+  input: string | null,
+  detail: string,
+): boolean {
+  if (!stage.onFail) return false;
+  const targetStage = pipeline.stages.find((candidate) => candidate.id === stage.onFail!.to);
+  const used = failEdgeRoundsUsed(pipeline, stage);
+  if (targetStage && used < stage.onFail.maxRounds) {
+    pipeline.cursor = {
+      stageId: targetStage.id,
+      state: "pending",
+      input,
+      activatedBy: { stageId: stage.id, attempt: attempt.n, edge: "fail" },
+    };
+    pipeline.state = "running";
+    pipeline.stateDetail = null;
+    pipeline.pausedState = null;
+    return true;
+  }
+  if (targetStage) {
+    park(pipeline, `fail-edge budget exhausted after ${used} round(s): ${detail}`, attempt);
+    return true;
+  }
+  return false;
 }
 
 function commitPassedStage(
@@ -1279,7 +1447,14 @@ function commitPassedStage(
   pipeline.publishedCommit = published.remote === "published" ? published.sha : null;
   attempt.state = "passed";
   attempt.completedAt = ports.now();
+  if (published.remote === "unreachable" && stage.next === null) {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+    return;
+  }
   advancePipeline(pipeline, stage, ports, attempt);
+  if (published.remote === "unreachable") {
+    keepPassedStageUnpublished(pipeline, attempt, published.detail);
+  }
 }
 
 /** One-shot settlement of a completed stage turn. Semantic contradictions park
@@ -1309,25 +1484,17 @@ function settleStageVerdict(
        mutation as the verdict. No worktree reset — the target continues from
        lastPassedCommit plus its own committed passes. needs_decision always
        parks; an exhausted budget parks with an actionable detail. */
-    if (parsed.verdict.status === "fail" && stage.onFail) {
-      const targetStage = pipeline.stages.find((candidate) => candidate.id === stage.onFail!.to);
-      const used = failEdgeRoundsUsed(pipeline, stage);
-      if (targetStage && used < stage.onFail.maxRounds) {
-        pipeline.cursor = {
-          stageId: targetStage.id,
-          state: "pending",
-          input: failEdgeInput(parsed),
-          activatedBy: { stageId: stage.id, attempt: attempt.n, edge: "fail" },
-        };
-        pipeline.state = "running";
-        pipeline.stateDetail = null;
-        pipeline.pausedState = null;
-        return;
-      }
-      if (targetStage) {
-        park(pipeline, `fail-edge budget exhausted after ${used} round(s): ${parsed.verdict.findings?.[0] ?? "stage verdict: fail"}`, attempt);
-        return;
-      }
+    if (
+      parsed.verdict.status === "fail"
+      && routeFailedAttempt(
+        pipeline,
+        stage,
+        attempt,
+        failEdgeInput(parsed),
+        parsed.verdict.findings?.[0] ?? "stage verdict: fail",
+      )
+    ) {
+      return;
     }
     park(pipeline, parsed.verdict.findings?.[0] ?? `stage verdict: ${parsed.verdict.status}`, attempt);
     return;
@@ -1379,12 +1546,19 @@ async function tickRunStage(
   entries: FileEntry[],
   ports: PipelinePorts,
   persist: () => void,
+  recoveryAccountingDeadline: number,
 ): Promise<void> {
+  const canSpendRecoveryCheck = () => ports.monotonicNow() < recoveryAccountingDeadline;
   const prior = currentAttempt(pipeline, stage.id);
   const attempt = pipeline.cursor?.state === "pending" && prior && ["passed", "failed", "needs_decision", "skipped"].includes(prior.state)
     ? newAttempt(pipeline, stage)
     : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
+
+  if (attempt.state === "passed" && pipeline.cursor?.state === "committing") {
+    retryTerminalStagePublication(pipeline, stage, attempt, ports);
+    return;
+  }
 
   if (attempt.state === "committing") {
     commitPassedStage(pipeline, stage, attempt, ports);
@@ -1411,7 +1585,7 @@ async function tickRunStage(
       /* The retried attempt supersedes its predecessor's round (issue #383):
          the prior attempt of the SAME stage that carries a conversation. */
       const priorAttempt = runFor(pipeline, stage.id)?.attempts.filter((candidate) => !candidate.historical).at(-2) ?? null;
-      const spawned = await ports.spawnAgent({
+      const spawnInput: Parameters<PipelinePorts["spawnAgent"]>[0] = {
         role: attempt.effectiveRole,
         cwd: pipeline.worktreeDir,
         prompt,
@@ -1429,11 +1603,35 @@ async function tickRunStage(
           round: attempt.n,
           parentConversationId: null,
         },
-      }, (reservation) => {
-        attempt.launchId = reservation.launchId;
-        attempt.conversationId = reservation.conversationId;
-        persist();
-      });
+      };
+      let spawned: PipelineStageSpawn | null = null;
+      for (let spawnAttempt = 1; spawnAttempt <= SPAWN_HANDSHAKE_MAX_ATTEMPTS; spawnAttempt += 1) {
+        try {
+          spawned = await ports.spawnAgent({
+            ...spawnInput,
+            clientAttemptId: spawnAttempt === 1
+              ? spawnInput.clientAttemptId
+              : `handshake_retry_${spawnAttempt - 1}_${spawnInput.clientAttemptId}`.slice(0, 128),
+          }, (reservation) => {
+            attempt.launchId = reservation.launchId;
+            attempt.conversationId = reservation.conversationId;
+            persist();
+          });
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const transient = isTransientStructuredSpawnFailure(message);
+          if (!transient || spawnAttempt === SPAWN_HANDSHAKE_MAX_ATTEMPTS) {
+            if (transient) {
+              throw new Error(`stage spawn failed after ${spawnAttempt - 1} retries: ${message}`);
+            }
+            throw error;
+          }
+          const sleep = ports.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+          await sleep(SPAWN_HANDSHAKE_RETRY_DELAY_MS);
+        }
+      }
+      if (!spawned) throw new Error("stage spawn failed without a result");
       attempt.launchId = spawned.launchId;
       attempt.conversationId = spawned.conversationId;
       attempt.sessionId = spawned.sessionId;
@@ -1493,7 +1691,15 @@ async function tickRunStage(
   const scanProjectsOpenTurn = entry?.activity === "live"
     || entry?.activityReason === "jsonl_turn_open"
     || (entry?.activityReason === "jsonl_turn_stalled" && attempt.paneId !== null);
-  if (entry && structuredActive !== false && scanProjectsOpenTurn) return;
+  const unavailableSince = !attempt.paneId && attempt.conversationId
+    ? await ports.conversationHostUnavailableSince?.(attempt.conversationId)
+    : null;
+  const unavailableAt = unavailableSince ? unixMs(unavailableSince) : 0;
+  const hostUnavailablePastGrace = unavailableAt > 0
+    && unixMs(ports.now()) - unavailableAt >= DEAD_RUNNING_ATTEMPT_GRACE_MS;
+  if (entry && structuredActive !== false && scanProjectsOpenTurn && !hostUnavailablePastGrace) return;
+
+  if (!canSpendRecoveryCheck()) return;
 
   /* The transcript artifact is the completion authority (#337). A terminal turn
      whose completion evidence belongs to this attempt and ends in a valid fenced
@@ -1503,26 +1709,37 @@ async function tickRunStage(
   const durable = await ports.durableTurnEvidence(attempt.effectiveRole.engine, attempt.agentPath);
   const durableTerminal = durable?.turn === "terminal" && durable.message !== null && durable.message.ts > unixMs(attempt.startedAt);
   if (durable && durableTerminal) {
-    const parsed = parseStageVerdict(durable.message!.text);
-    if (parsed) {
+    const parsed = parsePipelineStageVerdict(durable.message!.text);
+    if (parsed && (!hostUnavailablePastGrace || "verdict" in parsed)) {
       markVerdictRecoverySucceeded(attempt, ports.now(), durable.message!.ts);
       settleStageVerdict(pipeline, stage, attempt, parsed, ports, persist);
       return;
     }
-    recordVerdictRecoveryMiss(
-      pipeline,
-      attempt,
-      ports,
-      stageVerdictRejectionReason(durable.message!.text),
-      durable.message!.ts,
-    );
+    if (!hostUnavailablePastGrace) {
+      if (!canSpendRecoveryCheck()) return;
+      recordVerdictRecoveryMiss(
+        pipeline,
+        attempt,
+        ports,
+        pipelineStageVerdictRejectionReason(durable.message!.text),
+        durable.message!.ts,
+      );
+      return;
+    }
+  }
+  if (hostUnavailablePastGrace) {
+    attempt.state = "failed";
+    attempt.completedAt = ports.now();
+    attempt.error = HISTORICAL_MISSING_STAGE_VERDICT;
+    if (routeFailedAttempt(pipeline, stage, attempt, HISTORICAL_MISSING_STAGE_VERDICT, HISTORICAL_MISSING_STAGE_VERDICT)) return;
+    park(pipeline, HISTORICAL_MISSING_STAGE_VERDICT, attempt);
     return;
   }
   if (!entry) {
     /* A readable durable artifact means the disappearance is a projection loss,
        not an ended stage — wait for the scan or the terminal turn evidence. */
     if (durable) return;
-    if (structuredActive === false) {
+    if (structuredActive === false && canSpendRecoveryCheck()) {
       recordVerdictRecoveryMiss(
         pipeline,
         attempt,
@@ -1530,7 +1747,11 @@ async function tickRunStage(
         "canonical stage transcript is not yet readable after structured stage termination",
         null,
       );
-    } else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) {
+    } else if (
+      attempt.paneId
+      && !(await ports.paneAgentAlive(attempt.paneId))
+      && canSpendRecoveryCheck()
+    ) {
       recordVerdictRecoveryMiss(
         pipeline,
         attempt,
@@ -1548,7 +1769,7 @@ async function tickRunStage(
   if (durable?.turn === "busy" && !attempt.paneId) return;
   const message = ports.lastMessage(entry);
   if (!message || message.ts <= unixMs(attempt.startedAt)) {
-    if (structuredActive === false) {
+    if (structuredActive === false && canSpendRecoveryCheck()) {
       recordVerdictRecoveryMiss(
         pipeline,
         attempt,
@@ -1556,7 +1777,11 @@ async function tickRunStage(
         "canonical completed assistant turn has not been ingested after structured stage termination",
         message?.ts ?? null,
       );
-    } else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) {
+    } else if (
+      attempt.paneId
+      && !(await ports.paneAgentAlive(attempt.paneId))
+      && canSpendRecoveryCheck()
+    ) {
       recordVerdictRecoveryMiss(
         pipeline,
         attempt,
@@ -1567,13 +1792,14 @@ async function tickRunStage(
     }
     return;
   }
-  const parsed = parseStageVerdict(message.text);
+  const parsed = parsePipelineStageVerdict(message.text);
   if (!parsed) {
+    if (!canSpendRecoveryCheck()) return;
     recordVerdictRecoveryMiss(
       pipeline,
       attempt,
       ports,
-      stageVerdictRejectionReason(message.text),
+      pipelineStageVerdictRejectionReason(message.text),
       message.ts,
     );
     return;
@@ -1646,25 +1872,44 @@ export function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: Effec
  * null so the remote is genuinely probed, which is what makes a stale or
  * migrated record safe. Publication itself stays fast-forward-only.
  */
-function publishReviewIngressHead(pipeline: Pipeline, attempt: PipelineStageAttempt, ports: PipelinePorts): string | null {
+function publishReviewIngressHead(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt,
+  ports: PipelinePorts,
+): { ok: true } | { ok: false; retryable: boolean; detail: string } {
   const expected = attempt.expectedReviewHeadSha;
-  if (!expected) return "review-loop stage requires a verified pipeline commit";
+  if (!expected) return { ok: false, retryable: false, detail: "review-loop stage requires a verified pipeline commit" };
 
   const local = currentPipelineBranchHead(pipeline, ports.exec);
-  if (!local.ok) return `review stage could not verify the pipeline head before publishing: ${local.error}`;
+  if (!local.ok) {
+    return { ok: false, retryable: false, detail: `review stage could not verify the pipeline head before publishing: ${local.error}` };
+  }
   if (local.sha !== expected) {
-    return `review stage head mismatch: the accepted review head is ${expected}, but the pipeline worktree is at ${local.sha}; nothing was published`;
+    return {
+      ok: false,
+      retryable: false,
+      detail: `review stage head mismatch: the accepted review head is ${expected}, but the pipeline worktree is at ${local.sha}; nothing was published`,
+    };
   }
 
   /* `publishedSha` is deliberately omitted: ingress probes the remote for real
      rather than trusting a durable record that may be stale or migrated. */
   const published = publishPipelineBranch(pipeline, ports.exec, { acceptedSha: expected });
-  if (!published.ok) return `review stage could not publish the accepted head ${expected}: ${published.error}`;
+  if (!published.ok) {
+    return { ok: false, retryable: false, detail: `review stage could not publish the accepted head ${expected}: ${published.error}` };
+  }
+  if (published.remote === "unreachable") {
+    return { ok: false, retryable: true, detail: `passed but unpublished: ${published.detail}` };
+  }
   if (published.remote === "unavailable") {
-    return `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${expected} to`;
+    return {
+      ok: false,
+      retryable: false,
+      detail: `review stage requires a published pipeline branch, but this repository has no origin remote to publish ${expected} to`,
+    };
   }
   pipeline.publishedCommit = published.sha;
-  return null;
+  return { ok: true };
 }
 
 async function tickReviewStage(
@@ -1679,6 +1924,10 @@ async function tickReviewStage(
     ? newAttempt(pipeline, stage)
     : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
+  if (attempt.state === "passed" && pipeline.cursor?.state === "committing") {
+    retryTerminalStagePublication(pipeline, stage, attempt, ports);
+    return;
+  }
   if (attempt.state === "committing") {
     const fenceError = reviewHeadFenceError(pipeline, attempt, ports);
     if (fenceError) {
@@ -1707,11 +1956,19 @@ async function tickReviewStage(
   }
 
   if (!attempt.flowId) {
-    const ingressError = publishReviewIngressHead(pipeline, attempt, ports);
-    if (ingressError) {
-      park(pipeline, ingressError, attempt);
+    const ingress = publishReviewIngressHead(pipeline, attempt, ports);
+    if (!ingress.ok) {
+      if (ingress.retryable) {
+        attempt.error = ingress.detail;
+        pipeline.state = "running";
+        pipeline.stateDetail = ingress.detail;
+        return;
+      }
+      park(pipeline, ingress.detail, attempt);
       return;
     }
+    attempt.error = null;
+    pipeline.stateDetail = null;
     persist();
     const existing = ports.findFlow(implementer.agentPath, implementer.conversationId, pipeline.baseRef, attempt.expectedReviewHeadSha);
     if (existing) {
@@ -1798,6 +2055,15 @@ async function tickReviewStage(
     attempt.reviewHeadSha = capturedReviewHead;
     persist();
   }
+  const retryDetail = reviewFlowRetryDetail(flow);
+  if (retryDetail) {
+    pipeline.stateDetail = retryDetail;
+  } else if (
+    pipeline.stateDetail?.startsWith(REVIEW_FLOW_HOST_CLAIM_RETRY_PREFIX)
+    || pipeline.stateDetail?.startsWith(REVIEW_FLOW_RELAY_RETRY_PREFIX)
+  ) {
+    pipeline.stateDetail = null;
+  }
   if (flow.state === "approved") {
     const fenceError = reviewHeadFenceError(pipeline, attempt, ports);
     if (fenceError) {
@@ -1816,7 +2082,13 @@ async function tickReviewStage(
   }
 }
 
-async function tickPipeline(pipeline: Pipeline, entries: FileEntry[], ports: PipelinePorts, persist: () => void): Promise<boolean> {
+async function tickPipeline(
+  pipeline: Pipeline,
+  entries: FileEntry[],
+  ports: PipelinePorts,
+  persist: () => void,
+  recoveryAccountingDeadline: number,
+): Promise<boolean> {
   const before = JSON.stringify(pipeline);
   if (pipeline.state === "provisioning") {
     if (!pipeline.baseBranch || !pipeline.baseRef || !pipeline.lastPassedCommit) {
@@ -1842,7 +2114,9 @@ async function tickPipeline(pipeline: Pipeline, entries: FileEntry[], ports: Pip
   } else if (pipeline.state === "running") {
     const stage = currentStage(pipeline);
     if (!stage) park(pipeline, "pipeline cursor points to an unknown stage");
-    else if (stage.kind === "run") await tickRunStage(pipeline, stage, entries, ports, persist);
+    else if (stage.kind === "run") {
+      await tickRunStage(pipeline, stage, entries, ports, persist, recoveryAccountingDeadline);
+    }
     else await tickReviewStage(pipeline, stage, entries, ports, persist);
   }
   return JSON.stringify(pipeline) !== before;
@@ -1896,7 +2170,53 @@ function terminalReviewFlowError(flow: Flow): string | null {
   return `review loop ended in ${flow.state}: ${flow.stateDetail ?? "operator decision required"}`;
 }
 
-function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boolean {
+function safeFlowFinding(flow: Flow, finding: ReviewFinding): string {
+  const rawFile = finding.file?.trim() ?? "";
+  let safeFile = rawFile;
+  if (rawFile && path.isAbsolute(rawFile)) {
+    const relative = path.relative(flow.cwd, rawFile);
+    safeFile = relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+      ? relative
+      : path.basename(rawFile);
+  }
+  const location = safeFile
+    ? `${redactBounded(safeFile, 400)}${finding.line ? `:${finding.line}` : ""}`
+    : finding.line ? `line ${finding.line}` : "";
+  return [finding.severity, location, redactBounded(finding.title, 400)]
+    .filter(Boolean)
+    .join(" — ");
+}
+
+/** Terminal flow evidence can outlive the stage-side relay that launched it.
+    Parse the latest completed artifact through the flow's canonical parser,
+    then adapt it to the pipeline verdict interface so normal settlement owns
+    fail-edge routing and the board receives structured findings. */
+function terminalFlowStageVerdict(flow: Flow): ParsedStageVerdict | null {
+  if (flow.state !== "needs_decision" && flow.state !== "done_comment" && flow.state !== "closed") return null;
+  const round = flow.rounds.findLast((candidate) => candidate.verdict !== null);
+  if (!round?.findingsPath || round.verdict === "APPROVE") return null;
+  const parsed = readFindingsFile(round);
+  if (!parsed || parsed.verdict !== round.verdict) return null;
+  const review = parseReview(parsed.content, round.reviewedAt);
+  const reviewFindings = (review?.findings ?? []).map((finding) => safeFlowFinding(flow, finding));
+  const findings = [
+    ...(flow.stateDetail ? [redactBounded(flow.stateDetail, 2_000)] : []),
+    ...reviewFindings,
+  ].slice(0, 50);
+  if (reviewFindings.length === 0 && findings.length < 50) {
+    findings.push(`Review flow round ${round.n} returned ${parsed.verdict}; open the round artifact for details.`);
+  }
+  return {
+    verdict: {
+      status: parsed.verdict === "REQUEST_CHANGES" ? "fail" : "needs_decision",
+      findings,
+      confidence: 1,
+    },
+    output: `Review flow round ${round.n}: ${parsed.verdict}\n\n${findings.map((finding) => `- ${finding}`).join("\n")}`,
+  };
+}
+
+function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts, persist: () => void): boolean {
   if (pipeline.state !== "needs_decision") return false;
   const stage = currentStage(pipeline);
   if (stage?.kind !== "review-loop") return false;
@@ -1909,6 +2229,12 @@ function reconcileBoundReviewFlow(pipeline: Pipeline, ports: PipelinePorts): boo
     || !flow
     || !RECONCILABLE_REVIEW_FLOW_STATES.has(flow.state)
   ) return false;
+  const flowVerdict = terminalFlowStageVerdict(flow);
+  if (flowVerdict) {
+    synchronizeReviewFlowAttempt(attempt, flow, ports.now());
+    settleStageVerdict(pipeline, stage, attempt, flowVerdict, ports, persist);
+    return true;
+  }
   if (flow.state === "paused") {
     if (!isRecoverableLegacyRelayFailurePause(flow)) return false;
     const resumed = ports.patchFlow(flow.id, "resume");
@@ -1980,7 +2306,7 @@ async function reconcileExhaustedVerdictRecovery(
     || message.ts <= unixMs(attempt.startedAt)
     || message.ts <= (recovery.messageTs ?? 0)
   ) return false;
-  const parsed = parseStageVerdict(message.text);
+  const parsed = parsePipelineStageVerdict(message.text);
   if (!parsed || "failureReason" in parsed) return false;
 
   attempt.state = "running";
@@ -2028,6 +2354,11 @@ function reconcileParkedVerdictMiss(pipeline: Pipeline, ports: PipelinePorts): b
 function isStructuredSpawnPark(pipeline: Pipeline, attempt: PipelineStageAttempt): boolean {
   const failure = attempt.error ?? pipeline.stateDetail ?? "";
   return failure.startsWith("stage spawn")
+    || isTransientStructuredSpawnFailure(failure);
+}
+
+function isTransientStructuredSpawnFailure(failure: string): boolean {
+  return failure.includes("structured delivery controller is unavailable")
     || failure.includes("structured initial message")
     || failure.includes("runtime host request timed out");
 }
@@ -2159,6 +2490,7 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
   if (tickStore.__llvPipelineTick) return { pipelines: [], changed: false };
   tickStore.__llvPipelineTick = true;
   let followUp = false;
+  const recoveryAccountingDeadline = ports.monotonicNow() + VERDICT_RECOVERY_ACCOUNTING_BUDGET_MS;
   try {
     const result = await withPipelineControllerMutation(async (pipelines, persist) => {
       let changed = false;
@@ -2171,11 +2503,17 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
         pipelineChanged = await reconcileExhaustedVerdictRecovery(pipeline, ports, persistPipeline) || pipelineChanged;
         pipelineChanged = reconcileParkedVerdictMiss(pipeline, ports) || pipelineChanged;
         pipelineChanged = reconcileParkedStructuredSpawn(pipeline, ports) || pipelineChanged;
-        pipelineChanged = reconcileBoundReviewFlow(pipeline, ports) || pipelineChanged;
+        pipelineChanged = reconcileBoundReviewFlow(pipeline, ports, persistPipeline) || pipelineChanged;
         pipelineChanged = await reconcileUnconfirmedHosts(pipeline, ports) || pipelineChanged;
         pipelineChanged = await reconcileTerminalStageHosts(pipeline, ports) || pipelineChanged;
         if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
-          pipelineChanged = await tickPipeline(pipeline, entries, ports, persistPipeline) || pipelineChanged;
+          pipelineChanged = await tickPipeline(
+            pipeline,
+            entries,
+            ports,
+            persistPipeline,
+            recoveryAccountingDeadline,
+          ) || pipelineChanged;
         }
         if (pipelineChanged) {
           changed = true;
@@ -2204,6 +2542,23 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
   }
 }
 
+/* #1026: the expected shape each stage constraint names, shared by the batched
+   error response and the MCP tool schema's field descriptions so a caller reads
+   the same contract whether it asks the schema or trips the validator. */
+const STAGE_OBJECT_SHAPE = "{id, kind, prompt, next, onFail?, role?, engine?/model?/effort?/access? overrides}";
+const STAGE_PROMPT_SHAPE = `non-empty string up to ${MAX_STAGE_PROMPT_LENGTH} characters`;
+const STAGE_ROLE_SHAPE = `{roleId: one of ${PIPELINE_ROLE_IDS.join(" | ")}, params?: {<key>: string | number}} — runtime overrides belong on the stage, not in role`;
+const STAGE_ROLE_ID_SHAPE = `one of ${PIPELINE_ROLE_IDS.join(" | ")}`;
+const STAGE_ROLE_PARAMS_SHAPE = "object of the role's declared parameters, values string or number";
+const STAGE_RUNTIME_SHAPE = "a role and stage-level engine/model/effort/access the role registry can resolve";
+const STAGE_NEXT_SHAPE = "id of another stage, or null to terminate the pass chain";
+const STAGE_ON_FAIL_SHAPE = `null, or {to: <existing stage id>, maxRounds?: 1–${MAX_FAIL_EDGE_ROUNDS}} — run stages only`;
+const STAGE_GRAPH_SHAPE = "acyclic next chains over existing stage ids, with every review-loop reachable from a run stage";
+
+function stageViolations(violations: PipelineValidationViolation[]): { error: string; violations: PipelineValidationViolation[] } {
+  return { error: pipelineValidationError(violations), violations };
+}
+
 function normalizeStages(
   value: unknown,
   lookup?: PipelineRoleLookup | null,
@@ -2214,64 +2569,142 @@ function normalizeStages(
      acyclic pass edges, valid fail edges, review-loop reachability — apply
      either way. */
   minStages: number = MIN_STARTED_PIPELINE_STAGES,
-): { stages?: PipelineStage[]; error?: string } {
+): { stages?: PipelineStage[]; error?: string; violations?: PipelineValidationViolation[] } {
   if (!Array.isArray(value) || value.length < minStages || value.length > MAX_PIPELINE_STAGES) {
-    return {
-      error: minStages === 0
+    return stageViolations([{
+      field: "stages",
+      message: minStages === 0
         ? `pipelines require at most ${MAX_PIPELINE_STAGES} stages`
         : `pipelines require ${MIN_STARTED_PIPELINE_STAGES}–${MAX_PIPELINE_STAGES} stages`,
-    };
+      expected: `array of ${minStages}–${MAX_PIPELINE_STAGES} stage objects`,
+    }]);
   }
   const stages: PipelineStage[] = [];
   const ids = new Set<string>();
-  for (const raw of value) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "invalid pipeline stage" };
+  /* #1026: every stage is checked, and every violation it holds is collected,
+     before the request is answered. A stage that failed contributes no
+     normalized record, so the loop keeps going with the next one instead of
+     handing the caller one constraint per round trip. */
+  const violations: PipelineValidationViolation[] = [];
+  /* The graph rules read only id/kind/next/onFail. When those four are
+     well-formed on every stage the graph is validated in the same pass, even if
+     other fields failed — so a missing pass edge is reported beside the field
+     errors rather than one call later. */
+  const graphView: Array<Pick<PipelineStage, "id" | "kind" | "next"> & { onFail?: Pipeline["stages"][number]["onFail"] }> = [];
+  let graphViewComplete = true;
+  for (const [index, raw] of (value as unknown[]).entries()) {
+    const at = (field: string) => `stages[${index}]${field ? `.${field}` : ""}`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      violations.push({ field: at(""), message: "invalid pipeline stage", expected: STAGE_OBJECT_SHAPE });
+      graphViewComplete = false;
+      continue;
+    }
+    const before = violations.length;
     const stage = raw as Partial<PipelineStageInput>;
     const id = typeof stage.id === "string" ? stage.id.trim() : "";
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || ids.has(id)) return { error: "stage ids must be unique URL-safe names" };
+    const idValid = /^[A-Za-z0-9_-]{1,64}$/.test(id) && !ids.has(id);
+    if (!idValid) {
+      violations.push({ field: at("id"), message: "stage ids must be unique URL-safe names", expected: "1–64 characters of A–Z a–z 0–9 _ -, unique across stages" });
+    }
     const preservedStage = preservedStages?.get(id);
-    if (stage.kind !== "run" && stage.kind !== "review-loop") return { error: "stage kind must be run or review-loop" };
+    const kindValid = stage.kind === "run" || stage.kind === "review-loop";
+    if (!kindValid) violations.push({ field: at("kind"), message: "stage kind must be run or review-loop", expected: `"run" | "review-loop"` });
     const rawOnFail = (raw as { onFail?: unknown }).onFail;
+    let onFailValid = true;
     if (rawOnFail !== undefined && rawOnFail !== null) {
-      if (!rawOnFail || typeof rawOnFail !== "object" || Array.isArray(rawOnFail)) return { error: `stage ${id} onFail must be an object or null` };
-      const edge = rawOnFail as { to?: unknown; maxRounds?: unknown };
-      if (typeof edge.to !== "string" || !edge.to.trim()) return { error: `stage ${id} onFail requires a target stage id` };
-      const maxRounds = edge.maxRounds === undefined ? DEFAULT_FAIL_EDGE_ROUNDS : edge.maxRounds;
-      if (!Number.isInteger(maxRounds) || (maxRounds as number) < 1 || (maxRounds as number) > MAX_FAIL_EDGE_ROUNDS) {
-        return { error: `stage ${id} onFail maxRounds must be an integer between 1 and ${MAX_FAIL_EDGE_ROUNDS}` };
+      if (!rawOnFail || typeof rawOnFail !== "object" || Array.isArray(rawOnFail)) {
+        violations.push({ field: at("onFail"), message: `stage ${id} onFail must be an object or null`, expected: STAGE_ON_FAIL_SHAPE });
+        onFailValid = false;
+      } else {
+        const edge = rawOnFail as { to?: unknown; maxRounds?: unknown };
+        if (typeof edge.to !== "string" || !edge.to.trim()) {
+          violations.push({ field: at("onFail.to"), message: `stage ${id} onFail requires a target stage id`, expected: "id of an existing stage" });
+          onFailValid = false;
+        }
+        const maxRounds = edge.maxRounds === undefined ? DEFAULT_FAIL_EDGE_ROUNDS : edge.maxRounds;
+        if (!Number.isInteger(maxRounds) || (maxRounds as number) < 1 || (maxRounds as number) > MAX_FAIL_EDGE_ROUNDS) {
+          violations.push({
+            field: at("onFail.maxRounds"),
+            message: `stage ${id} onFail maxRounds must be an integer between 1 and ${MAX_FAIL_EDGE_ROUNDS}`,
+            expected: `integer 1–${MAX_FAIL_EDGE_ROUNDS} (default ${DEFAULT_FAIL_EDGE_ROUNDS})`,
+          });
+          onFailValid = false;
+        }
       }
     }
     const prompt = typeof stage.prompt === "string" ? stage.prompt.trim() : "";
-    if (!prompt) return { error: `stage ${id} prompt is required` };
-    if (prompt.length > MAX_STAGE_PROMPT_LENGTH) return { error: `stage ${id} prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters` };
+    if (!prompt) violations.push({ field: at("prompt"), message: `stage ${id} prompt is required`, expected: STAGE_PROMPT_SHAPE });
+    else if (prompt.length > MAX_STAGE_PROMPT_LENGTH) {
+      violations.push({ field: at("prompt"), message: `stage ${id} prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters`, expected: STAGE_PROMPT_SHAPE });
+    }
     const roleValue = (raw as { role?: unknown }).role;
+    let roleShapeValid = true;
     if (roleValue !== undefined && (!roleValue || typeof roleValue !== "object" || Array.isArray(roleValue))) {
-      return { error: `stage ${id} role must be an object` };
+      violations.push({ field: at("role"), message: `stage ${id} role must be an object`, expected: STAGE_ROLE_SHAPE });
+      roleShapeValid = false;
     }
-    if (roleValue && Object.keys(roleValue).some((key) => key !== "roleId" && key !== "params")) {
-      return { error: `stage ${id} role only accepts roleId and params; place runtime overrides on the stage` };
+    if (roleShapeValid && roleValue && Object.keys(roleValue).some((key) => key !== "roleId" && key !== "params")) {
+      violations.push({
+        field: at("role"),
+        message: `stage ${id} role only accepts roleId and params; place runtime overrides on the stage`,
+        expected: STAGE_ROLE_SHAPE,
+      });
+      roleShapeValid = false;
     }
-    const roleId = roleValue && typeof (roleValue as { roleId?: unknown }).roleId === "string"
+    const roleId = roleShapeValid && roleValue && typeof (roleValue as { roleId?: unknown }).roleId === "string"
       ? (roleValue as { roleId: string }).roleId.trim()
       : "";
-    if (roleValue && !roleId) return { error: `stage ${id} roleId is required when role is present` };
-    const rawParams = (roleValue as { params?: unknown } | undefined)?.params;
+    if (roleShapeValid && roleValue && !roleId) {
+      violations.push({ field: at("role.roleId"), message: `stage ${id} roleId is required when role is present`, expected: STAGE_ROLE_ID_SHAPE });
+      roleShapeValid = false;
+    }
+    const rawParams = roleShapeValid ? (roleValue as { params?: unknown } | undefined)?.params : undefined;
     if (rawParams !== undefined && (!rawParams || typeof rawParams !== "object" || Array.isArray(rawParams))) {
-      return { error: `stage ${id} role params must be an object` };
+      violations.push({ field: at("role.params"), message: `stage ${id} role params must be an object`, expected: STAGE_ROLE_PARAMS_SHAPE });
+      roleShapeValid = false;
     }
-    const roleParams = rawParams as Record<string, unknown> | undefined;
+    const roleParams = roleShapeValid ? rawParams as Record<string, unknown> | undefined : undefined;
     if (roleParams && Object.values(roleParams).some((value) => typeof value !== "string" && typeof value !== "number")) {
-      return { error: `stage ${id} role params must be strings or numbers` };
+      violations.push({ field: at("role.params"), message: `stage ${id} role params must be strings or numbers`, expected: STAGE_ROLE_PARAMS_SHAPE });
+      roleShapeValid = false;
     }
-    if (roleParams && !roleId) return { error: `stage ${id} role params require a roleId` };
-    if (roleId && roleParams && !preservedStage) {
+    if (roleShapeValid && roleParams && !roleId) {
+      violations.push({ field: at("role.roleId"), message: `stage ${id} role params require a roleId`, expected: STAGE_ROLE_ID_SHAPE });
+      roleShapeValid = false;
+    }
+    if (roleShapeValid && roleId && roleParams && !preservedStage) {
       /* Canonical value checks (options, integer bounds, text length, unknown
          keys) so an invalid param can't freeze into the stored scaffold. */
       const paramError = validatePipelineRoleParams(roleId, roleParams as Record<string, string | number>);
-      if (paramError) return { error: `stage ${id} ${paramError}` };
+      if (paramError) {
+        violations.push({ field: at("role.params"), message: `stage ${id} ${paramError}`, expected: STAGE_ROLE_PARAMS_SHAPE });
+        roleShapeValid = false;
+      }
     }
-    if (stage.model !== undefined && stage.model !== null && typeof stage.model !== "string") return { error: `stage ${id} model must be a string or null` };
-    if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") return { error: `stage ${id} effort must be a string or null` };
+    if (stage.model !== undefined && stage.model !== null && typeof stage.model !== "string") {
+      violations.push({ field: at("model"), message: `stage ${id} model must be a string or null`, expected: "model id string, or null to inherit the role default" });
+    }
+    if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") {
+      violations.push({ field: at("effort"), message: `stage ${id} effort must be a string or null`, expected: "effort string supported by the stage engine, or null to inherit the role default" });
+    }
+    const nextValid = stage.next === undefined || stage.next === null || typeof stage.next === "string";
+    if (!nextValid) {
+      violations.push({ field: at("next"), message: `stage ${id} next must be a stage id or null`, expected: STAGE_NEXT_SHAPE });
+    }
+    if (idValid && kindValid && onFailValid && nextValid) {
+      graphView.push({
+        id,
+        kind: stage.kind as PipelineStage["kind"],
+        next: stage.next ?? null,
+        onFail: rawOnFail
+          ? { to: (rawOnFail as { to: string }).to.trim(), maxRounds: ((rawOnFail as { maxRounds?: number }).maxRounds ?? DEFAULT_FAIL_EDGE_ROUNDS) }
+          : null,
+      });
+    } else {
+      graphViewComplete = false;
+    }
+    if (idValid) ids.add(id);
+    if (violations.length > before) continue;
     const onFailEdge = rawOnFail
       ? {
           to: (rawOnFail as { to: string }).to.trim(),
@@ -2280,7 +2713,7 @@ function normalizeStages(
       : null;
     const input: PipelineStageInput = {
       id,
-      kind: stage.kind,
+      kind: stage.kind as PipelineStage["kind"],
       ...(roleId ? { role: { roleId: roleId as PipelineRoleId, ...(roleParams && Object.keys(roleParams).length ? { params: roleParams as Record<string, string | number> } : {}) } } : {}),
       ...(stage.engine !== undefined ? { engine: stage.engine } : {}),
       ...(stage.model !== undefined ? { model: typeof stage.model === "string" ? stage.model.trim() || null : null } : {}),
@@ -2290,16 +2723,24 @@ function normalizeStages(
       next: stage.next ?? null,
       onFail: onFailEdge,
     };
-    const resolved = preservedStage ? { role: preservedStage.effectiveRole } : resolvePipelineRole(input, stage.kind, lookup);
-    if (!resolved.role) return { error: "error" in resolved ? resolved.error : "invalid stage role" };
+    const resolved = preservedStage ? { role: preservedStage.effectiveRole } : resolvePipelineRole(input, stage.kind as PipelineStage["kind"], lookup);
+    if (!resolved.role) {
+      const field = "field" in resolved && resolved.field === "model" ? "model" : "role";
+      violations.push({
+        field: at(field),
+        message: "error" in resolved && resolved.error ? resolved.error : "invalid stage role",
+        expected: field === "model" ? "model id from the selected engine's curated catalog" : STAGE_RUNTIME_SHAPE,
+      });
+      continue;
+    }
     const normalizedStage: PipelineStage = { ...input, effectiveRole: structuredClone(resolved.role) };
-    ids.add(id);
     stages.push(normalizedStage);
   }
   /* v3 graph contract: acyclic pass edges over valid targets, bounded fail
      edges, review-loop pass-reachability — shared with the store validator. */
-  const graphError = pipelineGraphError(stages);
-  if (graphError) return { error: graphError };
+  const graphError = graphViewComplete ? pipelineGraphError(graphView) : null;
+  if (graphError) violations.push({ field: "stages[].next", message: graphError, expected: STAGE_GRAPH_SHAPE });
+  if (violations.length) return stageViolations(violations);
   return { stages };
 }
 
@@ -2326,7 +2767,7 @@ function replaceDraftStages(
   pipeline: Pipeline,
   inputs: PipelineStageInput[],
   lookup?: PipelineRoleLookup | null,
-): { error?: string } {
+): { error?: string; violations?: PipelineValidationViolation[] } {
   /* Custom edges survive structural edits (#353): each kept stage's intentional
      pass and fail edge is preserved as-is, and the add/remove handlers rewire
      only the edit's own seam. This safety net clears an edge whose target left
@@ -2342,14 +2783,16 @@ function replaceDraftStages(
   /* Draft edits may empty the plan entirely (remove down to zero); the 1-stage
      floor is enforced only at Start (#136, #353). */
   const normalized = normalizeStages(relinked, lookup, preserved, 0);
-  if (!normalized.stages) return { error: normalized.error ?? "invalid stages" };
+  if (!normalized.stages) return { error: normalized.error ?? "invalid stages", ...(normalized.violations ? { violations: normalized.violations } : {}) };
   /* The entry stage (the draft cursor rests on stages[0]) must be a run: a
      review-loop entry has no preceding run to review and would park on Start.
      Preserved edges let a fronted review stay graph-reachable from a later run,
      so the array-position guard runs explicitly here (matching the client's
      reviewLoopChainValid). */
   if (normalized.stages[0] && normalized.stages[0].kind !== "run") {
-    return { error: "review-loop stage requires a preceding run stage" };
+    /* #1026: name the stage and the rule it breaks, not an ordering the caller
+       is left to guess at. */
+    return { error: `review-loop stage ${normalized.stages[0].id} may not be the entry stage: the plan starts on its first stage, which must be a run stage whose session a review-loop then reviews` };
   }
   pipeline.stages = normalized.stages;
   pipeline.runs = normalized.stages.map((stage) => ({ stageId: stage.id, attempts: [] }));
@@ -2366,6 +2809,10 @@ export type PipelineMutationResult = {
   code?: PipelineRepoPreflightErrorCode;
   field?: "repoDir";
   path?: string;
+  /** #1026: every request-shape constraint the call violated, each naming its
+      field and the shape that field expects. Present on a batched validation
+      rejection; `error` renders the same list. */
+  violations?: PipelineValidationViolation[];
   /** Set by the close action: what its host teardown stopped and preserved. */
   close?: PipelineCloseReport;
 };
@@ -2375,16 +2822,31 @@ type PipelineCreatorLineage = {
   srcConversationId: string | null;
 };
 
+/** #1026: the roots a creator transcript may live under, named in every `src`
+    rejection. A Claude-engine caller knows only its native path, so the message
+    has to say which address the viewer records — and that the native one is
+    accepted whenever the shared mirror holds the same file. */
+export const PIPELINE_SRC_ROOT_GUIDANCE =
+  "src must be a .jsonl transcript under an accepted root: the shared Claude transcript store (<viewer config dir>/shared/claude/projects), a Claude account's own projects root, or a Codex sessions root (~/.codex/sessions). A native ~/.claude/projects path is accepted and normalized to the shared store when the mirrored file exists there.";
+
 function resolvePipelineCreatorLineage(
   value: unknown,
   ports: Pick<PipelinePorts, "sourcePathAllowed" | "conversationIdForPath">,
 ): { lineage?: PipelineCreatorLineage; error?: string; status?: number } {
-  const srcPath = typeof value === "string" ? value.trim() : "";
-  if (!srcPath) return { error: "pipeline creator lineage is required; pass src", status: 400 };
-  if (!ports.sourcePathAllowed(srcPath)) return { error: "src path is not an allowed conversation transcript", status: 400 };
-  const srcConversationId = ports.conversationIdForPath(srcPath);
-  if (!srcConversationId) return { error: "src conversation does not exist", status: 400 };
-  return { lineage: { srcPath, srcConversationId } };
+  const requested = typeof value === "string" ? value.trim() : "";
+  if (!requested) return { error: "pipeline creator lineage is required; pass src", status: 400 };
+  /* The native `<claude home>/projects/...` path and its shared-store mirror
+     name the same file; viewer records address the shared one. Try what the
+     caller passed first, so nothing about an already-canonical path changes. */
+  for (const srcPath of [requested, mirroredClaudeTranscriptPath(requested)]) {
+    if (!srcPath || !ports.sourcePathAllowed(srcPath)) continue;
+    const srcConversationId = ports.conversationIdForPath(srcPath);
+    if (srcConversationId) return { lineage: { srcPath, srcConversationId } };
+  }
+  if (!ports.sourcePathAllowed(requested)) {
+    return { error: `src path is not an allowed conversation transcript. ${PIPELINE_SRC_ROOT_GUIDANCE}`, status: 400 };
+  }
+  return { error: `src conversation does not exist. ${PIPELINE_SRC_ROOT_GUIDANCE}`, status: 400 };
 }
 
 type CreatePipelineOptions = {
@@ -2462,17 +2924,23 @@ export async function createPipelineFromRequest(
   ports: PipelinePorts = defaultPipelinePorts(),
   options: CreatePipelineOptions = {},
 ): Promise<PipelineMutationResult> {
+  /* #1026: every request-shape constraint is evaluated before the request is
+     answered, and the response carries all of them. The checks and their
+     verdicts are the ones that were here before, only their reporting is
+     batched; the repo preflight and base resolution below still answer alone,
+     because each carries its own code, field and status. */
+  const violations: PipelineValidationViolation[] = [];
   const task = typeof req.task === "string" ? req.task.trim() : "";
-  if (!task) return { error: "task is required", status: 400 };
-  if (task.length > MAX_TASK_LENGTH) return { error: `task exceeds ${MAX_TASK_LENGTH} characters`, status: 400 };
+  if (!task) violations.push({ field: "task", message: "task is required", expected: `non-empty string up to ${MAX_TASK_LENGTH} characters` });
+  else if (task.length > MAX_TASK_LENGTH) violations.push({ field: "task", message: `task exceeds ${MAX_TASK_LENGTH} characters`, expected: `non-empty string up to ${MAX_TASK_LENGTH} characters` });
   const spec = typeof req.spec === "string" && req.spec.trim() ? req.spec.trim() : undefined;
-  if (req.spec !== undefined && typeof req.spec !== "string") return { error: "spec must be a string", status: 400 };
-  if (spec && spec.length > MAX_SPEC_LENGTH) return { error: `spec exceeds ${MAX_SPEC_LENGTH} characters`, status: 400 };
-  if (req.autoStart !== undefined && typeof req.autoStart !== "boolean") return { error: "autoStart must be a boolean", status: 400 };
-  if (req.baseBranch !== undefined && typeof req.baseBranch !== "string") return { error: "baseBranch must be a string", status: 400 };
-  if (req.baseRef !== undefined && typeof req.baseRef !== "string") return { error: "baseRef must be a string", status: 400 };
+  if (req.spec !== undefined && typeof req.spec !== "string") violations.push({ field: "spec", message: "spec must be a string", expected: `string up to ${MAX_SPEC_LENGTH} characters` });
+  if (spec && spec.length > MAX_SPEC_LENGTH) violations.push({ field: "spec", message: `spec exceeds ${MAX_SPEC_LENGTH} characters`, expected: `string up to ${MAX_SPEC_LENGTH} characters` });
+  if (req.autoStart !== undefined && typeof req.autoStart !== "boolean") violations.push({ field: "autoStart", message: "autoStart must be a boolean", expected: "boolean (false creates a draft the operator starts)" });
+  if (req.baseBranch !== undefined && typeof req.baseBranch !== "string") violations.push({ field: "baseBranch", message: "baseBranch must be a string", expected: "branch name string" });
+  if (req.baseRef !== undefined && typeof req.baseRef !== "string") violations.push({ field: "baseRef", message: "baseRef must be a string", expected: "commit-ish string resolved against repoDir" });
   if (req.taskIds !== undefined && (!Array.isArray(req.taskIds) || req.taskIds.some((taskId) => typeof taskId !== "string" || !taskId.trim()))) {
-    return { error: "taskIds must be an array of non-empty strings", status: 400 };
+    violations.push({ field: "taskIds", message: "taskIds must be an array of non-empty strings", expected: "array of board task ids" });
   }
   const taskSpawn = options.ensureTask && options.spawnParams && isTaskSpawnPipelineParams(options.spawnParams)
     ? { task: options.ensureTask, params: options.spawnParams }
@@ -2485,22 +2953,37 @@ export async function createPipelineFromRequest(
     : operatorDraftWithoutLineage
       ? { lineage: { srcPath: null, srcConversationId: null } }
     : resolvePipelineCreatorLineage(req.src, ports);
-  if (!creator.lineage) return { error: creator.error, status: creator.status };
+  /* A task-spawn lineage failure is a launch-identity conflict, not a request
+     the caller can fix by editing fields, so it answers alone as it always did. */
+  if (!creator.lineage && taskSpawn) return { error: creator.error, status: creator.status };
+  if (!creator.lineage) violations.push({ field: "src", message: creator.error ?? "pipeline creator lineage is required; pass src", expected: PIPELINE_SRC_ROOT_GUIDANCE });
   const taskIds = [...new Set((req.taskIds ?? []).map((taskId) => taskId.trim()))];
   const requestedRepoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
-  if (!requestedRepoDir) return { error: "repoDir is required", status: 400 };
-  const admission = ports.preflightRepo(requestedRepoDir);
-  if (!admission.ok) return preflightFailure(admission);
-  const repoDir = admission.repoDir;
+  if (!requestedRepoDir) violations.push({ field: "repoDir", message: "repoDir is required", expected: "absolute path of an existing git repository" });
   /* A draft (autoStart:false) may be created empty and assembled on the canvas
      (#136); an immediately-started pipeline needs at least its one implement
      conversation (#353). */
   const normalized = normalizeStages(req.stages, ports.roleLookup, undefined, req.autoStart === false ? 0 : MIN_STARTED_PIPELINE_STAGES);
-  if (!normalized.stages) return { error: normalized.error ?? "invalid stages", status: 400 };
-  const explicitBaseRef = req.baseRef?.trim();
-  if (req.autoStart === false && req.baseBranch?.trim() && !explicitBaseRef) {
-    return { error: "a draft baseBranch requires an explicit baseRef", status: 400 };
+  if (!normalized.stages) {
+    violations.push(...(normalized.violations ?? [{ field: "stages", message: normalized.error ?? "invalid stages", expected: STAGE_OBJECT_SHAPE }]));
   }
+  /* Read after the type checks above recorded their verdicts: with batching a
+     non-string baseRef reaches here, so the trims must not assume a string. */
+  const explicitBaseRef = typeof req.baseRef === "string" ? req.baseRef.trim() : undefined;
+  const requestedBaseBranch = typeof req.baseBranch === "string" ? req.baseBranch.trim() : "";
+  if (req.autoStart === false && requestedBaseBranch && !explicitBaseRef) {
+    violations.push({
+      field: "baseRef",
+      message: "a draft baseBranch requires an explicit baseRef",
+      expected: "commit SHA the draft is pinned to, resolved by the caller (a draft is not provisioned, so the viewer cannot resolve the branch itself)",
+    });
+  }
+  if (violations.length || !normalized.stages || !creator.lineage) {
+    return { error: pipelineValidationError(violations), violations, status: 400 };
+  }
+  const admission = ports.preflightRepo(requestedRepoDir);
+  if (!admission.ok) return preflightFailure(admission);
+  const repoDir = admission.repoDir;
   const base = req.autoStart === false && !explicitBaseRef
     ? null
     : resolvePipelineBase(repoDir, { baseBranch: req.baseBranch, baseRef: explicitBaseRef }, ports.exec);
@@ -2586,12 +3069,47 @@ async function orphanAgentPane(
   return { error: `stage agent may still be running in pane ${attempt.paneId}; wait for it to exit or kill the pane first`, status: 409 };
 }
 
-function verdictRecoveryResetRefusal(attempt: PipelineStageAttempt | null): { error: string; status: number } | null {
+function verdictRecoveryResetRefusal(
+  pipeline: Pipeline,
+  attempt: PipelineStageAttempt | null,
+  ports: PipelinePorts,
+): { error: string; status: number } | null {
   if (attempt?.verdictRecovery?.state !== "exhausted") return null;
-  return {
-    error: "automatic verdict recovery exhausted; preserve its worktree and conversation lineage, then continue the same conversation or close the pipeline",
-    status: 409,
-  };
+  const refusal = (reason: string) => ({
+    error: `automatic verdict recovery exhausted; retry-stage and skip-stage require a reset-safe worktree: ${reason}. Preserve the work or use close`,
+    status: 409 as const,
+  });
+  if (!pipeline.lastPassedCommit) return refusal("the pipeline has no passed-stage commit");
+  const local = currentPipelineBranchHead(pipeline, ports.exec);
+  if (!local.ok) return refusal(local.error);
+  if (local.sha === pipeline.lastPassedCommit) return null;
+  return refusal(`the worktree HEAD ${local.sha} differs from the last-passed commit ${pipeline.lastPassedCommit}`);
+}
+
+async function closeStopFailureEvidence(
+  candidate: StageHostCandidate,
+  ports: PipelinePorts,
+): Promise<string | null> {
+  try {
+    if (!(await ports.stageHostResident(candidate.target))) return "the host registry entry is dead or absent";
+  } catch {
+    // An unreadable registry leaves the transcript as the remaining authority.
+  }
+  if (!candidate.target.agentPath) return null;
+  const durable = await ports.durableTurnEvidence(candidate.attempt.effectiveRole.engine, candidate.target.agentPath);
+  if (durable?.turn !== "terminal" || !durable.message) return null;
+  if (durable.message.ts <= unixMs(candidate.attempt.startedAt)) return null;
+  const parsed = parsePipelineStageVerdict(durable.message.text);
+  if (!parsed || "failureReason" in parsed) return null;
+  return "the attempt transcript holds a completed final assistant turn with a valid fenced verdict";
+}
+
+function terminalizeAttemptForClose(candidate: StageHostCandidate, note: string, ports: PipelinePorts): void {
+  if (!TERMINAL_ATTEMPT_STATES.has(candidate.attempt.state)) {
+    candidate.attempt.state = "failed";
+    candidate.attempt.error = note;
+  }
+  candidate.attempt.completedAt ??= ports.now();
 }
 
 /**
@@ -2624,6 +3142,7 @@ function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
       if (seen.has(identity)) continue;
       seen.add(identity);
       candidates.push({
+        attempt,
         target: {
           stageId: run.stageId,
           attempt: attempt.n,
@@ -2645,7 +3164,7 @@ function launchedStageHosts(pipeline: Pipeline): StageHostCandidate[] {
 
 /** A launched host plus whether its attempt's turn ended, which decides only
     whether the pane heuristic may speak for it. */
-type StageHostCandidate = { target: PipelineStageHostRef; turnSettled: boolean };
+type StageHostCandidate = { attempt: PipelineStageAttempt; target: PipelineStageHostRef; turnSettled: boolean };
 
 /** Ceiling on a close's whole host teardown, holding the pipelines transaction. */
 const CLOSE_TEARDOWN_BUDGET_MS = 10_000;
@@ -2686,6 +3205,7 @@ function closeSummary(report: PipelineCloseReport): string | null {
   if (report.acknowledged.length > 0) {
     parts.push(`dismissed ${report.acknowledged.length} unconfirmed host${report.acknowledged.length === 1 ? "" : "s"} on the operator's word`);
   }
+  for (const note of report.notes) parts.push(`${note.detail} for ${stageHostLabel(note)}`);
   if (report.worktree?.error) {
     parts.push(`could not read the worktree at ${report.worktree.dir}: ${report.worktree.error}`);
   } else {
@@ -2701,6 +3221,7 @@ export async function patchPipeline(
   id: string,
   req: PatchPipelineRequest,
   ports: PipelinePorts = defaultPipelinePorts(),
+  actor: PauseResumeActor | null = OPERATOR_PAUSE_RESUME_ACTOR,
 ): Promise<PipelineMutationResult> {
   return withPipelineMutation(async (pipelines, persist) => {
     const pipeline = pipelines.find((item) => item.id === id);
@@ -2813,7 +3334,7 @@ export async function patchPipeline(
       inputs.splice(index, 0, inserted);
       if (predecessor) predecessor.next = inserted.id;
       const replaced = replaceDraftStages(pipeline, inputs, ports.roleLookup);
-      if (replaced.error) return { error: replaced.error, status: 400 };
+      if (replaced.error) return { error: replaced.error, status: 400, ...(replaced.violations ? { violations: replaced.violations } : {}) };
     } else if (req.action === "remove-stage") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       /* A draft can be emptied entirely on the canvas (#136); the 2-stage floor is
@@ -2838,7 +3359,7 @@ export async function patchPipeline(
         if (input.onFail?.to === removed.id) input.onFail = null;
       }
       const replaced = replaceDraftStages(pipeline, inputs, ports.roleLookup);
-      if (replaced.error) return { error: replaced.error, status: 400 };
+      if (replaced.error) return { error: replaced.error, status: 400, ...(replaced.violations ? { violations: replaced.violations } : {}) };
     } else if (req.action === "reorder-stage") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       const inputs = draftStageInputs(pipeline.stages);
@@ -2860,7 +3381,7 @@ export async function patchPipeline(
         ordered.splice(toIndex!, 0, moved!);
       }
       const replaced = replaceDraftStages(pipeline, ordered, ports.roleLookup);
-      if (replaced.error) return { error: replaced.error, status: 400 };
+      if (replaced.error) return { error: replaced.error, status: 400, ...(replaced.violations ? { violations: replaced.violations } : {}) };
     } else if (req.action === "set-edge") {
       /* Conversation-graph editing (#353): rewires a stage's pass or fail edge.
          Edits always shape the future, never rewrite evidence: a stage that has
@@ -2913,19 +3434,19 @@ export async function patchPipeline(
         pipeline.pausedState = pipeline.state;
         pipeline.state = "paused";
         pipeline.pausedAt = ports.now();
-        pipeline.stateDetail = "paused by user";
-        if (flow && flow.state !== "paused" && flow.state !== "closed") ports.patchFlow(flow.id, "pause");
+        pipeline.stateDetail = pauseResumeDetail("paused", actor);
+        if (flow && flow.state !== "paused" && flow.state !== "closed") ports.patchFlow(flow.id, "pause", undefined, actor);
       }
     } else if (req.action === "resume") {
       if (pipeline.state !== "paused") return { error: "pipeline is not paused", status: 409 };
       pipeline.state = pipeline.pausedState ?? "running";
       pipeline.pausedState = null;
       pipeline.resumedAt = ports.now();
-      pipeline.stateDetail = null;
-      if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
+      pipeline.stateDetail = pauseResumeDetail("resumed", actor);
+      if (flow?.state === "paused") ports.patchFlow(flow.id, "resume", undefined, actor);
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
-      const recoveryRefusal = verdictRecoveryResetRefusal(attempt);
+      const recoveryRefusal = verdictRecoveryResetRefusal(pipeline, attempt, ports);
       if (recoveryRefusal) return recoveryRefusal;
       const explicitReceiptRetry = req.stageId !== undefined || req.launchId !== undefined;
       if (explicitReceiptRetry && (typeof req.stageId !== "string" || typeof req.launchId !== "string")) {
@@ -3034,7 +3555,7 @@ export async function patchPipeline(
       pipeline.stateDetail = null;
     } else if (req.action === "skip-stage") {
       if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
-      const recoveryRefusal = verdictRecoveryResetRefusal(attempt);
+      const recoveryRefusal = verdictRecoveryResetRefusal(pipeline, attempt, ports);
       if (recoveryRefusal) return recoveryRefusal;
       const orphan = await orphanAgentPane(attempt, ports);
       if (orphan) return orphan;
@@ -3157,7 +3678,7 @@ export async function patchPipeline(
       if (req.acknowledgeHosts !== undefined && typeof req.acknowledgeHosts !== "boolean") {
         return { error: "acknowledgeHosts must be a boolean", status: 400 };
       }
-      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], acknowledged: [], reviewers: [], stillRunning: [], worktree: null };
+      const close: PipelineCloseReport = { stopped: [], alreadyStopped: [], unconfirmed: [], acknowledged: [], reviewers: [], stillRunning: [], notes: [], worktree: null };
       /* Each host's confirmation is bounded, but N of them multiply, and this
          whole loop holds the pipelines file transaction — every other pipeline
          mutation and the controller tick queue behind it. So the aggregate is
@@ -3167,7 +3688,8 @@ export async function patchPipeline(
       const teardownDeadline = ports.monotonicNow() + CLOSE_TEARDOWN_BUDGET_MS;
       const candidates = launchedStageHosts(pipeline);
       for (let index = 0; index < candidates.length; index += 1) {
-        const { target, turnSettled } = candidates[index]!;
+        const candidate = candidates[index]!;
+        const { target, turnSettled } = candidate;
         if (index > 0 && ports.monotonicNow() >= teardownDeadline) {
           for (const remaining of candidates.slice(index)) {
             close.unconfirmed.push({
@@ -3180,8 +3702,17 @@ export async function patchPipeline(
         }
         const result = await ports.stopStageAgent(target);
         if (result.outcome === "stopped") close.stopped.push(target);
-        else if (result.outcome === "failed") close.stillRunning.push({ ...target, error: result.error });
-        else if (result.outcome === "unconfirmed") {
+        else if (result.outcome === "failed") {
+          const evidence = await closeStopFailureEvidence(candidate, ports);
+          if (evidence) {
+            const detail = `stop failed with "${result.error}"; terminalized from ${evidence}`;
+            close.alreadyStopped.push(target);
+            close.notes.push({ ...target, detail });
+            terminalizeAttemptForClose(candidate, detail, ports);
+          } else {
+            close.stillRunning.push({ ...target, error: result.error });
+          }
+        } else if (result.outcome === "unconfirmed") {
           close.unconfirmed.push({ ...target, operationId: result.operationId, detail: result.detail });
         } else if (!turnSettled && target.paneId) {
           /* The registry knows no host, but the attempt never finished its turn
@@ -3191,8 +3722,14 @@ export async function patchPipeline(
           if (pane.outcome === "stopped") close.stopped.push(target);
           else if (pane.outcome === "failed") close.stillRunning.push({ ...target, error: pane.error });
           else if (pane.outcome === "unknown") close.unconfirmed.push({ ...target, operationId: null, detail: pane.detail });
-          else close.alreadyStopped.push(target);
-        } else close.alreadyStopped.push(target);
+          else {
+            close.alreadyStopped.push(target);
+            terminalizeAttemptForClose(candidate, "the stage pane was already absent when the pipeline closed", ports);
+          }
+        } else {
+          close.alreadyStopped.push(target);
+          terminalizeAttemptForClose(candidate, "the stage host was already absent when the pipeline closed", ports);
+        }
       }
       close.worktree = closeWorktreeReport(pipeline, ports);
       if (close.stillRunning.length > 0) {

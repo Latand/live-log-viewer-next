@@ -118,6 +118,9 @@ export async function handleRuntimeCommand(
         ...(rawImages ? { images: rawImages } : command.images?.length ? { imageRefs: command.images } : {}),
         ...(command.runtime ? { runtime: command.runtime } : {}),
         ...(command.selectedContext ? { selectedContext: command.selectedContext } : {}),
+        /* #1117: this route is the operator's own composer surface, so
+           authorship is stamped HERE, server-side — never read off the body. */
+        origin: { kind: "operator" },
       }, {
         enabled: dependencies.structuredEnabled ?? (() => structuredHostsEnabled()),
         client: () => client,

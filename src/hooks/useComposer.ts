@@ -7,25 +7,41 @@ import { performVoiceSend } from "@/hooks/composerVoiceSend";
 import { useAutosizePinned } from "@/hooks/useAutosizePinned";
 import { useDictation } from "@/hooks/useDictation";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { COMPOSER_MAX_PX, keyboardInset, mobileComposerCeiling, visibleViewportHeight } from "@/lib/composerScroll";
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
-/* The pane / draft / bulk / task-create composers grow to ~6 rows, then scroll
-   internally pinned to the newest text. */
-const COMPOSER_MAX_PX = 160;
-/* On the phone the field grows further — up to ~40% of the viewport (issue #177
-   item 3) — so a multi-line prompt is comfortable to read while typing, past
-   which it scrolls internally. The send/mic controls keep their 44px targets. */
-const COMPOSER_MAX_VH = 0.4;
-
-/* Live viewport height, tracked the same way as `useIsMobile` (external store,
-   no setState-in-effect) so the phone grow ceiling re-measures on rotation and
-   the server render stays stable. */
+/* Live VISIBLE viewport height, tracked the same way as `useIsMobile`
+   (external store, no setState-in-effect) so the phone grow ceiling
+   re-measures on rotation and the server render stays stable. The on-screen
+   keyboard is the reason both event sources matter (#983): browsers honoring
+   the app's interactive-widget=resizes-content shrink the layout viewport and
+   fire window `resize`, but iOS Safari ignores that meta — there the keyboard
+   shrinks only `window.visualViewport`, whose own `resize` is the one signal
+   that the visible area halved. */
 function subscribeViewport(onChange: () => void) {
   window.addEventListener("resize", onChange);
-  return () => window.removeEventListener("resize", onChange);
+  const visual = window.visualViewport;
+  visual?.addEventListener("resize", onChange);
+  return () => {
+    window.removeEventListener("resize", onChange);
+    visual?.removeEventListener("resize", onChange);
+  };
 }
 function useViewportHeight(): number {
-  return useSyncExternalStore(subscribeViewport, () => window.innerHeight, () => 800);
+  return useSyncExternalStore(subscribeViewport, () => visibleViewportHeight(window.innerHeight, window.visualViewport), () => 800);
+}
+
+/**
+ * The on-screen keyboard's overlap with the layout viewport (#983): how much of
+ * a full-height (100dvh) surface the keyboard covers when the browser refuses
+ * to shrink the layout viewport (iOS Safari). The mobile focus root pads this
+ * away so the composer's controls stay above the keyboard and the browser
+ * never scrolls the window to reach the focused field. Zero whenever the two
+ * viewports agree — keyboard closed, resizes-content honored, no
+ * visualViewport, desktop — so every other layout is byte-identical.
+ */
+export function useKeyboardInset(): number {
+  return useSyncExternalStore(subscribeViewport, () => keyboardInset(window.innerHeight, window.visualViewport), () => 0);
 }
 
 export interface ComposerStatus {
@@ -133,12 +149,17 @@ export function useComposer({ initialText, persistText, submit, disabled = false
     };
   }, []);
 
-  /* Grow ceiling: the desktop keeps its ~6-row cap; the phone tracks 40% of the
-     live viewport height so the field can open into a tall multi-line input and
-     re-measures on rotation/resize (issue #177 item 3). */
+  /* Grow ceiling: the desktop keeps its fixed ~6-row cap; the phone budgets
+     against the live VISIBLE viewport height so the field can open into a tall
+     multi-line input and re-measures on rotation/resize (issue #177 item 3).
+     With the on-screen keyboard up the visible viewport is roughly half the
+     screen — budgeting against the full layout height there grew the field
+     past what fits above the keyboard and pushed the picker/send controls out
+     of view (#983); on a short rotated viewport even the 160px cap overflows,
+     so the ceiling yields the chrome's share first and shrinks below it. */
   const isMobile = useIsMobile();
   const viewportH = useViewportHeight();
-  const maxPx = isMobile ? Math.max(COMPOSER_MAX_PX, Math.round(viewportH * COMPOSER_MAX_VH)) : COMPOSER_MAX_PX;
+  const maxPx = isMobile ? mobileComposerCeiling(viewportH) : COMPOSER_MAX_PX;
 
   const attachments = useImageAttachments({
     onError: (message) => setStatus({ kind: "err", text: message }),

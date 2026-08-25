@@ -9,8 +9,12 @@ import { AccountsPanel } from "./AccountsPanel";
 const base = (over: Partial<EngineAccountsState> = {}): EngineAccountsState => ({
   engine: "codex",
   accounts: [
-    { id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, effective: { percent: 12, window: "session", freshness: "fresh" } },
-    { id: "work", label: "Work", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, effective: { percent: 64, window: "weekly", freshness: "stale" } },
+    // Each capacity chip is reconciled from the account's own windows, so the
+    // fixture carries the windows the chip percentages come from.
+    { id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+      limits: { freshness: "fresh", session: { usedPercent: 88, resetsAt: null, windowMinutes: 300 }, weekly: null } },
+    { id: "work", label: "Work", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+      limits: { freshness: "stale", session: null, weekly: { usedPercent: 36, resetsAt: null, windowMinutes: 10_080 } } },
   ],
   active: "main",
   identityVersion: 0,
@@ -96,7 +100,6 @@ test("breaks out each account's session and weekly windows with reset times", ()
     accounts: [
       {
         id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
-        effective: { percent: 45, window: "session", freshness: "fresh" },
         limits: { freshness: "fresh", session: { usedPercent: 55, resetsAt: nowS + 7200, windowMinutes: 300 }, weekly: { usedPercent: 8, resetsAt: nowS + 259200, windowMinutes: 10_080 } },
       },
     ],
@@ -118,7 +121,6 @@ test("a weekly-only account labels its one window by the horizon it carries", ()
     accounts: [
       {
         id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
-        effective: { percent: 85, window: "weekly", freshness: "fresh" },
         limits: { freshness: "fresh", session: null, weekly: { usedPercent: 15, resetsAt: nowS + 437_631, windowMinutes: 10_080 } },
       },
     ],

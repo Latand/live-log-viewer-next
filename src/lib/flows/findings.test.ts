@@ -42,7 +42,7 @@ function fixtureRound(): Round {
     accountId: "default",
     attemptedAccounts: ["codex:default"],
     autoRetryCount: 0,
-    sessionId: "11111111-2222-4333-8444-555555555555",
+    sessionId: "round-1-reviewer-session",
     reviewerPid: null,
     reviewerIdentity: null,
     reviewerPane: null,
@@ -125,4 +125,54 @@ test("recovers a legacy managed Claude verdict from the engine resolved by its f
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("counts findings for reviewer formats that escape the bulleted-bold field contract (#930)", () => {
+  const headingFields = `VERDICT: REQUEST_CHANGES
+
+### Finding 1
+**Severity:** High
+**File:** src/example/alpha.ts
+**Line:** 42
+**Title:** Retry loop drops the deadline
+**Explanation:** The helper rebuilds the deadline on every attempt.
+
+### Finding 2
+**Severity:** Medium
+**File:** src/example/beta.ts
+**Title:** Missing null guard
+**Explanation:** The lookup assumes the map always holds the key.
+`;
+  const plainBulletFields = `VERDICT: REQUEST_CHANGES
+
+- Severity: Medium
+- File: src/example/alpha.ts
+- Line: 42
+- Title: Retry loop drops the deadline
+- Explanation: The deadline is recomputed per attempt.
+
+- Severity: Low
+- File: src/example/beta.ts
+- Title: Missing null guard
+- Explanation: The lookup assumes the map always holds the key.
+`;
+  const proseBullets = `VERDICT: REQUEST_CHANGES
+
+- **HIGH — src/example/alpha.ts:42 — Retry loop drops the deadline.** The helper recomputes the deadline per attempt.
+- **MEDIUM — src/example/beta.ts:17 — Missing null guard.** The lookup assumes the map always holds the key.
+- **LOW — src/example/gamma.ts:8 — Stale comment.** The comment describes the previous contract.
+`;
+
+  expect(parseFindings(headingFields)).toMatchObject({ verdict: "REQUEST_CHANGES", findingsCount: 2 });
+  expect(parseFindings(plainBulletFields)).toMatchObject({ verdict: "REQUEST_CHANGES", findingsCount: 2 });
+  expect(parseFindings(proseBullets)).toMatchObject({ verdict: "REQUEST_CHANGES", findingsCount: 3 });
+});
+
+test("keeps an approving prose review at zero findings", () => {
+  const approval = `VERDICT: APPROVE
+
+The parser change is scoped to the two files and the regression tests cover every observed format.
+Residual risk is low: the fallback count only runs for a requested-changes verdict.
+`;
+  expect(parseFindings(approval)).toMatchObject({ verdict: "APPROVE", findingsCount: 0 });
 });

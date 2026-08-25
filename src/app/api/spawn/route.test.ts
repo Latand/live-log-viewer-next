@@ -8,12 +8,14 @@ import { NextRequest } from "next/server";
 import { agentRegistry, AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots, createManagedCodexAccount } from "@/lib/accounts/codex";
+import { NoHealthyClaudeAccountError } from "@/lib/accounts/spawnHealth";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { projectLaunchConversations } from "@/lib/agent/spawnProjection";
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "@/lib/runtime/client";
+import { recoverPendingStructuredSpawns, terminalizeStaleStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
@@ -55,6 +57,12 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
       transcriptRoot: path.join(cwd, "projects"),
       env: { NODE_ENV: "test" },
     }),
+    resolvePinnedSpawnAdmission: async () => ({
+      kind: "admissible",
+      basis: "current",
+      stale: false,
+      retryAt: null,
+    }),
     runtimeHostClient: () => ({} as RuntimeHostClient),
     defer: (work) => { void work(); },
     storeImages: (images) => images.map((image) => ({
@@ -80,12 +88,25 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
 test("spawn admission rejects malformed MCP allowlists", async () => {
   const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
     method: "POST",
-    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
     body: JSON.stringify({ engine: "codex", cwd: routeSandbox, prompt: "inspect", mcpServers: "viewer" }),
   }), structuredRouteDependencies(routeSandbox));
 
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({ error: "mcpServers must be an array of non-empty server names" });
+});
+
+test("spawn admission rejects an explicit model outside the selected engine catalog", async () => {
+  const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+    body: JSON.stringify({ engine: "codex", model: "gpt-5.6-codex", cwd: routeSandbox, prompt: "inspect" }),
+  }), structuredRouteDependencies(routeSandbox));
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({
+    error: "invalid codex model id \"gpt-5.6-codex\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
+  });
 });
 
 test("an explicit spawn account is durably pinned while an omitted account uses the selected fallback", async () => {
@@ -118,7 +139,7 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
     const post = async (clientAttemptId: string, accountId?: string) => await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
-      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "inspect", clientAttemptId, ...(accountId ? { accountId } : {}) }),
+      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "inspect", clientAttemptId, ...(accountId ? { accountId } : {}) }),
     }), dependencies);
 
     const pinnedResponses = await Promise.all([
@@ -154,7 +175,618 @@ test("an explicit spawn account is durably pinned while an omitted account uses 
   }
 });
 
-test("an unusable explicit account creates a terminal retryable pinned receipt and card", async () => {
+test("a queued pinned account survives restart and launches exactly once on the pin after admission", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-retry-"));
+  const registryFile = path.join(cwd, "agent-registry.json");
+  let store = new AgentRegistry(registryFile);
+  const deferred: Array<() => Promise<void>> = [];
+  const spawnedAccounts: string[] = [];
+  let pinAdmissible = false;
+  const retryAt = new Date(Date.now() + 60_000).toISOString();
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const account = (accountId: string) => ({
+      engine: "claude" as const,
+      accountId,
+      kind: "managed" as const,
+      home: path.join(cwd, accountId),
+      transcriptRoot: path.join(cwd, accountId, "projects"),
+      env: { NODE_ENV: "test" as const },
+    });
+    const dependencies = {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => {
+        throw new NoHealthyClaudeAccountError(["account-a"]);
+      },
+      resolveSpawnAccount: (_engine: "claude" | "codex", accountId: string | null) => account(accountId ?? "account-b"),
+      resolvePinnedSpawnAdmission: async () => pinAdmissible
+        ? {
+            kind: "admissible" as const,
+            basis: "current" as const,
+            stale: false,
+            retryAt: null,
+          }
+        : {
+            kind: "retry-at" as const,
+            reason: "hard-limit" as const,
+            stale: false,
+            retryAt,
+          },
+      defer: (work: () => Promise<void>) => { deferred.push(work); },
+      spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
+        spawnedAccounts.push(input.account.accountId);
+        const sessionId = crypto.randomUUID();
+        const settled = input.registry.settleSpawn(input.receipt.launchId, {
+          key: { engine: input.engine, sessionId },
+          artifactPath: path.join(cwd, `${sessionId}.jsonl`),
+          cwd,
+          accountId: input.account.accountId,
+          status: "starting",
+          host: null,
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: "spawn",
+        });
+        if (settled.kind !== "settled") throw new Error("expected queued settlement");
+        return {
+          ok: true as const,
+          target: null,
+          path: settled.entry.artifactPath,
+          launchId: input.receipt.launchId,
+          conversationId: settled.conversation.id,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered" as const,
+          state: "settled" as const,
+        };
+      },
+    };
+    const post = async () => await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "sonnet",
+        cwd,
+        ["prompt"]: "continue",
+        accountId: "account-a",
+        clientAttemptId: "account_pin_retry_20260823",
+      }),
+    }), dependencies);
+
+    const response = await post();
+    expect(response.status).toBe(202);
+    const queued = await response.json();
+    expect(queued).toMatchObject({ state: "starting", initialMessage: "queued" });
+    expect(spawnedAccounts).toEqual([]);
+    const receipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
+    expect(receipt).toMatchObject({
+      accountId: "account-a",
+      accountPin: true,
+      state: "starting",
+      queuedPinnedSpawn: {
+        version: 1,
+        accountId: "account-a",
+        retryAt,
+        ["prompt"]: "continue",
+      },
+    });
+    expect(receipt.launchProfile.title).toBe(`Pinned account quota is exhausted — queued until ${retryAt}`);
+    expect(projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]).toMatchObject({
+      title: `Pinned account quota is exhausted — queued until ${retryAt}`,
+      spawn: { accountId: "account-a", accountPin: true },
+    });
+
+    store = new AgentRegistry(registryFile);
+    expect(store.spawnReceiptForClientAttempt("account_pin_retry_20260823")).toMatchObject({
+      launchId: queued.launchId,
+      conversationId: queued.conversationId,
+      state: "starting",
+      queuedPinnedSpawn: { retryAt, accountId: "account-a" },
+    });
+    expect(deferred).toHaveLength(0);
+    expect(spawnedAccounts).toEqual([]);
+
+    const recoveryClient = {
+      effectBatch: async () => [],
+      operationStatus: async () => null,
+      snapshot: async () => ({ revision: 0, sessions: [] }),
+      transitionOperation: async () => null,
+    } as unknown as RuntimeHostClient;
+    await recoverPendingStructuredSpawns(store, recoveryClient, {
+      now: () => Date.parse(retryAt) - 1,
+      resolveSpawnAccount: dependencies.resolveSpawnAccount,
+      resolvePinnedSpawnAdmission: dependencies.resolvePinnedSpawnAdmission,
+      spawnStructuredConversation: dependencies.spawnStructuredConversation,
+    });
+    expect(store.spawnReceiptForClientAttempt("account_pin_retry_20260823")).toMatchObject({
+      state: "starting",
+      admissionOwner: null,
+      queuedPinnedSpawn: { retryAt },
+    });
+    expect(spawnedAccounts).toEqual([]);
+
+    pinAdmissible = true;
+    const recover = async () => await recoverPendingStructuredSpawns(store, recoveryClient, {
+      now: () => Date.parse(retryAt) + 1,
+      resolveSpawnAccount: dependencies.resolveSpawnAccount,
+      resolvePinnedSpawnAdmission: dependencies.resolvePinnedSpawnAdmission,
+      spawnStructuredConversation: dependencies.spawnStructuredConversation,
+    });
+    await Promise.all([recover(), recover()]);
+    expect(spawnedAccounts).toEqual(["account-a"]);
+    const settledReceipt = store.spawnReceiptForClientAttempt("account_pin_retry_20260823")!;
+    const conversation = store.conversation(settledReceipt.conversationId)!;
+    expect(conversation).toMatchObject({
+      pinnedAccountId: "account-a",
+      migration: null,
+      generations: [expect.objectContaining({ accountId: "account-a" })],
+    });
+    expect(store.snapshot().entries[`claude:${settledReceipt.key!.sessionId}`]).toMatchObject({ accountId: "account-a" });
+
+    store.setEngineRouting("claude", "account-c");
+    expect(store.requestConversationMigrationToActiveAccount(conversation.id)).toMatchObject({
+      pinnedAccountId: "account-a",
+      migration: null,
+      generations: [expect.objectContaining({ accountId: "account-a" })],
+    });
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("queued pin recovery atomically refreshes a moved retry deadline and its card copy", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-moved-retry-"));
+  const registryFile = path.join(cwd, "agent-registry.json");
+  const initialRetryAt = new Date(Date.now() + 60_000).toISOString();
+  const movedRetryAt = new Date(Date.now() + 120_000).toISOString();
+  const store = new AgentRegistry(registryFile);
+  const begun = store.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    transport: "structured",
+    accountId: "account-a",
+    accountPin: true,
+    clientAttemptId: "account_pin_moved_retry_20260824",
+    launchProfile: emptyLaunchProfile({ cwd }),
+  });
+  if (begun.kind !== "created") throw new Error("expected queued receipt creation");
+  store.queuePinnedSpawn(begun.receipt.launchId, {
+    version: 1,
+    retryAt: initialRetryAt,
+    accountId: "account-a",
+    locale: "en",
+    spec: {
+      engine: "claude",
+      command: "claude",
+      cwd,
+      windowName: "queued-pin",
+      launchProfile: emptyLaunchProfile({ cwd }),
+    },
+    ["prompt"]: "continue",
+    imageRefs: [],
+    parentArtifactPath: null,
+    pipelineSourceConversationId: null,
+  }, `Pinned account quota is exhausted — queued until ${initialRetryAt}`);
+  store.releaseStartingStructuredSpawn(begun.receipt.launchId, begun.receipt.admissionOwner!);
+
+  const restarted = new AgentRegistry(registryFile);
+  const recoveryClient = {
+    effectBatch: async () => [],
+    operationStatus: async () => null,
+    snapshot: async () => ({ revision: 0, sessions: [] }),
+    transitionOperation: async () => null,
+  } as unknown as RuntimeHostClient;
+  const tick = await terminalizeStaleStructuredSpawns(restarted, recoveryClient, {
+    now: () => Date.parse(initialRetryAt) + 1,
+    resolveSpawnAccount: () => ({
+      engine: "claude",
+      accountId: "account-a",
+      kind: "managed",
+      home: path.join(cwd, "account-a"),
+      transcriptRoot: path.join(cwd, "account-a", "projects"),
+      env: { NODE_ENV: "test" },
+    }),
+    resolvePinnedSpawnAdmission: async () => ({
+      kind: "retry-at",
+      reason: "hard-limit",
+      stale: false,
+      retryAt: movedRetryAt,
+    }),
+    spawnStructuredConversation: async () => {
+      throw new Error("a moved retry deadline must remain queued");
+    },
+  });
+
+  expect(tick).toEqual({ examined: 1, terminalized: [], recovered: [] });
+  const refreshed = restarted.spawnReceiptForClientAttempt("account_pin_moved_retry_20260824")!;
+  expect(refreshed).toMatchObject({
+    state: "starting",
+    admissionOwner: null,
+    queuedPinnedSpawn: { retryAt: movedRetryAt, accountId: "account-a" },
+  });
+  expect(refreshed.launchProfile.title).toBe(`Pinned account quota is exhausted — queued until ${movedRetryAt}`);
+  expect(projectLaunchConversations([], restarted.snapshot(), Date.parse(initialRetryAt) + 1).cards[0]?.title)
+    .toBe(`Pinned account quota is exhausted — queued until ${movedRetryAt}`);
+});
+
+test("a queued payload write failure terminalizes without publishing a deadline-only card", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-payload-failure-"));
+  const store = new AgentRegistry(path.join(cwd, "agent-registry.json"));
+  const retryAt = new Date(Date.now() + 60_000).toISOString();
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const account = {
+      engine: "claude" as const,
+      accountId: "account-a",
+      kind: "managed" as const,
+      home: path.join(cwd, "account-a"),
+      transcriptRoot: path.join(cwd, "account-a", "projects"),
+      env: { NODE_ENV: "test" as const },
+    };
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "sonnet",
+        cwd,
+        ["prompt"]: "continue",
+        accountId: "account-a",
+        clientAttemptId: "account_pin_payload_failure_20260824",
+      }),
+    }), {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => ({
+        ...account,
+        requestedAdmission: {
+          kind: "retry-at" as const,
+          reason: "hard-limit" as const,
+          stale: false,
+          retryAt,
+        },
+      }),
+      resolveSpawnAccount: () => account,
+      storeImages: () => { throw new Error("image store unavailable"); },
+      defer: () => { throw new Error("a failed queue must not defer launch work"); },
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "image store unavailable" });
+    expect(store.spawnReceiptForClientAttempt("account_pin_payload_failure_20260824")).toMatchObject({
+      state: "failed",
+      queuedPinnedSpawn: null,
+      launchProfile: { title: null },
+    });
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("a retry-at tmux pin survives restart and actuates exactly once after its deadline", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-tmux-retry-"));
+  const registryFile = path.join(cwd, "agent-registry.json");
+  let store = new AgentRegistry(registryFile);
+  const retryAt = new Date(Date.now() + 60_000).toISOString();
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  process.env.LLV_SPAWN_TRANSPORT = "tmux";
+  let tmuxStarts = 0;
+  let pinAdmissible = false;
+  try {
+    const account = {
+      engine: "claude" as const,
+      accountId: "account-a",
+      kind: "managed" as const,
+      home: path.join(cwd, "account-a"),
+      transcriptRoot: path.join(cwd, "account-a", "projects"),
+      env: { NODE_ENV: "test" as const },
+    };
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "sonnet",
+        cwd,
+        ["prompt"]: "continue",
+        accountId: "account-a",
+        clientAttemptId: "account_pin_tmux_retry_20260823",
+      }),
+    }), {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => ({
+        ...account,
+        requestedAdmission: {
+          kind: "retry-at" as const,
+          reason: "hard-limit" as const,
+          stale: false,
+          retryAt,
+        },
+      }),
+      resolveSpawnAccount: () => account,
+      resolvePinnedSpawnAdmission: async () => pinAdmissible
+        ? { kind: "admissible" as const, basis: "current" as const, stale: false, retryAt: null }
+        : { kind: "retry-at" as const, reason: "hard-limit" as const, stale: false, retryAt },
+      spawnTmuxAgent: async () => {
+        tmuxStarts += 1;
+        throw new Error("tmux must stay gated");
+      },
+    });
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ state: "starting", initialMessage: "queued" });
+    expect(tmuxStarts).toBe(0);
+    expect(store.spawnReceiptForClientAttempt("account_pin_tmux_retry_20260823")).toMatchObject({
+      accountId: "account-a",
+      accountPin: true,
+      transport: "tmux",
+      state: "starting",
+      queuedPinnedSpawn: { retryAt, accountId: "account-a", prompt: "continue" },
+    });
+
+    store = new AgentRegistry(registryFile);
+    const recoveryClient = {
+      effectBatch: async () => [],
+      operationStatus: async () => null,
+      snapshot: async () => ({ revision: 0, sessions: [] }),
+      transitionOperation: async () => null,
+    } as unknown as RuntimeHostClient;
+    const recover = async (now: number) => await terminalizeStaleStructuredSpawns(store, recoveryClient, {
+      now: () => now,
+      resolveSpawnAccount: () => account,
+      resolvePinnedSpawnAdmission: async () => pinAdmissible
+        ? { kind: "admissible" as const, basis: "current" as const, stale: false, retryAt: null }
+        : { kind: "retry-at" as const, reason: "hard-limit" as const, stale: false, retryAt },
+      spawnTmuxAgent: async (_spec, payload, receipt) => {
+        tmuxStarts += 1;
+        expect(payload).toBe("continue");
+        if (!receipt) throw new Error("queued recovery must reuse its durable receipt");
+        const binding = {
+          endpoint: "/test-tmux",
+          server: { pid: 9, startIdentity: "9:server" },
+          paneId: "%9",
+          panePid: { pid: 99, startIdentity: "99:pane" },
+          target: "agents:9.0",
+        };
+        const host = {
+          kind: "tmux" as const,
+          ...binding,
+          windowName: "queued-pin",
+          agent: { pid: 100, startIdentity: "100:agent" },
+          argv: ["claude"],
+        };
+        store.bindSpawnPane(receipt.launchId, binding);
+        store.markSpawnHostVerified(receipt.launchId, host);
+        store.markSpawnPromptDelivered(receipt.launchId);
+        return { paneId: binding.paneId, display: binding.target, panePid: binding.panePid.pid, host, receipt };
+      },
+    });
+
+    await recover(Date.parse(retryAt) - 1);
+    expect(tmuxStarts).toBe(0);
+    pinAdmissible = true;
+    await Promise.all([recover(Date.parse(retryAt) + 1), recover(Date.parse(retryAt) + 1)]);
+    expect(tmuxStarts).toBe(1);
+    expect(store.spawnReceiptForClientAttempt("account_pin_tmux_retry_20260823")).toMatchObject({
+      accountId: "account-a",
+      accountPin: true,
+      transport: "tmux",
+      state: "path-pending",
+      queuedPinnedSpawn: null,
+      admissionOwner: null,
+    });
+    await recover(Date.parse(retryAt) + 2);
+    expect(tmuxStarts).toBe(1);
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+  }
+});
+
+test("a pinned account without a retry deadline falls back and records the degraded pin on the card", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-fallback-"));
+  const store = registry();
+  const deferred: Array<() => Promise<void>> = [];
+  const spawnedAccounts: string[] = [];
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const dependencies = {
+      ...structuredRouteDependencies(cwd),
+      registry: () => store,
+      resolveHealthySpawnAccount: async () => ({
+        engine: "claude" as const,
+        accountId: "account-b",
+        kind: "managed" as const,
+        home: path.join(cwd, "account-b"),
+        transcriptRoot: path.join(cwd, "account-b", "projects"),
+        env: { NODE_ENV: "test" as const },
+        requestedAdmission: {
+          kind: "unavailable" as const,
+          reason: "auth-failed" as const,
+          stale: false,
+          retryAt: null,
+        },
+      }),
+      defer: (work: () => Promise<void>) => { deferred.push(work); },
+      spawnStructuredConversation: async (input: Parameters<SpawnRouteTestDependencies["spawnStructuredConversation"]>[0]) => {
+        spawnedAccounts.push(input.account.accountId);
+        const sessionId = crypto.randomUUID();
+        const settled = input.registry.settleSpawn(input.receipt.launchId, {
+          key: { engine: input.engine, sessionId },
+          artifactPath: path.join(cwd, `${sessionId}.jsonl`),
+          cwd,
+          accountId: input.account.accountId,
+          status: "starting",
+          host: null,
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: "spawn",
+        });
+        if (settled.kind !== "settled") throw new Error("expected fallback settlement");
+        return {
+          ok: true as const,
+          target: null,
+          path: settled.entry.artifactPath,
+          launchId: input.receipt.launchId,
+          conversationId: settled.conversation.id,
+          launched: true,
+          retrySafe: false,
+          initialMessage: "delivered" as const,
+          state: "settled" as const,
+        };
+      },
+    };
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin", "accept-language": "uk-UA" },
+      body: JSON.stringify({
+        engine: "claude",
+        model: "sonnet",
+        cwd,
+        ["prompt"]: "continue",
+        accountId: "account-a",
+        clientAttemptId: "account_pin_fallback_20260823",
+      }),
+    }), dependencies);
+
+    expect(response.status).toBe(202);
+    const receipt = store.spawnReceiptForClientAttempt("account_pin_fallback_20260823")!;
+    expect(receipt).toMatchObject({ accountId: "account-a", accountPin: true, state: "starting" });
+    expect(receipt.launchProfile.title).toBe("Запущено на іншому акаунті — pin недоступний");
+    expect(projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]).toMatchObject({
+      title: "Запущено на іншому акаунті — pin недоступний",
+      spawn: { accountId: "account-a", accountPin: true },
+    });
+
+    expect(deferred).toHaveLength(1);
+    await deferred[0]!();
+    expect(spawnedAccounts).toEqual(["account-b"]);
+    const settledReceipt = store.spawnReceiptForClientAttempt("account_pin_fallback_20260823")!;
+    const conversation = store.conversation(settledReceipt.conversationId)!;
+    expect(conversation).toMatchObject({
+      pinnedAccountId: "account-a",
+      migration: null,
+      generations: [expect.objectContaining({ accountId: "account-b" })],
+    });
+    expect(store.snapshot().entries[`claude:${settledReceipt.key!.sessionId}`]).toMatchObject({ accountId: "account-b" });
+    store.setEngineRouting("claude", "account-c");
+    expect(store.requestConversationMigrationToActiveAccount(conversation.id)).toMatchObject({
+      pinnedAccountId: "account-a",
+      migration: null,
+      generations: [expect.objectContaining({ accountId: "account-b" })],
+    });
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
+test("a pinned spawn still refuses when no account is admissible", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "account-pin-none-"));
+  const store = registry();
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => store,
+    resolveHealthySpawnAccount: async () => {
+      throw new NoHealthyClaudeAccountError(["account-a", "account-b"]);
+    },
+    resolvePinnedSpawnAdmission: async () => ({
+      kind: "unavailable" as const,
+      reason: "auth-failed" as const,
+      stale: false,
+      retryAt: null,
+    }),
+  };
+  const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
+    body: JSON.stringify({
+      engine: "claude",
+      model: "sonnet",
+      cwd,
+      ["prompt"]: "continue",
+      accountId: "account-a",
+      clientAttemptId: "account_pin_none_20260823",
+    }),
+  }), dependencies);
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    state: "failed",
+    initialMessage: "failed",
+    retrySafe: true,
+    error: expect.stringContaining("No healthy Claude account is available"),
+  });
+  expect(store.spawnReceiptForClientAttempt("account_pin_none_20260823")).toMatchObject({
+    accountId: "account-a",
+    accountPin: true,
+    state: "failed",
+  });
+});
+
+test("a legacy resolver mismatch also degrades the pin to a durable fallback", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "unusable-account-pin-"));
   const store = registry();
   const previous = {
@@ -185,7 +817,7 @@ test("an unusable explicit account creates a terminal retryable pinned receipt a
     const capability = rotateOperatorSpawnCapability();
     const baseRequest = {
       engine: "claude",
-      model: "claude-sonnet-4-6",
+      model: "sonnet",
       cwd,
       ["prompt"]: "inspect",
       accountId: "unusable-pin",
@@ -208,16 +840,15 @@ test("an unusable explicit account creates a terminal retryable pinned receipt a
 
     const response = await post();
     const responseBody = await response.json();
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(responseBody).toMatchObject({
-      state: "failed",
-      initialMessage: "failed",
-      retrySafe: true,
-      error: "the requested account is not available for this launch",
+      state: "starting",
+      initialMessage: "pending",
+      retrySafe: false,
     });
     const replay = await post();
-    expect(replay.status).toBe(200);
-    expect(await replay.json()).toMatchObject({ launchId: responseBody.launchId, state: "failed" });
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toMatchObject({ launchId: responseBody.launchId, state: "starting" });
 
     const parent = store.ensureConversation("claude", path.join(cwd, "parent.jsonl"), "parent-account");
     const conflicts = [
@@ -238,16 +869,17 @@ test("an unusable explicit account creates a terminal retryable pinned receipt a
       accountId: "unusable-pin",
       accountPin: true,
       requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
-      state: "failed",
-      error: "the requested account is not available for this launch",
+      state: "starting",
+      error: null,
+      launchProfile: { title: "Launched on another account — pin unavailable" },
     });
     const card = projectLaunchConversations([], store.snapshot(), Date.now()).cards[0]?.spawn;
     expect(card).toMatchObject({
       accountId: "unusable-pin",
       accountPin: true,
-      state: "failed",
-      retrySafe: true,
-      error: "the requested account is not available for this launch",
+      state: "starting",
+      retrySafe: false,
+      error: null,
     });
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
@@ -290,14 +922,9 @@ test("a failed pinned reviewer preserves canonical child and pipeline lineage", 
     const dependencies = {
       ...structuredRouteDependencies(cwd),
       registry: () => store,
-      resolveHealthySpawnAccount: async () => ({
-        engine: "codex" as const,
-        accountId: "selected-account",
-        kind: "managed" as const,
-        home: path.join(cwd, "selected-account"),
-        transcriptRoot: path.join(cwd, "selected-account", "sessions"),
-        env: { CODEX_HOME: path.join(cwd, "selected-account"), NODE_ENV: "test" as const },
-      }),
+      resolveHealthySpawnAccount: async () => {
+        throw new NoHealthyClaudeAccountError(["unavailable-account"]);
+      },
       pipelineAttemptTargetForSource: () => ({
         pipelineId: "pipeline-failed-pin",
         stageId: "review",
@@ -414,7 +1041,7 @@ test("spawn admission grants MCP servers by session origin and refuses ungranted
            parent and no preset is the operator-root session class. */
         ...(role ? {} : { "sec-fetch-site": "same-origin" }),
       },
-      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "inspect", ...(role ? { role } : {}), clientAttemptId, ...(mcpServers === undefined ? {} : { mcpServers }) }),
+      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "inspect", ...(role ? { role } : {}), clientAttemptId, ...(mcpServers === undefined ? {} : { mcpServers }) }),
     }), dependencies);
 
     const defaultResponse = await post("mcp_default_20260723");
@@ -601,7 +1228,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
     const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "x-llv-spawn-capability": capability },
-      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
+      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
     }), dependencies);
 
     expect({ status: response.status, body: await response.clone().json() }).toMatchObject({ status: 202 });
@@ -616,7 +1243,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
         round: null,
         runtime: {
           engine: "claude",
-          model: "claude-sonnet-4-6",
+          model: "sonnet",
           effort: expect.any(String),
         },
       }),
@@ -625,7 +1252,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
       expect.objectContaining({
         runtime: {
           engine: "claude",
-          model: "claude-sonnet-4-6",
+          model: "sonnet",
           effort: expect.any(String),
         },
       }),
@@ -634,7 +1261,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
     const replay = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "x-llv-spawn-capability": capability },
-      body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
+      body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "fallback", src: sourcePath, role: "builder", clientAttemptId: "pipeline_adoption_20260719" }),
     }), dependencies);
     expect(replay.status).toBe(200);
     expect(structuredLaunches).toBe(1);
@@ -646,7 +1273,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
         agentPath: childPath,
         runtime: {
           engine: "claude",
-          model: "claude-sonnet-4-6",
+          model: "sonnet",
           effort: expect.any(String),
         },
       }),
@@ -658,7 +1285,7 @@ test("a materialized structured child is offered for pipeline attempt adoption",
         agentPath: childPath,
         runtime: {
           engine: "claude",
-          model: "claude-sonnet-4-6",
+          model: "sonnet",
           effort: expect.any(String),
         },
       }),
@@ -1508,7 +2135,7 @@ test("operator and agent structured Claude role launches both retain bypass perm
   const request = (capability: string, clientAttemptId = attemptId) => new NextRequest("http://127.0.0.1:8898/api/spawn", {
     method: "POST",
     headers: { host: "127.0.0.1:8898", "content-type": "application/json", "x-llv-spawn-capability": capability },
-    body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "build", src: callerPath, role: "builder", clientAttemptId }),
+    body: JSON.stringify({ engine: "claude", model: "sonnet", cwd, prompt: "build", src: callerPath, role: "builder", clientAttemptId }),
   });
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
   const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
@@ -1741,7 +2368,7 @@ async function runDeferred(work: (() => Promise<void>) | null): Promise<void> {
   if (work) await work();
 }
 
-test("text-only Codex models reject images before blob and receipt mutation", async () => {
+test("unknown Codex models reject before image blob and receipt mutation", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "codex-text-only-image-"));
   const previous = {
     transport: process.env.LLV_SPAWN_TRANSPORT,
@@ -1782,9 +2409,9 @@ test("text-only Codex models reject images before blob and receipt mutation", as
         images: [{ base64: png, mime: "image/png" }],
       }),
     }), dependencies);
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
-      error: "The selected Codex model does not advertise image input through app-server.",
+      error: "invalid codex model id \"gpt-5.3-codex-spark\"; valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna",
     });
     expect(storageCalled).toBeFalse();
     expect(Object.keys(agentRegistry().snapshot().receipts).sort()).toEqual(beforeReceipts);

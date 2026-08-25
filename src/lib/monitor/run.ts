@@ -29,7 +29,7 @@ import type { ConversationSummary, ViewerApi } from "./viewerApi";
  * nothing on success — so its empty log was equally consistent with perfect
  * operation and with total failure.
  *
- * So: the orchestrator is resolved through the durable record and addressed by
+ * So: the orchestrator is resolved through its project seat and addressed by
  * conversation id; gaps become board cards through the API; every run appends
  * exactly one audit line; and a run that cannot resolve an orchestrator fails
  * loudly and puts the condition on the board.
@@ -63,8 +63,8 @@ export interface MonitorDeps {
 
 export interface MonitorOptions {
   windowHours?: number;
-  /** Explicit project scope; omitted, the monitor scopes to the orchestrator's
-      own project and falls back to every project when it cannot resolve one. */
+  /** Project scope. Live runs require it because orchestrator seats are
+      per-project and no global designation remains. */
   project?: string | null;
   maxConversations?: number;
   maxCards?: number;
@@ -83,30 +83,30 @@ function emptyByState(): Record<RequestState, number> {
 /**
  * Who to talk to, and whether anyone is listening.
  *
- * The record answers the first question durably — a conversation id, which
+ * The seat answers the first question durably — a conversation id, which
  * follows the orchestrator across rollovers, restarts and model swaps. The
  * second question needs the host probe, and it is the one the mechanism this
  * replaces never asked: it nudged a conversation that had had no live host for
  * over a day. Delivering into a hostless conversation would also RESUME it,
  * and waking sessions is not the monitor's business.
  */
-async function resolveOrchestrator(api: ViewerApi): Promise<{ resolution: OrchestratorResolution; path: string | null; note: string | null }> {
+async function resolveOrchestrator(api: ViewerApi, project: string): Promise<{ resolution: OrchestratorResolution; path: string | null; note: string | null }> {
   let status: Awaited<ReturnType<ViewerApi["orchestrator"]>>;
   try {
-    status = await api.orchestrator();
+    status = await api.orchestrator(project);
   } catch (error) {
-    return { resolution: { kind: "unavailable", detail: `the orchestrator record could not be read: ${errorText(error)}` }, path: null, note: null };
+    return { resolution: { kind: "unavailable", detail: `the orchestrator seat could not be read: ${errorText(error)}` }, path: null, note: null };
   }
   if (!status.record) return { resolution: { kind: "missing-record" }, path: null, note: null };
   const { conversationId, path } = status.record;
   if (!status.exists) return { resolution: { kind: "stale-record", conversationId }, path, note: null };
-  /* A record with no settled transcript path cannot be probed, so nothing here
+  /* A seat with no settled transcript path cannot be probed, so nothing here
      can show that anyone is listening. Unproven is not resolved: the whole
      failure this monitor exists to end was a predecessor believing it had
      delivered when it had not. */
   if (!path) {
     return {
-      resolution: { kind: "unavailable", detail: "the orchestrator record has no settled transcript path, so no host could be confirmed" },
+      resolution: { kind: "unavailable", detail: "the orchestrator seat has no settled transcript path, so no host could be confirmed" },
       path,
       note: null,
     };
@@ -128,15 +128,15 @@ async function resolveOrchestrator(api: ViewerApi): Promise<{ resolution: Orches
       note: null,
     };
   }
-  return { resolution: { kind: "resolved", conversationId, source: "durable-record" }, path, note: null };
+  return { resolution: { kind: "resolved", conversationId, source: "project-seat" }, path, note: null };
 }
 
 function resolutionDetail(resolution: OrchestratorResolution): string {
   switch (resolution.kind) {
     case "missing-record":
-      return "no orchestrator has been adopted, so the durable record is empty";
+      return "the project has no active orchestrator seat";
     case "stale-record":
-      return "the recorded orchestrator conversation no longer has a transcript on disk";
+      return "the seated orchestrator conversation no longer has a transcript on disk";
     case "unavailable":
       return resolution.detail;
     case "resolved":
@@ -190,6 +190,7 @@ export async function runConversationMonitor(deps: MonitorDeps, options: Monitor
   const now = deps.now();
   const runId = deps.runId?.() ?? crypto.randomUUID();
   const appendRun = deps.appendRun ?? ((record: MonitorRunRecord) => deps.api.appendRun(record));
+  const project = options.project?.trim() || null;
   const windowHours = options.windowHours ?? DEFAULT_WINDOW_HOURS;
   const fromMs = now.getTime() - windowHours * 60 * 60 * 1000;
   const startedAt = now.toISOString();
@@ -198,7 +199,7 @@ export async function runConversationMonitor(deps: MonitorDeps, options: Monitor
     runId,
     startedAt,
     window: { from: new Date(fromMs).toISOString(), to: startedAt, hours: windowHours },
-    scope: { project: options.project ?? null },
+    scope: { project },
     orchestrator: { resolution: "unavailable", conversationId: null, delivered: false },
     scanned: { conversations: 0, operatorMessages: 0 },
     found: { total: 0, byState: emptyByState(), fingerprints: [] },
@@ -231,32 +232,22 @@ export async function runConversationMonitor(deps: MonitorDeps, options: Monitor
   if (!claim.claimed) return finish("skipped", claim.detail);
 
   try {
-    /* 1. Who is the orchestrator, by durable record — never by a path. */
-    const { resolution, path: orchestratorPath, note: livenessNote } = await resolveOrchestrator(deps.api);
+    if (!project) return await finish("failed", "a project is required to resolve the per-project orchestrator seat");
+
+    /* 1. Who is the orchestrator, by durable seat — never by a path. */
+    const { resolution, note: livenessNote } = await resolveOrchestrator(deps.api, project);
     base.orchestrator = {
       resolution: resolution.kind,
       conversationId: resolution.kind === "resolved" || resolution.kind === "stale-record" ? resolution.conversationId : null,
       delivered: false,
     };
 
-    /* 2. What to read: the orchestrator's own project unless told otherwise. */
+    /* 2. What to read: the explicitly selected project's conversations. */
     let catalog: ConversationSummary[];
     try {
-      catalog = await deps.api.conversations({ project: options.project ?? undefined, limit: 100 });
+      catalog = await deps.api.conversations({ project, limit: 100 });
     } catch (error) {
       return await finish("failed", `the conversation catalog could not be read: ${errorText(error)}`);
-    }
-    const project = options.project
-      ?? (orchestratorPath ? catalog.find((entry) => entry.path === orchestratorPath)?.project ?? null : null);
-    base.scope = { project };
-    if (!options.project && project) {
-      /* The first page was unscoped, so this project's older conversations may
-         have fallen off it. Ask again now that the scope is known. */
-      try {
-        catalog = await deps.api.conversations({ project, limit: 100 });
-      } catch {
-        /* Keep the unscoped page: a narrower sweep beats no sweep. */
-      }
     }
     const scanned = conversationsInWindow(catalog, project, fromMs, options.maxConversations ?? DEFAULT_MAX_CONVERSATIONS);
 

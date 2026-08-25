@@ -23,6 +23,7 @@ import {
   createMcpToolService,
   type McpToolBindings,
   type McpReceiptStore,
+  type McpToolResult,
 } from "./server";
 
 const scratch: string[] = [];
@@ -565,6 +566,37 @@ describe("MCP tool service", () => {
 
     release();
     await first;
+  });
+
+  test("only archive and unarchive recover an interrupted conversation action receipt", async () => {
+    const bindings = Object.fromEntries(MCP_TOOL_NAMES.map((toolName) => [toolName, async () => ({})])) as unknown as McpToolBindings;
+    const bindingCalls: string[] = [];
+    bindings.conversation_action = async (args) => {
+      bindingCalls.push(String(args.action));
+      return { operationId: `operation_${String(args.action)}` };
+    };
+
+    for (const action of ["archive", "unarchive", "interrupt", "kill", "resume"] as const) {
+      const completed: McpToolResult[] = [];
+      const pendingStore: McpReceiptStore = {
+        claim: () => ({ kind: "pending", unfinishedAgeMs: 4_000 }),
+        complete: (_key, _digest, result) => { completed.push(result); },
+      };
+      const result = await createMcpToolService(bindings, pendingStore).callTool("conversation_action", {
+        clientRequestId: `interrupted-${action}`,
+        conversationId: "conversation_fixture",
+        action,
+      });
+
+      if (action === "archive" || action === "unarchive") {
+        expect(result).toMatchObject({ ok: true, operationId: `operation_${action}` });
+        expect(completed).toEqual([result]);
+      } else {
+        expect(result).toMatchObject({ ok: false, code: "call_interrupted", replayed: true });
+        expect(completed).toEqual([]);
+      }
+    }
+    expect(bindingCalls).toEqual(["archive", "unarchive"]);
   });
 
   test("agent_activity keeps a durable receipt: it appends to the same journal lifecycle_events does", async () => {
@@ -1543,6 +1575,7 @@ describe("MCP tool service", () => {
         "pipeline_action",
         "link_task_to_pipeline",
         "list_conversations",
+        "search_transcripts",
         "get_conversation",
         "deploy_exact_sha",
         "get_pipeline",

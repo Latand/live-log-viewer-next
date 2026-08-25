@@ -5,13 +5,14 @@ import { useMemo } from "react";
 
 import { useCoarsePointer } from "@/hooks/useCoarsePointer";
 import { useColumns } from "@/hooks/useColumns";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { CatalogFailureNotice } from "./CatalogFailureNotice";
-import { OrchestratorChatButton } from "./OrchestratorChatButton";
+import { Search } from "./icons";
 import { buildBranchGroups, buildProjectSummaries, projectKey } from "./projectModel";
 import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
 
@@ -33,6 +34,10 @@ interface Props {
   onSelectFile: (file: FileEntry) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
   onMenu?: () => void;
+  /** Opens the global message search (issue #1054). The affordance sits in the
+      board chrome on every screen, so the operator never has to be somewhere
+      particular to search what they have sent. */
+  onOpenSearch?: () => void;
   /** Mobile shell: the attention badge lives in the header row instead of the
       fixed corner, so it never covers the header's own controls. */
   attention?: React.ReactNode;
@@ -45,8 +50,9 @@ interface Props {
 export const COARSE_TARGET_HEIGHT = 44;
 export const FINE_TARGET_HEIGHT = 22;
 
-export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {}, pipelines, workflows, archivedProjects, now, catalogFailures = 0, onSelectProject, onSelectFile, onMenu, attention }: Props) {
+export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {}, pipelines, workflows, archivedProjects, now, catalogFailures = 0, onSelectProject, onSelectFile, onMenu, onOpenSearch, attention }: Props) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const degraded = catalogFailures > 0;
   const cols = useColumns();
   const targetHeight = useCoarsePointer() ? COARSE_TARGET_HEIGHT : FINE_TARGET_HEIGHT;
@@ -99,7 +105,7 @@ export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {},
         <h1 className="min-w-0 shrink truncate text-[13.5px] font-bold">{t("rail.overview")}</h1>
         {/* Issue #701: the subtitle is dropped below 360px instead of wrapping
             into this fixed 40px bar, where it overprinted the title and the
-            Orchestrator button and pushed the board past the viewport. Above
+            header actions and pushed the board past the viewport. Above
             360px it truncates rather than growing the row. */}
         <span
           className={`hidden min-w-0 shrink truncate text-[11.5px] min-[360px]:block ${degraded ? "font-semibold text-danger" : "text-muted"}`}
@@ -115,7 +121,20 @@ export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {},
           {!degraded && archivedCount ? ` ${t("overview.archived", { count: archivedCount })}` : ""}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-2">
-          <OrchestratorChatButton />
+          {onOpenSearch ? (
+            <button
+              type="button"
+              data-testid="overview-search"
+              className={`flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                isMobile ? "h-11 w-11" : "h-7 w-7"
+              }`}
+              aria-label={isMobile ? t("search.openMobile") : t("search.open")}
+              title={t("search.open")}
+              onClick={onOpenSearch}
+            >
+              <Search className={isMobile ? "h-5 w-5" : "h-4 w-4"} aria-hidden />
+            </button>
+          ) : null}
           {attention}
         </span>
       </div>

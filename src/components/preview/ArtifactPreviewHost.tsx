@@ -9,6 +9,7 @@ import { parseArtifactFragment } from "@/lib/artifact/fragment";
 import { useLocale, type TFunction } from "@/lib/i18n";
 
 import { useModalLayer } from "../modalLayer";
+import { leftShellInset, useLeftShellInset } from "../shellLayout";
 import {
   artifactBasename,
   artifactContentUrl,
@@ -30,6 +31,20 @@ const WIDTH_KEY = "llvPreviewWidth";
 const MIN_WIDTH = 380;
 /** Keep at least this much conversation visible beside the desktop sheet. */
 const MIN_CONVERSATION = 320;
+
+/**
+ * The sheet is fixed to the right edge, so it covers whatever the shell puts
+ * under it — including surfaces pushed into the row from the LEFT, which its
+ * own `100vw` clamp cannot see. `leftShellInset` is the rail plus the
+ * orchestrator dock when that dock is open (PRD #976 decision 1), and the
+ * remembered width yields to it: a document opened at 560px on a 1440px screen
+ * used to bury the board down to 192px. The sheet gives way rather than the
+ * dock because it is opened on demand while the dock is a surface the operator
+ * sized on purpose — and the sheet still keeps its own {@link MIN_WIDTH}.
+ */
+export function roomForSheet(viewportWidth: number, inset: number): number {
+  return Math.max(MIN_WIDTH, viewportWidth - MIN_CONVERSATION - Math.max(0, inset));
+}
 
 interface OpenRequest {
   path: string;
@@ -140,6 +155,7 @@ function PreviewSheet({
   const [meta, setMeta] = useState<ArtifactMeta | null>(null);
   const [failure, setFailure] = useState<ArtifactFailure | null>(null);
   const [width, setWidth] = useState(storedWidth);
+  const inset = useLeftShellInset();
   useModalLayer({ containerRef, onClose });
 
   /* eslint-disable react-hooks/set-state-in-effect -- the meta round-trip is
@@ -170,7 +186,7 @@ function PreviewSheet({
       const move = (event: PointerEvent) => {
         const next = Math.min(
           Math.max(MIN_WIDTH, window.innerWidth - event.clientX),
-          Math.max(MIN_WIDTH, window.innerWidth - MIN_CONVERSATION),
+          roomForSheet(window.innerWidth, leftShellInset()),
         );
         setWidth(next);
       };
@@ -252,7 +268,10 @@ function PreviewSheet({
       className={`fixed z-50 flex flex-col border-border bg-card shadow-1 focus-visible:outline-none ${
         mobile ? "inset-0" : "inset-y-0 right-0 border-l"
       }`}
-      style={mobile ? undefined : { width: `min(${width}px, calc(100vw - ${MIN_CONVERSATION}px))` }}
+      data-artifact-preview-inset={mobile ? undefined : inset}
+      /* `max()/min()` in CSS so the viewport term stays live without a resize
+         listener; the inset term re-renders with the dock beside it. */
+      style={mobile ? undefined : { width: `max(${MIN_WIDTH}px, min(${width}px, calc(100vw - ${MIN_CONVERSATION + inset}px)))` }}
     >
       {mobile ? null : (
         <div

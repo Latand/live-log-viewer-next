@@ -28,7 +28,7 @@ import {
 } from "@/lib/accounts/migration/intentLiveness";
 import { procBackend } from "@/lib/proc";
 import { runtimeHostClient } from "@/lib/runtime/client";
-import { reconcileStaleSpawnsHeldByLiveOwners } from "@/lib/runtime/staleSpawnOwner";
+import { reconcileDeadStructuredRegistryHosts } from "@/lib/runtime/registry";
 import { terminalizeStaleStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { listFiles } from "@/lib/scanner";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
@@ -815,7 +815,6 @@ export interface ReaperActuationOverrides {
   saveFlows?: typeof saveFlows;
   now?: () => number;
   runtimeClient?: typeof runtimeHostClient;
-  reconcileLiveOwnerSpawns?: typeof reconcileStaleSpawnsHeldByLiveOwners;
   terminalizeStaleSpawns?: typeof terminalizeStaleStructuredSpawns;
 }
 
@@ -980,23 +979,26 @@ export async function runReaperCycle(options: {
   } catch (error) {
     console.error("[reaper] failed-spawn held-delivery convergence failed", error);
   }
-  /* Stale structured launch convergence (#334): the reaper cycle is the
-     while-running seam that turns dead-evidence pending receipts terminal, so
-     a permanent spinner no longer waits for a replay POST or a restart. The
-     pass is bounded and idempotent; its failure never blocks the reaper. */
+  /* Completed structured conversations can retain a live Viewer writer claim
+     after their recorded engine child exits without cleanup. Revalidate only
+     those recorded PIDs and available start identities, then clear dead rows
+     without signalling any process so ordinary recovery can claim them again. */
+  try {
+    reconcileDeadStructuredRegistryHosts(registry);
+  } catch (error) {
+    console.error("[reaper] dead structured-host ownership convergence failed", error);
+  }
+  /* Stale launch convergence (#334/#926): the reaper cycle is the while-running
+     seam that turns dead-evidence pending receipts terminal and actuates due
+     queued pins. Tmux recovery remains available during an intentional
+     structured-runtime rollback, while structured receipts wait for their
+     required client. The pass is bounded and idempotent; its failure never
+     blocks the reaper. */
   const runtimeClientForSpawns = (options.actuation?.runtimeClient ?? runtimeHostClient)();
-  if (runtimeClientForSpawns) {
-    try {
-      await (options.actuation?.reconcileLiveOwnerSpawns
-        ?? reconcileStaleSpawnsHeldByLiveOwners)(registry, runtimeClientForSpawns);
-    } catch (error) {
-      console.error("[reaper] terminal structured spawn owner convergence failed", error);
-    }
-    try {
-      await (options.actuation?.terminalizeStaleSpawns ?? terminalizeStaleStructuredSpawns)(registry, runtimeClientForSpawns);
-    } catch (error) {
-      console.error("[reaper] stale structured spawn convergence failed", error);
-    }
+  try {
+    await (options.actuation?.terminalizeStaleSpawns ?? terminalizeStaleStructuredSpawns)(registry, runtimeClientForSpawns);
+  } catch (error) {
+    console.error("[reaper] stale structured spawn convergence failed", error);
   }
   const state = updateObservationState(options.hosts, now);
   const report = evaluateReaper(await makeInput(registry, options.hosts, options.files, state, now, options.actuation));

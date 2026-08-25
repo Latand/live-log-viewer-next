@@ -110,8 +110,8 @@ function stubFetch(): void {
     const url = String(input);
     const json = (value: unknown) =>
       new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
-    if (url === "/api/orchestrator") {
-      return json({ record: null, exists: false, defaultCwd: "/repo" });
+    if (url === "/api/orchestrator/seat?project=atlas") {
+      return json({ seat: null, pending: null, exists: false });
     }
     if (url === "/api/runtime/send") {
       const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string; selectedContext?: SelectedContextRef };

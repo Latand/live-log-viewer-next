@@ -12,6 +12,7 @@ import { lastAssistantMessage } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
+import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { isShellCommand } from "@/lib/status";
@@ -20,7 +21,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { realExec, provisionWorktree, runFinish, setupStatus, startSetup, type ExecPort, type SetupStatus } from "./provision";
 import { fixerKickoff, prBody, stageKickoff } from "./prompts";
-import { buildWorkflow, loadTemplates, loadWorkflows, normalizeStages, saveWorkflows, setupExitPath } from "./store";
+import { buildWorkflow, loadTemplates, loadWorkflows, normalizeStages, saveWorkflows, setupExitPath, validateWorkflowLaunchModels } from "./store";
 import type {
   CreateWorkflowRequest,
   PatchWorkflowRequest,
@@ -492,6 +493,7 @@ export async function patchWorkflow(
   id: string,
   req: PatchWorkflowRequest,
   ports: WorkflowPorts = defaultPorts(),
+  actor: PauseResumeActor | null = OPERATOR_PAUSE_RESUME_ACTOR,
 ): Promise<{ workflow?: Workflow; error?: string; status?: number }> {
   const workflows = loadWorkflows();
   const wf = workflows.find((item) => item.id === id);
@@ -501,13 +503,13 @@ export async function patchWorkflow(
     if (wf.state !== "paused" && !TERMINAL_STATES.has(wf.state)) {
       if (wf.state !== "needs_decision") wf.pausedState = wf.state;
       wf.state = "paused";
-      wf.stateDetail = "paused by user";
+      wf.stateDetail = pauseResumeDetail("paused", actor);
     }
   } else if (req.action === "resume") {
     if (wf.state === "paused" || wf.state === "needs_decision") {
       wf.state = wf.pausedState && !PARKED_STATES.has(wf.pausedState) ? wf.pausedState : "provisioning";
       wf.pausedState = null;
-      wf.stateDetail = null;
+      wf.stateDetail = pauseResumeDetail("resumed", actor);
     }
   } else if (req.action === "advance") {
     const phase = phaseOf(wf);
@@ -610,6 +612,8 @@ export function createWorkflowFromRequest(
       ...(typeof req.verify === "string" && req.verify.trim() ? { verify: req.verify.trim() } : {}),
     };
   }
+  const modelValidation = validateWorkflowLaunchModels(template.stages);
+  if ("error" in modelValidation) return { error: modelValidation.error, status: 400 };
 
   const wf = buildWorkflow({
     id: crypto.randomUUID().slice(0, 8),

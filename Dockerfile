@@ -34,10 +34,12 @@ RUN --mount=type=cache,target=/app/.next/cache \
 RUN chmod -R u=rwX,go=rX /app
 
 FROM node:22.16.0-bookworm-slim AS runtime
+ARG LLV_RUNTIME_HOME=/home/user
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     NEXT_PUBLIC_RUNTIME_UI=1 \
+    HOME=${LLV_RUNTIME_HOME} \
     HOSTNAME=127.0.0.1 \
     PORT=8898 \
     LLV_WHISPER_VENV=/opt/llv-whisper-venv \
@@ -47,6 +49,7 @@ ENV NODE_ENV=production \
 
 RUN <<'EOF'
 set -eu
+/usr/sbin/usermod --home "$LLV_RUNTIME_HOME" node
 apt-get update
 apt-get install -y --no-install-recommends \
   ca-certificates \
@@ -86,7 +89,10 @@ case "\$wd" in
   "\$HOME"|"\$HOME"/*) ;;
   *) wd=\$HOME ;;
 esac
-exec nsenter -t 1 -m -p --setgid="\$(id -g)" --setuid="\$(id -u)" -- /bin/sh -c 'cd "\$1" || exit; shift; exec "\$@"' sh "\$wd" "$host_path" "\$@"
+uid=\$(id -u)
+gid=\$(id -g)
+groups=\$(id -G | tr ' ' ',')
+exec nsenter -t 1 -m -p -- /usr/bin/setpriv --reuid="\$uid" --regid="\$gid" --groups="\$groups" -- /bin/sh -c 'cd "\$1" || exit; shift; exec "\$@"' sh "\$wd" "$host_path" "\$@"
 WRAPPER
   chmod +x "/usr/local/bin/$name"
 }
@@ -125,11 +131,14 @@ host_wd() {
 
 run_host_tmux() {
   wd=$(host_wd)
+  uid=$(id -u)
+  gid=$(id -g)
+  groups=$(id -G | tr ' ' ',')
   # LC_ALL: without a UTF-8 locale tmux sanitizes control bytes in `-F` output,
   # turning the TAB field separators panePidMap relies on into "_" — which left
   # the viewer unable to see (or kill) any tmux session. Force UTF-8 so tabs
   # survive regardless of whether the container env propagates through nsenter.
-  nsenter -t 1 -m -p --setgid="$(id -g)" --setuid="$(id -u)" -- /bin/sh -c 'cd "$1" || exit; shift; exec "$@"' sh "$wd" env LC_ALL=C.UTF-8 /usr/bin/tmux "$@"
+  nsenter -t 1 -m -p -- /usr/bin/setpriv --reuid="$uid" --regid="$gid" --groups="$groups" -- /bin/sh -c 'cd "$1" || exit; shift; exec "$@"' sh "$wd" env LC_ALL=C.UTF-8 /usr/bin/tmux "$@"
 }
 
 target_key() {
@@ -212,6 +221,10 @@ COPY --from=build /app/next.config.ts ./next.config.ts
 COPY --from=build /app/tsconfig.json ./tsconfig.json
 COPY --from=build /app/src ./src
 COPY --from=build /app/scripts/whisper_transcribe.py ./scripts/whisper_transcribe.py
+# The pinned Telegram connector (#1059) is resolved at runtime from
+# /app/vendor — without this line the image ships without it and sign-in
+# dies with start_failed (#1081).
+COPY --from=build /app/vendor ./vendor
 COPY --from=build /app/scripts/runtime-host-viewer-adapter.ts ./scripts/runtime-host-viewer-adapter.ts
 COPY --from=build /app/node_modules ./node_modules
 

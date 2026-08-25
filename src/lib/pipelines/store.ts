@@ -75,6 +75,13 @@ function isReviewFlowSync(value: unknown): boolean {
   if (value === undefined) return true;
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const sync = value as Record<string, unknown>;
+  const hostClaim = sync.hostClaim as Record<string, unknown> | null | undefined;
+  const hostClaimValid = hostClaim === undefined || hostClaim === null || (
+    typeof hostClaim === "object"
+    && !Array.isArray(hostClaim)
+    && /^(?:claude|codex):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(hostClaim.sessionKey))
+    && /^(?:default|unknown|managed:[0-9a-f]{12})$/.test(String(hostClaim.accountRef))
+  );
   const flowStates = ["waiting_ready", "spawn_pending", "spawning", "reviewing", "relay_pending", "relaying", "fixing", "approved", "done_comment", "needs_decision", "paused", "closed"];
   return typeof sync.generation === "string"
     && (sync.sourceRevision === undefined || (Number.isInteger(sync.sourceRevision) && (sync.sourceRevision as number) >= 0))
@@ -84,6 +91,7 @@ function isReviewFlowSync(value: unknown): boolean {
     && (sync.verdict === null || ["APPROVE", "REQUEST_CHANGES", "COMMENT"].includes(String(sync.verdict)))
     && flowStates.includes(String(sync.relayState))
     && (sync.terminalState === null || flowStates.includes(String(sync.terminalState)))
+    && hostClaimValid
     && typeof sync.synchronizedAt === "string"
     && isNullableString(sync.sourceUpdatedAt)
     && (sync.lagMs === null || (typeof sync.lagMs === "number" && Number.isFinite(sync.lagMs) && sync.lagMs >= 0));
@@ -275,7 +283,19 @@ export function pipelineGraphError(
       }
       return false;
     });
-    if (!reachable) return "review-loop stage requires a preceding run stage";
+    /* #1026: this used to say "review-loop stage requires a preceding run
+       stage", which reads as an ordering rule and sent a caller reordering an
+       array that was already in the right order. The defect is a missing pass
+       edge: stages default to `next: null`, so nothing reaches the review-loop.
+       Name the unreachable stage and the edge that would reach it. */
+    if (!reachable) {
+      const runStages = stages.filter((candidate) => candidate.kind === "run");
+      if (runStages.length === 0) {
+        return `review-loop stage ${stage.id} is unreachable: the pipeline has no run stage, and a review-loop reviews the session of a run stage that reaches it`;
+      }
+      const source = runStages.findLast((candidate) => candidate.next === null) ?? runStages.at(-1)!;
+      return `review-loop stage ${stage.id} is unreachable: no run stage's next chain reaches it — set next: "${stage.id}" on run stage ${source.id}`;
+    }
   }
   return null;
 }

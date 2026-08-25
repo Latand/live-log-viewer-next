@@ -7,6 +7,7 @@ import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { createPipelineFromRequest, getPipelines } from "@/lib/pipelines/engine";
 import type { CreatePipelineRequest, Pipeline, PipelineRepoPreflightErrorCode, PipelinesResponse } from "@/lib/pipelines/types";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
+import type { PipelineValidationViolation } from "@/lib/pipelines/validation";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
@@ -17,6 +18,9 @@ type PipelineApiError = ApiError & {
   code?: PipelineRepoPreflightErrorCode | SpawnRejectionCode;
   field?: "repoDir";
   path?: string;
+  /** #1026: every violated create-time constraint, each with its field and the
+      shape that field expects — the same list the MCP tool returns. */
+  violations?: PipelineValidationViolation[];
 };
 
 export async function GET(): Promise<NextResponse<PipelinesResponse | ApiError>> {
@@ -86,6 +90,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; p
     if (!result.pipeline) return NextResponse.json({
       error: result.error ?? "could not create pipeline",
       ...(result.code ? { code: result.code, field: result.field, path: result.path } : {}),
+      ...(result.violations?.length ? { violations: result.violations } : {}),
     }, { status: result.status ?? 400 });
     if (result.pipeline.state !== "draft") requestPipelineTick();
     return NextResponse.json({ ok: true, pipeline: result.pipeline }, { status: 201 });

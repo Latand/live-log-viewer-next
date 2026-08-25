@@ -45,6 +45,10 @@ export async function GET(request: Request): Promise<Response> {
         return display ? { ...entry, title: display.title, project: display.project } : entry;
       });
       page = await loadConversationCatalogPage(projected, options);
+      // The bounded final page re-runs the registry overlay: search projection
+      // above carried only title/project, so without this the query branch
+      // ships conversationId: null for registry-owned rows (#1040 review).
+      overlaySessionTitles(page.items);
     } else {
       const projectEntries = source.map(catalogEntryToFileEntry);
       overlaySessionProjects(projectEntries);

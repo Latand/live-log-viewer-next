@@ -11,8 +11,9 @@ import { tickTaskInbox } from "../tasks/inboxScanner";
 import { panePidMap, resolveTarget } from "../tmux";
 import { tickWorkflows } from "../workflows/engine";
 import { activityVerdict, transcriptTurnResult } from "./activity";
+import type { ConversationCatalogEntry } from "./conversationCatalog";
 import { ctxFor } from "./context";
-import { lastTurnFor } from "./turnDuration";
+import { lastAssistantMessageAtFor, lastTurnFor } from "./turnDuration";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
 import { entryEffort, entryEffortResult, entryFast } from "./effort";
 import { linkEntries } from "./links";
@@ -102,6 +103,8 @@ export interface FileScanOptions {
 export interface FileCatalogScan {
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
+  /** Worker-only transport; the parent publishes and removes it on receipt. */
+  conversationCatalog?: ConversationCatalogEntry[];
   pinOverlayPaths?: string[];
   complete: boolean;
 }
@@ -274,6 +277,7 @@ async function listFilesInternal(
         hosted,
         resourceBaseline: options.resourceBaseline,
         onResourceSnapshot: options.onResourceSnapshot,
+        transportConversationCatalog: process.env.LLV_FILE_SCANNER_WORKER === "1",
       })
     : { files: await discoverFiles(undefined, demote ?? archivedTranscriptPaths(), pin, hosted), projectCatalog: [], complete: true };
   if (options.signal?.aborted) throw new DOMException("file scan cancelled", "AbortError");
@@ -309,6 +313,7 @@ async function listFilesInternal(
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
     entry.lastTurn = lastTurnFor(entry);
+    entry.lastAssistantMessageAt = lastAssistantMessageAtFor(entry);
     entry.pendingWakeup = pendingWakeupFor(entry);
     pendingQuestionFor(entry);
   });
@@ -341,6 +346,9 @@ async function listFilesInternal(
   return {
     files: entries,
     projectCatalog: scan.projectCatalog,
+    ...("conversationCatalog" in scan && scan.conversationCatalog
+      ? { conversationCatalog: scan.conversationCatalog }
+      : {}),
     ...(pinOverlayPaths?.length ? { pinOverlayPaths } : {}),
     complete: scan.complete && entries.every((entry) => entry.derivationComplete !== false),
   };

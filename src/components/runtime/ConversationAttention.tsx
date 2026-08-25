@@ -12,6 +12,43 @@ import { AttentionCard } from "./AttentionCard";
 import { isDeadHostSession } from "./DeadHostBanner";
 import { mintIdempotencyKey, type RuntimeAttention } from "./runtimeModel";
 
+/*
+ * Issue #765, structured half: dismissal is a view decision, exactly as on the
+ * transcript-path QuestionCard (#779). It never answers or resolves the
+ * attention — the runtime record stays whatever the engine says it is — the
+ * card only stops occupying the live composer region and stops presenting
+ * itself as awaiting input. Remembered per attention id in localStorage so a
+ * dead card does not return on every reload.
+ */
+type StorageLike = Pick<Storage, "getItem" | "setItem">;
+type AttentionIdentity = { conversationId: string; id: string };
+
+export function attentionDismissKey(attention: AttentionIdentity): string {
+  return `llvAttentionDismissed:${attention.conversationId}:${attention.id}`;
+}
+
+export function isAttentionDismissed(storage: StorageLike | null, attention: AttentionIdentity): boolean {
+  try {
+    return storage?.getItem(attentionDismissKey(attention)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function rememberAttentionDismissed(storage: StorageLike | null, attention: AttentionIdentity): void {
+  try {
+    storage?.setItem(attentionDismissKey(attention), "1");
+  } catch { /* best-effort: a full or blocked store only costs durability */ }
+}
+
+function browserStorage(): StorageLike | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 export function approvalResolution(attention: RuntimeAttention, approved: boolean): unknown {
   const protocol = attention.request.protocol;
   if (protocol?.engine === "claude") {
@@ -46,6 +83,8 @@ export function ConversationAttention({ file }: { file: FileEntry }) {
   const runtime = useRuntimeSession(conversationIdentity(file));
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /* Ids dismissed in this mount; the storage read below covers earlier ones. */
+  const [dismissedIds, setDismissedIds] = useState<readonly string[]>([]);
 
   if (!runtime) {
     return file.pendingQuestion || file.waitingInput ? <QuestionCard file={file} /> : null;
@@ -73,9 +112,21 @@ export function ConversationAttention({ file }: { file: FileEntry }) {
     setBusyId(null);
   };
 
+  /* Issue #765: a dismissed question card leaves the composer region entirely
+     — the same exit an engine-confirmed resolution takes — while the attention
+     record itself is untouched. Only question cards get the control: dismissing
+     an approval/permission would hide a request the engine is still blocked on
+     with no other surface to answer it from. */
+  const dismiss = (attention: RuntimeAttention) => {
+    rememberAttentionDismissed(browserStorage(), attention);
+    setDismissedIds((current) => [...current, attention.id]);
+  };
+  const visible = runtime.attentions.filter((attention) =>
+    !dismissedIds.includes(attention.id) && !isAttentionDismissed(browserStorage(), attention));
+
   return (
     <>
-      {runtime.attentions.map((attention) => (
+      {visible.map((attention) => (
         <AttentionCard
           key={attention.id}
           attention={attention}
@@ -93,6 +144,7 @@ export function ConversationAttention({ file }: { file: FileEntry }) {
           onAnswerQuestions={!archived && attention.kind === "question"
             ? (optionIndices) => void answer(attention, questionsResolution(attention, optionIndices))
             : undefined}
+          onDismiss={!archived && attention.kind === "question" ? () => dismiss(attention) : undefined}
         />
       ))}
       {error ? <div role="alert" className="my-2 text-[12px] font-semibold text-danger">{error}</div> : null}

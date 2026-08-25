@@ -3,6 +3,7 @@ import type {
   AgentRegistry,
   AgentRegistryEntry,
   ProcessIdentity,
+  RegistryConversation,
   StructuredHostColumns,
 } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
@@ -311,6 +312,42 @@ function verifiedProcessAlive(processIdentity: ProcessIdentity): boolean {
     && procBackend.processIdentity(processIdentity.pid) === processIdentity.startIdentity;
 }
 
+/** Clears one structured ownership claim only when its recorded engine process
+    exists and the registry revalidates its PID plus start identity, when one
+    was captured, as gone. */
+export function reconcileDeadStructuredRegistryHost(
+  registry: AgentRegistry,
+  conversationId: RegistryConversation["id"],
+  key: SessionKey,
+): boolean {
+  const entry = registry.readOnlySnapshot().entries[sessionKeyId(key)];
+  const structuredProcess = entry?.structuredHost?.process;
+  if (!entry || !structuredProcess) return false;
+  return Boolean(registry.terminateInactiveStructuredHost(conversationId, key, {
+    process: structuredProcess,
+    claimEpoch: entry.claimEpoch,
+  }));
+}
+
+/** Bounded reconciliation pass for completed conversation rows. Active conversation
+    recovery stays demand-driven. `shouldRetain` protects rows the same startup
+    pass will re-host; every other terminal row releases its dead process claim. */
+export function reconcileDeadStructuredRegistryHosts(
+  registry: AgentRegistry,
+  shouldRetain: StructuredHostAdoptionFilter = () => false,
+): void {
+  const snapshot = registry.readOnlySnapshot();
+  for (const conversation of Object.values(snapshot.conversations)) {
+    if (conversation.turn.state !== "terminal" && !conversation.supersededBy) continue;
+    const generation = conversation.generations.at(-1);
+    if (!generation) continue;
+    const key = { engine: conversation.engine, sessionId: generation.id } as const;
+    const entry = snapshot.entries[sessionKeyId(key)];
+    if (!entry?.structuredHost?.process || shouldRetain(entry)) continue;
+    reconcileDeadStructuredRegistryHost(registry, conversation.id, key);
+  }
+}
+
 async function waitForVerifiedProcessExit(processIdentity: ProcessIdentity, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (verifiedProcessAlive(processIdentity) && Date.now() < deadline) {
@@ -349,6 +386,9 @@ export async function demoteSkippedStructuredRegistryHosts(
       && host.pendingAttention.length === 0
       && host.activeFlags.length === 0;
     if (alreadyDead) continue;
+    const conversation = registry.conversationForPath(entry.artifactPath);
+    if (conversation
+      && reconcileDeadStructuredRegistryHost(registry, conversation.id, entry.key)) continue;
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
@@ -409,8 +449,14 @@ export async function adoptCodexRegistryHosts(
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
+        const current = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];
+        if (!current?.structuredHost || !shouldAdopt(current)) return;
         const claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
         if (!claimed?.structuredHost) return;
+        if (!shouldAdopt(claimed)) {
+          registry.releaseStructuredHostClaim(entry.key, claimed.claimOwner!, claimed.claimEpoch);
+          return;
+        }
         try {
           const host = await CodexAppServerHost.adopt(entry.key.sessionId, {
             ...optionsFor(claimed),
@@ -472,17 +518,28 @@ export async function adoptClaudeRegistryHosts(
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
+        const eligible = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];
+        if (!eligible?.structuredHost || !shouldAdopt(eligible)) return;
         let claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
         if (!claimed) {
           const current = registry.readOnlySnapshot().entries[`claude:${entry.key.sessionId}`];
           const orphan = current?.structuredHost?.kind === "claude-broker"
             ? current.structuredHost.process
             : null;
-          if (orphan && await terminateVerifiedClaudeOrphan(orphan, current?.claimOwner ?? null)) {
+          if (orphan
+            && current
+            && shouldAdopt(current)
+            && await terminateVerifiedClaudeOrphan(orphan, current.claimOwner ?? null)) {
+            const retry = registry.readOnlySnapshot().entries[sessionKeyId(entry.key)];
+            if (!retry?.structuredHost || !shouldAdopt(retry)) return;
             claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
           }
         }
         if (!claimed?.structuredHost) return;
+        if (!shouldAdopt(claimed)) {
+          registry.releaseStructuredHostClaim(entry.key, claimed.claimOwner!, claimed.claimEpoch);
+          return;
+        }
         try {
           const host = await ClaudeStreamBrokerHost.adopt(entry.key.sessionId, {
             ...optionsFor(claimed),

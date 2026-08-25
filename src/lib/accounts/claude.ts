@@ -234,6 +234,37 @@ export function claudeHomeOwningTranscript(pathname: string): string | null {
   return ownership.kind === "owned" && ownership.source === "path" ? ownership.home : null;
 }
 
+/**
+ * The shared-store equivalent of a transcript addressed through an account's
+ * own `<home>/projects` (#1026). A Claude-engine agent knows its native
+ * `~/.claude/projects/...` path — that is what the CLI writes and what its own
+ * environment reports — while every viewer record addresses the one shared
+ * store the home's `projects` symlink points into. The two name the same file,
+ * so a caller that hands over the native path is answering correctly and only
+ * needs the address translated.
+ *
+ * Returns the mirrored path only when that file actually exists: a home that is
+ * not cut over to the shared store keeps its own transcripts, and inventing a
+ * path there would trade a clear rejection for a phantom identity. Null when
+ * the path is not under any account's native projects root, when it already is
+ * the shared path, or when no mirrored file exists.
+ */
+export function mirroredClaudeTranscriptPath(pathname: string): string | null {
+  const shared = sharedClaudeProjectsRoot();
+  const resolved = path.resolve(pathname);
+  if (resolved === shared || resolved.startsWith(shared + path.sep)) return null;
+  for (const home of listClaudeAccounts().map((account) => account.home)) {
+    const nativeRoot = path.join(home, "projects");
+    if (!resolved.startsWith(nativeRoot + path.sep)) continue;
+    const mirrored = path.join(shared, path.relative(nativeRoot, resolved));
+    try {
+      if (fs.statSync(mirrored).isFile()) return mirrored;
+    } catch { /* nothing mirrored under the shared store */ }
+    return null;
+  }
+  return null;
+}
+
 function nextId(label: string, used: Set<string>): string {
   const base = label.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "account";
   for (let n = 0; ; n += 1) { const suffix = n ? `-${n}` : ""; const candidate = `${base.slice(0, 32 - suffix.length)}${suffix}`; if (ACCOUNT_ID.test(candidate) && candidate !== DEFAULT_ID && !used.has(candidate) && !fs.existsSync(managedHome(candidate))) return candidate; }

@@ -3,13 +3,16 @@ import fs from "node:fs";
 
 import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { agentRegistry } from "@/lib/agent/registry";
+import { validateLaunchModel } from "@/lib/agent/models";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { projectForCwd } from "@/lib/scanner/describe";
+import { resolveSpawnRole } from "@/lib/roles/registry";
 
 import { loadTasks } from "@/lib/tasks/store";
+import { orchestratorMandateForDelivery } from "./prompt";
 import {
   beginOrchestratorSeatIntent,
   completeOrchestratorSeatIntent,
@@ -18,7 +21,6 @@ import {
   orchestratorSeatFor,
   type OrchestratorSeat,
 } from "./seats";
-import { replaceOrchestratorIncumbent } from "./store";
 
 /* The one confirm behind the board draft's Orchestrator role: DESIGNATE this
  * project's orchestrator and INJECT the operator-edited mandate, atomically.
@@ -55,9 +57,6 @@ export interface SeatCommandDependencies {
   deliver(input: { conversationId: string; path: string | null; clientMessageId: string; text: string }): Promise<{ ok: boolean; error?: string; outcome?: string }>;
   /** Registry-backed eligibility of a conversation offered for adoption. */
   conversationTarget(conversationId: string): ExistingConversationTarget | null;
-  /** Keep the legacy single-instance manager record pointing at the newest
-      operator-selected seat, so the bridge follows the selection. */
-  syncLegacyRecord(input: { conversationId: string; path: string | null; engine?: string; model?: string }): void;
   /** Bounded open work for a rotation handoff; empty when unknown. */
   projectTasks(project: string): { id: string; status: string; text: string }[];
   /** Durable outcome of the spawn a pending intent's request attempted, read
@@ -183,15 +182,6 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       project: canonicalOrchestratorProject(ownedProject),
     };
   },
-  syncLegacyRecord: (input) => {
-    replaceOrchestratorIncumbent({
-      conversationId: input.conversationId,
-      path: input.path,
-      createdAt: new Date().toISOString(),
-      ...(input.engine ? { engine: input.engine } : {}),
-      ...(input.model ? { model: input.model } : {}),
-    });
-  },
   projectTasks: (project) => loadTasks()
     .filter((task) => task.project === project && task.status !== "done")
     .map((task) => ({ id: task.id, status: task.status, text: task.text })),
@@ -226,6 +216,18 @@ export interface SeatCommandResult {
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function explicitSeatModelError(rawBody: Record<string, unknown>): string | null {
+  const model = text(rawBody.model);
+  if (!model) return null;
+  const role = resolveSpawnRole({ role: "orchestrator", roleParams: rawBody.roleParams ?? { mode: "standard" } });
+  let engine: "claude" | "codex" | null = null;
+  if (rawBody.engine === "claude" || rawBody.engine === "codex") engine = rawBody.engine;
+  else if (role.ok && role.value) engine = role.value.config.engine;
+  if (!engine) return null;
+  const validation = validateLaunchModel(engine, model);
+  return "error" in validation ? validation.error : null;
 }
 
 function replayedSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
@@ -268,7 +270,7 @@ function inProgressSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
  * may reach them.
  */
 async function activate(
-  input: { project: string; clientRequestId: string; conversationId: string; path: string | null; launchId?: string | null; engine?: string; model?: string },
+  input: { project: string; clientRequestId: string; conversationId: string; path: string | null; launchId?: string | null },
   dependencies: SeatCommandDependencies,
 ): Promise<{ seat: OrchestratorSeat } | null> {
   const completed = completeOrchestratorSeatIntent({
@@ -280,14 +282,6 @@ async function activate(
     now: dependencies.now(),
   });
   if (completed.kind === "missing") return null;
-  if (completed.kind === "activated") {
-    dependencies.syncLegacyRecord({
-      conversationId: input.conversationId,
-      path: input.path,
-      ...(input.engine ? { engine: input.engine } : {}),
-      ...(input.model ? { model: input.model } : {}),
-    });
-  }
   return { seat: completed.seat };
 }
 
@@ -400,7 +394,7 @@ export async function executeOrchestratorSeatRequest(
       clientMessageId: `orchmandate_${clientRequestId}`,
       /* On a pending replay the ORIGINAL intent's mandate is what completes:
          a retry that recomposed its text must not deliver a second variant. */
-      text: begun.kind === "replay" ? begun.seat.mandate : mandate,
+      text: orchestratorMandateForDelivery(begun.kind === "replay" ? begun.seat.mandate : mandate),
     });
     if (!delivery.ok) {
       const error = delivery.error ?? "mandate delivery failed";
@@ -451,13 +445,15 @@ export async function executeOrchestratorSeatRequest(
       },
     };
   }
+  const modelError = explicitSeatModelError(rawBody);
+  if (modelError) return { status: 400, body: { error: modelError } };
   const begun = beginOrchestratorSeatIntent({ project, mandate, clientRequestId, mode: "spawn", promptVersion, now: dependencies.now() });
   if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
   if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);
   /* A pending replay spawns the ORIGINAL intent's mandate: the spawn receipt is
      matched by clientAttemptId AND request digest, so a recomposed retry would
      otherwise conflict with its own first attempt. */
-  const spawnMandate = begun.kind === "replay" ? begun.seat.mandate : mandate;
+  const spawnMandate = orchestratorMandateForDelivery(begun.kind === "replay" ? begun.seat.mandate : mandate);
 
   const spawnFields = ["engine", "model", "cwd", "effort", "fast", "accountId", "images", "roleParams", "allowSubagents"] as const;
   const cwd = resolveOrchestratorCwd(project, rawBody.cwd);
@@ -506,8 +502,6 @@ export async function executeOrchestratorSeatRequest(
     conversationId: spawnedConversationId,
     path: typeof spawned.body.path === "string" ? spawned.body.path : null,
     launchId: launchId || null,
-    ...(typeof rawBody.engine === "string" ? { engine: rawBody.engine } : {}),
-    ...(typeof rawBody.model === "string" ? { model: rawBody.model } : {}),
   }, dependencies);
   if (!activated) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
   return {
@@ -591,6 +585,7 @@ export async function executeOrchestratorRotation(
     ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
     ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
     ...(rawBody.effort !== undefined ? { effort: rawBody.effort } : {}),
+    ...(rawBody.fast !== undefined ? { fast: rawBody.fast } : {}),
     /* Issue #903: a rotation without an explicit cwd continues in the
        predecessor's checkout rather than falling through to the generic
        resolver — the successor inherits the incumbent's mandate, so it

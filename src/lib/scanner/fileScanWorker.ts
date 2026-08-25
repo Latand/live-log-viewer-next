@@ -3,9 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { systemScheduler, type DeadlineScheduler } from "@/lib/deadline";
+import { scheduleTranscriptIndex, type TranscriptIndexFeed } from "@/lib/search/transcriptFeed";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { FileCatalogScan, FileScanOptions } from "./index";
+import {
+  beginProjectCatalogScan,
+  isProjectCatalogScanCurrent,
+  publishConversationCatalogForScan,
+} from "./projectCatalog";
 
 const FILE_SCAN_WORKER_TIMEOUT_MS = 5 * 60_000;
 const FILE_SCAN_WORKER_OUTPUT_MAX_BYTES = 32 * 1024 * 1024;
@@ -24,6 +30,7 @@ export interface FileScanWorkerRuntime {
   timeoutMs?: number;
   signal?: AbortSignal | null;
   scheduler?: DeadlineScheduler;
+  transcriptIndexScheduler?: (feed: TranscriptIndexFeed) => void;
 }
 
 function abortError(): Error {
@@ -39,6 +46,7 @@ function fileCatalogScan(value: unknown): value is FileCatalogScan {
     && Array.isArray(value.files)
     && Array.isArray(value.projectCatalog)
     && typeof value.complete === "boolean"
+    && (value.conversationCatalog === undefined || Array.isArray(value.conversationCatalog))
     && (value.pinOverlayPaths === undefined || Array.isArray(value.pinOverlayPaths));
 }
 
@@ -73,6 +81,7 @@ export function collectFileScanInWorker(
   runtime: FileScanWorkerRuntime = {},
 ): Promise<FileCatalogScan> {
   if (runtime.signal?.aborted) return Promise.reject(abortError());
+  const catalogScanToken = beginProjectCatalogScan(false);
   const launch = runtime.launch ?? workerLaunch(runtime.cwd);
   /* Full-corpus scans are background freshness work. Keep the interactive
      Next process ahead of their CPU demand on a busy operator host. Explicit
@@ -97,6 +106,7 @@ export function collectFileScanInWorker(
     let stderr = "";
     let outputBytes = 0;
     let completed: FileCatalogScan | null = null;
+    let completedConversationCatalog: FileCatalogScan["conversationCatalog"];
     let terminationError: Error | null = null;
     let timer: unknown;
     const finish = (error?: Error, snapshot?: FileCatalogScan) => {
@@ -142,8 +152,17 @@ export function collectFileScanInWorker(
           fail("file scanner worker emitted an invalid message");
           return;
         }
-        if (message.type === "resource") onResourceSnapshot?.(message.snapshot);
-        else completed = message.snapshot;
+        if (message.type === "resource") {
+          onResourceSnapshot?.(message.snapshot);
+        } else {
+          const { conversationCatalog, ...snapshot } = message.snapshot;
+          /* The full scanner runs in a child process. Its process-global
+             publication cannot update the parent that serves /api/conversations,
+             so carry the completed uncapped catalog over the existing worker
+             response. Publication waits for successful worker exit below. */
+          completedConversationCatalog = conversationCatalog;
+          completed = snapshot;
+        }
       }
     };
     timer = scheduler.setTimeout(() => {
@@ -179,6 +198,22 @@ export function collectFileScanInWorker(
         const detail = stderr.trim();
         finish(new Error(`file scanner worker exited before completion (${signal ?? code ?? "unknown"})${detail ? `: ${detail}` : ""}`));
         return;
+      }
+      if (completedConversationCatalog) {
+        const currentScan = isProjectCatalogScanCurrent(catalogScanToken);
+        publishConversationCatalogForScan(completedConversationCatalog, catalogScanToken, completed.complete);
+        if (currentScan) {
+          (runtime.transcriptIndexScheduler ?? scheduleTranscriptIndex)({
+            complete: completed.complete,
+            sources: completedConversationCatalog.map((entry) => ({
+              path: entry.path,
+              project: entry.project,
+              engine: entry.engine,
+              size: entry.size,
+              mtimeMs: entry.mtime * 1_000,
+            })),
+          });
+        }
       }
       finish(undefined, completed);
     });

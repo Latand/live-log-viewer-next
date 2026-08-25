@@ -24,6 +24,7 @@ async function writeFixture(pathname: string, content: string, mtimeSeconds: num
 
 async function createRepository(root: string, name: string): Promise<string> {
   await mkdir(path.join(root, ".git"), { recursive: true });
+  await writeFile(path.join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
   await writeFile(path.join(root, ".git", "config"), [
     '[remote "origin"]',
     `\turl = ssh://git@example.invalid/team/${name}.git`,
@@ -1167,6 +1168,47 @@ test("project catalog omits task-only residue from a clean state", async () => {
     expect(scan.projectCatalog).toEqual([]);
     const persisted = JSON.parse(await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8"));
     expect(persisted.files[taskPath]).toBeDefined();
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a Claude transcript appearing in a previously sessionless project directory enters the conversation catalog", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-late-claude-session-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const repository = path.join(base, "late-session-repository");
+    const project = await createRepository(repository, "late-session-repository");
+    const encodedCwd = repository.replaceAll(path.sep, "-");
+    const projectDirectory = path.join(roots["claude-projects"], encodedCwd);
+    await writeFixture(
+      path.join(projectDirectory, "historical.jsonl.wakatime"),
+      "{}\n",
+      1_700_000_000,
+    );
+
+    const before = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(before.projectCatalog.some((entry) => entry.project === project)).toBe(false);
+
+    const transcript = path.join(projectDirectory, "late-session.jsonl");
+    await writeFixture(
+      transcript,
+      `${JSON.stringify({ type: "user", cwd: repository, message: { content: "late session" } })}\n`,
+      1_700_000_010,
+    );
+
+    const after = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(after.files.some((entry) => entry.path === transcript)).toBe(true);
+    expect(conversationCatalogSnapshot()).toContainEqual(expect.objectContaining({ path: transcript, project }));
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;

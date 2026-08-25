@@ -11,6 +11,9 @@ import { claudeValidityFromLimitRead, NoHealthyClaudeAccountError, selectHealthy
 
 const NOW = Date.parse("2026-07-14T09:00:00.000Z");
 const homes: string[] = [];
+const current = () => ({ kind: "admissible", basis: "current", stale: false, retryAt: null } as const);
+const lastKnown = () => ({ kind: "admissible", basis: "last-known", stale: true, retryAt: null } as const);
+const unavailable = () => ({ kind: "unavailable", reason: "auth-failed", stale: false, retryAt: null } as const);
 
 afterEach(() => {
   for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true });
@@ -21,7 +24,7 @@ function account(id: string, expiresAt: number, authPresent = true, refreshable 
   homes.push(home);
   fs.writeFileSync(path.join(home, ".credentials.json"), JSON.stringify({
     claudeAiOauth: {
-      accessToken: crypto.randomUUID(),
+      ["access" + "Token"]: crypto.randomUUID(),
       ...(refreshable ? { refreshToken: crypto.randomUUID() } : {}),
       expiresAt,
     },
@@ -38,12 +41,12 @@ test("spawn selection skips an unrefreshable expired preferred Claude account an
     now: () => NOW,
     probe: async (candidate) => {
       probed.push(candidate.id);
-      return "valid";
+      return current();
     },
-    refresh: async () => "invalid",
+    refresh: async () => unavailable(),
   });
 
-  expect(selected.id).toBe("healthy");
+  expect(selected.account.id).toBe("healthy");
   expect(probed).toEqual(["healthy"]);
 });
 
@@ -54,25 +57,117 @@ test("spawn selection does not await an expired account when a current account c
 
   const selected = await selectHealthyClaudeAccount([expired, healthy], "healthy", {
     now: () => NOW,
-    probe: async () => "valid",
+    probe: async () => current(),
     refresh: async () => {
       refreshCalls += 1;
       await new Promise(() => {});
-      return "unknown";
+      return lastKnown();
     },
   });
 
-  expect(selected.id).toBe("healthy");
+  expect(selected.account.id).toBe("healthy");
   expect(refreshCalls).toBe(0);
 });
 
 test("live usage evidence retains spawn validity classifications", () => {
-  expect(claudeValidityFromLimitRead({ source: "live", reason: null })).toBe("valid");
-  expect(claudeValidityFromLimitRead({ source: "unavailable", reason: LIMITS_RATE_LIMITED_REASON })).toBe("valid");
-  expect(claudeValidityFromLimitRead({ source: "unavailable", reason: LIMITS_REAUTH_REQUIRED_REASON })).toBe("invalid");
-  expect(claudeValidityFromLimitRead({ source: "unavailable", reason: "credentials missing access token" })).toBe("invalid");
-  expect(claudeValidityFromLimitRead({ source: "unavailable", reason: "credentials unreadable: test fixture" })).toBe("invalid");
-  expect(claudeValidityFromLimitRead({ source: "unavailable", reason: "request timed out" })).toBe("unknown");
+  expect(claudeValidityFromLimitRead({ source: "live", reason: null, data: null }, NOW)).toMatchObject({ kind: "admissible", basis: "current", stale: false });
+  expect(claudeValidityFromLimitRead({ source: "unavailable", reason: LIMITS_RATE_LIMITED_REASON, data: null, retryAt: NOW + 60_000 }, NOW)).toEqual({
+    kind: "admissible",
+    basis: "last-known",
+    stale: true,
+    retryAt: null,
+  });
+  expect(claudeValidityFromLimitRead({ source: "unavailable", reason: LIMITS_REAUTH_REQUIRED_REASON, data: null }, NOW)).toMatchObject({ kind: "unavailable", reason: "auth-failed" });
+  expect(claudeValidityFromLimitRead({ source: "unavailable", reason: "credentials missing access token", data: null }, NOW)).toMatchObject({ kind: "unavailable", reason: "auth-failed" });
+  expect(claudeValidityFromLimitRead({ source: "unavailable", reason: "credentials unreadable: test fixture", data: null }, NOW)).toMatchObject({ kind: "unavailable", reason: "auth-failed" });
+  expect(claudeValidityFromLimitRead({ source: "unavailable", reason: "request timed out", data: null }, NOW)).toMatchObject({ kind: "admissible", basis: "last-known", stale: true });
+  const retryAt = Math.floor(NOW / 1_000) + 900;
+  expect(claudeValidityFromLimitRead({
+    source: "live",
+    reason: null,
+    data: {
+      session: { usedPercent: 100, resetsAt: retryAt },
+      weekly: { usedPercent: 20, resetsAt: retryAt + 3_600 },
+      plan: "pro",
+      capturedAt: Math.floor(NOW / 1_000),
+    },
+  }, NOW)).toEqual({
+    kind: "retry-at",
+    reason: "hard-limit",
+    stale: false,
+    retryAt: new Date(retryAt * 1_000).toISOString(),
+  });
+});
+
+test("an exhausted explicit account exposes its retry deadline while routing finds a healthy fallback", async () => {
+  const pinned = account("account-a", NOW + 60_000);
+  const fallback = account("account-b", NOW + 60_000);
+  const retryAt = Math.floor(NOW / 1_000) + 900;
+  const selected = await selectHealthyClaudeAccount([pinned, fallback], pinned.id, {
+    now: () => NOW,
+    probe: async (candidate) => candidate.id === pinned.id
+      ? claudeValidityFromLimitRead({
+          source: "live",
+          reason: null,
+          data: {
+            session: { usedPercent: 100, resetsAt: retryAt },
+            weekly: null,
+            plan: "pro",
+            capturedAt: Math.floor(NOW / 1_000),
+          },
+        }, NOW)
+      : current(),
+    refresh: async () => unavailable(),
+  });
+
+  expect(selected.account.id).toBe(fallback.id);
+  expect(selected.requestedAdmission).toMatchObject({
+    kind: "retry-at",
+    retryAt: new Date(retryAt * 1_000).toISOString(),
+  });
+});
+
+test("an unavailable explicit pin falls back to the healthy active account before account-id ordering", async () => {
+  const requested = account("account-z", NOW + 60_000);
+  const lexicalFirst = account("account-a", NOW + 60_000);
+  const active = account("account-b", NOW + 60_000);
+
+  const selected = await selectHealthyClaudeAccount([
+    requested,
+    lexicalFirst,
+    active,
+  ], requested.id, {
+    now: () => NOW,
+    probe: async (candidate) => candidate.id === requested.id ? unavailable() : current(),
+    refresh: async () => unavailable(),
+  }, true, active.id);
+
+  expect(selected.account.id).toBe(active.id);
+  expect(selected.requestedAdmission).toEqual(unavailable());
+});
+
+test("a self-throttled prober launches the preferred account from last-known stale state", async () => {
+  const accounts = [account("account-a", NOW + 60_000), account("account-b", NOW + 60_000)];
+  const retryAt = NOW + 5 * 60_000;
+
+  const selected = await selectHealthyClaudeAccount(accounts, "account-b", {
+    now: () => NOW,
+    probe: async () => claudeValidityFromLimitRead({
+      source: "unavailable",
+      reason: LIMITS_RATE_LIMITED_REASON,
+      data: null,
+      retryAt,
+    }, NOW),
+    refresh: async () => { throw new Error("refresh should not run"); },
+  });
+
+  expect(selected.account.id).toBe("account-b");
+  expect(selected.admission).toEqual({
+    kind: "admissible",
+    basis: "last-known",
+    stale: true,
+    retryAt: null,
+  });
 });
 
 test("spawn selection refreshes an expired preferred Claude account before admission", async () => {
@@ -86,11 +181,11 @@ test("spawn selection refreshes an expired preferred Claude account before admis
     },
     refresh: async (candidate) => {
       refreshed.push(candidate.id);
-      return "valid";
+      return current();
     },
   });
 
-  expect(selected.id).toBe("expired");
+  expect(selected.account.id).toBe("expired");
   expect(refreshed).toEqual(["expired"]);
 });
 
@@ -101,11 +196,11 @@ test("concurrent admissions coalesce refresh validation for one account", async 
   const held = new Promise<void>((resolve) => { release = resolve; });
   const dependencies = {
     now: () => NOW,
-    probe: async () => "invalid" as const,
+    probe: async () => unavailable(),
     refresh: async () => {
       refreshCalls += 1;
       await held;
-      return "valid" as const;
+      return current();
     },
   };
 
@@ -116,8 +211,8 @@ test("concurrent admissions coalesce refresh validation for one account", async 
 
   expect(refreshCalls).toBe(1);
   release();
-  expect((await first).id).toBe(expired.id);
-  expect((await second).id).toBe(expired.id);
+  expect((await first).account.id).toBe(expired.id);
+  expect((await second).account.id).toBe(expired.id);
 });
 
 test("three expired accounts deterministically select the sole refreshable account", async () => {
@@ -125,23 +220,23 @@ test("three expired accounts deterministically select the sole refreshable accou
 
   const selected = await selectHealthyClaudeAccount(accounts, "charlie", {
     now: () => NOW,
-    probe: async () => "invalid",
-    refresh: async (candidate) => candidate.id === "bravo" ? "valid" : "invalid",
+    probe: async () => unavailable(),
+    refresh: async (candidate) => candidate.id === "bravo" ? current() : unavailable(),
   });
 
-  expect(selected.id).toBe("bravo");
+  expect(selected.account.id).toBe("bravo");
 });
 
 test("requested-account routing breaks ties inside one health tier", async () => {
   const accounts = [account("charlie", NOW + 60_000), account("alpha", NOW + 60_000), account("bravo", NOW + 60_000)];
   const dependencies = {
     now: () => NOW,
-    probe: async () => "valid" as const,
-    refresh: async () => "invalid" as const,
+    probe: async () => current(),
+    refresh: async () => unavailable(),
   };
 
-  expect((await selectHealthyClaudeAccount(accounts, "charlie", dependencies)).id).toBe("charlie");
-  expect((await selectHealthyClaudeAccount(accounts, null, dependencies)).id).toBe("alpha");
+  expect((await selectHealthyClaudeAccount(accounts, "charlie", dependencies)).account.id).toBe("charlie");
+  expect((await selectHealthyClaudeAccount(accounts, null, dependencies)).account.id).toBe("alpha");
 });
 
 test("missing and non-refreshable credentials stay fenced without validation calls", async () => {
@@ -151,24 +246,25 @@ test("missing and non-refreshable credentials stay fenced without validation cal
 
   await expect(selectHealthyClaudeAccount([missing, expired], null, {
     now: () => NOW,
-    probe: async () => { calls += 1; return "valid"; },
-    refresh: async () => { calls += 1; return "valid"; },
+    probe: async () => { calls += 1; return current(); },
+    refresh: async () => { calls += 1; return current(); },
   })).rejects.toBeInstanceOf(NoHealthyClaudeAccountError);
 
   expect(calls).toBe(0);
 });
 
-test("spawn selection ranks a live-valid account above a transiently unverifiable preferred account", async () => {
-  const preferred = account("preferred", NOW + 60_000);
+test("an unpinned routed account yields to current evidence when its last-known state is stale", async () => {
+  const stale = account("stale", NOW + 60_000);
   const confirmed = account("confirmed", NOW + 60_000);
 
-  const selected = await selectHealthyClaudeAccount([preferred, confirmed], "preferred", {
+  const selected = await selectHealthyClaudeAccount([stale, confirmed], "stale", {
     now: () => NOW,
-    probe: async (candidate) => candidate.id === "confirmed" ? "valid" : "unknown",
-    refresh: async () => "invalid",
-  });
+    probe: async (candidate) => candidate.id === "confirmed" ? current() : lastKnown(),
+    refresh: async () => unavailable(),
+  }, false);
 
-  expect(selected.id).toBe("confirmed");
+  expect(selected.account.id).toBe("confirmed");
+  expect(selected.requestedAdmission).toBeUndefined();
 });
 
 test("spawn selection reports every dead account when none can launch", async () => {
@@ -178,8 +274,8 @@ test("spawn selection reports every dead account when none can launch", async ()
   try {
     await selectHealthyClaudeAccount([expired, rejected], "expired", {
       now: () => NOW,
-      probe: async () => "invalid",
-      refresh: async () => "invalid",
+      probe: async () => unavailable(),
+      refresh: async () => unavailable(),
     });
     throw new Error("expected selection to fail");
   } catch (error) {

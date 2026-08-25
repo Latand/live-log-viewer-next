@@ -12,6 +12,7 @@ import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./
 import { CodexReplayFrameReducer, ReplayFrameOverflowError, sanitizeCodexImageFrame, shrinkReducedReplayFrame, type ImageSink, type ReplayFrameBudgets } from "./codexImageFrames";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY, type StructuredImageRef } from "./structuredContent";
+import { withTelegramConnectorGrant } from "./telegramConnectorEnv";
 import {
   normalizeVoiceDeliveries,
   streamingVoiceDelivery,
@@ -174,6 +175,10 @@ export interface CodexAppServerHostOptions {
   plugins?: readonly string[];
   fileAuthCredentials?: boolean;
   sandbox?: string;
+  permissionProfile?: string;
+  permissionProfileConfig?: string;
+  forwardGitHubConfig?: boolean;
+  releaseCleanup?: () => void;
   approvalPolicy?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
@@ -382,12 +387,18 @@ function stderrExitDiagnostic(value: string): string {
     .slice(0, 430);
 }
 
-function subscriptionEnv(source: NodeJS.ProcessEnv, codexHome?: string, desktopSession = false): NodeJS.ProcessEnv {
+function subscriptionEnv(
+  source: NodeJS.ProcessEnv,
+  codexHome?: string,
+  desktopSession = false,
+  forwardGitHubConfig = false,
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV };
   const names = desktopSession ? [...CHILD_ENV_ALLOWLIST, ...DESKTOP_ENV_ALLOWLIST] : CHILD_ENV_ALLOWLIST;
   for (const name of names) {
     if (source[name] !== undefined) env[name] = source[name];
   }
+  if (forwardGitHubConfig && source.GH_CONFIG_DIR !== undefined) env.GH_CONFIG_DIR = source.GH_CONFIG_DIR;
   if (codexHome) env.CODEX_HOME = codexHome;
   return env;
 }
@@ -678,6 +689,7 @@ export class CodexAppServerHost implements EngineHost {
   private resolveTermination: (() => void) | null = null;
   private failureCleanupTimer: ReturnType<typeof setTimeout> | null = null;
   private releasePromise: Promise<void> | null = null;
+  private releaseCleanup: (() => void) | null;
   private writerFence: (() => boolean) | null = null;
   private ledgerFailed = false;
   private failure: Error | null = null;
@@ -699,6 +711,7 @@ export class CodexAppServerHost implements EngineHost {
     this.signalProcess = options.signalProcess ?? process.kill;
     this.processIdentity = options.processIdentity ?? ((pid) => procBackend.processIdentity(pid));
     this.pidAlive = options.pidAlive ?? ((pid) => procBackend.pidAlive(pid));
+    this.releaseCleanup = options.releaseCleanup ?? null;
     this.childStartIdentity = child.pid ? this.processIdentity(child.pid) : null;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.resolveImagePath = options.resolveImagePath ?? ((ref) => {
@@ -744,16 +757,36 @@ export class CodexAppServerHost implements EngineHost {
       spawn(command, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
     const args = [
       ...(options.fileAuthCredentials ? ["-c", "cli_auth_credentials_store=file"] : []),
+      ...(options.permissionProfile && options.permissionProfileConfig
+        ? [
+          "-c", `default_permissions=${JSON.stringify(options.permissionProfile)}`,
+          "-c", options.permissionProfileConfig,
+        ]
+        : []),
       "app-server",
       "--enable",
       "realtime_conversation",
     ];
     const granted = grantedPlugins(options.plugins);
-    const child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", args, {
-      cwd: options.cwd,
-      env: subscriptionEnv(options.env ?? process.env, options.codexHome, granted.length > 0),
-      detached: true,
-    });
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", args, {
+        cwd: options.cwd,
+        env: withTelegramConnectorGrant(
+          subscriptionEnv(
+            options.env ?? process.env,
+            options.codexHome,
+            granted.length > 0,
+            options.forwardGitHubConfig === true,
+          ),
+          options.mcpServers,
+        ),
+        detached: true,
+      });
+    } catch (error) {
+      options.releaseCleanup?.();
+      throw error;
+    }
     const provisional = new CodexAppServerHost(child, { threadId: threadId ?? "pending", path: null }, options);
     try {
       const initialized = record(await provisional.rpc("initialize", {
@@ -785,11 +818,17 @@ export class CodexAppServerHost implements EngineHost {
         granted,
       );
       const result = threadId
-        ? await provisional.rpc("thread/resume", { threadId, config })
+        ? await provisional.rpc("thread/resume", {
+          threadId,
+          ...(options.permissionProfile ? { permissions: options.permissionProfile } : {}),
+          config,
+        })
         : await provisional.rpc("thread/start", {
           cwd: options.cwd,
           ...(options.model ? { model: options.model } : {}),
-          sandbox: options.sandbox ?? "read-only",
+          ...(options.permissionProfile
+            ? { permissions: options.permissionProfile }
+            : { sandbox: options.sandbox ?? "read-only" }),
           approvalPolicy: options.approvalPolicy ?? "never",
           config,
         });
@@ -916,6 +955,7 @@ export class CodexAppServerHost implements EngineHost {
       ...(normalized.expectedTurnId !== undefined ? { expectedTurnId: normalized.expectedTurnId } : {}),
       ...(normalized.runtime ? { runtime: normalized.runtime } : {}),
       ...(normalized.selectedContext ? { selectedContext: normalized.selectedContext } : {}),
+      ...(normalized.origin ? { origin: normalized.origin } : {}),
     };
     if (!entry.id) throw new Error("queue entry id is required");
     const confirmed = await this.confirmedDelivery(entry);
@@ -935,6 +975,9 @@ export class CodexAppServerHost implements EngineHost {
              canonical structured-user record, so it survives a restart and a
              re-parse and the transcript row renders the composer badge. */
           normalized.selectedContext,
+          /* #1117: authorship lands on the same record, so the feed can tell
+             the operator's bubble from an inter-agent relay without a join. */
+          normalized.origin,
         ),
       },
     ];
@@ -1793,6 +1836,9 @@ export class CodexAppServerHost implements EngineHost {
     this.setSessionStatus("unhosted", []);
     if (this.ledgerFailed || !this.eventLedgerRestored) this.notifyStateListeners();
     this.closeSubscribers();
+    const cleanup = this.releaseCleanup;
+    this.releaseCleanup = null;
+    cleanup?.();
   }
 
   private completeGroupCleanupAfterReap(): void {

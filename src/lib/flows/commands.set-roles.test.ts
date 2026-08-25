@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { CODEX_SOL_MODEL, ENGINE_MODELS } from "@/lib/agent/models";
+
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-set-roles-"));
 const { patchFlow } = await import("./commands");
 const { reviewerRoleFor, flowTickBase, persistTickFlows } = await import("./engine");
@@ -39,12 +41,12 @@ function seed(overrides: Partial<Flow> = {}): Flow {
 
 test("set-roles re-configures the reviewer for the next round and persists", () => {
   seed();
-  const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { model: "gpt-5-codex", effort: "" } } });
+  const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { model: CODEX_SOL_MODEL, effort: "" } } });
   expect(result.error).toBeUndefined();
-  expect(result.flow!.roles.reviewer).toEqual({ engine: "codex", model: "gpt-5-codex", effort: null });
+  expect(result.flow!.roles.reviewer).toEqual({ engine: "codex", model: CODEX_SOL_MODEL, effort: null });
   /* Implementer is untouched, and the change is written to the store. */
   expect(result.flow!.roles.implementer).toEqual({ engine: "codex", model: "gpt-5.6", effort: "medium" });
-  expect(loadFlows()[0]!.roles.reviewer.model).toBe("gpt-5-codex");
+  expect(loadFlows()[0]!.roles.reviewer.model).toBe(CODEX_SOL_MODEL);
 });
 
 test("resuming a known legacy pre-actuation relay failure clears its stale checkpoint", () => {
@@ -74,7 +76,7 @@ test("resuming a known legacy pre-actuation relay failure clears its stale check
 
   const resumed = patchFlow("f1", { action: "resume" }).flow!;
 
-  expect(resumed).toMatchObject({ state: "relaying", pausedState: null, stateDetail: null });
+  expect(resumed).toMatchObject({ state: "relaying", pausedState: null, stateDetail: "resumed by operator" });
   expect(resumed.rounds[0]).toMatchObject({
     relayStartedAt: null,
     relayDeliveryTransport: null,
@@ -83,10 +85,23 @@ test("resuming a known legacy pre-actuation relay failure clears its stale check
   });
 });
 
+test("pause and resume accept a calling agent identity (#1121)", () => {
+  seed({ state: "reviewing" });
+  const actor = { kind: "agent" as const, role: "reviewer", conversationId: "conversation_reviewer" };
+
+  const paused = patchFlow("f1", { action: "pause" }, actor).flow!;
+  expect(paused).toMatchObject({ state: "paused", stateDetail: "paused by reviewer conversation_reviewer" });
+  const resumed = patchFlow("f1", { action: "resume" }, actor).flow!;
+  expect(resumed).toMatchObject({ state: "reviewing", stateDetail: "resumed by reviewer conversation_reviewer" });
+});
+
 test("set-roles rejects a reviewer config the CLI cannot launch (issue #118 Finding 3)", () => {
   seed();
-  /* codex + a claude model must not persist and fail later at spawn. */
-  expect(patchFlow("f1", { action: "set-roles", roles: { reviewer: { model: "fable" } } }).status).toBe(400);
+  const rejected = patchFlow("f1", { action: "set-roles", roles: { reviewer: { model: "gpt-fabricated" } } });
+  expect(rejected).toEqual({
+    error: `invalid codex model id "gpt-fabricated"; valid codex model ids: ${ENGINE_MODELS.codex.map((option) => option.id).join(", ")}`,
+    status: 400,
+  });
   expect(patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine: "claude" } } }).status).toBe(400);
   expect(loadFlows()[0]!.roles.reviewer).toEqual({ engine: "codex", model: "gpt-5.6", effort: "high" });
 });
@@ -203,6 +218,28 @@ test("set-roles leaves a spawning round's frozen snapshot untouched (issue #118 
   const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine: "claude", model: "fable" } } });
   expect(result.flow!.rounds[0]!.reviewerRole).toEqual({ engine: "codex", model: "gpt-5.6", effort: "high" });
   expect(result.flow!.roles.reviewer).toMatchObject({ engine: "claude", model: "fable" });
+});
+
+test("set-roles leaves a dated Claude model on an in-flight round untouched", () => {
+  const historicalModel = "claude-opus-4-8-20260630";
+  seed({
+    state: "reviewing",
+    roles: {
+      implementer: { engine: "codex", model: "gpt-5.6", effort: "medium" },
+      reviewer: { engine: "claude", model: historicalModel, effort: "high" },
+    },
+    rounds: [{
+      n: 1, reviewerPath: "/rev", reviewerRole: { engine: "claude", model: historicalModel, effort: "high" },
+      accountId: null, sessionId: null, reviewerPane: null, findingsPath: null, triggeredBy: "button",
+      readyNote: null, verdict: null, findingsCount: null, startedAt: "2026-07-05T00:00:00Z",
+      spawnStartedAt: "2026-07-05T00:00:01Z", relayStartedAt: null, reviewedAt: null, relayedAt: null, error: null,
+    }] as never,
+  });
+
+  const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { model: "opus" } } });
+
+  expect(result.flow!.roles.reviewer.model).toBe("opus");
+  expect(result.flow!.rounds[0]!.reviewerRole?.model).toBe(historicalModel);
 });
 
 test("set-roles rejects an invalid override and an empty payload", () => {

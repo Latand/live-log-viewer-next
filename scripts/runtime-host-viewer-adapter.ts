@@ -31,7 +31,7 @@ import {
   viewerComposeServiceUid,
   viewerRegistryBackendMode,
 } from "../src/runtime-host/candidateContainer";
-import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
+import { ensureCanonicalMirror, resolveCanonicalRevision } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
 import { withBootstrapMcpHealthProbeAdmission } from "../src/runtime-host/bootstrapMcpHealthProbeAdmission";
 import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
@@ -125,11 +125,7 @@ async function ensureMirror(): Promise<void> {
 }
 
 async function resolveRevision(requested: string): Promise<string> {
-  await ensureMirror();
-  const value = requested === "origin/main" ? "refs/heads/main^{commit}" : `${requested}^{commit}`;
-  const revision = await command(["git", "--git-dir", mirrorDir, "rev-parse", "--verify", value]);
-  if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error("canonical repository returned an invalid revision");
-  return revision;
+  return resolveCanonicalRevision(requested, { mirrorDir, remote: canonicalRemote }, { run: command, ensureMirror });
 }
 
 function composeConfigFile(container: string): string {
@@ -205,6 +201,10 @@ function runtimeHostGeneration(value: unknown): { image: string; revision: strin
 }
 
 async function buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity> {
+  const runtimeHome = process.env.HOME?.trim();
+  if (!runtimeHome || !path.isAbsolute(runtimeHome)) {
+    throw new Error("runtime-host HOME must be an absolute path before building a Viewer candidate");
+  }
   await ensureMirror();
   await command(["git", "--git-dir", mirrorDir, "cat-file", "-e", `${revision}^{commit}`]);
   const sourceDir = path.join(deploymentDir, deploymentId, "source");
@@ -224,7 +224,12 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
       "--profile", "*", "config", "--format", "json",
     ]);
     writeComposeConfig(container, composeConfig);
-    await command(["docker", "build", "--pull", "--label", `dev.live-log-viewer.revision=${revision}`, "-t", image, sourceDir]);
+    await command([
+      "docker", "build", "--pull",
+      "--build-arg", `LLV_RUNTIME_HOME=${runtimeHome}`,
+      "--label", `dev.live-log-viewer.revision=${revision}`,
+      "-t", image, sourceDir,
+    ]);
     await command([process.execPath, "install", "--frozen-lockfile", "--production"], { cwd: sourceDir });
     await command([process.execPath, "run", "build:mcp"], { cwd: sourceDir });
     mcpRuntime = mcpRuntimeStore.stagePreparedPackage(sourceDir, deploymentId, revision);

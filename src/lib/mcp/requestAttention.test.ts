@@ -286,7 +286,12 @@ test("a target the server cannot attribute is refused rather than filed under a 
 
     expect(draft).toMatchObject({ ok: false, error: "a draft target needs an explicit project" });
     expect(missing).toMatchObject({ ok: false, error: "no conversation on the board has that transcript path" });
-    expect(nonsense).toMatchObject({ ok: false, error: "target must be a typed focus target" });
+    /* #1016: the rejection names the discriminator and its kinds rather than
+       restating that the value was not a target. The per-kind wording is pinned
+       in `requestAttention.targets.test.ts`. */
+    expect(nonsense.ok).toBe(false);
+    expect(nonsense.error).toContain('target.kind must be one of conversation | pipeline | stage | flowRound | task | draft | region | point');
+    expect(nonsense.error).toContain('read kind "elsewhere"');
     expect(readAttentionFile().requests).toEqual([]);
 
     /* Naming the project explicitly is the way through for a board draft. */

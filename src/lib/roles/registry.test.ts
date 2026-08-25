@@ -81,6 +81,10 @@ test("resolved prompts carry role safety fences and reject cross-engine inherite
   expect(reviewer.ok && reviewer.value.prompt).toContain("Read-only mode: edits, staging, commits, pushes, service restarts, and GitHub comments are prohibited.");
   expect(reviewer.ok && reviewer.value.prompt).toContain("actionable fix plan");
   expect(reviewer.ok && reviewer.value.prompt).toContain("No copy-paste code unless absolutely necessary.");
+  expect(reviewer.ok && reviewer.value.prompt).toContain("Report the reviewed SHA.");
+  expect(reviewer.ok && reviewer.value.prompt).toContain("State plainly when GitHub or DNS access was unavailable.");
+  expect(reviewer.ok && reviewer.value.prompt).toContain("environmental note");
+  expect(reviewer.ok && reviewer.value.prompt).toContain("bunx tsc --noEmit --incremental false");
 
   expect(resolveSpawnRole({ role: "builder", roleParams: { mode: "plain" }, engine: "claude" })).toEqual({
     ok: false,
@@ -114,6 +118,18 @@ test("spawn role resolution injects the scaffold and requires deploy confirmatio
   if (!spawn.ok || !spawn.value) throw new Error("expected resolved builder role");
   expect(spawn.value.config).toEqual({ engine: "claude", model: "opus", effort: "high" });
   expect(spawn.value.scaffold).toContain("Builder in tdd mode");
+});
+
+test("spawn role resolution enumerates the selected engine catalog for an invalid explicit model", () => {
+  expect(resolveSpawnRole({
+    role: "builder",
+    roleParams: { mode: "plain" },
+    engine: "claude",
+    model: "mythos-1",
+  })).toEqual({
+    ok: false,
+    error: "invalid claude model id \"mythos-1\"; valid claude model ids: opus, fable, sonnet, haiku",
+  });
 });
 
 test("orchestrator spawn defaults omitted maxWorkers to three and preserves explicit one", () => {

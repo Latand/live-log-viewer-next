@@ -7,7 +7,6 @@ import {
   activeOrchestratorSeats,
   orchestratorRevocations,
 } from "@/lib/orchestrator/seats";
-import { readOrchestratorRecord } from "@/lib/orchestrator/store";
 
 import type { BridgeChannelScope } from "./types";
 
@@ -20,7 +19,6 @@ function productionManagerAuthoritySources(): ManagerAuthoritySources {
   return {
     activeSeats: activeOrchestratorSeats,
     revocations: orchestratorRevocations,
-    legacyManagerConversationId: () => readOrchestratorRecord()?.conversationId ?? null,
     conversationFacts: (conversationId) => {
       const conversation = registry.conversation(conversationId as `conversation_${string}`);
       if (!conversation) return null;
