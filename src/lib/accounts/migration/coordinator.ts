@@ -984,13 +984,21 @@ export async function reconcileMigrations(
       return;
     }
     if (conversation.migration.phase === "rolled-back") {
+      /* Reconciliation can reach rolled-back residue before the hygiene sweep
+         clears it. Apply the same latest-admission ownership fence here so an
+         exact resend cannot be cancelled through its older reservation. */
       for (const item of registry.pendingDeliveries(conversation.id)) {
-        if (item.state === "held" || item.state === "assigned" || item.state === "delivery-uncertain") {
-          registry.terminalizeHeldDelivery(
-            item.id,
-            "delivery cancelled because its owning account migration was rolled back; send again to authorize a fresh delivery action",
-          );
-        }
+        if (item.state !== "held" && item.state !== "assigned" && item.state !== "delivery-uncertain") continue;
+        registry.terminalizeRolledBackMigrationDelivery(
+          item.id,
+          conversation.migration.intentId,
+          "delivery cancelled because its owning account migration was rolled back; send again to authorize a fresh delivery action",
+        );
+      }
+      if (registry.pendingDeliveries(conversation.id).some((item) =>
+        item.state === "assigned"
+        || (item.state === "delivery-uncertain" && delivery.reconcileUncertain))) {
+        await drainHeldDeliveries(conversation.id, delivery, registry);
       }
       return;
     }

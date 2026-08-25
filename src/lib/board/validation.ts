@@ -15,6 +15,8 @@ import type { BoardMutationV1 } from "@/lib/board/mutations";
    item-level limits; this cap only fences unbounded bodies on a
    localhost-only endpoint. */
 export const MAX_BOARD_BODY_BYTES = 48 * 1024 * 1024;
+export const MAX_BOARD_PATH_LIST_ITEMS = 512;
+export const MAX_BOARD_MUTATIONS_PER_REQUEST = 128;
 export type BoardPatch = Partial<BoardProjectStateV1["prefs"]>;
 
 /* Names the accepted alternatives so a caller can self-correct (#774). */
@@ -27,7 +29,7 @@ function record(value: unknown, field: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 function pathList(value: unknown, field: string): string[] {
-  if (!Array.isArray(value) || value.length > 512 || value.some((item) => typeof item !== "string" || item.length === 0 || item.length > 4096)) throw new ViewValidationError("INVALID_REQUEST", `invalid ${field}`);
+  if (!Array.isArray(value) || value.length > MAX_BOARD_PATH_LIST_ITEMS || value.some((item) => typeof item !== "string" || item.length === 0 || item.length > 4096)) throw new ViewValidationError("INVALID_REQUEST", `invalid ${field}`);
   if (new Set(value).size !== value.length) throw new ViewValidationError("INVALID_REQUEST", `duplicate ${field}`);
   return value as string[];
 }
@@ -54,7 +56,7 @@ function mutation(value: unknown, index: number): BoardMutationV1 {
   }
   if (raw.kind === "remap-paths") {
     exact(raw, ["kind", "pairs"], `mutations[${index}]`);
-    if (!Array.isArray(raw.pairs) || raw.pairs.length === 0 || raw.pairs.length > 512) throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].pairs`);
+    if (!Array.isArray(raw.pairs) || raw.pairs.length === 0 || raw.pairs.length > MAX_BOARD_PATH_LIST_ITEMS) throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].pairs`);
     const pairs = raw.pairs.map((pair, pairIndex) => {
       const item = record(pair, `mutations[${index}].pairs[${pairIndex}]`);
       exact(item, ["from", "to"], `mutations[${index}].pairs[${pairIndex}]`);
@@ -123,7 +125,7 @@ export function validateBoardPatchPayload(value: unknown): ValidatedBoardPatchPa
   if (!Number.isInteger(body.baseRevision) || (body.baseRevision as number) < 0) throw new ViewValidationError("INVALID_REQUEST", "invalid baseRevision");
   if ((body.patch === undefined) === (body.mutations === undefined)) throw new ViewValidationError("INVALID_REQUEST", "provide exactly one of patch or mutations");
   if (body.mutations !== undefined) {
-    if (!Array.isArray(body.mutations) || body.mutations.length === 0 || body.mutations.length > 128) throw new ViewValidationError("INVALID_REQUEST", "invalid mutations");
+    if (!Array.isArray(body.mutations) || body.mutations.length === 0 || body.mutations.length > MAX_BOARD_MUTATIONS_PER_REQUEST) throw new ViewValidationError("INVALID_REQUEST", "invalid mutations");
     const mutations = body.mutations.map(mutation);
     rejectMutationAliasCycles(mutations);
     return { project: body.project, baseRevision: body.baseRevision as number, mutations };

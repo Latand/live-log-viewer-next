@@ -29,6 +29,7 @@ import {
 import type { AttentionRequestV1, FocusIntent, FocusTarget, ZoomIntent } from "@/lib/attention/types";
 import { applyBoardCommand } from "@/lib/board/command";
 import { boardFor } from "@/lib/board/store";
+import { MAX_BOARD_MUTATIONS_PER_REQUEST, MAX_BOARD_PATH_LIST_ITEMS } from "@/lib/board/validation";
 import { applyConversationAction } from "@/lib/conversation/actions";
 import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
@@ -1977,6 +1978,7 @@ type ConversationArchiveInput = {
 type ResolvedConversationArchiveTarget = {
   conversationId: string | null;
   transcriptPath: string;
+  transcriptPaths: readonly string[];
   project: string;
 };
 
@@ -2026,6 +2028,21 @@ function latestReceiptForConversation(
   const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
   return Object.values(snapshot.receipts ?? {})
     .filter((receipt) => lookup.canonicalConversationId(receipt.conversationId) === conversationId)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
+}
+
+function latestPendingLaunchReceiptForConversation(
+  snapshot: RegistrySnapshot,
+  conversationId: string,
+): RegistrySnapshot["receipts"][string] | null {
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
+  return Object.values(snapshot.receipts ?? {})
+    .filter((receipt) => (
+      lookup.canonicalConversationId(receipt.conversationId) === conversationId
+      && receipt.transport === "structured"
+      && receipt.purpose === "launch"
+      && receipt.artifactLifecycle === "pending"
+    ))
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
 }
 
@@ -2079,12 +2096,25 @@ function resolveArchiveTargetFromRegistry(
   const receipt = pathReceipt ?? (conversationId ? latestReceiptForConversation(snapshot, conversationId) : null);
   if (requestedConversationId && !conversation && !receipt) return null;
 
-  const transcriptPath = conversation?.generations.at(-1)?.path
-    ?? (requestedConversationId && receipt ? `spawn:${receipt.launchId}` : input.transcriptPath);
+  const generationPaths = conversation?.generations.map((generation) => generation.path) ?? [];
+  const placeholderReceipt = conversationId
+    ? latestPendingLaunchReceiptForConversation(snapshot, conversationId)
+    : null;
+  const placeholderPath = placeholderReceipt
+    ? `spawn:${placeholderReceipt.launchId}`
+    : "";
+  const transcriptPath = input.transcriptPath
+    || generationPaths.at(-1)
+    || placeholderPath;
   if (!transcriptPath) return null;
+  const transcriptPaths = [...new Set([
+    ...(input.transcriptPath ? [input.transcriptPath] : []),
+    ...generationPaths,
+    ...(placeholderPath ? [placeholderPath] : []),
+  ])];
   const project = projectForArchiveTarget(conversation, receipt);
   if (!project) return null;
-  return { conversationId: conversationId ?? null, transcriptPath, project };
+  return { conversationId: conversationId ?? null, transcriptPath, transcriptPaths, project };
 }
 
 function resolveArchiveTargetFromFiles(
@@ -2099,19 +2129,9 @@ function resolveArchiveTargetFromFiles(
   return {
     conversationId: entry.conversationId ?? (input.conversationId || null),
     transcriptPath: entry.path,
+    transcriptPaths: [entry.path],
     project: entry.project,
   };
-}
-
-function canonicalBoardPath(board: ReturnType<typeof boardFor>, pathname: string): string {
-  let current = pathname;
-  const seen = new Set<string>();
-  while (board.pathAliases?.[current] !== undefined) {
-    if (seen.has(current)) throw new Error("board path alias cycle");
-    seen.add(current);
-    current = board.pathAliases[current]!;
-  }
-  return current;
 }
 
 function writeArchivePlacement(
@@ -2120,37 +2140,59 @@ function writeArchivePlacement(
   paths: readonly string[],
   snapshot: RegistrySnapshot,
   dependencies: ViewerMcpDomainDependencies,
-): { board: ReturnType<typeof boardFor>; appliedPaths: ReadonlySet<string> } {
+): { appliedPaths: ReadonlySet<string> } {
   let board = dependencies.boardFor(project);
   const appliedPaths = new Set<string>();
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const pendingPaths = [...new Set(paths.map((pathname) => canonicalBoardPath(board, pathname)))]
-      .filter((pathname) => action === "archive"
+  const uniquePaths = [...new Set(paths)];
+  const batchSize = action === "archive"
+    ? MAX_BOARD_PATH_LIST_ITEMS
+    : MAX_BOARD_MUTATIONS_PER_REQUEST;
+  for (let offset = 0; offset < uniquePaths.length; offset += batchSize) {
+    const batch = uniquePaths.slice(offset, offset + batchSize);
+    let settled = false;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const pendingPaths = batch.filter((pathname) => action === "archive"
         ? !board.prefs.hidden.includes(pathname)
         : board.prefs.hidden.includes(pathname));
-    if (pendingPaths.length === 0) return { board, appliedPaths };
+      if (pendingPaths.length === 0) {
+        settled = true;
+        break;
+      }
 
-    const result = dependencies.applyBoardCommand({
-      schemaVersion: 1,
-      project,
-      baseRevision: board.revision,
-      ...(action === "archive"
-        ? { patch: { hidden: pendingPaths } }
-        : {
-            mutations: pendingPaths.map((pathname) => ({
-              kind: "restore" as const,
-              path: pathname,
-              placement: "auto" as const,
-            })),
-          }),
-    }, snapshot);
-    board = result.board;
-    if (result.ok && result.applied) {
-      for (const pathname of pendingPaths) appliedPaths.add(canonicalBoardPath(board, pathname));
-      return { board, appliedPaths };
+      const previousBoard = board;
+      const result = dependencies.applyBoardCommand({
+        schemaVersion: 1,
+        project,
+        baseRevision: board.revision,
+        ...(action === "archive"
+          ? { patch: { hidden: pendingPaths } }
+          : {
+              mutations: pendingPaths.map((pathname) => ({
+                kind: "restore" as const,
+                path: pathname,
+                placement: "auto" as const,
+              })),
+            }),
+      }, snapshot);
+      board = result.board;
+      if (result.ok && result.applied) {
+        const hiddenBefore = new Set(previousBoard.prefs.hidden);
+        const hiddenAfter = new Set(board.prefs.hidden);
+        for (const pathname of uniquePaths) {
+          const changed = action === "archive"
+            ? !hiddenBefore.has(pathname) && hiddenAfter.has(pathname)
+            : hiddenBefore.has(pathname) && !hiddenAfter.has(pathname);
+          if (changed) appliedPaths.add(pathname);
+        }
+        settled = true;
+        break;
+      }
+    }
+    if (!settled) {
+      throw new Error(`board state changed repeatedly while ${action === "archive" ? "archiving" : "unarchiving"} conversations`);
     }
   }
-  throw new Error(`board state changed repeatedly while ${action === "archive" ? "archiving" : "unarchiving"} conversations`);
+  return { appliedPaths };
 }
 
 async function archiveConversationAction(
@@ -2179,23 +2221,25 @@ async function archiveConversationAction(
       const write = writeArchivePlacement(
         project,
         action,
-        projectMembers.map(({ target }) => target.transcriptPath),
+        projectMembers.flatMap(({ target }) => target.transcriptPaths),
         snapshot,
         dependencies,
       );
       if (write.appliedPaths.size > 0) projectsTouched.add(project);
       const attributedPaths = new Set<string>();
       for (const { index, target } of projectMembers) {
-        const transcriptPath = canonicalBoardPath(write.board, target.transcriptPath);
-        const applied = write.appliedPaths.has(transcriptPath) && !attributedPaths.has(transcriptPath);
-        if (applied) attributedPaths.add(transcriptPath);
+        const paths = target.transcriptPaths.filter((pathname) => (
+          write.appliedPaths.has(pathname) && !attributedPaths.has(pathname)
+        ));
+        for (const pathname of paths) attributedPaths.add(pathname);
         outcomes[index] = {
           conversationId: target.conversationId,
-          transcriptPath,
+          transcriptPath: target.transcriptPath,
+          paths,
           project,
           outcome: action === "archive"
-            ? applied ? "archived" : "already-archived"
-            : applied ? "unarchived" : "not-found",
+            ? paths.length > 0 ? "archived" : "already-archived"
+            : paths.length > 0 ? "unarchived" : "not-found",
         };
       }
     }
@@ -2223,6 +2267,7 @@ async function archiveConversationAction(
       outcomes[index] = {
         conversationId: inputs[index]!.conversationId || null,
         transcriptPath: inputs[index]!.transcriptPath || null,
+        paths: [],
         project: null,
         outcome: files ? "not-found" : "resolution-failed",
       };

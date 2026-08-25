@@ -85,6 +85,30 @@ function normalize(board: BoardProjectStateV1, aliases = aliasesOf(board)): Boar
   };
 }
 
+function preserveDurableHiddenSpellings(
+  previous: BoardProjectStateV1,
+  next: BoardProjectStateV1,
+): BoardProjectStateV1 {
+  /* Archive persists every concrete generation path. Reducers still normalize
+     membership through aliases, then restore prior spellings whose canonical
+     path remains hidden. A restore clears that canonical membership, so every
+     equivalent spelling disappears symmetrically. */
+  const aliases = aliasesOf(next);
+  const hiddenCanonicalPaths = new Set(
+    next.prefs.hidden.map((item) => resolvePath(item, aliases)),
+  );
+  const preserved = previous.prefs.hidden.filter((item) => (
+    hiddenCanonicalPaths.has(resolvePath(item, aliases))
+  ));
+  return {
+    ...next,
+    prefs: {
+      ...next.prefs,
+      hidden: unique([...preserved, ...next.prefs.hidden]),
+    },
+  };
+}
+
 function remapPaths(
   board: BoardProjectStateV1,
   pairs: readonly { from: string; to: string }[],
@@ -218,5 +242,5 @@ export function applyBoardMutations(board: BoardProjectStateV1, mutations: reado
       },
     });
   }
-  return next;
+  return preserveDurableHiddenSpellings(board, next);
 }

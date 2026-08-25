@@ -52,6 +52,8 @@ import { runtimeImageCapability } from "@/lib/runtime/runtimeImageStore";
 export class RuntimeJournalFault extends Error {}
 
 export const RUNTIME_SNAPSHOT_INACTIVE_SESSION_LIMIT = 128;
+export const RUNTIME_SNAPSHOT_TERMINAL_DEPLOYMENT_LIMIT = 50;
+export const RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 type EventRow = {
   seq: number;
@@ -272,7 +274,7 @@ export class RuntimeJournal {
   private readonly secretKey: Buffer;
   private readonly waiters = new Set<() => void>();
   private fault: string | null = null;
-  private snapshotCache: { changes: number; json: string } | null = null;
+  private snapshotCache: { changes: number; expiresAt: number | null; json: string } | null = null;
   private receiptSweepCursor = 0;
 
   constructor(filename: string, options: RuntimeJournalOptions = {}) {
@@ -301,7 +303,7 @@ export class RuntimeJournal {
       CREATE TABLE IF NOT EXISTS projections (scope TEXT PRIMARY KEY, revision INTEGER NOT NULL, state_json TEXT NOT NULL, checkpoint_seq INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS entities (
         kind TEXT NOT NULL, id TEXT NOT NULL, revision INTEGER NOT NULL,
-        state_json TEXT NOT NULL, checkpoint_seq INTEGER NOT NULL,
+        state_json TEXT NOT NULL, checkpoint_seq INTEGER NOT NULL, updated_at INTEGER,
         PRIMARY KEY(kind, id)
       );
       CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL, event_seq INTEGER NOT NULL, state TEXT NOT NULL);
@@ -326,6 +328,7 @@ export class RuntimeJournal {
     `);
     this.migrateOperationIdempotencyScope();
     this.migrateLegacyEvents();
+    this.migrateEntityUpdatedAt();
     for (const row of this.db.query<EventRow, []>("SELECT * FROM events WHERE producer_key IS NOT NULL").all()) {
       this.db.query("INSERT INTO producer_receipts(producer_kind, producer_key, event_json) VALUES (?, ?, ?) ON CONFLICT(producer_kind, producer_key) DO NOTHING")
         .run(row.producer_kind, row.producer_key, stableJson(toEvent(row)));
@@ -714,34 +717,38 @@ export class RuntimeJournal {
   }
 
   snapshot(): RuntimeSnapshot {
+    return this.snapshotAt(this.now());
+  }
+
+  private snapshotAt(now: number): RuntimeSnapshot {
     this.db.exec("BEGIN");
     try {
       const snapshot: RuntimeSnapshot = {
         schemaVersion: RUNTIME_SCHEMA_VERSION,
         snapshotSeq: Number(this.meta("published_seq")),
         retentionFloorSeq: Number(this.meta("anchor_seq")),
-        serverTime: new Date(this.now()).toISOString(),
+        serverTime: new Date(now).toISOString(),
         runtime: { hostEpoch: Number(this.meta("host_epoch")), health: this.meta("health") },
         filesRevision: Number(this.meta("files_revision")),
         sessions: this.snapshotSessionValues().map((session) => ({
           ...session,
-          // A terminal host has no live stream to resume. The durable entity
-          // retains its audit state while the browser snapshot drops transient
-          // text that can otherwise dominate every reconnect frame.
-          ...((session.host === "dead" || session.host === "unhosted")
-            ? { liveTurn: null }
-            : {}),
+          // Only a running turn has live text to resume. Re-normalizing here
+          // also caps legacy rows to the 64 KiB UTF-8 tail; omittedChars is the
+          // explicit marker that lets consumers disclose the clipped prefix.
+          liveTurn: session.turn === "running"
+            ? normalizeRuntimeLiveTurn(session.liveTurn)
+            : null,
           recentReceipts: visibleReceipts(session.recentReceipts).map(runtimePresentationReceipt),
         })),
         attentions: this.entityValues<RuntimeAttention>("attention"),
         recentOperations: visibleReceipts(
           this.recentEntityValues<RuntimeOperationReceipt>("operation", 100),
         ).map(runtimePresentationReceipt),
-        edges: this.entityValues<RuntimeEdge>("edge"),
+        edges: this.snapshotEdgeValues(now),
         flows: this.scopedValues<RuntimeSnapshot["flows"][number]["value"]>("flow"),
         workflows: this.scopedValues<RuntimeSnapshot["workflows"][number]["value"]>("workflow"),
         tasks: this.scopedValues<RuntimeSnapshot["tasks"][number]["value"]>("task"),
-        deployments: this.entityValues<ViewerDeploymentStatus>("deployment"),
+        deployments: this.snapshotDeploymentValues(),
       };
       this.db.exec("COMMIT");
       return snapshot;
@@ -751,19 +758,24 @@ export class RuntimeJournal {
     }
   }
 
-  /** Serialized snapshot, rebuilt only when the database has changed since the
-      cached build. Concurrent snapshot consumers otherwise stack full O(state)
-      rebuilds on the event loop until every socket request exceeds the
-      client's timeout and the retry storm keeps the host saturated (the
-      2026-08-04 spawn freeze). total_changes() counts every row this
-      connection has written, so no mutation path needs to remember to
-      invalidate. serverTime inside the cached frame dates from the last
-      mutation; no consumer reads it. */
+  /** Serialized snapshot, rebuilt when the database changes or the next
+      retained terminal edge reaches its age boundary. Concurrent snapshot
+      consumers otherwise stack full O(state) rebuilds on the event loop until
+      every socket request exceeds the client's timeout and the retry storm
+      keeps the host saturated (the 2026-08-04 spawn freeze). total_changes()
+      counts every row this connection has written, so no mutation path needs
+      to remember to invalidate. The time expiry covers the only projection
+      whose visibility changes without a write. serverTime inside the cached
+      frame dates from the last rebuild; no consumer reads it. */
   snapshotJson(): string {
     const changes = this.totalChanges();
-    if (this.snapshotCache?.changes === changes) return this.snapshotCache.json;
-    const json = JSON.stringify(this.snapshot());
-    this.snapshotCache = { changes, json };
+    const now = this.now();
+    if (this.snapshotCache?.changes === changes
+      && (this.snapshotCache.expiresAt === null || now < this.snapshotCache.expiresAt)) {
+      return this.snapshotCache.json;
+    }
+    const json = JSON.stringify(this.snapshotAt(now));
+    this.snapshotCache = { changes, expiresAt: this.snapshotEdgeExpiry(now), json };
     return json;
   }
 
@@ -1963,6 +1975,65 @@ export class RuntimeJournal {
       .sort((left, right) => left.conversationId.localeCompare(right.conversationId));
   }
 
+  private snapshotEdgeValues(now: number): RuntimeEdge[] {
+    const terminalSessions = new Map(this.db.query<{
+      id: string;
+      last_changed_at: number | null;
+    }, [string, string, string]>(`
+      SELECT session.id, session.updated_at AS last_changed_at
+      FROM entities AS session
+      WHERE session.kind = ?
+        AND json_extract(session.state_json, '$.host') IN (?, ?)
+    `).all("session", "dead", "unhosted").map((row) => [row.id, row.last_changed_at]));
+
+    return this.entityValues<RuntimeEdge>("edge").filter((edge) => {
+      if (!terminalSessions.has(edge.childConversationId)) return true;
+      const lastChangedAt = terminalSessions.get(edge.childConversationId);
+      return lastChangedAt === null
+        || lastChangedAt === undefined
+        || now <= lastChangedAt + RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS;
+    });
+  }
+
+  private snapshotEdgeExpiry(now: number): number | null {
+    return this.db.query<{ expires_at: number | null }, [number, string, string, number, number]>(`
+      SELECT MIN(session.updated_at + ? + 1) AS expires_at
+      FROM entities AS edge
+      JOIN entities AS session
+        ON session.kind = 'session'
+        AND session.id = json_extract(edge.state_json, '$.childConversationId')
+      WHERE edge.kind = 'edge'
+        AND json_extract(session.state_json, '$.host') IN (?, ?)
+        AND session.updated_at + ? >= ?
+    `).get(
+      RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS,
+      "dead",
+      "unhosted",
+      RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS,
+      now,
+    )?.expires_at ?? null;
+  }
+
+  private snapshotDeploymentValues(): ViewerDeploymentStatus[] {
+    const nonTerminal = this.db.query<{ state_json: string }, [string]>(`
+      SELECT state_json
+      FROM entities
+      WHERE kind = ?
+        AND COALESCE(json_extract(state_json, '$.terminal'), 0) != 1
+    `).all("deployment");
+    const terminal = this.db.query<{ state_json: string }, [string, number]>(`
+      SELECT state_json
+      FROM entities
+      WHERE kind = ?
+        AND json_extract(state_json, '$.terminal') = 1
+      ORDER BY checkpoint_seq DESC, id DESC
+      LIMIT ?
+    `).all("deployment", RUNTIME_SNAPSHOT_TERMINAL_DEPLOYMENT_LIMIT);
+    return [...nonTerminal, ...terminal]
+      .map((row) => JSON.parse(row.state_json) as ViewerDeploymentStatus)
+      .sort((left, right) => left.deploymentId.localeCompare(right.deploymentId));
+  }
+
   private recentEntityValues<T>(kind: string, limit: number): T[] {
     return this.db.query<{ state_json: string }, [string, number]>("SELECT state_json FROM entities WHERE kind = ? ORDER BY checkpoint_seq DESC LIMIT ?")
       .all(kind, limit)
@@ -1974,7 +2045,15 @@ export class RuntimeJournal {
   }
 
   private upsertEntity(kind: string, id: string, revision: number, value: unknown, seq: number): void {
-    this.db.query("INSERT INTO entities(kind, id, revision, state_json, checkpoint_seq) VALUES (?, ?, ?, ?, ?) ON CONFLICT(kind, id) DO UPDATE SET revision=excluded.revision, state_json=excluded.state_json, checkpoint_seq=excluded.checkpoint_seq").run(kind, id, revision, stableJson(value), seq);
+    this.db.query(`
+      INSERT INTO entities(kind, id, revision, state_json, checkpoint_seq, updated_at)
+      VALUES (?, ?, ?, ?, ?, (SELECT created_at FROM events WHERE seq = ?))
+      ON CONFLICT(kind, id) DO UPDATE SET
+        revision = excluded.revision,
+        state_json = excluded.state_json,
+        checkpoint_seq = excluded.checkpoint_seq,
+        updated_at = excluded.updated_at
+    `).run(kind, id, revision, stableJson(value), seq, seq);
   }
 
   private insertEffect(effect: RuntimeEffect, seq: number): void {
@@ -2110,6 +2189,19 @@ export class RuntimeJournal {
       UPDATE events SET producer_kind = 'viewer-compat' WHERE producer_kind IS NULL;
       UPDATE events SET causation_id = operation_id WHERE causation_id IS NULL AND operation_id IS NOT NULL;
     `);
+  }
+
+  private migrateEntityUpdatedAt(): void {
+    const columns = new Set(this.db.query<{ name: string }, []>("PRAGMA table_info(entities)").all().map((row) => row.name));
+    if (!columns.has("updated_at")) this.db.exec("ALTER TABLE entities ADD COLUMN updated_at INTEGER");
+    this.db.query(`
+      UPDATE entities
+      SET updated_at = COALESCE(
+        (SELECT created_at FROM events WHERE events.seq = entities.checkpoint_seq),
+        ?
+      )
+      WHERE updated_at IS NULL
+    `).run(this.now());
   }
 
   private meta(key: string): string {

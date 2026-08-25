@@ -1,4 +1,4 @@
-import type { ConversationMigration, MigrationEngine, MigrationIntent } from "./contracts";
+import type { ConversationMigration, HeldDelivery, MigrationEngine, MigrationIntent } from "./contracts";
 
 export const MIGRATION_INTENT_PROGRESS_TIMEOUT_MS = 5 * 60_000;
 export const MIGRATION_DELIVERY_CANCELLATION_PREFIX = "delivery cancelled because";
@@ -8,6 +8,19 @@ export const ROLLED_BACK_MIGRATION_DELIVERY_REASON =
   `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its owning account migration was rolled back; send again to authorize a fresh delivery`;
 export const COMMITTED_MIGRATION_DELIVERY_REASON =
   `${MIGRATION_DELIVERY_CANCELLATION_PREFIX} its owning account migration committed; send again to authorize a fresh delivery action`;
+
+export function rolledBackMigrationOwnsDelivery(
+  delivery: Pick<HeldDelivery, "createdAt" | "assignedAt">,
+  rolledBackAt: string,
+): boolean {
+  const cutoff = Date.parse(rolledBackAt);
+  const latestAdmission = Date.parse(delivery.assignedAt ?? delivery.createdAt);
+  /* Equality is ambiguous at millisecond precision. Preserve the delivery
+     unless its latest admission is provably inside the pre-rollback window. */
+  return Number.isFinite(cutoff)
+    && Number.isFinite(latestAdmission)
+    && latestAdmission < cutoff;
+}
 
 interface MigrationIntentContext {
   engineRouting: Record<MigrationEngine, { activeAccountId: string | null }>;
