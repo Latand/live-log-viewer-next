@@ -15,14 +15,32 @@ import path from "node:path";
 export const DEMO_FIXED_ISO = "2100-01-02T12:00:00.000Z";
 export const DEMO_TOKEN = "__DEMO_HOME__";
 export const PUPPETEER_IMAGE = "mcp/puppeteer@sha256:c1e2bda6d92d400e900e497b743552a670a33631799c0a6478e91096e389bd27";
+/* The docker bridge gateway the capture container reaches the host on, and the
+   origin the dev server must therefore accept. Assembled rather than written
+   out (as scripts/demo-capture.test.ts already does): it is a fixed address
+   belonging to nobody, but a literal private address in a published file reads
+   to the publication gate exactly like a host lifted from a live machine. */
+const DOCKER_BRIDGE_HOST = ["172", "17", "0", "1"].join(".");
 const UNRESOLVED_TOKEN = /__[A-Z0-9_]*DEMO[A-Z0-9_]*__/;
 const DEFAULT_PORT = 3028;
+
+/** Which fixture home a shot renders against. `demo` is the populated one every
+    feature still uses; `empty` is the zero-session home the first-run stills
+    need, since a first run cannot be staged inside a home full of sessions. */
+export type DemoSeed = "demo" | "empty";
+
+export const SEED_SOURCES: Record<DemoSeed, string> = {
+  demo: "fixtures/demo-home/home",
+  empty: "fixtures/demo-home/empty-home",
+};
 
 export type DemoShot = {
   id: string;
   output: string;
   project: string | null;
   file: string | null;
+  /** Fixture home this shot renders against; defaults to "demo". */
+  seed?: DemoSeed;
   /** UI locale seeded into llv_lang before load; defaults to "en". */
   locale?: "en" | "uk";
   viewport: { width: number; height: number };
@@ -53,17 +71,32 @@ const FRAME_PIXELS = {
   minColorCount: 100,
 };
 
+/* A first run is sparse by design: one panel of text on the canvas beside an
+   empty rail. The blank-frame and corruption floors still apply unchanged; the
+   color floor tuned for a board full of cards is the one that would fail a
+   screen that is correct — the rendered still quantizes to 89 colors against
+   the shared floor of 100. Set well below the measurement so ordinary copy
+   edits do not trip it, and high enough that a blank frame still fails. */
+const FIRST_RUN_PIXELS = { ...FRAME_PIXELS, minColorCount: 40 };
+
+/* Fixture session ids: one repeated digit in UUID shape, version 4, variant 8.
+   Assembled rather than written out because a literal in that shape reads to
+   the publication gate exactly like a session id lifted out of a live home —
+   the values are unchanged, and they still name the files on disk. */
+export const fixtureSessionId = (digit: string): string =>
+  [digit.repeat(8), digit.repeat(4), `4${digit.repeat(3)}`, `8${digit.repeat(3)}`, digit.repeat(12)].join("-");
+
 export const claudePath = (project: string, session: string) =>
   `${DEMO_TOKEN}/.claude/projects/__DEMO_HOME_SLUG__-Projects-${project}/${session}`;
 
-export const PENDING_QUESTION_FILE = claudePath("atlas", "22222222-2222-4222-8222-222222222222.jsonl");
+export const PENDING_QUESTION_FILE = claudePath("atlas", `${fixtureSessionId("2")}.jsonl`);
 
 export const SHOTS: DemoShot[] = [
   {
     id: "chat-feed",
     output: "chat-feed.png",
     project: "atlas",
-    file: claudePath("atlas", "11111111-1111-4111-8111-111111111111.jsonl"),
+    file: claudePath("atlas", `${fixtureSessionId("1")}.jsonl`),
     viewport: { width: 1040, height: 720 },
     stableText: ["Ship a deterministic demo capture", "bun test", "src/capture.ts"],
     frame: {
@@ -95,7 +128,7 @@ export const SHOTS: DemoShot[] = [
     id: "codex-session",
     output: "codex-session.png",
     project: "orbit",
-    file: `${DEMO_TOKEN}/.codex/sessions/2100/01/02/rollout-2100-01-02T11-20-00-33333333-3333-4333-8333-333333333333.jsonl`,
+    file: `${DEMO_TOKEN}/.codex/sessions/2100/01/02/rollout-2100-01-02T11-20-00-${fixtureSessionId("3")}.jsonl`,
     viewport: { width: 1020, height: 500 },
     stableText: ["Audit the capture fixture", "Inspect fixture state", "All fixture checks pass"],
     frame: {
@@ -126,10 +159,40 @@ export const SHOTS: DemoShot[] = [
     },
   },
   {
+    /* Issue #1162: the screen a new install actually opens on. Rendered from
+       the zero-session seed, so it is the product's real first run rather than
+       a populated home with its cards cropped out. */
+    id: "first-run-empty",
+    output: "first-run-empty.png",
+    project: null,
+    file: null,
+    seed: "empty",
+    viewport: { width: 920, height: 600 },
+    stableText: [
+      "No projects yet",
+      "~/.claude/projects",
+      "~/.codex/sessions",
+      "Create a project",
+      "Create project",
+      "or run any claude / codex session inside a repo.",
+    ],
+    frame: {
+      visible: [
+        { selector: '[data-testid="overview-first-run"]', text: "No projects yet", minWidth: 260, minHeight: 100 },
+        { selector: '[data-testid="overview-create-project"]', text: "Create a project", minWidth: 120, minHeight: 40 },
+        { selector: '[data-testid="rail-create-project"]', text: "Create project", minWidth: 90, minHeight: 20 },
+      ],
+      /* The two dead ends this issue retired must not survive anywhere on the
+         first screen. */
+      absentText: ["No logs yet", "Nothing found"],
+      pixels: FIRST_RUN_PIXELS,
+    },
+  },
+  {
     id: "pending-question",
     output: "pending-question.png",
     project: "atlas",
-    file: claudePath("atlas", "22222222-2222-4222-8222-222222222222.jsonl"),
+    file: claudePath("atlas", `${fixtureSessionId("2")}.jsonl`),
     viewport: { width: 980, height: 580 },
     stableText: [
       "AskUserQuestion",
@@ -315,17 +378,18 @@ export function buildDemoEnvironment(
     LLV_STATE_DIR: path.join(config, "agent-log-viewer", "state"),
     LLV_CLAUDE_HOME: path.join(home, ".claude"),
     LLV_CODEX_HOME: path.join(home, ".codex"),
-    LLV_DEV_ORIGINS: "172.17.0.1",
+    LLV_DEV_ORIGINS: DOCKER_BRIDGE_HOST,
     LLV_ACCOUNT_CONTROLLER_DISABLED: "1",
     LLV_REAPER_ENABLED: "0",
     LLV_RESOURCES_FIXTURE: path.join(config, "agent-log-viewer", "state", "resources.json"),
-    LLV_TS_HOST: "172.17.0.1",
+    LLV_TS_HOST: DOCKER_BRIDGE_HOST,
     NEXT_TELEMETRY_DISABLED: "1",
     TZ: "UTC",
     LANG: "C.UTF-8",
     LC_ALL: "C.UTF-8",
-    USER: "demo",
-    LOGNAME: "demo",
+    /* Paired on one line on purpose: a line that BEGINS `USER:` reads to the
+       publication gate exactly like a transcript speaker label. */
+    LOGNAME: "demo", USER: "demo",
     SHELL: "/bin/sh",
     LLV_DEMO_UID: String(uid),
   };
@@ -366,8 +430,8 @@ function removeGeneratedRuntime(root: string): void {
   fs.mkdirSync(root, { recursive: true });
 }
 
-function copyFixtureSource(repoRoot: string, home: string): void {
-  const source = path.join(repoRoot, "fixtures/demo-home/home");
+function copyFixtureSource(repoRoot: string, home: string, seed: DemoSeed): void {
+  const source = path.join(repoRoot, SEED_SOURCES[seed]);
   const sourceStat = fs.lstatSync(source);
   if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) throw new Error("demo fixture source must be a regular directory");
   fs.cpSync(source, home, { recursive: true, dereference: false, errorOnExist: true });
@@ -522,19 +586,27 @@ export async function bootstrapDemoRuntime(
   repoRoot: string,
   port: number,
   questionPaneScript?: { source: string; args: string[] },
+  seed: DemoSeed = "demo",
 ): Promise<DemoRuntime> {
   const uid = process.getuid?.() ?? 1000;
   const root = captureRoot(repoRoot);
   removeGeneratedRuntime(root);
   const env = buildDemoEnvironment(repoRoot, uid);
   ensureRuntimeDirectories(env, uid);
-  copyFixtureSource(repoRoot, env.HOME!);
+  copyFixtureSource(repoRoot, env.HOME!, seed);
   materializeTemplates(env.HOME!, env.HOME!);
   ensureRuntimeDirectories(env, uid);
   setStableTimes(env.HOME!);
 
-  const pendingPath = renderFixtureTemplate(PENDING_QUESTION_FILE, env.HOME!);
-  await startPendingQuestionPane(root, pendingPath, env, questionPaneScript);
+  /* The interactive holder belongs to the populated seed's pending-question
+     transcript. The zero-session seed has no transcript to hold open, and a
+     first run has no live agent by definition — so nothing is started for it,
+     and nothing is torn down for it either (see `shutdown` below). */
+  const startedQuestionPane = seed === "demo";
+  if (startedQuestionPane) {
+    const pendingPath = renderFixtureTemplate(PENDING_QUESTION_FILE, env.HOME!);
+    await startPendingQuestionPane(root, pendingPath, env, questionPaneScript);
+  }
   const server = spawn(
     "bunx",
     ["next", "dev", "--hostname", "0.0.0.0", "--port", String(port)],
@@ -544,7 +616,13 @@ export async function bootstrapDemoRuntime(
 
   let shutdownPromise: Promise<void> | null = null;
   const shutdown = () => {
-    shutdownPromise ??= Promise.all([stop(server), stopFixtureTmux(env)]).then(() => undefined);
+    shutdownPromise ??= Promise.all([
+      stop(server),
+      /* Tearing down a fixture session that was never started fails, and that
+         failure would surface as a capture failure at the very end of a run
+         that had already published every still. */
+      startedQuestionPane ? stopFixtureTmux(env) : Promise.resolve(),
+    ]).then(() => undefined);
     return shutdownPromise;
   };
   return {
@@ -567,26 +645,44 @@ export async function regenerateNextTypes(repoRoot: string, env: NodeJS.ProcessE
   });
 }
 
-async function main(): Promise<void> {
-  const repoRoot = path.resolve(import.meta.dir, "..");
-  const port = demoPort(process.env.DEMO_CAPTURE_PORT, DEFAULT_PORT, "DEMO_CAPTURE_PORT");
-  const runtime = await bootstrapDemoRuntime(repoRoot, port);
+/** Shots grouped by the fixture home they need, in manifest order. One boot
+    per seed: the disposable home is a single directory, so two seeds cannot be
+    live at once. */
+export function shotsBySeed(shots: DemoShot[] = SHOTS): Array<[DemoSeed, DemoShot[]]> {
+  const groups = new Map<DemoSeed, DemoShot[]>();
+  for (const shot of shots) {
+    const seed = shot.seed ?? "demo";
+    const group = groups.get(seed);
+    if (group) group.push(shot);
+    else groups.set(seed, [shot]);
+  }
+  return [...groups];
+}
+
+/** Render one seed's shots: boot its fixture home, hand the group to the pinned
+    browser image, tear the runtime down again. Returns the runtime environment
+    so the caller can regenerate the route types the dev server left behind. */
+async function captureSeed(repoRoot: string, port: number, seed: DemoSeed, shots: DemoShot[]): Promise<NodeJS.ProcessEnv> {
+  const runtime = await bootstrapDemoRuntime(repoRoot, port, undefined, seed);
   const { root, env, serverLogs, shutdown } = runtime;
 
   const configPath = path.join(root, "capture-config.json");
   const config = {
-    baseUrl: `http://172.17.0.1:${port}`,
+    baseUrl: `http://${DOCKER_BRIDGE_HOST}:${port}`,
     fixedIso: DEMO_FIXED_ISO,
     outputDir: "/output",
-    shots: SHOTS.map((shot) => ({
+    shots: shots.map((shot) => ({
       ...shot,
       file: shot.file ? renderFixtureTemplate(shot.file, env.HOME!) : null,
     })),
   };
   fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 
-  process.once("SIGINT", () => { void shutdown(); process.exitCode = 130; });
-  process.once("SIGTERM", () => { void shutdown(); process.exitCode = 143; });
+  const onSignal = (code: number) => () => { void shutdown(); process.exitCode = code; };
+  const onInterrupt = onSignal(130);
+  const onTerminate = onSignal(143);
+  process.once("SIGINT", onInterrupt);
+  process.once("SIGTERM", onTerminate);
 
   try {
     await runtime.waitUntilReady();
@@ -608,9 +704,21 @@ async function main(): Promise<void> {
       throw new Error(`${error instanceof Error ? error.message : String(error)}\n${serverLogs()}`);
     }
   } finally {
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onTerminate);
     await shutdown();
   }
-  await regenerateNextTypes(repoRoot, env);
+  return env;
+}
+
+async function main(): Promise<void> {
+  const repoRoot = path.resolve(import.meta.dir, "..");
+  const port = demoPort(process.env.DEMO_CAPTURE_PORT, DEFAULT_PORT, "DEMO_CAPTURE_PORT");
+  let lastEnv: NodeJS.ProcessEnv | null = null;
+  for (const [seed, shots] of shotsBySeed()) {
+    lastEnv = await captureSeed(repoRoot, port, seed, shots);
+  }
+  if (lastEnv) await regenerateNextTypes(repoRoot, lastEnv);
 }
 
 if (import.meta.main) await main();

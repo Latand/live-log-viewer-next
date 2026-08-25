@@ -1,12 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { CreateProjectOutcome, CreateProjectRequestOptions } from "@/hooks/useProjectCuration";
 import { projectMatchesQuery } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
+import { consumePendingProjectCreateForm, onProjectCreateFormRequest } from "@/lib/projects/openCreateForm";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
@@ -72,6 +73,19 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
   );
   const totalLive = useMemo(() => summaries.reduce((sum, s) => sum + s.liveCount, 0), [summaries]);
   const totalAttention = useMemo(() => summaries.reduce((sum, s) => sum + s.attentionCount, 0), [summaries]);
+  /* First run (issue #1162): the catalog answered and named no project at all.
+     Distinct from a filter query that matched none, and from a failed fetch —
+     both of those keep their own treatment. */
+  const firstRun = loaded && catalogFailures === 0 && !summaries.length;
+  /* The first-run overview's «Create a project» button steers this form
+     (issue #1162) instead of carrying a second creation path. Desktop: the rail
+     is mounted, so the live request lands. Mobile: the rail mounts with the
+     drawer the button opens, so the request just dispatched is claimed here. */
+  useEffect(() => {
+    if (!onCreateProject) return;
+    if (consumePendingProjectCreateForm()) setCreateOpen(true);
+    return onProjectCreateFormRequest(() => setCreateOpen(true));
+  }, [onCreateProject]);
 
   const railRow = (summary: ProjectSummary) => {
     const crowned = crownedProjects.has(summary.project);
@@ -175,17 +189,31 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
           onChange={(event) => setQuery(event.target.value)}
         />
         {onCreateProject ? (
+          /* Issue #1162: on a rail with no projects at all the icon is the only
+             thing on screen that starts anything, and an icon alone does not say
+             so — it carries its label there. A rail that already lists projects
+             keeps the icon-only button, which is legible from its neighbours. */
           <button
             type="button"
-            className={`flex shrink-0 items-center justify-center rounded-[9px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-              isMobile ? "min-h-11 min-w-11" : "w-7"
-            } ${createOpen ? "text-primary" : ""}`}
+            data-testid="rail-create-project"
+            className={[
+              "flex shrink-0 items-center justify-center gap-1.5 rounded-[9px] border bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+              isMobile ? "min-h-11" : "",
+              firstRun
+                ? "border-accent/45 px-2.5 text-[12px] font-semibold text-accent hover:bg-accent/10"
+                : [
+                  "border-border text-muted hover:text-primary",
+                  isMobile ? "min-w-11" : "w-7",
+                  createOpen ? "text-primary" : "",
+                ].join(" "),
+            ].join(" ")}
             title={t("rail.createProject")}
             aria-label={t("rail.createProject")}
             aria-expanded={createOpen}
             onClick={() => setCreateOpen((value) => !value)}
           >
-            <FolderPlus className="h-3.5 w-3.5" aria-hidden />
+            <FolderPlus className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            {firstRun ? <span className="truncate">{t("rail.createProject")}</span> : null}
           </button>
         ) : null}
       </div>
@@ -261,7 +289,12 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
           catalogFailures > 0 ? (
             <CatalogFailureNotice failures={catalogFailures} size="inline" />
           ) : loaded ? (
-            <div className="px-3 py-4 text-center text-[12px] text-muted">{t("common.nothingFound")}</div>
+            /* Issue #1162: «Nothing found» answers a filter query. A first run
+               has nothing to find — the labelled create button above says what
+               to do instead, and the overview carries the full statement. */
+            query.trim() ? (
+              <div className="px-3 py-4 text-center text-[12px] text-muted">{t("common.nothingFound")}</div>
+            ) : null
           ) : (
             <div className="flex items-center justify-center gap-2 px-3 py-4 text-[12px] text-muted">
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
