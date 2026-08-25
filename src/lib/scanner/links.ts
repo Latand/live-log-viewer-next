@@ -17,6 +17,10 @@ import {
   RegistryReadError,
   type RegistryFile,
 } from "../agent/registry";
+import {
+  durableHandoffProvenanceForConversation,
+  type DurableHandoffProvenance,
+} from "../agent/spawnProjection";
 import { forEachCooperatively } from "../cooperative";
 import type { FileEntry } from "../types";
 import { globalCache } from "./caches";
@@ -515,16 +519,13 @@ function bgCommand(
 
 const ANCESTRY_MAX_DEPTH = 15;
 
-export type DurableHandoffProvenance = "operator-handoff" | "container-spawn";
-
 export interface DurableHandoffLineage {
   provenanceForChild(pathname: string): DurableHandoffProvenance | null;
 }
 
 /**
- * Classifies compatibility handoff edges from durable spawn evidence. Container
- * membership proves container provenance only when it was committed with the
- * launch itself; membership added later must not erase an operator handoff.
+ * Adapts scanner paths to the durable launch-provenance seam. Compatibility
+ * handoff edges stay path-keyed; provenance stays conversation-keyed.
  */
 export function durableHandoffLineageFromSnapshot(snapshot: RegistryFile): DurableHandoffLineage {
   const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
@@ -532,21 +533,7 @@ export function durableHandoffLineageFromSnapshot(snapshot: RegistryFile): Durab
     provenanceForChild(pathname) {
       const conversation = lookup.conversationForPath(pathname);
       if (!conversation) return null;
-      const edge = snapshot.lineageEdges[conversation.id];
-      if (!edge || edge.source !== "viewer-spawn") return null;
-      const receipt = edge.evidence.launchId ? snapshot.receipts[edge.evidence.launchId] : null;
-      /* Recorded-at-birth operator evidence wins even when the conversation is
-         enrolled into a flow or pipeline later. */
-      if (receipt?.delegationDepth === 0 || receipt?.parentSource || receipt?.launchDisplay) {
-        return "operator-handoff";
-      }
-      const parentConversationId = lookup.canonicalConversationId(edge.parentConversationId);
-      const bornAt = receipt?.createdAt ?? edge.createdAt;
-      const bornIntoContainer = (snapshot.memberships[conversation.id] ?? []).some((membership) =>
-        membership.createdAt === bornAt
-          && membership.parentConversationId !== null
-          && lookup.canonicalConversationId(membership.parentConversationId) === parentConversationId);
-      return bornIntoContainer ? "container-spawn" : "operator-handoff";
+      return durableHandoffProvenanceForConversation(snapshot, conversation.id);
     },
   };
 }

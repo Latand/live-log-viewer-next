@@ -162,7 +162,6 @@ describe("linkEntries", () => {
       accountId: "work",
       parentConversationId: parentConversation.id,
       role: "builder",
-      origin: { kind: "container", container: "pipeline", containerId: "pipeline-fixture", creatorConversationId: parentConversation.id },
       memberships: [{
         kind: "pipeline",
         containerId: "pipeline-fixture",
