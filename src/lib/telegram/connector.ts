@@ -6,9 +6,12 @@ import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { withFileTransaction } from "@/lib/state/fileTransaction";
 
+import { TELEGRAM_CONNECTOR_LOG_MAX_BYTES, telegramConnectorLogPath } from "./connectorLog";
 import type { TelegramErrorCode } from "./contracts";
 import { connectorLaunchSpec, TELEGRAM_BURST_CONSUMING_TOOLS, telegramApiCredentials, telegramMcpServerPath, telegramMcpUrl, telegramVenvPython, type ProcessSpec } from "./packaging";
 import { ensureTelegramStateDir, telegramIncomingFeedPath, type StoredTelegramSession } from "./sessionStore";
+
+export { TELEGRAM_CONNECTOR_LOG_MAX_BYTES, telegramConnectorLogPath };
 
 /**
  * Supervisor for the ONE shared loopback connector process (issue #1059).
@@ -93,9 +96,9 @@ export interface TelegramConnectorPorts {
   sleep(ms: number): Promise<void>;
   now(): number;
   ownsProcess?(binding: ConnectorBinding): boolean;
-  /** Whether the recorded process is the generation that runs the incoming
-      event feed the Daily Report reads (#1091). */
-  runsFeed?(binding: ConnectorBinding): boolean;
+  /** Whether the recorded process has every launch-time trait required for
+      adoption: the report feed and the connector-owned bounded log sink. */
+  canAdopt?(binding: ConnectorBinding): boolean;
   recordProcess?(child: ConnectorChild, spec: ProcessSpec, binding: ConnectorBinding): boolean;
   stop?(): Promise<void> | void;
   beginOperation?(): () => boolean;
@@ -109,9 +112,6 @@ const TERMINATION_GRACE_MS = 2_000;
 const TERMINATION_KILL_MS = 2_000;
 const TERMINATION_POLL_MS = 25;
 const PID_FILE = "connector.json";
-const CONNECTOR_LOG_FILE = "connector.log";
-const CONNECTOR_LOG_TRIM_INTERVAL_MS = 1_000;
-export const TELEGRAM_CONNECTOR_LOG_MAX_BYTES = 256 * 1024;
 
 /** The read-only gate, pure so it is directly provable: one tool that lacks
     an affirmative readOnlyHint OR falls outside the exposed allowlist fails
@@ -180,24 +180,19 @@ export async function probeTelegramConnector(url: string, connectorToken: string
 
 const realPorts: TelegramConnectorPorts = {
   spawn(spec) {
-    const logFd = connectorLogDescriptor();
-    if (logFd === null) return null;
     try {
-      const child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ["ignore", logFd, logFd], detached: true });
+      const child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: "ignore", detached: true });
       child.unref();
-      startConnectorLogMaintenance();
       return child;
     } catch {
       return null;
-    } finally {
-      try { fs.closeSync(logFd); } catch { /* already closed */ }
     }
   },
   probe: probeTelegramConnector,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: () => Date.now(),
   ownsProcess: ownsRecordedConnector,
-  runsFeed: recordedConnectorRunsFeed,
+  canAdopt: recordedConnectorCanBeAdopted,
   recordProcess: recordConnectorProcess,
   stop: stopRealConnectorUnlocked,
   beginOperation: beginConnectorOperation,
@@ -205,55 +200,6 @@ const realPorts: TelegramConnectorPorts = {
 
 function pidFilePath(): string {
   return statePath("telegram", PID_FILE);
-}
-
-export function telegramConnectorLogPath(): string {
-  return statePath("telegram", CONNECTOR_LOG_FILE);
-}
-
-function openConnectorLog(flags: number): number | null {
-  let fd: number | null = null;
-  try {
-    ensureTelegramStateDir(true);
-    const noFollow = "O_NOFOLLOW" in fs.constants ? fs.constants.O_NOFOLLOW : 0;
-    fd = fs.openSync(telegramConnectorLogPath(), flags | fs.constants.O_CREAT | noFollow, 0o600);
-    const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0
-      || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
-      fs.closeSync(fd);
-      return null;
-    }
-    return fd;
-  } catch {
-    if (fd !== null) {
-      try { fs.closeSync(fd); } catch { /* already closed */ }
-    }
-    return null;
-  }
-}
-
-/** Keep the tail in place so an inherited append fd remains valid. */
-export function trimTelegramConnectorLog(): boolean {
-  const fd = openConnectorLog(fs.constants.O_RDWR);
-  if (fd === null) return false;
-  try {
-    const stat = fs.fstatSync(fd);
-    if (stat.size <= TELEGRAM_CONNECTOR_LOG_MAX_BYTES) return true;
-    const tail = Buffer.alloc(TELEGRAM_CONNECTOR_LOG_MAX_BYTES);
-    fs.readSync(fd, tail, 0, tail.length, stat.size - tail.length);
-    fs.ftruncateSync(fd, 0);
-    fs.writeSync(fd, tail, 0, tail.length, 0);
-    return true;
-  } catch {
-    return false;
-  } finally {
-    try { fs.closeSync(fd); } catch { /* already closed */ }
-  }
-}
-
-function connectorLogDescriptor(): number | null {
-  if (!trimTelegramConnectorLog()) return null;
-  return openConnectorLog(fs.constants.O_WRONLY | fs.constants.O_APPEND);
 }
 
 type ConnectorRecord = {
@@ -272,6 +218,8 @@ type ConnectorRecord = {
   /** ISO instant this feed listener started, which is the earliest moment its
       feed can vouch for (#1091). Optional for the same reason as `feedFile`. */
   feedSince?: string;
+  /** Present only when stdout/stderr are bounded inside the connector process. */
+  logSinkVersion?: 1;
 };
 
 let liveConnectorChild: {
@@ -280,19 +228,6 @@ let liveConnectorChild: {
   identity: string;
 } | null = null;
 let supervisorGeneration = 0;
-let connectorLogTrimTimer: ReturnType<typeof setInterval> | null = null;
-
-function startConnectorLogMaintenance(): void {
-  if (connectorLogTrimTimer) return;
-  connectorLogTrimTimer = setInterval(() => { trimTelegramConnectorLog(); }, CONNECTOR_LOG_TRIM_INTERVAL_MS);
-  connectorLogTrimTimer.unref?.();
-}
-
-function stopConnectorLogMaintenance(): void {
-  if (!connectorLogTrimTimer) return;
-  clearInterval(connectorLogTrimTimer);
-  connectorLogTrimTimer = null;
-}
 
 function beginConnectorOperation(): () => boolean {
   const generation = ++supervisorGeneration;
@@ -315,6 +250,7 @@ function readConnectorRecord(): ConnectorRecord | null {
       || typeof row.connectorTokenSha256 !== "string" || typeof row.command !== "string" || typeof row.entrypoint !== "string") return null;
     if (row.feedFile !== undefined && typeof row.feedFile !== "string") return null;
     if (row.feedSince !== undefined && typeof row.feedSince !== "string") return null;
+    if (row.logSinkVersion !== undefined && row.logSinkVersion !== 1) return null;
     return row as ConnectorRecord;
   } catch {
     return null;
@@ -328,8 +264,8 @@ function connectorArgvMatches(record: ConnectorRecord): boolean {
 }
 
 /**
- * Whether the recorded connector is one that runs the incoming event feed
- * (#1091).
+ * Whether the recorded connector has the launch-time traits required for
+ * adoption: the incoming event feed (#1091) and process-owned log bounds.
  *
  * The feed is child ENVIRONMENT, so no probe and no argv can prove it: the
  * record written at spawn is the evidence, and a record from a Viewer
@@ -341,11 +277,14 @@ function connectorArgvMatches(record: ConnectorRecord): boolean {
  *
  * The comparison is against THIS credential generation's feed, so a listener
  * still writing a previous account's file is ineligible on the same evidence
- * as a listener writing none.
+ * as a listener writing none. A record from before the connector-owned log
+ * sink is also replaced, because its inherited append descriptor becomes
+ * unbounded as soon as the Viewer that launched it exits.
  */
-function recordedConnectorRunsFeed(binding: ConnectorBinding): boolean {
+function recordedConnectorCanBeAdopted(binding: ConnectorBinding): boolean {
   const record = readConnectorRecord();
-  return record?.feedFile === telegramIncomingFeedPath(binding.credentialRef);
+  return record?.feedFile === telegramIncomingFeedPath(binding.credentialRef)
+    && record.logSinkVersion === 1;
 }
 
 /**
@@ -413,6 +352,10 @@ function recordConnectorProcess(child: ConnectorChild, spec: ProcessSpec, bindin
        feed file with no start stamp vouches for nothing (#1091). */
     ...(spec.env?.TELEGRAM_EVENT_FEED_FILE
       ? { feedFile: spec.env.TELEGRAM_EVENT_FEED_FILE, feedSince: new Date().toISOString() }
+      : {}),
+    ...(spec.env?.LLV_TELEGRAM_CONNECTOR_LOG === telegramConnectorLogPath()
+      && spec.env.LLV_TELEGRAM_CONNECTOR_LOG_MAX_BYTES === String(TELEGRAM_CONNECTOR_LOG_MAX_BYTES)
+      ? { logSinkVersion: 1 as const }
       : {}),
   };
   const tmp = `${pidFilePath()}.${process.pid}.tmp`;
@@ -501,7 +444,6 @@ async function stopRealConnectorUnlocked(): Promise<void> {
   if (unverifiedRecordedProcess) throw new Error("Telegram connector ownership could not be verified");
   liveConnectorChild = null;
   removeConnectorRecord();
-  stopConnectorLogMaintenance();
 }
 
 async function withConnectorSupervisorLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -553,15 +495,14 @@ export async function ensureTelegramConnector(
   session: StoredTelegramSession,
   ports: TelegramConnectorPorts = realPorts,
 ): Promise<ConnectorEnsureResult> {
-  if (ports === realPorts) startConnectorLogMaintenance();
   const url = telegramMcpUrl();
   const binding = { credentialRef: session.credentialRef, connectorToken: session.connectorToken };
   const stop = ports.stop ?? stopRealConnectorUnlocked;
   const ownsProcess = ports.ownsProcess ?? ownsRecordedConnector;
-  const runsFeed = ports.runsFeed ?? recordedConnectorRunsFeed;
+  const canAdopt = ports.canAdopt ?? recordedConnectorCanBeAdopted;
   let isCurrent = ports.beginOperation?.() ?? (() => true);
   const prepared = await withConnectorSupervisorLock(async (): Promise<ConnectorEnsureResult | "spawned"> => {
-    if (ownsProcess(binding) && runsFeed(binding)) {
+    if (ownsProcess(binding) && canAdopt(binding)) {
       const adopted = await verifiedProbe(url, session.connectorToken, ports);
       if (!isCurrent()) return { ok: false, code: "connector_failed" };
       if (adopted && adopted !== "timeout") {
@@ -570,18 +511,20 @@ export async function ensureTelegramConnector(
       }
     }
     /* Missing ownership, a credential-generation mismatch, or a process
-       launched without the incoming event feed (#1091) makes any current
-       listener ineligible for adoption — the last of those because the report's
-       dialog discovery reads that feed, and a connector that records nothing
-       would send it back to a bounded walk over a list ordered by pins. Stop
-       and record the replacement while holding the cross-process supervisor
-       lock, so another Viewer generation can only adopt the one durable
-       winner. */
+       launched without today's feed/log guarantees makes any current listener
+       ineligible for adoption. Stop and record the replacement while holding
+       the cross-process supervisor lock, so another Viewer generation can only
+       adopt the one durable winner. */
     await stop();
     isCurrent = ports.beginOperation?.() ?? (() => true);
     const credentials = telegramApiCredentials();
     if (!credentials) return { ok: false, code: "credentials_missing" };
-    const spec = connectorLaunchSpec({ credentialRef: session.credentialRef, sessionString: session.sessionString, connectorToken: session.connectorToken, credentials });
+    let spec: ProcessSpec;
+    try {
+      spec = connectorLaunchSpec({ credentialRef: session.credentialRef, sessionString: session.sessionString, connectorToken: session.connectorToken, credentials });
+    } catch {
+      return { ok: false, code: "connector_failed" };
+    }
     if (!isCurrent()) return { ok: false, code: "connector_failed" };
     const child = ports.spawn(spec);
     if (!child) return { ok: false, code: "connector_failed" };
