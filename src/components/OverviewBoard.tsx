@@ -239,11 +239,15 @@ export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {},
             first-run panel is held back until a fetch actually succeeds. */}
         {degraded ? (
           <CatalogFailureNotice failures={catalogFailures} className={`col-span-full ${summaries.length ? "mt-1" : "mt-[12vh]"}`} />
-        ) : !summaries.length ? (
+        ) : !allSummaries.length ? (
           /* First run (issue #1162). A board with nothing on it used to state
              the fact and stop there; it now says where sessions come from and
              offers the one next step. The button steers the rail's existing
-             create form rather than opening a second creation path. */
+             create form rather than opening a second creation path.
+             `allSummaries`, not the archived-filtered list: an installation
+             whose only projects are shelved has had projects, and the header
+             says so — «No projects yet» would contradict its own «1 archived»
+             two rows above. */
           <div
             data-testid="overview-first-run"
             className="col-span-full mt-[14vh] flex flex-col items-center gap-2.5 px-4 text-center"
@@ -257,8 +261,9 @@ export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {},
               onClick={() => {
                 /* Desktop: the rail is mounted beside the board, so it hears
                    this and opens the create form it already owns. Phone: that
-                   form lives behind the project drawer — open the drawer, where
-                   the rail's own labelled create button is the first control. */
+                   rail does not exist yet, so nothing could hear an event —
+                   opening the drawer mounts it, and a rail arriving into a
+                   first run opens the same form itself. One tap either way. */
                 if (isMobile) onMenu?.();
                 else window.dispatchEvent(new Event(CREATE_PROJECT_FORM_EVENT));
               }}

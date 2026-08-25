@@ -64,7 +64,6 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
   const isMobile = useIsMobile();
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
   const summaries = useMemo(
     () => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines, projectDisplayNames),
     [files, now, workflows, projectCatalog, pipelines, projectDisplayNames],
@@ -86,10 +85,19 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
      Distinct from a filter query that matched none, and from a failed fetch —
      both of those keep their own treatment. */
   const firstRun = loaded && catalogFailures === 0 && !summaries.length;
+  /* The phone's rail is not mounted beside the board — it exists only once
+     something opens the drawer, so nothing an event fired at tap time could
+     reach. It decides at mount instead: a rail arriving into a first run lists
+     no projects, and the only reason to have summoned it is what this form
+     does, so it arrives open. That makes the overview's «Create a project»
+     button one tap on a phone too (issue #1162), and the labelled button above
+     the form still collapses it. */
+  const [createOpen, setCreateOpen] = useState(() => isMobile && firstRun && !!onCreateProject);
   /* The first-run overview's «Create a project» button steers this form
      (issue #1162) instead of carrying a second creation path. The rail owns the
      form, so it owns the event that opens it — the same one-window-event idiom
-     `llv:mcp-navigate` already uses between two mounted components. */
+     `llv:mcp-navigate` already uses between two mounted components. This is the
+     desktop half: there the rail is already mounted beside the board. */
   useEffect(() => {
     if (!onCreateProject) return;
     const open = () => setCreateOpen(true);

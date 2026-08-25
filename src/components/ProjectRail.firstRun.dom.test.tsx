@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { CreateProjectOutcome } from "@/hooks/useProjectCuration";
@@ -198,6 +198,67 @@ test("the first-run overview's own button opens the form on the rail beside it",
   expect(overviewCreate).not.toBeNull();
   click(overviewCreate);
   expect(form(host)).not.toBeNull();
+});
+
+test("on a phone one tap on the overview's button reaches the open form", () => {
+  /* Exactly how Viewer mounts these two on a phone: the rail does not exist
+     until the drawer opens, so the tap has nothing to dispatch into — the rail
+     it summons has to arrive with the form already open. */
+  viewportWidth = 390;
+  const container = dom.document.createElement("div");
+  dom.document.body.appendChild(container);
+  root = createRoot(container as unknown as Element);
+  function MobileShell() {
+    const [drawerOpen, setDrawerOpen] = useState(false);
+    return (
+      <>
+        <OverviewBoard
+          files={[]}
+          projectCatalog={[]}
+          pipelines={[]}
+          workflows={[]}
+          archivedProjects={new Set()}
+          now={2_000}
+          onSelectProject={() => {}}
+          onSelectFile={() => {}}
+          onMenu={() => setDrawerOpen(true)}
+        />
+        {drawerOpen ? (
+          <ProjectRail
+            files={[]}
+            projectCatalog={[]}
+            pipelines={[]}
+            workflows={[]}
+            archivedProjects={new Set()}
+            selected="__overview__"
+            loaded
+            now={2_000}
+            onSelect={() => {}}
+            onCreateProject={createProject}
+          />
+        ) : null}
+      </>
+    );
+  }
+  act(() => root!.render(<MobileShell />));
+  const host = container as unknown as HTMLElement;
+  expect(form(host)).toBeNull();
+
+  click(host.querySelector('[data-testid="overview-create-project"]') as unknown as HTMLElement);
+
+  /* One tap: the drawer's rail is mounted AND its create form is on screen. */
+  expect(create(host)).not.toBeNull();
+  expect(form(host)).not.toBeNull();
+  /* The labelled button still owns it — a second tap collapses the form. */
+  click(create(host)!);
+  expect(form(host)).toBeNull();
+});
+
+test("a desktop rail does not open the form until it is asked", () => {
+  /* The phone's auto-open is scoped to the drawer it lives in: an always-on
+     desktop rail must not expand a form nobody asked for. */
+  const host = renderRail();
+  expect(form(host)).toBeNull();
 });
 
 test("a rail with no create handler stays out of the request entirely", () => {

@@ -108,7 +108,7 @@ afterEach(() => { for (const root of roots) flushSync(() => root.unmount()); roo
 const emptyProjectProps = () => ({
   files: [], flows: [], pipelines: [], workflows: [], tasks: [],
   project: "atlas", loaded: true, openNonce: 0, archived: false, catalogKnown: false,
-  projectCwd: "/home/user/Projects/atlas", catalogConversationCount: 0,
+  projectCwd: "/repo/atlas", catalogConversationCount: 0,
   onArchive: () => {}, onUnarchive: () => {},
 });
 

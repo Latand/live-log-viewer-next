@@ -153,8 +153,9 @@ test("on a phone the same button opens the drawer the rail and its form live in"
   flushSync(() => createButton(host)!.dispatchEvent(click()));
   dom.removeEventListener(CREATE_PROJECT_FORM_EVENT, listener);
   expect(opened).toEqual(["drawer"]);
-  /* No request fires into a rail that has not mounted yet: the drawer itself
-     is the answer, and the rail's labelled create button waits inside it. */
+  /* No request fires into a rail that has not mounted yet — nothing would hear
+     it. The rail the drawer mounts opens the same form itself, so the tap still
+     lands on it; ProjectRail.firstRun.dom.test.tsx proves both ends together. */
   expect(requests).toEqual([]);
 });
 
@@ -163,6 +164,18 @@ test("a board with projects on it renders cards, never the first-run panel", () 
   expect(panel(host)).toBeNull();
   expect(createButton(host)).toBeNull();
   expect(host.querySelector('[data-testid="overview-card"]')).not.toBeNull();
+});
+
+test("an installation whose only project is archived is not a first run", () => {
+  /* The header says «1 archived» two rows up: a panel titled «No projects yet»
+     under it would contradict the same screen. Archived projects are still
+     projects — the first-run panel waits for an installation with none. */
+  const host = renderBoard({ files: [fileEntry()], archivedProjects: new Set(["atlas"]) });
+  expect(panel(host)).toBeNull();
+  expect(createButton(host)).toBeNull();
+  expect(host.textContent).not.toContain(en["overview.firstRunTitle"]);
+  expect(host.textContent).toContain(en["overview.archived"].replace("{count}", "1"));
+  expect(host.querySelector('[data-testid="overview-card"]')).toBeNull();
 });
 
 test("an unreachable catalog keeps its failure notice instead of the first-run panel", () => {

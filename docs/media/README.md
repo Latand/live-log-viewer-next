@@ -12,16 +12,12 @@ bun run demo:capture
 
 Renders every PNG in the `scripts/demo-capture.ts` shot manifest (`chat-feed.png`,
 `session-tree.png`, `codex-session.png`, `overview-board.png`,
-`first-run-empty.png`, `pending-question.png`, the `review-group-*.png` trio,
-`readiness-kanban.png`, `readiness-kanban-mobile.png`, `review-loop.png`). The
-runner:
+`pending-question.png`, the `review-group-*.png` trio, `readiness-kanban.png`,
+`readiness-kanban-mobile.png`, `review-loop.png`). The runner:
 
-1. materializes a disposable home under `fixtures/demo-home/.capture/` from the
-   seed a shot declares — `fixtures/demo-home/home` for every feature still, and
-   the zero-session `fixtures/demo-home/empty-home` for `first-run-empty.png`,
-   which is what a new install actually opens on,
+1. materializes a disposable home under `fixtures/demo-home/.capture/`,
 2. boots an isolated Next.js dev server against it (port `3028`, override with
-   `DEMO_CAPTURE_PORT`), once per seed,
+   `DEMO_CAPTURE_PORT`),
 3. renders every shot twice inside the pinned `mcp/puppeteer` Docker image and
    publishes it only when both passes agree and the element + pixel gates pass.
 
