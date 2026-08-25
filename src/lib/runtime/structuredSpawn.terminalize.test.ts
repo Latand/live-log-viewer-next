@@ -7,11 +7,12 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 
-import type { RuntimeHostClient } from "./client";
+import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import {
   STALE_STRUCTURED_SPAWN_TIMEOUT_MS,
   recoverPendingStructuredSpawns,
   reconcileStructuredSpawnReplay,
+  spawnStructuredConversation,
   terminalizeStaleStructuredSpawns,
 } from "./structuredSpawn";
 
@@ -71,6 +72,54 @@ function stagedStructuredReceipt(store: AgentRegistry, attempt: string) {
 }
 
 const AGED = () => Date.now() + STALE_STRUCTURED_SPAWN_TIMEOUT_MS + 60_000;
+
+test("a runtime-host transport failure becomes actionable on the structured spawn card", async () => {
+  const store = registry();
+  const cwd = path.dirname(store.filename);
+  const launchProfile = emptyLaunchProfile({ cwd });
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "work",
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("expected structured launch creation");
+  let admissionAttempts = 0;
+  const unavailableClient = {
+    command: async () => {
+      admissionAttempts += 1;
+      throw new RuntimeHostUnavailableError("runtime host request timed out");
+    },
+    transitionOperation: async () => {
+      throw new RuntimeHostUnavailableError("runtime host request timed out");
+    },
+  } as unknown as RuntimeHostClient;
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "runtime-host-card", engine: "codex", launchProfile },
+    account: { engine: "codex", accountId: "work", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    ["prompt"]: "run",
+    registry: store,
+    client: unavailableClient,
+  }, {
+    startHost: async () => { throw new Error("runtime admission must precede host start"); },
+  })).rejects.toThrow("runtime host request timed out");
+
+  expect(admissionAttempts).toBe(3);
+  const failed = store.snapshot().receipts[begun.receipt.launchId];
+  if (!failed) throw new Error("failed structured spawn receipt was unavailable");
+  const actionableFailure = "structured spawn runtime host is unavailable; start agent-log-viewer through its CLI and check the CLI log for the host startup failure";
+  expect(failed).toMatchObject({ state: "failed", error: actionableFailure });
+  expect(spawnResponseForReceipt(failed, failed.artifactPath, { structured: true })).toMatchObject({
+    state: "failed",
+    initialMessage: "failed",
+    retrySafe: true,
+    error: actionableFailure,
+  });
+});
 
 test("a stale dead-evidence structured launch converges to durable retry-safe failed exactly once", async () => {
   const store = registry();
