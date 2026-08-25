@@ -140,7 +140,6 @@ function evidenceValue<T>(resolution: EvidenceResolution<T>): T | null {
 function resolveConversationEvidence(
   file: RegistryFile,
   input: IdentityWaveMigrationInput,
-  titlesByReceipt: ReadonlyMap<ViewerConversationId, string>,
 ): Map<ViewerConversationId, ConversationEvidence> {
   const evidence = new Map<ViewerConversationId, ConversationEvidence>();
   for (const conversation of Object.values(file.conversations)) {
@@ -152,15 +151,7 @@ function resolveConversationEvidence(
       const sharedPath = evidenceValue(safeSharedPath(input, ownedGeneration.path));
       return sharedPath ? [{ legacyPath: ownedGeneration.path, sharedPath }] : [];
     });
-    const transcriptPath = pathRekeys.find((rekey) => rekey.legacyPath === generation.path)?.sharedPath
-      ?? generation.path;
-    const needsTranscriptTitle = needsTitleCleanup
-      && conversationTitle === null
-      && !titlesByReceipt.has(conversation.id);
-    const transcriptTitle = needsTranscriptTitle
-      ? evidenceValue(safeTranscriptTitle(input, transcriptPath, conversation.engine))
-      : null;
-    evidence.set(conversation.id, { conversationTitle, needsTitleCleanup, pathRekeys, transcriptTitle });
+    evidence.set(conversation.id, { conversationTitle, needsTitleCleanup, pathRekeys, transcriptTitle: null });
   }
   return evidence;
 }
@@ -215,6 +206,27 @@ function resolveRekeyOwnership(
     conversationEvidence.pathRekeys = owned;
   }
   return { rekeys, quarantined };
+}
+
+function resolveTranscriptEvidence(
+  file: RegistryFile,
+  input: IdentityWaveMigrationInput,
+  titlesByReceipt: ReadonlyMap<ViewerConversationId, string>,
+  evidence: Map<ViewerConversationId, ConversationEvidence>,
+): void {
+  for (const conversation of Object.values(file.conversations)) {
+    const generation = conversation.generations.at(-1);
+    const conversationEvidence = evidence.get(conversation.id);
+    if (!generation || !conversationEvidence?.needsTitleCleanup
+      || conversationEvidence.conversationTitle !== null
+      || titlesByReceipt.has(conversation.id)) continue;
+    const transcriptPath = conversationEvidence.pathRekeys
+      .find((rekey) => rekey.legacyPath === generation.path)?.sharedPath
+      ?? generation.path;
+    conversationEvidence.transcriptTitle = evidenceValue(
+      safeTranscriptTitle(input, transcriptPath, conversation.engine),
+    );
+  }
 }
 
 function rekeyProviderReceipt(
@@ -400,8 +412,9 @@ export function applyIdentityWaveMigration(
   // Resolve every fallible evidence read before mutating the registry. A failed
   // read aborts the transaction and leaves the durable completion marker open
   // for a later startup retry.
-  const evidenceByConversation = resolveConversationEvidence(file, input, titlesByReceipt);
+  const evidenceByConversation = resolveConversationEvidence(file, input);
   const ownership = resolveRekeyOwnership(file, evidenceByConversation);
+  resolveTranscriptEvidence(file, input, titlesByReceipt, evidenceByConversation);
   if (!dryRun && ownership.rekeys.length > 0) {
     input.commitExternalPathRekeys?.(ownership.rekeys);
   }
@@ -481,6 +494,7 @@ export function applyIdentityWaveMigration(
       completedAt: input.now,
       retitled,
       rekeyed,
+      quarantinedRekeys: ownership.quarantined,
       edgesStamped,
     };
   }
