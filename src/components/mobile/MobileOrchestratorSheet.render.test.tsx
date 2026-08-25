@@ -72,6 +72,7 @@ function quietBannerCount(file: FileEntry): number {
       state={state}
       file={file}
       pendingMandate=""
+      viewerMcpRegistered={false}
       submitting={false}
       onConfirm={() => undefined}
       onRecheck={() => undefined}

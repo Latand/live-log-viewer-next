@@ -34,15 +34,16 @@ const { resetOrchestratorIncumbentCacheForTests, useOrchestratorIncumbent } = aw
 /** One project's answers on the server, as the two routes report them. */
 const seats = new Map<string, string>();
 const models = new Map<string, string>();
+const viewerMcpCwds = new Set<string>();
 /** Reads issued per project, so «revalidated in the background» is a count and
     not a hope. */
 let seatReads: string[];
 let statusReads: string[];
 const realFetch = globalThis.fetch;
 
-function seatBody(project: string): unknown {
+function seatBody(project: string, cwd: string): unknown {
   const conversationId = seats.get(project);
-  if (!conversationId) return { seat: null, pending: null, exists: true };
+  if (!conversationId) return { seat: null, pending: null, exists: true, viewerMcpRegistered: viewerMcpCwds.has(cwd) };
   return {
     seat: {
       project,
@@ -57,6 +58,7 @@ function seatBody(project: string): unknown {
     },
     pending: null,
     exists: true,
+    viewerMcpRegistered: viewerMcpCwds.has(cwd),
   };
 }
 
@@ -77,6 +79,7 @@ beforeEach(() => {
   resetOrchestratorIncumbentCacheForTests();
   seats.clear();
   models.clear();
+  viewerMcpCwds.clear();
   seatReads = [];
   statusReads = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -87,7 +90,7 @@ beforeEach(() => {
       return { ok: true, status: 200, json: async () => statusBody(project) } as Response;
     }
     seatReads.push(project);
-    return { ok: true, status: 200, json: async () => seatBody(project) } as Response;
+    return { ok: true, status: 200, json: async () => seatBody(project, url.searchParams.get("cwd") ?? "") } as Response;
   }) as typeof fetch;
 });
 
@@ -99,16 +102,16 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-/** Everything the panel derives its state from, as two attributes: the seat
-    answer (or the absence that renders as `loading`) and the incumbent's model,
-    which is what the header would name. */
-function Probe({ project }: { project: string }) {
-  const { status, failed } = useOrchestratorSeat(project);
+/** Everything the panel derives its state from: the seat answer (or loading),
+    the incumbent model, and the cwd-scoped Viewer MCP preflight. */
+function Probe({ project, cwd }: { project: string; cwd?: string }) {
+  const { status, failed } = useOrchestratorSeat(project, cwd);
   const { incumbent } = useOrchestratorIncumbent(project, Boolean(status?.seat));
   return (
     <div
       data-seat={status ? status.seat?.conversationId ?? "vacant" : failed ? "unavailable" : "loading"}
       data-model={incumbent?.model ?? "unread"}
+      data-viewer-mcp={status?.viewerMcpRegistered ? "registered" : "missing"}
     />
   );
 }
@@ -125,12 +128,30 @@ function mountProbe() {
   roots.add(root);
   const probe = () => host.querySelector("div[data-seat]")!;
   return {
-    /* Keyed by project, the way the dock re-seats the panel. */
-    open: (project: string) => flushSync(() => root.render(<Probe key={project} project={project} />)),
+    /* Keyed by project and cwd, the status scope the panel opens. */
+    open: (project: string, cwd?: string) => flushSync(() => root.render(<Probe key={`${project}:${cwd ?? ""}`} project={project} cwd={cwd} />)),
     seat: () => probe().getAttribute("data-seat"),
     model: () => probe().getAttribute("data-model"),
+    viewerMcp: () => probe().getAttribute("data-viewer-mcp"),
   };
 }
+
+test("the Viewer MCP preflight cache is scoped by cwd inside one grouped project", async () => {
+  const dock = mountProbe();
+  viewerMcpCwds.add("/repo/atlas/registered");
+
+  dock.open("atlas", "/repo/atlas/missing");
+  await settle();
+  expect(dock.viewerMcp()).toBe("missing");
+
+  dock.open("atlas", "/repo/atlas/registered");
+  expect(dock.seat()).toBe("loading");
+  await settle();
+  expect(dock.viewerMcp()).toBe("registered");
+
+  dock.open("atlas", "/repo/atlas/missing");
+  expect(dock.viewerMcp()).toBe("missing");
+});
 
 test("a project answered once repaints from the answer, and revalidates behind it", async () => {
   seats.set("atlas", "conversation_atlas");

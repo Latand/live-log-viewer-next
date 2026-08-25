@@ -1,4 +1,4 @@
-import { CODEX_VIEWER_SPAWN_FEATURES } from "@/lib/agent/spawnPolicy";
+import { CODEX_VIEWER_SPAWN_FEATURES, viewerMcpServerEntry } from "@/lib/agent/spawnPolicy";
 import { grantedMcpServers } from "@/lib/agent/mcpAllowlist";
 import { grantedPlugins } from "@/lib/agent/pluginAllowlist";
 
@@ -38,12 +38,16 @@ export function headlessCodexThreadConfig(
      table is materialized from the re-validated list, so a launch profile
      edited by hand cannot turn a server on for this thread. */
   const enabled = new Set(grantedMcpServers(mcpServers));
+  const viewerMissing = record(servers.viewer) === null;
+  const materializedServers = viewerMissing && enabled.has("viewer")
+    ? { ...servers, viewer: viewerMcpServerEntry() }
+    : servers;
   /* The plugin subsystem is off for every session that holds no grant, which
      is the default. A grant turns it on for THIS thread only — never for the
      app-server, never in the operator's configuration. */
   const granted = grantedPlugins(plugins);
   return {
-    mcp_servers: Object.fromEntries(Object.entries(servers).map(([name, server]) => {
+    mcp_servers: Object.fromEntries(Object.entries(materializedServers).map(([name, server]) => {
       const configuredApproval = record(server)?.default_tools_approval_mode;
       const approval = name === "viewer"
         ? "approve"
@@ -51,6 +55,7 @@ export function headlessCodexThreadConfig(
           ? configuredApproval
           : null;
       return [name, {
+        ...(name === "viewer" && viewerMissing ? server as JsonObject : {}),
         enabled: enabled.has(name),
         ...(approval ? { default_tools_approval_mode: approval } : {}),
       }];

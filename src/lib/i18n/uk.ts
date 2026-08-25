@@ -1776,6 +1776,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "orchPanel.draftTitle": "Створити оркестратора для цього проєкту",
   "orchPanel.draftHint": "Він працює в {project}, володіє цією дошкою і відповідає вам тут. Текст нижче буде доставлено йому як перше повідомлення — редагуйте як завгодно.",
   "orchPanel.draftHintVacated": "Розмова попереднього оркестратора зникла. Створіть нового для {project}; текст нижче буде доставлено як перше повідомлення.",
+  "orchPanel.viewerMcpRegistered": "viewer MCP: зареєстровано ✓",
+  "orchPanel.viewerMcpMissing": "viewer MCP: виконайте scripts/install-mcp.sh або claude mcp add viewer -- bun ./bin/mcp-server.mjs",
   "orchPanel.mandate": "Мандат",
   "orchPanel.mandateSent": "Надсилається як перше повідомлення",
   "orchPanel.restoreDefault": "Повернути типовий",

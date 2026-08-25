@@ -61,6 +61,7 @@ export function MobileOrchestratorSheet({
   state,
   file,
   pendingMandate,
+  viewerMcpRegistered,
   submitting,
   onConfirm,
   onRecheck,
@@ -76,6 +77,7 @@ export function MobileOrchestratorSheet({
   /** The pending intent's own mandate, replayed verbatim when a stuck
       designation is resumed. */
   pendingMandate: string;
+  viewerMcpRegistered: boolean;
   submitting: boolean;
   onConfirm: (payload: SeatConfirmPayload) => void;
   onRecheck: () => void;
@@ -269,6 +271,14 @@ export function MobileOrchestratorSheet({
                   </p>
                 </div>
               )}
+
+              <p
+                className="shrink-0 rounded-control border border-border bg-card px-3 py-2 font-mono text-caption text-secondary"
+                data-viewer-mcp-status={viewerMcpRegistered ? "registered" : "missing"}
+                role="status"
+              >
+                {t(viewerMcpRegistered ? "orchPanel.viewerMcpRegistered" : "orchPanel.viewerMcpMissing")}
+              </p>
 
               {/* The shared launch module, in the phone's own layout: the same
                   fields and the same invariants the dock has, lifted to 44px
