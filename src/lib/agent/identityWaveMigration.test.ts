@@ -853,6 +853,119 @@ test("a quarantined shared-path collision keeps legacy title evidence and counte
   }
 });
 
+test("a pending receipt reservation quarantines its shared-path rekey and later settles with JSON and SQLite parity", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-receipt-reservation-"));
+  try {
+    const filename = path.join(directory, "agent-registry.json");
+    const transcriptFilename = `${crypto.randomUUID()}.jsonl`;
+    const legacyRoot = path.join(directory, "legacy-projects");
+    const sharedRoot = path.join(directory, "shared-projects");
+    const legacyPath = path.join(legacyRoot, "-repo", transcriptFilename);
+    const sharedPath = path.join(sharedRoot, "-repo", transcriptFilename);
+    fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+    fs.writeFileSync(sharedPath, "{}\n");
+
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+    const legacyConversation = registry.ensureConversation("claude", legacyPath, null);
+    const reserved = registry.beginSpawnRequest({
+      engine: "claude",
+      cwd: directory,
+      expectedArtifactPath: sharedPath,
+      launchProfile: { title: "Reserve the shared transcript" },
+    });
+    if (reserved.kind !== "created") throw new Error("expected a pending receipt reservation");
+
+    expect(runIdentityWaveMigrationAtStartup({
+      registry,
+      seats: () => [],
+      now: () => NOW,
+      transcriptTitle: () => null,
+      sharedPath: (pathname) => sharedPathForLegacyClaudeTranscript(pathname, legacyRoot, sharedRoot),
+      log: () => {},
+      env: {},
+    })).toMatchObject({
+      alreadyCompleted: false,
+      rekeyed: 0,
+      quarantinedRekeys: 1,
+    });
+    expect(registry.conversation(legacyConversation.id)?.generations.at(-1)?.path).toBe(legacyPath);
+
+    const key = sessionKeyFromTranscript("claude", sharedPath);
+    if (!key) throw new Error("expected a shared transcript key");
+    expect(registry.settleSpawn(reserved.receipt.launchId, {
+      key,
+      artifactPath: sharedPath,
+      cwd: directory,
+      accountId: null,
+      status: "live",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    }).kind).toBe("settled");
+
+    const jsonSnapshot = registry.snapshot();
+    const sqliteSnapshot = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot();
+    expect(sqliteSnapshot).toEqual(jsonSnapshot);
+    expect(jsonSnapshot.conversations[reserved.receipt.conversationId]!.generations.at(-1)?.path).toBe(sharedPath);
+    expect(jsonSnapshot.identityMigrations[IDENTITY_WAVE_MIGRATION]).toMatchObject({
+      rekeyed: 0,
+      quarantinedRekeys: 1,
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a registry entry claim quarantines its shared-path rekey", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-entry-reservation-"));
+  try {
+    const filename = path.join(directory, "agent-registry.json");
+    const transcriptFilename = `${crypto.randomUUID()}.jsonl`;
+    const legacyRoot = path.join(directory, "legacy-projects");
+    const sharedRoot = path.join(directory, "shared-projects");
+    const legacyPath = path.join(legacyRoot, "-repo", transcriptFilename);
+    const sharedPath = path.join(sharedRoot, "-repo", transcriptFilename);
+    fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+    fs.writeFileSync(sharedPath, "{}\n");
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+    const legacyConversation = registry.ensureConversation("claude", legacyPath, null);
+    registry.upsert({
+      key: { engine: "claude", sessionId: crypto.randomUUID() },
+      artifactPath: sharedPath,
+      cwd: directory,
+      accountId: null,
+      status: "live",
+      host: null,
+      claimEpoch: 1,
+      claimOwner: "structured-host:test",
+      pendingAction: null,
+    });
+
+    expect(runIdentityWaveMigrationAtStartup({
+      registry,
+      seats: () => [],
+      now: () => NOW,
+      transcriptTitle: () => null,
+      sharedPath: (pathname) => sharedPathForLegacyClaudeTranscript(pathname, legacyRoot, sharedRoot),
+      log: () => {},
+      env: {},
+    })).toMatchObject({
+      alreadyCompleted: false,
+      rekeyed: 0,
+      quarantinedRekeys: 1,
+    });
+
+    const jsonSnapshot = registry.snapshot();
+    const sqliteSnapshot = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot();
+    expect(sqliteSnapshot).toEqual(jsonSnapshot);
+    expect(jsonSnapshot.conversations[legacyConversation.id]!.generations.at(-1)?.path).toBe(legacyPath);
+    expect(Object.values(jsonSnapshot.entries)).toContainEqual(expect.objectContaining({ artifactPath: sharedPath }));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("receipt evidence retitles from the original launch prompt, not a later relay", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-launch-evidence-"));
   try {

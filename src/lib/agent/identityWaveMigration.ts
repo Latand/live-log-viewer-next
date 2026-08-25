@@ -156,21 +156,23 @@ function resolveConversationEvidence(
   return evidence;
 }
 
-/** Drops the rekey pairs whose shared path is claimed by another conversation
-    (or by a second legacy path) and keeps the rest. A collision is durable data
-    state — two registry rows describing one transcript — so aborting the wave on
-    it would never converge on retry and would strand every clean rekey and every
-    placeholder retitle behind it. Quarantining is per pair, counted, and
-    reported by the caller; evidence *read* failures still abort the whole wave,
-    because those genuinely can succeed on a later startup. */
+/** Drops the rekey pairs whose shared path is claimed by another durable owner
+    (conversation, receipt, registry entry, or second legacy path) and keeps the
+    rest. A collision is durable data state — two registry rows describing one
+    transcript — so aborting the wave on it would never converge on retry and
+    would strand every clean rekey and every placeholder retitle behind it.
+    Quarantining is per pair, counted, and reported by the caller; evidence
+    *read* failures still abort the whole wave, because those genuinely can
+    succeed on a later startup. */
 function resolveRekeyOwnership(
   file: RegistryFile,
   evidence: Map<ViewerConversationId, ConversationEvidence>,
 ): { rekeys: IdentityWavePathRekey[]; quarantined: number } {
-  const owners = new Map<string, Set<ViewerConversationId>>();
+  const owners = new Map<string, Set<string>>();
   const generationPaths = new Map<string, Set<ViewerConversationId>>();
-  const rememberOwner = (map: Map<string, Set<ViewerConversationId>>, pathname: string, conversationId: ViewerConversationId) => {
-    const pathOwners = map.get(pathname) ?? new Set<ViewerConversationId>();
+  const generationOwners = new Map<string, Set<string>>();
+  const rememberOwner = (map: Map<string, Set<string>>, pathname: string, conversationId: string) => {
+    const pathOwners = map.get(pathname) ?? new Set<string>();
     pathOwners.add(conversationId);
     map.set(pathname, pathOwners);
   };
@@ -178,8 +180,25 @@ function resolveRekeyOwnership(
     for (const generation of conversation.generations) {
       rememberOwner(owners, generation.path, conversation.id);
       rememberOwner(generationPaths, generation.path, conversation.id);
+      rememberOwner(generationOwners, `${conversation.engine}:${generation.id}`, conversation.id);
     }
     for (const pathname of conversation.continuityPaths) rememberOwner(owners, pathname, conversation.id);
+  }
+  for (const receipt of Object.values(file.receipts)) {
+    if (!receipt.artifactPath) continue;
+    rememberOwner(
+      owners,
+      receipt.artifactPath,
+      canonicalConversationId(file, receipt.conversationId) ?? `receipt:${receipt.launchId}`,
+    );
+  }
+  for (const entry of Object.values(file.entries)) {
+    const entryOwners = generationOwners.get(`${entry.key.engine}:${entry.key.sessionId}`);
+    if (entryOwners?.size) {
+      for (const conversationId of entryOwners) rememberOwner(owners, entry.artifactPath, conversationId);
+    } else {
+      rememberOwner(owners, entry.artifactPath, `entry:${entry.key.engine}:${entry.key.sessionId}`);
+    }
   }
 
   const targetSources = new Map<string, string>();
