@@ -313,22 +313,29 @@ export const MAX_APP_SERVER_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MA
 const MAX_LINE_BYTES = MAX_APP_SERVER_LINE_BYTES;
 /**
  * A full-history `thread/read`, a legacy `thread/resume`, or an individually
- * large `thread/turns/list` page can exceed `MAX_LINE_BYTES` (issue #794: one
- * production resume envelope reached ~55 MB). Only an awaited history response
- * may pass through `CodexReplayFrameReducer`, which bounds every string token
- * while it streams. Every other oversized frame is skipped with a surfaced
- * diagnostic, keeping the host reachable after degraded output (issue #301).
+ * large history page can exceed `MAX_LINE_BYTES` (issue #794: one production
+ * resume envelope reached ~55 MB). Awaited history responses and completion
+ * notifications may pass through `CodexReplayFrameReducer`, which bounds every
+ * string token while it streams. Every other oversized frame is skipped with a
+ * surfaced diagnostic, keeping the host reachable after degraded output (#301).
  */
-const REPLAY_ENVELOPE_METHODS = new Set(["thread/resume", "thread/read", "thread/turns/list"]);
+const REPLAY_ENVELOPE_METHODS = new Set([
+  "thread/resume",
+  "thread/read",
+  "thread/turns/list",
+  "thread/items/list",
+]);
+const REDUCIBLE_OVERSIZED_NOTIFICATION_METHODS = new Set(["item/completed", "turn/completed"]);
 /**
  * Paginated history hydration (issue #301). `thread/resume` runs with
- * `excludeTurns: true` and history arrives through `thread/turns/list` pages of
- * this many turns, so no single response frame has to carry the whole thread.
- * A page whose turns are still oversized is admitted through the replay
- * reducer like a legacy envelope.
+ * `excludeTurns: true`; turn metadata arrives through `thread/turns/list`, then
+ * items arrive independently through `thread/items/list`. Both page sizes are
+ * bounded, and an individually large item is admitted through the reducer.
  */
 const RESUME_TURNS_PAGE_LIMIT = 10;
 const MAX_RESUME_TURN_PAGES = 4096;
+const RESUME_ITEMS_PAGE_LIMIT = 10;
+const MAX_RESUME_ITEM_PAGES = 65_536;
 const MAX_OVERSIZED_FRAME_DIAGNOSTICS = 8;
 const OVERSIZED_FRAME_HEAD_CHARS = 2048;
 const REPLAY_REDUCTION_THRESHOLD_BYTES = MAX_REPLAY_ENVELOPE_BYTES;
@@ -470,6 +477,18 @@ function pagedTurns(value: unknown): JsonObject[] {
   const data = record(value)?.data;
   if (!Array.isArray(data)) throw new Error("thread/turns/list returned no data array");
   return data.map(record).filter((turn): turn is JsonObject => turn !== null);
+}
+
+function pagedItemEntries(value: unknown): Array<{ turnId: string; item: unknown }> {
+  const data = record(value)?.data;
+  if (!Array.isArray(data)) throw new Error("thread/items/list returned no data array");
+  return data.map((value) => {
+    const entry = record(value);
+    const turnId = stringField(entry, "turnId");
+    const item = record(entry?.item);
+    if (!turnId || !item) throw new Error("thread/items/list returned a malformed item entry");
+    return { turnId, item };
+  });
 }
 
 function resumedActiveTurnId(turns: readonly JsonObject[]): string | null {
@@ -724,7 +743,12 @@ export class CodexAppServerHost implements EngineHost {
   /** Sticky once the app-server rejects `thread/turns/list` as unknown; every
       later history read goes straight to the legacy full-envelope path. */
   private turnPaginationUnsupported = false;
+  /** Sticky fallback when item pagination is unavailable; full turn pages
+      remain protected by the bounded reducer. */
+  private itemPaginationUnsupported = false;
   private replayReductionRpcId: number | null = null;
+  private replayReductionMethod: string | null = null;
+  private oversizedCompletionReconciliation: Promise<void> | null = null;
   private oversizedDiscard: { headText: string; bytes: number; reported: boolean } | null = null;
   private oversizedFrameDiagnostics = 0;
   private reaped = false;
@@ -959,6 +983,22 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private async collectTurnPages(initialCursor: string | null): Promise<JsonObject[]> {
+    if (this.itemPaginationUnsupported) return this.collectTurnPagesByView(initialCursor, "full");
+    const turns = await this.collectTurnPagesByView(initialCursor, "notLoaded");
+    try {
+      await this.hydrateTurnItems(turns);
+      return turns;
+    } catch (error) {
+      if (!isUnknownMethodError(error)) throw error;
+      this.itemPaginationUnsupported = true;
+      return this.collectTurnPagesByView(initialCursor, "full");
+    }
+  }
+
+  private async collectTurnPagesByView(
+    initialCursor: string | null,
+    itemsView: "full" | "notLoaded",
+  ): Promise<JsonObject[]> {
     /* Pages arrive newest-first. The first copy of a repeated turn has its
        freshest content; the last occurrence supplies its chronological
        position before the collected ids are reversed for reconciliation. */
@@ -968,7 +1008,7 @@ export class CodexAppServerHost implements EngineHost {
     for (let page = 0; page < MAX_RESUME_TURN_PAGES; page += 1) {
       const result = record(await this.rpc("thread/turns/list", {
         threadId: this.identity.threadId,
-        itemsView: "full",
+        itemsView,
         sortDirection: "desc",
         limit: RESUME_TURNS_PAGE_LIMIT,
         ...(cursor !== null ? { cursor } : {}),
@@ -988,6 +1028,43 @@ export class CodexAppServerHost implements EngineHost {
       if (cursor === null) return newestFirst.reverse().map((turnId) => byId.get(turnId)!);
     }
     throw new Error("thread/turns/list paged past the bounded resume budget");
+  }
+
+  private async hydrateTurnItems(turns: JsonObject[]): Promise<void> {
+    const turnsById = new Map(turns.flatMap((turn) => {
+      const turnId = stringField(turn, "id");
+      if (!turnId) return [];
+      turn.items = [];
+      turn.itemsView = "full";
+      return [[turnId, turn] as const];
+    }));
+    const itemIndexes = new Map<string, Map<string, number>>();
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_RESUME_ITEM_PAGES; page += 1) {
+      const result = record(await this.rpc("thread/items/list", {
+        threadId: this.identity.threadId,
+        sortDirection: "asc",
+        limit: RESUME_ITEMS_PAGE_LIMIT,
+        ...(cursor !== null ? { cursor } : {}),
+      }));
+      for (const entry of pagedItemEntries(result)) {
+        const turn = turnsById.get(entry.turnId);
+        if (!turn || !Array.isArray(turn.items)) continue;
+        const indexes = itemIndexes.get(entry.turnId) ?? new Map<string, number>();
+        itemIndexes.set(entry.turnId, indexes);
+        const key = itemReplayKey(entry.item);
+        const existing = indexes.get(key);
+        if (existing === undefined) {
+          indexes.set(key, turn.items.length);
+          turn.items.push(entry.item);
+        } else {
+          turn.items[existing] = entry.item;
+        }
+      }
+      cursor = stringField(result, "nextCursor");
+      if (cursor === null) return;
+    }
+    throw new Error("thread/items/list paged past the bounded resume budget");
   }
 
   private async retryOnceOnInvalidCursor<T>(operation: (retry: boolean) => Promise<T>): Promise<T> {
@@ -2258,9 +2335,18 @@ export class CodexAppServerHost implements EngineHost {
    * single response frame grows with the whole session.
    */
   private async scanPersistedDeliveries(entryId: string): Promise<void> {
+    if (!this.itemPaginationUnsupported) {
+      try {
+        await this.retryOnceOnInvalidCursor(() => this.scanDeliveryItemPages(entryId));
+        return;
+      } catch (error) {
+        if (isUnknownMethodError(error)) this.itemPaginationUnsupported = true;
+        else if (!isThreadNotLoadedError(error)) throw error;
+      }
+    }
     if (!this.turnPaginationUnsupported) {
       try {
-        await this.retryOnceOnInvalidCursor(() => this.scanDeliveryPages(entryId));
+        await this.retryOnceOnInvalidCursor(() => this.scanDeliveryTurnPages(entryId));
         return;
       } catch (error) {
         /* `thread/turns/list` serves only loaded threads; `thread/read` reads
@@ -2277,7 +2363,26 @@ export class CodexAppServerHost implements EngineHost {
     this.rememberConfirmedDeliveries(resumedTurns(thread));
   }
 
-  private async scanDeliveryPages(entryId: string): Promise<void> {
+  private async scanDeliveryItemPages(entryId: string): Promise<void> {
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_RESUME_ITEM_PAGES; page += 1) {
+      const result = record(await this.rpc("thread/items/list", {
+        threadId: this.identity.threadId,
+        sortDirection: "desc",
+        limit: RESUME_ITEMS_PAGE_LIMIT,
+        ...(cursor !== null ? { cursor } : {}),
+      }));
+      for (const entry of pagedItemEntries(result)) {
+        this.rememberConfirmedDelivery(entry.turnId, entry.item);
+      }
+      if (this.confirmedDeliveries.has(entryId)) return;
+      cursor = stringField(result, "nextCursor");
+      if (cursor === null) return;
+    }
+    throw new Error("thread/items/list paged past the bounded delivery scan budget");
+  }
+
+  private async scanDeliveryTurnPages(entryId: string): Promise<void> {
     let cursor: string | null = null;
     for (let page = 0; page < MAX_RESUME_TURN_PAGES; page += 1) {
       const result = record(await this.rpc("thread/turns/list", {
@@ -2512,7 +2617,9 @@ export class CodexAppServerHost implements EngineHost {
         this.pending.delete(id);
         /* History reads may legally answer after their timeout; remember the id
            so the late response is consumed harmlessly. */
-        if (method === "thread/read" || method === "thread/turns/list") this.rememberLateHistoryResponse(id, timeoutMs);
+        if (method === "thread/read" || method === "thread/turns/list" || method === "thread/items/list") {
+          this.rememberLateHistoryResponse(id, timeoutMs);
+        }
         const error = new Error(`${method} timed out${MUTATING_RPC_METHODS.has(method) ? "; outcome is uncertain" : ""}`);
         reject(error);
         if (MUTATING_RPC_METHODS.has(method)) this.fail(error);
@@ -2574,6 +2681,7 @@ export class CodexAppServerHost implements EngineHost {
         this.replayReduction = null;
         this.replayReductionBytes = 0;
         this.replayReductionRpcId = null;
+        this.replayReductionMethod = null;
         this.oversizedDiscard = null;
         return;
       }
@@ -2586,6 +2694,7 @@ export class CodexAppServerHost implements EngineHost {
       this.replayReduction = null;
       this.replayReductionBytes = 0;
       this.replayReductionRpcId = null;
+      this.replayReductionMethod = null;
       this.oversizedDiscard = null;
     }
   }
@@ -2599,15 +2708,15 @@ export class CodexAppServerHost implements EngineHost {
       this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
       const lineBytes = Buffer.byteLength(line);
       if (lineBytes > MAX_LINE_BYTES) {
-        const envelopeId = this.awaitedReplayEnvelopeId(line);
-        if (envelopeId === null) {
+        const reduction = this.reducibleOversizedFrame(line);
+        if (reduction === null) {
           /* Oversized and complete: skip it loudly while preserving a
              reachable host with degraded output (#301). */
           this.reportOversizedFrame(line, lineBytes);
         } else {
           const remainder = this.stdoutBuffer;
           this.stdoutBuffer = "";
-          this.beginReplayReduction(envelopeId);
+          this.beginReplayReduction(reduction.rpcId, reduction.method);
           if (!this.feedReplayFrame(line)) {
             /* The frame ended with this line; an overflow skip needs no
                discard window before the stream resumes. */
@@ -2628,11 +2737,11 @@ export class CodexAppServerHost implements EngineHost {
     }
     const bufferedBytes = Buffer.byteLength(this.stdoutBuffer);
     if (bufferedBytes > REPLAY_REDUCTION_THRESHOLD_BYTES) {
-      const envelopeId = this.awaitedReplayEnvelopeId(this.stdoutBuffer);
-      if (envelopeId !== null) {
+      const reduction = this.reducibleOversizedFrame(this.stdoutBuffer, bufferedBytes > MAX_LINE_BYTES);
+      if (reduction !== null) {
         const buffered = this.stdoutBuffer;
         this.stdoutBuffer = "";
-        this.beginReplayReduction(envelopeId);
+        this.beginReplayReduction(reduction.rpcId, reduction.method);
         return buffered;
       }
       if (bufferedBytes > MAX_LINE_BYTES) {
@@ -2663,7 +2772,7 @@ export class CodexAppServerHost implements EngineHost {
     return chunk.slice(newline + 1);
   }
 
-  /** Streams the awaited replay envelope; returns bytes after the frame's newline. */
+  /** Streams an admitted history or completion frame; returns bytes after its newline. */
   private feedReplayReduction(chunk: string): string {
     const newline = chunk.indexOf("\n");
     if (!this.feedReplayFrame(newline === -1 ? chunk : chunk.slice(0, newline))) {
@@ -2677,10 +2786,11 @@ export class CodexAppServerHost implements EngineHost {
     return this.dead || this.releasing || this.released ? "" : chunk.slice(newline + 1);
   }
 
-  private beginReplayReduction(envelopeId: number): void {
+  private beginReplayReduction(rpcId: number | null, method: string | null): void {
     this.replayReduction = new CodexReplayFrameReducer(REPLAY_FRAME_BUDGETS);
     this.replayReductionBytes = 0;
-    this.replayReductionRpcId = envelopeId;
+    this.replayReductionRpcId = rpcId;
+    this.replayReductionMethod = method;
   }
 
   private feedReplayFrame(text: string): boolean {
@@ -2689,11 +2799,12 @@ export class CodexAppServerHost implements EngineHost {
       this.replayReduction!.feed(text);
       return true;
     } catch (error) {
-      if (error instanceof ReplayFrameOverflowError) this.skipOverflowedReplayEnvelope(false);
+      if (error instanceof ReplayFrameOverflowError) this.skipOverflowedReducedFrame(false);
       else {
         this.replayReduction = null;
         this.replayReductionBytes = 0;
         this.replayReductionRpcId = null;
+        this.replayReductionMethod = null;
         this.fail(new Error(safeError(error)));
       }
       return false;
@@ -2702,6 +2813,8 @@ export class CodexAppServerHost implements EngineHost {
 
   private finishReplayReduction(): void {
     const reducer = this.replayReduction!;
+    const observedBytes = this.replayReductionBytes;
+    const method = this.replayReductionMethod;
     let reduced: string;
     try {
       reduced = reducer.finish().trim();
@@ -2709,39 +2822,47 @@ export class CodexAppServerHost implements EngineHost {
         reduced = shrinkReducedReplayFrame(reduced, MAX_LINE_BYTES, REPLAY_FRAME_BUDGETS).trim();
       }
     } catch (error) {
-      if (error instanceof ReplayFrameOverflowError) this.skipOverflowedReplayEnvelope(true);
+      if (error instanceof ReplayFrameOverflowError) this.skipOverflowedReducedFrame(true);
       else {
         this.replayReduction = null;
         this.replayReductionBytes = 0;
         this.replayReductionRpcId = null;
+        this.replayReductionMethod = null;
         this.fail(new Error(safeError(error)));
       }
       return;
     }
     if (Buffer.byteLength(reduced) > MAX_LINE_BYTES) {
-      this.skipOverflowedReplayEnvelope(true);
+      this.skipOverflowedReducedFrame(true);
       return;
     }
     this.replayReduction = null;
     this.replayReductionBytes = 0;
     this.replayReductionRpcId = null;
+    this.replayReductionMethod = null;
+    if (method && observedBytes > MAX_LINE_BYTES) {
+      const diagnostic = oversizedFrameDiagnostic(observedBytes, method);
+      this.warnOversizedFrame(observedBytes, method);
+      this.emitOversizedFrameDiagnostic(diagnostic);
+    }
     if (reduced) this.acceptMessage(reduced);
   }
 
   /**
-   * A replay envelope even the string-truncating reducer could not fit under
-   * the bound. The awaiting request fails with the full diagnostic and the
-   * host stays alive; mid-frame overflows open a discard window that swallows
-   * the rest of the frame.
+   * A frame the string-truncating reducer could not fit under the bound. An
+   * awaiting request fails with the full diagnostic; a completion schedules
+   * paginated reconciliation. Mid-frame overflows discard through the newline.
    */
-  private skipOverflowedReplayEnvelope(frameComplete: boolean): void {
+  private skipOverflowedReducedFrame(frameComplete: boolean): void {
     const rpcId = this.replayReductionRpcId;
+    const method = this.replayReductionMethod;
     const observedBytes = this.replayReductionBytes;
     this.replayReduction = null;
     this.replayReductionBytes = 0;
     this.replayReductionRpcId = null;
+    this.replayReductionMethod = null;
     const pending = rpcId !== null ? this.pending.get(rpcId) : undefined;
-    const descriptor = pending ? `response to ${pending.method}` : "awaited replay envelope";
+    const descriptor = method ?? (pending ? `response to ${pending.method}` : "awaited replay envelope");
     const diagnostic = oversizedFrameDiagnostic(observedBytes, descriptor);
     this.warnOversizedFrame(observedBytes, descriptor);
     if (pending && rpcId !== null) {
@@ -2751,6 +2872,7 @@ export class CodexAppServerHost implements EngineHost {
       pending.reject(new Error(diagnostic));
     }
     this.emitOversizedFrameDiagnostic(diagnostic);
+    if (method) this.scheduleOversizedCompletionReconciliation();
     if (!frameComplete) this.oversizedDiscard = { headText: "", bytes: observedBytes, reported: true };
   }
 
@@ -2785,6 +2907,53 @@ export class CodexAppServerHost implements EngineHost {
       this.write({ jsonrpc: "2.0", id: requestId, error: { code: -32600, message: "oversized frame skipped by client" } });
     }
     this.emitOversizedFrameDiagnostic(diagnostic);
+    if (method && REDUCIBLE_OVERSIZED_NOTIFICATION_METHODS.has(method)) {
+      this.scheduleOversizedCompletionReconciliation();
+    }
+  }
+
+  private scheduleOversizedCompletionReconciliation(): void {
+    if (this.oversizedCompletionReconciliation || this.dead || this.releasing || this.released) return;
+    const task = (async () => {
+      try {
+        const activeTurnId = this.activeTurnId;
+        if (activeTurnId) await this.reconcilePersistedTurn(activeTurnId);
+        for (const entryId of [...this.pendingDeliveries.keys()]) {
+          if (!this.pendingDeliveries.has(entryId)) continue;
+          await this.scanPersistedDeliveries(entryId);
+        }
+      } catch (error) {
+        console.warn("[codex app-server host] oversized completion reconciliation failed", {
+          threadId: this.identity.threadId,
+          error: safeError(error),
+        });
+      }
+    })();
+    this.oversizedCompletionReconciliation = task;
+    void task.finally(() => {
+      if (this.oversizedCompletionReconciliation === task) this.oversizedCompletionReconciliation = null;
+    });
+  }
+
+  private async reconcilePersistedTurn(turnId: string): Promise<void> {
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_RESUME_TURN_PAGES; page += 1) {
+      const result = record(await this.rpc("thread/turns/list", {
+        threadId: this.identity.threadId,
+        itemsView: "notLoaded",
+        sortDirection: "desc",
+        limit: RESUME_TURNS_PAGE_LIMIT,
+        ...(cursor !== null ? { cursor } : {}),
+      }));
+      const turn = pagedTurns(result).find((candidate) => stringField(candidate, "id") === turnId);
+      if (turn) {
+        this.reconcileTurnHistory(turn);
+        return;
+      }
+      cursor = stringField(result, "nextCursor");
+      if (cursor === null) return;
+    }
+    throw new Error("thread/turns/list paged past the bounded completion reconciliation budget");
   }
 
   private warnOversizedFrame(observedBytes: number, messageType: string): void {
@@ -2811,12 +2980,25 @@ export class CodexAppServerHost implements EngineHost {
     });
   }
 
-  /** The numeric id when this frame opens as the response to an awaited replay read. */
-  private awaitedReplayEnvelopeId(text: string): number | null {
+  /** Identifies an awaited history response or a completion notification whose
+      bounded projection preserves delivery and active-turn evidence. */
+  private reducibleOversizedFrame(
+    text: string,
+    includeCompletionNotifications = true,
+  ): { rpcId: number | null; method: string | null } | null {
     const match = REPLAY_RESPONSE_PREFIX.exec(text.slice(0, 64).trimStart());
-    if (!match) return null;
-    const id = Number(match[1]);
-    return this.replayEnvelopeRequestIds.has(id) ? id : null;
+    if (match) {
+      const id = Number(match[1]);
+      if (this.replayEnvelopeRequestIds.has(id)) return { rpcId: id, method: null };
+    }
+    if (!includeCompletionNotifications) return null;
+    const head = text.slice(0, OVERSIZED_FRAME_HEAD_CHARS);
+    const envelopeEnd = head.search(/"params"\s*:/);
+    const envelope = envelopeEnd === -1 ? head : head.slice(0, envelopeEnd);
+    const method = /"method"\s*:\s*"([^"]{1,128})"/.exec(envelope)?.[1] ?? null;
+    return method && REDUCIBLE_OVERSIZED_NOTIFICATION_METHODS.has(method)
+      ? { rpcId: null, method }
+      : null;
   }
 
   private trackReplayEnvelopeRequest(id: number): void {
