@@ -200,6 +200,7 @@ class CodexRealtimeClient {
   private operatorActivityFlush: Promise<void> | null = null;
   private operatorActivityRetryTimer: number | null = null;
   private operatorActivityRetryMs = OPERATOR_ACTIVITY_RETRY_MIN_MS;
+  private operatorActivityOutbox: string[];
   private lineSequence = 0;
   /** The line each speaker is still streaming into, by line id. Held here
       rather than read off the end of the list because a delegating turn
@@ -208,7 +209,9 @@ class CodexRealtimeClient {
   private readonly openTranscriptLines = new Map<TranscriptSpeaker, string>();
   private epoch = 0;
 
-  constructor(readonly conversationId: string) {}
+  constructor(readonly conversationId: string) {
+    this.operatorActivityOutbox = readOperatorActivityOutbox(conversationId);
+  }
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -466,9 +469,11 @@ class CodexRealtimeClient {
   }
 
   private enqueueOperatorActivity(): void {
-    const ids = readOperatorActivityOutbox(this.conversationId);
-    ids.push(newOperatorActivityId());
-    writeOperatorActivityOutbox(this.conversationId, ids);
+    this.operatorActivityOutbox = [...new Set([
+      ...this.operatorActivityOutbox,
+      newOperatorActivityId(),
+    ])].slice(-MAX_OPERATOR_ACTIVITY_OUTBOX);
+    writeOperatorActivityOutbox(this.conversationId, this.operatorActivityOutbox);
     this.flushOperatorActivities();
   }
 
@@ -487,7 +492,7 @@ class CodexRealtimeClient {
 
   private async deliverOperatorActivities(): Promise<void> {
     while (this.snapshot.phase === "live" && this.realtimeSessionId) {
-      const operatorEventId = readOperatorActivityOutbox(this.conversationId)[0];
+      const operatorEventId = this.operatorActivityOutbox[0];
       if (!operatorEventId) {
         this.operatorActivityRetryMs = OPERATOR_ACTIVITY_RETRY_MIN_MS;
         return;
@@ -507,10 +512,8 @@ class CodexRealtimeClient {
         this.scheduleOperatorActivityRetry();
         return;
       }
-      writeOperatorActivityOutbox(
-        this.conversationId,
-        readOperatorActivityOutbox(this.conversationId).filter((candidate) => candidate !== operatorEventId),
-      );
+      this.operatorActivityOutbox = this.operatorActivityOutbox.filter((candidate) => candidate !== operatorEventId);
+      writeOperatorActivityOutbox(this.conversationId, this.operatorActivityOutbox);
       this.operatorActivityRetryMs = OPERATOR_ACTIVITY_RETRY_MIN_MS;
     }
   }

@@ -211,6 +211,24 @@ test("call teardown keeps an unacknowledged hash identity for the next live peer
   expect(dom.localStorage.length).toBe(0);
 });
 
+test("a live call still reports operator activity when browser storage rejects writes", async () => {
+  const peer = await liveCall("conversation_voice_storage_restricted");
+  const originalSetItem = dom.localStorage.setItem.bind(dom.localStorage);
+  dom.localStorage.setItem = () => {
+    throw new Error("storage is restricted");
+  };
+  try {
+    finished(peer, "user", "record this direct activity");
+    for (let index = 0; index < 4; index += 1) await Promise.resolve();
+  } finally {
+    dom.localStorage.setItem = originalSetItem;
+  }
+
+  const published = requests.filter((request) => request.action === "operatorActivity");
+  expect(published).toHaveLength(1);
+  expect(published[0]!.operatorEventId).toMatch(/^[a-f0-9]{64}$/);
+});
+
 test("streaming fragments and the agent's own speech publish nothing", async () => {
   const peer = await liveCall("conversation_voice_quiet");
   fragment(peer, "user", "look at");
