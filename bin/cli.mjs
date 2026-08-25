@@ -804,7 +804,7 @@ async function main() {
 
   const server = resolveServer(packageRoot);
   const runtimeHostConfig = cliRuntimeHostConfig(packageRoot);
-  const runtimeHostEnvironment = cliRuntimeHostEnvironment(process.env, runtimeHostConfig.socketPath);
+  const runtimeHostEnvironment = cliRuntimeHostEnvironment(process.env, runtimeHostConfig);
   const runtimeHostSupervisor = createRuntimeHostSupervisor(
     runtimeHostConfig,
     viewerServerBunRuntime(),

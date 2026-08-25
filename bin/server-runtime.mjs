@@ -60,8 +60,8 @@ export function viewerServerBunRuntime(options = {}) {
 /**
  * Resolve the runtime host the public CLI will supervise. Ordinary package
  * installs share the Viewer state directory while retaining distinct socket
- * ownership. Ambient deployment socket configuration never crosses this CLI
- * ownership boundary.
+ * and journal ownership. Ambient deployment runtime configuration never
+ * crosses this CLI ownership boundary.
  *
  * @param {string} packageRoot
  * @param {{ env?: Readonly<Record<string, string | undefined>>, home?: string }} [options]
@@ -76,6 +76,7 @@ export function cliRuntimeHostConfig(packageRoot, options = {}) {
   const source = join(packageRoot, "src", "runtime-host", "main.ts");
   return {
     socketPath: join(stateDirectory, `runtime-host-${installId}.sock`),
+    journalPath: join(stateDirectory, `runtime-events-${installId}.sqlite`),
     entrypoint: existsSync(bundled) ? bundled : source,
   };
 }
@@ -83,15 +84,18 @@ export function cliRuntimeHostConfig(packageRoot, options = {}) {
 /**
  * Environment shared by the supervised runtime host and the Viewer server.
  * The CLI is the structured-host activation boundary, including for callers
- * whose shell still carries one of the former rollback values.
+ * whose shell still carries one of the former rollback values. Its journal
+ * follows the same installation boundary as its socket, so a CLI host cannot
+ * claim an ambient deployment's host epoch through the shared state directory.
  *
  * @param {Readonly<Record<string, string | undefined>>} base
- * @param {string} socketPath
+ * @param {{ socketPath: string, journalPath: string }} config
  */
-export function cliRuntimeHostEnvironment(base, socketPath) {
+export function cliRuntimeHostEnvironment(base, config) {
   return {
     ...withoutWakatimeCredential(base),
-    LLV_RUNTIME_HOST_SOCKET: socketPath,
+    LLV_RUNTIME_HOST_SOCKET: config.socketPath,
+    LLV_RUNTIME_JOURNAL: config.journalPath,
     LLV_STRUCTURED_HOSTS: "1",
     LLV_RUNTIME_EVENTS: "1",
     LLV_SPAWN_TRANSPORT: "structured",

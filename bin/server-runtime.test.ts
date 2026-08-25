@@ -41,6 +41,7 @@ test("the CLI derives a distinct managed runtime host for each install", () => {
   const secondPackageRoot = path.join(sandbox, "second");
   const stateDirectory = path.join(sandbox, "state");
   const ambientSocket = path.join(sandbox, "operator-runtime.sock");
+  const ambientJournal = path.join(sandbox, "operator-runtime.sqlite");
   const firstBundle = path.join(firstPackageRoot, "dist", "runtime-host.mjs");
   const secondBundle = path.join(secondPackageRoot, "dist", "runtime-host.mjs");
   fs.mkdirSync(path.dirname(firstBundle), { recursive: true });
@@ -49,7 +50,11 @@ test("the CLI derives a distinct managed runtime host for each install", () => {
   fs.writeFileSync(secondBundle, "export {};\n");
   try {
     const options = {
-      env: { LLV_STATE_DIR: stateDirectory, LLV_RUNTIME_HOST_SOCKET: ambientSocket },
+      env: {
+        LLV_STATE_DIR: stateDirectory,
+        LLV_RUNTIME_HOST_SOCKET: ambientSocket,
+        LLV_RUNTIME_JOURNAL: ambientJournal,
+      },
       home: path.join(sandbox, "home"),
     };
     const first = cliRuntimeHostConfig(firstPackageRoot, options);
@@ -61,9 +66,16 @@ test("the CLI derives a distinct managed runtime host for each install", () => {
     expect(path.dirname(second.socketPath)).toBe(stateDirectory);
     expect(path.basename(first.socketPath)).toMatch(/^runtime-host-[a-f0-9]{16}\.sock$/);
     expect(path.basename(second.socketPath)).toMatch(/^runtime-host-[a-f0-9]{16}\.sock$/);
+    expect(path.dirname(first.journalPath)).toBe(stateDirectory);
+    expect(path.dirname(second.journalPath)).toBe(stateDirectory);
+    expect(path.basename(first.journalPath)).toMatch(/^runtime-events-[a-f0-9]{16}\.sqlite$/);
+    expect(path.basename(second.journalPath)).toMatch(/^runtime-events-[a-f0-9]{16}\.sqlite$/);
     expect(first.socketPath).not.toBe(second.socketPath);
+    expect(first.journalPath).not.toBe(second.journalPath);
     expect(first.socketPath).not.toBe(ambientSocket);
     expect(second.socketPath).not.toBe(ambientSocket);
+    expect(first.journalPath).not.toBe(ambientJournal);
+    expect(second.journalPath).not.toBe(ambientJournal);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
@@ -82,25 +94,30 @@ test("the CLI uses the source runtime host in a checkout", () => {
     });
     expect(config.entrypoint).toBe(source);
     expect(path.dirname(config.socketPath)).toBe(stateDirectory);
+    expect(path.dirname(config.journalPath)).toBe(stateDirectory);
   } finally {
     fs.rmSync(packageRoot, { recursive: true, force: true });
   }
 });
 
-test("the CLI runtime environment enables the host and strips ambient WakaTime credentials", () => {
+test("the CLI runtime environment owns its socket and journal and strips ambient WakaTime credentials", () => {
   const socketPath = "/runtime/viewer.sock";
+  const journalPath = "/runtime/viewer.sqlite";
   const env: Record<string, string | undefined> = cliRuntimeHostEnvironment({
     PATH: "/usr/bin",
+    LLV_RUNTIME_HOST_SOCKET: "/runtime/operator.sock",
+    LLV_RUNTIME_JOURNAL: "/runtime/operator.sqlite",
     LLV_STRUCTURED_HOSTS: "off",
     LLV_RUNTIME_EVENTS: "0",
     LLV_SPAWN_TRANSPORT: "tmux",
     NEXT_PUBLIC_RUNTIME_UI: "0",
     [WAKATIME_CREDENTIAL_ENV]: "fixture-value",
-  }, socketPath);
+  }, { socketPath, journalPath });
 
   expect(env).toMatchObject({
     PATH: "/usr/bin",
     LLV_RUNTIME_HOST_SOCKET: socketPath,
+    LLV_RUNTIME_JOURNAL: journalPath,
     LLV_STRUCTURED_HOSTS: "1",
     LLV_RUNTIME_EVENTS: "1",
     LLV_SPAWN_TRANSPORT: "structured",

@@ -124,10 +124,11 @@ feature-flag configuration.
 
 Agents launch through a structured runtime host. The installed CLI supervises
 that host with the same Bun executable as the Viewer and places its Unix socket
-under the Viewer state directory with an installation-specific name. Ambient
-deployment socket settings are ignored so separate bunx installations cannot
-attach to each other's host. Startup fails clearly when Bun, the packaged host
-entry, the managed socket, or its directory permissions are unavailable.
+and runtime journal under the Viewer state directory with installation-specific
+names. Ambient deployment runtime settings are ignored so separate bunx
+installations cannot attach to each other's host or claim each other's journal
+epoch. Startup fails clearly when Bun, the packaged host entry, the managed
+socket, or its directory permissions are unavailable.
 The CLI log carries the host failure and the pipeline card directs the operator
 to it. There is no tmux fallback.
 

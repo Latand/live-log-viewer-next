@@ -18,6 +18,7 @@ import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
 import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
+import { supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
 import { redactBounded } from "@/lib/monitor/redact";
 import { parseReview, type ReviewFinding } from "@/lib/review";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
@@ -306,7 +307,7 @@ async function spawnPipelineAgent(
 
   const spec = { ...specBase, launchProfile };
   const client = runtimeHostClient();
-  const unavailable = "pipeline structured runtime host is unavailable; start agent-log-viewer through its CLI and check the CLI log for the host startup failure";
+  const unavailable = supervisedRuntimeHostUnavailableReason("pipeline structured runtime host");
   if (!client) throw new Error(unavailable);
   let response: Awaited<ReturnType<typeof spawnStructuredConversation>>;
   try {
