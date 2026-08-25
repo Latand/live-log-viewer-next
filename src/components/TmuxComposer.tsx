@@ -1014,22 +1014,23 @@ export function TmuxComposer(props: TmuxComposerProps) {
     portals the form into) and the props the composer needs, republished every
     render because `file` is a fresh snapshot each board poll. */
 function VoiceComposerCardSlot({ cardId, composerProps, primary }: { cardId: string; composerProps: TmuxComposerProps; primary: boolean }) {
+  const placeId = useId();
   const publishNode = useCallback(
     (node: HTMLDivElement | null) => {
       if (!node) return undefined;
-      return publishVoiceComposerCardNode(cardId, node, primary);
+      return publishVoiceComposerCardNode(cardId, node, primary, placeId);
     },
-    [cardId, primary],
+    [cardId, placeId, primary],
   );
   useEffect(() => {
-    publishVoiceComposerCardProps(cardId, {
+    publishVoiceComposerCardProps(cardId, placeId, {
       file: composerProps.file,
       pollPaused: composerProps.pollPaused ?? false,
       deadHost: composerProps.deadHost ?? false,
       sendBlockedReason: composerProps.sendBlockedReason ?? null,
       placeholder: composerProps.placeholder,
     });
-  });
+  }, [cardId, composerProps.deadHost, composerProps.file, composerProps.placeholder, composerProps.pollPaused, composerProps.sendBlockedReason, placeId]);
   return <div ref={publishNode} data-testid="voice-composer-card-slot" className="contents" />;
 }
 

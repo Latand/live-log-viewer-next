@@ -4,9 +4,12 @@ import { Window } from "happy-dom";
 import {
   getVoiceComposerCardIds,
   getVoiceComposerCardNode,
+  getVoiceComposerCardProps,
   publishVoiceComposerCardNode,
+  publishVoiceComposerCardProps,
   resetVoiceSlotsForTest,
 } from "./voiceSlots";
+import type { FileEntry } from "@/lib/types";
 
 /*
  * Several surfaces can be on screen for ONE conversation at once — the board
@@ -22,6 +25,13 @@ const node = (id: string) => {
   element.id = id;
   return element as unknown as HTMLElement;
 };
+const props = (placeholder?: string) => ({
+  file: {} as FileEntry,
+  pollPaused: false,
+  deadHost: false,
+  sendBlockedReason: null,
+  placeholder,
+});
 
 afterEach(() => resetVoiceSlotsForTest());
 
@@ -65,6 +75,20 @@ test("retracting the primary hands the composer back to the ordinary card", () =
   retractDock();
 
   expect(getVoiceComposerCardNode("conversation_a")).toBe(board);
+});
+
+test("a primary place keeps its placeholder when an ordinary card publishes later", () => {
+  const dock = node("dock");
+  const board = node("board");
+  const retractDock = publishVoiceComposerCardNode("conversation_a", dock, true, "dock");
+  publishVoiceComposerCardNode("conversation_a", board, false, "board");
+  publishVoiceComposerCardProps("conversation_a", "dock", props("what should get done in Atlas?"));
+  publishVoiceComposerCardProps("conversation_a", "board", props());
+
+  expect(getVoiceComposerCardProps("conversation_a")?.placeholder).toBe("what should get done in Atlas?");
+
+  retractDock();
+  expect(getVoiceComposerCardProps("conversation_a")?.placeholder).toBeUndefined();
 });
 
 test("the last place leaving removes the conversation entirely", () => {
