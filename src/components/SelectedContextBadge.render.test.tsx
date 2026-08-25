@@ -48,11 +48,16 @@ test("a selected card renders its label and an accessible description", () => {
   expect(html).toMatch(/aria-label="[^"]*Worker A[^"]*"/);
 });
 
-test("an explicit empty selection renders its own visible state, not nothing", () => {
+/* #1148: the operator asked what the eye chip over every message was for. An
+   explicit empty selection remains a fact of the persisted reference, which is
+   where anything needing it reads it from. The badge names a card or renders
+   nothing at all, visibly and to a screen reader alike. */
+test("an explicit empty selection renders nothing at all", () => {
   setLocale("en");
-  const html = renderToStaticMarkup(<SelectedContextBadge reference={empty()} />);
-  expect(html).toContain("Nothing selected");
-  expect(html).toMatch(/aria-label="[^"]*"/);
+  expect(renderToStaticMarkup(<SelectedContextBadge reference={empty()} />)).toBe("");
+  setLocale("uk");
+  expect(renderToStaticMarkup(<SelectedContextBadge reference={empty()} />)).toBe("");
+  setLocale("en");
 });
 
 test("a card the view could only name by id still identifies itself", () => {
@@ -65,21 +70,24 @@ test("no reference renders nothing at all", () => {
   expect(renderToStaticMarkup(<SelectedContextBadge reference={null} />)).toBe("");
 });
 
-test("a stale reference is marked, and says so in its accessible text", () => {
+test("a stale reference is struck through, and says so in its accessible text", () => {
   setLocale("en");
   const html = renderToStaticMarkup(<SelectedContextBadge reference={reference()} stale />);
+  expect(html).toContain("Worker A");
+  expect(html).toContain("line-through");
+  expect(html).toContain('data-selected-context-stale="true"');
   expect(html.toLowerCase()).toContain("stale");
 });
 
-test("Ukrainian renders translated copy for both states", () => {
+test("Ukrainian renders translated copy for the state it has", () => {
   setLocale("uk");
   const selected = renderToStaticMarkup(<SelectedContextBadge reference={reference()} />);
-  const none = renderToStaticMarkup(<SelectedContextBadge reference={empty()} />);
+  const stale = renderToStaticMarkup(<SelectedContextBadge reference={reference()} stale />);
   setLocale("en");
   expect(selected).toContain("Worker A");
   expect(selected).not.toContain("Selected card");
-  expect(none).not.toContain("Nothing selected");
-  expect(none).toMatch(/[Ѐ-ӿ]/);
+  expect(selected).toMatch(/[Ѐ-ӿ]/);
+  expect(stale).toContain("застаріле");
 });
 
 test("the badge never renders transcript content — it has none to render", () => {
