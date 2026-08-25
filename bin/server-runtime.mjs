@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export const WAKATIME_CREDENTIAL_ENV = "WAKATIME_API_KEY";
 
@@ -58,8 +59,9 @@ export function viewerServerBunRuntime(options = {}) {
 
 /**
  * Resolve the runtime host the public CLI will supervise. Ordinary package
- * installs use their own state directory; tests and custom installations may
- * override the socket path while retaining CLI ownership.
+ * installs share the Viewer state directory while retaining distinct socket
+ * ownership. Ambient deployment socket configuration never crosses this CLI
+ * ownership boundary.
  *
  * @param {string} packageRoot
  * @param {{ env?: Readonly<Record<string, string | undefined>>, home?: string }} [options]
@@ -67,13 +69,13 @@ export function viewerServerBunRuntime(options = {}) {
 export function cliRuntimeHostConfig(packageRoot, options = {}) {
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
-  const configuredSocket = env.LLV_RUNTIME_HOST_SOCKET?.trim();
   const stateDirectory = env.LLV_STATE_DIR?.trim()
     || join(env.XDG_CONFIG_HOME?.trim() || join(home, ".config"), "agent-log-viewer", "state");
+  const installId = createHash("sha256").update(resolve(packageRoot)).digest("hex").slice(0, 16);
   const bundled = join(packageRoot, "dist", "runtime-host.mjs");
   const source = join(packageRoot, "src", "runtime-host", "main.ts");
   return {
-    socketPath: configuredSocket || join(stateDirectory, "runtime-host.sock"),
+    socketPath: join(stateDirectory, `runtime-host-${installId}.sock`),
     entrypoint: existsSync(bundled) ? bundled : source,
   };
 }
@@ -92,5 +94,7 @@ export function cliRuntimeHostEnvironment(base, socketPath) {
     LLV_RUNTIME_HOST_SOCKET: socketPath,
     LLV_STRUCTURED_HOSTS: "1",
     LLV_RUNTIME_EVENTS: "1",
+    LLV_SPAWN_TRANSPORT: "structured",
+    NEXT_PUBLIC_RUNTIME_UI: "1",
   };
 }

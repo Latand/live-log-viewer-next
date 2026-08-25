@@ -11,6 +11,7 @@ import { loadFlows } from "@/lib/flows/store";
 import { loadArchivedPipelines, loadPipelines } from "@/lib/pipelines/store";
 import { structuredHostsEnabled as structuredHostsEnabledInApp } from "@/lib/runtime/flags";
 import { loadWorkflows } from "@/lib/workflows/store";
+import { RuntimeHostFence } from "@/runtime-host/runtimeHostFence";
 
 import {
   cliRuntimeHostConfig,
@@ -34,36 +35,53 @@ async function availablePort(): Promise<number> {
   return address.port;
 }
 
-test("the CLI derives a managed runtime host from the install state directory", () => {
-  const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-package-"));
-  const configRoot = path.join(packageRoot, "config");
-  const bundle = path.join(packageRoot, "dist", "runtime-host.mjs");
-  fs.mkdirSync(path.dirname(bundle), { recursive: true });
-  fs.writeFileSync(bundle, "export {};\n");
+test("the CLI derives a distinct managed runtime host for each install", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-package-"));
+  const firstPackageRoot = path.join(sandbox, "first");
+  const secondPackageRoot = path.join(sandbox, "second");
+  const stateDirectory = path.join(sandbox, "state");
+  const ambientSocket = path.join(sandbox, "operator-runtime.sock");
+  const firstBundle = path.join(firstPackageRoot, "dist", "runtime-host.mjs");
+  const secondBundle = path.join(secondPackageRoot, "dist", "runtime-host.mjs");
+  fs.mkdirSync(path.dirname(firstBundle), { recursive: true });
+  fs.mkdirSync(path.dirname(secondBundle), { recursive: true });
+  fs.writeFileSync(firstBundle, "export {};\n");
+  fs.writeFileSync(secondBundle, "export {};\n");
   try {
-    expect(cliRuntimeHostConfig(packageRoot, {
-      env: { XDG_CONFIG_HOME: configRoot },
-      home: path.join(packageRoot, "home"),
-    })).toEqual({
-      socketPath: path.join(configRoot, "agent-log-viewer", "state", "runtime-host.sock"),
-      entrypoint: bundle,
-    });
+    const options = {
+      env: { LLV_STATE_DIR: stateDirectory, LLV_RUNTIME_HOST_SOCKET: ambientSocket },
+      home: path.join(sandbox, "home"),
+    };
+    const first = cliRuntimeHostConfig(firstPackageRoot, options);
+    const second = cliRuntimeHostConfig(secondPackageRoot, options);
+
+    expect(first.entrypoint).toBe(firstBundle);
+    expect(second.entrypoint).toBe(secondBundle);
+    expect(path.dirname(first.socketPath)).toBe(stateDirectory);
+    expect(path.dirname(second.socketPath)).toBe(stateDirectory);
+    expect(path.basename(first.socketPath)).toMatch(/^runtime-host-[a-f0-9]{16}\.sock$/);
+    expect(path.basename(second.socketPath)).toMatch(/^runtime-host-[a-f0-9]{16}\.sock$/);
+    expect(first.socketPath).not.toBe(second.socketPath);
+    expect(first.socketPath).not.toBe(ambientSocket);
+    expect(second.socketPath).not.toBe(ambientSocket);
   } finally {
-    fs.rmSync(packageRoot, { recursive: true, force: true });
+    fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
 
-test("the CLI uses the source runtime host in a checkout and honors a socket override", () => {
+test("the CLI uses the source runtime host in a checkout", () => {
   const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-source-"));
   const source = path.join(packageRoot, "src", "runtime-host", "main.ts");
-  const socketPath = path.join(packageRoot, "external.sock");
+  const stateDirectory = path.join(packageRoot, "state");
   fs.mkdirSync(path.dirname(source), { recursive: true });
   fs.writeFileSync(source, "export {};\n");
   try {
-    expect(cliRuntimeHostConfig(packageRoot, {
-      env: { LLV_RUNTIME_HOST_SOCKET: `  ${socketPath}  ` },
+    const config = cliRuntimeHostConfig(packageRoot, {
+      env: { LLV_STATE_DIR: stateDirectory },
       home: path.join(packageRoot, "home"),
-    })).toEqual({ socketPath, entrypoint: source });
+    });
+    expect(config.entrypoint).toBe(source);
+    expect(path.dirname(config.socketPath)).toBe(stateDirectory);
   } finally {
     fs.rmSync(packageRoot, { recursive: true, force: true });
   }
@@ -75,6 +93,8 @@ test("the CLI runtime environment enables the host and strips ambient WakaTime c
     PATH: "/usr/bin",
     LLV_STRUCTURED_HOSTS: "off",
     LLV_RUNTIME_EVENTS: "0",
+    LLV_SPAWN_TRANSPORT: "tmux",
+    NEXT_PUBLIC_RUNTIME_UI: "0",
     [WAKATIME_CREDENTIAL_ENV]: "fixture-value",
   }, socketPath);
 
@@ -83,9 +103,58 @@ test("the CLI runtime environment enables the host and strips ambient WakaTime c
     LLV_RUNTIME_HOST_SOCKET: socketPath,
     LLV_STRUCTURED_HOSTS: "1",
     LLV_RUNTIME_EVENTS: "1",
+    LLV_SPAWN_TRANSPORT: "structured",
+    NEXT_PUBLIC_RUNTIME_UI: "1",
   });
   expect(env[WAKATIME_CREDENTIAL_ENV]).toBeUndefined();
 });
+
+test("the CLI rejects a ready runtime socket owned by another process", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-incumbent-"));
+  const packageRoot = path.resolve(import.meta.dir, "..");
+  const stateDirectory = path.join(sandbox, "state");
+  const environment: Record<string, string | undefined> = {
+    ...process.env,
+    HOME: path.join(sandbox, "home"),
+    XDG_CONFIG_HOME: path.join(sandbox, "config"),
+    LLV_STATE_DIR: stateDirectory,
+    TMPDIR: path.join(sandbox, "tmp"),
+    LLV_LANG: "en",
+    LLV_RUNTIME_HOST_FENCE_WAIT_MS: "0",
+  };
+  const socketPath = cliRuntimeHostConfig(packageRoot, { env: environment, home: environment.HOME }).socketPath;
+  const fence = new RuntimeHostFence(`${socketPath}.lock`);
+  const listener = net.createServer((socket) => socket.end());
+  fs.mkdirSync(environment.HOME!, { recursive: true });
+  fs.mkdirSync(environment.XDG_CONFIG_HOME!, { recursive: true });
+  fs.mkdirSync(environment.TMPDIR!, { recursive: true });
+  fence.acquire();
+  await new Promise<void>((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(socketPath, resolve);
+  });
+
+  const child = Bun.spawn([
+    process.execPath,
+    "--bun",
+    path.join(import.meta.dir, "cli.mjs"),
+    "--no-open",
+    "--port",
+    String(await availablePort()),
+  ], { cwd: packageRoot, env: environment, stdout: "pipe", stderr: "pipe" });
+  try {
+    const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Couldn't start the structured runtime host");
+    expect(stderr).toContain(`runtime host socket is owned by pid ${process.pid}`);
+    expect(stderr).toContain("stop the other agent-log-viewer instance");
+  } finally {
+    if (!child.killed) child.kill();
+    await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+    fence.release();
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}, 10_000);
 
 test("the CLI names a missing Bun prerequisite before starting the Viewer", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-missing-bun-"));

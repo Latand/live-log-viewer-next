@@ -84,6 +84,7 @@ Options:
     runtimeHostStartFail: (detail) => `Couldn't start the structured runtime host: ${detail}`,
     runtimeHostTimeout: (socketPath) => `the runtime host did not bind ${socketPath} within ${RUNTIME_HOST_READINESS_TIMEOUT_MS / 1_000} seconds; check the socket directory permissions`,
     runtimeHostExited: (detail) => `the runtime host exited before its socket was ready${detail ? `: ${detail}` : ""}`,
+    runtimeHostOwnerMismatch: (ownerPid, childPid) => `the runtime host socket is owned by pid ${ownerPid}, while this CLI spawned pid ${childPid}; stop the other agent-log-viewer instance for this installation and try again`,
     runtimeHostRestart: (delay, detail) => `[runtime host] ${detail}; restarting in ${delay}ms`,
     runtimeHostRestartFail: (detail) => `[runtime host] restart failed: ${detail}`,
   },
@@ -121,6 +122,7 @@ Options:
     runtimeHostStartFail: (detail) => `Не вдалося запустити structured runtime host: ${detail}`,
     runtimeHostTimeout: (socketPath) => `runtime host не створив ${socketPath} за ${RUNTIME_HOST_READINESS_TIMEOUT_MS / 1_000} секунд; перевірте права каталогу сокета`,
     runtimeHostExited: (detail) => `runtime host завершився до готовності сокета${detail ? `: ${detail}` : ""}`,
+    runtimeHostOwnerMismatch: (ownerPid, childPid) => `сокетом runtime host володіє процес ${ownerPid}, а цей CLI запустив процес ${childPid}; зупиніть інший agent-log-viewer для цієї інсталяції та повторіть спробу`,
     runtimeHostRestart: (delay, detail) => `[runtime host] ${detail}; повторний запуск за ${delay} мс`,
     runtimeHostRestartFail: (detail) => `[runtime host] помилка повторного запуску: ${detail}`,
   },
@@ -409,6 +411,18 @@ function probeRuntimeHost(socketPath) {
   });
 }
 
+function runtimeHostFenceOwner(socketPath) {
+  try {
+    const owner = JSON.parse(readFileSync(`${socketPath}.lock`, "utf8"));
+    if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 1) return null;
+    if (typeof owner.startIdentity !== "string" || !owner.startIdentity.startsWith(`${owner.pid}:`)) return null;
+    if (typeof owner.acquisitionId !== "string" || owner.acquisitionId.length < 16) return null;
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
 function runtimeHostExitDetail(processHandle) {
   const { child, state } = processHandle;
   if (state.spawnError) {
@@ -435,7 +449,12 @@ async function waitForRuntimeHost(socketPath, processHandle = null) {
     if (processHandle && (processHandle.child.exitCode !== null || processHandle.child.signalCode !== null)) {
       throw new Error(m.runtimeHostExited(runtimeHostExitDetail(processHandle)));
     }
-    if (await probeRuntimeHost(socketPath)) return;
+    if (await probeRuntimeHost(socketPath)) {
+      const owner = runtimeHostFenceOwner(socketPath);
+      if (!processHandle) return;
+      if (owner?.pid === processHandle.child.pid) return;
+      if (owner) throw new Error(m.runtimeHostOwnerMismatch(owner.pid, processHandle.child.pid));
+    }
     await wait(RUNTIME_HOST_READINESS_INTERVAL_MS);
   }
   throw new Error(m.runtimeHostTimeout(socketPath));

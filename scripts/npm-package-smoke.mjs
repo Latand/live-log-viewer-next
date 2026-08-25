@@ -7,6 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { cliRuntimeHostConfig } from "../bin/server-runtime.mjs";
+
 const scriptPath = fileURLToPath(import.meta.url);
 const root = path.resolve(path.dirname(scriptPath), "..");
 const standaloneServer = path.join(root, "dist/standalone/server.js");
@@ -538,7 +540,10 @@ async function main() {
     await waitForOk(cliPort, "/api/files", server, safeOutput);
     const cliFailure = workerFailure(safeOutput());
     if (cliFailure) throw new Error(`worker failure during CLI smoke: ${cliFailure}`);
-    const socketPath = path.join(stateDirectory, "runtime-host.sock");
+    const socketPath = cliRuntimeHostConfig(extractedPackage, {
+      env: runtimeEnvironment,
+      home: homeDirectory,
+    }).socketPath;
     const firstRuntimeHostPid = await waitForRuntimeHostPid(socketPath, server, safeOutput);
     if (firstRuntimeHostPid === process.pid || firstRuntimeHostPid === server.pid) {
       throw new Error("runtime host fence points at the smoke runner or Viewer process");

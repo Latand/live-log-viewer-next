@@ -124,10 +124,10 @@ feature-flag configuration.
 
 Agents launch through a structured runtime host. The installed CLI supervises
 that host with the same Bun executable as the Viewer and places its Unix socket
-under the Viewer state directory. `LLV_RUNTIME_HOST_SOCKET` can point the CLI at
-an alternate socket path while the CLI retains host ownership. Startup fails
-clearly when Bun, the packaged host entry, the configured socket, or its
-directory permissions are unavailable.
+under the Viewer state directory with an installation-specific name. Ambient
+deployment socket settings are ignored so separate bunx installations cannot
+attach to each other's host. Startup fails clearly when Bun, the packaged host
+entry, the managed socket, or its directory permissions are unavailable.
 The CLI log carries the host failure and the pipeline card directs the operator
 to it. There is no tmux fallback.
 
@@ -396,7 +396,6 @@ All optional. Transcription variables are documented in full in
 | --- | --- |
 | `VIEWER_PROC_BACKEND` | `portable` or `linux` — force the process-discovery backend (auto-selected by default). |
 | `LLV_LANG` | `uk` or `en` — force the CLI message language. |
-| `LLV_RUNTIME_HOST_SOCKET` | Unix socket path for the CLI-supervised runtime host. Unset places it under the Viewer state directory. |
 | `LLV_TRANSCRIBE_BACKEND` | `local`, `chatgpt`, or `elevenlabs` — pick the dictation backend (default `local`). |
 | `LLV_WHISPER_MODEL` | faster-whisper model size (default `small`). |
 | `LLV_WHISPER_DEVICE` | `cpu` (default) or `cuda`. |
