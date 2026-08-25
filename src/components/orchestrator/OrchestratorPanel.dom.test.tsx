@@ -290,6 +290,15 @@ function confirmButton(host: HTMLElement): HTMLButtonElement {
   return host.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement;
 }
 
+/** The disclosure the built-in mandate lives behind (#1163). */
+function mandateRules(host: HTMLElement): HTMLElement {
+  return host.querySelector("[data-orchestrator-mandate-details]") as HTMLElement;
+}
+
+function rulesSummary(host: HTMLElement): string {
+  return mandateRules(host).querySelector("summary")?.textContent ?? "";
+}
+
 /** Typing, the way this repo's DOM tests type: happy-dom does not carry React's
     value tracker, so the field's own onChange is invoked with the new value. */
 function type(field: HTMLTextAreaElement, value: string): void {
@@ -348,6 +357,70 @@ test("an unedited mandate records the approved prompt version", async () => {
   /* Whatever the approved prompt currently is — the panel reports the
      constant, never a number of its own. */
   expect(seatPosts[0]!.promptVersion).toBe(ORCHESTRATOR_PROMPT_VERSION);
+});
+
+test("the draft opens on the plain intro with the built-in rules COLLAPSED — and confirm still posts them unchanged", async () => {
+  const host = mount();
+  await settle();
+  flushSync(() => undefined);
+
+  /* What an operator meets first: what they say to it, what it does with that,
+     and that it acts on its own — never 58 lines of rules (#1163). */
+  const intro = host.querySelector("[data-orchestrator-intro]")?.textContent ?? "";
+  expect(intro).toContain("You talk to it like a colleague");
+  expect(intro).toContain("merges on APPROVE");
+  expect(intro).toContain("it deploys on its own");
+  /* Copy, not a gate: it says when one agent is the better answer, above a
+     button that stays exactly as pressable as it was. */
+  expect(host.querySelector("[data-orchestrator-one-task]")?.textContent).toContain("One task?");
+  expect(confirmButton(host).disabled).toBe(false);
+
+  expect(mandateRules(host).hasAttribute("open")).toBe(false);
+  expect(rulesSummary(host)).toBe(`Mandate v${ORCHESTRATOR_PROMPT_VERSION} — built-in operating rules (edit)`);
+
+  /* Folded away and delivered verbatim: the disclosure hides the text, it never
+     edits it (PRD #976 decision 3). */
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts[0]!.mandate).toBe(ORCHESTRATOR_SYSTEM_PROMPT.trim());
+  expect(seatPosts[0]!.promptVersion).toBe(ORCHESTRATOR_PROMPT_VERSION);
+});
+
+test("an edited mandate expands the rules, drops the version claim, and comes back expanded", async () => {
+  const host = mount();
+  await settle();
+
+  type(host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement, "You run Atlas. Talk to me here.");
+  await settle();
+  flushSync(() => undefined);
+
+  expect(mandateRules(host).hasAttribute("open")).toBe(true);
+  /* Edited text is the operator's own and claims no version — the summary says
+     so rather than labelling their words as the built-in ones. */
+  expect(rulesSummary(host)).toBe("Mandate — your own operating rules (edit)");
+
+  /* The draft survives in sessionStorage, so the panel reopened on it lands on
+     the same edit — with it in view, not folded back out of sight. */
+  const next = remount();
+  await settle();
+  flushSync(() => undefined);
+  expect((next.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe("You run Atlas. Talk to me here.");
+  expect(mandateRules(next).hasAttribute("open")).toBe(true);
+});
+
+test("a designation that fails expands the rules over the error — the text to fix is never behind a click", async () => {
+  seatResponses = [{ status: 400, body: { error: "orchestrator cwd could not be resolved", code: "cwd_unresolved" } }];
+  const host = mount();
+  await settle();
+  expect(mandateRules(host).hasAttribute("open")).toBe(false);
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("intent-error");
+  expect(mandateRules(host).hasAttribute("open")).toBe(true);
+  expect((host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
 });
 
 test("a double-click designates ONCE and a retry after a lost reply replays the same key", async () => {
@@ -656,6 +729,11 @@ test("Rotate opens the SAME draft, prefilled from the incumbent, over the conver
   /* The incumbent's own mandate, editable — the handoff is the server's job. */
   const mandate = host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
   expect(mandate.value).toBe("run it");
+  /* A rotation is not an introduction: this operator already has one running,
+     and the rules behind the summary are ITS mandate's version, not the
+     built-in prompt's (#1163). */
+  expect(host.querySelector("[data-orchestrator-intro]")).toBeNull();
+  expect(rulesSummary(host)).toBe("Mandate v3 — built-in operating rules (edit)");
   expect(host.textContent).not.toContain("Handoff from your predecessor");
   /* The account picker opens on the account the incumbent is running under. */
   const account = host.querySelector('select[aria-label*="Claude"]') as HTMLSelectElement;
