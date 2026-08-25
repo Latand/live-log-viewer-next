@@ -388,7 +388,7 @@ export function OrchestratorPanel({
               onCancel={() => setRotateFrom(null)}
             />
           ) : file ? (
-            <OrchestratorConversation file={file} />
+            <OrchestratorConversation file={file} projectName={projectName} />
           ) : (
             <Centered>
               <LoaderCircle className="h-5 w-5 animate-spin text-muted" aria-hidden />

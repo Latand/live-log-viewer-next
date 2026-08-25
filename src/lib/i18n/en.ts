@@ -372,6 +372,7 @@ export const en = {
   "composer.placeholderSpawn": "prompt — the agent will start…",
   "composer.placeholderResolving": "message the agent — reconnecting to its session…",
   "composer.placeholderSend": "message the agent…",
+  "composer.placeholderOrchestrator": "what should get done in {project}?",
   "composer.textAria": "Text for the agent",
   /* Chat-first mobile composer (issue #419 reopened): the model/reasoning +
      attachment second row folds behind this compact primary-row action so the

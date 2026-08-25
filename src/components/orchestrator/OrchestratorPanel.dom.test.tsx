@@ -463,7 +463,7 @@ test("an active seat mounts the REAL conversation column — feed and composer, 
   expect(panelState(host)).toBe("live");
   expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
   expect(host.querySelector("[data-agent-control-strip]")).not.toBeNull();
-  expect(host.querySelector("textarea")).not.toBeNull();
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).placeholder).toBe("what should get done in Atlas?");
   /* No draft on a seated project: a second create is not offered at all. */
   expect(confirmButton(host)).toBeNull();
 });
