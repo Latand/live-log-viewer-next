@@ -57,16 +57,23 @@ mock.module("@/hooks/useRuntime", () => ({
   useRuntimeReceiptsForArtifact: () => [],
   useRuntimeFlow: () => null,
 }));
+/** What the feed already holds for a path. The real hook keeps exactly this —
+    a browser-wide per-path snapshot of the tail (`useLogTail`'s own cache),
+    read synchronously on mount — which is why a re-seated conversation view
+    repaints a transcript this tab has already read (#1149). */
+const tailLines = new Map<string, string[]>();
 mock.module("@/hooks/useLogTail", () => ({
-  useLogTail: () => ({
-    lines: [], linesStart: 0, size: 0, loading: false, error: null, tickTime: null,
+  ...actualLogTail,
+  useLogTail: (file: FileEntry | null) => ({
+    lines: (file && tailLines.get(file.path)) ?? [], linesStart: 0, size: 0, loading: false, error: null, tickTime: null,
     paused: false, setPaused: () => undefined, clear: () => undefined,
     hasMore: false, loadingOlder: false, loadOlder: async () => 0, prependGen: 0,
   }),
 }));
 
 const { OrchestratorPanel } = await import("./OrchestratorPanel");
-const { SEAT_POLL_MS } = await import("./useOrchestratorSeat");
+const { SEAT_POLL_MS, resetOrchestratorSeatCacheForTests } = await import("./useOrchestratorSeat");
+const { resetOrchestratorIncumbentCacheForTests } = await import("./useOrchestratorIncumbent");
 
 const accounts = {
   claude: { active: "primary", accounts: [{ id: "primary", label: "primary", authPresent: true }, { id: "spare", label: "spare", authPresent: true }] },
@@ -107,13 +114,20 @@ function installFetch(): void {
       rotatePosts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return answer(rotateResponses);
     }
+    /* Both reads are per-project, and only atlas has an orchestrator here, so
+       a switch away genuinely lands on another project's own answer. */
     if (url.startsWith("/api/orchestrator/seat/status")) {
-      return { ok: true, status: 200, json: async () => incumbentStatus } as Response;
+      const target = new URL(url, "http://localhost").searchParams.get("project");
+      return { ok: true, status: 200, json: async () => (target === "atlas" ? incumbentStatus : { project: target, designated: false, rotation: null, context: null }) } as Response;
     }
     if (url.startsWith("/api/orchestrator/seat?")) {
-      return { ok: true, status: 200, json: async () => seatStatus } as Response;
+      const target = new URL(url, "http://localhost").searchParams.get("project");
+      return { ok: true, status: 200, json: async () => (target === "atlas" ? seatStatus : { seat: null, pending: null, exists: true }) } as Response;
     }
     if (url === "/api/accounts") return { ok: true, status: 200, json: async () => accounts } as Response;
+    /* No voice backend in a DOM test, so a transcript's speak control renders
+       nothing rather than reading a shape the catch-all below cannot supply. */
+    if (url.startsWith("/api/tts/")) return { ok: false, status: 404, json: async () => ({}) } as Response;
     if (url.startsWith("/api/spawn")) {
       spawnPosts += 1;
       return { ok: true, status: 200, json: async () => ({}) } as Response;
@@ -192,6 +206,11 @@ const orchestratorFile: FileEntry = {
 
 const roots = new Set<Root>();
 beforeEach(() => {
+  /* Both answer caches are this TAB's memory (#1149), so each test starts as a
+     tab that has never read a seat. */
+  resetOrchestratorSeatCacheForTests();
+  resetOrchestratorIncumbentCacheForTests();
+  tailLines.clear();
   seatStatus = { seat: null, pending: null, exists: true };
   incumbentStatus = { project: "atlas", designated: false, rotation: null, context: null };
   seatPosts = [];
@@ -238,6 +257,28 @@ function remount(files: FileEntry[] = []): HTMLElement {
   roots.clear();
   dom.document.body.replaceChildren();
   return mount(files);
+}
+
+/** One dock's panel across a project switch: the SAME root, the panel re-seated
+    under `key={project}` exactly as `OrchestratorDock` mounts it. */
+function mountDock(files: FileEntry[]) {
+  const host = dom.document.createElement("div");
+  dom.document.body.append(host);
+  const root = createRoot(host as unknown as HTMLElement);
+  roots.add(root);
+  return {
+    host: host as unknown as HTMLElement,
+    open: (project: string) => flushSync(() => root.render(
+      <OrchestratorPanel
+        key={project}
+        project={project}
+        projectName={project}
+        projectCwd={`/repos/${project}`}
+        files={files}
+        onClose={() => undefined}
+      />,
+    )),
+  };
 }
 
 function panelState(host: HTMLElement): string | null {
@@ -891,3 +932,41 @@ test("the draft a closed conversation returns to can actually create — it says
   await settle();
   expect(seatPosts[0]!.replaceIncumbent).toBeUndefined();
 }, SEAT_POLL_MS + 4_000);
+
+test("coming back to a project paints its conversation in the first commit, transcript and all", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent();
+  tailLines.set(orchestratorFile.path, [
+    JSON.stringify({ type: "assistant", uuid: "uuid-atlas-1", timestamp: "2026-08-13T10:05:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "Atlas mandate accepted." }] } }),
+  ]);
+
+  const dock = mountDock([orchestratorFile]);
+  dock.open("atlas");
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(dock.host)).toBe("live");
+  expect(dock.host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+  expect(dock.host.textContent).toContain("Atlas mandate accepted.");
+
+  /* A project with no orchestrator of its own: its own draft, its own read. */
+  dock.open("borealis");
+  await settle();
+  expect(panelState(dock.host)).toBe("draft");
+
+  /* Back to atlas. Nothing is awaited: this is the frame the switch itself
+     produced, so no round trip can have contributed to it. The conversation is
+     mounted on the same file with the transcript it was left showing — never
+     a loading state, never a blank column that fills in a moment later. */
+  dock.open("atlas");
+  expect(panelState(dock.host)).toBe("live");
+  expect(dock.host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+  expect(dock.host.textContent).toContain("Atlas mandate accepted.");
+  /* The incumbent header is whole too — the model is read, not degraded to the
+     dash a fresh 60s-cadence status read would leave for a minute. */
+  expect(dock.host.textContent).toContain("opus");
+
+  /* The poll behind that paint still runs, and lands in place. */
+  seatStatus = { seat: activeSeat({ conversationId: "conversation_successor", path: "/transcripts/successor.jsonl" }), pending: null, exists: true };
+  await settle();
+  expect(panelState(dock.host)).toBe("live");
+});

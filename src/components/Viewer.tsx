@@ -33,7 +33,7 @@ import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
 import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows";
 import { KeepAwakeProvider } from "./KeepAwakeControl";
-import { OrchestratorDock, OPEN_KEY as ORCHESTRATOR_OPEN_KEY } from "./orchestrator/OrchestratorDock";
+import { OrchestratorDock, dockOpenFor, rememberDockOpen } from "./orchestrator/OrchestratorDock";
 import { OverviewBoard } from "./OverviewBoard";
 import { GlobalSearch, transcriptFocusHash } from "./search/GlobalSearch";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
@@ -206,10 +206,19 @@ export function Viewer() {
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
   /* The per-project orchestrator dock (PRD #976 slice A). Its open state is the
-     operator's, persisted like the panel's width; the server render and the
-     first client render agree on «closed», and the mount effect below applies
-     what was stored — the same shape the project restore uses. */
+     operator's and belongs to the PROJECT (#1149), exactly as the dock's width
+     does (#1011): the server render and the first client render agree on
+     «closed» (the Overview, which has no dock), and every project that comes
+     after answers for itself in the render below. */
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
+  /* The project the open state above was read for. A switch re-reads during
+     render, so the dock the operator closed in one project stays closed there
+     and nowhere else, with no frame of the previous project's answer. */
+  const [orchestratorOpenProject, setOrchestratorOpenProject] = useState(OVERVIEW);
+  if (orchestratorOpenProject !== project) {
+    setOrchestratorOpenProject(project);
+    setOrchestratorOpen(dockOpenFor(project));
+  }
   /* The ONE global message search (issue #1054). It is shell state, not board
      state: the same overlay answers from the overview, from any project and on
      the phone, and it unmounts on close so every open starts on «my messages»
@@ -260,8 +269,9 @@ export function Viewer() {
     const initial = readHash();
     if (initial.filePath || initial.conversationId) setPendingHash(initial);
     const savedProject = initial.project ?? localStorage.getItem(PROJECT_KEY);
+    /* The restored project answers for its own dock through the same
+       per-project read a later switch uses — see `orchestratorOpenProject`. */
     if (savedProject) setProject(savedProject);
-    if (localStorage.getItem(ORCHESTRATOR_OPEN_KEY) === "1") setOrchestratorOpen(true);
     if (!recognizedFragment(location.hash)) setUnknownFragmentNotice(true);
   }, []);
 
@@ -378,20 +388,16 @@ export function Viewer() {
     recordProjectNavigation(projectUrl(nextProject));
   }, [applyProject]);
 
-  /* The dock FOLLOWS the selected project rather than belonging to one: the
-     open state is a device preference, and the panel re-seats itself on
-     whichever project the rail is showing. */
+  /* Opening or closing the dock is a statement about THIS project (#1149): it
+     is remembered under the project's own key, so the projects the operator is
+     not looking at keep the dock exactly as they had it. */
   const toggleOrchestrator = useCallback(() => {
     setOrchestratorOpen((open) => {
       const next = !open;
-      try {
-        localStorage.setItem(ORCHESTRATOR_OPEN_KEY, next ? "1" : "0");
-      } catch {
-        /* private mode */
-      }
+      rememberDockOpen(project, next);
       return next;
     });
-  }, []);
+  }, [project]);
 
   /* The overview board has no project view state to report: presence publishes
      the overview context/slice here, and ProjectDashboard takes over the moment
