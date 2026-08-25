@@ -326,13 +326,37 @@ function projectedActivity(spawn: StructuredSpawnCardState, createdAt: string, n
   return "live";
 }
 
-/** Launch/delivery facts stop being news once the launch has been terminal for
-    {@link TERMINAL_SPAWN_RECENT_MS}: the chips inside the conversation window
-    are transient status, not permanent chrome (issue #569). */
-function transientLaunchFact(spawn: StructuredSpawnCardState, createdAt: string, nowMs: number): boolean {
-  const terminal = spawn.state === "failed" || spawn.state === "recovered" || spawn.state === "live-late-success";
-  if (!terminal) return true;
+/** A real assistant turn this launch produced, read from the live transcript
+    row the projection already holds (issue #1138). `lastAssistantMessageAt` is
+    the scanner's visible-acknowledgment evidence — synthetic no-op and tool-only
+    records do not count — so a number at or after the launch proves the agent
+    answered. `null` (the scanned tail carried none) and `undefined` (no
+    derivation ran, or a projected scanner-lag row) are both "no evidence yet". */
+function assistantTurnObserved(live: FileEntry | null, launchedMs: number): boolean {
+  const observedMs = live?.lastAssistantMessageAt;
+  if (typeof observedMs !== "number") return false;
+  return !Number.isFinite(launchedMs) || observedMs >= launchedMs;
+}
+
+/** Launch/delivery facts stop being news once the launch stops being news: the
+    chips inside the conversation window are transient status, not permanent
+    chrome (issue #569).
+
+    A SUCCEEDED launch (`recovered` / `live-late-success`) retires on evidence —
+    the conversation's own first assistant turn says everything the chips did, at
+    any age (issue #1138). The {@link TERMINAL_SPAWN_RECENT_MS} bound stays as
+    the fallback while no such evidence exists, and `failed` keeps that bound as
+    its only rule: its error and retry are the point of the row. */
+function transientLaunchFact(
+  spawn: StructuredSpawnCardState,
+  createdAt: string,
+  nowMs: number,
+  live: FileEntry | null,
+): boolean {
+  const succeeded = spawn.state === "recovered" || spawn.state === "live-late-success";
+  if (!succeeded && spawn.state !== "failed") return true;
   const createdMs = Date.parse(createdAt);
+  if (succeeded && assistantTurnObserved(live, createdMs)) return false;
   return !Number.isFinite(createdMs) || nowMs - createdMs < TERMINAL_SPAWN_RECENT_MS;
 }
 
@@ -413,7 +437,7 @@ export function projectLaunchConversations(
     );
     if (materialized.entry) {
       if (materialized.projected) cards.push(materialized.entry);
-      if (transientLaunchFact(spawn, receipt.createdAt, nowMs)) {
+      if (transientLaunchFact(spawn, receipt.createdAt, nowMs, materialized.entry)) {
         facts.set(materialized.entry.path, launchFactsWithoutPrompt(spawn));
       }
       continue;

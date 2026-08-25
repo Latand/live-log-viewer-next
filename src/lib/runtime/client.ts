@@ -3,10 +3,14 @@ import net from "node:net";
 import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimePendingEffect, RuntimeReceiptStatus, RuntimeReplay, RuntimeRetryOptions, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
 import { runtimeHostSocket } from "./flags";
 
-// Exact-SHA handoff briefly pairs the new Viewer with the previous runtime
-// host. Its pre-compaction snapshot can exceed 8 MiB; the successor host
-// projects dead-session live text away and returns to the smaller steady state.
-const MAX_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024;
+// The snapshot frame carries every hosted session, and a hosted session keeps
+// its liveTurn text until its host dies — idle hosts never retire (#747), so
+// the frame grows with every finished turn. On 2026-08-24 it crossed 16 MiB
+// (551 sessions, 357 with liveTurn) and every viewer→runtime call failed as
+// "unavailable": no spawn, kill, or archive could run and the deploy probe
+// failed (#1145). The bound stays a last-resort guard against a runaway host;
+// the durable fix is a bounded snapshot on the journal side.
+const MAX_RESPONSE_FRAME_BYTES = 64 * 1024 * 1024;
 export const RUNTIME_SNAPSHOT_REQUEST_TIMEOUT_MS = 10_000;
 export const VIEWER_DEPLOYMENT_REQUEST_TIMEOUT_MS = 120_000;
 

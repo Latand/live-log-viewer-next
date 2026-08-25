@@ -380,6 +380,66 @@ test("issue 569: a materialized live conversation retires the duplicate launch c
   }
 });
 
+test("issue 1138: a succeeded launch retires its chips on the first assistant turn, with the 15-minute bound as the fallback", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1138-assistant-turn-retirement-"));
+  try {
+    const launch = lateSuccessLaunch(directory);
+    const snapshot = launch.registry.snapshot();
+
+    /* Nothing has answered yet: the chips are the only proof the launch landed,
+       so they stay until the fallback bound expires — today's behaviour. */
+    const silent = scannedFile(launch.artifactPath);
+    silent.lastAssistantMessageAt = null;
+    expect(projectLaunchConversations([silent], snapshot, launch.createdAt + 14 * 60_000).facts.get(launch.artifactPath))
+      .toMatchObject({ state: "live-late-success", initialMessage: "delivered" });
+    expect(projectLaunchConversations([silent], snapshot, launch.createdAt + 16 * 60_000).facts.get(launch.artifactPath))
+      .toBeUndefined();
+
+    /* An assistant turn OLDER than the launch is somebody else's answer and
+       proves nothing about this one, so the fallback still governs. */
+    const stale = scannedFile(launch.artifactPath);
+    stale.lastAssistantMessageAt = launch.createdAt - 30_000;
+    expect(projectLaunchConversations([stale], snapshot, launch.createdAt + 60_000).facts.get(launch.artifactPath))
+      .toMatchObject({ state: "live-late-success" });
+
+    /* The agent answered inside this conversation: the transcript says
+       everything the chips did, so they retire at once and stay retired — the
+       window underneath is untouched, exactly as after the old timer. */
+    const answered = scannedFile(launch.artifactPath);
+    answered.lastAssistantMessageAt = launch.createdAt + 30_000;
+    for (const offset of [45_000, 14 * 60_000]) {
+      const projection = projectLaunchConversations([answered], snapshot, launch.createdAt + offset);
+      expect(projection.cards).toEqual([]);
+      expect(projection.facts.size).toBe(0);
+      expect(projection.routes[`spawn:${launch.launchId}`]).toBe(launch.conversationId);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("issue 1138: a failed launch keeps its chips through the assistant turns that follow it", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-1138-failed-keeps-chips-"));
+  try {
+    const launch = lateSuccessLaunch(directory);
+    const snapshot = launch.registry.snapshot();
+    const receipt = snapshot.receipts[launch.launchId]!;
+    receipt.state = "failed";
+    receipt.error = "host never bound";
+
+    /* Failure is the point of the row: its error and Retry stay reachable for
+       the whole freshness bound no matter what the transcript grew afterwards. */
+    const answered = scannedFile(launch.artifactPath);
+    answered.lastAssistantMessageAt = launch.createdAt + 30_000;
+    expect(projectLaunchConversations([answered], snapshot, launch.createdAt + 60_000).facts.get(launch.artifactPath))
+      .toMatchObject({ state: "failed", initialMessage: "failed", retrySafe: true, error: "host never bound" });
+    expect(projectLaunchConversations([answered], snapshot, launch.createdAt + 16 * 60_000).facts.get(launch.artifactPath))
+      .toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("issue 922: launch facts project canonical conversation and exact native generation across a durable alias", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-922-canonical-launch-projection-"));
   const nativeId = "00000000-0000-0000-0000-000000000000";
