@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt, NATIVE_MULTI_AGENT_HOOK_MATCHER, NATIVE_MULTI_AGENT_TOOLS, NATIVE_SUBAGENT_DENY_MESSAGE, prepareManagedClaudeSpawnHome, VIEWER_SPAWN_PROMPT_FENCE } from "./spawnPolicy";
+import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt, NATIVE_MULTI_AGENT_HOOK_MATCHER, NATIVE_MULTI_AGENT_TOOLS, NATIVE_SUBAGENT_DENY_MESSAGE, prepareManagedClaudeSpawnHome, viewerMcpServerEntry, VIEWER_SPAWN_PROMPT_FENCE } from "./spawnPolicy";
 
 const homes: string[] = [];
 const TELEGRAM_HEADERS = {
@@ -165,6 +165,47 @@ test("Claude native MCP config defaults to the registered Viewer server only", (
 
   expect(mcpConfig.mcpServers).toEqual({ viewer: { type: "stdio", command: "viewer-mcp" } });
   expect(JSON.parse(fs.readFileSync(installed.settingsPath, "utf8"))).not.toHaveProperty("mcpServers");
+});
+
+test("Claude native MCP config supplies the packaged Viewer server on a fresh install", () => {
+  const accountHome = home();
+  const launcher = path.resolve(process.cwd(), "bin", "mcp-server.mjs");
+
+  const installed = applyClaudeSpawnPolicy(accountHome, { profileId: "fresh-mcp", cwd: "/repo" });
+  const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+
+  expect(mcpConfig.mcpServers).toEqual({
+    viewer: { type: "stdio", command: "bun", args: [launcher] },
+  });
+  expect(viewerMcpServerEntry()).toEqual({ command: "bun", args: [launcher] });
+  expect(fs.existsSync(launcher)).toBe(true);
+  expect(fs.existsSync(path.join(accountHome, ".claude.json"))).toBe(false);
+});
+
+test("the packaged Viewer entry fails before writing an unusable launcher path", () => {
+  expect(() => viewerMcpServerEntry(home())).toThrow("Viewer MCP launcher could not be resolved");
+});
+
+test("Claude native MCP config preserves an operator Viewer definition byte-for-byte", () => {
+  const accountHome = home();
+  const statePath = path.join(accountHome, ".claude.json");
+  const operatorState = JSON.stringify({
+    theme: "dark",
+    mcpServers: {
+      viewer: { type: "stdio", command: "operator-viewer", args: ["--custom"] },
+    },
+  }, null, 2) + "\n";
+  fs.writeFileSync(statePath, operatorState);
+
+  const installed = applyClaudeSpawnPolicy(accountHome, { profileId: "operator-mcp", cwd: "/repo" });
+  const mcpConfig = JSON.parse(fs.readFileSync(installed.mcpConfigPath, "utf8")) as {
+    mcpServers: Record<string, unknown>;
+  };
+
+  expect(mcpConfig.mcpServers.viewer).toEqual({ type: "stdio", command: "operator-viewer", args: ["--custom"] });
+  expect(fs.readFileSync(statePath, "utf8")).toBe(operatorState);
 });
 
 test("Claude native MCP config merges project scope between user and local scopes", () => {
