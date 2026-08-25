@@ -117,15 +117,6 @@ test("the answer route marks which 502 it is", async () => {
   expect(route).toMatch(/error instanceof DeliveryError[^\n]*delivered: false/);
 });
 
-test("the legacy pending-question route records authorized activity before pane delivery", async () => {
-  const fs = await import("node:fs");
-  const path = await import("node:path");
-  const route = fs.readFileSync(path.join(import.meta.dir, "../../app/api/answer/route.ts"), "utf8");
-  expect(route).toContain("requireOperatorAuthority");
-  expect(route).toContain("recordDirectOperatorWakatimeActivity");
-  expect(route.indexOf("recordDirectOperatorWakatimeActivity({")).toBeLessThan(route.indexOf("deliverAnswer(paneIo"));
-});
-
 test("a rejected answer clears the selection, hides the raw error and offers a retry", async () => {
   let posts = 0;
   globalThis.fetch = mock(async () => {

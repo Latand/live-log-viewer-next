@@ -204,10 +204,7 @@ export async function unassignTask(id: string, handle: string | AssignmentRef): 
 export async function sendTask(id: string, paths: string[]): Promise<TaskSendResult | { error: string }> {
   const textError = await pendingTextError(id);
   if (textError) return { error: textError };
-  const res = await request<TaskSendResult>(`/api/tasks/${encodeURIComponent(id)}/send`, "POST", {
-    paths,
-    clientRequestId: newClientRequestId(),
-  });
+  const res = await request<TaskSendResult>(`/api/tasks/${encodeURIComponent(id)}/send`, "POST", { paths });
   return res.ok ? res.data : { error: res.error };
 }
 
