@@ -382,8 +382,34 @@ test("the draft opens on the plain intro with the built-in rules COLLAPSED — a
      edits it (PRD #976 decision 3). */
   flushSync(() => confirmButton(host).click());
   await settle();
-  expect(seatPosts[0]!.mandate).toBe(ORCHESTRATOR_SYSTEM_PROMPT.trim());
+  expect(seatPosts[0]!.mandate).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
   expect(seatPosts[0]!.promptVersion).toBe(ORCHESTRATOR_PROMPT_VERSION);
+});
+
+test("confirm posts the textarea byte for byte — the operator's own blank lines survive it", async () => {
+  const host = mount();
+  await settle();
+  const mandate = host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
+
+  /* Trim asks ONE question — is there a mandate at all — and whitespace alone
+     still answers no. */
+  type(mandate, "  \n\t \n ");
+  await settle();
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts).toHaveLength(0);
+  expect(host.textContent).toContain("The mandate can't be empty.");
+
+  /* It never answers the other question. What the field holds is what the
+     orchestrator reads, indentation and surrounding blank lines included: the
+     mandate is prose the operator wrote, and its shape is part of it. */
+  const exact = "\n\n  You run Atlas.\n\n    - talk to me here\n  \n";
+  type(mandate, exact);
+  await settle();
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts).toHaveLength(1);
+  expect(seatPosts[0]!.mandate).toBe(exact);
 });
 
 test("an edited mandate expands the rules, drops the version claim, and comes back expanded", async () => {
@@ -422,6 +448,37 @@ test("a designation that fails expands the rules over the error — the text to 
   expect(mandateRules(host).hasAttribute("open")).toBe(true);
   expect((host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
 });
+
+test("a disclosure folded back by hand re-opens when a durable error reaches the mounted draft", async () => {
+  const host = mount();
+  await settle();
+
+  /* Two separate reasons to be open, in the order that used to lose the second
+     one. The edit opens it... */
+  type(host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement, "You run Atlas. Talk to me here.");
+  await settle();
+  flushSync(() => undefined);
+  expect(mandateRules(host).hasAttribute("open")).toBe(true);
+
+  /* ...the operator folds it back, which is theirs to do... */
+  (mandateRules(host) as HTMLDetailsElement).open = false;
+  expect(mandateRules(host).hasAttribute("open")).toBe(false);
+
+  /* ...and a designation recorded as terminally failed arrives on the POLL, so
+     this draft becomes the error surface without a reload or a remount to
+     reset the disclosure — the one path where the second reason has to speak
+     for itself. */
+  seatStatus = { seat: null, pending: pendingSeat("spawn was rejected with HTTP status 500"), exists: true };
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, SEAT_POLL_MS + 5));
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("intent-error");
+  /* The text the error is about is in view, not behind a click. */
+  expect(mandateRules(host).hasAttribute("open")).toBe(true);
+  expect((host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe("You run Atlas. Talk to me here.");
+}, SEAT_POLL_MS + 4_000);
 
 test("a double-click designates ONCE and a retry after a lost reply replays the same key", async () => {
   seatResponses = [{ status: 0, body: null, throws: true }];

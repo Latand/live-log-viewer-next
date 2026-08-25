@@ -205,8 +205,10 @@ export function OrchestratorPanel({
       seat command then completes that intent with ITS original mandate, so the
       text sent here cannot become a second variant. */
   const confirmCreate = (replayRequestId?: string | null) => {
-    const text = mandate.trim();
-    if (!text) {
+    /* Trim ASKS whether there is a mandate at all. It never ANSWERS with one:
+       what the textarea holds is what the orchestrator is sent, byte for byte,
+       blank lines and all (PRD #976 decision 3). */
+    if (!mandate.trim()) {
       setFormError(t("orchPanel.mandateRequired"));
       return;
     }
@@ -214,7 +216,7 @@ export function OrchestratorPanel({
     void create.submit({
       body: {
         project,
-        mandate: text,
+        mandate,
         engine: launch.engine,
         ...(launch.model ? { model: launch.model } : {}),
         ...(launch.effort ? { effort: launch.effort } : {}),
@@ -225,8 +227,10 @@ export function OrchestratorPanel({
            seat route resolves the project's newest checkout itself. */
         ...(projectCwd ? { cwd: projectCwd } : {}),
         /* Only an UNEDITED mandate is a version of the approved prompt; an
-           edited one is bespoke and records no version. */
-        ...(text === ORCHESTRATOR_SYSTEM_PROMPT.trim() ? { promptVersion: ORCHESTRATOR_PROMPT_VERSION } : {}),
+           edited one is bespoke and records no version. The predicate is the
+           one the summary reads from, so «untouched» means the same thing in
+           the body as it does on screen. */
+        ...(mandate === ORCHESTRATOR_SYSTEM_PROMPT ? { promptVersion: ORCHESTRATOR_PROMPT_VERSION } : {}),
         /* The seat OUTLIVES its conversation: closing the card leaves the
            record designated, and a plain spawn over a designated seat is
            refused as an accidental rotation. That refusal is right in general
@@ -235,7 +239,7 @@ export function OrchestratorPanel({
            «returns to draft» promise is one the button can keep. */
         ...(state.kind === "draft" && state.vacated ? { replaceIncumbent: true } : {}),
       },
-      launch: { draft: launch, cwd: projectCwd ?? "", firstMessage: text },
+      launch: { draft: launch, cwd: projectCwd ?? "", firstMessage: mandate },
     }, replayRequestId);
   };
 
@@ -495,8 +499,9 @@ function RotateDraft({
   const cwd = (incumbent?.cwd ?? null) ?? projectCwd;
 
   const confirm = () => {
-    const text = mandate.trim();
-    if (!text) {
+    /* Emptiness is the only question trim answers here too — the successor's
+       mandate is posted exactly as it was typed. */
+    if (!mandate.trim()) {
       setFormError(t("orchPanel.mandateRequired"));
       return;
     }
@@ -504,14 +509,14 @@ function RotateDraft({
     void flow.submit({
       body: {
         project,
-        mandate: text,
+        mandate,
         engine: launch.engine,
         ...(launch.model ? { model: launch.model } : {}),
         ...(launch.effort ? { effort: launch.effort } : {}),
         ...(launch.engine === "codex" && launch.speed ? { fast: launch.speed === "fast" } : {}),
         ...(launch.launchAccountId ? { accountId: launch.launchAccountId } : {}),
       },
-      launch: { draft: launch, cwd: cwd ?? "", firstMessage: text },
+      launch: { draft: launch, cwd: cwd ?? "", firstMessage: mandate },
     });
   };
 
@@ -594,12 +599,19 @@ function OrchestratorDraft({
      The disclosure keeps its OWN open state — the operator's toggle is theirs
      to keep — and this only ever nudges it open, when there is something in
      there to read: a mandate already edited (typed here, or restored from a
-     previous visit), or a designation that failed on text about to be fixed. */
+     previous visit), or a designation that failed on text about to be fixed.
+     The two reasons are watched SEPARATELY, on their own arrival. Folded into
+     one `edited || errored` boolean they hide each other: after an edit has
+     opened the disclosure and the operator has folded it back, the boolean is
+     already true when the designation fails, the effect never re-runs, and the
+     text the error is about stays behind a click. */
   const rules = useRef<HTMLDetailsElement>(null);
-  const autoOpen = edited || errored;
   useEffect(() => {
-    if (autoOpen && rules.current) rules.current.open = true;
-  }, [autoOpen]);
+    if (edited && rules.current) rules.current.open = true;
+  }, [edited]);
+  useEffect(() => {
+    if (errored && rules.current) rules.current.open = true;
+  }, [errored]);
   /* Only untouched text is a version of anything; an edited mandate is the
      operator's own and says so instead of claiming a version it isn't. */
   const version = edited ? null : baseVersion;
