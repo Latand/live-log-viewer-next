@@ -8,10 +8,11 @@ const OLD_STATE = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
 const { TelegramConnectionService } = await import("./service");
-const { readTelegramConnection, readTelegramSession, saveTelegramSession, telegramSessionPath, writeTelegramConnection } = await import("./sessionStore");
+const { deleteTelegramSession, readTelegramConnection, readTelegramSession, saveTelegramSession, telegramSessionPath, writeTelegramConnection } = await import("./sessionStore");
 
 import type { TelegramAdapter, TelegramEnrollmentEvent, TelegramHealthResult } from "./adapter";
-import type { TelegramErrorCode } from "./contracts";
+import type { ConnectorEnsureResult } from "./connector";
+import type { TelegramAccountIdentity, TelegramErrorCode } from "./contracts";
 import type { TelegramServicePorts } from "./service";
 
 /* A placeholder with the string-session shape; never a real credential. */
@@ -32,6 +33,9 @@ class FakeAdapter implements TelegramAdapter {
   unavailable: TelegramErrorCode | null = null;
   health: TelegramHealthResult = { status: "connected", identity: { name: "Account A", username: "account_a", id: "770000001" } };
   healthPromise: Promise<TelegramHealthResult> | null = null;
+  connectorResult: ConnectorEnsureResult = { ok: true, url: "http://127.0.0.1:8809/mcp" };
+  connectorIdentity: TelegramAccountIdentity = { name: "Account A", username: "account_a", id: "770000001" };
+  connectorIdentityError: Error | null = null;
   logoutResult: { ok: boolean; code: TelegramErrorCode | null } = { ok: true, code: null };
   logoutCalls = 0;
 
@@ -50,15 +54,22 @@ class FakeAdapter implements TelegramAdapter {
 
 function harness() {
   const adapter = new FakeAdapter();
-  const calls = { ensure: [] as string[], stop: 0, register: 0, unregister: 0, order: [] as string[] };
+  const calls = { ensure: [] as string[], stop: 0, stoppedCredentialRefs: [] as string[], register: 0, unregister: 0, order: [] as string[] };
   const ports: TelegramServicePorts = {
     adapter,
     ensureConnector: async (session) => {
       calls.ensure.push(session.sessionString);
       calls.order.push("ensure");
-      return { ok: true, url: "http://127.0.0.1:8809/mcp" };
+      return adapter.connectorResult;
     },
-    stopConnector: () => { calls.stop += 1; },
+    readConnectorIdentity: async () => {
+      if (adapter.connectorIdentityError) throw adapter.connectorIdentityError;
+      return adapter.connectorIdentity;
+    },
+    stopConnector: (session) => {
+      calls.stop += 1;
+      if (session) calls.stoppedCredentialRefs.push(session.credentialRef);
+    },
     registerHosts: () => { calls.register += 1; calls.order.push("register"); return HOSTS_REGISTERED; },
     unregisterHosts: () => { calls.unregister += 1; },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
@@ -209,6 +220,74 @@ test("health: connected refreshes identity and re-ensures the connector", async 
   expect(calls.ensure).toEqual([PLACEHOLDER_SESSION]);
 });
 
+test("health serves cached status while a report owns the connector read phase", async () => {
+  const { adapter, calls, service } = harness();
+  const session = saveTelegramSession(PLACEHOLDER_SESSION);
+  writeTelegramConnection({
+    version: 1,
+    status: "connected",
+    credentialRef: session.credentialRef,
+    identity: { name: "Account A", username: "account_a", id: "770000001" },
+    lastHealthCheckAt: "2026-08-20T11:59:00.000Z",
+    errorCode: null,
+    identityIdUpgradedAt: null,
+  });
+  adapter.checkSession = async () => { throw new Error("bridge must remain idle"); };
+
+  const release = await service.beginReportReadPhase();
+  try {
+    const cached = await service.checkHealth();
+    expect(cached.phase).toBe("connected");
+    expect(cached.lastHealthCheckAt).toBe("2026-08-20T11:59:00.000Z");
+    expect(calls.ensure).toEqual([]);
+    expect(calls.stop).toBe(0);
+    expect(calls.register).toBe(0);
+  } finally {
+    release();
+  }
+
+  expect((await service.checkHealth()).lastHealthCheckAt).toBe("2026-08-20T12:00:00.000Z");
+  expect(calls.ensure).toEqual([PLACEHOLDER_SESSION]);
+});
+
+test("a report read waits for an in-flight health check", async () => {
+  const adapter = new FakeAdapter();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  let resolveConnector!: (result: ConnectorEnsureResult) => void;
+  const connector = new Promise<ConnectorEnsureResult>((resolve) => { resolveConnector = resolve; });
+  let ensureStarted!: () => void;
+  const started = new Promise<void>((resolve) => { ensureStarted = resolve; });
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => {
+      ensureStarted();
+      return await connector;
+    },
+    readConnectorIdentity: async () => ({ name: "Account A", username: "account_a", id: "770000001" }),
+    stopConnector: () => {},
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
+  });
+
+  const health = service.checkHealth();
+  await started;
+  let readStarted = false;
+  const read = service.beginReportReadPhase().then((release) => {
+    readStarted = true;
+    return release;
+  });
+  await Promise.resolve();
+  expect(readStarted).toBe(false);
+
+  resolveConnector({ ok: true, url: "http://127.0.0.1:8809/mcp" });
+  expect((await health).phase).toBe("connected");
+  const releaseRead = await read;
+  expect(readStarted).toBe(true);
+  releaseRead();
+});
+
 test("health recovery registers hosts after a prior connector failure", async () => {
   const { adapter } = harness();
   saveTelegramSession(PLACEHOLDER_SESSION);
@@ -219,6 +298,7 @@ test("health recovery registers hosts after a prior connector failure", async ()
     ensureConnector: async () => (++attempts === 1
       ? { ok: false, code: "connector_failed" }
       : { ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    readConnectorIdentity: async () => ({ name: "Account A", username: "account_a", id: "770000001" }),
     stopConnector: () => {},
     registerHosts: () => { registrations += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
@@ -232,18 +312,22 @@ test("health recovery registers hosts after a prior connector failure", async ()
   expect(registrations).toBe(1);
 });
 
-test("health releases the shared connector before the session bridge connects", async () => {
+test("health verifies a healthy live connector without stopping it or taking the session bridge lock", async () => {
   const adapter = new FakeAdapter();
   const order: string[] = [];
   adapter.checkSession = async () => {
-    order.push("health");
-    return { status: "connected", identity: { name: "Account A", username: null, id: "770000001" } };
+    order.push("bridge");
+    throw new Error("the live connector still owns the session lock");
   };
   saveTelegramSession(PLACEHOLDER_SESSION);
   const service = new TelegramConnectionService({
     adapter,
     stopConnector: () => { order.push("stop"); },
     ensureConnector: async () => { order.push("ensure"); return { ok: true, url: "http://127.0.0.1:8809/mcp" }; },
+    readConnectorIdentity: async () => {
+      order.push("get_me");
+      return { name: "Account A", username: null, id: "770000001" };
+    },
     registerHosts: () => { order.push("register"); return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
@@ -251,16 +335,110 @@ test("health releases the shared connector before the session bridge connects", 
   });
 
   expect((await service.checkHealth()).phase).toBe("connected");
-  expect(order).toEqual(["stop", "health", "ensure", "register"]);
+  expect(order).toEqual(["ensure", "get_me", "register"]);
 });
 
-test("health: a session Telegram revoked reads as expired and stops the connector", async () => {
+test("a failed get_me probe stops and replaces the current credential connector once", async () => {
+  const { adapter, calls, service } = harness();
+  const session = saveTelegramSession(PLACEHOLDER_SESSION);
+  adapter.connectorIdentityError = new Error("invented tool failure");
+  adapter.checkSession = async () => { throw new Error("bridge must remain idle"); };
+
+  const status = await service.checkHealth();
+
+  expect(status.phase).toBe("error");
+  expect(status.error?.code).toBe("connector_failed");
+  expect(calls.ensure).toEqual([PLACEHOLDER_SESSION, PLACEHOLDER_SESSION]);
+  expect(calls.stop).toBe(1);
+  expect(calls.stoppedCredentialRefs).toEqual([session.credentialRef]);
+  expect(calls.register).toBe(0);
+});
+
+test("a failed get_me probe cannot stop a newer credential generation", async () => {
+  const adapter = new FakeAdapter();
+  const first = saveTelegramSession(PLACEHOLDER_SESSION);
+  let resolveIdentity!: (identity: TelegramAccountIdentity | null) => void;
+  let markIdentityStarted!: () => void;
+  const identityStarted = new Promise<void>((resolve) => { markIdentityStarted = resolve; });
+  const identity = new Promise<TelegramAccountIdentity | null>((resolve) => { resolveIdentity = resolve; });
+  let ensures = 0;
+  let stops = 0;
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => { ensures += 1; return { ok: true, url: "http://127.0.0.1:8809/mcp" }; },
+    readConnectorIdentity: async () => { markIdentityStarted(); return await identity; },
+    stopConnector: () => { stops += 1; },
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
+  });
+
+  const pending = service.checkHealth();
+  await identityStarted;
+  deleteTelegramSession();
+  const second = saveTelegramSession("1BpWapzMBu4placeholder-also-not-a-session");
+  resolveIdentity(null);
+  await pending;
+
+  expect(second.credentialRef).not.toBe(first.credentialRef);
+  expect(readTelegramSession()?.credentialRef).toBe(second.credentialRef);
+  expect(ensures).toBe(1);
+  expect(stops).toBe(0);
+});
+
+test("local deletion invalidates a replacement ensure after a failed get_me probe", async () => {
+  const adapter = new FakeAdapter();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  let ensureCalls = 0;
+  let markReplacementStarted!: () => void;
+  const replacementStarted = new Promise<void>((resolve) => { markReplacementStarted = resolve; });
+  let resolveReplacement!: (result: ConnectorEnsureResult) => void;
+  const replacement = new Promise<ConnectorEnsureResult>((resolve) => { resolveReplacement = resolve; });
+  let markDeletionStopStarted!: () => void;
+  const deletionStopStarted = new Promise<void>((resolve) => { markDeletionStopStarted = resolve; });
+  let releaseDeletionStop!: () => void;
+  const deletionStop = new Promise<void>((resolve) => { releaseDeletionStop = resolve; });
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => {
+      ensureCalls += 1;
+      if (ensureCalls === 1) return { ok: true, url: "http://127.0.0.1:8809/mcp" };
+      markReplacementStarted();
+      return await replacement;
+    },
+    readConnectorIdentity: async () => null,
+    stopConnector: async (session) => {
+      if (session) return true;
+      markDeletionStopStarted();
+      await deletionStop;
+    },
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
+  });
+
+  const health = service.checkHealth();
+  await replacementStarted;
+  const deletion = service.deleteLocalSession();
+  resolveReplacement({ ok: true, url: "http://127.0.0.1:8809/mcp" });
+  await deletionStopStarted;
+
+  expect((await health).phase).toBe("disconnected");
+  expect(readTelegramConnection().status).toBe("disconnected");
+  releaseDeletionStop();
+  expect((await deletion).phase).toBe("disconnected");
+});
+
+test("health: a failed connector probe falls back to the bridge and detects an expired session", async () => {
   const { adapter, calls, service } = harness();
   saveTelegramSession(PLACEHOLDER_SESSION);
+  adapter.connectorResult = { ok: false, code: "connector_failed" };
   adapter.health = { status: "expired" };
   const status = await service.checkHealth();
   expect(status.phase).toBe("expired");
-  expect(calls.stop).toBe(1);
+  expect(calls.stop).toBe(0);
   /* The stored session survives — Reconnect and local deletion stay offered. */
   expect(readTelegramSession()).not.toBeNull();
 });
@@ -268,6 +446,7 @@ test("health: a session Telegram revoked reads as expired and stops the connecto
 test("health: a probe failure is an explicit error, not a silent disconnect", async () => {
   const { adapter, service } = harness();
   saveTelegramSession(PLACEHOLDER_SESSION);
+  adapter.connectorResult = { ok: false, code: "connector_failed" };
   adapter.health = { status: "error", code: "network_failed" };
   const status = await service.checkHealth();
   expect(status.phase).toBe("error");
@@ -295,6 +474,7 @@ test("remote logout releases the shared connector before the session bridge conn
     adapter,
     stopConnector: () => { order.push("stop"); },
     ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => { order.push("unregister"); },
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
@@ -340,6 +520,7 @@ test("successful logout serializes health behind its terminal connector stop", a
       connectorRunning = true;
       return { ok: true, url: "http://127.0.0.1:8809/mcp" };
     },
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => {},
     now: () => Date.parse("2026-08-20T12:00:00.000Z"),
@@ -399,6 +580,7 @@ test("local deletion waits for confirmed connector exit before publishing discon
   const service = new TelegramConnectionService({
     adapter: new FakeAdapter(),
     ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     stopConnector: async () => await stopped,
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => {},
@@ -422,6 +604,7 @@ test("a connector stop failure still deletes credentials and refuses a disconnec
   const service = new TelegramConnectionService({
     adapter: new FakeAdapter(),
     ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     stopConnector: async () => { throw new Error("connector still alive"); },
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => { unregistered += 1; },
@@ -442,6 +625,7 @@ test("host cleanup failure cannot preserve credentials during local deletion", a
   const service = new TelegramConnectionService({
     adapter: new FakeAdapter(),
     ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     stopConnector: () => { stopped += 1; },
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => { throw new Error("host config unavailable"); },
@@ -461,6 +645,7 @@ test("host cleanup failure cannot preserve an authorized canceled credential", a
   const service = new TelegramConnectionService({
     adapter,
     ensureConnector: async () => await connector,
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     stopConnector: () => {},
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => { throw new Error("host config unavailable"); },
@@ -483,6 +668,7 @@ test("a connector refusing the read-only bound blocks connected and never regist
   const refusing = new TelegramConnectionService({
     adapter,
     ensureConnector: async () => ({ ok: false, code: "not_read_only" }),
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     stopConnector: () => {},
     registerHosts: () => { registered += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
@@ -506,6 +692,7 @@ test("a connector bring-up that THROWS surfaces too, instead of leaving connecte
   const throwing = new TelegramConnectionService({
     adapter,
     ensureConnector: async () => { throw new Error("boom"); },
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     stopConnector: () => {},
     registerHosts: () => { registered += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => {},
@@ -528,6 +715,7 @@ test("host registration failure blocks connected after connector verification", 
   const service = new TelegramConnectionService({
     adapter,
     ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     stopConnector: () => { stopped += 1; },
     registerHosts: () => ({
       ok: false,
@@ -553,6 +741,7 @@ test("health over a healthy account still refuses connected when the connector f
   const failing = new TelegramConnectionService({
     adapter,
     ensureConnector: async () => ({ ok: false, code: "connector_failed" }),
+    readConnectorIdentity: async () => ({ name: "Account A", username: "account_a", id: "770000001" }),
     stopConnector: () => {},
     registerHosts: () => HOSTS_REGISTERED,
     unregisterHosts: () => {},
@@ -571,10 +760,12 @@ test("health recovery reports host registration failure instead of connected", a
   const adapter = new FakeAdapter();
   saveTelegramSession(PLACEHOLDER_SESSION);
   let unregistered = 0;
+  let stopped = 0;
   const service = new TelegramConnectionService({
     adapter,
     ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
-    stopConnector: () => {},
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
+    stopConnector: () => { stopped += 1; },
     registerHosts: () => ({
       ok: false,
       claude: { registered: 0, conflict: 0, unwritable: 1 },
@@ -589,6 +780,7 @@ test("health recovery reports host registration failure instead of connected", a
   expect(status.phase).toBe("error");
   expect(status.error?.code).toBe("host_registration_failed");
   expect(unregistered).toBe(1);
+  expect(stopped).toBe(0);
 });
 
 test("an unsafe session file (symlink) reads as an explicit session_unsafe error", async () => {
@@ -624,6 +816,7 @@ test("local deletion invalidates an in-flight health result", async () => {
   const { adapter, calls, service } = harness();
   saveTelegramSession(PLACEHOLDER_SESSION);
   let resolveHealth!: (value: TelegramHealthResult) => void;
+  adapter.connectorResult = { ok: false, code: "connector_failed" };
   adapter.healthPromise = new Promise((resolve) => { resolveHealth = resolve; });
 
   const pending = service.checkHealth();
@@ -632,7 +825,7 @@ test("local deletion invalidates an in-flight health result", async () => {
   expect((await deletion).phase).toBe("disconnected");
   expect((await pending).phase).toBe("disconnected");
   expect(readTelegramSession()).toBeNull();
-  expect(calls.ensure).toEqual([]);
+  expect(calls.ensure).toEqual([PLACEHOLDER_SESSION]);
   expect(calls.register).toBe(0);
 });
 
@@ -644,6 +837,7 @@ test("cancel during connector verification cannot publish the authorized session
   const service = new TelegramConnectionService({
     adapter,
     ensureConnector: async () => await connector,
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     stopConnector: () => { calls.stop += 1; },
     registerHosts: () => { calls.register += 1; return HOSTS_REGISTERED; },
     unregisterHosts: () => { calls.unregister += 1; },
@@ -730,7 +924,7 @@ test("a pre-#1091 connection recovers its account id on the next health check, o
      must not erase the recorded one, or the verifier silently falls back to
      comparing names again. And the migration does not re-run: the stamp is the
      one it already earned. */
-  adapter.health = { status: "connected", identity: { name: "Account A renamed", username: "account_a", id: null } };
+  adapter.connectorIdentity = { name: "Account A renamed", username: "account_a", id: null };
   expect((await service.checkHealth()).phase).toBe("connected");
   const later = readTelegramConnection();
   expect(later.identity).toEqual({ name: "Account A renamed", username: "account_a", id: "770000001" });

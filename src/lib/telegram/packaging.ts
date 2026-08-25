@@ -7,6 +7,7 @@ import path from "node:path";
 import { configFilePath, stateDir, statePath } from "@/lib/configDir";
 import { withFileTransaction } from "@/lib/state/fileTransaction";
 
+import { connectorLogSinkEnv } from "./connectorLog";
 import { ensureTelegramStateDir, telegramIncomingFeedPath } from "./sessionStore";
 
 /**
@@ -247,12 +248,14 @@ export function ensureConnectorProvisioned(): Promise<boolean> {
     transcripts, or the activity journal. */
 export function connectorLaunchSpec(input: { credentialRef: string; sessionString: string; connectorToken: string; credentials: TelegramApiCredentials }): ProcessSpec {
   const vendor = stagedConnectorSourceDir();
+  const logSinkEnv = connectorLogSinkEnv();
   return {
     command: telegramVenvPython(),
     args: [telegramMcpServerPath()],
     cwd: vendor,
     env: {
       ...minimalChildEnv(),
+      ...logSinkEnv,
       TELEGRAM_API_ID: input.credentials.apiId,
       TELEGRAM_API_HASH: input.credentials.apiHash,
       TELEGRAM_SESSION_STRING: input.sessionString,

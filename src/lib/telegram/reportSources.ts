@@ -1,5 +1,5 @@
-import { readTelegramSession } from "./sessionStore";
-import { connectorFeedCoverageSince } from "./connector";
+import { readTelegramSession, type StoredTelegramSession } from "./sessionStore";
+import { connectorFeedCoverageSince, ensureTelegramConnector, type ConnectorEnsureResult } from "./connector";
 import { telegramMcpUrl } from "./packaging";
 import { validTelegramAccountId, type TelegramAccountIdentity } from "./contracts";
 import { readFeedDialogsSince, scopedFeedFile, type FeedDialog } from "./reportFeed";
@@ -320,6 +320,19 @@ export async function listReportGroups(port: TelegramReadPort): Promise<Array<{ 
 
 type ToolResult = { content?: Array<{ type?: string; text?: string }> };
 
+export interface TelegramConnectorReadPorts {
+  readSession(): StoredTelegramSession | null;
+  callTool(session: StoredTelegramSession, name: string, args: Record<string, unknown>): Promise<unknown>;
+  ensureConnector(session: StoredTelegramSession): Promise<ConnectorEnsureResult>;
+  sleep(ms: number): Promise<void>;
+  now(): number;
+  readinessTimeoutMs?: number;
+}
+
+const CONNECTOR_READINESS_TIMEOUT_MS = 30_000;
+const CONNECTOR_READINESS_INITIAL_BACKOFF_MS = 250;
+const CONNECTOR_READINESS_MAX_BACKOFF_MS = 2_000;
+
 function toolText(result: unknown): string {
   const blocks = (result as ToolResult)?.content ?? [];
   return blocks.filter((block) => block?.type === "text").map((block) => block.text ?? "").join("\n");
@@ -349,6 +362,94 @@ function chatSummary(record: Record<string, unknown>, kind: TelegramChatKind): T
   };
 }
 
+async function callConnectorTool(
+  session: StoredTelegramSession,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+  const client = new Client({ name: "agent-log-viewer", version: "1.0.0" });
+  const transport = new StreamableHTTPClientTransport(new URL(telegramMcpUrl()), {
+    requestInit: { headers: { Authorization: `Bearer ${session.connectorToken}` } },
+  });
+  try {
+    await client.connect(transport);
+    return await client.callTool({ name, arguments: args });
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
+const productionConnectorReadPorts: TelegramConnectorReadPorts = {
+  readSession: readTelegramSession,
+  callTool: callConnectorTool,
+  ensureConnector: (session) => ensureTelegramConnector(session),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now: Date.now,
+};
+
+function currentReadSession(
+  pinned: string,
+  ports: TelegramConnectorReadPorts,
+): StoredTelegramSession {
+  const session = ports.readSession();
+  if (!session) throw new Error("Telegram is not connected");
+  if (session.credentialRef !== pinned) throw new Error("Telegram credential generation changed");
+  return session;
+}
+
+/**
+ * One connector read with a bounded recovery lane. The ordinary path performs
+ * no extra probe. When a transport call fails, the supervisor is asked to
+ * adopt or replace the connector and performs its own bounded readiness
+ * polling. Spawn and transport races remain inside one exponential-backoff
+ * deadline so repeated restarts cannot fail the report immediately.
+ */
+export async function callTelegramConnectorWithReadiness(
+  session: StoredTelegramSession,
+  name: string,
+  args: Record<string, unknown>,
+  ports: TelegramConnectorReadPorts = productionConnectorReadPorts,
+): Promise<unknown> {
+  try {
+    return await ports.callTool(session, name, args);
+  } catch {
+    /* The upstream error can contain connector output. Only the fixed failure
+       below may cross this wrapper. */
+  }
+
+  const timeoutMs = Math.max(1, ports.readinessTimeoutMs ?? CONNECTOR_READINESS_TIMEOUT_MS);
+  const deadline = ports.now() + timeoutMs;
+  let backoffMs = CONNECTOR_READINESS_INITIAL_BACKOFF_MS;
+  while (ports.now() < deadline) {
+    const current = currentReadSession(session.credentialRef, ports);
+    let ready: ConnectorEnsureResult;
+    try {
+      ready = await ports.ensureConnector(current);
+    } catch {
+      ready = { ok: false, code: "connector_failed" };
+    }
+    if (ready.ok) {
+      const verified = currentReadSession(session.credentialRef, ports);
+      try {
+        return await ports.callTool(verified, name, args);
+      } catch {
+        /* Readiness can race another connector exit. Stay inside this bounded
+           lane and ask the supervisor for the next verified generation. */
+      }
+    } else if (ready.code !== "connector_failed") {
+      /* Policy/configuration failures will not heal with another sleep. */
+      throw new Error("Telegram connector is unavailable");
+    }
+    const remaining = deadline - ports.now();
+    if (remaining <= 0) break;
+    await ports.sleep(Math.min(backoffMs, remaining));
+    backoffMs = Math.min(backoffMs * 2, CONNECTOR_READINESS_MAX_BACKOFF_MS);
+  }
+  throw new Error("Telegram connector is unavailable");
+}
+
 /**
  * The production port: the shared loopback connector, over the same
  * streamable-HTTP client the readiness probe uses, authenticated with the
@@ -368,27 +469,19 @@ function chatSummary(record: Record<string, unknown>, kind: TelegramChatKind): T
  * check behind it — passes `null` and the port pins itself to the generation
  * of its first read, which keeps that single pass internally consistent.
  */
-export function connectorReadPort(credentialRef: string | null = null): TelegramReadPort {
+export function connectorReadPort(
+  credentialRef: string | null = null,
+  ports: TelegramConnectorReadPorts = productionConnectorReadPorts,
+): TelegramReadPort {
   let pinned = credentialRef;
   const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
-    const session = readTelegramSession();
+    const session = ports.readSession();
     if (!session) throw new Error("Telegram is not connected");
     pinned ??= session.credentialRef;
     /* One fixed sentence: nothing about which generations these were belongs
        in an error a caller may log. */
     if (session.credentialRef !== pinned) throw new Error("Telegram credential generation changed");
-    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-    const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
-    const client = new Client({ name: "agent-log-viewer", version: "1.0.0" });
-    const transport = new StreamableHTTPClientTransport(new URL(telegramMcpUrl()), {
-      requestInit: { headers: { Authorization: `Bearer ${session.connectorToken}` } },
-    });
-    try {
-      await client.connect(transport);
-      return await client.callTool({ name, arguments: args });
-    } finally {
-      await client.close().catch(() => undefined);
-    }
+    return await callTelegramConnectorWithReadiness(session, name, args, ports);
   };
   return {
     async getMe() {
