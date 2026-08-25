@@ -8,7 +8,12 @@ import { searchTextForTranscript } from "@/lib/scanner/describe";
 import { durableSemanticTitle } from "@/lib/title";
 
 import { agentRegistry, type AgentRegistry } from "./registry";
-import type { IdentityWaveMigrationResult, IdentityWavePathRekey, IdentityWaveSeat } from "./identityWaveMigration";
+import type {
+  IdentityWaveMigrationResult,
+  IdentityWavePathRekey,
+  IdentityWaveSeat,
+  IdentityWaveSharedPathCandidate,
+} from "./identityWaveMigration";
 
 function evidenceIsAbsent(error: unknown): boolean {
   const code = error && typeof error === "object"
@@ -39,13 +44,33 @@ export function sharedPathForLegacyClaudeTranscript(
   pathname: string,
   legacyProjectsRoot = path.join(legacyClaudeHome(), "projects"),
   sharedProjectsRoot = sharedClaudeProjectsRoot(),
-): string | null {
+): IdentityWaveSharedPathCandidate | null {
   const relative = path.relative(legacyProjectsRoot, pathname);
   if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
   const candidate = path.join(sharedProjectsRoot, relative);
   if (candidate === pathname) return null;
   try {
-    return fs.statSync(candidate).isFile() ? candidate : null;
+    const candidateStat = fs.statSync(candidate);
+    if (!candidateStat.isFile()) return null;
+    let canonicalRootsMatch = false;
+    try {
+      canonicalRootsMatch = fs.realpathSync.native(legacyProjectsRoot) === fs.realpathSync.native(sharedProjectsRoot);
+    } catch (error) {
+      if (!evidenceIsAbsent(error)) throw error;
+    }
+    let sourceFileMatches = false;
+    try {
+      const sourceStat = fs.statSync(pathname);
+      sourceFileMatches = sourceStat.isFile()
+        && sourceStat.dev === candidateStat.dev
+        && sourceStat.ino === candidateStat.ino;
+    } catch (error) {
+      if (!evidenceIsAbsent(error)) throw error;
+    }
+    return {
+      sharedPath: candidate,
+      identityEquivalent: canonicalRootsMatch || sourceFileMatches,
+    };
   } catch (error) {
     if (evidenceIsAbsent(error)) return null;
     throw error;
@@ -57,7 +82,7 @@ export interface IdentityWaveStartupDependencies {
   seats(): readonly IdentityWaveSeat[];
   now(): string;
   transcriptTitle(pathname: string, engine: "claude" | "codex"): string | null;
-  sharedPath(pathname: string): string | null;
+  sharedPath(pathname: string): IdentityWaveSharedPathCandidate | null;
   commitExternalPathRekeys(rekeys: readonly IdentityWavePathRekey[]): void;
   log(message: string, detail: Record<string, unknown>): void;
   env: Readonly<Record<string, string | undefined>>;
@@ -76,14 +101,16 @@ export function runIdentityWaveMigrationAtStartup(
     log: overrides.log ?? ((message, detail) => console.info(message, detail)),
     env: overrides.env ?? process.env,
   };
-  const result = withAccountMutationLock(() => dependencies.registry.runIdentityWaveMigration({
-    dryRun: dependencies.env.LLV_IDENTITY_WAVE_DRY_RUN === "1",
+  const dryRun = dependencies.env.LLV_IDENTITY_WAVE_DRY_RUN === "1";
+  const migrate = () => dependencies.registry.runIdentityWaveMigration({
+    dryRun,
     now: dependencies.now(),
     transcriptTitle: dependencies.transcriptTitle,
     sharedPathForLegacy: dependencies.sharedPath,
     orchestratorSeats: dependencies.seats(),
     commitExternalPathRekeys: dependencies.commitExternalPathRekeys,
-  }));
+  });
+  const result = dryRun ? migrate() : withAccountMutationLock(migrate);
   dependencies.log("[identity-wave] registry migration", {
     dryRun: result.dryRun,
     alreadyCompleted: result.alreadyCompleted,

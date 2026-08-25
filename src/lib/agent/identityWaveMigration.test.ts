@@ -22,6 +22,10 @@ import {
 
 const NOW = "2026-08-05T12:00:00.000Z";
 
+function verifiedSharedPath(sharedPath: string) {
+  return { sharedPath, identityEquivalent: true };
+}
+
 test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and completes once", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-"));
   try {
@@ -48,6 +52,7 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
     fs.writeFileSync(transcriptSharedPath, `${JSON.stringify({ type: "ai-title", aiTitle: "Transcript head title" })}\n`);
     fs.writeFileSync(orchestratorPath, "{}\n");
     fs.writeFileSync(successorPath, "{}\n");
+    fs.symlinkSync(sharedRoot, legacyRoot, "dir");
 
     const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const receiptConversation = seed.ensureConversation("claude", receiptLegacyPath, null);
@@ -277,6 +282,128 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
       edgesStamped: 0,
     });
   } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("same-relative shared transcript without root or file identity proof is quarantined", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-unproven-rekey-"));
+  try {
+    const filename = path.join(directory, "agent-registry.json");
+    const legacyRoot = path.join(directory, "legacy-projects");
+    const sharedRoot = path.join(directory, "shared-projects");
+    const relativeTranscript = path.join("-repo", `${crypto.randomUUID()}.jsonl`);
+    const legacyPath = path.join(legacyRoot, relativeTranscript);
+    const sharedPath = path.join(sharedRoot, relativeTranscript);
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+    fs.writeFileSync(legacyPath, `${JSON.stringify({ type: "ai-title", aiTitle: "Repair the legacy registry" })}\n`);
+    fs.writeFileSync(sharedPath, `${JSON.stringify({ type: "ai-title", aiTitle: "Unrelated shared transcript" })}\n`);
+
+    const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const conversation = seed.ensureConversation("claude", legacyPath, null);
+    const seeded = seed.snapshot();
+    seeded.conversations[conversation.id]!.generations.at(-1)!.launchProfile.title = "Claude session";
+    fs.writeFileSync(filename, `${JSON.stringify(seeded, null, 2)}\n`);
+
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    expect(registry.runIdentityWaveMigration({
+      now: NOW,
+      transcriptTitle: titleFromTranscriptHead,
+      sharedPathForLegacy: (pathname) => sharedPathForLegacyClaudeTranscript(pathname, legacyRoot, sharedRoot),
+      orchestratorSeats: [],
+    })).toMatchObject({
+      alreadyCompleted: false,
+      retitled: 1,
+      rekeyed: 0,
+      quarantinedRekeys: 1,
+    });
+    expect(registry.conversation(conversation.id)?.generations.at(-1)).toMatchObject({
+      path: legacyPath,
+      launchProfile: expect.objectContaining({ title: "Repair the legacy registry" }),
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("source-file identity proves a shared transcript across distinct roots", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-file-identity-"));
+  try {
+    const legacyRoot = path.join(directory, "legacy-projects");
+    const sharedRoot = path.join(directory, "shared-projects");
+    const relativeTranscript = path.join("-repo", `${crypto.randomUUID()}.jsonl`);
+    const legacyPath = path.join(legacyRoot, relativeTranscript);
+    const sharedPath = path.join(sharedRoot, relativeTranscript);
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+    fs.writeFileSync(legacyPath, "{}\n");
+    fs.linkSync(legacyPath, sharedPath);
+
+    expect(sharedPathForLegacyClaudeTranscript(legacyPath, legacyRoot, sharedRoot)).toEqual({
+      sharedPath,
+      identityEquivalent: true,
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("startup dry-run leaves the complete durable state tree unchanged", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-dry-run-state-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  try {
+    const stateDirectory = path.join(directory, "state");
+    process.env.LLV_STATE_DIR = stateDirectory;
+    const filename = path.join(stateDirectory, "agent-registry.json");
+    const transcriptPath = path.join(directory, "legacy.jsonl");
+    fs.writeFileSync(transcriptPath, `${JSON.stringify({ type: "ai-title", aiTitle: "Preview the identity repair" })}\n`);
+    const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const conversation = seed.ensureConversation("claude", transcriptPath, null);
+    const seeded = seed.snapshot();
+    seeded.conversations[conversation.id]!.generations.at(-1)!.launchProfile.title = "Claude session";
+    fs.writeFileSync(filename, `${JSON.stringify(seeded, null, 2)}\n`);
+    fs.mkdirSync(path.join(stateDirectory, "preserved"), { recursive: true });
+    fs.writeFileSync(path.join(stateDirectory, "preserved", "sentinel.json"), "{\"preserved\":true}\n");
+
+    const stateTree = (): string[] => {
+      const entries: string[] = [];
+      const visit = (current: string, relative: string) => {
+        const stat = fs.lstatSync(current);
+        if (stat.isDirectory()) {
+          entries.push(`directory:${relative || "."}`);
+          for (const child of fs.readdirSync(current).sort()) {
+            visit(path.join(current, child), relative ? path.join(relative, child) : child);
+          }
+          return;
+        }
+        if (stat.isSymbolicLink()) {
+          entries.push(`symlink:${relative}:${fs.readlinkSync(current)}`);
+          return;
+        }
+        entries.push(`file:${relative}:${fs.readFileSync(current).toString("base64")}`);
+      };
+      visit(stateDirectory, "");
+      return entries;
+    };
+
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const before = stateTree();
+    const result = runIdentityWaveMigrationAtStartup({
+      registry,
+      seats: () => [],
+      now: () => NOW,
+      transcriptTitle: titleFromTranscriptHead,
+      sharedPath: () => null,
+      log: () => {},
+      env: { LLV_IDENTITY_WAVE_DRY_RUN: "1" },
+    });
+
+    expect(result).toMatchObject({ dryRun: true, alreadyCompleted: false, retitled: 1 });
+    expect(stateTree()).toEqual(before);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -520,7 +647,7 @@ test("malformed sibling seat evidence leaves path rekey and the migration marker
         registry,
         now: () => NOW,
         transcriptTitle: () => null,
-        sharedPath: (pathname) => pathname === legacyPath ? sharedPath : null,
+        sharedPath: (pathname) => pathname === legacyPath ? verifiedSharedPath(sharedPath) : null,
         log: () => {},
         env: {},
       })).toThrow("orchestrator seat evidence is malformed");
@@ -607,7 +734,7 @@ test("resolver failures leave the identity wave unmarked and a retry can complet
         },
         sharedPathForLegacy: () => {
           if (shouldFail && failingResolver === "sharedPathForLegacy") throw new Error("temporary shared-path read failure");
-          return sharedPath;
+          return verifiedSharedPath(sharedPath);
         },
         orchestratorSeats: [],
       };
@@ -654,7 +781,7 @@ test("an external path-authority write failure leaves the identity wave open for
     const input = {
       now: NOW,
       transcriptTitle: () => null,
-      sharedPathForLegacy: () => sharedPath,
+      sharedPathForLegacy: () => verifiedSharedPath(sharedPath),
       orchestratorSeats: [],
       commitExternalPathRekeys: () => {
         if (shouldFail) throw new Error("temporary authority write failure");
@@ -721,7 +848,7 @@ test("a concurrent orchestrator rotation cannot be overwritten by the startup wa
       registry,
       now: () => NOW,
       transcriptTitle: () => null,
-      sharedPath: (pathname: string) => pathname === legacyPath ? sharedPath : null,
+      sharedPath: (pathname: string) => pathname === legacyPath ? verifiedSharedPath(sharedPath) : null,
       log: () => {},
       env: {},
     };
@@ -784,7 +911,7 @@ test("a shared-path ownership collision is quarantined and counted, and the wave
     expect(registry.runIdentityWaveMigration({
       now: NOW,
       transcriptTitle: () => null,
-      sharedPathForLegacy: (pathname) => pathname === legacyPath ? occupiedSharedPath : null,
+      sharedPathForLegacy: (pathname) => pathname === legacyPath ? verifiedSharedPath(occupiedSharedPath) : null,
       orchestratorSeats: [],
     })).toMatchObject({ alreadyCompleted: false, rekeyed: 0, quarantinedRekeys: 1 });
     expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]?.completedAt).toBe(NOW);
@@ -820,7 +947,7 @@ test("a quarantined shared-path collision keeps legacy title evidence and counte
         transcriptReads.push(pathname);
         return titleFromTranscriptHead(pathname, engine);
       },
-      sharedPathForLegacy: (pathname) => pathname === legacyPath ? occupiedSharedPath : null,
+      sharedPathForLegacy: (pathname) => pathname === legacyPath ? verifiedSharedPath(occupiedSharedPath) : null,
       orchestratorSeats: [],
     })).toMatchObject({
       alreadyCompleted: false,
@@ -1064,9 +1191,9 @@ test("a quarantined rekey pair leaves clean rekeys and every retitle intact", ()
       now: NOW,
       transcriptTitle: (pathname) => transcriptTitles[pathname] ?? null,
       sharedPathForLegacy: (pathname) => {
-        if (pathname === cleanLegacyPath) return cleanSharedPath;
-        if (pathname === phantomLegacyPath) return phantomSharedPath;
-        if (pathname === duplicatePath) return duplicateSharedPath;
+        if (pathname === cleanLegacyPath) return verifiedSharedPath(cleanSharedPath);
+        if (pathname === phantomLegacyPath) return verifiedSharedPath(phantomSharedPath);
+        if (pathname === duplicatePath) return verifiedSharedPath(duplicateSharedPath);
         return null;
       },
       orchestratorSeats: [],
@@ -1249,7 +1376,7 @@ test("the startup wrapper logs populated counters and persists migrated JSON and
       }],
       now: () => NOW,
       transcriptTitle: () => null,
-      sharedPath: (pathname) => pathname === legacyPath ? sharedPath : null,
+      sharedPath: (pathname) => pathname === legacyPath ? verifiedSharedPath(sharedPath) : null,
       log: (...args) => { logs.push(args); },
       env: {},
     });

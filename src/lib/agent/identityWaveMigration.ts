@@ -21,11 +21,16 @@ export interface IdentityWavePathRekey {
   sharedPath: string;
 }
 
+export interface IdentityWaveSharedPathCandidate {
+  sharedPath: string;
+  identityEquivalent: boolean;
+}
+
 export interface IdentityWaveMigrationInput {
   dryRun?: boolean;
   now: string;
   transcriptTitle(pathname: string, engine: "claude" | "codex"): string | null;
-  sharedPathForLegacy(pathname: string): string | null;
+  sharedPathForLegacy(pathname: string): IdentityWaveSharedPathCandidate | null;
   orchestratorSeats: readonly IdentityWaveSeat[];
   commitExternalPathRekeys?(rekeys: readonly IdentityWavePathRekey[]): void;
 }
@@ -35,9 +40,9 @@ export interface IdentityWaveMigrationResult {
   alreadyCompleted: boolean;
   retitled: number;
   rekeyed: number;
-  /** Rekey pairs skipped because the shared path is already owned elsewhere.
-      Reported, never silently dropped: each one is a duplicate-identity repair
-      the wave cannot make on its own evidence. */
+  /** Rekey pairs skipped because transcript identity is unproven or the shared
+      path is already owned elsewhere. Reported, never silently dropped: each
+      one is a repair the wave cannot make on its own evidence. */
   quarantinedRekeys: number;
   edgesStamped: number;
 }
@@ -83,7 +88,7 @@ type EvidenceResolution<T> =
 interface ConversationEvidence {
   conversationTitle: string | null;
   needsTitleCleanup: boolean;
-  pathRekeys: IdentityWavePathRekey[];
+  pathRekeys: Array<IdentityWavePathRekey & { identityEquivalent: boolean }>;
   transcriptTitle: string | null;
 }
 
@@ -108,12 +113,15 @@ function conversationNeedsTitleCleanup(file: RegistryFile, conversation: Registr
     && placeholderTitle(receipt.launchProfile.title));
 }
 
-function safeSharedPath(input: IdentityWaveMigrationInput, pathname: string): EvidenceResolution<string> {
+function safeSharedPath(
+  input: IdentityWaveMigrationInput,
+  pathname: string,
+): EvidenceResolution<{ sharedPath: string; identityEquivalent: boolean }> {
   try {
     const candidate = input.sharedPathForLegacy(pathname);
-    return candidate && candidate !== pathname
-      ? { kind: "found", value: candidate }
-      : { kind: "absent" };
+    if (!candidate) return { kind: "absent" };
+    if (candidate.sharedPath === pathname) return { kind: "absent" };
+    return { kind: "found", value: candidate };
   } catch (error) {
     return { kind: "failed", error };
   }
@@ -148,22 +156,21 @@ function resolveConversationEvidence(
     const conversationTitle = newestSemanticConversationTitle(conversation);
     const needsTitleCleanup = conversationNeedsTitleCleanup(file, conversation);
     const pathRekeys = conversation.generations.flatMap((ownedGeneration) => {
-      const sharedPath = evidenceValue(safeSharedPath(input, ownedGeneration.path));
-      return sharedPath ? [{ legacyPath: ownedGeneration.path, sharedPath }] : [];
+      const candidate = evidenceValue(safeSharedPath(input, ownedGeneration.path));
+      return candidate ? [{ legacyPath: ownedGeneration.path, ...candidate }] : [];
     });
     evidence.set(conversation.id, { conversationTitle, needsTitleCleanup, pathRekeys, transcriptTitle: null });
   }
   return evidence;
 }
 
-/** Drops the rekey pairs whose shared path is claimed by another durable owner
-    (conversation, receipt, registry entry, or second legacy path) and keeps the
-    rest. A collision is durable data state — two registry rows describing one
-    transcript — so aborting the wave on it would never converge on retry and
-    would strand every clean rekey and every placeholder retitle behind it.
-    Quarantining is per pair, counted, and reported by the caller; evidence
-    *read* failures still abort the whole wave, because those genuinely can
-    succeed on a later startup. */
+/** Drops rekey pairs without identity proof and pairs whose shared path is
+    claimed by another durable owner (conversation, receipt, registry entry,
+    or second legacy path). A collision is durable data state, so aborting the
+    wave on it would never converge on retry and would strand every clean rekey
+    and placeholder retitle behind it. Quarantining is per pair, counted, and
+    reported by the caller; evidence read failures still abort the whole wave,
+    because those genuinely can succeed on a later startup. */
 function resolveRekeyOwnership(
   file: RegistryFile,
   evidence: Map<ViewerConversationId, ConversationEvidence>,
@@ -205,8 +212,12 @@ function resolveRekeyOwnership(
   const rekeys: IdentityWavePathRekey[] = [];
   let quarantined = 0;
   for (const [conversationId, conversationEvidence] of evidence) {
-    const owned: IdentityWavePathRekey[] = [];
+    const owned: typeof conversationEvidence.pathRekeys = [];
     for (const rekey of conversationEvidence.pathRekeys) {
+      if (!rekey.identityEquivalent) {
+        quarantined += 1;
+        continue;
+      }
       const pathOwners = owners.get(rekey.sharedPath);
       const sourceOwners = owners.get(rekey.legacyPath);
       const generationOwners = generationPaths.get(rekey.sharedPath);
@@ -220,7 +231,7 @@ function resolveRekeyOwnership(
       }
       targetSources.set(rekey.sharedPath, rekey.legacyPath);
       owned.push(rekey);
-      rekeys.push(rekey);
+      rekeys.push({ legacyPath: rekey.legacyPath, sharedPath: rekey.sharedPath });
     }
     conversationEvidence.pathRekeys = owned;
   }

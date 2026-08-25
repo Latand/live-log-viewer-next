@@ -508,7 +508,9 @@ test("derived, custom-title, and migrated generic receipts preserve pre-title re
     expect(restarted.runIdentityWaveMigration({
       now: "2026-08-05T12:00:00.000Z",
       transcriptTitle: () => null,
-      sharedPathForLegacy: (pathname) => pathname === legacyPath ? sharedPath : null,
+      sharedPathForLegacy: (pathname) => pathname === legacyPath
+        ? { sharedPath, identityEquivalent: true }
+        : null,
       orchestratorSeats: [],
     })).toMatchObject({ retitled: 1, rekeyed: 1 });
     expect(restarted.spawnReceiptForClientAttempt("title_digest_replay_20260805")).toMatchObject({
