@@ -433,16 +433,24 @@ class CodexRealtimeClient {
 
   private publishOperatorActivity(): void {
     if (!this.realtimeSessionId) return;
-    void fetch("/api/runtime/realtime", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        action: "operatorActivity",
-        conversationId: this.conversationId,
-        realtimeSessionId: this.realtimeSessionId,
-        operatorEventId: newOperatorActivityId(),
-      }),
-    }).then(responseJson).catch(() => undefined);
+    const payload = JSON.stringify({
+      action: "operatorActivity",
+      conversationId: this.conversationId,
+      realtimeSessionId: this.realtimeSessionId,
+      operatorEventId: newOperatorActivityId(),
+    });
+    const publish = async (retriesRemaining: number): Promise<void> => {
+      try {
+        await responseJson(await fetch("/api/runtime/realtime", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: payload,
+        }));
+      } catch {
+        if (retriesRemaining > 0) await publish(retriesRemaining - 1);
+      }
+    };
+    void publish(1);
   }
 
   /**

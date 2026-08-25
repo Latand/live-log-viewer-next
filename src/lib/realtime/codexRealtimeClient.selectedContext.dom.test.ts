@@ -158,20 +158,36 @@ test("a finished utterance reports the selected card against the call's own cred
   });
 });
 
-test("a failed operator-event submission is attempted once without browser persistence", async () => {
+test("operator activity retries network and server failures with one stable event identity", async () => {
+  let firstOperatorEventId: string | null = null;
+  const attemptsByEventId = new Map<string, number>();
   globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
     const request = JSON.parse(String(init?.body)) as ControlRequest;
     requests.push(request);
-    if (request.action === "operatorActivity") throw new Error("offline");
+    if (request.action === "operatorActivity") {
+      const operatorEventId = request.operatorEventId!;
+      firstOperatorEventId ??= operatorEventId;
+      const attempt = (attemptsByEventId.get(operatorEventId) ?? 0) + 1;
+      attemptsByEventId.set(operatorEventId, attempt);
+      if (attempt === 1 && operatorEventId === firstOperatorEventId) throw new Error("offline");
+      if (attempt === 1) {
+        return { ok: false, status: 503, json: async () => ({ error: "temporarily unavailable" }) } as Response;
+      }
+    }
     return { ok: true, status: 200, json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" }) } as unknown as Response;
   }) as typeof fetch;
-  const peer = await liveCall("conversation_voice_single_attempt");
+  const peer = await liveCall("conversation_voice_retry");
 
-  finished(peer, "user", "record one event");
-  for (let microtask = 0; microtask < 4; microtask += 1) await Promise.resolve();
+  finished(peer, "user", "record after a network failure");
+  for (let microtask = 0; microtask < 8; microtask += 1) await Promise.resolve();
+  finished(peer, "user", "record after a server failure");
+  for (let microtask = 0; microtask < 8; microtask += 1) await Promise.resolve();
 
   const published = requests.filter((request) => request.action === "operatorActivity");
-  expect(published).toHaveLength(1);
+  expect(published).toHaveLength(4);
+  expect(published[0]!.operatorEventId).toBe(published[1]!.operatorEventId);
+  expect(published[2]!.operatorEventId).toBe(published[3]!.operatorEventId);
+  expect(published[0]!.operatorEventId).not.toBe(published[2]!.operatorEventId);
   expect(dom.localStorage.length).toBe(0);
 });
 
