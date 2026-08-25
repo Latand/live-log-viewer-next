@@ -400,11 +400,11 @@ function currentReadSession(
 }
 
 /**
- * One connector read with a single recovery lane. The ordinary path performs
+ * One connector read with a bounded recovery lane. The ordinary path performs
  * no extra probe. When a transport call fails, the supervisor is asked to
  * adopt or replace the connector and performs its own bounded readiness
- * polling. Fast spawn failures are retried with a bounded exponential backoff;
- * once readiness is proved, the original read is attempted once more.
+ * polling. Spawn and transport races remain inside one exponential-backoff
+ * deadline so repeated restarts cannot fail the report immediately.
  */
 export async function callTelegramConnectorWithReadiness(
   session: StoredTelegramSession,
@@ -435,11 +435,13 @@ export async function callTelegramConnectorWithReadiness(
       try {
         return await ports.callTool(verified, name, args);
       } catch {
-        throw new Error("Telegram connector is unavailable");
+        /* Readiness can race another connector exit. Stay inside this bounded
+           lane and ask the supervisor for the next verified generation. */
       }
+    } else if (ready.code !== "connector_failed") {
+      /* Policy/configuration failures will not heal with another sleep. */
+      throw new Error("Telegram connector is unavailable");
     }
-    /* Policy/configuration failures will not heal with another sleep. */
-    if (ready.code !== "connector_failed") throw new Error("Telegram connector is unavailable");
     const remaining = deadline - ports.now();
     if (remaining <= 0) break;
     await ports.sleep(Math.min(backoffMs, remaining));

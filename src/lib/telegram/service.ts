@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentEvent, type TelegramEnrollmentHandle } from "./adapter";
-import { ensureTelegramConnector, stopTelegramConnector, telegramConnectorOwnsSession, type ConnectorEnsureResult } from "./connector";
+import { ensureTelegramConnector, stopTelegramConnector, stopTelegramConnectorForSession, telegramConnectorOwnsSession, type ConnectorEnsureResult } from "./connector";
 import type { TelegramAccountIdentity, TelegramErrorCode, TelegramStatusPayload } from "./contracts";
 import { registerTelegramHosts, unregisterTelegramHosts, type TelegramHostRegistrationResult } from "./hostRegistration";
 import { telegramApiCredentials } from "./packaging";
@@ -34,7 +34,7 @@ export interface TelegramServicePorts {
   adapter: TelegramAdapter;
   ensureConnector(session: StoredTelegramSession): Promise<ConnectorEnsureResult>;
   readConnectorIdentity(session: StoredTelegramSession): Promise<TelegramAccountIdentity | null>;
-  stopConnector(): Promise<void> | void;
+  stopConnector(session?: StoredTelegramSession): Promise<boolean | void> | boolean | void;
   registerHosts(): TelegramHostRegistrationResult;
   unregisterHosts(): void;
   now(): number;
@@ -47,7 +47,7 @@ const productionPorts: TelegramServicePorts = {
   adapter: processTelegramAdapter,
   ensureConnector: (session) => ensureTelegramConnector(session),
   readConnectorIdentity: (session) => connectorReadPort(session.credentialRef).getMe(),
-  stopConnector: stopTelegramConnector,
+  stopConnector: (session) => session ? stopTelegramConnectorForSession(session) : stopTelegramConnector(),
   registerHosts: () => registerTelegramHosts(),
   unregisterHosts: () => unregisterTelegramHosts(),
   now: Date.now,
@@ -452,7 +452,9 @@ export class TelegramConnectionService {
       }
       if (!this.lifecycleIsCurrent(generation)) return;
       if (!identity) {
-        writeTelegramConnection({ ...connection, status: "error", credentialRef: session.credentialRef, lastHealthCheckAt: checkedAt, errorCode: "connector_failed" });
+        const replacement = await this.replaceFailedConnector(session, generation);
+        if (!replacement) return;
+        writeTelegramConnection({ ...connection, status: "error", credentialRef: session.credentialRef, lastHealthCheckAt: checkedAt, errorCode: replacement.ok ? "connector_failed" : replacement.code });
         return;
       }
       const recorded = recordedIdentityAfterHealthCheck(connection, identity, checkedAt);
@@ -487,6 +489,38 @@ export class TelegramConnectionService {
       return;
     }
     writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: connection.identity, lastHealthCheckAt: checkedAt, errorCode: result.code, identityIdUpgradedAt: connection.identityIdUpgradedAt });
+  }
+
+  private currentHealthSession(session: StoredTelegramSession, generation: number): StoredTelegramSession | null {
+    if (!this.lifecycleIsCurrent(generation)) return null;
+    try {
+      const current = readTelegramSession();
+      return current?.credentialRef === session.credentialRef ? current : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async replaceFailedConnector(
+    session: StoredTelegramSession,
+    generation: number,
+  ): Promise<ConnectorEnsureResult | null> {
+    let current = this.currentHealthSession(session, generation);
+    if (!current) return null;
+    try {
+      await this.ports.stopConnector(current);
+    } catch {
+      return { ok: false, code: "connector_failed" };
+    }
+    current = this.currentHealthSession(session, generation);
+    if (!current) return null;
+    let replacement: ConnectorEnsureResult;
+    try {
+      replacement = await this.ports.ensureConnector(current);
+    } catch {
+      replacement = { ok: false, code: "connector_failed" };
+    }
+    return this.currentHealthSession(session, generation) ? replacement : null;
   }
 
   /** Remote logout. Success removes the local session too; failure PRESERVES

@@ -621,3 +621,19 @@ export async function ensureTelegramConnector(
 export async function stopTelegramConnector(): Promise<void> {
   await withConnectorSupervisorLock(stopRealConnectorUnlocked);
 }
+
+/** Stops the recorded connector only while it still belongs to this
+    credential generation. The ownership check and stop share the supervisor
+    lock so another Viewer cannot replace the connector between them. */
+export async function stopTelegramConnectorForSession(
+  session: ConnectorBinding,
+  ports: Pick<TelegramConnectorPorts, "ownsProcess" | "stop"> = {},
+): Promise<boolean> {
+  const ownsProcess = ports.ownsProcess ?? ownsRecordedConnector;
+  const stop = ports.stop ?? stopRealConnectorUnlocked;
+  return await withConnectorSupervisorLock(async () => {
+    if (!ownsProcess(session)) return false;
+    await stop();
+    return true;
+  });
+}

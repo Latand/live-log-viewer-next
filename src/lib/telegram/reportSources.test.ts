@@ -460,6 +460,42 @@ test("a connector read awaits one bounded readiness recovery before retrying", a
   expect(sleeps).toEqual([250]);
 });
 
+test("a connector read keeps recovering when the listener restarts after readiness", async () => {
+  const session: StoredTelegramSession = {
+    version: 1,
+    credentialRef: "credential-generation-placeholder",
+    connectorToken: "A".repeat(43),
+    sessionString: "1ApWapzMBu4placeholder-not-a-real-session",
+    savedAt: "2026-08-25T09:00:00.000Z",
+  };
+  let clock = 0;
+  let calls = 0;
+  let ensures = 0;
+  const sleeps: number[] = [];
+  const ports: TelegramConnectorReadPorts = {
+    readSession: () => session,
+    callTool: async () => {
+      calls += 1;
+      if (calls < 3) throw new Error("listener restarted again");
+      return { content: [{ type: "text", text: "ready" }] };
+    },
+    ensureConnector: async () => {
+      ensures += 1;
+      return { ok: true, url: "http://127.0.0.1:8809/mcp" };
+    },
+    sleep: async (ms) => { sleeps.push(ms); clock += ms; },
+    now: () => clock,
+    readinessTimeoutMs: 5_000,
+  };
+
+  await expect(callTelegramConnectorWithReadiness(session, "get_me", {}, ports)).resolves.toEqual({
+    content: [{ type: "text", text: "ready" }],
+  });
+  expect(calls).toBe(3);
+  expect(ensures).toBe(2);
+  expect(sleeps).toEqual([250]);
+});
+
 test("connector readiness backoff stops at its deadline", async () => {
   const session: StoredTelegramSession = {
     version: 1,
@@ -482,6 +518,36 @@ test("connector readiness backoff stops at its deadline", async () => {
   await expect(callTelegramConnectorWithReadiness(session, "list_chats", {}, ports)).rejects.toThrow(
     "Telegram connector is unavailable",
   );
+  expect(sleeps).toEqual([250, 500, 250]);
+  expect(clock).toBe(1_000);
+});
+
+test("repeated post-readiness failures stop at the same bounded deadline", async () => {
+  const session: StoredTelegramSession = {
+    version: 1,
+    credentialRef: "credential-generation-placeholder",
+    connectorToken: "A".repeat(43),
+    sessionString: "1ApWapzMBu4placeholder-not-a-real-session",
+    savedAt: "2026-08-25T09:00:00.000Z",
+  };
+  let clock = 0;
+  let calls = 0;
+  let ensures = 0;
+  const sleeps: number[] = [];
+  const ports: TelegramConnectorReadPorts = {
+    readSession: () => session,
+    callTool: async () => { calls += 1; throw new Error("listener keeps restarting"); },
+    ensureConnector: async () => { ensures += 1; return { ok: true, url: "http://127.0.0.1:8809/mcp" }; },
+    sleep: async (ms) => { sleeps.push(ms); clock += ms; },
+    now: () => clock,
+    readinessTimeoutMs: 1_000,
+  };
+
+  await expect(callTelegramConnectorWithReadiness(session, "list_chats", {}, ports)).rejects.toThrow(
+    "Telegram connector is unavailable",
+  );
+  expect(calls).toBe(4);
+  expect(ensures).toBe(3);
   expect(sleeps).toEqual([250, 500, 250]);
   expect(clock).toBe(1_000);
 });

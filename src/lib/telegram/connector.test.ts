@@ -12,7 +12,7 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_TELEGRAM_API_ID = "12345";
 process.env.LLV_TELEGRAM_API_HASH = "0123456789abcdef0123456789abcdef";
 
-const { TELEGRAM_CONNECTOR_LOG_MAX_BYTES, TELEGRAM_FEED_EXPOSED_TOOLS, TELEGRAM_READ_TOOL_ALLOWLIST, connectorFeedCoverageSince, connectorServerName, ensureTelegramConnector, stopTelegramConnector, telegramConnectorLogPath, trimTelegramConnectorLog, verifyReadOnlyTools } = await import("./connector");
+const { TELEGRAM_CONNECTOR_LOG_MAX_BYTES, TELEGRAM_FEED_EXPOSED_TOOLS, TELEGRAM_READ_TOOL_ALLOWLIST, connectorFeedCoverageSince, connectorServerName, ensureTelegramConnector, stopTelegramConnector, stopTelegramConnectorForSession, telegramConnectorLogPath, trimTelegramConnectorLog, verifyReadOnlyTools } = await import("./connector");
 const { TELEGRAM_BURST_CONSUMING_TOOLS, telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
 
 import type { ConnectorProbe, TelegramConnectorPorts } from "./connector";
@@ -179,6 +179,16 @@ test("an already-listening read-only connector is adopted, never duplicated", as
   expect(result).toEqual({ ok: true, url: telegramMcpUrl() });
   expect(calls.spawns).toBe(0);
   expect(calls.probeTokens).toEqual([CONNECTOR_SESSION.connectorToken]);
+});
+
+test("a failed probe stops only the connector owned by its credential generation", async () => {
+  const current = fakePorts([], { owned: true });
+  expect(await stopTelegramConnectorForSession(CONNECTOR_SESSION, current.ports)).toBe(true);
+  expect(current.calls.stops).toBe(1);
+
+  const stale = fakePorts([], { owned: false });
+  expect(await stopTelegramConnectorForSession(CONNECTOR_SESSION, stale.ports)).toBe(false);
+  expect(stale.calls.stops).toBe(0);
 });
 
 test("spawns once, waits for readiness, and records the winner before probing", async () => {
