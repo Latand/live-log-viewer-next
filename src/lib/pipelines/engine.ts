@@ -17,7 +17,8 @@ import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
 import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
-import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
+import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
+import { supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
 import { redactBounded } from "@/lib/monitor/redact";
 import { parseReview, type ReviewFinding } from "@/lib/review";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
@@ -306,16 +307,23 @@ async function spawnPipelineAgent(
 
   const spec = { ...specBase, launchProfile };
   const client = runtimeHostClient();
-  if (!client) throw new Error("pipeline structured runtime host is unavailable");
-  const response = await spawnStructuredConversation({
-    engine: input.role.engine,
-    receipt: begun.receipt,
-    spec,
-    account,
-    "prompt": input.prompt,
-    registry,
-    client,
-  });
+  const unavailable = supervisedRuntimeHostUnavailableReason("pipeline structured runtime host");
+  if (!client) throw new Error(unavailable);
+  let response: Awaited<ReturnType<typeof spawnStructuredConversation>>;
+  try {
+    response = await spawnStructuredConversation({
+      engine: input.role.engine,
+      receipt: begun.receipt,
+      spec,
+      account,
+      "prompt": input.prompt,
+      registry,
+      client,
+    });
+  } catch (error) {
+    if (isRuntimeHostTransportFailure(error)) throw new Error(unavailable, { cause: error });
+    throw error;
+  }
   const transcript = response.path ?? null;
   const key = transcript ? sessionKeyFromTranscript(input.role.engine, transcript) : null;
   if (transcript && input.parentPath && parent.conversationId) {
