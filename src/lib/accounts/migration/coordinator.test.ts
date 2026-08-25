@@ -2656,11 +2656,11 @@ describe("durable account migration coordinator", () => {
       "rolled-back-reauthorized-race",
     );
     const pendingDeliveries = store.pendingDeliveries.bind(store);
-    let reauthorizedId: string | null = null;
+    const reauthorized = { id: null as string | null };
     store.pendingDeliveries = (conversationId) => {
       const pending = pendingDeliveries(conversationId);
-      if (!reauthorizedId && pending.some((item) => item.id === "owned-by-rollback")) {
-        reauthorizedId = store.holdDelivery(
+      if (!reauthorized.id && pending.some((item) => item.id === "owned-by-rollback")) {
+        reauthorized.id = store.holdDelivery(
           conversation.id,
           "fixture payload",
           "owned-by-rollback",
@@ -2671,8 +2671,8 @@ describe("durable account migration coordinator", () => {
 
     await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
 
-    expect(reauthorizedId).toBe("owned-by-rollback");
-    expect(store.snapshot().heldDeliveries[reauthorizedId!]).toMatchObject({
+    expect(reauthorized.id).toBe("owned-by-rollback");
+    expect(store.snapshot().heldDeliveries[reauthorized.id!]).toMatchObject({
       state: "delivered",
       attempts: 1,
       error: null,
