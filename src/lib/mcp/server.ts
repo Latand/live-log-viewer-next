@@ -1645,7 +1645,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   get_flow: "Read one implement-review flow by durable id.",
   flow_action: "Apply a supported action to an implement-review flow.",
   list_pipelines: "List durable pipelines as bounded board cards: id, task, project, branch/worktree, state and stateDetail, cursor stage, task links, and a per-stage summary (role, engine, attempt count, latest attempt's state and verdict). Deliberately carries no bodies — the spec, stage prompts, role scaffolds and every attempt's input/output transcript are read with get_pipeline, which still returns the whole record. hasSpec tells you a spec exists; long free text is truncated.",
-  conversation_action: "Control or archive Viewer conversations. interrupt, kill, resume, compact, and dialog-key accept one conversation by id, transcript path, or selected-card reference. archive and unarchive also accept up to 100 targets; they update the existing board hidden placement without requiring a live host or readable transcript. A conversationId resolves server-side to its current generation path. Archive execution requires the operator root or a designated orchestrator seat and retains conversation_action's existing cross-project reach.",
+  conversation_action: "Control or archive Viewer conversations. interrupt, kill, resume, compact, and dialog-key accept one conversation by id, transcript path, or selected-card reference. archive and unarchive also accept up to 100 targets; they update the existing board hidden placement without requiring a live host or readable transcript. Each archive or unarchive target expands to every registered generation path while preserving an exact transcriptPath and a spawn:<launchId> placeholder. Each per-target outcome lists the paths actually written by this call; already-archived means the full expanded set was already hidden. Archive execution requires the operator root or a designated orchestrator seat and retains conversation_action's existing cross-project reach.",
   operator_snapshot: "Read the bounded, secret-redacted Viewer state currently visible to the operator.",
   list_tasks: "List durable board tasks.",
   get_task: "Read one durable board task.",
@@ -1678,9 +1678,9 @@ const selectedContextSchema = z.union([z.string().min(1), z.record(z.string(), z
   .describe("Selected-card reference from the operator's turn (the `ctx=` marker token, or the decoded object). Resolves the conversation through a bounded identity lookup — no operator_snapshot needed.");
 const conversationArchiveTargetSchema = z.object({
   conversationId: z.string().min(1).optional()
-    .describe("Durable Viewer conversation id. Resolves to the current generation path."),
+    .describe("Durable Viewer conversation id. Archive and unarchive actions expand it to every registered generation path."),
   transcriptPath: z.string().min(1).optional()
-    .describe("Exact board transcript path, including a spawn:<launchId> placeholder."),
+    .describe("Exact board transcript path, including a spawn:<launchId> placeholder. Archive and unarchive actions preserve it and add every generation of the resolved conversation."),
 }).strict().refine((target) => Boolean(target.conversationId || target.transcriptPath), {
   message: "conversationId or transcriptPath is required",
 });
@@ -1946,9 +1946,9 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   conversation_action: z.object({
     clientRequestId: clientRequestIdSchema,
     conversationId: z.string().optional()
-      .describe("Durable Viewer conversation id. Archive actions resolve it to the current generation path."),
+      .describe("Durable Viewer conversation id. Archive and unarchive actions expand it to every registered generation path."),
     transcriptPath: z.string().optional()
-      .describe("Exact transcript or spawn:<launchId> board path."),
+      .describe("Exact transcript or spawn:<launchId> board path. Archive and unarchive actions preserve it and add every generation of the resolved conversation."),
     selectedContext: selectedContextSchema,
     targets: z.array(conversationArchiveTargetSchema).min(1).max(100).optional()
       .describe("Archive/unarchive list form. Cannot be combined with the single-target fields."),
