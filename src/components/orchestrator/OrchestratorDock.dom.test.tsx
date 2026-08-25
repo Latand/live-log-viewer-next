@@ -52,7 +52,7 @@ mock.module("@/hooks/useRuntime", () => ({
 
 const {
   OrchestratorDock,
-  LEGACY_OPEN_KEY,
+  OPEN_KEY,
   MIN_WIDTH,
   MIN_BOARD,
   DEFAULT_WIDTH,
@@ -422,7 +422,7 @@ test("open and closed are the project's own, and the legacy global flag seeds a 
 
   /* What an operator carries in from before #1149: ONE flag for every project.
      It seeds them all, so a dock left open stays open everywhere. */
-  dom.localStorage.setItem(LEGACY_OPEN_KEY, "1");
+  dom.localStorage.setItem(OPEN_KEY, "1");
   expect(dockOpenFor("atlas")).toBe(true);
   expect(dockOpenFor("borealis")).toBe(true);
 
@@ -435,7 +435,7 @@ test("open and closed are the project's own, and the legacy global flag seeds a 
   /* ...and only that project's. Atlas still reads the seed, and the seed is
      never written to. */
   expect(dockOpenFor("atlas")).toBe(true);
-  expect(dom.localStorage.getItem(LEGACY_OPEN_KEY)).toBe("1");
+  expect(dom.localStorage.getItem(OPEN_KEY)).toBe("1");
 
   /* Two projects, two independent answers. */
   rememberDockOpen("atlas", false);

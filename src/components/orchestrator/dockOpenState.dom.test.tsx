@@ -4,10 +4,14 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 /*
- * The dock's place in the shell (issue #977 acceptance): it is PUSHED INTO the
- * layout between the project rail and the board — never an overlay — it follows
- * whichever project the rail has selected, it does not exist on the Overview
- * (which is not a project and has no seat), and its open state survives reload.
+ * The dock's open state is the PROJECT's (issue #1149), asserted where the
+ * operator meets it: the real shell, switching projects through the rail.
+ *
+ * `OrchestratorDock.dom.test.tsx` covers the storage contract itself —
+ * `dockOpenFor` / `rememberDockOpen`, their keys and the seed. What only a
+ * mounted `Viewer` can prove is that a SWITCH re-reads it: the dock the
+ * operator closed in a project they were glancing at must still be closed when
+ * they come back to it, and must never have touched the project they left.
  */
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -67,12 +71,13 @@ mock.module("@/hooks/runtimeBus", () => ({
   }),
 }));
 
-const { Viewer } = await import("./Viewer");
+const { Viewer } = await import("../Viewer");
 const { resetFilesClientCacheForTests } = await import("@/hooks/useFiles");
-const { OPEN_KEY } = await import("./orchestrator/OrchestratorDock");
+const { OPEN_KEY } = await import("./OrchestratorDock");
 
 const PROJECT = "atlas";
 const OTHER = "borealis";
+const openKey = (project: string) => `${OPEN_KEY}:${project}`;
 const originalFetch = globalThis.fetch;
 
 function stubFetch(): void {
@@ -122,73 +127,68 @@ async function mountViewer(): Promise<HTMLElement> {
   return host as unknown as HTMLElement;
 }
 
-function dock(host: HTMLElement): HTMLElement | null {
-  return host.querySelector("[data-orchestrator-dock]");
-}
+/** Present or not, as a boolean: a failing `toBeNull()` on a happy-dom element
+    prints the whole node graph, which is megabytes of noise around one bit. */
+const hasDock = (host: HTMLElement) => host.querySelector("[data-orchestrator-dock]") !== null;
+const seatedOn = (host: HTMLElement) =>
+  host.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-panel") ?? null;
+const toggle = (host: HTMLElement) => host.querySelector("[data-orchestrator-toggle]") as HTMLButtonElement;
 
-test("a stored open state restores the dock, pushed into the layout between the rail and the board", async () => {
-  dom.localStorage.setItem("llvProject", PROJECT);
-  dom.localStorage.setItem(OPEN_KEY, "1");
-
-  const host = await mountViewer();
-
-  const panel = dock(host);
-  expect(panel).not.toBeNull();
-  expect(panel!.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-panel")).toBe(PROJECT);
-
-  /* In the layout, not over it: the shell row is rail → dock → main, and the
-     dock is a plain flex sibling with no fixed/absolute positioning. */
-  const shell = panel!.parentElement!;
-  const children = [...shell.children];
-  const rail = shell.querySelector("aside:not([data-orchestrator-dock])");
-  expect(children.indexOf(panel!)).toBeGreaterThan(children.indexOf(rail as Element));
-  expect(children.indexOf(panel!)).toBeLessThan(children.indexOf(shell.querySelector("main") as Element));
-  expect(panel!.className).not.toContain("fixed");
-  expect(panel!.className).not.toContain("absolute");
-});
-
-test("the Overview has no orchestrator dock, even with the panel remembered open", async () => {
-  dom.localStorage.setItem(OPEN_KEY, "1");
-
-  const host = await mountViewer();
-
-  expect(dock(host)).toBeNull();
-});
-
-test("the header button toggles the dock and the choice survives a reload", async () => {
-  dom.localStorage.setItem("llvProject", PROJECT);
-
-  const host = await mountViewer();
-  expect(dock(host)).toBeNull();
-
-  const toggle = host.querySelector("[data-orchestrator-toggle]") as HTMLButtonElement;
-  expect(toggle).not.toBeNull();
-  expect(toggle.getAttribute("aria-pressed")).toBe("false");
-
-  await act(async () => { toggle.click(); });
-  expect(dock(host)).not.toBeNull();
-  /* Under the PROJECT's own key since #1149; `OPEN_KEY` itself only seeds a
-     project that has never answered, and nothing writes it. */
-  expect(dom.localStorage.getItem(`${OPEN_KEY}:${PROJECT}`)).toBe("1");
-  expect((host.querySelector("[data-orchestrator-toggle]") as HTMLButtonElement).getAttribute("aria-pressed")).toBe("true");
-
-  await act(async () => { (host.querySelector("[data-orchestrator-toggle]") as HTMLButtonElement).click(); });
-  expect(dock(host)).toBeNull();
-  expect(dom.localStorage.getItem(`${OPEN_KEY}:${PROJECT}`)).toBe("0");
-});
-
-test("the dock follows the selected project", async () => {
-  dom.localStorage.setItem("llvProject", PROJECT);
-  dom.localStorage.setItem(OPEN_KEY, "1");
-
-  const host = await mountViewer();
-  expect(dock(host)!.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-panel")).toBe(PROJECT);
-
+/** Selecting a project the way the rail does — through the hash, which is also
+    what a reload of a project URL replays. Explicit, because a test that
+    inherits the previous one's hash is a test of the Overview. */
+async function goTo(project: string): Promise<void> {
   await act(async () => {
-    dom.location.hash = `#p=${encodeURIComponent(OTHER)}`;
+    dom.location.hash = `#p=${encodeURIComponent(project)}`;
     dom.dispatchEvent(new dom.Event("hashchange"));
   });
   await act(async () => { await Bun.sleep(20); });
+}
 
-  expect(dock(host)!.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-panel")).toBe(OTHER);
+test("closing the dock in one project leaves the other project's open", async () => {
+  /* Both projects open, from the one flag an operator carries in (#1149 seed). */
+  dom.localStorage.setItem("llvProject", PROJECT);
+  dom.localStorage.setItem(OPEN_KEY, "1");
+
+  const host = await mountViewer();
+  await goTo(PROJECT);
+  expect(hasDock(host)).toBe(true);
+
+  /* The operator closes it in the project they are only glancing at... */
+  await goTo(OTHER);
+  expect(hasDock(host)).toBe(true);
+  await act(async () => { toggle(host).click(); });
+  expect(hasDock(host)).toBe(false);
+  expect(dom.localStorage.getItem(openKey(OTHER))).toBe("0");
+
+  /* ...and the project they are running still has its dock, on its own seat. */
+  await goTo(PROJECT);
+  expect(hasDock(host)).toBe(true);
+  expect(seatedOn(host)).toBe(PROJECT);
+  expect(dom.localStorage.getItem(openKey(PROJECT))).toBeNull();
+
+  /* Back again: still closed where it was closed, and nothing wrote the seed. */
+  await goTo(OTHER);
+  expect(hasDock(host)).toBe(false);
+  expect(dom.localStorage.getItem(OPEN_KEY)).toBe("1");
+});
+
+test("a project's own answer outranks the pre-#1149 global flag, across a switch", async () => {
+  dom.localStorage.setItem("llvProject", PROJECT);
+  dom.localStorage.setItem(OPEN_KEY, "1");
+  /* Closed here, and the seed says «open»: the project that answered wins. */
+  dom.localStorage.setItem(openKey(PROJECT), "0");
+
+  const host = await mountViewer();
+  await goTo(PROJECT);
+  expect(hasDock(host)).toBe(false);
+
+  /* The seed still answers for the project that never has. */
+  await goTo(OTHER);
+  expect(hasDock(host)).toBe(true);
+  expect(seatedOn(host)).toBe(OTHER);
+
+  /* And the switch back re-reads, rather than carrying `borealis`'s answer. */
+  await goTo(PROJECT);
+  expect(hasDock(host)).toBe(false);
 });

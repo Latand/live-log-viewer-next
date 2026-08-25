@@ -93,9 +93,8 @@ afterAll(() => {
   globalThis.fetch = realFetch;
 });
 beforeEach(() => {
-  /* The seat answer is cached per project for the session (#1149), so each test
-     starts as a tab that has never read this project's seat — otherwise the
-     row opens on the answer the test before it was given. */
+  /* Each test is a tab that has never read this project's seat; the answer is
+     cached per project for the session since #1149. */
   resetOrchestratorSeatCacheForTests();
   requests.length = 0;
   seatAnswer = { seat: null, pending: null, exists: true };

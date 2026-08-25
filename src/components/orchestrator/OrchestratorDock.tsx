@@ -17,14 +17,16 @@ const LEGACY_WIDTH_KEY = "llvOrchestratorPanelWidth";
     dragged wide for a mandate-heavy project must not resize every other one. */
 const widthKey = (project: string) => `${LEGACY_WIDTH_KEY}:${project}`;
 /** The open/closed flag every project shared before #1149, now the same kind of
-    seed the width is: a project that has never been opened or closed answers
-    with it, so an operator coming from the single global preference finds the
-    dock where they left it everywhere. Nothing writes it. */
-export const LEGACY_OPEN_KEY = "llvOrchestratorPanelOpen";
+    seed `LEGACY_WIDTH_KEY` is: a project that has never been opened or closed
+    answers with it, so an operator coming from the single global preference
+    finds the dock where they left it everywhere. Nothing writes it. It keeps
+    its pre-#1149 name because it is the same key holding the same value — only
+    its role narrowed. */
+export const OPEN_KEY = "llvOrchestratorPanelOpen";
 /** One project's own open state (#1149). The dock is a per-project surface —
     closing it in a project the operator only glances at must not close it in
     the one they are running. */
-const openKey = (project: string) => `${LEGACY_OPEN_KEY}:${project}`;
+const projectOpenKey = (project: string) => `${OPEN_KEY}:${project}`;
 
 export const MIN_WIDTH = 360;
 export const DEFAULT_WIDTH = 440;
@@ -73,13 +75,13 @@ function projectDockWidth(project: string): number {
     the seed — a project that has answered for itself outranks it, «closed»
     included. */
 export function dockOpenFor(project: string): boolean {
-  return (readStorage(openKey(project)) ?? readStorage(LEGACY_OPEN_KEY)) === "1";
+  return (readStorage(projectOpenKey(project)) ?? readStorage(OPEN_KEY)) === "1";
 }
 
 /** Remember what the operator just did to THIS project's dock. */
 export function rememberDockOpen(project: string, open: boolean): void {
   try {
-    window.localStorage.setItem(openKey(project), open ? "1" : "0");
+    window.localStorage.setItem(projectOpenKey(project), open ? "1" : "0");
   } catch {
     /* private mode */
   }
