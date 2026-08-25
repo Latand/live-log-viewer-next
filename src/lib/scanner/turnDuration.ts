@@ -1,6 +1,5 @@
 import type { FileEntry, TurnBoundary } from "../types";
 import { isClaudeTurnWindowMeta } from "@/lib/claudeProtocolUser";
-import { decodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
 import { tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
@@ -14,7 +13,6 @@ const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>(
 
 export interface RecentTurnWindows {
   windows: TurnBoundary[];
-  operatorActionsAtMs?: number[];
   assistantMessagesAtMs?: number[];
   prefixTruncated: boolean;
   complete: boolean;
@@ -179,43 +177,19 @@ export function recentTurnWindowsFromRecords(records: RecordLike[], codex: boole
   return windows;
 }
 
-/** Direct operator actions are preserved independently from turn windows.
-    Codex and Claude both require explicit server-authored operator provenance,
-    keeping SDK, peer, coordinator, and automation envelopes in the agent lane. */
+/** Turn windows and visible assistant acknowledgements derived from one record slice. */
 export function recentTurnActivityFromRecords(
   records: RecordLike[],
   codex: boolean,
-): Pick<RecentTurnWindows, "windows" | "operatorActionsAtMs" | "assistantMessagesAtMs"> {
-  const operatorActions = new Set<number>();
+): Pick<RecentTurnWindows, "windows" | "assistantMessagesAtMs"> {
   const assistantMessages = new Set<number>();
   for (const record of records) {
     const atMs = parseMillis(record.timestamp);
     if (atMs === null) continue;
     if (visibleAssistantMessage(record, codex)) assistantMessages.add(atMs);
-    if (codex) {
-      const payload = recordValue(record.payload) ?? {};
-      let text = "";
-      if (stringValue(payload.type) === "user_message") {
-        text = stringValue(payload.message) ?? "";
-      } else if (stringValue(payload.type) === "message" && payload.role === "user") {
-        text = recordsValue(payload.content)
-          .map((part) => stringValue(part.text) ?? stringValue(part.input_text) ?? "")
-          .join("\n");
-      }
-      if (text && decodeCodexStructuredUserText(text).origin?.kind === "operator") operatorActions.add(atMs);
-      continue;
-    }
-    if (!isTurnStart(record, false)) continue;
-    const originKind = typeof record.origin === "string"
-      ? record.origin
-      : stringValue(recordValue(record.origin)?.kind);
-    if (originKind === "human" || record.promptSource === "typed") {
-      operatorActions.add(atMs);
-    }
   }
   return {
     windows: recentTurnWindowsFromRecords(records, codex),
-    operatorActionsAtMs: [...operatorActions].sort((left, right) => left - right),
     assistantMessagesAtMs: [...assistantMessages].sort((left, right) => left - right),
   };
 }

@@ -75,27 +75,17 @@ const codexToolOutput = (timestamp: string, id: string) => ({
 const codexTaskComplete = (timestamp: string) => ({ timestamp, payload: { type: "task_complete" } });
 
 describe("lastTurnFromRecords — Claude", () => {
-  test("preserves direct operator action times without treating relayed work as operator input", () => {
+  test("preserves turn windows while tracking visible assistant messages", () => {
     const result = recentTurnActivityFromRecords(
       [
         claudeUser("2026-07-14T10:00:00.000+03:00", "start"),
         claudeAssistantOpen("2026-07-14T07:00:05.000Z"),
-        {
-          ...claudeUser("2026-07-14T07:03:00.000Z", "steer"),
-          promptSource: "typed",
-          origin: { kind: "human" },
-        },
-        {
-          ...claudeUser("2026-07-14T07:04:00.000Z", "relayed"),
-          isMeta: true,
-          origin: { kind: "coordinator" },
-        },
+        claudeUser("2026-07-14T07:03:00.000Z", "steer"),
         claudeAssistantEnd("2026-07-14T07:05:00.000Z"),
       ],
       false,
     );
 
-    expect(result.operatorActionsAtMs).toEqual([ms("2026-07-14T07:03:00.000Z")]);
     expect(result.assistantMessagesAtMs).toEqual([
       ms("2026-07-14T07:00:05.000Z"),
       ms("2026-07-14T07:05:00.000Z"),
@@ -118,30 +108,6 @@ describe("lastTurnFromRecords — Claude", () => {
     );
 
     expect(result.assistantMessagesAtMs).toEqual([ms("2026-07-14T10:00:02.000Z")]);
-  });
-
-  test("gives a legacy terminal prompt no operator identity and excludes automated Claude lanes", () => {
-    const at = "2026-07-14T07:03:00.000Z";
-    const result = recentTurnActivityFromRecords([{
-      ...claudeUser(at, "typed in a legacy terminal"),
-      uuid: "legacy-terminal-record",
-    }, {
-      ...claudeUser("2026-07-14T07:04:00.000Z", "SDK injection"),
-      uuid: "sdk-record",
-      promptSource: "sdk",
-    }, {
-      ...claudeUser("2026-07-14T07:05:00.000Z", "peer injection"),
-      uuid: "peer-record",
-      isMeta: true,
-      origin: { kind: "peer" },
-    }, {
-      ...claudeUser("2026-07-14T07:06:00.000Z", "coordinator injection"),
-      uuid: "coordinator-record",
-      isMeta: true,
-      origin: { kind: "coordinator" },
-    }], false);
-
-    expect(result.operatorActionsAtMs).toEqual([]);
   });
 
   test("enumerates every completed turn in chronological order", () => {
@@ -499,27 +465,6 @@ describe("lastTurnFromRecords — Claude", () => {
 });
 
 describe("lastTurnFromRecords — Codex", () => {
-  test("deduplicates Viewer operator input and excludes unstructured harness prompts", () => {
-    const at = "2026-07-14T10:00:00.000Z";
-    const structured = "<!-- llv:structured-user origin=operator -->\ncontinue";
-    const result = recentTurnActivityFromRecords(
-      [
-        {
-          type: "response_item",
-          timestamp: at,
-          payload: { type: "message", role: "user", content: [{ type: "input_text", text: structured }] },
-        },
-        codexUser(at, structured),
-        codexTaskStarted("2026-07-14T10:00:01.000Z"),
-        codexTaskComplete("2026-07-14T10:01:00.000Z"),
-        codexUser("2026-07-14T10:02:00.000Z", "# AGENTS.md instructions for a worker"),
-      ],
-      true,
-    );
-
-    expect(result.operatorActionsAtMs).toEqual([ms(at)]);
-  });
-
   test("tracks a visible Codex assistant message in the current turn", () => {
     const result = recentTurnActivityFromRecords(
       [
@@ -532,14 +477,6 @@ describe("lastTurnFromRecords — Codex", () => {
     );
 
     expect(result.assistantMessagesAtMs).toEqual([ms("2026-07-14T10:00:03.000Z")]);
-  });
-
-  test("an agent structured marker cannot claim direct operator provenance", () => {
-    const result = recentTurnActivityFromRecords([
-      codexUser("2026-07-14T10:00:00.000Z", "<!-- llv:structured-user -->\nagent relay"),
-    ], true);
-
-    expect(result.operatorActionsAtMs).toEqual([]);
   });
 
   test("enumerates completed turns followed by the final open turn", () => {
@@ -663,7 +600,6 @@ test("a truncated transcript prefix reports the gap and never fabricates a turn 
     expect(recentTurnWindowsFor(entry)).toEqual({
       prefixTruncated: true,
       complete: true,
-      operatorActionsAtMs: [],
       assistantMessagesAtMs: [
         ms("2026-07-14T08:01:00.000Z"),
         ms("2026-07-14T10:01:00.000Z"),

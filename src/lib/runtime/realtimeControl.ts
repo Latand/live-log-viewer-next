@@ -195,23 +195,6 @@ export async function executeRealtimeControl(
      * refused `unbound` without a second rule to keep in sync.
      */
     if (request.action === "selectedContext") {
-      const operatorEventId = typeof request.operatorEventId === "string" ? request.operatorEventId.trim() : "";
-      if (operatorEventId && (operatorEventId.length > 128 || !/^[A-Za-z0-9_-]+$/.test(operatorEventId))) {
-        return { status: 400, body: { error: "operatorEventId is invalid" } };
-      }
-      if (operatorEventId) {
-        if (caller.kind !== "session" || caller.realtimeSessionId !== host.currentRealtimeSessionId?.()) {
-          return { status: 403, body: { error: "operator activity requires the live realtime peer" } };
-        }
-        try {
-          dependencies.recordOperatorActivity({
-            conversationId,
-            idempotencyKey: `realtime:${operatorEventId}`,
-          });
-        } catch {
-          return { status: 503, body: { error: "direct operator activity could not be recorded" } };
-        }
-      }
       const admission = admitVoiceSelectedContext({
         conversationId,
         realtimeSessionId: caller.kind === "session" ? caller.realtimeSessionId : "",
