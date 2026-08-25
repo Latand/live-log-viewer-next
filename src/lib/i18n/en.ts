@@ -1815,6 +1815,8 @@ export const en = {
   "orchPanel.draftTitle": "Create this project's orchestrator",
   "orchPanel.draftHint": "It runs in {project}, owns this board, and answers you here. The text below is delivered to it as its first message — edit it however you like.",
   "orchPanel.draftHintVacated": "The previous orchestrator's conversation is gone. Create a new one for {project}; the text below is delivered as its first message.",
+  "orchPanel.viewerMcpRegistered": "viewer MCP: registered ✓",
+  "orchPanel.viewerMcpMissing": "viewer MCP: run scripts/install-mcp.sh or claude mcp add viewer -- bun ./bin/mcp-server.mjs",
   "orchPanel.mandate": "Mandate",
   "orchPanel.mandateSent": "Sent as the first message",
   "orchPanel.restoreDefault": "Restore default",
