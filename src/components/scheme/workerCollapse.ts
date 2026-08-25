@@ -231,7 +231,8 @@ export function shouldCollapseWorker(file: FileEntry, context: CollapseContext):
      must not also fold them into an origin stack, or a tray member would render
      in two places. S2 claims them before this classifier ever runs. */
   if (file.spawnOrigin === "engine") return false;
-  if (file.spawn || file.migratedTo) return false;
+  if (file.spawn && file.spawn.state !== "failed" && file.spawn.state !== "recovered") return false;
+  if (file.migratedTo) return false;
   if (file.engine !== "claude" && file.engine !== "codex") return false;
   return !keepExpanded(file, context);
 }
@@ -408,12 +409,13 @@ export function protectedReviewerNodes(input: ProtectedReviewerNodesInput): File
       if (input.renderedNodePaths.has(path) || input.hiddenPaths.has(path)) continue;
       const file = byPath.get(path);
       if (!file) continue;
-      if (input.keepExpandedPaths && !input.keepExpandedPaths.has(path)) continue;
+      const admittedBySharedRule = input.keepExpandedPaths?.has(path) ?? false;
+      if (input.keepExpandedPaths && !admittedBySharedRule) continue;
       /* An owner pin is explicit intent and stays unbounded. Other legacy
          materialization reasons remain inside the placement horizon. */
       const owned = input.pinnedPaths.has(path);
       if (!owned && !withinPlacementHorizon(file, input.now ?? 0, input.ageHorizonSeconds ?? schemeAgeHorizonSeconds())) continue;
-      if (owned || file.userAuthored || file.authorshipUnverified) {
+      if (admittedBySharedRule || owned || file.userAuthored || file.authorshipUnverified) {
         out.push(file);
         seen.add(path);
       }

@@ -1258,6 +1258,60 @@ test("a pipeline stage placeholder carries durable spawn lineage without an oper
   }
 });
 
+test("a materialized pipeline stage clears a legacy handoff before response lineage enrichment", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-materialized-handoff-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      role: "builder",
+      origin: { kind: "container", container: "pipeline", containerId: "pipeline-fixture", creatorConversationId: parent.id },
+      memberships: [{
+        kind: "pipeline",
+        containerId: "pipeline-fixture",
+        role: "builder",
+        slot: "build:1",
+        stageId: "build",
+        stageOrder: 0,
+        round: 1,
+        parentConversationId: parent.id,
+      }],
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId: SETTLED_SESSION_ID },
+      artifactPath,
+      cwd: directory,
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      status: "unhosted",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    const stage = scannedFile(artifactPath);
+    stage.parent = parentPath;
+    stage.handoff = true;
+    expect(stage.durableLineage).toBeUndefined();
+
+    projectLaunchConversations([scannedFile(parentPath), stage], registry.snapshot());
+
+    expect(stage.handoff).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("terminal receipts age through history and retire at the 24h bound; non-terminal receipts always project (#342)", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-retire-"));
   const filename = path.join(directory, "agent-registry.json");

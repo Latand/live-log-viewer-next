@@ -309,6 +309,35 @@ describe("shouldCollapseWorker", () => {
     expect(shouldCollapseWorker(child, ctx())).toBe(false);
   });
 
+  test("fresh terminal spawn placeholders collapse into a stack immediately", () => {
+    const terminal = (["failed", "recovered"] as const).map((state) => entry({
+      path: `spawn:${state}`,
+      activity: state === "failed" ? "stalled" : "recent",
+      mtime: NOW_SEC - 5,
+      spawn: {
+        launchId: state,
+        clientAttemptId: null,
+        accountId: null,
+        state,
+        initialMessage: state === "failed" ? "failed" : "delivered",
+        retrySafe: state === "failed",
+        error: state === "failed" ? "fixture failure" : null,
+      },
+    }));
+
+    const stacks = computeWorkerStacks({
+      files: terminal,
+      project: "demo",
+      flows: [],
+      pinnedPaths: new Set(),
+      renderedPaths: new Set(),
+      nowMs: NOW,
+    });
+
+    expect(stacks.flatMap((stack) => stack.items).map((file) => file.path).sort())
+      .toEqual(["spawn:failed", "spawn:recovered"]);
+  });
+
   test("a finished reviewer round collapses immediately, even while fresh", () => {
     const reviewer = entry({
       path: "/rev",
@@ -694,6 +723,12 @@ describe("protectedReviewerNodes", () => {
     const authored = entry({ path: "/rev", userAuthored: true, proc: "killed" });
     const flows = [closed({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
     expect(nodes({ files: [authored], flows, keepExpandedPaths: new Set() })).toEqual([]);
+  });
+
+  test("the shared rule materializes a clean active reviewer when its implementer has no deck", () => {
+    const reviewer = entry({ path: "/rev", activity: "live" });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", state: "reviewing", rounds: [round({ reviewerPath: "/rev" })] })];
+    expect(nodes({ files: [reviewer], flows, keepExpandedPaths: new Set(["/rev"]) })).toEqual(["/rev"]);
   });
 
   test("HARD CONSTRAINT: materializes a protected reviewer of an ACTIVE flow whose implementer is UNPLACED", () => {
