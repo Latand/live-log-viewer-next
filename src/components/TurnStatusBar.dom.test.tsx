@@ -27,10 +27,15 @@ afterEach(() => {
   setSystemTime();
 });
 
-const file = (lastTurn: FileEntry["lastTurn"], activity: FileEntry["activity"]) =>
-  ({ lastTurn, activity }) as Pick<FileEntry, "lastTurn" | "activity">;
+type StatusFile = Pick<FileEntry, "lastTurn" | "activity" | "mtime" | "pendingQuestion" | "waitingInput" | "rateLimit">;
 
-const render = (entry: Pick<FileEntry, "lastTurn" | "activity">, container: HTMLElement) => {
+const file = (
+  lastTurn: FileEntry["lastTurn"],
+  activity: FileEntry["activity"],
+  overrides: Partial<Pick<FileEntry, "mtime" | "pendingQuestion" | "waitingInput" | "rateLimit">> = {},
+) => ({ lastTurn, activity, mtime: 0, pendingQuestion: null, waitingInput: null, rateLimit: null, ...overrides }) as StatusFile;
+
+const render = (entry: StatusFile, container: HTMLElement) => {
   root ??= createRoot(container);
   flushSync(() => root!.render(<TurnStatusBar file={entry} workingLabel="working…" workingIcon={Sparkle} />));
 };
@@ -138,4 +143,58 @@ test("idle pane with no completed turn renders nothing", () => {
   document.body.appendChild(container);
   render(file(null, "idle"), container);
   expect(container.querySelector("[data-turn-status]")).toBeNull();
+});
+
+test("a pending question takes precedence over a live turn and uses the warning tone", () => {
+  const t0 = Date.parse("2026-07-18T10:00:00.000Z");
+  setSystemTime(new Date(t0 + 90 * 60 * 1000));
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+
+  render(file({ startedAt: t0, endedAt: null }, "live", {
+    pendingQuestion: {
+      kind: "question",
+      toolUseId: "tool-1",
+      transcriptPath: "/sessions/q.jsonl",
+      pid: 42,
+      paneTarget: "%1",
+      askedAt: new Date(t0).toISOString(),
+    },
+  }), container);
+
+  const waiting = container.querySelector('[data-turn-status="waiting"]');
+  expect(waiting?.textContent).toContain("waiting for your answer");
+  expect(waiting?.textContent).toContain("1:30:00");
+  expect(waiting?.className).toContain("text-warning");
+  expect(container.querySelector('[data-turn-status="running"]')).toBeNull();
+});
+
+test("terminal waits take precedence over a finished turn", () => {
+  const t0 = Date.parse("2026-07-18T10:00:00.000Z");
+  setSystemTime(new Date(t0 + 65 * 1000));
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+
+  render(file({ startedAt: t0, endedAt: t0 + 30_000 }, "recent", {
+    waitingInput: { since: t0 / 1000, screenTail: "Continue?", target: "%1", menu: null },
+  }), container);
+
+  expect(container.querySelector('[data-turn-status="waiting"]')?.textContent).toContain("waiting for your answer");
+  expect(container.querySelector('[data-turn-status="finished"]')).toBeNull();
+});
+
+test("a rate limit still renders the operator-blocked status without an open turn", () => {
+  const t0 = Date.parse("2026-07-18T10:00:00.000Z");
+  setSystemTime(new Date(t0 + 65 * 1000));
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+
+  render(file(null, "idle", {
+    mtime: t0 / 1000,
+    rateLimit: { source: "account", accountId: "account-a", window: "session", resetAt: null },
+  }), container);
+
+  expect(container.querySelector('[data-turn-status="waiting"]')?.textContent).toContain("waiting for your answer");
+  expect(container.querySelector('[data-turn-status="waiting"]')?.textContent).toContain("1:05");
+  expect(container.querySelector('[data-turn-status="waiting"]')?.className).toContain("text-warning");
 });

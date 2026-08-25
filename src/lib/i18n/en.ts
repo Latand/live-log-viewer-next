@@ -51,6 +51,7 @@ export const en = {
   "turn.running": "working {d}",
   "turn.lastRun": "last run: {d}",
   "turn.timer": "elapsed work time",
+  "turn.waiting": "waiting for your answer",
 
   // Board status vocabulary (issue #961) — wording reused from the existing
   // attention/receipt/turn surfaces, one word per card.

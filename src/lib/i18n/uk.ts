@@ -48,6 +48,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "turn.running": "працює {d}",
   "turn.lastRun": "останній прогін: {d}",
   "turn.timer": "час роботи",
+  "turn.waiting": "чекає на вашу відповідь",
 
   // Словник статусів дошки (issue #961) — формулювання з наявних поверхонь
   // уваги/квитанцій/ходу, одне слово на картку.
