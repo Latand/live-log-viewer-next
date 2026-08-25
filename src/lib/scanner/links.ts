@@ -533,7 +533,7 @@ export function durableHandoffLineageFromSnapshot(snapshot: RegistryFile): Durab
     provenanceForChild(pathname) {
       const conversation = lookup.conversationForPath(pathname);
       if (!conversation) return null;
-      return durableHandoffProvenanceForConversation(snapshot, conversation.id);
+      return durableHandoffProvenanceForConversation(snapshot, conversation.id, lookup);
     },
   };
 }

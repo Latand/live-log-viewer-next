@@ -188,6 +188,48 @@ describe("linkEntries", () => {
     expect(child.handoff).toBeUndefined();
   });
 
+  test("builds the conversation lookup once for all durable provenance queries", () => {
+    const registry = new AgentRegistry(path.join(SANDBOX, "provenance-lookup-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(SANDBOX, "provenance-lookup-parent.jsonl");
+    const childPath = path.join(SANDBOX, "provenance-lookup-child.jsonl");
+    const parentConversation = registry.ensureConversation("claude", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "claude",
+      cwd: SANDBOX,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parentConversation.id,
+      role: "builder",
+      memberships: [{
+        kind: "pipeline",
+        containerId: "pipeline-lookup-fixture",
+        role: "builder",
+        slot: "build:1",
+        stageId: "build",
+        stageOrder: 0,
+        round: 1,
+        parentConversationId: parentConversation.id,
+      }],
+    });
+    if (begun.kind !== "created") throw new Error("expected created spawn");
+    settleSpawn(registry, begun.receipt.launchId, childPath, "provenance-lookup-session");
+    const snapshot = registry.snapshot();
+    const conversations = snapshot.conversations;
+    let lookupBuilds = 0;
+    snapshot.conversations = new Proxy(conversations, {
+      ownKeys(target) {
+        lookupBuilds += 1;
+        return Reflect.ownKeys(target);
+      },
+    });
+
+    const lineage = durableHandoffLineageFromSnapshot(snapshot);
+    expect(lineage.provenanceForChild(childPath)).toBe("container-spawn");
+    expect(lineage.provenanceForChild(parentPath)).toBeNull();
+    expect(lineage.provenanceForChild(childPath)).toBe("container-spawn");
+    expect(lookupBuilds).toBe(1);
+  });
+
   test("preserves an operator handoff that later gains flow membership", async () => {
     const registry = new AgentRegistry(path.join(SANDBOX, "enrolled-handoff-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const parentPath = path.join(SANDBOX, "enrolled-handoff-parent.jsonl");

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { readOnlyConversationLookupFromSnapshot, type RegistryFile, type SpawnReceipt } from "./registry";
+import { readOnlyConversationLookupFromSnapshot, type ConversationLookup, type RegistryFile, type SpawnReceipt } from "./registry";
 import { projectRootForCwd } from "@/lib/scanner/describe";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
@@ -27,25 +27,25 @@ export type DurableHandoffProvenance = "operator-handoff" | "container-spawn";
 export function durableHandoffProvenanceForConversation(
   snapshot: RegistryFile,
   conversationId: SpawnReceipt["conversationId"],
+  lookup: ConversationLookup = readOnlyConversationLookupFromSnapshot(snapshot),
 ): DurableHandoffProvenance | null {
-  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
   const canonicalConversationId = lookup.canonicalConversationId(conversationId);
   const edge = snapshot.lineageEdges[canonicalConversationId];
   if (!edge || edge.source !== "viewer-spawn") return null;
   const receipt = edge.evidence.launchId ? snapshot.receipts[edge.evidence.launchId] : null;
-  /* The operator/UI display payload is birth evidence and wins even if a flow
-     or pipeline enrolls the conversation later. Delegation depth and parent
-     attribution are ambiguous for legacy and agent-initiated launches. */
-  if (receipt?.launchDisplay) {
-    return "operator-handoff";
-  }
   const parentConversationId = lookup.canonicalConversationId(edge.parentConversationId);
   const bornAt = receipt?.createdAt ?? edge.createdAt;
   const bornIntoContainer = (snapshot.memberships[canonicalConversationId] ?? []).some((membership) =>
     membership.createdAt === bornAt
       && membership.parentConversationId !== null
       && lookup.canonicalConversationId(membership.parentConversationId) === parentConversationId);
-  if (bornIntoContainer) return "container-spawn";
+  /* Parent attribution, admitted delegation depth, and same-birth membership
+     are durable origin facts. Launch display belongs solely to presentation. */
+  const parentSource = edge.evidence.parentSource ?? receipt?.parentSource ?? null;
+  const delegatedAtBirth = receipt?.delegationDepth !== null
+    && receipt?.delegationDepth !== undefined
+    && receipt.delegationDepth > 0;
+  if (bornIntoContainer || parentSource === "inferred-caller" || delegatedAtBirth) return "container-spawn";
   return "operator-handoff";
 }
 

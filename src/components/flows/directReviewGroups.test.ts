@@ -412,6 +412,40 @@ describe("directReviewFlows", () => {
     expect(verdictGroup[0]!.state).toBe("done_comment");
   });
 
+  test("queued delivery and operator pins keep stale direct reviewers actionable", () => {
+    const builder = entry({ path: "/builder", conversationId: "conversation-builder" });
+    const stale = directReviewer("/reviewer-stale", {
+      id: "conversation-r1",
+      reviews: "conversation-builder",
+      mtime: 10_000,
+      activity: "idle",
+    });
+    const idleMs = 15 * 60_000;
+    const nowMs = 10_000_000 + idleMs;
+
+    const deliveredTo = directReviewFlows({
+      files: [builder, stale],
+      flows: [],
+      tasks: [],
+      nowMs,
+      idleMs,
+      activeDeliveryConversationIds: new Set(["conversation-r1"]),
+    });
+    expect(deliveredTo[0]!.rounds[0]!.error).toBeNull();
+    expect(deliveredTo[0]!.state).toBe("reviewing");
+
+    const pinned = directReviewFlows({
+      files: [builder, stale],
+      flows: [],
+      tasks: [],
+      nowMs,
+      idleMs,
+      pinnedPaths: new Set(["/reviewer-stale"]),
+    });
+    expect(pinned[0]!.rounds[0]!.error).toBeNull();
+    expect(pinned[0]!.state).toBe("reviewing");
+  });
+
   test("an active managed flow on the reviewed conversation keeps its deck — the direct group yields", () => {
     /* One node hosts one deck: a builder that is ALSO an implementer of a live
        managed loop keeps that loop's deck and controls; direct reviewers stay

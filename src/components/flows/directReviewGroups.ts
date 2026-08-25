@@ -5,7 +5,7 @@ import type { FileEntry } from "@/lib/types";
 import { currentConversationFile, withoutArchivedPredecessors } from "@/lib/accounts/identity";
 
 import { projectKey } from "@/components/projectModel";
-import { workerCollapseIdleMs } from "@/components/scheme/workerCollapse";
+import { collapseContext, keepExpanded, workerCollapseIdleMs } from "@/components/scheme/workerCollapse";
 
 import { isActiveFlow } from "./flowModel";
 
@@ -70,31 +70,30 @@ export interface DirectReviewGroupsInput {
   nowMs?: number;
   /** Freshness horizon override (tests); null disables age-only settlement. */
   idleMs?: number | null;
+  /** Inputs consumed by the board's shared expansion predicate. */
+  pipelines?: Parameters<typeof collapseContext>[0]["pipelines"];
+  pinnedPaths?: ReadonlySet<string>;
+  protectedPaths?: ReadonlySet<string>;
+  activeDeliveryConversationIds?: ReadonlySet<string>;
 }
 
-/** An activity read that must not mislabel a still-working reviewer as failed:
-    anything live, mid-turn, or waiting on input is not terminal. */
-function reviewerStillWorking(file: FileEntry): boolean {
-  return (
-    file.activity === "live"
-    || file.proc === "running"
-    || Boolean(file.pendingQuestion)
-    || Boolean(file.waitingInput)
-  );
-}
-
-function reviewerSettled(file: FileEntry): boolean {
-  return file.proc === "killed"
-    || file.proc === "done"
-    || file.authoritativeTurn?.state === "terminal"
-    || Boolean(file.supersededBy);
-}
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
   const visible = withoutArchivedPredecessors([...input.files]);
   const groups = groupDirectReviewers(input);
   const nowMs = input.nowMs ?? Date.now();
   const idleMs = input.idleMs === undefined ? workerCollapseIdleMs() : input.idleMs;
+  const expansionContext = collapseContext({
+    files: visible,
+    flows: input.flows,
+    pipelines: input.pipelines,
+    pinnedPaths: input.pinnedPaths ?? EMPTY_PATHS,
+    protectedPaths: input.protectedPaths,
+    activeDeliveryConversationIds: input.activeDeliveryConversationIds,
+    nowMs,
+    idleMs,
+  });
 
   const out: Flow[] = [];
   for (const { key, members } of groups) {
@@ -111,11 +110,9 @@ export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
     const rounds = members.map<Round>((member, index) => {
       const { file } = member;
       const outcome = file.review ?? null;
-      const expired = idleMs !== null && nowMs - file.mtime * 1000 >= idleMs;
-      /* Verdict-less terminal reviewers park immediately. An unresolved idle
-         reviewer parks after W; positive work/input evidence keeps it active. */
-      const failed = !outcome
-        && (reviewerSettled(file) || (!reviewerStillWorking(file) && expired));
+      /* Direct reviewers share the board's expansion decision, including
+         delivery, pin, terminal, input, process, and idle-window evidence. */
+      const failed = !outcome && !keepExpanded(file, expansionContext);
       return {
         n: index + 1,
         reviewerPath: file.path,

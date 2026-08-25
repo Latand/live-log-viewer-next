@@ -1258,6 +1258,39 @@ test("a pipeline stage placeholder carries durable spawn lineage without an oper
   }
 });
 
+test("an agent-authenticated child with launch display stays caller-owned", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-caller-owned-display-projection-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      parentSource: "inferred-caller",
+      role: "builder",
+      origin: { kind: "agent", conversationId: parent.id },
+      launchDisplay: { prompt: "Review the projection", images: 0, echo: "Review the projection" },
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+
+    const card = preallocatedStructuredSpawnCards([scannedFile(parentPath)], registry.snapshot())[0]!;
+    expect(begun.receipt.delegationDepth).toBe(1);
+    expect(card.parent).toBe(parentPath);
+    expect(card.handoff).toBeUndefined();
+    expect(card.durableLineage).toMatchObject({
+      role: "builder",
+      parentConversationId: parent.id,
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("an operator handoff placeholder keeps its provenance after later flow enrollment", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-enrolled-handoff-placeholder-"));
   try {

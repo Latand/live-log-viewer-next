@@ -454,9 +454,8 @@ function stackKeyFor(
     pipeline) lead, then spawner groups, then the worktree catch-all. */
 const STACK_KIND_RANK: Record<WorkerStack["kind"], number> = { flow: 0, pipeline: 1, origin: 2, worktree: 3 };
 
-export interface CollapsibleInput {
+export interface CollapseContextInput {
   files: readonly FileEntry[];
-  project: string;
   flows: readonly Flow[];
   pipelines?: readonly Pipeline[];
   /** Durable manual placements/expansions — pinned against collapse. */
@@ -468,9 +467,13 @@ export interface CollapsibleInput {
   idleMs?: number | null;
 }
 
+export interface CollapsibleInput extends CollapseContextInput {
+  project: string;
+}
+
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
-function collapseContext(input: CollapsibleInput): CollapseContext {
+export function collapseContext(input: CollapseContextInput): CollapseContext {
   /* One resolver per pass: durable flow/pipeline records are matched against the
      projected corpus, whatever spelling each side happens to carry (#943). */
   const resolveClaimPath = transcriptClaimResolver(input.files);

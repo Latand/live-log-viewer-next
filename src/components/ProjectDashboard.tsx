@@ -429,6 +429,12 @@ function ProjectDashboardView({
   const idleCollapseMinutes = board.prefs.idleCollapseMinutes === undefined
     ? DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES
     : board.prefs.idleCollapseMinutes;
+  /* Conversation auto-collapse (#112/#1158): genuine user placements, manual
+     expansions, and favorites pin a card against collapse. */
+  const pinnedPaths = useMemo(
+    () => new Set([...board.explicitManual, ...prefs.expanded, ...favoriteRows.map((row) => row.file.path)]),
+    [board.explicitManual, prefs.expanded, favoriteRows],
+  );
   const [drafts, setDrafts] = useState<string[]>([]);
   const [pendingRestoredHandoffs, setPendingRestoredHandoffs] = useState<Set<string>>(() => new Set());
   /* The phone focus view reports its currently-focused conversation here so the
@@ -495,6 +501,9 @@ function ProjectDashboardView({
     () => new Set(activeDeliverySignature ? activeDeliverySignature.split("\n") : []),
     [activeDeliverySignature],
   );
+  /* Only active execution cursors receive pipeline expansion protection.
+     Completed prior stages remain reachable through compact history. */
+  const protectedCollapsePaths = useMemo(() => pipelineCursorStagePaths(pipelines, files), [pipelines, files]);
   /* The subagent-tray projection measures transcript freshness and attention
      TTLs against `mtime`, which is SECONDS. It takes the seconds clock
      straight from the shared hook rather than a conversion of `nowMs` — the
@@ -616,8 +625,12 @@ function ProjectDashboardView({
       conversationAliases,
       nowMs,
       idleMs: idleCollapseMinutes === null ? null : idleCollapseMinutes * 60_000,
+      pipelines: pipelinesError ? undefined : pipelines,
+      pinnedPaths,
+      protectedPaths: protectedCollapsePaths,
+      activeDeliveryConversationIds,
     }),
-    [files, flows, tasks, conversationAliases, nowMs, idleCollapseMinutes],
+    [files, flows, tasks, conversationAliases, nowMs, idleCollapseMinutes, pipelines, pipelinesError, pinnedPaths, protectedCollapsePaths, activeDeliveryConversationIds],
   );
   const deckFlows = useMemo(
     () => (directReviewGroups.length ? [...flows, ...directReviewGroups] : flows),
@@ -661,13 +674,6 @@ function ProjectDashboardView({
     for (const path of prefs.expanded) paths.add(path);
     return paths;
   }, [expandedFlowConversations, prefs.expanded]);
-  /* Conversation auto-collapse (#112/#1158): a card is pinned against collapse
-     by a GENUINE user placement (`explicitManual`, not the roots reconcile-roots
-     auto-seeds into `prefs.manual`) or a manual expansion. */
-  const pinnedPaths = useMemo(
-    () => new Set([...board.explicitManual, ...prefs.expanded, ...favoriteRows.map((row) => row.file.path)]),
-    [board.explicitManual, prefs.expanded, favoriteRows],
-  );
   /* The pipeline layout's full-pane set remains its claim authority (#507 F2).
      Derived BEFORE `groupFiles` (issue #560): the review stage's current
      reviewer transcript is one of these full-pane paths, and it must be
@@ -680,10 +686,6 @@ function ProjectDashboardView({
     () => pipelineFullPanePaths(pipelines, deckFlows),
     [pipelines, deckFlows],
   );
-  /* View expansion is narrower: only the active execution cursor is protected.
-     Recorded attempt paths are resolved onto the scanner's current spelling;
-     completed prior stages remain reachable as compact pipeline/history rows. */
-  const protectedCollapsePaths = useMemo(() => pipelineCursorStagePaths(pipelines, files), [pipelines, files]);
   /* Pipeline review stages remain real conversation cards inside their colored
      stage group. Standalone flow reviewers still fold into their round decks. */
   const compactLayoutFlows = useMemo(
