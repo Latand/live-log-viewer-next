@@ -271,7 +271,10 @@ function inventoryWorkerLaunch(cwd = process.cwd()): { executable: string; worke
   if (fs.existsSync(source) && fs.existsSync("/usr/local/bin/bun-container")) {
     return { executable: "/usr/local/bin/bun-container", workerPath: source };
   }
-  if (fs.existsSync(bundled)) return { executable: process.execPath, workerPath: bundled };
+  if (fs.existsSync(bundled)) {
+    const bun = process.versions.bun ? process.execPath : (process.env.LLV_BUN_EXECUTABLE || "bun");
+    return { executable: bun, workerPath: bundled };
+  }
   return { executable: process.execPath, workerPath: source };
 }
 

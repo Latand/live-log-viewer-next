@@ -73,7 +73,7 @@ function workerFailure(output) {
   return output.split("\n").find((line) => (
     line.includes("Cannot find module")
     || line.includes("Module not found")
-    || /worker(?:_|\s)exited/i.test(line)
+    || /worker(?:_|\s)(?:exited|start_failed|failed to start)/i.test(line)
     || /worker exit/i.test(line)
   ));
 }
@@ -164,12 +164,14 @@ async function main() {
     const runtimePath = pathWithoutBunContainer(process.env.PATH);
     if (!runtimePath) throw new Error("smoke PATH is empty after removing bun-container");
     const bunRuntime = process.versions.bun ? process.execPath : (process.env.LLV_BUN_EXECUTABLE || "bun");
+    const nodeRuntime = process.env.LLV_NODE_EXECUTABLE || "node";
     const port = await availablePort();
     const runtimeEnvironment = {
       PATH: runtimePath,
       HOME: homeDirectory,
       XDG_CONFIG_HOME: configDirectory,
       LLV_STATE_DIR: stateDirectory,
+      LLV_BUN_EXECUTABLE: bunRuntime,
       TMPDIR: runtimeTempDirectory,
       NODE_ENV: "production",
       LLV_STRUCTURED_HOSTS: "off",
@@ -182,7 +184,7 @@ async function main() {
         output = Buffer.from(output).subarray(-outputLimitBytes).toString("utf8");
       }
     };
-    server = spawn(bunRuntime, ["--bun", "dist/standalone/server.js"], {
+    server = spawn(nodeRuntime, ["dist/standalone/server.js"], {
       cwd: extractedPackage,
       detached: true,
       env: {
