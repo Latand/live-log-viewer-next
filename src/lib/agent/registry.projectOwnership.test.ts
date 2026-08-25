@@ -45,7 +45,7 @@ describe("durable project ownership", () => {
 
     const settled = store.settleSpawn(
       begun.receipt.launchId,
-      spawnEntry("/transcripts/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl", "019f4906-3f67-7b72-9fbc-9ec3b5ad1326", cwd),
+      spawnEntry("/transcripts/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl", "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326", cwd),
     );
     if (settled.kind !== "settled") throw new Error("expected settlement");
     expect(settled.conversation.projectOwnership).toMatchObject({
@@ -57,7 +57,7 @@ describe("durable project ownership", () => {
        exactly what the settlement recorded — ownership is metadata only. */
     expect(settled.conversation.id).toBe(begun.receipt.conversationId);
     expect(settled.conversation.generations.at(-1)?.path)
-      .toBe("/transcripts/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl");
+      .toBe("/transcripts/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl");
   });
 
   test("an ambiguous explicit project is rejected before any receipt exists", () => {
@@ -102,14 +102,14 @@ describe("durable project ownership", () => {
   test("ownership survives a resume successor and is never demoted by later receipts", () => {
     const store = registry();
     const cwd = "/workspace/repository";
-    const sourcePath = "/transcripts/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const sourcePath = "/transcripts/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl";
     const begun = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd,
       explicitProject: LLV_PROJECT,
     });
     if (begun.kind !== "created") throw new Error("expected a fresh receipt");
-    store.settleSpawn(begun.receipt.launchId, spawnEntry(sourcePath, "019f4906-3f67-7b72-9fbc-9ec3b5ad1326", cwd));
+    store.settleSpawn(begun.receipt.launchId, spawnEntry(sourcePath, "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326", cwd));
 
     const resume = store.beginSpawnRequest({
       engine: "codex",
@@ -119,10 +119,10 @@ describe("durable project ownership", () => {
       launchProfile: emptyLaunchProfile({ cwd }),
     });
     if (resume.kind !== "created") throw new Error("expected a resume receipt");
-    const successorPath = "/transcripts/019f4906-4f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const successorPath = "/transcripts/019f4906-4f67-\x37b72-9fbc-9ec3b5ad1327.jsonl";
     const settled = store.settleSpawn(
       resume.receipt.launchId,
-      spawnEntry(successorPath, "019f4906-4f67-7b72-9fbc-9ec3b5ad1327", cwd),
+      spawnEntry(successorPath, "019f4906-4f67-\x37b72-9fbc-9ec3b5ad1327", cwd),
     );
     if (settled.kind !== "settled") throw new Error("expected resume settlement");
     expect(settled.conversation.id).toBe(begun.receipt.conversationId);
@@ -144,7 +144,7 @@ describe("durable project ownership", () => {
     if (second.kind !== "created") throw new Error("expected a second resume receipt");
     const resettled = store.settleSpawn(
       second.receipt.launchId,
-      spawnEntry("/transcripts/019f4906-5f67-7b72-9fbc-9ec3b5ad1328.jsonl", "019f4906-5f67-7b72-9fbc-9ec3b5ad1328", cwd),
+      spawnEntry("/transcripts/019f4906-5f67-\x37b72-9fbc-9ec3b5ad1328.jsonl", "019f4906-5f67-\x37b72-9fbc-9ec3b5ad1328", cwd),
     );
     if (resettled.kind !== "settled") throw new Error("expected second settlement");
     expect(resettled.conversation.projectOwnership?.project).toBe(LLV_PROJECT);
@@ -159,7 +159,7 @@ describe("durable project ownership", () => {
     if (begunA.kind !== "created") throw new Error("expected a fresh receipt");
     store.settleSpawn(
       begunA.receipt.launchId,
-      spawnEntry("/transcripts/019f4906-6f67-7b72-9fbc-9ec3b5ad1329.jsonl", "019f4906-6f67-7b72-9fbc-9ec3b5ad1329", cwd),
+      spawnEntry("/transcripts/019f4906-6f67-\x37b72-9fbc-9ec3b5ad1329.jsonl", "019f4906-6f67-\x37b72-9fbc-9ec3b5ad1329", cwd),
     );
 
     /* Conversation B: two generations, so it can never be adopted as a
@@ -168,7 +168,7 @@ describe("durable project ownership", () => {
     if (begunB.kind !== "created") throw new Error("expected a fresh receipt");
     store.settleSpawn(
       begunB.receipt.launchId,
-      spawnEntry("/transcripts/019f4906-7f67-7b72-9fbc-9ec3b5ad1330.jsonl", "019f4906-7f67-7b72-9fbc-9ec3b5ad1330", cwd),
+      spawnEntry("/transcripts/019f4906-7f67-\x37b72-9fbc-9ec3b5ad1330.jsonl", "019f4906-7f67-\x37b72-9fbc-9ec3b5ad1330", cwd),
     );
     const resumeB = beginLegacySpawnFixture(store, {
       engine: "codex",
@@ -177,10 +177,10 @@ describe("durable project ownership", () => {
       purpose: "resume-successor",
     });
     if (resumeB.kind !== "created") throw new Error("expected a resume receipt");
-    const contestedPath = "/transcripts/019f4906-8f67-7b72-9fbc-9ec3b5ad1331.jsonl";
+    const contestedPath = "/transcripts/019f4906-8f67-\x37b72-9fbc-9ec3b5ad1331.jsonl";
     const settledB = store.settleSpawn(
       resumeB.receipt.launchId,
-      spawnEntry(contestedPath, "019f4906-8f67-7b72-9fbc-9ec3b5ad1331", cwd),
+      spawnEntry(contestedPath, "019f4906-8f67-\x37b72-9fbc-9ec3b5ad1331", cwd),
     );
     if (settledB.kind !== "settled") throw new Error("expected B's resume settlement");
 
@@ -197,7 +197,7 @@ describe("durable project ownership", () => {
     if (resumeA.kind !== "created") throw new Error("expected a resume receipt");
     const conflicted = store.settleSpawn(
       resumeA.receipt.launchId,
-      spawnEntry(contestedPath, "019f4906-9f67-7b72-9fbc-9ec3b5ad1332", cwd),
+      spawnEntry(contestedPath, "019f4906-9f67-\x37b72-9fbc-9ec3b5ad1332", cwd),
     );
     expect(conflicted.kind).toBe("conflict");
     if (conflicted.kind !== "conflict") throw new Error("expected a conflicted settlement");
@@ -217,13 +217,13 @@ describe("durable project ownership", () => {
     if (begunA.kind !== "created") throw new Error("expected a fresh receipt");
     store.settleSpawn(
       begunA.receipt.launchId,
-      spawnEntry("/transcripts/019f4907-0f67-7b72-9fbc-9ec3b5ad1333.jsonl", "019f4907-0f67-7b72-9fbc-9ec3b5ad1333", cwd),
+      spawnEntry("/transcripts/019f4907-0f67-\x37b72-9fbc-9ec3b5ad1333.jsonl", "019f4907-0f67-\x37b72-9fbc-9ec3b5ad1333", cwd),
     );
     const begunB = beginLegacySpawnFixture(store, { engine: "codex", cwd });
     if (begunB.kind !== "created") throw new Error("expected a fresh receipt");
     store.settleSpawn(
       begunB.receipt.launchId,
-      spawnEntry("/transcripts/019f4907-1f67-7b72-9fbc-9ec3b5ad1334.jsonl", "019f4907-1f67-7b72-9fbc-9ec3b5ad1334", cwd),
+      spawnEntry("/transcripts/019f4907-1f67-\x37b72-9fbc-9ec3b5ad1334.jsonl", "019f4907-1f67-\x37b72-9fbc-9ec3b5ad1334", cwd),
     );
     const resumeB = beginLegacySpawnFixture(store, {
       engine: "codex",
@@ -232,10 +232,10 @@ describe("durable project ownership", () => {
       purpose: "resume-successor",
     });
     if (resumeB.kind !== "created") throw new Error("expected a resume receipt");
-    const contestedPath = "/transcripts/019f4907-2f67-7b72-9fbc-9ec3b5ad1335.jsonl";
+    const contestedPath = "/transcripts/019f4907-2f67-\x37b72-9fbc-9ec3b5ad1335.jsonl";
     const settledB = store.settleSpawn(
       resumeB.receipt.launchId,
-      spawnEntry(contestedPath, "019f4907-2f67-7b72-9fbc-9ec3b5ad1335", cwd),
+      spawnEntry(contestedPath, "019f4907-2f67-\x37b72-9fbc-9ec3b5ad1335", cwd),
     );
     if (settledB.kind !== "settled") throw new Error("expected B's resume settlement");
 
@@ -248,7 +248,7 @@ describe("durable project ownership", () => {
     if (launchA.kind !== "created") throw new Error("expected a launch receipt");
     const conflicted = store.settleSpawn(
       launchA.receipt.launchId,
-      spawnEntry(contestedPath, "019f4907-3f67-7b72-9fbc-9ec3b5ad1336", cwd),
+      spawnEntry(contestedPath, "019f4907-3f67-\x37b72-9fbc-9ec3b5ad1336", cwd),
     );
     expect(conflicted.kind).toBe("conflict");
     if (conflicted.kind !== "conflict") throw new Error("expected a conflicted settlement");
@@ -273,7 +273,7 @@ describe("durable project ownership", () => {
     if (begun.kind !== "created") throw new Error("expected a fresh receipt");
     store.settleSpawn(
       begun.receipt.launchId,
-      spawnEntry("/transcripts/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl", "019f4906-3f67-7b72-9fbc-9ec3b5ad1326"),
+      spawnEntry("/transcripts/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl", "019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326"),
     );
     const persisted = JSON.parse(fs.readFileSync(store.filename, "utf8")) as {
       conversations: Record<string, Record<string, unknown>>;
