@@ -1,0 +1,126 @@
+name: Supply-chain audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.3
+
+      - name: Require a lockfile change with dependency changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bun -e '
+          const { execFileSync } = require("node:child_process");
+
+          const base = process.env.BASE_SHA;
+          const dependencySections = [
+            "dependencies",
+            "devDependencies",
+            "optionalDependencies",
+            "peerDependencies",
+            "peerDependenciesMeta",
+            "bundledDependencies",
+            "bundleDependencies",
+            "overrides",
+            "resolutions",
+          ];
+
+          const readPackage = (revision) => JSON.parse(execFileSync(
+            "git",
+            ["show", `${revision}:package.json`],
+            { encoding: "utf8" },
+          ));
+          const basePackage = readPackage(base);
+          const headPackage = readPackage("HEAD");
+          const changedSections = dependencySections.filter((section) =>
+            JSON.stringify(basePackage[section] ?? null) !== JSON.stringify(headPackage[section] ?? null),
+          );
+
+          if (changedSections.length === 0) {
+            console.log("No package.json dependency sections changed");
+            process.exit(0);
+          }
+
+          const changedFiles = execFileSync(
+            "git",
+            ["diff", "--name-only", base, "HEAD"],
+            { encoding: "utf8" },
+          ).trim().split("\n").filter(Boolean);
+          if (!changedFiles.includes("bun.lock")) {
+            throw new Error(`Dependency sections changed without bun.lock: ${changedSections.join(", ")}`);
+          }
+          console.log(`Dependency sections ${changedSections.join(", ")} have a matching bun.lock change`);
+          '
+
+      - name: Install production and development dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Audit production and development dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          audit_ids="$(bun -e '
+          const fs = require("node:fs");
+
+          const allowlist = JSON.parse(fs.readFileSync("security/audit-allowlist.json", "utf8"));
+          const today = new Date().toISOString().slice(0, 10);
+          const idPattern = /^(?:CVE-\d{4}-\d{4,}|GHSA-[a-z0-9]+(?:-[a-z0-9]+)+)$/i;
+          const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+          const seen = new Set();
+
+          if (!Array.isArray(allowlist)) {
+            throw new Error("security/audit-allowlist.json must contain an array");
+          }
+          for (const [index, entry] of allowlist.entries()) {
+            if (!entry || typeof entry !== "object") {
+              throw new Error(`Allowlist entry ${index} must be an object`);
+            }
+            const id = typeof entry.id === "string" ? entry.id.trim() : "";
+            const reason = typeof entry.reason === "string" ? entry.reason.trim() : "";
+            const expires = entry.expires;
+            if (!idPattern.test(id)) throw new Error(`Allowlist entry ${index} has an invalid advisory id`);
+            if (!reason) throw new Error(`Allowlist entry ${index} must include a reason`);
+            if (typeof expires !== "string" || !datePattern.test(expires)) {
+              throw new Error(`Allowlist entry ${index} must include an ISO expiry date`);
+            }
+            const parsedExpiry = new Date(`${expires}T00:00:00Z`);
+            if (parsedExpiry.toISOString().slice(0, 10) !== expires) {
+              throw new Error(`Allowlist entry ${index} has an invalid expiry date`);
+            }
+            if (expires < today) throw new Error(`Allowlist entry ${id} expired on ${expires}`);
+            if (seen.has(id.toUpperCase())) throw new Error(`Duplicate allowlist entry for ${id}`);
+            seen.add(id.toUpperCase());
+            console.error(`Allowlisting ${id} through ${expires}: ${reason}`);
+            process.stdout.write(`${id}\n`);
+          }
+          '
+          )"
+
+          audit_args=()
+          if [[ -n "$audit_ids" ]]; then
+            while IFS= read -r advisory; do
+              audit_args+=("--ignore=$advisory")
+            done <<< "$audit_ids"
+          fi
+          bun audit --audit-level=high "${audit_args[@]}"

@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      # Security updates are opened immediately; this schedule groups version updates.
+      interval: weekly
+    groups:
+      npm-dependencies:
+        patterns:
+          - "*"

@@ -151,6 +151,9 @@ export interface BoardProjectStateV1 {
        because legacy board files omit both; the store defaults them to empty. */
     foldedEngineChildIds?: string[];
     expandedEngineTrayParentIds?: string[];
+    /** Minutes before an unsettled idle conversation folds. Null disables the
+        age-only rule; terminal evidence continues to fold immediately. */
+    idleCollapseMinutes?: number | null;
     viewMode: "scheme" | "list" | null;
     taskPanelOpen: boolean;
   };
