@@ -179,7 +179,10 @@ test("terminal waits take precedence over a finished turn", () => {
     waitingInput: { since: t0 / 1000, screenTail: "Continue?", target: "%1", menu: null },
   }), container);
 
-  expect(container.querySelector('[data-turn-status="waiting"]')?.textContent).toContain("waiting for your answer");
+  const waiting = container.querySelector('[data-turn-status="waiting"]');
+  expect(waiting?.textContent).toContain("waiting for your answer");
+  expect(waiting?.textContent).toContain("1:05");
+  expect(waiting?.className).toContain("text-warning");
   expect(container.querySelector('[data-turn-status="finished"]')).toBeNull();
 });
 
