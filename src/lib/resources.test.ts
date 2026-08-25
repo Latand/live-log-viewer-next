@@ -779,15 +779,19 @@ describe("resource observation", () => {
     const standaloneBundle = `${standaloneCwd}/.next/server/resource-collector-worker.js`;
     const prepackBundle = `${prepackCwd}/.next/server/resource-collector-worker.js`;
     const bunContainer = "/usr/local/bin/bun-container";
-    const resolve = (cwd: string, present: string[], env: NodeJS.ProcessEnv = { NODE_ENV: "test" }) => resolveResourceWorkerLaunch({
+    const resolve = (cwd: string, present: string[], env: NodeJS.ProcessEnv = {
+      NODE_ENV: "test",
+      LLV_BUN_EXECUTABLE: "/usr/bin/bun",
+    }) => resolveResourceWorkerLaunch({
       cwd,
       env,
       execPath: "/usr/bin/node",
       exists: (pathname) => present.includes(pathname),
+      versions: {},
     });
 
     expect(resolve(sourceCwd, [sourceWorker, sourceBundle, bunContainer])).toEqual({ executable: bunContainer, workerPath: sourceWorker });
-    expect(resolve(sourceCwd, [sourceWorker, sourceBundle])).toEqual({ executable: "/usr/bin/node", workerPath: sourceBundle });
+    expect(resolve(sourceCwd, [sourceWorker, sourceBundle])).toEqual({ executable: "/usr/bin/bun", workerPath: sourceBundle });
     expect(resolve(sourceCwd, [sourceWorker])).toEqual({ executable: "bun", workerPath: sourceWorker });
     expect(resolve(sourceCwd, [sourceWorker], {
       NODE_ENV: "test",
@@ -803,11 +807,11 @@ describe("resource observation", () => {
       ["prepack", prepackCwd, prepackBundle],
     ] as const) {
       expect(resolve(cwd, [bundle, bunContainer]), `${layout} with bun-container`).toEqual({
-        executable: "/usr/bin/node",
+        executable: "/usr/bin/bun",
         workerPath: bundle,
       });
       expect(resolve(cwd, [bundle]), `${layout} without bun-container`).toEqual({
-        executable: "/usr/bin/node",
+        executable: "/usr/bin/bun",
         workerPath: bundle,
       });
       expect(resolve(cwd, [bundle], {

@@ -388,7 +388,10 @@ async function startWakatimeWorker(): Promise<void> {
   const launch = fs.existsSync(source) && fs.existsSync(bunContainer)
     ? { executable: bunContainer, workerPath: source }
     : fs.existsSync(bundled)
-      ? { executable: process.execPath, workerPath: bundled }
+      ? {
+          executable: process.versions.bun ? process.execPath : (process.env.LLV_BUN_EXECUTABLE || "bun"),
+          workerPath: bundled,
+        }
       : { executable: process.execPath, workerPath: source };
   const { spawn } = await import("node:child_process");
   const useNice = fs.existsSync("/usr/bin/nice");

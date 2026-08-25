@@ -1,4 +1,4 @@
-import { cp, readdir, rm } from "node:fs/promises";
+import { cp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -17,6 +17,27 @@ const standaloneDir = join(root, ".next", "standalone");
 const staticDir = join(root, ".next", "static");
 const distDir = join(root, "dist");
 const distStandaloneDir = join(distDir, "standalone");
+
+const standaloneServerBootstrap = `const { spawn } = require("node:child_process");
+
+if (process.versions.bun) {
+  require("./server.bun.js");
+} else {
+  const bun = process.env.LLV_BUN_EXECUTABLE || "bun";
+  const child = spawn(bun, ["--bun", __filename, ...process.argv.slice(2)], {
+    env: process.env,
+    stdio: "inherit",
+  });
+  child.once("error", (error) => {
+    console.error(\`Failed to start the Bun server runtime: \${error.message}\`);
+    process.exitCode = 1;
+  });
+  child.once("exit", (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exitCode = code ?? 1;
+  });
+}
+`;
 
 function runNextBuild() {
   return new Promise((resolve, reject) => {
@@ -103,6 +124,8 @@ async function main() {
     await rm(join(distStandaloneDir, ".claude"), { recursive: true, force: true });
   }
   await cp(staticDir, join(distStandaloneDir, ".next", "static"), { recursive: true });
+  await rename(join(distStandaloneDir, "server.js"), join(distStandaloneDir, "server.bun.js"));
+  await writeFile(join(distStandaloneDir, "server.js"), standaloneServerBootstrap);
   await runMcpBuild();
 
   if (!existsSync(join(distStandaloneDir, "server.js"))) {
