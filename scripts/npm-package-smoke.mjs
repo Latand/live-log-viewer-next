@@ -6,7 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const scriptPath = fileURLToPath(import.meta.url);
+const root = path.resolve(path.dirname(scriptPath), "..");
 const standaloneServer = path.join(root, "dist/standalone/server.js");
 const observationMs = 60_000;
 const startupTimeoutMs = 30_000;
@@ -59,14 +60,39 @@ function probe(port, pathname) {
   return new Promise((resolve) => {
     const request = http.get({ hostname: "127.0.0.1", port, path: pathname, timeout: 5_000 }, (response) => {
       response.resume();
-      response.once("end", () => resolve(response.statusCode ?? 0));
+      response.once("end", () => resolve({
+        status: response.statusCode ?? 0,
+        headers: response.headers,
+      }));
     });
     request.once("timeout", () => {
       request.destroy();
-      resolve(0);
+      resolve({ status: 0, headers: {} });
     });
-    request.once("error", () => resolve(0));
+    request.once("error", () => resolve({ status: 0, headers: {} }));
   });
+}
+
+export function assertHealthyResourceDiagnostic(rawHeader) {
+  if (typeof rawHeader !== "string") {
+    throw new Error("resource worker diagnostic is missing");
+  }
+  let diagnostic;
+  try {
+    diagnostic = JSON.parse(rawHeader);
+  } catch {
+    throw new Error("resource worker diagnostic is invalid JSON");
+  }
+  if (
+    !diagnostic
+    || typeof diagnostic !== "object"
+    || Array.isArray(diagnostic)
+    || diagnostic.status !== "complete"
+    || diagnostic.degradedReason !== undefined
+    || diagnostic.failure !== undefined
+  ) {
+    throw new Error(`resource worker diagnostic is unhealthy: ${rawHeader}`);
+  }
 }
 
 function workerFailure(output) {
@@ -80,15 +106,15 @@ function workerFailure(output) {
 
 async function waitForOk(port, pathname, child, output) {
   const deadline = Date.now() + startupTimeoutMs;
-  let status = 0;
+  let response = { status: 0, headers: {} };
   while (Date.now() < deadline && child.exitCode === null && child.signalCode === null) {
     const failure = workerFailure(output());
     if (failure) throw new Error(`worker failure before ${pathname} became ready: ${failure}`);
-    status = await probe(port, pathname);
-    if (status === 200) return;
+    response = await probe(port, pathname);
+    if (response.status === 200) return response;
     await delay(250);
   }
-  throw new Error(`${pathname} did not answer 200 (last status ${status})${output() ? `: ${output()}` : ""}`);
+  throw new Error(`${pathname} did not answer 200 (last status ${response.status})${output() ? `: ${output()}` : ""}`);
 }
 
 function scrubOutput(output, tempDirectory) {
@@ -201,8 +227,9 @@ async function main() {
     const safeOutput = () => scrubOutput(output, tempDirectory);
     await waitForOk(port, "/api/files", server, safeOutput);
     console.log("npm package smoke: /api/files returned 200.");
-    await waitForOk(port, "/api/resources", server, safeOutput);
-    console.log("npm package smoke: /api/resources returned 200; observing worker health.");
+    const resourceResponse = await waitForOk(port, "/api/resources", server, safeOutput);
+    assertHealthyResourceDiagnostic(resourceResponse.headers["x-llv-resource-phases"]);
+    console.log("npm package smoke: /api/resources returned a healthy worker diagnostic; observing worker health.");
     const observationDeadline = Date.now() + observationMs;
     while (Date.now() < observationDeadline) {
       if (server.exitCode !== null || server.signalCode !== null) {
@@ -244,7 +271,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
