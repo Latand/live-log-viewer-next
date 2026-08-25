@@ -8,6 +8,7 @@ const OLD_STATE = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
 const { TelegramReportRunner, RUN_TIMEOUT_MS } = await import("./reportRunner");
+const { telegramReportReadPhaseActive, tryBeginTelegramHealthCheck } = await import("./reportReadGuard");
 const { readTelegramReports, readReportText, reportInboxPath, reportSourcesPath, updateTelegramReports } = await import("./reportStore");
 const { DEFAULT_DAILY_REPORT_PROMPT } = await import("./reportPrompt");
 /* The tag lives in the operator's editable brief; fixtures use a synthetic
@@ -419,6 +420,44 @@ test("a reconnect after the source pass settles the run instead of launching for
   expect(ports.logs).toEqual(["account_mismatch"]);
   expect(fs.existsSync(reportSourcesPath(file.history[0].id))).toBe(false);
   expect(file.cursor.lastSuccessfulWindowEndAt).toBeNull();
+});
+
+test("the report holds the connector guard from get_me through the source pass", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  let release!: () => void;
+  ports.listChatsGate = new Promise<void>((resolve) => { release = resolve; });
+  const runner = new TelegramReportRunner(ports);
+
+  expect((await runner.runNow()).ok).toBe(true);
+  for (let turn = 0; turn < 10 && !ports.reads.includes("listChats"); turn += 1) {
+    await Promise.resolve();
+  }
+  expect(ports.reads).toContain("getMe");
+  expect(ports.reads).toContain("listChats");
+  expect(telegramReportReadPhaseActive()).toBe(true);
+
+  release();
+  await runner.settled();
+  expect(telegramReportReadPhaseActive()).toBe(false);
+  expect(ports.spawns.length).toBe(1);
+});
+
+test("a report waits for a health check that already owns the connector", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  const runner = new TelegramReportRunner(ports);
+  const releaseHealthCheck = tryBeginTelegramHealthCheck();
+  expect(releaseHealthCheck).not.toBeNull();
+
+  expect((await runner.runNow()).ok).toBe(true);
+  await Promise.resolve();
+  expect(ports.reads).toEqual([]);
+
+  releaseHealthCheck!();
+  await runner.settled();
+  expect(ports.reads[0]).toBe("getMe");
+  expect(ports.spawns.length).toBe(1);
 });
 
 test("the grant admission resolves belongs to the generation the run verified", async () => {

@@ -12,7 +12,7 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_TELEGRAM_API_ID = "12345";
 process.env.LLV_TELEGRAM_API_HASH = "0123456789abcdef0123456789abcdef";
 
-const { TELEGRAM_FEED_EXPOSED_TOOLS, TELEGRAM_READ_TOOL_ALLOWLIST, connectorFeedCoverageSince, connectorServerName, ensureTelegramConnector, stopTelegramConnector, verifyReadOnlyTools } = await import("./connector");
+const { TELEGRAM_CONNECTOR_LOG_MAX_BYTES, TELEGRAM_FEED_EXPOSED_TOOLS, TELEGRAM_READ_TOOL_ALLOWLIST, connectorFeedCoverageSince, connectorServerName, ensureTelegramConnector, stopTelegramConnector, telegramConnectorLogPath, trimTelegramConnectorLog, verifyReadOnlyTools } = await import("./connector");
 const { TELEGRAM_BURST_CONSUMING_TOOLS, telegramMcpUrl, vendoredConnectorDir } = await import("./packaging");
 
 import type { ConnectorProbe, TelegramConnectorPorts } from "./connector";
@@ -188,6 +188,21 @@ test("spawns once, waits for readiness, and records the winner before probing", 
   expect(calls.spawns).toBe(1);
   expect(calls.records).toBe(1);
   expect(calls.probes).toBe(3);
+});
+
+test("the connector output log keeps an owner-only bounded tail", () => {
+  const fixture = Buffer.concat([
+    Buffer.from("invented connector output\n"),
+    Buffer.alloc(TELEGRAM_CONNECTOR_LOG_MAX_BYTES + 128, "x"),
+    Buffer.from("bounded tail marker\n"),
+  ]);
+  fs.writeFileSync(telegramConnectorLogPath(), fixture, { mode: 0o600 });
+
+  expect(trimTelegramConnectorLog()).toBe(true);
+  const stat = fs.statSync(telegramConnectorLogPath());
+  expect(stat.size).toBeLessThanOrEqual(TELEGRAM_CONNECTOR_LOG_MAX_BYTES);
+  expect(stat.mode & 0o077).toBe(0);
+  expect(fs.readFileSync(telegramConnectorLogPath(), "utf8")).toEndWith("bounded tail marker\n");
 });
 
 test("a connector advertising a non-read-only tool is refused", async () => {

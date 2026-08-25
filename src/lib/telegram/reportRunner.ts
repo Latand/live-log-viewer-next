@@ -22,6 +22,7 @@ import {
   slotInstant,
 } from "./reportSchedule";
 import { reportAttemptId, TELEGRAM_REPORT_PROJECT } from "./reportLineage";
+import { beginTelegramReportReadPhase } from "./reportReadGuard";
 import { connectorReadPort, planReportSources, type TelegramReadPort } from "./reportSources";
 import { launchReportConversation, type ReportSpawnInput, type ReportSpawnResult } from "./reportSpawn";
 import {
@@ -386,37 +387,41 @@ export class TelegramReportRunner {
        being verified, so the connector cannot answer this pass as a different
        account (#1091). */
     const port = this.ports.readPort(recorded.credentialRef);
-
-    /* A mismatch is the issue's `account-mismatch` outcome: no report, no
-       window advance, and — because this runs before the source pass — no read
-       of the wrong account's dialogs either. */
     let live: Awaited<ReturnType<TelegramReadPort["getMe"]>>;
-    try {
-      live = await port.getMe();
-    } catch {
-      this.ports.log("account_check_failed");
-      this.settle(runId, "failed", "account_check_failed", false);
-      return;
-    }
-    if (!sameTelegramAccount(live, recorded)) {
-      this.ports.log("account_mismatch");
-      this.settle(runId, "account-mismatch", null, false);
-      return;
-    }
-
     let sourcesPath: string;
+    const releaseReadPhase = await beginTelegramReportReadPhase();
     try {
-      const plan = await planReportSources(port, {
-        windowStart: window.startAt,
-        windowEnd: window.endAt,
-        groups: file.settings.groups,
-        promptVersion: DAILY_REPORT_PROMPT_VERSION,
-      });
-      sourcesPath = writeReportSources(runId, plan);
-    } catch {
-      this.ports.log("sources_failed");
-      this.settle(runId, "failed", "sources_failed", false);
-      return;
+      /* A mismatch is the issue's `account-mismatch` outcome: no report, no
+         window advance, and — because this runs before the source pass — no
+         read of the wrong account's dialogs either. */
+      try {
+        live = await port.getMe();
+      } catch {
+        this.ports.log("account_check_failed");
+        this.settle(runId, "failed", "account_check_failed", false);
+        return;
+      }
+      if (!sameTelegramAccount(live, recorded)) {
+        this.ports.log("account_mismatch");
+        this.settle(runId, "account-mismatch", null, false);
+        return;
+      }
+
+      try {
+        const plan = await planReportSources(port, {
+          windowStart: window.startAt,
+          windowEnd: window.endAt,
+          groups: file.settings.groups,
+          promptVersion: DAILY_REPORT_PROMPT_VERSION,
+        });
+        sourcesPath = writeReportSources(runId, plan);
+      } catch {
+        this.ports.log("sources_failed");
+        this.settle(runId, "failed", "sources_failed", false);
+        return;
+      }
+    } finally {
+      releaseReadPhase();
     }
 
     /* The source pass can take a minute; if the run was settled meanwhile —

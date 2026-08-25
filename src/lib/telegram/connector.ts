@@ -109,6 +109,9 @@ const TERMINATION_GRACE_MS = 2_000;
 const TERMINATION_KILL_MS = 2_000;
 const TERMINATION_POLL_MS = 25;
 const PID_FILE = "connector.json";
+const CONNECTOR_LOG_FILE = "connector.log";
+const CONNECTOR_LOG_TRIM_INTERVAL_MS = 1_000;
+export const TELEGRAM_CONNECTOR_LOG_MAX_BYTES = 256 * 1024;
 
 /** The read-only gate, pure so it is directly provable: one tool that lacks
     an affirmative readOnlyHint OR falls outside the exposed allowlist fails
@@ -177,12 +180,17 @@ export async function probeTelegramConnector(url: string, connectorToken: string
 
 const realPorts: TelegramConnectorPorts = {
   spawn(spec) {
+    const logFd = connectorLogDescriptor();
+    if (logFd === null) return null;
     try {
-      const child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ["ignore", "ignore", "ignore"], detached: true });
+      const child = spawn(spec.command, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ["ignore", logFd, logFd], detached: true });
       child.unref();
+      startConnectorLogMaintenance();
       return child;
     } catch {
       return null;
+    } finally {
+      try { fs.closeSync(logFd); } catch { /* already closed */ }
     }
   },
   probe: probeTelegramConnector,
@@ -197,6 +205,55 @@ const realPorts: TelegramConnectorPorts = {
 
 function pidFilePath(): string {
   return statePath("telegram", PID_FILE);
+}
+
+export function telegramConnectorLogPath(): string {
+  return statePath("telegram", CONNECTOR_LOG_FILE);
+}
+
+function openConnectorLog(flags: number): number | null {
+  let fd: number | null = null;
+  try {
+    ensureTelegramStateDir(true);
+    const noFollow = "O_NOFOLLOW" in fs.constants ? fs.constants.O_NOFOLLOW : 0;
+    fd = fs.openSync(telegramConnectorLogPath(), flags | fs.constants.O_CREAT | noFollow, 0o600);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0
+      || (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+      fs.closeSync(fd);
+      return null;
+    }
+    return fd;
+  } catch {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* already closed */ }
+    }
+    return null;
+  }
+}
+
+/** Keep the tail in place so an inherited append fd remains valid. */
+export function trimTelegramConnectorLog(): boolean {
+  const fd = openConnectorLog(fs.constants.O_RDWR);
+  if (fd === null) return false;
+  try {
+    const stat = fs.fstatSync(fd);
+    if (stat.size <= TELEGRAM_CONNECTOR_LOG_MAX_BYTES) return true;
+    const tail = Buffer.alloc(TELEGRAM_CONNECTOR_LOG_MAX_BYTES);
+    fs.readSync(fd, tail, 0, tail.length, stat.size - tail.length);
+    fs.ftruncateSync(fd, 0);
+    fs.writeSync(fd, tail, 0, tail.length, 0);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+  }
+}
+
+function connectorLogDescriptor(): number | null {
+  if (!trimTelegramConnectorLog()) return null;
+  return openConnectorLog(fs.constants.O_WRONLY | fs.constants.O_APPEND);
 }
 
 type ConnectorRecord = {
@@ -223,6 +280,19 @@ let liveConnectorChild: {
   identity: string;
 } | null = null;
 let supervisorGeneration = 0;
+let connectorLogTrimTimer: ReturnType<typeof setInterval> | null = null;
+
+function startConnectorLogMaintenance(): void {
+  if (connectorLogTrimTimer) return;
+  connectorLogTrimTimer = setInterval(() => { trimTelegramConnectorLog(); }, CONNECTOR_LOG_TRIM_INTERVAL_MS);
+  connectorLogTrimTimer.unref?.();
+}
+
+function stopConnectorLogMaintenance(): void {
+  if (!connectorLogTrimTimer) return;
+  clearInterval(connectorLogTrimTimer);
+  connectorLogTrimTimer = null;
+}
 
 function beginConnectorOperation(): () => boolean {
   const generation = ++supervisorGeneration;
@@ -312,6 +382,11 @@ function ownsRecordedConnector(binding: ConnectorBinding): boolean {
     && record.connectorTokenSha256 === connectorTokenSha256(binding.connectorToken)
     && procBackend.processIdentity(record.pid) === record.identity
     && connectorArgvMatches(record));
+}
+
+/** Whether this credential generation still owns the recorded live process. */
+export function telegramConnectorOwnsSession(session: ConnectorBinding): boolean {
+  return ownsRecordedConnector(session);
 }
 
 function terminateChildImmediately(child: ConnectorChild): void {
@@ -426,6 +501,7 @@ async function stopRealConnectorUnlocked(): Promise<void> {
   if (unverifiedRecordedProcess) throw new Error("Telegram connector ownership could not be verified");
   liveConnectorChild = null;
   removeConnectorRecord();
+  stopConnectorLogMaintenance();
 }
 
 async function withConnectorSupervisorLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -477,6 +553,7 @@ export async function ensureTelegramConnector(
   session: StoredTelegramSession,
   ports: TelegramConnectorPorts = realPorts,
 ): Promise<ConnectorEnsureResult> {
+  if (ports === realPorts) startConnectorLogMaintenance();
   const url = telegramMcpUrl();
   const binding = { credentialRef: session.credentialRef, connectorToken: session.connectorToken };
   const stop = ports.stop ?? stopRealConnectorUnlocked;
