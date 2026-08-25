@@ -58,6 +58,7 @@ mock.module("@/hooks/useLogTail", () => ({
 }));
 
 const { MobileFocusView } = await import("./MobileFocusView");
+const { resetOrchestratorSeatCacheForTests } = await import("../orchestrator/useOrchestratorSeat");
 
 interface SeatAnswer { seat: unknown; pending: unknown; exists: boolean }
 interface Recorded { url: string; method: string; body: Record<string, unknown> }
@@ -92,6 +93,10 @@ afterAll(() => {
   globalThis.fetch = realFetch;
 });
 beforeEach(() => {
+  /* The seat answer is cached per project for the session (#1149), so each test
+     starts as a tab that has never read this project's seat — otherwise the
+     row opens on the answer the test before it was given. */
+  resetOrchestratorSeatCacheForTests();
   requests.length = 0;
   seatAnswer = { seat: null, pending: null, exists: true };
   postSeat = async () => new Response(JSON.stringify({ ok: true, state: "starting" }), { status: 200, headers: { "content-type": "application/json" } });

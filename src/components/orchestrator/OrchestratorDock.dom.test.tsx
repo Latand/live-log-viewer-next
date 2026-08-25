@@ -12,6 +12,9 @@ import { emptyStore } from "@/components/runtime/runtimeModel";
  * the document preview sheet open on the other side. Since #1011 that width is
  * remembered PER PROJECT, so a mandate-heavy dock in one project leaves every
  * other project's dock the size the operator left it.
+ *
+ * Since #1149 the OPEN state is the project's too, on the same terms: its own
+ * key, seeded once from the single global flag operators carry in.
  */
 
 const dom = new HappyWindow();
@@ -49,12 +52,15 @@ mock.module("@/hooks/useRuntime", () => ({
 
 const {
   OrchestratorDock,
+  LEGACY_OPEN_KEY,
   MIN_WIDTH,
   MIN_BOARD,
   DEFAULT_WIDTH,
   RAIL_WIDTH,
   RESERVED_BESIDE_DOCK,
+  dockOpenFor,
   dockWidthForPointer,
+  rememberDockOpen,
   storedDockWidth,
 } = await import("./OrchestratorDock");
 const { leftShellInset } = await import("../shellLayout");
@@ -408,4 +414,32 @@ test("the published row and the committed width change in the same frame", () =>
   expect(seen.at(-1)).toEqual({ width: "900", inset: RAIL_WIDTH + 900 });
   expect(visibleBoard(1_920, 900)).toBeGreaterThanOrEqual(MIN_BOARD);
   expect(1_920 - RAIL_WIDTH - 900 - sheetWidth(1_920, RAIL_WIDTH + 400)).toBeLessThan(MIN_BOARD);
+});
+
+test("open and closed are the project's own, and the legacy global flag seeds a project that has never answered", () => {
+  /* Never opened, never closed, nothing carried in: closed. */
+  expect(dockOpenFor("atlas")).toBe(false);
+
+  /* What an operator carries in from before #1149: ONE flag for every project.
+     It seeds them all, so a dock left open stays open everywhere. */
+  dom.localStorage.setItem(LEGACY_OPEN_KEY, "1");
+  expect(dockOpenFor("atlas")).toBe(true);
+  expect(dockOpenFor("borealis")).toBe(true);
+
+  /* An answer of its own outranks the seed — «closed» included, which is the
+     whole point: closing the dock in a project the operator only glances at
+     must survive a seed that says «open». */
+  rememberDockOpen("borealis", false);
+  expect(dom.localStorage.getItem("llvOrchestratorPanelOpen:borealis")).toBe("0");
+  expect(dockOpenFor("borealis")).toBe(false);
+  /* ...and only that project's. Atlas still reads the seed, and the seed is
+     never written to. */
+  expect(dockOpenFor("atlas")).toBe(true);
+  expect(dom.localStorage.getItem(LEGACY_OPEN_KEY)).toBe("1");
+
+  /* Two projects, two independent answers. */
+  rememberDockOpen("atlas", false);
+  rememberDockOpen("borealis", true);
+  expect(dockOpenFor("atlas")).toBe(false);
+  expect(dockOpenFor("borealis")).toBe(true);
 });

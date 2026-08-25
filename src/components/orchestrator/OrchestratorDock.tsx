@@ -16,7 +16,15 @@ const LEGACY_WIDTH_KEY = "llvOrchestratorPanelWidth";
 /** One project's own width (#1011). Projects are isolated surfaces — a dock
     dragged wide for a mandate-heavy project must not resize every other one. */
 const widthKey = (project: string) => `${LEGACY_WIDTH_KEY}:${project}`;
-export const OPEN_KEY = "llvOrchestratorPanelOpen";
+/** The open/closed flag every project shared before #1149, now the same kind of
+    seed the width is: a project that has never been opened or closed answers
+    with it, so an operator coming from the single global preference finds the
+    dock where they left it everywhere. Nothing writes it. */
+export const LEGACY_OPEN_KEY = "llvOrchestratorPanelOpen";
+/** One project's own open state (#1149). The dock is a per-project surface —
+    closing it in a project the operator only glances at must not close it in
+    the one they are running. */
+const openKey = (project: string) => `${LEGACY_OPEN_KEY}:${project}`;
 
 export const MIN_WIDTH = 360;
 export const DEFAULT_WIDTH = 440;
@@ -58,6 +66,23 @@ function readStorage(key: string): string | null {
     that has been sized answers for itself, nonsense included. */
 function projectDockWidth(project: string): number {
   return storedDockWidth(() => readStorage(widthKey(project)) ?? readStorage(LEGACY_WIDTH_KEY));
+}
+
+/** Whether the dock opens for `project`: its own remembered answer, else the
+    pre-#1149 global one as a seed, else closed. Only ABSENCE falls through to
+    the seed — a project that has answered for itself outranks it, «closed»
+    included. */
+export function dockOpenFor(project: string): boolean {
+  return (readStorage(openKey(project)) ?? readStorage(LEGACY_OPEN_KEY)) === "1";
+}
+
+/** Remember what the operator just did to THIS project's dock. */
+export function rememberDockOpen(project: string, open: boolean): void {
+  try {
+    window.localStorage.setItem(openKey(project), open ? "1" : "0");
+  } catch {
+    /* private mode */
+  }
 }
 
 /** Width the drag lands on for a pointer at `clientX`, given the viewport. */
@@ -181,7 +206,16 @@ export function OrchestratorDock({
           and the idempotency key of an unsettled confirm — belongs to ONE
           project. The dock survives the switch, resized to the new project's
           own remembered width; the panel is re-seated on it and reads that
-          project's own stored draft. */}
+          project's own stored draft.
+
+          The key STAYS, and instant switching (#1149) is bought outside the
+          subtree instead: the seat and incumbent hooks keep this tab's answers
+          in a map keyed by project, and the feed keeps its own per-path
+          transcript snapshot (`useLogTail`), so the re-seated panel paints the
+          project's live conversation in its first commit and revalidates
+          behind it. Dropping the key would keep the subtree alive but leave
+          five pieces of one project's draft state on another project's panel —
+          a much larger change for the same paint. */}
       <OrchestratorPanel
         key={project}
         project={project}
