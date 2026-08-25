@@ -33,9 +33,10 @@ mock.module("./process", () => ({
   writingHolders: () => new Map(),
 }));
 
-const { linkEntries } = await import("./links");
+const { AgentRegistry } = await import("../agent/registry");
+const { durableHandoffLineageFromSnapshot, linkEntries } = await import("./links");
 const { nativeCodexParentThreadId } = await import("./codexNative");
-const { normalizeHandoffLineageStore } = await import("../handoffLineage");
+const { normalizeHandoffLineageStore, rememberHandoffChild } = await import("../handoffLineage");
 
 afterAll(() => {
   if (REAL_STATE !== undefined) process.env.LLV_STATE_DIR = REAL_STATE;
@@ -70,6 +71,28 @@ function entry(pathname: string, overrides: Partial<FileEntry> = {}): FileEntry 
 function writeJsonl(pathname: string, rows: unknown[]): void {
   fs.mkdirSync(path.dirname(pathname), { recursive: true });
   fs.writeFileSync(pathname, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+}
+
+function settleSpawn(
+  registry: InstanceType<typeof AgentRegistry>,
+  launchId: string,
+  artifactPath: string,
+  sessionId: string,
+): void {
+  const receipt = registry.snapshot().receipts[launchId]!;
+  const settled = registry.settleSpawn(launchId, {
+    key: { engine: "claude", sessionId },
+    artifactPath,
+    cwd: SANDBOX,
+    accountId: "work",
+    launchProfile: receipt.launchProfile,
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  if (settled.kind !== "settled") throw new Error("expected settled spawn");
 }
 
 describe("linkEntries", () => {
@@ -125,6 +148,85 @@ describe("linkEntries", () => {
 
     expect(normalized.children.get(child)).toBe(parent);
     expect(normalized.conversationChildren.get("conversation_child")).toBe("conversation_parent");
+  });
+
+  test("suppresses a persisted handoff flag for a historical container-born stage", async () => {
+    const registry = new AgentRegistry(path.join(SANDBOX, "container-stage-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(SANDBOX, "container-stage-parent.jsonl");
+    const childPath = path.join(SANDBOX, "container-stage-child.jsonl");
+    const parentConversation = registry.ensureConversation("claude", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "claude",
+      cwd: SANDBOX,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parentConversation.id,
+      role: "builder",
+      origin: { kind: "container", container: "pipeline", containerId: "pipeline-fixture", creatorConversationId: parentConversation.id },
+      memberships: [{
+        kind: "pipeline",
+        containerId: "pipeline-fixture",
+        role: "builder",
+        slot: "build:1",
+        stageId: "build",
+        stageOrder: 0,
+        round: 1,
+        parentConversationId: parentConversation.id,
+      }],
+    });
+    if (begun.kind !== "created") throw new Error("expected created spawn");
+    settleSpawn(registry, begun.receipt.launchId, childPath, "container-stage-session");
+    rememberHandoffChild(childPath, parentPath);
+    const parent = entry(parentPath);
+    const child = entry(childPath, { handoff: true });
+
+    await linkEntries([parent, child], {
+      persist: false,
+      durableHandoffLineage: durableHandoffLineageFromSnapshot(registry.snapshot()),
+    });
+
+    expect(child.parent).toBe(parentPath);
+    expect(child.handoff).toBeUndefined();
+  });
+
+  test("preserves an operator handoff that later gains flow membership", async () => {
+    const registry = new AgentRegistry(path.join(SANDBOX, "enrolled-handoff-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(SANDBOX, "enrolled-handoff-parent.jsonl");
+    const childPath = path.join(SANDBOX, "enrolled-handoff-child.jsonl");
+    const parentConversation = registry.ensureConversation("claude", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "claude",
+      cwd: SANDBOX,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parentConversation.id,
+      parentSource: "explicit",
+      role: "builder",
+      origin: { kind: "operator" },
+    });
+    if (begun.kind !== "created") throw new Error("expected created spawn");
+    settleSpawn(registry, begun.receipt.launchId, childPath, "enrolled-handoff-session");
+    registry.rememberMembership(begun.receipt.conversationId, {
+      kind: "flow",
+      containerId: "flow-fixture",
+      role: "implementer",
+      slot: "implementer",
+      stageId: null,
+      stageOrder: 0,
+      round: null,
+      parentConversationId: null,
+    });
+    rememberHandoffChild(childPath, parentPath);
+    const parent = entry(parentPath);
+    const child = entry(childPath);
+
+    await linkEntries([parent, child], {
+      persist: false,
+      durableHandoffLineage: durableHandoffLineageFromSnapshot(registry.snapshot()),
+    });
+
+    expect(child.parent).toBe(parentPath);
+    expect(child.handoff).toBe(true);
   });
 
   test("links a native Codex spawn_agent child through parent_thread_id metadata", async () => {

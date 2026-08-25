@@ -1258,8 +1258,8 @@ test("a pipeline stage placeholder carries durable spawn lineage without an oper
   }
 });
 
-test("a materialized pipeline stage clears a legacy handoff before response lineage enrichment", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-materialized-handoff-"));
+test("a materialized operator handoff stays input-immutable after later flow enrollment", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-enrolled-operator-handoff-"));
   const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
   try {
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
@@ -1271,18 +1271,9 @@ test("a materialized pipeline stage clears a legacy handoff before response line
       transport: "structured",
       accountId: "work",
       parentConversationId: parent.id,
+      parentSource: "explicit",
       role: "builder",
-      origin: { kind: "container", container: "pipeline", containerId: "pipeline-fixture", creatorConversationId: parent.id },
-      memberships: [{
-        kind: "pipeline",
-        containerId: "pipeline-fixture",
-        role: "builder",
-        slot: "build:1",
-        stageId: "build",
-        stageOrder: 0,
-        round: 1,
-        parentConversationId: parent.id,
-      }],
+      origin: { kind: "operator" },
       launchProfile: emptyLaunchProfile({ cwd: directory }),
     });
     if (begun.kind !== "created") throw new Error("expected structured launch creation");
@@ -1298,15 +1289,30 @@ test("a materialized pipeline stage clears a legacy handoff before response line
       claimOwner: null,
       pendingAction: null,
     });
+    registry.rememberMembership(begun.receipt.conversationId, {
+      kind: "flow",
+      containerId: "flow-fixture",
+      role: "implementer",
+      slot: "implementer",
+      stageId: null,
+      stageOrder: 0,
+      round: null,
+      parentConversationId: null,
+    });
 
     const stage = scannedFile(artifactPath);
     stage.parent = parentPath;
     stage.handoff = true;
-    expect(stage.durableLineage).toBeUndefined();
+    const files = [scannedFile(parentPath), stage];
+    const before = structuredClone(files);
+    const snapshot = registry.snapshot();
+    const snapshotBefore = structuredClone(snapshot);
 
-    projectLaunchConversations([scannedFile(parentPath), stage], registry.snapshot());
+    projectLaunchConversations(files, snapshot);
 
-    expect(stage.handoff).toBeUndefined();
+    expect(files).toEqual(before);
+    expect(snapshot).toEqual(snapshotBefore);
+    expect(stage.handoff).toBe(true);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

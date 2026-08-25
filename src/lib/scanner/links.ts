@@ -11,6 +11,12 @@ import {
   persistHandoffLineage,
   rememberHandoffChild,
 } from "../handoffLineage";
+import {
+  agentRegistry,
+  readOnlyConversationLookupFromSnapshot,
+  RegistryReadError,
+  type RegistryFile,
+} from "../agent/registry";
 import { forEachCooperatively } from "../cooperative";
 import type { FileEntry } from "../types";
 import { globalCache } from "./caches";
@@ -509,6 +515,51 @@ function bgCommand(
 
 const ANCESTRY_MAX_DEPTH = 15;
 
+export type DurableHandoffProvenance = "operator-handoff" | "container-spawn";
+
+export interface DurableHandoffLineage {
+  provenanceForChild(pathname: string): DurableHandoffProvenance | null;
+}
+
+/**
+ * Classifies compatibility handoff edges from durable spawn evidence. Container
+ * membership proves container provenance only when it was committed with the
+ * launch itself; membership added later must not erase an operator handoff.
+ */
+export function durableHandoffLineageFromSnapshot(snapshot: RegistryFile): DurableHandoffLineage {
+  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
+  return {
+    provenanceForChild(pathname) {
+      const conversation = lookup.conversationForPath(pathname);
+      if (!conversation) return null;
+      const edge = snapshot.lineageEdges[conversation.id];
+      if (!edge || edge.source !== "viewer-spawn") return null;
+      const receipt = edge.evidence.launchId ? snapshot.receipts[edge.evidence.launchId] : null;
+      /* Recorded-at-birth operator evidence wins even when the conversation is
+         enrolled into a flow or pipeline later. */
+      if (receipt?.delegationDepth === 0 || receipt?.parentSource || receipt?.launchDisplay) {
+        return "operator-handoff";
+      }
+      const parentConversationId = lookup.canonicalConversationId(edge.parentConversationId);
+      const bornAt = receipt?.createdAt ?? edge.createdAt;
+      const bornIntoContainer = (snapshot.memberships[conversation.id] ?? []).some((membership) =>
+        membership.createdAt === bornAt
+          && membership.parentConversationId !== null
+          && lookup.canonicalConversationId(membership.parentConversationId) === parentConversationId);
+      return bornIntoContainer ? "container-spawn" : "operator-handoff";
+    },
+  };
+}
+
+function currentDurableHandoffLineage(): DurableHandoffLineage {
+  try {
+    return durableHandoffLineageFromSnapshot(agentRegistry().readOnlySnapshot());
+  } catch (error) {
+    if (error instanceof RegistryReadError) return { provenanceForChild: () => null };
+    throw error;
+  }
+}
+
 /**
  * Spawn parentage of a codex rollout is a permanent fact. Live /proc ancestry
  * can prove native spawns while both processes still exist; each proven edge is
@@ -628,9 +679,15 @@ async function attachLiveCodexParents(entries: FileEntry[], persist: boolean): P
  * The `handoff` flag makes the UI treat the child as a branch of its source
  * rather than a compaction predecessor.
  */
-async function attachHandoffParents(entries: FileEntry[], persist: boolean): Promise<void> {
+async function attachHandoffParents(
+  entries: FileEntry[],
+  persist: boolean,
+  durableLineage: DurableHandoffLineage,
+): Promise<void> {
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   await forEachCooperatively(entries, (entry) => {
+    const durableProvenance = durableLineage.provenanceForChild(entry.path);
+    if (durableProvenance === "container-spawn") delete entry.handoff;
     if (entry.parent) return;
     if (entry.root !== "claude-projects" && entry.root !== "codex-sessions") return;
     if (!entry.path.endsWith(".jsonl") || entry.path.includes(path.sep + "subagents" + path.sep)) return;
@@ -647,14 +704,18 @@ async function attachHandoffParents(entries: FileEntry[], persist: boolean): Pro
     }
     if (parent && parent !== entry.path && byPath.has(parent)) {
       entry.parent = parent;
-      entry.handoff = true;
+      if (durableProvenance !== "container-spawn") entry.handoff = true;
     }
   });
   if (persist) persistHandoffLineage();
 }
 
-export async function linkEntries(entries: FileEntry[], options: { persist?: boolean } = {}): Promise<void> {
+export async function linkEntries(
+  entries: FileEntry[],
+  options: { persist?: boolean; durableHandoffLineage?: DurableHandoffLineage } = {},
+): Promise<void> {
   const persist = options.persist !== false;
+  const durableHandoffLineage = options.durableHandoffLineage ?? currentDurableHandoffLineage();
   loadBackgroundCommands();
   loadCompactChains();
   const limit = createLimiter(48);
@@ -731,7 +792,7 @@ export async function linkEntries(entries: FileEntry[], options: { persist?: boo
   });
   await attachNativeCodexSubagentParents(entries, persist);
   await attachLiveCodexParents(entries, persist);
-  await attachHandoffParents(entries, persist);
+  await attachHandoffParents(entries, persist, durableHandoffLineage);
   await chainCompactedSessions(entries);
   const rootProject = (entry: FileEntry): string => {
     const seen = new Set<string>();

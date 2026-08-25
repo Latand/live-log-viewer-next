@@ -411,14 +411,6 @@ export function projectLaunchConversations(
   nowMs = Date.now(),
   artifactProbe: (pathname: string) => ArtifactProbeResult = readableArtifact,
 ): LaunchProjection {
-  const lookup = readOnlyConversationLookupFromSnapshot(snapshot);
-  /* Scanner linking precedes the registry overlay in /api/files. Clear legacy
-     operator-handoff compatibility evidence from materialized container members
-     here, where the same response already has the durable membership snapshot. */
-  for (const file of files) {
-    const conversation = lookup.conversationForPath(file.path);
-    if (conversation && (snapshot.memberships[conversation.id]?.length ?? 0) > 0) delete file.handoff;
-  }
   const byPath = new Map(files.map((file) => [file.path, file]));
   const scannedPaths = new Set(byPath.keys());
   const receipts = newestLaunchReceipts(snapshot, nowMs);
