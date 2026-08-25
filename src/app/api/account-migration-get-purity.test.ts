@@ -15,8 +15,17 @@ const getFiles = (request: Request) => buildFilesResponse(request, {
   listFilesWithProjectCatalog: async () => ({ files: [], projectCatalog: [], complete: true }),
 });
 
-function registryBytes(): string {
-  return fs.readFileSync(path.join(root, "registry.json")).toString("base64");
+function stateBytes(): Record<string, string> {
+  const files: Record<string, string> = {};
+  const walk = (directory: string) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const pathname = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(pathname);
+      else if (entry.isFile()) files[path.relative(root, pathname)] = fs.readFileSync(pathname).toString("base64");
+    }
+  };
+  walk(root);
+  return files;
 }
 
 beforeEach(() => setAgentRegistryForTests(registry));
@@ -28,23 +37,25 @@ afterAll(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test("GET accounts and files preserve registry bytes exactly", async () => {
-  const before = registryBytes();
+test("GET accounts and files preserve durable state bytes exactly", async () => {
+  const initialized = await getFiles(new Request("http://127.0.0.1/api/files"));
+  expect(initialized.status).toBe(200);
+  const before = stateBytes();
   const accounts = await getAccounts();
   expect(accounts.status).toBe(200);
-  expect(registryBytes()).toEqual(before);
+  expect(stateBytes()).toEqual(before);
 
   const files = await getFiles(new Request("http://127.0.0.1/api/files"));
   expect(files.status).toBe(200);
-  expect(registryBytes()).toEqual(before);
+  expect(stateBytes()).toEqual(before);
 }, 15_000);
 
 test("conditional GET keeps the same durable bytes", async () => {
   const first = await getFiles(new Request("http://127.0.0.1/api/files"));
   const etag = first.headers.get("etag");
   expect(etag).toBeTruthy();
-  const before = registryBytes();
+  const before = stateBytes();
   const second = await getFiles(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(second.status).toBe(304);
-  expect(registryBytes()).toEqual(before);
+  expect(stateBytes()).toEqual(before);
 }, 15_000);
