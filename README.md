@@ -95,22 +95,25 @@ bunx agent-log-viewer
 npx agent-log-viewer
 ```
 
-This starts the server on `127.0.0.1:8898` and opens your browser. Both launch
-paths require Bun to be installed because the authoritative state stores use
-Bun SQLite.
+This starts the server on `127.0.0.1:8898` and opens your browser. The CLI also
+starts and supervises the packaged structured runtime host, including restart
+backoff and Ctrl-C cleanup. Pipelines and the orchestrator work from this
+installation without Docker. Both launch paths require Bun because the runtime
+journal and authoritative state stores use Bun SQLite.
 
 ### From a local clone
 
 ```bash
 bun install
 bun run build
-bun run start -- --port 8898 --hostname 127.0.0.1
+bun bin/cli.mjs --no-open --port 8898 --hostname 127.0.0.1
 # open http://127.0.0.1:8898/
 ```
 
-`start` serves the output of the last `build`, so run `build` first. For
-development, `bun dev` runs the app with hot reload (it needs a high OS
-file-watch limit for large home directories).
+The CLI serves the output of the last `build`, so run `build` first. For
+development, `bun dev` runs the app with hot reload and expects a separately
+managed runtime host (it needs a high OS file-watch limit for large home
+directories).
 
 The Viewer server runs on Bun. The runtime journal and hot state collections
 use `bun:sqlite`, and macOS process ownership uses the kernel's microsecond
@@ -119,20 +122,14 @@ feature-flag configuration.
 
 ### Spawn transport
 
-Agents launch through a structured runtime host — no tmux pane between the
-Viewer and the agent — wherever a deployment can serve one. The transport is
-chosen by capability: a deployment that declares `LLV_RUNTIME_HOST_SOCKET`
-spawns structured, and one without a host still spawns through tmux instead of
-failing. Structured hosting itself is on by default; `LLV_STRUCTURED_HOSTS=0`,
-`LLV_RUNTIME_EVENTS=0`, and `NEXT_PUBLIC_RUNTIME_UI=0` are rollback switches.
-Each of the three sends the implicit choice back to tmux, so reaching for one
-during an incident never costs the ability to spawn. They accept the spellings
-an env file actually produces — `0`, `" 0 "`, `'0'`, `false`, `off`, `no` — and
-an unset variable means the default is on.
-
-`LLV_SPAWN_TRANSPORT=tmux|structured` overrides the choice. An explicit
-`structured` without a reachable host returns a gap naming what is missing
-rather than quietly downgrading the request.
+Agents launch through a structured runtime host. The installed CLI supervises
+that host with the same Bun executable as the Viewer and places its Unix socket
+under the Viewer state directory. `LLV_RUNTIME_HOST_SOCKET` can point the CLI at
+an alternate socket path while the CLI retains host ownership. Startup fails
+clearly when Bun, the packaged host entry, the configured socket, or its
+directory permissions are unavailable.
+The CLI log carries the host failure and the pipeline card directs the operator
+to it. There is no tmux fallback.
 
 ### Connect an orchestrator through MCP
 
@@ -399,6 +396,7 @@ All optional. Transcription variables are documented in full in
 | --- | --- |
 | `VIEWER_PROC_BACKEND` | `portable` or `linux` — force the process-discovery backend (auto-selected by default). |
 | `LLV_LANG` | `uk` or `en` — force the CLI message language. |
+| `LLV_RUNTIME_HOST_SOCKET` | Unix socket path for the CLI-supervised runtime host. Unset places it under the Viewer state directory. |
 | `LLV_TRANSCRIBE_BACKEND` | `local`, `chatgpt`, or `elevenlabs` — pick the dictation backend (default `local`). |
 | `LLV_WHISPER_MODEL` | faster-whisper model size (default `small`). |
 | `LLV_WHISPER_DEVICE` | `cpu` (default) or `cuda`. |

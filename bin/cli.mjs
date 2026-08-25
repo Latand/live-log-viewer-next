@@ -3,16 +3,18 @@
 import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { detectTailscale, getToken, readStatus, serve as serveTailscale, TailscaleError } from "./tailscale.mjs";
 import {
+  cliRuntimeHostConfig,
+  cliRuntimeHostEnvironment,
   discardWakatimeEnvironmentCredential,
   viewerChildProcessOptions,
   viewerServerBunRuntime,
-  withoutWakatimeCredential,
 } from "./server-runtime.mjs";
 
 discardWakatimeEnvironmentCredential();
@@ -27,6 +29,11 @@ const READINESS_INTERVAL_MS = 200;
 // Reusing READINESS_INTERVAL_MS here made every probe abort before the healthy
 // server could answer, so startup always "timed out" and killed its own server.
 const READINESS_PROBE_TIMEOUT_MS = 5_000;
+const RUNTIME_HOST_READINESS_TIMEOUT_MS = 15_000;
+const RUNTIME_HOST_READINESS_INTERVAL_MS = 100;
+const RUNTIME_HOST_RESTART_BASE_MS = 500;
+const RUNTIME_HOST_RESTART_MAX_MS = 10_000;
+const RUNTIME_HOST_STABLE_UPTIME_MS = 30_000;
 
 const cliPath = fileURLToPath(import.meta.url);
 const cliDir = dirname(cliPath);
@@ -73,6 +80,12 @@ Options:
     tsCookie: () => "  After the first open the key is stored in a cookie for 30 days.",
     nonLocalWarn: () => "Warning: a non-local address exposes the viewer to the network, so access-key mode is forced on.",
     serverNotReady: () => "Server not ready.",
+    runtimeHostEntryMissing: () => "The runtime host is missing from this install. Reinstall agent-log-viewer and try again.",
+    runtimeHostStartFail: (detail) => `Couldn't start the structured runtime host: ${detail}`,
+    runtimeHostTimeout: (socketPath) => `the runtime host did not bind ${socketPath} within ${RUNTIME_HOST_READINESS_TIMEOUT_MS / 1_000} seconds; check the socket directory permissions`,
+    runtimeHostExited: (detail) => `the runtime host exited before its socket was ready${detail ? `: ${detail}` : ""}`,
+    runtimeHostRestart: (delay, detail) => `[runtime host] ${detail}; restarting in ${delay}ms`,
+    runtimeHostRestartFail: (detail) => `[runtime host] restart failed: ${detail}`,
   },
   uk: {
     usage: () => `Використання: agent-log-viewer [опції]
@@ -104,6 +117,12 @@ Options:
     tsCookie: () => "  Після першого відкриття ключ зберігається у cookie на 30 днів.",
     nonLocalWarn: () => "Увага: нелокальна адреса відкриває viewer для мережі, тому режим ключа доступу увімкнено примусово.",
     serverNotReady: () => "Сервер не готовий.",
+    runtimeHostEntryMissing: () => "У цьому пакеті немає runtime host. Перевстановіть agent-log-viewer і повторіть спробу.",
+    runtimeHostStartFail: (detail) => `Не вдалося запустити structured runtime host: ${detail}`,
+    runtimeHostTimeout: (socketPath) => `runtime host не створив ${socketPath} за ${RUNTIME_HOST_READINESS_TIMEOUT_MS / 1_000} секунд; перевірте права каталогу сокета`,
+    runtimeHostExited: (detail) => `runtime host завершився до готовності сокета${detail ? `: ${detail}` : ""}`,
+    runtimeHostRestart: (delay, detail) => `[runtime host] ${detail}; повторний запуск за ${delay} мс`,
+    runtimeHostRestartFail: (detail) => `[runtime host] помилка повторного запуску: ${detail}`,
   },
 };
 
@@ -255,9 +274,9 @@ function resolveServer(packageRoot) {
   };
 }
 
-function buildChildEnv(options, runtime, packageRoot) {
+function buildChildEnv(options, runtime, packageRoot, runtimeHostEnvironment) {
   const env = {
-    ...withoutWakatimeCredential(process.env),
+    ...runtimeHostEnvironment,
     PORT: String(options.port),
     // zsh exports HOSTNAME with the machine name on this user's machine; setting it here keeps standalone bound to the requested address.
     HOSTNAME: options.hostname,
@@ -306,10 +325,10 @@ function buildChildEnv(options, runtime, packageRoot) {
   return env;
 }
 
-function startServer(server, options, runtime, tailscaleProcessRef, packageRoot) {
+function startServer(server, options, runtime, tailscaleProcessRef, runtimeHostSupervisor, packageRoot, runtimeHostEnvironment) {
   const child = spawn(server.command, server.args, viewerChildProcessOptions({
     cwd: server.cwd,
-    env: buildChildEnv(options, runtime, packageRoot),
+    env: buildChildEnv(options, runtime, packageRoot, runtimeHostEnvironment),
     stdio: ["ignore", "inherit", "pipe"],
   }));
 
@@ -333,7 +352,11 @@ function startServer(server, options, runtime, tailscaleProcessRef, packageRoot)
   });
 
   child.on("error", (error) => {
-    fail(m.serverStartFail(error.message));
+    state.stopping = true;
+    void Promise.all([
+      tailscaleProcessRef?.current ? stopChild(tailscaleProcessRef.current) : Promise.resolve(),
+      runtimeHostSupervisor.stop(),
+    ]).finally(() => fail(m.serverStartFail(error.message)));
   });
 
   child.on("exit", async (code, signal) => {
@@ -348,6 +371,7 @@ function startServer(server, options, runtime, tailscaleProcessRef, packageRoot)
     if (tailscaleProcessRef?.current) {
       await stopChild(tailscaleProcessRef.current);
     }
+    await runtimeHostSupervisor.stop();
 
     if (state.sawAddressInUse) {
       process.exit(1);
@@ -367,6 +391,139 @@ function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function probeRuntimeHost(socketPath) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(socketPath);
+    let settled = false;
+    const finish = (ready) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ready);
+    };
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.setTimeout(1_000, () => finish(false));
+  });
+}
+
+function runtimeHostExitDetail(processHandle) {
+  const { child, state } = processHandle;
+  if (state.spawnError) {
+    return state.spawnError.code === "ENOENT"
+      ? `Bun executable ${state.command} is unavailable (${state.spawnError.message})`
+      : `Bun could not launch the host (${state.spawnError.message})`;
+  }
+  const outcome = child.signalCode ? `signal ${child.signalCode}` : `exit code ${child.exitCode ?? "unknown"}`;
+  const stderr = state.stderrTail
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(-3)
+    .join(" | ");
+  return stderr ? `${outcome}: ${stderr}` : outcome;
+}
+
+async function waitForRuntimeHost(socketPath, processHandle = null) {
+  const deadline = Date.now() + RUNTIME_HOST_READINESS_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (processHandle?.state.spawnError) {
+      throw new Error(runtimeHostExitDetail(processHandle));
+    }
+    if (processHandle && (processHandle.child.exitCode !== null || processHandle.child.signalCode !== null)) {
+      throw new Error(m.runtimeHostExited(runtimeHostExitDetail(processHandle)));
+    }
+    if (await probeRuntimeHost(socketPath)) return;
+    await wait(RUNTIME_HOST_READINESS_INTERVAL_MS);
+  }
+  throw new Error(m.runtimeHostTimeout(socketPath));
+}
+
+function createRuntimeHostSupervisor(config, bunRuntime, environment, packageRoot) {
+  let current = null;
+  let restartTimer = null;
+  let restartFailures = 0;
+  let stopping = false;
+
+  const scheduleRestart = (detail, uptimeMs = 0) => {
+    if (stopping || restartTimer) return;
+    restartFailures = uptimeMs >= RUNTIME_HOST_STABLE_UPTIME_MS ? 1 : restartFailures + 1;
+    const delay = Math.min(
+      RUNTIME_HOST_RESTART_BASE_MS * (2 ** Math.max(0, restartFailures - 1)),
+      RUNTIME_HOST_RESTART_MAX_MS,
+    );
+    console.error(m.runtimeHostRestart(delay, detail));
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      void launch(false).catch((error) => {
+        if (stopping) return;
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(m.runtimeHostRestartFail(message));
+        scheduleRestart(message);
+      });
+    }, delay);
+  };
+
+  const spawnHost = () => {
+    const child = spawn(bunRuntime, ["--bun", config.entrypoint], viewerChildProcessOptions({
+      cwd: packageRoot,
+      env: environment,
+      stdio: ["ignore", "inherit", "pipe"],
+    }));
+    const state = {
+      command: bunRuntime,
+      readyAt: null,
+      spawnError: null,
+      stderrTail: "",
+      stopping: false,
+    };
+    const processHandle = { child, state };
+    current = processHandle;
+    child.stderr.on("data", (chunk) => {
+      state.stderrTail = `${state.stderrTail}${chunk}`.slice(-8_192);
+      process.stderr.write(chunk);
+    });
+    child.once("error", (error) => {
+      state.spawnError = error;
+    });
+    child.once("exit", () => {
+      if (current !== processHandle || stopping || state.stopping || state.readyAt === null) return;
+      scheduleRestart(runtimeHostExitDetail(processHandle), Date.now() - state.readyAt);
+    });
+    return processHandle;
+  };
+
+  const launch = async (initial) => {
+    const processHandle = spawnHost();
+    try {
+      await waitForRuntimeHost(config.socketPath, processHandle);
+      processHandle.state.readyAt = Date.now();
+      if (processHandle.child.exitCode !== null || processHandle.child.signalCode !== null) {
+        throw new Error(m.runtimeHostExited(runtimeHostExitDetail(processHandle)));
+      }
+    } catch (error) {
+      await stopChild(processHandle);
+      if (initial) throw error;
+      throw error;
+    }
+  };
+
+  return {
+    async start() {
+      if (!existsSync(config.entrypoint)) throw new Error(m.runtimeHostEntryMissing());
+      await launch(true);
+    },
+    async stop() {
+      stopping = true;
+      if (restartTimer) {
+        clearTimeout(restartTimer);
+        restartTimer = null;
+      }
+      if (current) await stopChild(current);
+    },
+  };
 }
 
 function probe(url) {
@@ -477,16 +634,17 @@ async function stopChild(processHandle) {
   });
 }
 
-async function stopAll(serverProcess, tailscaleProcess) {
+async function stopAll(serverProcess, tailscaleProcess, runtimeHostSupervisor) {
   await Promise.all([
     serverProcess ? stopChild(serverProcess) : Promise.resolve(),
     tailscaleProcess ? stopChild(tailscaleProcess) : Promise.resolve(),
+    runtimeHostSupervisor ? runtimeHostSupervisor.stop() : Promise.resolve(),
   ]);
 }
 
-function installSignalHandlers(serverProcess, tailscaleProcessRef) {
+function installSignalHandlers(serverProcess, tailscaleProcessRef, runtimeHostSupervisor) {
   const shutdown = async () => {
-    await stopAll(serverProcess, tailscaleProcessRef.current);
+    await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);
     process.exit(0);
   };
 
@@ -626,9 +784,32 @@ async function main() {
   }
 
   const server = resolveServer(packageRoot);
+  const runtimeHostConfig = cliRuntimeHostConfig(packageRoot);
+  const runtimeHostEnvironment = cliRuntimeHostEnvironment(process.env, runtimeHostConfig.socketPath);
+  const runtimeHostSupervisor = createRuntimeHostSupervisor(
+    runtimeHostConfig,
+    viewerServerBunRuntime(),
+    runtimeHostEnvironment,
+    packageRoot,
+  );
+  try {
+    await runtimeHostSupervisor.start();
+  } catch (error) {
+    await runtimeHostSupervisor.stop();
+    fail(m.runtimeHostStartFail(error instanceof Error ? error.message : String(error)));
+  }
+
   const tailscaleProcessRef = { current: null };
-  const serverProcess = startServer(server, options, runtime, tailscaleProcessRef, packageRoot);
-  installSignalHandlers(serverProcess, tailscaleProcessRef);
+  const serverProcess = startServer(
+    server,
+    options,
+    runtime,
+    tailscaleProcessRef,
+    runtimeHostSupervisor,
+    packageRoot,
+    runtimeHostEnvironment,
+  );
+  installSignalHandlers(serverProcess, tailscaleProcessRef, runtimeHostSupervisor);
 
   if (options.tailscale && runtime.tailscalePath) {
     tailscaleProcessRef.current = serveTailscale(runtime.tailscalePath, options.port);
@@ -637,7 +818,7 @@ async function main() {
   try {
     await waitForReadiness(options.port);
   } catch (error) {
-    await stopAll(serverProcess, tailscaleProcessRef.current);
+    await stopAll(serverProcess, tailscaleProcessRef.current, runtimeHostSupervisor);
     fail(error instanceof Error ? error.message : m.serverNotReady());
   }
 

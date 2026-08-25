@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -12,12 +13,115 @@ import { structuredHostsEnabled as structuredHostsEnabledInApp } from "@/lib/run
 import { loadWorkflows } from "@/lib/workflows/store";
 
 import {
+  cliRuntimeHostConfig,
+  cliRuntimeHostEnvironment,
   structuredHostsEnabled as structuredHostsEnabledInLauncher,
   viewerServerBunRuntime,
   viewerChildProcessOptions,
   WAKATIME_CREDENTIAL_ENV,
   withoutWakatimeCredential,
 } from "./server-runtime.mjs";
+
+async function availablePort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("could not reserve a launcher test port");
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return address.port;
+}
+
+test("the CLI derives a managed runtime host from the install state directory", () => {
+  const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-package-"));
+  const configRoot = path.join(packageRoot, "config");
+  const bundle = path.join(packageRoot, "dist", "runtime-host.mjs");
+  fs.mkdirSync(path.dirname(bundle), { recursive: true });
+  fs.writeFileSync(bundle, "export {};\n");
+  try {
+    expect(cliRuntimeHostConfig(packageRoot, {
+      env: { XDG_CONFIG_HOME: configRoot },
+      home: path.join(packageRoot, "home"),
+    })).toEqual({
+      socketPath: path.join(configRoot, "agent-log-viewer", "state", "runtime-host.sock"),
+      entrypoint: bundle,
+    });
+  } finally {
+    fs.rmSync(packageRoot, { recursive: true, force: true });
+  }
+});
+
+test("the CLI uses the source runtime host in a checkout and honors a socket override", () => {
+  const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-source-"));
+  const source = path.join(packageRoot, "src", "runtime-host", "main.ts");
+  const socketPath = path.join(packageRoot, "external.sock");
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, "export {};\n");
+  try {
+    expect(cliRuntimeHostConfig(packageRoot, {
+      env: { LLV_RUNTIME_HOST_SOCKET: `  ${socketPath}  ` },
+      home: path.join(packageRoot, "home"),
+    })).toEqual({ socketPath, entrypoint: source });
+  } finally {
+    fs.rmSync(packageRoot, { recursive: true, force: true });
+  }
+});
+
+test("the CLI runtime environment enables the host and strips ambient WakaTime credentials", () => {
+  const socketPath = "/runtime/viewer.sock";
+  const env: Record<string, string | undefined> = cliRuntimeHostEnvironment({
+    PATH: "/usr/bin",
+    LLV_STRUCTURED_HOSTS: "off",
+    LLV_RUNTIME_EVENTS: "0",
+    [WAKATIME_CREDENTIAL_ENV]: "fixture-value",
+  }, socketPath);
+
+  expect(env).toMatchObject({
+    PATH: "/usr/bin",
+    LLV_RUNTIME_HOST_SOCKET: socketPath,
+    LLV_STRUCTURED_HOSTS: "1",
+    LLV_RUNTIME_EVENTS: "1",
+  });
+  expect(env[WAKATIME_CREDENTIAL_ENV]).toBeUndefined();
+});
+
+test("the CLI names a missing Bun prerequisite before starting the Viewer", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-missing-bun-"));
+  const nodeSearchPath = (process.env.PATH ?? "")
+    .split(path.delimiter)
+    .filter((directory) => !path.basename(directory).startsWith("bun-node-"))
+    .join(path.delimiter);
+  const nodeExecutable = Bun.which("node", { PATH: nodeSearchPath });
+  if (!nodeExecutable) throw new Error("the launcher prerequisite test requires Node");
+  const environment: Record<string, string | undefined> = {
+    ...process.env,
+    PATH: nodeSearchPath,
+    HOME: path.join(sandbox, "home"),
+    XDG_CONFIG_HOME: path.join(sandbox, "config"),
+    LLV_STATE_DIR: path.join(sandbox, "state"),
+    TMPDIR: path.join(sandbox, "tmp"),
+    LLV_BUN_EXECUTABLE: path.join(sandbox, "missing-bun"),
+  };
+  delete environment.LLV_RUNTIME_HOST_SOCKET;
+  const child = Bun.spawn([
+    nodeExecutable,
+    path.join(import.meta.dir, "cli.mjs"),
+    "--no-open",
+    "--port",
+    String(await availablePort()),
+  ], { cwd: path.resolve(import.meta.dir, ".."), env: environment, stdout: "pipe", stderr: "pipe" });
+  try {
+    const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Couldn't start the structured runtime host");
+    expect(stderr).toContain("Bun executable");
+    expect(stderr).toContain("is unavailable");
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}, 10_000);
 
 test("structured hosts select Bun for a CLI process launched by Node", () => {
   expect(viewerServerBunRuntime({

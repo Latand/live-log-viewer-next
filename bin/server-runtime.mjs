@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 export const WAKATIME_CREDENTIAL_ENV = "WAKATIME_API_KEY";
 
 /** @param {Record<string, string | undefined>} environment */
@@ -50,4 +54,43 @@ export function viewerServerBunRuntime(options = {}) {
   const versions = options.versions ?? process.versions;
   const execPath = options.execPath ?? process.execPath;
   return versions.bun ? execPath : (env.LLV_BUN_EXECUTABLE || "bun");
+}
+
+/**
+ * Resolve the runtime host the public CLI will supervise. Ordinary package
+ * installs use their own state directory; tests and custom installations may
+ * override the socket path while retaining CLI ownership.
+ *
+ * @param {string} packageRoot
+ * @param {{ env?: Readonly<Record<string, string | undefined>>, home?: string }} [options]
+ */
+export function cliRuntimeHostConfig(packageRoot, options = {}) {
+  const env = options.env ?? process.env;
+  const home = options.home ?? homedir();
+  const configuredSocket = env.LLV_RUNTIME_HOST_SOCKET?.trim();
+  const stateDirectory = env.LLV_STATE_DIR?.trim()
+    || join(env.XDG_CONFIG_HOME?.trim() || join(home, ".config"), "agent-log-viewer", "state");
+  const bundled = join(packageRoot, "dist", "runtime-host.mjs");
+  const source = join(packageRoot, "src", "runtime-host", "main.ts");
+  return {
+    socketPath: configuredSocket || join(stateDirectory, "runtime-host.sock"),
+    entrypoint: existsSync(bundled) ? bundled : source,
+  };
+}
+
+/**
+ * Environment shared by the supervised runtime host and the Viewer server.
+ * The CLI is the structured-host activation boundary, including for callers
+ * whose shell still carries one of the former rollback values.
+ *
+ * @param {Readonly<Record<string, string | undefined>>} base
+ * @param {string} socketPath
+ */
+export function cliRuntimeHostEnvironment(base, socketPath) {
+  return {
+    ...withoutWakatimeCredential(base),
+    LLV_RUNTIME_HOST_SOCKET: socketPath,
+    LLV_STRUCTURED_HOSTS: "1",
+    LLV_RUNTIME_EVENTS: "1",
+  };
 }
