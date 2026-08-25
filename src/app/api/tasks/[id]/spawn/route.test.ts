@@ -77,7 +77,7 @@ test("task retry preserves a failed receipt's historical model without fresh-lau
     cwd,
     accountId: "claude-test",
     origin: { kind: "operator" },
-    launchProfile: emptyLaunchProfile({ cwd, model: historicalModel, effort: "high" }),
+    launchProfile: emptyLaunchProfile({ cwd, model: historicalModel, effort: "high", title: "Retry a historical task-spawn model" }),
   });
   if (begun.kind !== "created") throw new Error("expected historical task launch receipt");
   registry.failSpawn(begun.receipt.launchId, "historical launch failed before pane creation");

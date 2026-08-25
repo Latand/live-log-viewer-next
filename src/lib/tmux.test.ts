@@ -557,7 +557,13 @@ describe("structured transport prohibits legacy tmux Claude launches", () => {
 
   test("the receipt fallback rejects a titleless launch before actuation", async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-titleless-fallback-"));
-    const spec = freshSpecFor("codex", cwd);
+    const spec = {
+      command: "codex",
+      cwd,
+      windowName: "codex-new",
+      engine: "codex" as const,
+      launchProfile: emptyLaunchProfile({ cwd }),
+    };
     await expect(spawnAgentWithPrompt(spec, "hello")).rejects.toThrow(
       "title is required for every new spawn",
     );

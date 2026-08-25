@@ -6,7 +6,6 @@ import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import type { AccountContext } from "@/lib/accounts/contracts";
 import { accountManager, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
@@ -440,7 +439,7 @@ export async function executeSpawnRequest(
     const grantedServers = reportClassGrant
       ? grantedMcpServers(reportClassGrant.mcpServers)
       : mcpServersForSession({ origin: sessionOrigin, requested: requestedMcpServers });
-    const requestDigestForAccount = (accountId: string) => {
+    const requestDigestForAccount = (accountId: string, preserveOperationalTitleReplay = false) => {
       const digests = spawnRequestDigests({
         engine,
         cwd,
@@ -461,6 +460,9 @@ export async function executeSpawnRequest(
         images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
       });
       if (identityWaveTitleReplay) {
+        return existingAttempt.requestDigest === digests.current ? digests.current : digests.withoutTitle;
+      }
+      if (preserveOperationalTitleReplay && existingAttempt) {
         return existingAttempt.requestDigest === digests.current ? digests.current : digests.withoutTitle;
       }
       const existingSemanticTitle = durableSemanticTitle(existingAttempt?.launchProfile.title, 120);
@@ -616,6 +618,7 @@ export async function executeSpawnRequest(
        the admitted fallback while a changed pin still conflicts. */
     const digest = requestDigestForAccount(
       typeof body.accountId === "string" ? body.accountId : account.accountId,
+      pinFallback || queuedUntil !== null,
     );
     const specForAccount = (
       launchAccount: HealthySpawnAccountResolution,

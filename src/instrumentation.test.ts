@@ -265,6 +265,29 @@ test("a current release monitors rollback fences while activation is still pendi
   await expect(activation).rejects.toThrow("injected activation failure");
 });
 
+test("runtime activation completes the identity wave before publishing hot-state readiness", async () => {
+  const events: string[] = [];
+  await completeViewerRuntimeActivation({
+    initializeOperatorCapability: async () => { events.push("operator-capability"); },
+    runIdentityMigration: () => { events.push("identity-wave"); },
+    startWakatime: async () => { events.push("wakatime"); },
+    publishHotStateActivation: () => { events.push("hot-state-ready"); },
+    startStructuredHosts: () => { events.push("structured-hosts"); },
+    startControllers: async () => { events.push("controllers"); },
+    publishViewerReleaseReady: () => { events.push("release-ready"); },
+  });
+
+  expect(events).toEqual([
+    "operator-capability",
+    "identity-wave",
+    "wakatime",
+    "hot-state-ready",
+    "structured-hosts",
+    "controllers",
+    "release-ready",
+  ]);
+});
+
 test("hot-state activation beats a slow structured-host startup and the promote deadline", async () => {
   let finishStructuredStartup!: () => void;
   let publishActivation!: () => void;

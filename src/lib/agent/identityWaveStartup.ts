@@ -4,7 +4,6 @@ import path from "node:path";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { legacyClaudeHome, sharedClaudeProjectsRoot } from "@/lib/accounts/claude";
 import { activeOrchestratorSeatsForMigration, rekeyOrchestratorSeatPaths } from "@/lib/orchestrator/seats";
-import { rekeyOrchestratorRecordPath } from "@/lib/orchestrator/store";
 import { searchTextForTranscript } from "@/lib/scanner/describe";
 import { durableSemanticTitle } from "@/lib/title";
 
@@ -73,10 +72,7 @@ export function runIdentityWaveMigrationAtStartup(
     now: overrides.now ?? (() => new Date().toISOString()),
     transcriptTitle: overrides.transcriptTitle ?? titleFromTranscriptHead,
     sharedPath: overrides.sharedPath ?? sharedPathForLegacyClaudeTranscript,
-    commitExternalPathRekeys: overrides.commitExternalPathRekeys ?? ((rekeys) => {
-      rekeyOrchestratorSeatPaths(rekeys);
-      rekeyOrchestratorRecordPath(rekeys);
-    }),
+    commitExternalPathRekeys: overrides.commitExternalPathRekeys ?? rekeyOrchestratorSeatPaths,
     log: overrides.log ?? ((message, detail) => console.info(message, detail)),
     env: overrides.env ?? process.env,
   };

@@ -7,6 +7,7 @@ import { applySpawnedConversationSnapshot } from "@/hooks/useFiles";
 import { requestFilesRefresh } from "@/lib/filesEvents";
 import { useLocale } from "@/lib/i18n";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
+import { derivedSpawnTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -165,6 +166,7 @@ export function MobileOrchestratorRow({
         if (outcome.kind === "launched") {
           const provisional = provisionalSpawnFile(
             createSpawnAttempt(clientRequestId, at, {
+              title: derivedSpawnTitle("orchestrator", text, project),
               engine: payload.engine,
               model: payload.model,
               cwd: projectCwd,
