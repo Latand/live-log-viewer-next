@@ -1,0 +1,77 @@
+[
+  {
+    "id": "GHSA-3jxr-9vmj-r5cp",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-28wg-ghj8-5hjv",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-2v37-7h3g-55p8",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-5p4m-2wfm-xmqj",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-6g55-p6wh-862q",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-6gpp-xcg3-4w24",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-7p8r-x3mc-p8w7",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-89xv-2m56-2m9x",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-f88m-g3jw-g9cj",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-mwp4-54f8-5fhr",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-m99w-x7hq-7vfj",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-mh99-v99m-4gvg",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-p9j2-gv94-2wf4",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-r28c-9q8g-f849",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  },
+  {
+    "id": "GHSA-rgw5-rvv9-x895",
+    "reason": "Current lockfile advisory is tracked for dependency upgrade.",
+    "expires": "2026-09-24"
+  }
+]

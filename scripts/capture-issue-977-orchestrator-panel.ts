@@ -15,9 +15,10 @@
  *
  *   <out>/977-<state>-<scheme>.png
  *
- * States: draft (empty), draft with the mandate edited, creating, intent-error,
- * live (real feed + composer), live-but-finished (resumable in place), and live
- * with the rotation advisory.
+ * States: draft (empty, with the built-in rules collapsed as they ship — #1163),
+ * draft with those rules opened, draft with the mandate edited, creating,
+ * intent-error, live (real feed + composer), live-but-finished (resumable in
+ * place), and live with the rotation advisory.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
@@ -184,8 +185,9 @@ async function main(): Promise<void> {
        `resumable` one. */
     const hosted = { proc: "running", pid: 4_977 };
     const overLimit = { ctx: { usedTokens: 142_000, windowTokens: 200_000, pct: 71, source: "transcript", confidence: "reported", observedAt: "2100-01-02T11:59:00.000Z" } };
-    const states: { id: string; answer: SeatAnswer; patch?: Record<string, unknown>; edit?: boolean }[] = [
+    const states: { id: string; answer: SeatAnswer; patch?: Record<string, unknown>; edit?: boolean; expand?: boolean }[] = [
       { id: "draft", answer: { seat: null, pending: null, exists: true } },
+      { id: "draft-rules", answer: { seat: null, pending: null, exists: true }, expand: true },
       { id: "draft-edited", answer: { seat: null, pending: null, exists: true }, edit: true },
       {
         id: "creating",
@@ -225,6 +227,13 @@ async function main(): Promise<void> {
         }
         await page.goto(baseUrl, { waitUntil: "networkidle" });
         await page.waitForSelector("[data-orchestrator-panel]", { timeout: 20_000 });
+        /* The rules ship COLLAPSED (#1163): a frame that needs the textarea opens
+           the disclosure first, and one frame IS that disclosure open — the only
+           one showing the rules an operator would be editing. */
+        if (state.expand || state.edit) {
+          await page.click("[data-orchestrator-mandate-details] > summary");
+          await page.waitForSelector("[data-orchestrator-mandate-details][open]", { timeout: 5_000 });
+        }
         if (state.edit) {
           await page.fill("[data-orchestrator-mandate]", "You are the Atlas orchestrator.\n\nYou own this board and you talk to me here, directly, whenever you have something worth saying.\n\n## What you do\n- one lane per issue, one owner per file\n- a fresh reviewer every round\n- merge only on APPROVE with green gates\n- never deploy red");
         }

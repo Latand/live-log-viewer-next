@@ -32,6 +32,10 @@ const seat = (over: Record<string, unknown> = {}) => ({
 const pending = (over: Record<string, unknown> = {}) =>
   seat({ conversationId: null, state: "pending", activatedAt: null, ...over });
 
+type SeatStatusFixture = Omit<OrchestratorSeatStatus, "viewerMcpRegistered"> & {
+  viewerMcpRegistered?: boolean;
+};
+
 const conversation: FileEntry = {
   path: "/orchestrator.jsonl", root: "claude-projects", name: "orchestrator.jsonl", project: "atlas",
   title: "Run the Atlas board", engine: "claude", kind: "session", fmt: "claude", parent: null,
@@ -40,7 +44,7 @@ const conversation: FileEntry = {
 } as FileEntry;
 
 function rowFor(input: {
-  status: OrchestratorSeatStatus | null;
+  status: SeatStatusFixture | null;
   statusFailed?: boolean;
   submitting?: boolean;
   file?: FileEntry | null;
@@ -48,7 +52,7 @@ function rowFor(input: {
 }) {
   const file = input.file ?? null;
   const state = deriveOrchestratorPanelState({
-    status: input.status,
+    status: input.status ? { viewerMcpRegistered: false, ...input.status } : null,
     statusFailed: input.statusFailed ?? false,
     submitting: input.submitting ?? false,
     submitFailure: null,

@@ -60,7 +60,7 @@ const G = globalThis as Record<string, unknown>;
 
 let boardRevision = 1;
 let boardPrefs: Record<string, unknown> = {};
-let seatAnswer: unknown = { seat: null, pending: null, exists: true };
+let seatAnswer: unknown = { seat: null, pending: null, exists: true, viewerMcpRegistered: false };
 const seatPosts: Record<string, unknown>[] = [];
 const emptyPrefs = () => ({
   manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [],
@@ -162,7 +162,7 @@ beforeEach(() => {
   boardRevision = 1;
   boardPrefs = {};
   catalogRows = [];
-  seatAnswer = { seat: null, pending: null, exists: true };
+  seatAnswer = { seat: null, pending: null, exists: true, viewerMcpRegistered: false };
   seatPosts.length = 0;
   dom.document.body.replaceChildren();
   dom.sessionStorage.clear();
@@ -255,6 +255,8 @@ test("a project with nothing in it still offers the create row — the leaf wher
   await settle();
   const sheet = host.querySelector('[data-testid="mobile-orchestrator-sheet"]') as unknown as HTMLElement;
   expect(sheet).not.toBeNull();
+  expect(sheet.querySelector("[data-viewer-mcp-status]")?.textContent).toContain("scripts/install-mcp.sh");
+  expect(sheet.querySelector("[data-viewer-mcp-status]")?.textContent).toContain("claude mcp add viewer");
   expect((sheet.querySelector("[data-orchestrator-mandate]") as unknown as HTMLTextAreaElement).value.length).toBeGreaterThan(0);
   flushSync(() => (sheet.querySelector("[data-orchestrator-confirm]") as unknown as HTMLButtonElement).click());
   expect(await waitFor(() => seatPosts.length === 1)).toBe(true);

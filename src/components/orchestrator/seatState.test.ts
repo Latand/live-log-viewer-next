@@ -34,7 +34,7 @@ function seat(overrides: Partial<OrchestratorSeat> = {}): OrchestratorSeat {
 }
 
 function status(overrides: Partial<OrchestratorSeatStatus> = {}): OrchestratorSeatStatus {
-  return { seat: null, pending: null, exists: true, ...overrides };
+  return { seat: null, pending: null, exists: true, viewerMcpRegistered: false, ...overrides };
 }
 
 function file(overrides: Partial<FileEntry> = {}): FileEntry {
@@ -320,15 +320,16 @@ describe("the rotate draft renders the same two states the create draft does (#9
 
 describe("seat status parsing", () => {
   test("a malformed body reads as no seat rather than throwing", () => {
-    expect(parseSeatStatus(null)).toEqual({ seat: null, pending: null, exists: true });
+    expect(parseSeatStatus(null)).toEqual({ seat: null, pending: null, exists: true, viewerMcpRegistered: false });
     expect(parseSeatStatus({ seat: { project: 7 }, pending: [], exists: false }))
-      .toEqual({ seat: null, pending: null, exists: false });
+      .toEqual({ seat: null, pending: null, exists: false, viewerMcpRegistered: false });
   });
 
   test("a well-formed seat keeps the fields the panel renders from", () => {
-    const parsed = parseSeatStatus({ seat: seat(), pending: null, exists: true });
+    const parsed = parseSeatStatus({ seat: seat(), pending: null, exists: true, viewerMcpRegistered: true });
     expect(parsed.seat?.conversationId).toBe("conversation_orchestrator");
     expect(parsed.seat?.intent.clientRequestId).toBe("req-11111111");
+    expect(parsed.viewerMcpRegistered).toBe(true);
   });
 });
 

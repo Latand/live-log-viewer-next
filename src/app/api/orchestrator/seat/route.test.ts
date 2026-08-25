@@ -12,7 +12,7 @@ import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { orchestratorSeatFor } from "@/lib/orchestrator/seats";
 
 import { POST as rotatePost } from "../rotate/route";
-import { POST as seatPost } from "./route";
+import { GET as seatGet, POST as seatPost } from "./route";
 
 /*
  * BLOCKING 1 (#758 review), the route half: the designation surface refuses a
@@ -24,12 +24,15 @@ import { POST as seatPost } from "./route";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
+let previousHome: string | undefined;
 const WORKER_CAPABILITY = crypto.randomBytes(32).toString("base64url");
 
 beforeEach(() => {
   previousStateDir = process.env.LLV_STATE_DIR;
+  previousHome = process.env.HOME;
   sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-seat-route-"));
   process.env.LLV_STATE_DIR = sandbox;
+  process.env.HOME = sandbox;
   setCallerConversationResolverForTests((digest) =>
     digest === crypto.createHash("sha256").update(WORKER_CAPABILITY).digest("hex")
       ? "conversation_worker"
@@ -40,6 +43,8 @@ afterEach(() => {
   setCallerConversationResolverForTests(null);
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
   fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
@@ -72,4 +77,18 @@ test("a capability-presenting agent is refused designation at both routes, and n
   const { active, pending } = orchestratorSeatFor("proj-a");
   expect(active).toBeNull();
   expect(pending).toBeNull();
+});
+
+test("the seat read reports the Viewer MCP definition resolved for the project cwd", async () => {
+  const project = path.join(sandbox, "project");
+  fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+
+  const missing = await seatGet(new NextRequest(`http://127.0.0.1/api/orchestrator/seat?project=proj-a&cwd=${encodeURIComponent(project)}`));
+  expect(await missing.json()).toMatchObject({ viewerMcpRegistered: false });
+
+  fs.writeFileSync(path.join(project, ".mcp.json"), JSON.stringify({
+    mcpServers: { viewer: { type: "stdio", command: "project-viewer" } },
+  }));
+  const registered = await seatGet(new NextRequest(`http://127.0.0.1/api/orchestrator/seat?project=proj-a&cwd=${encodeURIComponent(project)}`));
+  expect(await registered.json()).toMatchObject({ viewerMcpRegistered: true });
 });

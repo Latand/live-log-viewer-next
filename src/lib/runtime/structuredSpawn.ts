@@ -28,6 +28,7 @@ import { hardenedRedact } from "@/lib/view/compactText";
 import { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import { CodexAppServerHost } from "./codexAppServerHost";
 import { isRuntimeHostTransportFailure, type RuntimeHostClient } from "./client";
+import { supervisedRuntimeHostUnavailableReason } from "./flags";
 import { StructuredHostAdoptionCleanupError, type EngineHost, type HostState } from "./engineHost";
 import { messageOriginRole, type MessageOrigin } from "./messageOrigin";
 import { runtimeSettingsCapability, type RuntimeOperationResult, type RuntimeSession } from "./contracts";
@@ -207,6 +208,9 @@ async function terminateVerifiedStructuredSpawnProcess(expected: ProcessIdentity
 }
 
 function structuredSpawnFailureReason(error: unknown): string {
+  if (isRuntimeHostTransportFailure(error)) {
+    return supervisedRuntimeHostUnavailableReason("structured spawn runtime host");
+  }
   const message = error instanceof Error ? error.message : "structured spawn failed";
   return hardenedRedact(message).replace(/\s+/g, " ").trim().slice(0, 240) || "structured spawn failed";
 }
@@ -655,7 +659,9 @@ async function actuateQueuedPinnedSpawn(
         registry.markSpawnPathPending(receipt.launchId);
       }
     } else {
-      if (!client) throw new Error("structured spawn runtime host is unavailable");
+      if (!client) {
+        throw new Error(supervisedRuntimeHostUnavailableReason("structured spawn runtime host"));
+      }
       response = await (options.spawnStructuredConversation ?? spawnStructuredConversation)({
         engine: receipt.engine,
         receipt: admissionClaim.receipt,

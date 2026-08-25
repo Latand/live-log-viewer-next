@@ -43,6 +43,24 @@ export const CODEX_VIEWER_SPAWN_FEATURES = {
   multi_agent: false,
 } as const;
 
+export interface ViewerMcpServerEntry {
+  command: string;
+  args: string[];
+}
+
+/** The package-owned Viewer server, from either a checkout root or the
+    standalone server directory used by the published CLI. */
+export function viewerMcpServerEntry(packageCwd = process.cwd()): ViewerMcpServerEntry {
+  const direct = path.resolve(packageCwd, "bin", "mcp-server.mjs");
+  const fromStandalone = path.resolve(packageCwd, "..", "..", "bin", "mcp-server.mjs");
+  const launcher = [direct, fromStandalone].find((candidate) => fs.existsSync(candidate));
+  if (!launcher) throw new Error(`Viewer MCP launcher could not be resolved from package cwd: ${packageCwd}`);
+  return {
+    command: "bun",
+    args: [launcher],
+  };
+}
+
 export interface ClaudeSpawnPolicyResult {
   settingsPath: string;
   mcpConfigPath: string;
@@ -115,25 +133,44 @@ function claudeProjectMcpServers(cwd: string | undefined): JsonObject {
   return record(readSettings(configPath).mcpServers) ?? {};
 }
 
-function claudeMcpServers(
-  pathname: string,
+/** Resolves Claude's registered MCP definitions with the same scope precedence
+    used when a structured spawn builds its strict per-spawn config. */
+export function resolveClaudeMcpServers(
+  home: string,
   cwd: string | undefined,
-  allowlist: readonly string[] | undefined,
+  mcpStatePath = path.join(home, ".claude.json"),
 ): JsonObject {
-  if (!fs.existsSync(pathname)) return {};
-  const state = readSettings(pathname);
+  const state = fs.existsSync(mcpStatePath) ? readSettings(mcpStatePath) : {};
   const rootServers = record(state.mcpServers) ?? {};
   const projects = record(state.projects);
   const project = cwd && projects ? record(projects[cwd]) : null;
   const sharedProjectServers = claudeProjectMcpServers(cwd);
   const localProjectServers = record(project?.mcpServers) ?? {};
-  const registered = { ...rootServers, ...sharedProjectServers, ...localProjectServers };
+  return { ...rootServers, ...sharedProjectServers, ...localProjectServers };
+}
+
+export function viewerMcpRegistered(
+  home: string,
+  cwd: string | undefined,
+  mcpStatePath?: string,
+): boolean {
+  return record(resolveClaudeMcpServers(home, cwd, mcpStatePath).viewer) !== null;
+}
+
+function claudeMcpServers(
+  home: string,
+  cwd: string | undefined,
+  allowlist: readonly string[] | undefined,
+  mcpStatePath?: string,
+): JsonObject {
+  const registered = resolveClaudeMcpServers(home, cwd, mcpStatePath);
   /* The grant bound is enforced again here (issue #739): the per-spawn
      `--strict-mcp-config` file is copied from the re-validated list, so a
      server the Viewer cannot grant is never written into it. */
   const names = grantedMcpServers(allowlist);
   return Object.fromEntries(names.flatMap((name) => {
-    const definition = record(registered[name]);
+    const definition = record(registered[name])
+      ?? (name === "viewer" ? { type: "stdio", ...viewerMcpServerEntry() } : null);
     return definition ? [[name, definition]] : [];
   }));
 }
@@ -236,9 +273,10 @@ export function applyClaudeSpawnPolicy(
     ? settings
     : { ...settings, disableAllHooks: false, allowManagedHooksOnly: false };
   const mcpServers = claudeMcpServers(
-    options.mcpStatePath ?? path.join(home, ".claude.json"),
+    home,
     options.cwd,
     options.mcpServers,
+    options.mcpStatePath,
   );
   const includedMcpServers = new Set(Object.keys(mcpServers));
   const excludedProjectMcpServers = Object.keys(claudeProjectMcpServers(options.cwd))

@@ -1,10 +1,16 @@
 # Docker
 
-The Docker image pins Node 22 and builds the Next.js app inside the image from a clean environment. It keeps the viewer host-coupled by design: Compose uses the host network, host PID namespace, privileged `nsenter` shims, the real `/home/latand` tree, and the host tmux socket.
+The npm/bunx CLI includes its own supervised runtime host, so pipelines and the
+orchestrator do not require Docker. Compose keeps a separate production
+ownership model: the `runtime-host` profile owns the stable listener, journal,
+deployment coordinator, and socket configured below. CLI supervision does not
+change this profile.
 
-Runtime tools are split by coupling. The image owns stable runtimes: Node 22, Git, GitHub CLI, OpenSSH client, curl, CA certificates, Python 3, and a faster-whisper venv at `/opt/llv-whisper-venv`. Compose mounts the full host home at `/home/latand`, so SSH keys, Git config, GitHub CLI auth, Claude/Codex state, app cache, Hugging Face cache, and workspace roots line up with host paths. `GIT_SSH_COMMAND` points image Git/OpenSSH at the mounted host SSH config, known hosts, and default GitHub identity.
+The Docker image pins Node 22 and builds the Next.js app inside the image from a clean environment. It keeps the viewer host-coupled by design: Compose uses the host network, host PID namespace, privileged `nsenter` shims, the real `/home/user` tree, and the host tmux socket.
 
-Host developer CLIs run through `nsenter` shims in `/usr/local/bin`, ahead of mounted user bins in `PATH`. The shims enter the host mount and PID namespaces, use the caller uid/gid, preserve host-visible cwd values, and fall back to `$HOME` for container-only paths such as `/app`. They execute the exact host paths: `claude`, `codex`, and `bun` from `/home/latand/.bun/bin`; `uv` from `/home/latand/.local/bin`; `just` and `tmux` from `/usr/bin`. `LLV_DOCKER_NSENTER_SHIMS=1` also makes direct Claude/Codex resolver calls choose `/usr/local/bin` shims. The image contains the app, Node dependencies, the local transcription helper script, and the prebuilt `.next` output.
+Runtime tools are split by coupling. The image owns stable runtimes: Node 22, Git, GitHub CLI, OpenSSH client, curl, CA certificates, Python 3, and a faster-whisper venv at `/opt/llv-whisper-venv`. Compose mounts the full host home at `/home/user`, so SSH keys, Git config, GitHub CLI auth, Claude/Codex state, app cache, Hugging Face cache, and workspace roots line up with host paths. `GIT_SSH_COMMAND` points image Git/OpenSSH at the mounted host SSH config, known hosts, and default GitHub identity.
+
+Host developer CLIs run through `nsenter` shims in `/usr/local/bin`, ahead of mounted user bins in `PATH`. The shims enter the host mount and PID namespaces, use the caller uid/gid, preserve host-visible cwd values, and fall back to `$HOME` for container-only paths such as `/app`. They execute the exact host paths: `claude`, `codex`, and `bun` from `/home/user/.bun/bin`; `uv` from `/home/user/.local/bin`; `just` and `tmux` from `/usr/bin`. `LLV_DOCKER_NSENTER_SHIMS=1` also makes direct Claude/Codex resolver calls choose `/usr/local/bin` shims. The image contains the app, Node dependencies, the local transcription helper script, and the prebuilt `.next` output.
 
 ## Production instance
 
@@ -128,14 +134,14 @@ LLV_TEST_PORT=8901 LLV_TRANSCRIBE_BACKEND=chatgpt docker compose --profile test 
 
 Compose mounts the whole host home:
 
-- `/home/latand:/home/latand`
+- `/home/user:/home/user`
 
 This gives the scanner and spawn validation the same paths the host service sees, including:
 
-- `/home/latand/.claude/projects`
-- `/home/latand/.codex/sessions`
-- `/home/latand/.claude.json`
-- any cwd under `/home/latand`, such as `.agents`, `Projects`, `Documents`, `Downloads`, `Desktop`, and `remote`
+- `/home/user/.claude/projects`
+- `/home/user/.codex/sessions`
+- `/home/user/.claude.json`
+- any cwd under `/home/user`, such as `.agents`, `Projects`, `Documents`, `Downloads`, `Desktop`, and `remote`
 
 Additional runtime mounts keep host sockets reachable:
 

@@ -23,12 +23,13 @@ interface ScopedRead {
   /** The project this answer is about; an answer for any other project is
       reconciled away at render time rather than shown for a frame. */
   project: string;
+  cwd: string;
   status: OrchestratorSeatStatus | null;
   failed: boolean;
 }
 
 /**
- * Every answer this tab has been given, keyed by project (#1149).
+ * Every answer this tab has been given, keyed by project and cwd (#1149).
  *
  * The panel is RE-SEATED on a project switch — a fresh mount, because its draft
  * belongs to one project — so the answer cannot live in its state and survive.
@@ -41,18 +42,23 @@ interface ScopedRead {
  * still be READ, never restored from disk.
  */
 const answers = new Map<string, ScopedRead>();
+const readKey = (project: string, cwd: string | undefined): string => `${project}\0${cwd ?? ""}`;
 
 export function resetOrchestratorSeatCacheForTests(): void {
   answers.clear();
 }
 
-export async function fetchOrchestratorSeat(project: string, signal?: AbortSignal): Promise<OrchestratorSeatStatus> {
-  const response = await fetch("/api/orchestrator/seat?project=" + encodeURIComponent(project), signal ? { signal } : undefined);
+export async function fetchOrchestratorSeat(project: string, cwd?: string, signal?: AbortSignal): Promise<OrchestratorSeatStatus> {
+  const query = new URLSearchParams({ project });
+  if (cwd) query.set("cwd", cwd);
+  const response = await fetch("/api/orchestrator/seat?" + query, signal ? { signal } : undefined);
   if (!response.ok) throw new Error(`orchestrator seat read failed: ${response.status}`);
   return parseSeatStatus(await response.json());
 }
 
-const cachedSeat = (project: string | null): ScopedRead | null => (project ? answers.get(project) ?? null : null);
+const cachedSeat = (project: string | null, cwd: string | undefined): ScopedRead | null => (
+  project ? answers.get(readKey(project, cwd)) ?? null : null
+);
 
 /**
  * The project's orchestrator seat, polled — and answered at once for a project
@@ -60,43 +66,47 @@ const cachedSeat = (project: string | null): ScopedRead | null => (project ? ans
  *
  * `project` null (Overview, or the panel closed) reads nothing at all.
  */
-export function useOrchestratorSeat(project: string | null): OrchestratorSeatRead {
-  const [read, setRead] = useState<ScopedRead | null>(() => cachedSeat(project));
-  /* Every answer carries the project it answered for, so a project switch
+export function useOrchestratorSeat(project: string | null, cwd?: string): OrchestratorSeatRead {
+  const [read, setRead] = useState<ScopedRead | null>(() => cachedSeat(project, cwd));
+  /* Every answer carries the project and cwd it answered for, so a scope switch
      invalidates the previous seat HERE, in render, with no effect and no frame
-     in which the old incumbent shows under the new project's name. What takes
-     its place is what THIS project last answered, not «loading». */
-  const current = read && read.project === project ? read : cachedSeat(project);
+     in which another checkout's preflight appears under this draft. */
+  const current = read && read.project === project && read.cwd === (cwd ?? "")
+    ? read
+    : cachedSeat(project, cwd);
 
-  const settle = useCallback((target: string, status: OrchestratorSeatStatus | null, failed: boolean) => {
+  const settle = useCallback((target: string, targetCwd: string | undefined, status: OrchestratorSeatStatus | null, failed: boolean) => {
+    const key = readKey(target, targetCwd);
     const next: ScopedRead = {
       project: target,
+      cwd: targetCwd ?? "",
       /* A failed re-read keeps the last good answer for the SAME project; the
-         cache is keyed by project, so it can never resurrect another's. */
-      status: status ?? answers.get(target)?.status ?? null,
+         cache is keyed by project and cwd, so it cannot resurrect another
+         checkout's registration status. */
+      status: status ?? answers.get(key)?.status ?? null,
       failed,
     };
-    answers.set(target, next);
+    answers.set(key, next);
     setRead(next);
   }, []);
 
   const refresh = useCallback(async () => {
     if (!project) return;
     try {
-      settle(project, await fetchOrchestratorSeat(project), false);
+      settle(project, cwd, await fetchOrchestratorSeat(project, cwd), false);
     } catch {
-      settle(project, null, true);
+      settle(project, cwd, null, true);
     }
-  }, [project, settle]);
+  }, [cwd, project, settle]);
 
   useEffect(() => {
     if (!project) return;
     const controller = new AbortController();
     const load = () => {
-      void fetchOrchestratorSeat(project, controller.signal)
-        .then((status) => settle(project, status, false))
+      void fetchOrchestratorSeat(project, cwd, controller.signal)
+        .then((status) => settle(project, cwd, status, false))
         .catch((cause: unknown) => {
-          if ((cause as { name?: string }).name !== "AbortError") settle(project, null, true);
+          if ((cause as { name?: string }).name !== "AbortError") settle(project, cwd, null, true);
         });
     };
     load();
@@ -105,7 +115,7 @@ export function useOrchestratorSeat(project: string | null): OrchestratorSeatRea
       clearInterval(timer);
       controller.abort();
     };
-  }, [project, settle]);
+  }, [cwd, project, settle]);
 
   return { status: current?.status ?? null, failed: current?.failed ?? false, refresh };
 }

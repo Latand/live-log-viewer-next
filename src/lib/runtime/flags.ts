@@ -21,6 +21,14 @@ export type EnvRecord = Readonly<Record<string, string | undefined>>;
  */
 export const RUNTIME_PLANE_ABSENT = "runtime-plane-absent";
 
+/** Actionable card copy for a CLI-owned runtime host that is absent or whose
+    socket transport failed. The supervised child writes the specific startup
+    prerequisite to the CLI log, which is the only surface that can distinguish
+    a missing Bun executable from socket and directory permission failures. */
+export function supervisedRuntimeHostUnavailableReason(subject: string): string {
+  return `${subject} is unavailable; start agent-log-viewer through its CLI and check the CLI log for the host startup failure`;
+}
+
 /**
  * The one reader every rollback switch goes through.
  *
