@@ -117,6 +117,9 @@ export const en = {
   "dash.emptyTitle": "The scheme is empty for now",
   "dash.emptyStartHere": "Start here: Orchestrator — tell it what you want done in {project}.",
   "dash.emptyOneAgent": "Or spawn one agent for one task (Create → Agent).",
+  /* The empty project's second offer names the menu path it stands in for, so
+     the same route is findable again from the header once the board fills. */
+  "dash.emptyAgentCta": "Create → Agent",
   "dash.viewScheme": "scheme",
   "dash.viewList": "conversations",
   "dash.viewSchemeMenu": "View: scheme",

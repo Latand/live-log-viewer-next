@@ -7,7 +7,6 @@ import { useCoarsePointer } from "@/hooks/useCoarsePointer";
 import { useColumns } from "@/hooks/useColumns";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
-import { requestProjectCreateForm } from "@/lib/projects/openCreateForm";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
@@ -15,6 +14,7 @@ import type { Workflow } from "@/lib/workflows/types";
 import { CatalogFailureNotice } from "./CatalogFailureNotice";
 import { FolderPlus, Search } from "./icons";
 import { buildBranchGroups, buildProjectSummaries, projectKey } from "./projectModel";
+import { CREATE_PROJECT_FORM_EVENT } from "./ProjectRail";
 import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
 
 interface Props {
@@ -243,8 +243,7 @@ export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {},
           /* First run (issue #1162). A board with nothing on it used to state
              the fact and stop there; it now says where sessions come from and
              offers the one next step. The button steers the rail's existing
-             create form rather than opening a second creation path — on the
-             phone the drawer that form lives in is opened first. */
+             create form rather than opening a second creation path. */
           <div
             data-testid="overview-first-run"
             className="col-span-full mt-[14vh] flex flex-col items-center gap-2.5 px-4 text-center"
@@ -256,8 +255,12 @@ export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {},
               data-testid="overview-create-project"
               className="inline-flex min-h-11 items-center gap-1.5 rounded-[10px] border border-accent/45 bg-card px-4 text-[13px] font-bold text-accent shadow-1 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               onClick={() => {
-                onMenu?.();
-                requestProjectCreateForm();
+                /* Desktop: the rail is mounted beside the board, so it hears
+                   this and opens the create form it already owns. Phone: that
+                   form lives behind the project drawer — open the drawer, where
+                   the rail's own labelled create button is the first control. */
+                if (isMobile) onMenu?.();
+                else window.dispatchEvent(new Event(CREATE_PROJECT_FORM_EVENT));
               }}
             >
               <FolderPlus className="h-4 w-4" aria-hidden /> {t("overview.firstRunCreate")}

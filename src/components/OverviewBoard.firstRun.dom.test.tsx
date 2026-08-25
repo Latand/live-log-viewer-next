@@ -9,13 +9,15 @@ import { uk } from "@/lib/i18n/uk";
 import type { FileEntry } from "@/lib/types";
 
 import { OverviewBoard } from "./OverviewBoard";
+import { CREATE_PROJECT_FORM_EVENT } from "./ProjectRail";
 
 /*
  * Issue #1162, the zero-project overview. A first run used to answer with one
  * dead sentence («No logs yet») and no way forward. It now names where sessions
  * come from, offers the create button the rail's form already backs, and says
  * that running an agent in any repo works too — in both locales, and without
- * inventing a second creation path.
+ * inventing a second creation path. The pairing with the rail itself is proven
+ * end to end in ProjectRail.firstRun.dom.test.tsx.
  */
 
 const dom = new Window({ url: "http://localhost/" });
@@ -48,8 +50,6 @@ Object.assign(globalThis, {
   matchMedia: matchMediaStub,
 });
 
-const { consumePendingProjectCreateForm, onProjectCreateFormRequest } = await import("@/lib/projects/openCreateForm");
-
 function fileEntry(overrides: Partial<FileEntry> = {}): FileEntry {
   return {
     path: "/sessions/a.jsonl",
@@ -79,8 +79,6 @@ afterEach(() => {
   dom.document.body.replaceChildren();
   setLocale("en");
   viewportWidth = 1280;
-  /* Drop any latched create request so it cannot leak into the next case. */
-  consumePendingProjectCreateForm();
 });
 
 function renderBoard(extra: Partial<React.ComponentProps<typeof OverviewBoard>> = {}): HTMLElement {
@@ -135,26 +133,29 @@ test("the retired «No logs yet» copy is gone from the dictionaries and the boa
   expect(Object.keys(uk)).not.toContain("overview.empty");
 });
 
-test("the create button asks the rail to open the form it already owns", () => {
-  const requests: number[] = [];
-  const stop = onProjectCreateFormRequest(() => requests.push(1));
+test("the create button asks the mounted rail to open the form it already owns", () => {
+  const requests: string[] = [];
+  const listener = () => requests.push("open");
+  dom.addEventListener(CREATE_PROJECT_FORM_EVENT, listener);
   const host = renderBoard();
   flushSync(() => createButton(host)!.dispatchEvent(click()));
-  stop();
-  expect(requests).toHaveLength(1);
-  /* …and the request is also latched, so a rail that mounts a moment later
-     (the phone drawer) still claims it. */
-  expect(consumePendingProjectCreateForm()).toBe(true);
-  expect(consumePendingProjectCreateForm()).toBe(false);
+  dom.removeEventListener(CREATE_PROJECT_FORM_EVENT, listener);
+  expect(requests).toEqual(["open"]);
 });
 
-test("on a phone the same button opens the drawer the form lives in first", () => {
+test("on a phone the same button opens the drawer the rail and its form live in", () => {
   viewportWidth = 390;
   const opened: string[] = [];
+  const requests: string[] = [];
+  const listener = () => requests.push("open");
+  dom.addEventListener(CREATE_PROJECT_FORM_EVENT, listener);
   const host = renderBoard({ onMenu: () => opened.push("drawer") });
   flushSync(() => createButton(host)!.dispatchEvent(click()));
+  dom.removeEventListener(CREATE_PROJECT_FORM_EVENT, listener);
   expect(opened).toEqual(["drawer"]);
-  expect(consumePendingProjectCreateForm()).toBe(true);
+  /* No request fires into a rail that has not mounted yet: the drawer itself
+     is the answer, and the rail's labelled create button waits inside it. */
+  expect(requests).toEqual([]);
 });
 
 test("a board with projects on it renders cards, never the first-run panel", () => {

@@ -142,7 +142,7 @@ test("desktop: the empty project offers the orchestrator and one agent, both wir
 
   const orchestrator = q(host, '[data-testid="project-empty-orchestrator"]')!;
   expect(orchestrator).not.toBeNull();
-  expect(orchestrator.textContent).toContain(en["orchPanel.title"]);
+  expect(orchestrator.textContent?.trim()).toBe(en["orchPanel.title"]);
   click(orchestrator);
   expect(toggles).toEqual(["orchestrator"]);
 
@@ -150,7 +150,10 @@ test("desktop: the empty project offers the orchestrator and one agent, both wir
      pane appears on the board, which is exactly what leaves this empty state. */
   const agent = q(host, '[data-testid="project-empty-agent"]')!;
   expect(agent).not.toBeNull();
-  expect(agent.textContent).toContain(en["dash.agent"]);
+  /* The visible copy is the header menu path, exactly: «Create → Agent», not
+     the board's «+ Agent» shorthand. */
+  expect(agent.textContent?.trim()).toBe(en["dash.emptyAgentCta"]);
+  expect(agent.textContent?.trim()).toBe(`${en["dash.createMenu"]} → ${en["dash.agent"]}`);
   click(agent);
   expect(await waitFor(() => leaf(host) === null)).toBe(true);
   await settle();
@@ -190,10 +193,12 @@ test("the retired switchboard advice is gone from both dictionaries and both lea
   expect(Object.keys(uk)).not.toContain("dash.emptyHint");
 });
 
-test("Ukrainian carries the same two lines", async () => {
+test("Ukrainian carries the same two lines and the same two labels", async () => {
   setLocale("uk");
   const host = await mount({ onToggleOrchestratorPanel: () => {} });
   const empty = leaf(host)!;
   expect(empty.textContent).toContain(translate("uk", "dash.emptyStartHere", { project: "atlas" }));
   expect(empty.textContent).toContain(translate("uk", "dash.emptyOneAgent"));
+  expect(q(host, '[data-testid="project-empty-orchestrator"]')!.textContent?.trim()).toBe(translate("uk", "orchPanel.title"));
+  expect(q(host, '[data-testid="project-empty-agent"]')!.textContent?.trim()).toBe(translate("uk", "dash.emptyAgentCta"));
 });

@@ -355,10 +355,12 @@ function EmptyProjectLeaf({
                 data-testid="project-empty-agent"
                 onClick={onAgent}
                 disabled={agentDisabled}
-                aria-label={t("dash.newConvo")}
+                title={t("dash.newConvo")}
                 className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-[10px] border border-border bg-card px-4 text-[13px] font-bold text-primary shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
               >
-                <span className="text-[15px] leading-none text-accent">+</span> {t("dash.agent")}
+                {/* The visible copy is the header menu path this button stands
+                    in for, so the route survives the empty state (issue #1162). */}
+                <MessageSquarePlus className="h-4 w-4 shrink-0 text-accent" aria-hidden /> {t("dash.emptyAgentCta")}
               </button>
             ) : null}
           </div>

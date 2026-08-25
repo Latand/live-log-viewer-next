@@ -111,6 +111,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "dash.emptyTitle": "На схемі поки порожньо",
   "dash.emptyStartHere": "Почни звідси: Оркестратор — скажи йому, що треба зробити в {project}.",
   "dash.emptyOneAgent": "Або запусти одного агента на одну задачу (Створити → Агент).",
+  "dash.emptyAgentCta": "Створити → Агент",
   "dash.viewScheme": "схема",
   "dash.viewList": "розмови",
   "dash.viewSchemeMenu": "Вигляд: схема",

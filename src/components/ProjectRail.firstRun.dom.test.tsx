@@ -8,19 +8,20 @@ import { setLocale, translate } from "@/lib/i18n";
 import { en } from "@/lib/i18n/en";
 import type { FileEntry } from "@/lib/types";
 
-import { ProjectRail } from "./ProjectRail";
+import { OverviewBoard } from "./OverviewBoard";
+import { CREATE_PROJECT_FORM_EVENT, ProjectRail } from "./ProjectRail";
 
 /*
  * Issue #1162, the empty rail. With no projects at all the FolderPlus button is
  * the only thing on screen that starts anything, and an icon alone never said
  * so — it carries its «Create project» label there, while a populated rail
  * keeps the compact icon. The same rail also answers the first-run overview's
- * create button by opening the form it already owns, including when it mounts
- * a moment later behind the phone drawer.
+ * create button by opening the form it already owns — the two are rendered
+ * together here, so the pairing is proven rather than assumed.
  */
 
-/* React needs this before `act` will drive effects — the rail claims a pending
-   create request from one. */
+/* React needs this before `act` will drive effects — the rail subscribes to the
+   overview's create request from one. */
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const dom = new Window({ url: "http://localhost/" });
@@ -57,8 +58,6 @@ Object.assign(globalThis, {
 /* The rail's footers and header controls poll APIs on mount; a failed response
    leaves each of them in its own empty state. */
 globalThis.fetch = (async () => ({ ok: false, status: 503, json: async () => ({}) })) as unknown as typeof fetch;
-
-const { consumePendingProjectCreateForm, requestProjectCreateForm } = await import("@/lib/projects/openCreateForm");
 
 function fileEntry(overrides: Partial<FileEntry> = {}): FileEntry {
   return {
@@ -98,28 +97,30 @@ afterEach(async () => {
   unmount();
   setLocale("en");
   viewportWidth = 1280;
-  consumePendingProjectCreateForm();
 });
 
-function renderRail(extra: Partial<React.ComponentProps<typeof ProjectRail>> = {}): HTMLElement {
+function renderRail(extra: Partial<React.ComponentProps<typeof ProjectRail>> = {}, beside?: React.ReactNode): HTMLElement {
   const container = dom.document.createElement("div");
   dom.document.body.appendChild(container);
   root = createRoot(container as unknown as Element);
   act(() =>
     root!.render(
-      <ProjectRail
-        files={[]}
-        projectCatalog={[]}
-        pipelines={[]}
-        workflows={[]}
-        archivedProjects={new Set()}
-        selected="__overview__"
-        loaded
-        now={2_000}
-        onSelect={() => {}}
-        onCreateProject={createProject}
-        {...extra}
-      />,
+      <>
+        <ProjectRail
+          files={[]}
+          projectCatalog={[]}
+          pipelines={[]}
+          workflows={[]}
+          archivedProjects={new Set()}
+          selected="__overview__"
+          loaded
+          now={2_000}
+          onSelect={() => {}}
+          onCreateProject={createProject}
+          {...extra}
+        />
+        {beside}
+      </>,
     ),
   );
   return container as unknown as HTMLElement;
@@ -180,21 +181,32 @@ test("«Nothing found» answers a filter query, never an installation with no pr
   expect(host.textContent).toContain(en["common.nothingFound"]);
 });
 
-test("the overview's create request opens the form on the mounted rail", () => {
-  const host = renderRail();
+test("the first-run overview's own button opens the form on the rail beside it", () => {
+  /* Both surfaces, exactly as Viewer mounts them side by side on the desktop. */
+  const host = renderRail({}, <OverviewBoard
+    files={[]}
+    projectCatalog={[]}
+    pipelines={[]}
+    workflows={[]}
+    archivedProjects={new Set()}
+    now={2_000}
+    onSelectProject={() => {}}
+    onSelectFile={() => {}}
+  />);
   expect(form(host)).toBeNull();
-  act(() => requestProjectCreateForm());
+  const overviewCreate = host.querySelector('[data-testid="overview-create-project"]') as unknown as HTMLElement;
+  expect(overviewCreate).not.toBeNull();
+  click(overviewCreate);
   expect(form(host)).not.toBeNull();
 });
 
-test("a rail mounting behind the phone drawer claims the request dispatched just before it", () => {
-  viewportWidth = 390;
-  requestProjectCreateForm();
-  const host = renderRail();
-  expect(form(host)).not.toBeNull();
-  /* Claimed once: a rail that mounts later still starts closed. */
-  unmount();
-  expect(form(renderRail())).toBeNull();
+test("a rail with no create handler stays out of the request entirely", () => {
+  const host = renderRail({ onCreateProject: undefined });
+  act(() => {
+    dom.dispatchEvent(new dom.Event(CREATE_PROJECT_FORM_EVENT));
+  });
+  expect(form(host)).toBeNull();
+  expect(create(host)).toBeNull();
 });
 
 test("Ukrainian labels the same empty-rail button", () => {

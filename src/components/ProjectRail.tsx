@@ -7,7 +7,6 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import type { CreateProjectOutcome, CreateProjectRequestOptions } from "@/hooks/useProjectCuration";
 import { projectMatchesQuery } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
-import { consumePendingProjectCreateForm, onProjectCreateFormRequest } from "@/lib/projects/openCreateForm";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
@@ -22,6 +21,16 @@ import { buildProjectSummaries, OVERVIEW, partitionCrownedSummaries, type Projec
 import { PushBell } from "./PushBell";
 import { ResourcesFooter } from "./ResourcesFooter";
 import { fmtAge } from "./utils";
+
+/**
+ * Asks the rail to open the create-project form it already owns (issue #1162).
+ * The first-run overview's «Create a project» button dispatches it rather than
+ * carrying a second creation path; the rail, being mounted beside the board on
+ * the desktop, hears it. On the phone the rail lives behind the drawer, which
+ * that button opens instead — the labelled create button is the first control
+ * inside it.
+ */
+export const CREATE_PROJECT_FORM_EVENT = "llv:create-project-form";
 
 interface Props {
   files: FileEntry[];
@@ -78,13 +87,14 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
      both of those keep their own treatment. */
   const firstRun = loaded && catalogFailures === 0 && !summaries.length;
   /* The first-run overview's «Create a project» button steers this form
-     (issue #1162) instead of carrying a second creation path. Desktop: the rail
-     is mounted, so the live request lands. Mobile: the rail mounts with the
-     drawer the button opens, so the request just dispatched is claimed here. */
+     (issue #1162) instead of carrying a second creation path. The rail owns the
+     form, so it owns the event that opens it — the same one-window-event idiom
+     `llv:mcp-navigate` already uses between two mounted components. */
   useEffect(() => {
     if (!onCreateProject) return;
-    if (consumePendingProjectCreateForm()) setCreateOpen(true);
-    return onProjectCreateFormRequest(() => setCreateOpen(true));
+    const open = () => setCreateOpen(true);
+    window.addEventListener(CREATE_PROJECT_FORM_EVENT, open);
+    return () => window.removeEventListener(CREATE_PROJECT_FORM_EVENT, open);
   }, [onCreateProject]);
 
   const railRow = (summary: ProjectSummary) => {
