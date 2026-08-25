@@ -134,6 +134,7 @@ class FakeAppServer extends EventEmitter {
       list method with its real unknown-variant error. */
   supportsTurnPagination = true;
   supportsItemPagination = true;
+  resumeItemsBackwardsCursor = "resume-items-anchor";
   rejectFullTurnPages = false;
   invalidCursorErrorsRemaining = 0;
   malformedTurnPage = false;
@@ -238,7 +239,17 @@ class FakeAppServer extends EventEmitter {
           turns: excludeTurns ? [] : this.turns,
           ...(this.resumeStatus ? { status: this.resumeStatus } : {}),
         },
-        ...(excludeTurns ? { turnsBackwardsCursor: this.turns.length > 0 ? "0" : null } : {}),
+        ...(excludeTurns ? {
+          turnsBackwardsCursor: this.turns.length > 0 ? "0" : null,
+          itemsBackwardsCursor: this.turns.some((turn) =>
+            turn !== null
+            && typeof turn === "object"
+            && !Array.isArray(turn)
+            && Array.isArray((turn as { items?: unknown }).items)
+            && (turn as { items: unknown[] }).items.length > 0)
+            ? this.resumeItemsBackwardsCursor
+            : null,
+        } : {}),
       });
     }
     if (method === "thread/turns/list") {
@@ -296,7 +307,9 @@ class FakeAppServer extends EventEmitter {
         return turn.items.map((item) => ({ turnId: turn.id as string, item }));
       });
       const ordered = params.sortDirection === "desc" ? entries.reverse() : entries;
-      const start = params.cursor != null ? Number(params.cursor) : 0;
+      const start = params.cursor === this.resumeItemsBackwardsCursor
+        ? 0
+        : params.cursor != null ? Number(params.cursor) : 0;
       const limit = params.limit ?? 100;
       const data = ordered.slice(start, start + limit);
       const nextCursor = start + limit < ordered.length ? String(start + limit) : null;
@@ -1713,6 +1726,13 @@ describe("CodexAppServerHost", () => {
     expect(pages[0]?.params).toMatchObject({ threadId, cursor: "0", itemsView: "notLoaded", sortDirection: "desc", limit: 10 });
     expect((pages[1]?.params as { cursor?: unknown }).cursor).toBe("10");
     expect((pages[2]?.params as { cursor?: unknown }).cursor).toBe("20");
+    const itemPages = server.requests.filter((request) => request.method === "thread/items/list");
+    expect(itemPages[0]?.params).toMatchObject({
+      threadId,
+      cursor: server.resumeItemsBackwardsCursor,
+      sortDirection: "desc",
+      limit: 10,
+    });
 
     const items = eventStore.load(threadId).filter((event) => event.kind === "item");
     expect(items.map((event) => (event.item as { id: string }).id))
@@ -1751,7 +1771,11 @@ describe("CodexAppServerHost", () => {
     expect(turnPages[0]?.params).toMatchObject({ itemsView: "notLoaded", limit: 10 });
     const itemPages = server.requests.filter((request) => request.method === "thread/items/list");
     expect(itemPages).toHaveLength(3);
-    expect(itemPages[0]?.params).toMatchObject({ sortDirection: "asc", limit: 10 });
+    expect(itemPages[0]?.params).toMatchObject({
+      cursor: server.resumeItemsBackwardsCursor,
+      sortDirection: "desc",
+      limit: 10,
+    });
     const items = eventStore.load(threadId).filter((event) => event.kind === "item");
     expect(items.map((event) => (event.item as { id: string }).id))
       .toEqual(Array.from({ length: 25 }, (_, index) => `concentrated-item-${index}`));
@@ -2009,6 +2033,59 @@ describe("CodexAppServerHost", () => {
     }
   });
 
+  test("an oversized completion buffered before restore keeps adoption reachable", async () => {
+    const threadId = "oversized-pre-restore-completion-thread";
+    const turnId = "turn-completed-before-restore";
+    const body = Buffer.alloc(19 * 1024 * 1024, 7).toString("base64");
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(
+      threadId,
+      threadId,
+      false,
+      [{ id: turnId, status: "inProgress", items: [] }],
+      { type: "active", activeFlags: ["running"] },
+      {
+        method: "turn/completed",
+        params: {
+          threadId,
+          turn: {
+            id: turnId,
+            status: "completed",
+            items: [{
+              id: "large-image-result",
+              type: "userMessage",
+              content: [{ type: "input_image", image_url: `data:image/png;base64,${body}` }],
+            }],
+          },
+        },
+      },
+    );
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const host = await CodexAppServerHost.adopt(threadId, {
+        cwd: "/repo",
+        eventStore,
+        spawnProcess: fakeSpawn(server),
+        ...stubbedTermination(server),
+      });
+
+      expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+      expect(eventStore.load(threadId)).toContainEqual(expect.objectContaining({
+        kind: "turn-ended",
+        turnId,
+        status: "completed",
+      }));
+      expect(eventStore.load(threadId).some((event) => event.kind === "item"
+        && JSON.stringify(event.item).includes("pre-restore notification exceeded")))
+        .toBeTrue();
+      expect(await host.send({ id: "after-pre-restore-completion", text: "continue" }))
+        .toMatchObject({ outcome: "turn-started" });
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
+  }, 30_000);
+
   test("a legal chunked completion keeps its full content", async () => {
     const threadId = "chunked-legal-completion-thread";
     const server = new FakeAppServer(threadId);
@@ -2124,7 +2201,7 @@ describe("CodexAppServerHost", () => {
     }
   });
 
-  test("an oversized response to a pending non-replay request rejects that request and the host survives", async () => {
+  test("an oversized mutating response poisons the writer before retry", async () => {
     const server = new FakeAppServer("oversized-turn-start-thread");
     server.oversizedTurnStartResult = true;
     const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -2137,12 +2214,13 @@ describe("CodexAppServerHost", () => {
       });
 
       await expect(host.send({ id: "oversized-turn-start", text: "hi" }))
-        .rejects.toThrow(/oversized JSONL frame.*turn\/start/);
-      expect((await host.health()).status).not.toBe("dead");
+        .rejects.toThrow(/oversized JSONL frame.*turn\/start.*outcome is uncertain/);
+      expect(await host.health()).toMatchObject({ status: "dead", activeTurnRef: null });
 
       server.oversizedTurnStartResult = false;
       expect(await host.send({ id: "after-oversized-response", text: "again" }))
-        .toMatchObject({ outcome: "turn-started" });
+        .toEqual({ outcome: "rejected", reason: "dead-host" });
+      expect(server.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
       await host.release();
     } finally {
       warn.mockRestore();

@@ -491,6 +491,45 @@ function pagedItemEntries(value: unknown): Array<{ turnId: string; item: unknown
   });
 }
 
+/** Keeps the lifecycle and idempotency fields needed while adoption restores
+    its durable ledger. Persisted content can be recovered through paginated
+    history and delivery scans; retaining an oversized payload here would
+    defeat the separate pre-restore buffer bound. */
+function preRestoreCompletionProjection(message: JsonObject): JsonObject | null {
+  const method = stringField(message, "method");
+  if (!method || !REDUCIBLE_OVERSIZED_NOTIFICATION_METHODS.has(method)) return null;
+  const params = record(message.params) ?? {};
+  const projectedParams: JsonObject = {};
+  const threadId = stringField(params, "threadId");
+  const turnId = turnIdFromParams(params);
+  if (threadId) projectedParams.threadId = threadId;
+  if (turnId) projectedParams.turnId = turnId;
+  if (method === "turn/completed") {
+    const turn = record(params.turn);
+    projectedParams.turn = {
+      ...(turnId ? { id: turnId } : {}),
+      ...(typeof turn?.status === "string" ? { status: turn.status } : {}),
+    };
+  } else {
+    const item = record(params.item);
+    const projectedItem: JsonObject = {};
+    for (const key of ["id", "type", "status", "clientId"] as const) {
+      if (typeof item?.[key] === "string") projectedItem[key] = item[key];
+    }
+    if (stringField(item, "type") === "userMessage") {
+      for (const key of ["text", "content", "contentDigest"] as const) {
+        if (!(key in (item ?? {}))) continue;
+        const serialized = JSON.stringify(item![key]);
+        if (serialized !== undefined && Buffer.byteLength(serialized) <= 64 * 1024) {
+          projectedItem[key] = item![key];
+        }
+      }
+    }
+    if (item) projectedParams.item = projectedItem;
+  }
+  return { jsonrpc: "2.0", method, params: projectedParams };
+}
+
 function resumedActiveTurnId(turns: readonly JsonObject[]): string | null {
   const activeTurn = turns.findLast((turn) => stringField(turn, "status") === "inProgress");
   return activeTurn ? stringField(activeTurn, "id") : null;
@@ -970,9 +1009,14 @@ export class CodexAppServerHost implements EngineHost {
     if (inline.length > 0 || this.turnPaginationUnsupported) return inline;
     const backwardsCursor = stringField(record(result), "turnsBackwardsCursor");
     if (backwardsCursor === null) return inline;
+    const itemsBackwardsCursor = stringField(record(result), "itemsBackwardsCursor");
     try {
       return await this.retryOnceOnInvalidCursor((retry) =>
-        this.collectTurnPages(retry ? null : backwardsCursor));
+        this.collectTurnPages(
+          retry ? null : backwardsCursor,
+          retry ? null : itemsBackwardsCursor,
+          retry || itemsBackwardsCursor !== null,
+        ));
     } catch (error) {
       if (isUnknownMethodError(error)) {
         this.turnPaginationUnsupported = true;
@@ -982,11 +1026,22 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
-  private async collectTurnPages(initialCursor: string | null): Promise<JsonObject[]> {
+  private async collectTurnPages(
+    initialCursor: string | null,
+    initialItemsCursor: string | null,
+    hydrateItems: boolean,
+  ): Promise<JsonObject[]> {
     if (this.itemPaginationUnsupported) return this.collectTurnPagesByView(initialCursor, "full");
     const turns = await this.collectTurnPagesByView(initialCursor, "notLoaded");
+    if (!hydrateItems) {
+      for (const turn of turns) {
+        turn.items = [];
+        turn.itemsView = "full";
+      }
+      return turns;
+    }
     try {
-      await this.hydrateTurnItems(turns);
+      await this.hydrateTurnItems(turns, initialItemsCursor);
       return turns;
     } catch (error) {
       if (!isUnknownMethodError(error)) throw error;
@@ -1030,7 +1085,7 @@ export class CodexAppServerHost implements EngineHost {
     throw new Error("thread/turns/list paged past the bounded resume budget");
   }
 
-  private async hydrateTurnItems(turns: JsonObject[]): Promise<void> {
+  private async hydrateTurnItems(turns: JsonObject[], initialCursor: string | null): Promise<void> {
     const turnsById = new Map(turns.flatMap((turn) => {
       const turnId = stringField(turn, "id");
       if (!turnId) return [];
@@ -1038,31 +1093,36 @@ export class CodexAppServerHost implements EngineHost {
       turn.itemsView = "full";
       return [[turnId, turn] as const];
     }));
-    const itemIndexes = new Map<string, Map<string, number>>();
-    let cursor: string | null = null;
+    const itemOrder = new Map<string, string[]>();
+    const itemsByTurn = new Map<string, Map<string, unknown>>();
+    let cursor = initialCursor;
     for (let page = 0; page < MAX_RESUME_ITEM_PAGES; page += 1) {
       const result = record(await this.rpc("thread/items/list", {
         threadId: this.identity.threadId,
-        sortDirection: "asc",
+        sortDirection: "desc",
         limit: RESUME_ITEMS_PAGE_LIMIT,
         ...(cursor !== null ? { cursor } : {}),
       }));
       for (const entry of pagedItemEntries(result)) {
         const turn = turnsById.get(entry.turnId);
         if (!turn || !Array.isArray(turn.items)) continue;
-        const indexes = itemIndexes.get(entry.turnId) ?? new Map<string, number>();
-        itemIndexes.set(entry.turnId, indexes);
+        const order = itemOrder.get(entry.turnId) ?? [];
+        const items = itemsByTurn.get(entry.turnId) ?? new Map<string, unknown>();
+        itemOrder.set(entry.turnId, order);
+        itemsByTurn.set(entry.turnId, items);
         const key = itemReplayKey(entry.item);
-        const existing = indexes.get(key);
-        if (existing === undefined) {
-          indexes.set(key, turn.items.length);
-          turn.items.push(entry.item);
-        } else {
-          turn.items[existing] = entry.item;
-        }
+        if (items.has(key)) continue;
+        items.set(key, entry.item);
+        order.push(key);
       }
       cursor = stringField(result, "nextCursor");
-      if (cursor === null) return;
+      if (cursor === null) {
+        for (const [turnId, turn] of turnsById) {
+          const items = itemsByTurn.get(turnId);
+          turn.items = (itemOrder.get(turnId) ?? []).reverse().map((key) => items!.get(key)!);
+        }
+        return;
+      }
     }
     throw new Error("thread/items/list paged past the bounded resume budget");
   }
@@ -2881,7 +2941,9 @@ export class CodexAppServerHost implements EngineHost {
    * The frame's head names its message type or request id; a response rejects
    * its awaiting request with the diagnostic, a server request is answered
    * with a JSON-RPC error so the app-server does not wait forever, and the
-   * skip lands in the durable ledger so the degradation is visible.
+   * skip lands in the durable ledger so the degradation is visible. A
+   * mutating response keeps the existing uncertain-outcome fence: the host
+   * cannot safely accept another write after losing that acknowledgement.
    */
   private reportOversizedFrame(headText: string, observedBytes: number): void {
     const head = headText.slice(0, OVERSIZED_FRAME_HEAD_CHARS);
@@ -2901,12 +2963,17 @@ export class CodexAppServerHost implements EngineHost {
       this.pending.delete(numericId);
       this.replayEnvelopeRequestIds.delete(numericId);
       clearTimeout(pending.timer);
-      pending.reject(new Error(diagnostic));
+      const error = new Error(`${diagnostic}${MUTATING_RPC_METHODS.has(pending.method) ? "; outcome is uncertain" : ""}`);
+      pending.reject(error);
+      this.emitOversizedFrameDiagnostic(diagnostic);
+      if (MUTATING_RPC_METHODS.has(pending.method)) this.fail(error);
     } else if (method !== null && idToken !== null) {
       const requestId = idToken.startsWith("\"") ? idToken.slice(1, -1) : Number(idToken);
       this.write({ jsonrpc: "2.0", id: requestId, error: { code: -32600, message: "oversized frame skipped by client" } });
+      this.emitOversizedFrameDiagnostic(diagnostic);
+    } else {
+      this.emitOversizedFrameDiagnostic(diagnostic);
     }
-    this.emitOversizedFrameDiagnostic(diagnostic);
     if (method && REDUCIBLE_OVERSIZED_NOTIFICATION_METHODS.has(method)) {
       this.scheduleOversizedCompletionReconciliation();
     }
@@ -3025,13 +3092,32 @@ export class CodexAppServerHost implements EngineHost {
       return;
     }
     if (typeof message.method === "string" && !this.eventLedgerRestored) {
-      const bytes = Buffer.byteLength(line);
+      let bufferedMessage = message;
+      let bytes = Buffer.byteLength(line);
+      if (this.preRestoreBytes + bytes > MAX_PRE_RESTORE_BYTES) {
+        const projection = preRestoreCompletionProjection(message);
+        if (projection) {
+          const method = stringField(message, "method") ?? "unknown message type";
+          const diagnostic = "Codex app-server pre-restore notification exceeded its bounded capacity: "
+            + `observed ${bytes} bytes, bound ${MAX_PRE_RESTORE_BYTES} bytes, message type ${method}; `
+            + "payload content was projected before bounded buffering";
+          console.warn("[codex app-server host] projected a pre-restore notification", {
+            threadId: this.identity.threadId,
+            observedBytes: bytes,
+            boundBytes: MAX_PRE_RESTORE_BYTES,
+            messageType: method,
+          });
+          this.emitOversizedFrameDiagnostic(diagnostic);
+          bufferedMessage = projection;
+          bytes = Buffer.byteLength(JSON.stringify(projection));
+        }
+      }
       if (this.preRestoreEvents.length + this.preRestoreMessages.length >= MAX_PRE_RESTORE_FRAMES
         || this.preRestoreBytes + bytes > MAX_PRE_RESTORE_BYTES) {
         this.fail(new Error("Codex app-server pre-restore notification buffer exceeded its bounded capacity"));
         return;
       }
-      this.preRestoreMessages.push({ message, bytes });
+      this.preRestoreMessages.push({ message: bufferedMessage, bytes });
       this.preRestoreBytes += bytes;
       return;
     }
