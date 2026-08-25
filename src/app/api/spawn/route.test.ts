@@ -6,7 +6,6 @@ import { afterAll, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
 import { createSpawnAttempt, spawnRequestBody } from "@/components/draftSpawn";
-import { orchestratorSpawnBody } from "@/components/orchestratorChat";
 import { agentRegistry, AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots, createManagedCodexAccount } from "@/lib/accounts/codex";
@@ -19,6 +18,7 @@ import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, Spa
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "@/lib/runtime/client";
 import { recoverPendingStructuredSpawns, terminalizeStaleStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
+import { executeOrchestratorSeatRequest, type SeatCommandDependencies } from "@/lib/orchestrator/seatCommand";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
 
@@ -151,7 +151,7 @@ test("new semantic, empty, and image-only prompts require an explicit semantic t
   }
 });
 
-test("Viewer draft and orchestrator request builders pass public spawn admission", async () => {
+test("Viewer draft and per-project orchestrator seat pass public spawn admission", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "viewer-request-admission-"));
   const store = registry();
   const previous = {
@@ -170,7 +170,7 @@ test("Viewer draft and orchestrator request builders pass public spawn admission
     const draftBody = spawnRequestBody(createSpawnAttempt("viewer_draft_admission_20260806", Date.now(), {
       title: "claude · inspect release readiness",
       engine: "claude",
-      model: "claude-sonnet-4-6",
+      model: "sonnet",
       cwd,
       effort: "low",
       fast: null,
@@ -180,7 +180,7 @@ test("Viewer draft and orchestrator request builders pass public spawn admission
       src: "",
     }));
     const dependencies = { ...structuredRouteDependencies(cwd), registry: () => store };
-    for (const body of [draftBody, orchestratorSpawnBody(cwd)]) {
+    const admit = async (body: Record<string, unknown>) => {
       const response = await POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
         method: "POST",
         headers: {
@@ -191,8 +191,32 @@ test("Viewer draft and orchestrator request builders pass public spawn admission
         },
         body: JSON.stringify(body),
       }), dependencies);
-      expect(response.status).toBe(202);
-    }
+      return { status: response.status, body: await response.json() as Record<string, unknown> };
+    };
+    expect((await admit(draftBody)).status).toBe(202);
+
+    const seatDependencies: SeatCommandDependencies = {
+      spawn: admit,
+      deliver: async () => ({ ok: false, error: "unused" }),
+      conversationTarget: () => null,
+      projectTasks: () => [],
+      launchSettlement: () => ({ kind: "unknown" }),
+      runtimeIdentity: () => ({ engine: null, model: null }),
+      stampRegistryIdentity: () => {},
+      now: () => "2026-08-25T00:00:00.000Z",
+    };
+    const orchestratorAttempt = "viewer_orchestrator_admission_20260825";
+    const orchestrator = await executeOrchestratorSeatRequest({
+      project: "viewer",
+      mandate: "Inspect project delivery",
+      clientRequestId: orchestratorAttempt,
+      engine: "claude",
+      model: "opus",
+      effort: "low",
+      cwd,
+    }, seatDependencies);
+    expect(orchestrator.status).toBe(202);
+    expect(store.spawnReceiptForClientAttempt(orchestratorAttempt)?.launchProfile.title).toBe("orchestrator · Inspect project delivery");
   } finally {
     for (const [key, value] of Object.entries({
       LLV_SPAWN_TRANSPORT: previous.transport,
@@ -449,7 +473,7 @@ test("derived, custom-title, and migrated generic receipts preserve pre-title re
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
       body: JSON.stringify({
         engine: "claude",
-        model: "claude-sonnet-4-6",
+        model: "sonnet",
         cwd,
         ["prompt"]: "inspect",
         title,
@@ -681,6 +705,7 @@ test("a queued pinned account survives restart and launches exactly once on the 
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
       body: JSON.stringify({
+        title: "Continue queued account work",
         engine: "claude",
         model: "sonnet",
         cwd,
@@ -793,7 +818,7 @@ test("queued pin recovery atomically refreshes a moved retry deadline and its ca
     accountId: "account-a",
     accountPin: true,
     clientAttemptId: "account_pin_moved_retry_20260824",
-    launchProfile: emptyLaunchProfile({ cwd }),
+    launchProfile: emptyLaunchProfile({ cwd, title: "Continue queued account work" }),
   });
   if (begun.kind !== "created") throw new Error("expected queued receipt creation");
   store.queuePinnedSpawn(begun.receipt.launchId, {
@@ -806,7 +831,7 @@ test("queued pin recovery atomically refreshes a moved retry deadline and its ca
       command: "claude",
       cwd,
       windowName: "queued-pin",
-      launchProfile: emptyLaunchProfile({ cwd }),
+      launchProfile: emptyLaunchProfile({ cwd, title: "Continue queued account work" }),
     },
     ["prompt"]: "continue",
     imageRefs: [],
@@ -884,6 +909,7 @@ test("a queued payload write failure terminalizes without publishing a deadline-
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
       body: JSON.stringify({
+        title: "Queue account payload",
         engine: "claude",
         model: "sonnet",
         cwd,
@@ -913,7 +939,7 @@ test("a queued payload write failure terminalizes without publishing a deadline-
     expect(store.spawnReceiptForClientAttempt("account_pin_payload_failure_20260824")).toMatchObject({
       state: "failed",
       queuedPinnedSpawn: null,
-      launchProfile: { title: null },
+      launchProfile: { title: "Queue account payload" },
     });
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
@@ -951,6 +977,7 @@ test("a retry-at tmux pin survives restart and actuates exactly once after its d
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
       body: JSON.stringify({
+        title: "Continue queued tmux work",
         engine: "claude",
         model: "sonnet",
         cwd,
@@ -1118,6 +1145,7 @@ test("a pinned account without a retry deadline falls back and records the degra
       method: "POST",
       headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin", "accept-language": "uk-UA" },
       body: JSON.stringify({
+        title: "Continue on available account",
         engine: "claude",
         model: "sonnet",
         cwd,
@@ -1187,6 +1215,7 @@ test("a pinned spawn still refuses when no account is admissible", async () => {
     method: "POST",
     headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json", "sec-fetch-site": "same-origin" },
     body: JSON.stringify({
+      title: "Continue pinned account work",
       engine: "claude",
       model: "sonnet",
       cwd,

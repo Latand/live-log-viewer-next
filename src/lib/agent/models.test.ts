@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 
 import {
-  CODEX_LUNA_MODEL,
   CODEX_SOL_MODEL,
   CODEX_TERRA_MODEL,
   CODEX_LUNA_MODEL,

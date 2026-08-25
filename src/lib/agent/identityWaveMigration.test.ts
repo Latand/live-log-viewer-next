@@ -10,7 +10,6 @@ import {
   completeOrchestratorSeatIntent,
   orchestratorSeatFor,
 } from "@/lib/orchestrator/seats";
-import { readOrchestratorRecord, replaceOrchestratorIncumbent } from "@/lib/orchestrator/store";
 
 import { AgentRegistry } from "./registry";
 import { IDENTITY_WAVE_MIGRATION } from "./identityWaveMigration";
@@ -673,59 +672,6 @@ test("an external path-authority write failure leaves the identity wave open for
   }
 });
 
-test("startup retries a partial orchestrator-store rekey before completing the marker", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-store-retry-"));
-  const previousStateDir = process.env.LLV_STATE_DIR;
-  try {
-    process.env.LLV_STATE_DIR = directory;
-    const filename = path.join(directory, "agent-registry.json");
-    const legacyPath = path.join(directory, "legacy.jsonl");
-    const sharedPath = path.join(directory, "shared.jsonl");
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
-    const conversation = registry.ensureConversation("claude", legacyPath, null);
-    beginOrchestratorSeatIntent({
-      project: "viewer",
-      mandate: "own migrations",
-      clientRequestId: "req_00002001",
-      mode: "spawn",
-      now: NOW,
-    });
-    completeOrchestratorSeatIntent({
-      project: "viewer",
-      clientRequestId: "req_00002001",
-      conversationId: conversation.id,
-      path: legacyPath,
-      now: NOW,
-    });
-    fs.writeFileSync(path.join(directory, "orchestrator.json"), "{", "utf8");
-    const overrides = {
-      registry,
-      now: () => NOW,
-      transcriptTitle: () => null,
-      sharedPath: (pathname: string) => pathname === legacyPath ? sharedPath : null,
-      log: () => {},
-      env: {},
-    };
-
-    expect(() => runIdentityWaveMigrationAtStartup(overrides)).toThrow("orchestrator record evidence is malformed");
-    expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]).toBeUndefined();
-    expect(orchestratorSeatFor("viewer").active?.path).toBe(sharedPath);
-
-    replaceOrchestratorIncumbent({
-      conversationId: conversation.id,
-      path: legacyPath,
-      createdAt: NOW,
-    });
-    expect(runIdentityWaveMigrationAtStartup(overrides)).toMatchObject({ alreadyCompleted: false, rekeyed: 1 });
-    expect(readOrchestratorRecord()?.path).toBe(sharedPath);
-    expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]?.completedAt).toBe(NOW);
-  } finally {
-    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
-    else process.env.LLV_STATE_DIR = previousStateDir;
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
-
 test("a concurrent orchestrator rotation cannot be overwritten by the startup wave", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-rotation-race-"));
   const previousStateDir = process.env.LLV_STATE_DIR;
@@ -753,8 +699,6 @@ test("a concurrent orchestrator rotation cannot be overwritten by the startup wa
       path: legacyPath,
       now: NOW,
     });
-    replaceOrchestratorIncumbent({ conversationId: conversation.id, path: legacyPath, createdAt: NOW });
-
     const mutationPath = path.join(import.meta.dir, "../accounts/accountMutation.ts");
     holder = Bun.spawn({
       cmd: [process.execPath, "-e", `
@@ -808,15 +752,12 @@ test("a concurrent orchestrator rotation cannot be overwritten by the startup wa
       path: legacyPath,
       now: NOW,
     });
-    replaceOrchestratorIncumbent({ conversationId: "conversation_new", path: legacyPath, createdAt: NOW });
-
     expect(runIdentityWaveMigrationAtStartup(overrides)).toMatchObject({ alreadyCompleted: false, rekeyed: 1 });
     expect(orchestratorSeatFor("viewer").active).toMatchObject({
       conversationId: "conversation_new",
       seatEpoch: 2,
       path: sharedPath,
     });
-    expect(readOrchestratorRecord()).toMatchObject({ conversationId: "conversation_new", path: sharedPath });
     expect(registry.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]?.completedAt).toBe(NOW);
   } finally {
     if (holder) {
