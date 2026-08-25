@@ -96,9 +96,6 @@ export interface TelegramConnectorPorts {
   sleep(ms: number): Promise<void>;
   now(): number;
   ownsProcess?(binding: ConnectorBinding): boolean;
-  /** Whether the recorded process has every launch-time trait required for
-      adoption: the report feed and the connector-owned bounded log sink. */
-  canAdopt?(binding: ConnectorBinding): boolean;
   recordProcess?(child: ConnectorChild, spec: ProcessSpec, binding: ConnectorBinding): boolean;
   stop?(): Promise<void> | void;
   beginOperation?(): () => boolean;
@@ -116,8 +113,8 @@ const PID_FILE = "connector.json";
 /** The read-only gate, pure so it is directly provable: one tool that lacks
     an affirmative readOnlyHint OR falls outside the exposed allowlist fails
     the whole surface; an empty surface proves nothing and fails too. Every
-    connector the Viewer launches or adopts runs the feed, so the default
-    allowlist is the withheld one. */
+    new connector launch runs the feed, so the default allowlist withholds its
+    burst-consuming competitor. */
 export function verifyReadOnlyTools(
   tools: Array<{ name: string; readOnly: boolean }>,
   allowlist: ReadonlySet<string> = TELEGRAM_FEED_EXPOSED_TOOLS,
@@ -192,7 +189,6 @@ const realPorts: TelegramConnectorPorts = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: () => Date.now(),
   ownsProcess: ownsRecordedConnector,
-  canAdopt: recordedConnectorCanBeAdopted,
   recordProcess: recordConnectorProcess,
   stop: stopRealConnectorUnlocked,
   beginOperation: beginConnectorOperation,
@@ -213,7 +209,7 @@ type ConnectorRecord = {
   /** The event feed file this process was launched with (#1091), absent on a
       record written before the feed existed. Optional on purpose: a record
       that cannot be parsed is a connector that cannot be STOPPED, so the
-      feed is a condition of ADOPTION rather than of reading the record. */
+      feed metadata is validated separately from process ownership. */
   feedFile?: string;
   /** ISO instant this feed listener started, which is the earliest moment its
       feed can vouch for (#1091). Optional for the same reason as `feedFile`. */
@@ -261,30 +257,6 @@ function connectorArgvMatches(record: ConnectorRecord): boolean {
   const argv = procBackend.readArgv(record.pid);
   return argv[0] === record.command && argv[1] === record.entrypoint
     && record.command === telegramVenvPython() && record.entrypoint === telegramMcpServerPath();
-}
-
-/**
- * Whether the recorded connector has the launch-time traits required for
- * adoption: the incoming event feed (#1091) and process-owned log bounds.
- *
- * The feed is child ENVIRONMENT, so no probe and no argv can prove it: the
- * record written at spawn is the evidence, and a record from a Viewer
- * generation that predates the feed simply has none. Such a process is fully
- * functional as a read surface, which is why it was adopted happily — and
- * exactly why it had to be caught: its `incoming_feed_status` reports a feed
- * that will never start, and the report's dialog discovery would fall back to
- * a bounded walk over a list that is not ordered by recency.
- *
- * The comparison is against THIS credential generation's feed, so a listener
- * still writing a previous account's file is ineligible on the same evidence
- * as a listener writing none. A record from before the connector-owned log
- * sink is also replaced, because its inherited append descriptor becomes
- * unbounded as soon as the Viewer that launched it exits.
- */
-function recordedConnectorCanBeAdopted(binding: ConnectorBinding): boolean {
-  const record = readConnectorRecord();
-  return record?.feedFile === telegramIncomingFeedPath(binding.credentialRef)
-    && record.logSinkVersion === 1;
 }
 
 /**
@@ -488,8 +460,9 @@ async function verifiedProbe(
  * once its read-only surface is verified. A process already listening on the
  * shared port (a previous Viewer generation's connector, still recorded in
  * the pid file) is adopted, not duplicated — that keeps the process count at
- * one across Viewer restarts — PROVIDED its record proves it runs the incoming
- * event feed (#1091). One that does not is replaced, once.
+ * one across Viewer restarts. Launch metadata controls which feed coverage the
+ * report may trust; it never turns a healthy current-credential process into
+ * a restart candidate during a fresh health check.
  */
 export async function ensureTelegramConnector(
   session: StoredTelegramSession,
@@ -499,10 +472,9 @@ export async function ensureTelegramConnector(
   const binding = { credentialRef: session.credentialRef, connectorToken: session.connectorToken };
   const stop = ports.stop ?? stopRealConnectorUnlocked;
   const ownsProcess = ports.ownsProcess ?? ownsRecordedConnector;
-  const canAdopt = ports.canAdopt ?? recordedConnectorCanBeAdopted;
   let isCurrent = ports.beginOperation?.() ?? (() => true);
   const prepared = await withConnectorSupervisorLock(async (): Promise<ConnectorEnsureResult | "spawned"> => {
-    if (ownsProcess(binding) && canAdopt(binding)) {
+    if (ownsProcess(binding)) {
       const adopted = await verifiedProbe(url, session.connectorToken, ports);
       if (!isCurrent()) return { ok: false, code: "connector_failed" };
       if (adopted && adopted !== "timeout") {
@@ -510,11 +482,10 @@ export async function ensureTelegramConnector(
         return adopted;
       }
     }
-    /* Missing ownership, a credential-generation mismatch, or a process
-       launched without today's feed/log guarantees makes any current listener
-       ineligible for adoption. Stop and record the replacement while holding
-       the cross-process supervisor lock, so another Viewer generation can only
-       adopt the one durable winner. */
+    /* Missing ownership, a credential-generation mismatch, or a failed probe
+       makes the current listener ineligible. Stop and record the replacement
+       while holding the cross-process supervisor lock, so another Viewer
+       generation can only adopt the one durable winner. */
     await stop();
     isCurrent = ports.beginOperation?.() ?? (() => true);
     const credentials = telegramApiCredentials();

@@ -8,7 +8,6 @@ const OLD_STATE = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
 const { TelegramConnectionService } = await import("./service");
-const { beginTelegramReportReadPhase } = await import("./reportReadGuard");
 const { deleteTelegramSession, readTelegramConnection, readTelegramSession, saveTelegramSession, telegramSessionPath, writeTelegramConnection } = await import("./sessionStore");
 
 import type { TelegramAdapter, TelegramEnrollmentEvent, TelegramHealthResult } from "./adapter";
@@ -235,7 +234,7 @@ test("health serves cached status while a report owns the connector read phase",
   });
   adapter.checkSession = async () => { throw new Error("bridge must remain idle"); };
 
-  const release = await beginTelegramReportReadPhase();
+  const release = await service.beginReportReadPhase();
   try {
     const cached = await service.checkHealth();
     expect(cached.phase).toBe("connected");
@@ -249,6 +248,44 @@ test("health serves cached status while a report owns the connector read phase",
 
   expect((await service.checkHealth()).lastHealthCheckAt).toBe("2026-08-20T12:00:00.000Z");
   expect(calls.ensure).toEqual([PLACEHOLDER_SESSION]);
+});
+
+test("a report read waits for an in-flight health check", async () => {
+  const adapter = new FakeAdapter();
+  saveTelegramSession(PLACEHOLDER_SESSION);
+  let resolveConnector!: (result: ConnectorEnsureResult) => void;
+  const connector = new Promise<ConnectorEnsureResult>((resolve) => { resolveConnector = resolve; });
+  let ensureStarted!: () => void;
+  const started = new Promise<void>((resolve) => { ensureStarted = resolve; });
+  const service = new TelegramConnectionService({
+    adapter,
+    ensureConnector: async () => {
+      ensureStarted();
+      return await connector;
+    },
+    readConnectorIdentity: async () => ({ name: "Account A", username: "account_a", id: "770000001" }),
+    stopConnector: () => {},
+    registerHosts: () => HOSTS_REGISTERED,
+    unregisterHosts: () => {},
+    now: () => Date.parse("2026-08-20T12:00:00.000Z"),
+    credentialsConfigured: () => true,
+  });
+
+  const health = service.checkHealth();
+  await started;
+  let readStarted = false;
+  const read = service.beginReportReadPhase().then((release) => {
+    readStarted = true;
+    return release;
+  });
+  await Promise.resolve();
+  expect(readStarted).toBe(false);
+
+  resolveConnector({ ok: true, url: "http://127.0.0.1:8809/mcp" });
+  expect((await health).phase).toBe("connected");
+  const releaseRead = await read;
+  expect(readStarted).toBe(true);
+  releaseRead();
 });
 
 test("health recovery registers hosts after a prior connector failure", async () => {

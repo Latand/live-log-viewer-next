@@ -36,13 +36,10 @@ const READ_ONLY: ConnectorProbe = {
   ],
 };
 
-function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?: boolean; owned?: boolean; recordFails?: boolean; runsFeed?: boolean } = {}) {
+function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?: boolean; owned?: boolean; recordFails?: boolean } = {}) {
   const calls = { spawns: 0, probes: 0, stops: 0, records: 0, kills: [] as Array<NodeJS.Signals | undefined>, probeTokens: [] as string[] };
   let clock = 0;
   let owned = options.owned ?? false;
-  /* A record written by this Viewer generation has both adoption guarantees;
-     `runsFeed: false` models the record a pre-feed generation left behind. */
-  let adoptable = options.runsFeed ?? true;
   const ports: TelegramConnectorPorts = {
     spawn: () => {
       calls.spawns += 1;
@@ -57,13 +54,11 @@ function fakePorts(script: Array<ConnectorProbe | null>, options: { spawnFails?:
     sleep: async () => { clock += 10_000; },
     now: () => clock,
     ownsProcess: () => owned,
-    canAdopt: () => adoptable,
     stop: () => { calls.stops += 1; owned = false; },
     recordProcess: () => {
       calls.records += 1;
       if (options.recordFails) return false;
       owned = true;
-      adoptable = true;
       return true;
     },
   };
@@ -347,26 +342,24 @@ test("an allowlisted foreign listener is never adopted", async () => {
   expect(calls.stops).toBeGreaterThanOrEqual(2);
 });
 
-test("a listening connector that runs no feed is replaced, not adopted (#1091)", async () => {
-  /* The tail's own regression: a connector spawned by a Viewer generation that
-     predates the feed is a perfectly good read surface, so it was adopted
-     happily — and it records no activity at all, which sends the report's
-     dialog discovery back to a bounded walk over a list ordered by pins. It is
-     ineligible now: stopped and replaced, once, and the replacement records
-     the feed it was launched with. */
-  const { ports, calls } = fakePorts([READ_ONLY], { owned: true, runsFeed: false });
+test("a healthy current-generation connector is preserved when launch metadata is missing", async () => {
+  /* A connector spawned by an older Viewer can lack feed/log metadata while
+     still proving the current credential and read-only MCP surface. Fresh
+     health must keep that healthy process; a later allowed replacement will
+     add the newer launch guarantees. */
+  const { ports, calls } = fakePorts([READ_ONLY], { owned: true });
 
   const result = await ensureTelegramConnector(CONNECTOR_SESSION, ports);
 
   expect(result).toEqual({ ok: true, url: telegramMcpUrl() });
-  expect(calls.spawns).toBe(1);
-  expect(calls.stops).toBeGreaterThanOrEqual(1);
-  expect(calls.records).toBe(1);
+  expect(calls.spawns).toBe(0);
+  expect(calls.stops).toBe(0);
+  expect(calls.records).toBe(0);
+  expect(calls.probes).toBe(1);
 });
 
-/** A connector record of the shape the supervisor writes, so the REAL feed
-    eligibility check has something to read. Nothing here is a live process:
-    the check reads the record only. */
+/** A connector record of the shape the supervisor writes, so the real feed
+    coverage check has something to read. Nothing here is a live process. */
 async function writeConnectorRecord(feedFile: string, feedSince?: string, hasBoundedLog = true): Promise<void> {
   fs.writeFileSync(
     path.join(process.env.LLV_STATE_DIR!, "telegram", "connector.json"),
@@ -411,28 +404,23 @@ test("the record says since when this generation's feed can be believed (#1091)"
   expect(connectorFeedCoverageSince(CONNECTOR_SESSION.credentialRef)).toBeNull();
 });
 
-test("a listener writing another credential generation's feed is not adopted (#1091)", async () => {
+test("a feed metadata mismatch does not restart a healthy current-generation connector", async () => {
   const { telegramIncomingFeedPath } = await import("./sessionStore");
-  /* The operator disconnected one account and connected another. A listener
-     left writing the FIRST generation's feed would hand the second account
-     the first one's recent dialogs as its own active sources — after the id
-     check had already passed. The record names the file, so the mismatch is
-     visible without probing anything. */
+  /* The mismatched record cannot vouch for this generation's feed coverage,
+     though process ownership plus a successful probe still prove the healthy
+     connector itself. */
   await writeConnectorRecord(telegramIncomingFeedPath("credential-generation-of-another-account"));
   const stale = fakePorts([READ_ONLY], { owned: true });
-  delete stale.ports.canAdopt;
 
-  const replaced = await ensureTelegramConnector(CONNECTOR_SESSION, stale.ports);
+  const adoptedWithoutCoverage = await ensureTelegramConnector(CONNECTOR_SESSION, stale.ports);
 
-  expect(replaced).toEqual({ ok: true, url: telegramMcpUrl() });
-  expect(stale.calls.spawns).toBe(1);
-  expect(stale.calls.stops).toBeGreaterThanOrEqual(1);
+  expect(adoptedWithoutCoverage).toEqual({ ok: true, url: telegramMcpUrl() });
+  expect(stale.calls.spawns).toBe(0);
+  expect(stale.calls.stops).toBe(0);
 
-  /* The same record naming THIS generation's feed is adopted, so the refusal
-     above is the feed scope and not the check refusing everything. */
+  /* Matching metadata preserves the same healthy-process behavior. */
   await writeConnectorRecord(telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef));
   const current = fakePorts([READ_ONLY], { owned: true });
-  delete current.ports.canAdopt;
 
   const adopted = await ensureTelegramConnector(CONNECTOR_SESSION, current.ports);
 
@@ -440,7 +428,7 @@ test("a listener writing another credential generation's feed is not adopted (#1
   expect(current.calls.spawns).toBe(0);
 });
 
-test("a connector recorded before process-owned log bounds is replaced on adoption", async () => {
+test("fresh health preserves a healthy connector recorded before process-owned log bounds", async () => {
   const { telegramIncomingFeedPath } = await import("./sessionStore");
   await writeConnectorRecord(
     telegramIncomingFeedPath(CONNECTOR_SESSION.credentialRef),
@@ -448,13 +436,13 @@ test("a connector recorded before process-owned log bounds is replaced on adopti
     false,
   );
   const previousViewer = fakePorts([READ_ONLY], { owned: true });
-  delete previousViewer.ports.canAdopt;
 
   const result = await ensureTelegramConnector(CONNECTOR_SESSION, previousViewer.ports);
 
   expect(result).toEqual({ ok: true, url: telegramMcpUrl() });
-  expect(previousViewer.calls.stops).toBeGreaterThanOrEqual(1);
-  expect(previousViewer.calls.spawns).toBe(1);
+  expect(previousViewer.calls.stops).toBe(0);
+  expect(previousViewer.calls.spawns).toBe(0);
+  expect(previousViewer.calls.probes).toBe(1);
 });
 
 test("a credential-generation mismatch stops the old record before spawning", async () => {
@@ -471,7 +459,6 @@ test("concurrent Viewer generations serialize adoption and spawn one recorded co
   let records = 0;
   const ports: TelegramConnectorPorts = {
     ownsProcess: () => owned,
-    canAdopt: () => true,
     stop: async () => { await Promise.resolve(); owned = false; },
     spawn: () => {
       spawns += 1;
@@ -515,7 +502,6 @@ test("an older failed readiness probe cannot stop a newer credential generation"
   const ports: TelegramConnectorPorts = {
     ownsProcess: (candidate) => binding?.credentialRef === candidate.credentialRef
       && binding.connectorToken === candidate.connectorToken,
-    canAdopt: () => true,
     stop: () => { stops += 1; binding = null; },
     spawn: () => { spawns += 1; return { pid: process.pid, kill: () => true }; },
     recordProcess: (_child, _spec, candidate) => { binding = { ...candidate }; return true; },
@@ -566,7 +552,6 @@ test("stop invalidates an in-flight connector operation", async () => {
     sleep: async () => {},
     now: () => 0,
     ownsProcess: () => true,
-    canAdopt: () => true,
     beginOperation: () => {
       const current = ++generation;
       return () => current === generation;
@@ -595,7 +580,6 @@ test("a stalled readiness probe is bounded and terminates the spawned child", as
     sleep: async () => {},
     now: () => 0,
     ownsProcess: () => owned,
-    canAdopt: () => owned,
     recordProcess: () => { owned = true; return true; },
     stop: () => { owned = false; child.kill("SIGTERM"); },
     probeTimeoutMs: 10,

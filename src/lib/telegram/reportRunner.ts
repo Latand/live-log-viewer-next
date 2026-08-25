@@ -22,7 +22,6 @@ import {
   slotInstant,
 } from "./reportSchedule";
 import { reportAttemptId, TELEGRAM_REPORT_PROJECT } from "./reportLineage";
-import { beginTelegramReportReadPhase } from "./reportReadGuard";
 import { connectorReadPort, planReportSources, type TelegramReadPort } from "./reportSources";
 import { launchReportConversation, type ReportSpawnInput, type ReportSpawnResult } from "./reportSpawn";
 import {
@@ -96,6 +95,10 @@ export interface ReportRunnerPorts {
       every one of them bound to the credential generation the run verified
       (#1091). */
   readPort(credentialRef: string): TelegramReadPort;
+  /** Acquires the connection service's read lease for get_me plus the full
+      sequential source pass. Optional only for injected fixtures that never
+      enter the read path; a real read fails closed without it. */
+  beginReadPhase?(): Promise<() => void>;
   /** Runs the one-time id migration a pre-#1091 connection is owed: the
       ordinary health check, which re-reads the account through the login
       bridge and persists whatever id it reports. */
@@ -156,6 +159,10 @@ export const productionReportRunnerPorts: ReportRunnerPorts = {
     catch { return { version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "session_unsafe", identityIdUpgradedAt: null }; }
   },
   readPort: (credentialRef) => connectorReadPort(credentialRef),
+  beginReadPhase: async () => {
+    const { telegramService } = await import("./service");
+    return await telegramService().beginReportReadPhase();
+  },
   migrateIdentity,
   spawn: launchReportConversation,
   reportRunConversation,
@@ -389,7 +396,8 @@ export class TelegramReportRunner {
     const port = this.ports.readPort(recorded.credentialRef);
     let live: Awaited<ReturnType<TelegramReadPort["getMe"]>>;
     let sourcesPath: string;
-    const releaseReadPhase = await beginTelegramReportReadPhase();
+    if (!this.ports.beginReadPhase) throw new Error("Telegram report read lease is unavailable");
+    const releaseReadPhase = await this.ports.beginReadPhase();
     try {
       /* A mismatch is the issue's `account-mismatch` outcome: no report, no
          window advance, and — because this runs before the source pass — no

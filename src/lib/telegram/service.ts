@@ -5,7 +5,6 @@ import { ensureTelegramConnector, stopTelegramConnector, stopTelegramConnectorFo
 import type { TelegramAccountIdentity, TelegramErrorCode, TelegramStatusPayload } from "./contracts";
 import { registerTelegramHosts, unregisterTelegramHosts, type TelegramHostRegistrationResult } from "./hostRegistration";
 import { telegramApiCredentials } from "./packaging";
-import { tryBeginTelegramHealthCheck } from "./reportReadGuard";
 import { connectorReadPort } from "./reportSources";
 import {
   deleteTelegramSession,
@@ -75,6 +74,9 @@ export class TelegramConnectionService {
   private lifecycleGeneration = 0;
   private lifecycleActive = false;
   private readonly lifecycleQueue: LifecycleJob[] = [];
+  private reportReaders = 0;
+  private healthActive = false;
+  private readonly healthWaiters: Array<() => void> = [];
 
   constructor(private readonly ports: TelegramServicePorts = productionPorts) {}
 
@@ -389,6 +391,35 @@ export class TelegramConnectionService {
     this.deleteCredentialsAndPublishDisconnected(connectorStopped);
   }
 
+  /** Holds the shared connector from the report's account check through its
+      sequential source pass. A report waits for an in-flight health check;
+      fresh health polls serve cached status while any report holds the lease. */
+  async beginReportReadPhase(): Promise<() => void> {
+    while (this.healthActive) {
+      await new Promise<void>((resolve) => { this.healthWaiters.push(resolve); });
+    }
+    this.reportReaders += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.reportReaders = Math.max(0, this.reportReaders - 1);
+    };
+  }
+
+  private tryBeginHealthCheck(): (() => void) | null {
+    if (this.reportReaders > 0 || this.healthActive) return null;
+    this.healthActive = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.healthActive = false;
+      const waiters = this.healthWaiters.splice(0);
+      for (const resume of waiters) resume();
+    };
+  }
+
   /** Health check against the stored session; updates the durable status. */
   checkHealth(): Promise<TelegramStatusPayload> {
     const expectedGeneration = this.lifecycleGeneration;
@@ -400,7 +431,7 @@ export class TelegramConnectionService {
   }
 
   private async runHealthCheck(generation: number): Promise<void> {
-    const releaseHealthCheck = tryBeginTelegramHealthCheck();
+    const releaseHealthCheck = this.tryBeginHealthCheck();
     if (!releaseHealthCheck) return;
     try {
       await this.runHealthCheckWithConnector(generation);
