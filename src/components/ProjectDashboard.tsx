@@ -681,8 +681,9 @@ function ProjectDashboardView({
     [pipelines, deckFlows],
   );
   /* View expansion is narrower: only the active execution cursor is protected.
-     Completed prior stages remain reachable as compact pipeline/history rows. */
-  const protectedCollapsePaths = useMemo(() => pipelineCursorStagePaths(pipelines), [pipelines]);
+     Recorded attempt paths are resolved onto the scanner's current spelling;
+     completed prior stages remain reachable as compact pipeline/history rows. */
+  const protectedCollapsePaths = useMemo(() => pipelineCursorStagePaths(pipelines, files), [pipelines, files]);
   /* Pipeline review stages remain real conversation cards inside their colored
      stage group. Standalone flow reviewers still fold into their round decks. */
   const compactLayoutFlows = useMemo(

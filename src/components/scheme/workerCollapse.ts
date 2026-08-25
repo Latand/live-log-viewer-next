@@ -226,25 +226,30 @@ export function keepExpanded(file: FileEntry, context: CollapseContext): boolean
  * on terminal evidence; every unsettled conversation follows the idle window.
  */
 export function shouldCollapseWorker(file: FileEntry, context: CollapseContext): boolean {
-  /* Engine-native subagents (#142 S2) are owned by the tray projection, which
-     decides their promoted/folded surface — generic age-based worker collapse
-     must not also fold them into an origin stack, or a tray member would render
-     in two places. S2 claims them before this classifier ever runs. */
-  if (file.spawnOrigin === "engine") return false;
+  /* Engine-native subagents use this same decision before tray placement. The
+     dashboard puts collapsedPaths in the tray's claimed set, so a settled row
+     folds into exactly one worker stack while live/pinned rows remain eligible
+     for the tray's promoted/full-card projection. */
   if (file.spawn && file.spawn.state !== "failed" && file.spawn.state !== "recovered") return false;
   if (file.migratedTo) return false;
   if (file.engine !== "claude" && file.engine !== "codex") return false;
   return !keepExpanded(file, context);
 }
 
-/** The one pipeline stage path protected by each active execution cursor. */
-export function pipelineCursorStagePaths(pipelines: readonly Pipeline[]): Set<string> {
+/** The one pipeline stage path protected by each active execution cursor.
+    Attempts retain their recorded spelling, so resolve each claim onto the
+    scanned corpus before the set is compared with `file.path`. */
+export function pipelineCursorStagePaths(
+  pipelines: readonly Pipeline[],
+  files: readonly { path: string }[] = [],
+): Set<string> {
+  const resolve = transcriptClaimResolver(files);
   const paths = new Set<string>();
   for (const pipeline of pipelines) {
     if (!pipeline.cursor || !["provisioning", "running", "needs_decision"].includes(pipeline.state)) continue;
     const run = pipeline.runs.find((candidate) => candidate.stageId === pipeline.cursor!.stageId);
     const attempt = run?.attempts.filter((candidate) => !candidate.historical).at(-1);
-    if (attempt?.agentPath) paths.add(attempt.agentPath);
+    if (attempt?.agentPath) paths.add(resolve(attempt.agentPath));
   }
   return paths;
 }

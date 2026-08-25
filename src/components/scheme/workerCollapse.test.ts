@@ -296,17 +296,65 @@ describe("keepExpanded — one board rule", () => {
 });
 
 describe("shouldCollapseWorker", () => {
-  test("an engine-native subagent is exempt — the #142 tray projection owns it", () => {
-    /* A quiet, day-idle engine child would otherwise be a spawned-descendant
-       collapse candidate; S2 claims it, so generic collapse must skip it. */
-    const child = entry({
-      path: "/orchestrator/agent-1",
+  test("settled engine-native children use the shared rule before tray placement", () => {
+    /* The tray's legacy precedence treats a killed host as actionable and
+       authorship as owner intent. Neither can reopen settled work under #1158:
+       collapsedPaths claims these rows before the tray classifies them. */
+    const killedAuthored = entry({
+      path: "/orchestrator/agent-killed",
       parent: "/orchestrator",
       kind: "subagent",
       spawnOrigin: "engine",
-      mtime: NOW_SEC - 24 * 3600,
+      proc: "killed",
+      userAuthored: true,
     });
-    expect(shouldCollapseWorker(child, ctx())).toBe(false);
+    const verdictlessReviewer = entry({
+      path: "/orchestrator/agent-reviewer",
+      parent: "/orchestrator",
+      kind: "subagent",
+      spawnOrigin: "engine",
+      proc: "done",
+      authorshipUnverified: true,
+      durableLineage: {
+        kind: "review",
+        role: "reviewer",
+        parentConversationId: "conversation-orchestrator",
+        reviewsConversationId: "conversation-orchestrator",
+        memberships: [{
+          kind: "flow",
+          containerId: "f1",
+          role: "reviewer",
+          slot: "reviewer:1",
+          stageId: null,
+          stageOrder: null,
+          round: 1,
+          parentConversationId: "conversation-orchestrator",
+        }],
+      },
+    });
+    const flows = [flow({
+      id: "f1",
+      implementerPath: "/orchestrator",
+      rounds: [round({ reviewerPath: verdictlessReviewer.path })],
+    })];
+
+    const collapsed = collapsibleWorkerFiles({
+      files: [killedAuthored, verdictlessReviewer],
+      project: "demo",
+      flows,
+      pinnedPaths: new Set(),
+      nowMs: NOW,
+    });
+    expect(collapsed.map((file) => file.path)).toEqual([killedAuthored.path, verdictlessReviewer.path]);
+
+    const pinned = collapsibleWorkerFiles({
+      files: [killedAuthored, verdictlessReviewer],
+      project: "demo",
+      flows,
+      pinnedPaths: new Set([killedAuthored.path, verdictlessReviewer.path]),
+      nowMs: NOW,
+    });
+    expect(pinned).toEqual([]);
   });
 
   test("fresh terminal spawn placeholders collapse into a stack immediately", () => {
@@ -433,6 +481,43 @@ describe("pipelineStageAgentPaths", () => {
       ],
     }] as unknown as Pipeline[];
     expect(pipelineCursorStagePaths(pipelines)).toEqual(new Set(["/build"]));
+  });
+
+  test("resolves an active cursor attempt onto the scanned transcript spelling", () => {
+    const recordedRoot = "/store/legacy/projects/enc-project";
+    const scannedRoot = "/store/shared/projects/enc-project";
+    const stage = entry({
+      path: `${scannedRoot}/stage-77bd.jsonl`,
+      mtime: NOW_SEC - 24 * 3600,
+      durableLineage: {
+        kind: "spawn",
+        role: "builder",
+        parentConversationId: "conversation-root",
+        reviewsConversationId: null,
+        memberships: [pipelineMembership("pl")],
+      },
+    });
+    const pipelines = [{
+      id: "pl",
+      state: "running",
+      cursor: { stageId: "build" },
+      runs: [{
+        stageId: "build",
+        attempts: [{ agentPath: `${recordedRoot}/stage-77bd.jsonl`, historical: false }],
+      }],
+    }] as unknown as Pipeline[];
+
+    const protectedPaths = pipelineCursorStagePaths(pipelines, [stage]);
+    expect(protectedPaths).toEqual(new Set([stage.path]));
+    expect(collapsibleWorkerFiles({
+      files: [stage],
+      project: "demo",
+      flows: [],
+      pipelines,
+      pinnedPaths: new Set(),
+      protectedPaths,
+      nowMs: NOW,
+    })).toEqual([]);
   });
 
   test("a durable member of an omitted closed pipeline is settled", () => {
