@@ -9,6 +9,7 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { beginOrchestratorSeatIntent, completeOrchestratorSeatIntent } from "@/lib/orchestrator/seats";
 
 import { bridgeChannelScopeForConversation } from "./routing";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 let sandbox = "";
 const previousStateDir = process.env.LLV_STATE_DIR;
@@ -26,7 +27,7 @@ afterEach(() => {
 
 function registerConversation(project: string, clientAttemptId: string): string {
   const registry = agentRegistry();
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd: sandbox,
     clientAttemptId,

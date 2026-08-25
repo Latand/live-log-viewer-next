@@ -813,9 +813,13 @@ test("a quarantined shared-path collision keeps legacy title evidence and counte
     fs.writeFileSync(filename, `${JSON.stringify(seeded, null, 2)}\n`);
 
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+    const transcriptReads: string[] = [];
     expect(registry.runIdentityWaveMigration({
       now: NOW,
-      transcriptTitle: titleFromTranscriptHead,
+      transcriptTitle: (pathname, engine) => {
+        transcriptReads.push(pathname);
+        return titleFromTranscriptHead(pathname, engine);
+      },
       sharedPathForLegacy: (pathname) => pathname === legacyPath ? occupiedSharedPath : null,
       orchestratorSeats: [],
     })).toMatchObject({
@@ -824,6 +828,7 @@ test("a quarantined shared-path collision keeps legacy title evidence and counte
       rekeyed: 0,
       quarantinedRekeys: 1,
     });
+    expect(transcriptReads).toEqual([legacyPath]);
 
     const jsonSnapshot = registry.snapshot();
     const sqliteSnapshot = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot();

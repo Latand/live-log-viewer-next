@@ -24,6 +24,7 @@ import { demoteSkippedStructuredRegistryHosts, type StructuredHostAdoptionFilter
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { didStructuredHostStartupFail, structuredStartupStatus } from "./startupStatus";
 import { adoptStructuredHostsAtStartup, structuredStartupHosts, type StructuredStartupDependencies } from "./startup";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
   return {
@@ -140,7 +141,7 @@ test("server startup delegates managed rows with file credentials and their laun
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const artifactPath = "/managed/sessions/startup-thread.jsonl";
   const conversation = registry.ensureConversation("codex", artifactPath, "managed");
-  registry.beginSpawnRequest({
+  beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd: "/repo",
     conversationId: conversation.id,
@@ -2832,7 +2833,7 @@ test("startup keeps a failed spawn host dead while reconciling its receipt", asy
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
-  const profile = emptyLaunchProfile({ cwd: directory });
+  const profile = emptyLaunchProfile({ cwd: directory, title: "Recover a failed spawn host" });
   const begun = registry.beginSpawnRequest({ engine: "codex", cwd: directory, accountId: "managed", launchProfile: profile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   await client.command({
@@ -2938,7 +2939,7 @@ test("startup keeps a delivered spawn host dead while settling its receipt", asy
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
-  const profile = emptyLaunchProfile({ cwd: directory });
+  const profile = emptyLaunchProfile({ cwd: directory, title: "Settle a delivered spawn host" });
   const begun = registry.beginSpawnRequest({ engine: "codex", cwd: directory, accountId: "managed", launchProfile: profile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   await client.command({
@@ -3050,7 +3051,7 @@ test("startup terminalizes a delivered Claude spawn whose unverifiable host clai
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
-  const profile = emptyLaunchProfile({ cwd: directory, model: "claude-opus-4-8" });
+  const profile = emptyLaunchProfile({ cwd: directory, model: "claude-opus-4-8", title: "Reconcile a delivered Claude spawn" });
   const begun = registry.beginSpawnRequest({
     engine: "claude",
     cwd: directory,
@@ -3159,7 +3160,7 @@ test("startup settles a delivered pipeline retry and collapses its rebooted pred
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
-  const profile = emptyLaunchProfile({ cwd: directory, model: "gpt-5.6-sol" });
+  const profile = emptyLaunchProfile({ cwd: directory, model: "gpt-5.6-sol", title: "Reconcile a delivered pipeline retry" });
   const staleClaimOwner = `structured-host:${JSON.stringify({ pid: process.pid, startIdentity: null })}`;
   const predecessor = registry.beginSpawnRequest({
     engine: "codex",
