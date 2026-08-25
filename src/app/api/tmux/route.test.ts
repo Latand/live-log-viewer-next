@@ -61,7 +61,6 @@ let structuredMessageCalls = 0;
 let structuredMessageRequest: Record<string, unknown> | null = null;
 let operatorActivityRequests: Record<string, unknown>[] = [];
 let operatorActivityEnabled = true;
-let operatorCompatibilitySettlements: string[] = [];
 let collectedImages: Array<{ base64: string; mime: string }> = [];
 let deletedImagePaths: string[][] = [];
 let structuredMessageResult:
@@ -131,13 +130,12 @@ mock.module("@/lib/wakatime/operatorActivity", () => ({
     if (!operatorActivityEnabled) return null;
     operatorActivityRequests.push(request);
     return {
-      key: typeof request.compatibilityFingerprint === "string" ? request.compatibilityFingerprint : "a".repeat(64),
+      key: "a".repeat(64),
       engine: "codex",
       project: "fixture",
       atMs: Date.now(),
     };
   },
-  settleDirectOperatorWakatimeCompatibility: (key: string) => { operatorCompatibilitySettlements.push(key); },
 }));
 mock.module("@/lib/delivery", () => ({
   answerDialogKey: async () => ({ ok: true, target: "" }),
@@ -327,9 +325,8 @@ test("/api/tmux records an authorized dialog answer once and excludes an agent c
   }
 });
 
-test("/api/tmux gives an id-less retry one stable hash-only activity identity", async () => {
+test("/api/tmux gives each id-less request a hash-only fallback with no message text", async () => {
   operatorActivityRequests = [];
-  operatorCompatibilitySettlements = [];
   const body = { path: PATHNAME, text: "legacy retry payload" };
 
   const first = await POST(post(body));
@@ -339,40 +336,7 @@ test("/api/tmux gives an id-less retry one stable hash-only activity identity", 
   expect([first.status, retry.status, distinct.status]).toEqual([200, 200, 200]);
   expect(operatorActivityRequests).toHaveLength(3);
   expect(operatorActivityRequests[0]).not.toHaveProperty("idempotencyKey");
-  expect(operatorActivityRequests[0]?.compatibilityFingerprint).toMatch(/^[a-f0-9]{64}$/);
-  expect(operatorActivityRequests[1]?.compatibilityFingerprint).toBe(operatorActivityRequests[0]?.compatibilityFingerprint);
-  expect(operatorActivityRequests[2]?.compatibilityFingerprint).not.toBe(operatorActivityRequests[0]?.compatibilityFingerprint);
-  expect(operatorCompatibilitySettlements).toEqual(operatorActivityRequests
-    .map((request) => String(request.compatibilityFingerprint)));
   expect(JSON.stringify(operatorActivityRequests)).not.toContain("legacy retry payload");
-});
-
-test("/api/tmux retires an id-less compatibility identity only after delivery succeeds", async () => {
-  let attempts = 0;
-  operatorActivityRequests = [];
-  operatorCompatibilitySettlements = [];
-  delivery = async () => {
-    attempts += 1;
-    return attempts === 1
-      ? { ok: false, outcome: "failed", error: "temporary delivery failure", status: 503 }
-      : { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
-  };
-  try {
-    const body = { path: PATHNAME, text: "retry after failure" };
-    const failed = await POST(post(body));
-    const retried = await POST(post(body));
-
-    expect([failed.status, retried.status]).toEqual([503, 200]);
-    expect(operatorActivityRequests.map((request) => request.compatibilityFingerprint)).toEqual([
-      operatorActivityRequests[0]?.compatibilityFingerprint,
-      operatorActivityRequests[0]?.compatibilityFingerprint,
-    ]);
-    expect(operatorCompatibilitySettlements).toEqual([
-      String(operatorActivityRequests[0]?.compatibilityFingerprint),
-    ]);
-  } finally {
-    delivery = async () => ({ ok: true, outcome: "delivered-to-live", target: "agents:4.0" });
-  }
 });
 
 test("/api/tmux attributes by path before a recycled pid and rejects conflicting strong evidence", async () => {

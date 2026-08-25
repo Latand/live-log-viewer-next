@@ -1,5 +1,3 @@
-import crypto from "node:crypto";
-
 import { NextRequest, NextResponse } from "next/server";
 
 import {
@@ -30,10 +28,7 @@ import {
   tmuxEndpointDescriptor,
 } from "@/lib/tmux";
 import type { ApiError, FileEntry } from "@/lib/types";
-import {
-  recordDirectOperatorWakatimeActivity,
-  settleDirectOperatorWakatimeCompatibility,
-} from "@/lib/wakatime/operatorActivity";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -109,24 +104,10 @@ function operatorFallbackEntry(
   return files.find((entry) => entry.pid === target.pid);
 }
 
-function compatibilityFingerprint(
-  target: { pid: number; hasPid: boolean; filePath: string; conversationId: string },
-  gesture: Record<string, unknown>,
-): string {
-  return crypto.createHash("sha256").update(JSON.stringify({
-    target: {
-      ...(target.conversationId ? { conversationId: target.conversationId } : {}),
-      ...(target.filePath ? { path: target.filePath } : {}),
-      ...(!target.conversationId && !target.filePath && target.hasPid ? { pid: target.pid } : {}),
-    },
-    gesture,
-  })).digest("hex");
-}
-
 async function recordAuthorizedOperatorActivity(
   req: NextRequest,
   target: { pid: number; hasPid: boolean; filePath: string; conversationId: string },
-  identity: { idempotencyKey?: string; compatibilityFingerprint?: string },
+  identity: { idempotencyKey?: string },
 ): Promise<ReturnType<typeof recordDirectOperatorWakatimeActivity> | null> {
   if (!directOperatorActivityAuthority(req).ok) return null;
   const fallbackEntry = operatorFallbackEntry((await completedFileScan()).snapshot.files, target);
@@ -269,24 +250,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
 
   const explicitAction = typeof body.action === "string" ? body.action : "";
   if ((CONVERSATION_ACTIONS as readonly string[]).includes(explicitAction)) {
-    let compatibilityActionKey: string | undefined;
     if (explicitAction === "dialog-key") {
       const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim().slice(0, 128) : "";
       const target = { pid, hasPid, filePath, conversationId };
       try {
-        const action = await recordAuthorizedOperatorActivity(
+        await recordAuthorizedOperatorActivity(
           req,
           target,
-          clientMessageId
-            ? { idempotencyKey: clientMessageId }
-            : { compatibilityFingerprint: compatibilityFingerprint(target, {
-                action: "dialog-key",
-                key: typeof body.key === "string" ? body.key : "",
-                label: body.label,
-                question: body.question,
-              }) },
+          clientMessageId ? { idempotencyKey: clientMessageId } : {},
         );
-        if (!clientMessageId) compatibilityActionKey = action?.key;
       } catch (error) {
         if (error instanceof OperatorActivityTargetConflictError) {
           return NextResponse.json({ error: error.message }, { status: 409 });
@@ -308,13 +280,6 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       label: body.label,
       question: body.question,
     });
-    if (compatibilityActionKey && result.status < 400) {
-      try {
-        settleDirectOperatorWakatimeCompatibility(compatibilityActionKey);
-      } catch {
-        return NextResponse.json({ error: "direct operator activity could not be settled" }, { status: 503 });
-      }
-    }
     return NextResponse.json(result.body, { status: result.status });
   }
 
@@ -360,22 +325,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
 
   const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim().slice(0, 128) : "";
   const operatorTarget = { pid, hasPid, filePath, conversationId };
-  let operatorActionKey: string | undefined;
-  let compatibilityActionKey: string | undefined;
   try {
-    const action = await recordAuthorizedOperatorActivity(
+    await recordAuthorizedOperatorActivity(
       req,
       operatorTarget,
-      clientMessageId
-        ? { idempotencyKey: clientMessageId }
-        : { compatibilityFingerprint: compatibilityFingerprint(operatorTarget, {
-            action: "message",
-            text,
-            images,
-          }) },
+      clientMessageId ? { idempotencyKey: clientMessageId } : {},
     );
-    operatorActionKey = action?.key;
-    if (!clientMessageId) compatibilityActionKey = action?.key;
   } catch (error) {
     if (error instanceof OperatorActivityTargetConflictError) {
       return NextResponse.json({ error: error.message }, { status: 409 });
@@ -389,20 +344,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       path: filePath,
       ...(conversationId ? { conversationId } : {}),
       ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
-      ...(operatorActionKey ? { operatorActionKey } : {}),
       text: text.trim(),
       images,
       ...(origin ? { origin } : {}),
     });
     if (structured) {
       const { status, ...response } = structured.ok ? { ...structured, status: 200 } : structured;
-      if (compatibilityActionKey && status < 400) {
-        try {
-          settleDirectOperatorWakatimeCompatibility(compatibilityActionKey);
-        } catch {
-          return NextResponse.json({ error: "direct operator activity could not be settled" }, { status: 503 });
-        }
-      }
       return NextResponse.json(response, { status });
     }
   }
@@ -421,12 +368,5 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     ...(typeof body.effort === "string" ? { resumeEffort: body.effort } : {}),
     ...(typeof body.fast === "boolean" ? { resumeFast: body.fast } : {}),
   }));
-  if (compatibilityActionKey && response.status < 400) {
-    try {
-      settleDirectOperatorWakatimeCompatibility(compatibilityActionKey);
-    } catch {
-      return NextResponse.json({ error: "direct operator activity could not be settled" }, { status: 503 });
-    }
-  }
   return response;
 }

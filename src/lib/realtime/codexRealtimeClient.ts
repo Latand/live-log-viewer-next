@@ -46,36 +46,6 @@ export type ParsedRealtimeEvent =
 
 const MAX_LINE_CHARS = 12_000;
 const MAX_LINES = 80;
-const MAX_OPERATOR_ACTIVITY_OUTBOX = 256;
-const OPERATOR_ACTIVITY_RETRY_MIN_MS = 1_000;
-const OPERATOR_ACTIVITY_RETRY_MAX_MS = 30_000;
-const OPERATOR_ACTIVITY_ID = /^[a-f0-9]{64}$/;
-
-function operatorActivityStorageKey(conversationId: string): string {
-  return `llv.realtime-operator-activity.v1.${conversationId}`;
-}
-
-function readOperatorActivityOutbox(conversationId: string): string[] {
-  try {
-    const value = JSON.parse(window.localStorage.getItem(operatorActivityStorageKey(conversationId)) ?? "[]") as unknown;
-    if (!Array.isArray(value)) return [];
-    return [...new Set(value.filter((item): item is string => typeof item === "string" && OPERATOR_ACTIVITY_ID.test(item)))]
-      .slice(-MAX_OPERATOR_ACTIVITY_OUTBOX);
-  } catch {
-    return [];
-  }
-}
-
-function writeOperatorActivityOutbox(conversationId: string, ids: readonly string[]): void {
-  try {
-    const key = operatorActivityStorageKey(conversationId);
-    const bounded = [...new Set(ids.filter((item) => OPERATOR_ACTIVITY_ID.test(item)))].slice(-MAX_OPERATOR_ACTIVITY_OUTBOX);
-    if (bounded.length === 0) window.localStorage.removeItem(key);
-    else window.localStorage.setItem(key, JSON.stringify(bounded));
-  } catch {
-    /* A privacy-restricted browser still keeps the live call usable. */
-  }
-}
 
 function newOperatorActivityId(): string {
   const bytes = new Uint8Array(32);
@@ -197,10 +167,6 @@ class CodexRealtimeClient {
   private workerDeliveryFlush: Promise<void> | null = null;
   private workerDeliveryWakeEpoch: number | null = null;
   private unloadHangup: (() => void) | null = null;
-  private operatorActivityFlush: Promise<void> | null = null;
-  private operatorActivityRetryTimer: number | null = null;
-  private operatorActivityRetryMs = OPERATOR_ACTIVITY_RETRY_MIN_MS;
-  private operatorActivityOutbox: string[];
   private lineSequence = 0;
   /** The line each speaker is still streaming into, by line id. Held here
       rather than read off the end of the list because a delegating turn
@@ -209,9 +175,7 @@ class CodexRealtimeClient {
   private readonly openTranscriptLines = new Map<TranscriptSpeaker, string>();
   private epoch = 0;
 
-  constructor(readonly conversationId: string) {
-    this.operatorActivityOutbox = readOperatorActivityOutbox(conversationId);
-  }
+  constructor(readonly conversationId: string) {}
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -289,7 +253,6 @@ class CodexRealtimeClient {
         if (epoch === this.epoch) {
           this.update({ phase: "live", error: null, startedAt: Date.now() });
           this.flushWorkerDeliveries();
-          this.flushOperatorActivities();
         }
       };
       /* Closing the tab must hang up too. A call the backend still believes is
@@ -468,64 +431,18 @@ class CodexRealtimeClient {
     }
   }
 
-  private enqueueOperatorActivity(): void {
-    this.operatorActivityOutbox = [...new Set([
-      ...this.operatorActivityOutbox,
-      newOperatorActivityId(),
-    ])].slice(-MAX_OPERATOR_ACTIVITY_OUTBOX);
-    writeOperatorActivityOutbox(this.conversationId, this.operatorActivityOutbox);
-    this.flushOperatorActivities();
-  }
-
-  private flushOperatorActivities(): void {
-    if (this.snapshot.phase !== "live" || !this.realtimeSessionId || this.operatorActivityFlush) return;
-    if (this.operatorActivityRetryTimer !== null) {
-      window.clearTimeout(this.operatorActivityRetryTimer);
-      this.operatorActivityRetryTimer = null;
-    }
-    const task = this.deliverOperatorActivities();
-    this.operatorActivityFlush = task;
-    void task.finally(() => {
-      if (this.operatorActivityFlush === task) this.operatorActivityFlush = null;
-    });
-  }
-
-  private async deliverOperatorActivities(): Promise<void> {
-    while (this.snapshot.phase === "live" && this.realtimeSessionId) {
-      const operatorEventId = this.operatorActivityOutbox[0];
-      if (!operatorEventId) {
-        this.operatorActivityRetryMs = OPERATOR_ACTIVITY_RETRY_MIN_MS;
-        return;
-      }
-      try {
-        await responseJson(await fetch("/api/runtime/realtime", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            action: "operatorActivity",
-            conversationId: this.conversationId,
-            realtimeSessionId: this.realtimeSessionId,
-            operatorEventId,
-          }),
-        }));
-      } catch {
-        this.scheduleOperatorActivityRetry();
-        return;
-      }
-      this.operatorActivityOutbox = this.operatorActivityOutbox.filter((candidate) => candidate !== operatorEventId);
-      writeOperatorActivityOutbox(this.conversationId, this.operatorActivityOutbox);
-      this.operatorActivityRetryMs = OPERATOR_ACTIVITY_RETRY_MIN_MS;
-    }
-  }
-
-  private scheduleOperatorActivityRetry(): void {
-    if (this.operatorActivityRetryTimer !== null || this.snapshot.phase !== "live") return;
-    const delay = this.operatorActivityRetryMs;
-    this.operatorActivityRetryMs = Math.min(OPERATOR_ACTIVITY_RETRY_MAX_MS, delay * 2);
-    this.operatorActivityRetryTimer = window.setTimeout(() => {
-      this.operatorActivityRetryTimer = null;
-      this.flushOperatorActivities();
-    }, delay);
+  private publishOperatorActivity(): void {
+    if (!this.realtimeSessionId) return;
+    void fetch("/api/runtime/realtime", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "operatorActivity",
+        conversationId: this.conversationId,
+        realtimeSessionId: this.realtimeSessionId,
+        operatorEventId: newOperatorActivityId(),
+      }),
+    }).then(responseJson).catch(() => undefined);
   }
 
   /**
@@ -585,7 +502,7 @@ class CodexRealtimeClient {
          is decided by the state that existed when the operator finished
          speaking. */
       if (event.role === "user" && event.final) {
-        this.enqueueOperatorActivity();
+        this.publishOperatorActivity();
         this.publishSelectedContext();
       }
     } else if (event.kind === "delegation") {
@@ -681,8 +598,6 @@ class CodexRealtimeClient {
     /* No line survives a dead transport as "still streaming": the next call
        opens its own rather than appending to a turn nobody can finish. */
     this.openTranscriptLines.clear();
-    if (this.operatorActivityRetryTimer !== null) window.clearTimeout(this.operatorActivityRetryTimer);
-    this.operatorActivityRetryTimer = null;
     if (this.unloadHangup) window.removeEventListener("pagehide", this.unloadHangup);
     this.unloadHangup = null;
     this.events?.close();

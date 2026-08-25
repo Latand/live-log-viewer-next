@@ -956,7 +956,6 @@ export class CodexAppServerHost implements EngineHost {
       ...(normalized.runtime ? { runtime: normalized.runtime } : {}),
       ...(normalized.selectedContext ? { selectedContext: normalized.selectedContext } : {}),
       ...(normalized.origin ? { origin: normalized.origin } : {}),
-      ...(normalized.operatorActionKey ? { operatorActionKey: normalized.operatorActionKey } : {}),
     };
     if (!entry.id) throw new Error("queue entry id is required");
     const confirmed = await this.confirmedDelivery(entry);
@@ -979,7 +978,6 @@ export class CodexAppServerHost implements EngineHost {
           /* #1117: authorship lands on the same record, so the feed can tell
              the operator's bubble from an inter-agent relay without a join. */
           normalized.origin,
-          normalized.operatorActionKey,
         ),
       },
     ];

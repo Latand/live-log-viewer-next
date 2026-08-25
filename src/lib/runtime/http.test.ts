@@ -107,8 +107,6 @@ test("runtime send records operator activity before delivery failure and exclude
       conversationId: "conversation_direct",
       idempotencyKey: "direct-runtime-one",
     }]);
-    expect(enqueued[0]).toMatchObject({ operatorActionKey: "b".repeat(64) });
-    expect(enqueued[1]).not.toHaveProperty("operatorActionKey");
   } finally {
     setCallerConversationResolverForTests(null);
   }

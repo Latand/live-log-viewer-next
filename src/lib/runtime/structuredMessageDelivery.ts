@@ -57,7 +57,6 @@ export interface StructuredMessageRequest {
       command and replays it at drain time, so a held operator message never
       resurfaces as a system row nor a held relay as an operator bubble. */
   origin?: MessageOrigin;
-  operatorActionKey?: string;
 }
 
 export type StructuredMessageResult =
@@ -879,7 +878,6 @@ export async function enqueueStructuredMessage(
       ...(request.runtime ? { runtime: request.runtime } : {}),
       ...(request.selectedContext ? { selectedContext: request.selectedContext } : {}),
       ...(request.origin ? { origin: request.origin } : {}),
-      ...(request.operatorActionKey ? { operatorActionKey: request.operatorActionKey } : {}),
     });
     const result = commandResult;
     const receipt = result.receipt;

@@ -14,7 +14,6 @@ const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>(
 
 export interface RecentTurnWindows {
   windows: TurnBoundary[];
-  operatorActions?: Array<{ key: string; atMs: number }>;
   operatorActionsAtMs?: number[];
   assistantMessagesAtMs?: number[];
   prefixTruncated: boolean;
@@ -181,17 +180,13 @@ export function recentTurnWindowsFromRecords(records: RecordLike[], codex: boole
 }
 
 /** Direct operator actions are preserved independently from turn windows.
-    A short agent turn can end before the operator's engagement window, and a
-    steering action can occur inside an already-open turn. Codex requires the
-    server-issued operator key inside its structured marker. Claude requires a
-    provider record id plus explicit human/typed provenance, keeping SDK, peer,
-    coordinator, and automation envelopes in the agent lane. */
+    Codex and Claude both require explicit server-authored operator provenance,
+    keeping SDK, peer, coordinator, and automation envelopes in the agent lane. */
 export function recentTurnActivityFromRecords(
   records: RecordLike[],
   codex: boolean,
-): Pick<RecentTurnWindows, "windows" | "operatorActions" | "operatorActionsAtMs" | "assistantMessagesAtMs"> {
+): Pick<RecentTurnWindows, "windows" | "operatorActionsAtMs" | "assistantMessagesAtMs"> {
   const operatorActions = new Set<number>();
-  const provenOperatorActions = new Map<string, number>();
   const assistantMessages = new Set<number>();
   for (const record of records) {
     const atMs = parseMillis(record.timestamp);
@@ -207,11 +202,7 @@ export function recentTurnActivityFromRecords(
           .map((part) => stringValue(part.text) ?? stringValue(part.input_text) ?? "")
           .join("\n");
       }
-      const operatorActionKey = text ? decodeCodexStructuredUserText(text).operatorActionKey : undefined;
-      if (operatorActionKey) {
-        operatorActions.add(atMs);
-        provenOperatorActions.set(operatorActionKey, Math.min(provenOperatorActions.get(operatorActionKey) ?? atMs, atMs));
-      }
+      if (text && decodeCodexStructuredUserText(text).origin?.kind === "operator") operatorActions.add(atMs);
       continue;
     }
     if (!isTurnStart(record, false)) continue;
@@ -220,20 +211,10 @@ export function recentTurnActivityFromRecords(
       : stringValue(recordValue(record.origin)?.kind);
     if (originKind === "human" || record.promptSource === "typed") {
       operatorActions.add(atMs);
-      const uuid = stringValue(record.uuid);
-      if (uuid) {
-        const key = `claude:${uuid}`;
-        provenOperatorActions.set(key, Math.min(provenOperatorActions.get(key) ?? atMs, atMs));
-      }
     }
   }
   return {
     windows: recentTurnWindowsFromRecords(records, codex),
-    ...(provenOperatorActions.size > 0 ? {
-      operatorActions: [...provenOperatorActions]
-        .map(([key, actionAtMs]) => ({ key, atMs: actionAtMs }))
-        .sort((left, right) => left.atMs - right.atMs || left.key.localeCompare(right.key)),
-    } : {}),
     operatorActionsAtMs: [...operatorActions].sort((left, right) => left - right),
     assistantMessagesAtMs: [...assistantMessages].sort((left, right) => left - right),
   };

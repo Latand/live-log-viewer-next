@@ -120,23 +120,6 @@ describe("lastTurnFromRecords — Claude", () => {
     expect(result.assistantMessagesAtMs).toEqual([ms("2026-07-14T10:00:02.000Z")]);
   });
 
-  test("gives a terminal-authored human record a stable transcript identity", () => {
-    const at = "2026-07-14T07:03:00.000Z";
-    const result = recentTurnActivityFromRecords([{
-      ...claudeUser(at, "typed at the terminal"),
-      uuid: "human-record-one",
-      promptSource: "typed",
-      origin: { kind: "human" },
-    }, {
-      ...claudeUser("2026-07-14T07:04:00.000Z", "coordinator relay"),
-      uuid: "relay-record-one",
-      isMeta: true,
-      origin: { kind: "coordinator" },
-    }], false);
-
-    expect(result.operatorActions).toEqual([{ key: "claude:human-record-one", atMs: ms(at) }]);
-  });
-
   test("gives a legacy terminal prompt no operator identity and excludes automated Claude lanes", () => {
     const at = "2026-07-14T07:03:00.000Z";
     const result = recentTurnActivityFromRecords([{
@@ -158,7 +141,6 @@ describe("lastTurnFromRecords — Claude", () => {
       origin: { kind: "coordinator" },
     }], false);
 
-    expect(result.operatorActions).toBeUndefined();
     expect(result.operatorActionsAtMs).toEqual([]);
   });
 
@@ -519,8 +501,7 @@ describe("lastTurnFromRecords — Claude", () => {
 describe("lastTurnFromRecords — Codex", () => {
   test("deduplicates Viewer operator input and excludes unstructured harness prompts", () => {
     const at = "2026-07-14T10:00:00.000Z";
-    const actionKey = "c".repeat(64);
-    const structured = `<!-- llv:structured-user op=${actionKey} -->\ncontinue`;
+    const structured = "<!-- llv:structured-user origin=operator -->\ncontinue";
     const result = recentTurnActivityFromRecords(
       [
         {
@@ -537,7 +518,6 @@ describe("lastTurnFromRecords — Codex", () => {
     );
 
     expect(result.operatorActionsAtMs).toEqual([ms(at)]);
-    expect(result.operatorActions).toEqual([{ key: actionKey, atMs: ms(at) }]);
   });
 
   test("tracks a visible Codex assistant message in the current turn", () => {
@@ -560,7 +540,6 @@ describe("lastTurnFromRecords — Codex", () => {
     ], true);
 
     expect(result.operatorActionsAtMs).toEqual([]);
-    expect(result.operatorActions).toBeUndefined();
   });
 
   test("enumerates completed turns followed by the final open turn", () => {

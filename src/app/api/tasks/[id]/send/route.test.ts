@@ -56,7 +56,6 @@ test("one authorized task fan-out records one durable operator gesture across re
       recorded.set(key, input);
       return { key: "a".repeat(64), engine: "claude" as const, project: task.project, atMs: 1 };
     },
-    settleOperatorCompatibility: () => {},
   };
   const request = () => new NextRequest("http://127.0.0.1/api/tasks/task-fanout-one/send", {
     method: "POST",

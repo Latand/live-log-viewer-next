@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 
 import { deliverConversationMessage, type DeliveryOutcome } from "@/lib/delivery";
@@ -12,10 +11,7 @@ import { assembleSendResults, type TaskSendTargetOutcome } from "@/lib/tasks/sen
 import { loadTasks, mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { ApiError } from "@/lib/types";
-import {
-  recordDirectOperatorWakatimeActivity,
-  settleDirectOperatorWakatimeCompatibility,
-} from "@/lib/wakatime/operatorActivity";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,7 +42,6 @@ interface TaskSendDependencies {
   deliverConversationMessage: typeof deliverConversationMessage;
   mutateTasks: typeof mutateTasks;
   recordOperatorActivity: typeof recordDirectOperatorWakatimeActivity;
-  settleOperatorCompatibility: typeof settleDirectOperatorWakatimeCompatibility;
 }
 
 const productionDependencies: TaskSendDependencies = {
@@ -55,7 +50,6 @@ const productionDependencies: TaskSendDependencies = {
   deliverConversationMessage,
   mutateTasks,
   recordOperatorActivity: recordDirectOperatorWakatimeActivity,
-  settleOperatorCompatibility: settleDirectOperatorWakatimeCompatibility,
 };
 
 async function postTaskSend(
@@ -92,22 +86,15 @@ async function postTaskSend(
   if (clientRequestId && !/^[A-Za-z0-9_-]{8,128}$/.test(clientRequestId)) {
     return NextResponse.json({ error: "clientRequestId must be 8-128 URL-safe characters" }, { status: 400 });
   }
-  let compatibilityActionKey: string | undefined;
   if (targetEntries[0] && directOperatorActivityAuthority(req).ok) {
-    const compatibilityFingerprint = crypto.createHash("sha256")
-      .update(JSON.stringify({ taskId: task.id, paths: [...paths].sort() }))
-      .digest("hex");
     try {
-      const action = dependencies.recordOperatorActivity({
-        ...(clientRequestId
-          ? { idempotencyKey: `task-send:${clientRequestId}` }
-          : { compatibilityFingerprint }),
+      dependencies.recordOperatorActivity({
+        ...(clientRequestId ? { idempotencyKey: `task-send:${clientRequestId}` } : {}),
         resolvedAttribution: {
           engine: targetEntries[0].engine === "claude" ? "claude" : "codex",
           project: task.project,
         },
       });
-      if (!clientRequestId) compatibilityActionKey = action?.key;
     } catch {
       return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
     }
@@ -143,13 +130,6 @@ async function postTaskSend(
     return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-  if (compatibilityActionKey) {
-    try {
-      dependencies.settleOperatorCompatibility(compatibilityActionKey);
-    } catch {
-      return NextResponse.json({ error: "direct operator activity could not be settled" }, { status: 503 });
-    }
-  }
   return NextResponse.json({
     ok: true,
     task: result.task,

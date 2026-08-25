@@ -1,16 +1,8 @@
 import { expect, test } from "bun:test";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import type { RegistryFile } from "@/lib/agent/registry";
 
-import {
-  acknowledgeDirectOperatorWakatimeActions,
-  readDirectOperatorWakatimeActions,
-  recordDirectOperatorWakatimeActivity,
-  settleDirectOperatorWakatimeCompatibility,
-} from "./operatorActivity";
+import { recordDirectOperatorWakatimeActivity, type DirectOperatorWakatimeAction } from "./operatorActivity";
 
 const NOW = Date.parse("2026-07-29T12:00:00.000Z");
 const ENABLED = { enabled: () => true } as const;
@@ -67,191 +59,131 @@ function registry(): RegistryFile {
   } as unknown as RegistryFile;
 }
 
-test("a direct operator action at delegation depth one is durably keyed once without raw ingress identity", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-operator-"));
-  const filename = path.join(directory, "operator-actions.json");
-  try {
-    const dependencies = { filename, now: () => NOW, registrySnapshot: registry, ...ENABLED };
-    const input = {
-      conversationId: "conversation_direct",
-      path: "/sessions/direct.jsonl",
-      idempotencyKey: "private-direct-message-id",
-    };
+test("a direct operator action enters the existing heartbeat queue with no ingress content", () => {
+  const enqueued: DirectOperatorWakatimeAction[] = [];
+  const action = recordDirectOperatorWakatimeActivity({
+    conversationId: "conversation_direct",
+    path: "/sessions/direct.jsonl",
+    idempotencyKey: "private-direct-message-id",
+  }, {
+    now: () => NOW,
+    registrySnapshot: registry,
+    enqueue: (value) => { enqueued.push(value); },
+    ...ENABLED,
+  });
 
-    const first = recordDirectOperatorWakatimeActivity(input, dependencies);
-    const replay = recordDirectOperatorWakatimeActivity(input, { ...dependencies, now: () => NOW + 30_000 });
-    const actions = readDirectOperatorWakatimeActions(filename, ENABLED.enabled);
-
-    expect(replay).toEqual(first);
-    expect(actions).toEqual([{
-      key: expect.stringMatching(/^[a-f0-9]{64}$/),
-      engine: "codex",
-      project: "project-fixture",
-      atMs: NOW,
-    }]);
-    const persisted = fs.readFileSync(filename, "utf8");
-    expect(persisted).not.toContain("private-direct-message-id");
-    expect(persisted).not.toContain("/sessions/direct.jsonl");
-    expect(fs.statSync(filename).mode & 0o777).toBe(0o600);
-
-    acknowledgeDirectOperatorWakatimeActions([first!.key], filename, ENABLED.enabled);
-    expect(readDirectOperatorWakatimeActions(filename, ENABLED.enabled)).toEqual([]);
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
+  expect(enqueued).toEqual([{
+    key: expect.stringMatching(/^[a-f0-9]{64}$/),
+    engine: "codex",
+    project: "project-fixture",
+    atMs: NOW,
+  }]);
+  expect(action).toEqual(enqueued[0]);
+  expect(JSON.stringify(enqueued)).not.toContain("private-direct-message-id");
+  expect(JSON.stringify(enqueued)).not.toContain("/sessions/direct.jsonl");
 });
 
-test("an id-less retry reuses a privacy-safe fingerprint briefly while a later identical gesture stays distinct", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-operator-"));
-  const filename = path.join(directory, "operator-actions.json");
-  const fingerprint = "f".repeat(64);
-  try {
-    const input = {
-      conversationId: "conversation_direct",
-      compatibilityFingerprint: fingerprint,
-    };
-    const first = recordDirectOperatorWakatimeActivity(input, {
-      filename,
-      ...ENABLED,
-      now: () => NOW,
-      registrySnapshot: registry,
-    });
-    const retry = recordDirectOperatorWakatimeActivity(input, {
-      filename,
-      ...ENABLED,
-      now: () => NOW + 1_000,
-      registrySnapshot: registry,
-    });
-    settleDirectOperatorWakatimeCompatibility(first!.key, filename, ENABLED.enabled);
-    const laterGesture = recordDirectOperatorWakatimeActivity(input, {
-      filename,
-      ...ENABLED,
-      now: () => NOW + 1_001,
-      registrySnapshot: registry,
-    });
+test("a stable ingress identity keeps one queue identity across retries", () => {
+  const enqueued: Array<{ key: string; atMs: number }> = [];
+  const record = (atMs: number) => recordDirectOperatorWakatimeActivity({
+    conversationId: "conversation_direct",
+    idempotencyKey: "stable-request-id",
+  }, {
+    now: () => atMs,
+    registrySnapshot: registry,
+    enqueue: (value) => { enqueued.push(value); },
+    ...ENABLED,
+  });
 
-    expect(retry!.key).toBe(first!.key);
-    expect(laterGesture!.key).not.toBe(first!.key);
-    expect(readDirectOperatorWakatimeActions(filename, ENABLED.enabled)).toHaveLength(2);
-    const persisted = fs.readFileSync(filename, "utf8");
-    expect(persisted).toContain(fingerprint);
-    expect(persisted).not.toContain("conversation_direct");
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
+  record(NOW);
+  record(NOW + 30_000);
+
+  expect(enqueued[0]!.key).toBe(enqueued[1]!.key);
 });
 
-test("a failed id-less delivery retains its retry identity until the retry succeeds", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-operator-"));
-  const filename = path.join(directory, "operator-actions.json");
-  const input = { conversationId: "conversation_direct", compatibilityFingerprint: "d".repeat(64) };
-  try {
-    const first = recordDirectOperatorWakatimeActivity(input, { filename, ...ENABLED, now: () => NOW, registrySnapshot: registry });
-    const failedRetry = recordDirectOperatorWakatimeActivity(input, {
-      filename,
-      ...ENABLED,
-      now: () => NOW + 2_000,
-      registrySnapshot: registry,
-    });
-    expect(failedRetry!.key).toBe(first!.key);
+test("each legacy id-less request gets one opaque heartbeat identity even in the same millisecond", () => {
+  const enqueued: Array<{ key: string }> = [];
+  const record = (atMs: number) => recordDirectOperatorWakatimeActivity({
+    conversationId: "conversation_direct",
+  }, {
+    now: () => atMs,
+    registrySnapshot: registry,
+    enqueue: (value) => { enqueued.push(value); },
+    ...ENABLED,
+  });
 
-    settleDirectOperatorWakatimeCompatibility(failedRetry!.key, filename, ENABLED.enabled);
-    const nextGesture = recordDirectOperatorWakatimeActivity(input, {
-      filename,
-      ...ENABLED,
-      now: () => NOW + 2_001,
-      registrySnapshot: registry,
-    });
-    expect(nextGesture!.key).not.toBe(first!.key);
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
+  record(NOW);
+  record(NOW);
+
+  expect(enqueued).toHaveLength(2);
+  expect(enqueued[0]!.key).not.toBe(enqueued[1]!.key);
 });
 
 test("conflicting canonical path and conversation evidence is rejected", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-operator-"));
-  try {
-    expect(() => recordDirectOperatorWakatimeActivity({
-      conversationId: "conversation_direct",
-      path: "/sessions/unrelated.jsonl",
-      idempotencyKey: "conflicting-target",
-    }, {
-      filename: path.join(directory, "operator-actions.json"),
-      ...ENABLED,
-      now: () => NOW,
-      registrySnapshot: registry,
-    })).toThrow("conflicting target evidence");
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
+  expect(() => recordDirectOperatorWakatimeActivity({
+    conversationId: "conversation_direct",
+    path: "/sessions/unrelated.jsonl",
+    idempotencyKey: "conflicting-target",
+  }, {
+    ...ENABLED,
+    now: () => NOW,
+    registrySnapshot: registry,
+    enqueue: () => undefined,
+  })).toThrow("conflicting target evidence");
 });
 
 test("disabled direct recording is a zero-state pass-through", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-disabled-"));
-  const filename = path.join(directory, "operator-actions.json");
   let registryReads = 0;
-  try {
-    const action = recordDirectOperatorWakatimeActivity({
-      conversationId: "conversation_direct",
-      idempotencyKey: "disabled-gesture",
-    }, {
-      filename,
-      enabled: () => false,
-      registrySnapshot: () => {
-        registryReads += 1;
-        throw new Error("disabled recording touched the registry");
-      },
-    });
+  let enqueues = 0;
+  const action = recordDirectOperatorWakatimeActivity({
+    conversationId: "conversation_direct",
+    idempotencyKey: "disabled-gesture",
+  }, {
+    enabled: () => false,
+    registrySnapshot: () => {
+      registryReads += 1;
+      throw new Error("disabled recording touched the registry");
+    },
+    enqueue: () => { enqueues += 1; },
+  });
 
-    expect(action).toBeNull();
-    expect(registryReads).toBe(0);
-    expect(fs.existsSync(filename)).toBe(false);
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
+  expect(action).toBeNull();
+  expect(registryReads).toBe(0);
+  expect(enqueues).toBe(0);
 });
 
-test("enabled direct recording accepts server-resolved spawn attribution", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-resolved-"));
-  const filename = path.join(directory, "operator-actions.json");
-  try {
-    const action = recordDirectOperatorWakatimeActivity({
-      idempotencyKey: "spawn-attempt-one",
-      resolvedAttribution: { engine: "claude", project: "project-fixture" },
-    }, {
-      filename,
-      enabled: () => true,
-      now: () => NOW,
-      registrySnapshot: () => { throw new Error("resolved attribution should avoid registry access"); },
-    });
+test("server-resolved spawn attribution avoids registry lookup", () => {
+  const enqueued: unknown[] = [];
+  const action = recordDirectOperatorWakatimeActivity({
+    idempotencyKey: "spawn-attempt-one",
+    resolvedAttribution: { engine: "claude", project: "project-fixture" },
+  }, {
+    enabled: () => true,
+    now: () => NOW,
+    registrySnapshot: () => { throw new Error("resolved attribution should avoid registry access"); },
+    enqueue: (value) => { enqueued.push(value); },
+  });
 
-    expect(action).toMatchObject({ engine: "claude", project: "project-fixture", atMs: NOW });
-    expect(readDirectOperatorWakatimeActions(filename, () => true)).toEqual([action!]);
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
+  expect(action).toMatchObject({ engine: "claude", project: "project-fixture", atMs: NOW });
+  expect(enqueued).toEqual([action!]);
 });
 
-test("missing project attribution is rejected before operator state is created", () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-unresolved-"));
-  const filename = path.join(directory, "operator-actions.json");
+test("missing project attribution is rejected before a heartbeat is queued", () => {
   const snapshot = registry();
   const conversation = snapshot.conversations.conversation_direct!;
   conversation.projectOwnership = null;
   conversation.generations[0]!.launchProfile.cwd = "";
   conversation.generations[0]!.launchProfile.project = null;
-  try {
-    expect(() => recordDirectOperatorWakatimeActivity({
-      conversationId: "conversation_direct",
-      idempotencyKey: "unresolved-project-gesture",
-    }, {
-      filename,
-      enabled: () => true,
-      now: () => NOW,
-      registrySnapshot: () => snapshot,
-    })).toThrow("direct operator activity project is unavailable");
-    expect(fs.existsSync(filename)).toBe(false);
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
+  let enqueues = 0;
+
+  expect(() => recordDirectOperatorWakatimeActivity({
+    conversationId: "conversation_direct",
+    idempotencyKey: "unresolved-project-gesture",
+  }, {
+    enabled: () => true,
+    now: () => NOW,
+    registrySnapshot: () => snapshot,
+    enqueue: () => { enqueues += 1; },
+  })).toThrow("direct operator activity project is unavailable");
+  expect(enqueues).toBe(0);
 });

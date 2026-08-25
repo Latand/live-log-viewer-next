@@ -244,8 +244,6 @@ export interface RuntimeSendCommand extends RuntimeCommandBase {
       carried on the durable send effect so delivery evidence (ledger record,
       structured-user marker) can say operator vs inter-agent. */
   origin?: MessageOrigin;
-  /** Server-issued hash identifying one authorized operator gesture. */
-  operatorActionKey?: string;
 }
 
 /**

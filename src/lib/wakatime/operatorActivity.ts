@@ -1,43 +1,26 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 
 import {
   agentRegistry,
   readOnlyConversationLookupFromSnapshot,
   type RegistryFile,
 } from "@/lib/agent/registry";
-import { statePath } from "@/lib/configDir";
 import { UNRESOLVED_PROJECT } from "@/lib/projects/identity";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
-import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 import type { FileEntry } from "@/lib/types";
+
 import { wakatimeIntegrationEnabled } from "./activation";
+import {
+  enqueueProductionOperatorHeartbeat,
+  type DirectOperatorWakatimeHeartbeat,
+} from "./sync";
 
-const FILE_VERSION = 1;
-const BUSY_MESSAGE = "WakaTime operator activity is busy";
-const COMPATIBILITY_RETRY_WINDOW_MS = 5_000;
-
-export interface DirectOperatorWakatimeAction {
-  key: string;
-  engine: "claude" | "codex";
-  project: string;
-  atMs: number;
-  compatibilityFingerprint?: string;
-}
-
-interface DirectOperatorActionFile {
-  version: 1;
-  actions: Record<string, DirectOperatorWakatimeAction>;
-}
+export type DirectOperatorWakatimeAction = DirectOperatorWakatimeHeartbeat;
 
 export interface DirectOperatorWakatimeInput {
   conversationId?: string;
   path?: string;
   idempotencyKey?: string;
-  /** Hash-only compatibility identity for old clients that supplied no
-      message id. Reused solely inside a short retry window. */
-  compatibilityFingerprint?: string;
   /** Attribution resolved at a trusted server ingress before a conversation
       exists, such as a new-agent spawn or task fan-out. */
   resolvedAttribution?: { engine: "claude" | "codex"; project: string };
@@ -45,92 +28,14 @@ export interface DirectOperatorWakatimeInput {
 }
 
 interface DirectOperatorWakatimeDependencies {
-  filename: string;
   enabled(): boolean;
   now(): number;
   registrySnapshot(): RegistryFile;
+  enqueue(action: DirectOperatorWakatimeHeartbeat): void;
 }
 
 function digest(...parts: string[]): string {
   return crypto.createHash("sha256").update(parts.join("\0")).digest("hex");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseAction(value: unknown, key: string): DirectOperatorWakatimeAction | null {
-  if (!isRecord(value)
-    || value.key !== key
-    || !/^[a-f0-9]{64}$/.test(key)
-    || (value.engine !== "claude" && value.engine !== "codex")
-    || typeof value.project !== "string" || !value.project.trim() || value.project.trim() === UNRESOLVED_PROJECT
-    || typeof value.atMs !== "number" || !Number.isSafeInteger(value.atMs) || value.atMs <= 0
-    || (value.compatibilityFingerprint !== undefined
-      && (typeof value.compatibilityFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(value.compatibilityFingerprint)))) return null;
-  return {
-    key,
-    engine: value.engine,
-    project: value.project.trim(),
-    atMs: value.atMs,
-    ...(typeof value.compatibilityFingerprint === "string"
-      ? { compatibilityFingerprint: value.compatibilityFingerprint }
-      : {}),
-  };
-}
-
-function readActionFile(filename: string): DirectOperatorActionFile {
-  let value: unknown;
-  try {
-    value = JSON.parse(fs.readFileSync(filename, "utf8")) as unknown;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: FILE_VERSION, actions: {} };
-    throw error;
-  }
-  if (!isRecord(value) || value.version !== FILE_VERSION || !isRecord(value.actions)) {
-    throw new Error("WakaTime operator activity state is invalid");
-  }
-  const actions: Record<string, DirectOperatorWakatimeAction> = {};
-  for (const [key, candidate] of Object.entries(value.actions)) {
-    const action = parseAction(candidate, key);
-    if (!action) throw new Error("WakaTime operator activity state is invalid");
-    actions[key] = action;
-  }
-  return { version: FILE_VERSION, actions };
-}
-
-function writeActionFile(filename: string, value: DirectOperatorActionFile): void {
-  fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
-  const temporary = path.join(
-    path.dirname(filename),
-    `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`,
-  );
-  let descriptor: number | null = null;
-  try {
-    descriptor = fs.openSync(temporary, "wx", 0o600);
-    fs.writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-    fs.fsyncSync(descriptor);
-    fs.closeSync(descriptor);
-    descriptor = null;
-    fs.renameSync(temporary, filename);
-    fs.chmodSync(filename, 0o600);
-  } finally {
-    if (descriptor !== null) fs.closeSync(descriptor);
-    fs.rmSync(temporary, { force: true });
-  }
-}
-
-export function directOperatorWakatimeActionFile(): string {
-  return statePath("wakatime-operator-actions.json");
-}
-
-export function readDirectOperatorWakatimeActions(
-  filename: string = directOperatorWakatimeActionFile(),
-  enabled: () => boolean = wakatimeIntegrationEnabled,
-): DirectOperatorWakatimeAction[] {
-  if (!enabled()) return [];
-  return Object.values(readActionFile(filename).actions)
-    .sort((left, right) => left.atMs - right.atMs || left.key.localeCompare(right.key));
 }
 
 export function recordDirectOperatorWakatimeActivity(
@@ -138,17 +43,13 @@ export function recordDirectOperatorWakatimeActivity(
   overrides: Partial<DirectOperatorWakatimeDependencies> = {},
 ): DirectOperatorWakatimeAction | null {
   const dependencies: DirectOperatorWakatimeDependencies = {
-    filename: overrides.filename ?? directOperatorWakatimeActionFile(),
     enabled: overrides.enabled ?? wakatimeIntegrationEnabled,
     now: overrides.now ?? Date.now,
     registrySnapshot: overrides.registrySnapshot ?? (() => agentRegistry().readOnlySnapshot()),
+    enqueue: overrides.enqueue ?? enqueueProductionOperatorHeartbeat,
   };
   if (!dependencies.enabled()) return null;
   const idempotencyKey = input.idempotencyKey?.trim() ?? "";
-  const compatibilityFingerprint = input.compatibilityFingerprint?.trim() ?? "";
-  if (!idempotencyKey && !/^[a-f0-9]{64}$/.test(compatibilityFingerprint)) {
-    throw new Error("direct operator activity requires an idempotency key or compatibility fingerprint");
-  }
 
   const resolvedAttribution = input.resolvedAttribution;
   if (resolvedAttribution
@@ -192,78 +93,12 @@ export function recordDirectOperatorWakatimeActivity(
   if (!project || project === UNRESOLVED_PROJECT) {
     throw new Error("direct operator activity project is unavailable");
   }
-  /* The authorized ingress supplies this identity once per gesture and reuses
-     it for retry, resume, and fan-out. Keeping the target out of the digest makes those
-     delivery shapes one operator action even when they address several
-     conversations or a successor generation. */
   const atMs = dependencies.now();
   if (!Number.isSafeInteger(atMs) || atMs <= 0) throw new Error("direct operator activity time is invalid");
-
-  return withFileTransactionSync(dependencies.filename, BUSY_MESSAGE, () => {
-    const state = readActionFile(dependencies.filename);
-    if (!idempotencyKey) {
-      const retry = Object.values(state.actions)
-        .filter((candidate) => candidate.compatibilityFingerprint === compatibilityFingerprint
-          && candidate.engine === engine
-          && candidate.project === project
-          && atMs >= candidate.atMs
-          && atMs - candidate.atMs < COMPATIBILITY_RETRY_WINDOW_MS)
-        .sort((left, right) => right.atMs - left.atMs)[0];
-      if (retry) return retry;
-    }
-    const key = idempotencyKey
-      ? digest("llv-wakatime-direct-operator-v1", idempotencyKey)
-      : digest("llv-wakatime-direct-operator-compat-v1", compatibilityFingerprint, String(atMs));
-    const existing = state.actions[key];
-    if (existing) return existing;
-    const action: DirectOperatorWakatimeAction = {
-      key,
-      engine,
-      project,
-      atMs,
-      ...(!idempotencyKey ? { compatibilityFingerprint } : {}),
-    };
-    state.actions[key] = action;
-    writeActionFile(dependencies.filename, state);
-    return action;
-  });
-}
-
-export function acknowledgeDirectOperatorWakatimeActions(
-  keys: readonly string[],
-  filename: string = directOperatorWakatimeActionFile(),
-  enabled: () => boolean = wakatimeIntegrationEnabled,
-): void {
-  if (!enabled()) return;
-  if (keys.length === 0) return;
-  const acknowledged = new Set(keys);
-  withFileTransactionSync(filename, BUSY_MESSAGE, () => {
-    const state = readActionFile(filename);
-    const retained = Object.fromEntries(
-      Object.entries(state.actions).filter(([key]) => !acknowledged.has(key)),
-    );
-    if (Object.keys(retained).length === Object.keys(state.actions).length) return;
-    writeActionFile(filename, { version: FILE_VERSION, actions: retained });
-  });
-}
-
-/** Successful legacy delivery consumes its retry fingerprint. The action
-    remains queued for WakaTime, while a later identical gesture receives a
-    fresh identity immediately. Failed or interrupted deliveries leave the
-    fingerprint in place for one compatibility retry. */
-export function settleDirectOperatorWakatimeCompatibility(
-  key: string,
-  filename: string = directOperatorWakatimeActionFile(),
-  enabled: () => boolean = wakatimeIntegrationEnabled,
-): void {
-  if (!enabled()) return;
-  withFileTransactionSync(filename, BUSY_MESSAGE, () => {
-    const state = readActionFile(filename);
-    const action = state.actions[key];
-    if (!action?.compatibilityFingerprint) return;
-    const settled = { ...action };
-    delete settled.compatibilityFingerprint;
-    state.actions[key] = settled;
-    writeActionFile(filename, state);
-  });
+  const key = idempotencyKey
+    ? digest("llv-wakatime-direct-operator-v1", idempotencyKey)
+    : crypto.randomBytes(32).toString("hex");
+  const action: DirectOperatorWakatimeAction = { key, engine, project, atMs };
+  dependencies.enqueue(action);
+  return action;
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { agentRegistry, conversationLookupFromSnapshot, type RegistryFile } from "@/lib/agent/registry";
 import { configFilePath, statePath } from "@/lib/configDir";
+import { UNRESOLVED_PROJECT } from "@/lib/projects/identity";
 import {
   currentFileScan,
   persistedFileScanSnapshot,
@@ -11,23 +12,17 @@ import {
 } from "@/lib/scanner/scanCache";
 import { recentTurnWindowsFor, type RecentTurnWindows } from "@/lib/scanner/turnDuration";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
+import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 import type { FileEntry, TurnBoundary } from "@/lib/types";
 
 import { acquireWakatimeSchedulerLease, type WakatimeSchedulerLease } from "./lease";
 import { wakatimeIntegrationEnabled } from "./activation";
-import {
-  acknowledgeDirectOperatorWakatimeActions,
-  readDirectOperatorWakatimeActions,
-  type DirectOperatorWakatimeAction,
-} from "./operatorActivity";
 
 const ENDPOINT = "https://api.wakatime.com/api/v1/users/current/heartbeats.bulk";
 const SAMPLE_INTERVAL_MS = 120_000;
 const TICK_INTERVAL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const MAX_BATCH = 25;
-const MAX_OPERATOR_ACTIONS_PER_TICK = 256;
-const OPERATOR_ENGAGEMENT_MS = 10 * 60_000;
 const DEFAULT_MAX_PENDING = 10_000;
 const DEFAULT_MAX_STREAMS = 5_000;
 const CLOSED_STREAM_RETENTION_MS = 30 * 24 * 60 * 60_000;
@@ -94,6 +89,13 @@ export interface WakatimeCredential {
   sourceStamp: string;
 }
 
+export interface DirectOperatorWakatimeHeartbeat {
+  key: string;
+  engine: "claude" | "codex";
+  project: string;
+  atMs: number;
+}
+
 interface TimerHandle {
   unref?(): unknown;
 }
@@ -108,11 +110,9 @@ export interface WakatimeSyncDependencies {
   scan(): Promise<{ files: FileEntry[]; complete: boolean }>;
   registrySnapshot(): RegistryFile;
   recentTurnWindows(entry: FileEntry): RecentTurnWindows;
-  readOperatorActions?(): Promise<DirectOperatorWakatimeAction[]> | DirectOperatorWakatimeAction[];
-  acknowledgeOperatorActions?(keys: readonly string[]): Promise<void> | void;
   readCredential(): Promise<WakatimeCredential | null> | WakatimeCredential | null;
   readState(): Promise<unknown | null> | unknown | null;
-  writeState(state: WakatimeStateV1): Promise<void> | void;
+  writeState(state: WakatimeStateV1): Promise<WakatimeStateV1 | void> | WakatimeStateV1 | void;
   fetch(url: string, init: RequestInit): Promise<WakatimeResponse>;
   now(): number;
   random(): number;
@@ -371,6 +371,43 @@ function addWindow(
   if (closesObservedInterval) stream.boundaryFinalizedAtMs = end;
 }
 
+function addDirectOperatorHeartbeat(
+  state: WakatimeStateV1,
+  action: DirectOperatorWakatimeHeartbeat,
+  now: number,
+  existingKeys: Set<string>,
+): void {
+  if (state.streams[action.key] || state.retiredStreams?.[action.key]) return;
+  const entity = `agent-log-viewer/operator/${action.engine}/${action.key.slice(0, 16)}`;
+  state.streams[action.key] = {
+    entity,
+    engine: action.engine,
+    project: action.project,
+    startedAtMs: action.atMs,
+    endedAtMs: action.atMs + 1,
+    lastMaterializedAtMs: action.atMs + 1,
+    lastObservedAtMs: action.atMs,
+    boundaryFinalizedAtMs: action.atMs + 1,
+  };
+  const key = eventKey(action.key, action.atMs);
+  if (existingKeys.has(key)) return;
+  state.pending.push({
+    key,
+    stream: action.key,
+    kind: "activity",
+    createdAtMs: now,
+    heartbeat: {
+      entity,
+      type: "app",
+      project: action.project,
+      category: "ai coding",
+      time: action.atMs / 1_000,
+      ai_session: action.key,
+    },
+  });
+  existingKeys.add(key);
+}
+
 function openTurnIsActive(entry: FileEntry): boolean {
   return entry.proc === "running"
     && entry.pid !== null
@@ -554,7 +591,8 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
 
   const persist = async (current: WakatimeStateV1): Promise<boolean> => {
     try {
-      await deps.writeState(structuredClone(current));
+      const written = await deps.writeState(structuredClone(current));
+      if (written) Object.assign(current, structuredClone(written));
       return true;
     } catch {
       report("state_write_failed");
@@ -562,7 +600,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
     }
   };
 
-  const observe = async (current: WakatimeStateV1): Promise<string[]> => {
+  const observe = async (current: WakatimeStateV1): Promise<void> => {
     const now = deps.now();
     const existingKeys = new Set(current.pending.map((event) => event.key));
     const observations: Array<{
@@ -574,46 +612,6 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       respectEnabledAt: boolean;
       allowExpired: boolean;
     }> = [];
-    let operatorActions: DirectOperatorWakatimeAction[] = [];
-    try {
-      operatorActions = await deps.readOperatorActions?.() ?? [];
-    } catch {
-      report("operator_activity_read_failed");
-    }
-    if (operatorActions.length > MAX_OPERATOR_ACTIONS_PER_TICK) {
-      report("operator_activity_backlog", {
-        total: operatorActions.length,
-        processing: MAX_OPERATOR_ACTIONS_PER_TICK,
-      });
-      operatorActions = operatorActions.slice(0, MAX_OPERATOR_ACTIONS_PER_TICK);
-    }
-    const directOperatorKeys = new Set(operatorActions.map((action) => action.key));
-    const acknowledgeable: string[] = [];
-    let staleOperatorActions = 0;
-    for (const action of operatorActions) {
-      const existing = current.streams[action.key];
-      if ((existing && existing.startedAtMs !== action.atMs) || current.retiredStreams?.[action.key]) {
-        acknowledgeable.push(action.key);
-        continue;
-      }
-      const engagementEndMs = action.atMs + OPERATOR_ENGAGEMENT_MS;
-      const engagementActive = engagementEndMs > now;
-      if (engagementEndMs < now - CLOSED_STREAM_RETENTION_MS) staleOperatorActions += 1;
-      observations.push({
-        source: { engine: action.engine, lastActivityAtMs: action.atMs },
-        streamKey: action.key,
-        project: action.project,
-        window: { startedAt: action.atMs, endedAt: engagementActive ? null : engagementEndMs },
-        openWindowActive: engagementActive,
-        respectEnabledAt: false,
-        allowExpired: true,
-      });
-      if (!engagementActive) acknowledgeable.push(action.key);
-    }
-    if (staleOperatorActions > 0) {
-      report("operator_activity_stale_materialized", { count: staleOperatorActions });
-    }
-
     let scan: { files: FileEntry[]; complete: boolean } = { files: [], complete: false };
     try {
       scan = await deps.scan();
@@ -645,24 +643,6 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
             fallbackProject: entry.project,
           }).project;
           if (!project) continue;
-          for (const action of recent.operatorActions ?? []) {
-            const sourceKey = action.key;
-            const streamKey = /^[a-f0-9]{64}$/.test(sourceKey)
-              ? sourceKey
-              : digest("llv-wakatime-transcript-operator-v1", conversation.id, sourceKey);
-            if (directOperatorKeys.has(streamKey)) continue;
-            const engagementEndMs = action.atMs + OPERATOR_ENGAGEMENT_MS;
-            const engagementActive = engagementEndMs > now;
-            observations.push({
-              source: { engine: entry.engine, lastActivityAtMs: action.atMs },
-              streamKey,
-              project,
-              window: { startedAt: action.atMs, endedAt: engagementActive ? null : engagementEndMs },
-              openWindowActive: engagementActive,
-              respectEnabledAt: true,
-              allowExpired: false,
-            });
-          }
           const openWindowActive = openTurnIsActive(entry);
           for (const window of recent.windows) {
             observations.push({
@@ -744,7 +724,6 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
         observation.allowExpired,
       );
     }
-    return acknowledgeable;
   };
 
   const setRetry = (
@@ -890,9 +869,8 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
 
   const run = async (): Promise<void> => {
     const current = await load();
-    let acknowledgeableOperatorActions: string[];
     try {
-      acknowledgeableOperatorActions = await observe(current);
+      await observe(current);
     } catch {
       report("observation_failed");
       return;
@@ -908,18 +886,6 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       });
     }
     if (!await persist(current)) return;
-    const settledOperatorActions = acknowledgeableOperatorActions.filter((key) => {
-      const stream = current.streams[key];
-      return Boolean(current.retiredStreams?.[key])
-        || (stream !== undefined && stream.endedAtMs !== null && stream.lastMaterializedAtMs >= stream.endedAtMs);
-    });
-    if (settledOperatorActions.length > 0) {
-      try {
-        await deps.acknowledgeOperatorActions?.(settledOperatorActions);
-      } catch {
-        report("operator_activity_ack_failed");
-      }
-    }
     try {
       await deliver(current);
     } catch {
@@ -1011,17 +977,16 @@ export function readProductionWakatimeCredential(
   return readWakatimeCredentialFile(filename);
 }
 
-function readProductionState(): unknown | null {
+function readProductionState(filename: string = statePath("wakatime-state.json")): unknown | null {
   try {
-    return JSON.parse(fs.readFileSync(statePath("wakatime-state.json"), "utf8")) as unknown;
+    return JSON.parse(fs.readFileSync(filename, "utf8")) as unknown;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
 }
 
-function writeProductionState(state: WakatimeStateV1): void {
-  const filename = statePath("wakatime-state.json");
+function writeStateFile(filename: string, state: WakatimeStateV1): void {
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temporary = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
@@ -1030,6 +995,55 @@ function writeProductionState(state: WakatimeStateV1): void {
   } finally {
     try { fs.unlinkSync(temporary); } catch { /* rename or cleanup already completed */ }
   }
+}
+
+function operatorStream(stream: WakatimeStateV1["streams"][string]): boolean {
+  return stream.entity.startsWith("agent-log-viewer/operator/");
+}
+
+export function writeProductionWakatimeState(
+  state: WakatimeStateV1,
+  filename: string = statePath("wakatime-state.json"),
+): WakatimeStateV1 {
+  return withFileTransactionSync(filename, "WakaTime state is busy", () => {
+    const concurrent = stateFrom(readProductionState(filename));
+    if (concurrent) {
+      const pendingKeys = new Set(state.pending.map((event) => event.key));
+      for (const [key, stream] of Object.entries(concurrent.streams)) {
+        if (!operatorStream(stream) || state.streams[key]) continue;
+        state.streams[key] = stream;
+        for (const event of concurrent.pending) {
+          if (event.stream === key && !pendingKeys.has(event.key)) {
+            state.pending.push(event);
+            pendingKeys.add(event.key);
+          }
+        }
+      }
+    }
+    writeStateFile(filename, state);
+    return state;
+  });
+}
+
+export function enqueueProductionOperatorHeartbeat(
+  action: DirectOperatorWakatimeHeartbeat,
+  filename: string = statePath("wakatime-state.json"),
+  enabled: () => boolean = wakatimeIntegrationEnabled,
+): void {
+  if (!enabled()) return;
+  if (!/^[a-f0-9]{64}$/.test(action.key)
+    || (action.engine !== "claude" && action.engine !== "codex")
+    || !action.project.trim()
+    || action.project.trim() === UNRESOLVED_PROJECT
+    || !Number.isSafeInteger(action.atMs)
+    || action.atMs <= 0) {
+    throw new Error("direct operator heartbeat is invalid");
+  }
+  withFileTransactionSync(filename, "WakaTime state is busy", () => {
+    const current = stateFrom(readProductionState(filename)) ?? freshState(action.atMs);
+    addDirectOperatorHeartbeat(current, { ...action, project: action.project.trim() }, action.atMs, new Set(current.pending.map((event) => event.key)));
+    writeStateFile(filename, current);
+  });
 }
 
 const singleton = globalThis as typeof globalThis & { __llvWakatimeSync?: WakatimeSync };
@@ -1056,11 +1070,9 @@ function productionDependencies(): WakatimeSyncDependencies {
     scan: () => wakatimeProductionScan(),
     registrySnapshot: () => agentRegistry().readOnlySnapshot(),
     recentTurnWindows: recentTurnWindowsFor,
-    readOperatorActions: readDirectOperatorWakatimeActions,
-    acknowledgeOperatorActions: acknowledgeDirectOperatorWakatimeActions,
     readCredential: readProductionWakatimeCredential,
     readState: readProductionState,
-    writeState: writeProductionState,
+    writeState: writeProductionWakatimeState,
     fetch: (url, init) => fetch(url, init),
     now: Date.now,
     random: Math.random,

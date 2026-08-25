@@ -278,43 +278,6 @@ test("a runtime settings snapshot on the durable effect rides the queue entry to
   expect(entries[1]!.runtime).toBeUndefined();
 });
 
-test("a server-issued operator key survives the durable effect while malformed claims are dropped", async () => {
-  const entries: QueueEntry[] = [];
-  const operatorActionKey = "e".repeat(64);
-  const queue = new StructuredDeliveryQueue({
-    effects: async () => [{
-      id: "effect:operator",
-      kind: "runtime.send",
-      eventSeq: 1,
-      payload: {
-        operationId: "operator",
-        conversationId: "conversation-one",
-        text: "direct input",
-        operatorActionKey,
-      },
-    }, {
-      id: "effect:agent",
-      kind: "runtime.send",
-      eventSeq: 2,
-      payload: {
-        operationId: "agent",
-        conversationId: "conversation-one",
-        text: "agent input",
-        operatorActionKey: "forged",
-      },
-    }],
-    transition: async () => {},
-  }, () => host(async (entry) => {
-    entries.push(entry);
-    return { outcome: "turn-started", turnId: `turn-${entry.id}` };
-  }));
-
-  await queue.drain();
-
-  expect(entries[0]?.operatorActionKey).toBe(operatorActionKey);
-  expect(entries[1]?.operatorActionKey).toBeUndefined();
-});
-
 test("unrelated outbox effects cannot starve structured message delivery", async () => {
   const allEffects = [
     ...Array.from({ length: 100 }, (_, index) => ({

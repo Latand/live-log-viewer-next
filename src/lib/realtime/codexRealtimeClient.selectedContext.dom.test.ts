@@ -158,60 +158,24 @@ test("a finished utterance reports the selected card against the call's own cred
   });
 });
 
-test("arbitrary transient operator-event failures retain one hash-only identity until acknowledgement", async () => {
-  let operatorAttempts = 0;
+test("a failed operator-event submission is attempted once without browser persistence", async () => {
   globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
     const request = JSON.parse(String(init?.body)) as ControlRequest;
     requests.push(request);
-    if (request.action === "operatorActivity" && operatorAttempts++ < 4) throw new Error("offline");
+    if (request.action === "operatorActivity") throw new Error("offline");
     return { ok: true, status: 200, json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" }) } as unknown as Response;
   }) as typeof fetch;
-  const peer = await liveCall("conversation_voice_retry");
+  const peer = await liveCall("conversation_voice_single_attempt");
 
-  finished(peer, "user", "retry my event");
-  for (let index = 0; index < 4; index += 1) {
-    for (let microtask = 0; microtask < 4; microtask += 1) await Promise.resolve();
-    peer.channel.onopen?.();
-  }
+  finished(peer, "user", "record one event");
   for (let microtask = 0; microtask < 4; microtask += 1) await Promise.resolve();
 
   const published = requests.filter((request) => request.action === "operatorActivity");
-  expect(published).toHaveLength(5);
-  expect(new Set(published.map((request) => request.operatorEventId)).size).toBe(1);
-  expect(dom.localStorage.length).toBe(0);
-
-  peer.channel.onopen?.();
-  await Promise.resolve();
-  expect(requests.filter((request) => request.action === "operatorActivity")).toHaveLength(5);
-});
-
-test("call teardown keeps an unacknowledged hash identity for the next live peer without storing speech", async () => {
-  let failActivity = true;
-  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
-    const request = JSON.parse(String(init?.body)) as ControlRequest;
-    requests.push(request);
-    if (request.action === "operatorActivity" && failActivity) throw new Error("offline");
-    return { ok: true, status: 200, json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" }) } as unknown as Response;
-  }) as typeof fetch;
-  const conversationId = "conversation_voice_teardown";
-  const client = codexRealtimeClient(conversationId);
-  const peer = await liveCall(conversationId);
-  finished(peer, "user", "private spoken fixture");
-  for (let index = 0; index < 4; index += 1) await Promise.resolve();
-
-  await client.stop();
-  const stored = Array.from({ length: dom.localStorage.length }, (_, index) => dom.localStorage.getItem(dom.localStorage.key(index)!)).join("\n");
-  expect(stored).toMatch(/^[\[\]",a-f0-9]+$/);
-  expect(stored).not.toContain("private spoken fixture");
-
-  failActivity = false;
-  const restartedPeer = await liveCall(conversationId);
-  restartedPeer.channel.onopen?.();
-  for (let index = 0; index < 4; index += 1) await Promise.resolve();
+  expect(published).toHaveLength(1);
   expect(dom.localStorage.length).toBe(0);
 });
 
-test("a live call still reports operator activity when browser storage rejects writes", async () => {
+test("a live call reports operator activity without browser storage", async () => {
   const peer = await liveCall("conversation_voice_storage_restricted");
   const originalSetItem = dom.localStorage.setItem.bind(dom.localStorage);
   dom.localStorage.setItem = () => {
