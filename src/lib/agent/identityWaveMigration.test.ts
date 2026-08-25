@@ -264,6 +264,7 @@ test("the identity wave retitles, rekeys, stamps roots, supports dry-run, and co
       completedAt: NOW,
       retitled: 2,
       rekeyed: 2,
+      quarantinedRekeys: 0,
       edgesStamped: 2,
     });
 
@@ -794,6 +795,59 @@ test("a shared-path ownership collision is quarantined and counted, and the wave
   }
 });
 
+test("a quarantined shared-path collision keeps legacy title evidence and counters in JSON and SQLite", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-collision-parity-"));
+  try {
+    const filename = path.join(directory, "agent-registry.json");
+    const legacyPath = path.join(directory, "legacy.jsonl");
+    const occupiedSharedPath = path.join(directory, "shared.jsonl");
+    fs.writeFileSync(legacyPath, `${JSON.stringify({ type: "ai-title", aiTitle: "Repair the legacy conversation" })}\n`);
+    fs.writeFileSync(occupiedSharedPath, `${JSON.stringify({ type: "ai-title", aiTitle: "Other conversation title" })}\n`);
+
+    const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const legacy = seed.ensureConversation("claude", legacyPath, null);
+    const sharedOwner = seed.ensureConversation("claude", occupiedSharedPath, null);
+    const seeded = seed.snapshot();
+    seeded.conversations[legacy.id]!.generations.at(-1)!.launchProfile.title = "Claude session";
+    seeded.conversations[sharedOwner.id]!.generations.at(-1)!.launchProfile.title = "Own the shared transcript";
+    fs.writeFileSync(filename, `${JSON.stringify(seeded, null, 2)}\n`);
+
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+    expect(registry.runIdentityWaveMigration({
+      now: NOW,
+      transcriptTitle: titleFromTranscriptHead,
+      sharedPathForLegacy: (pathname) => pathname === legacyPath ? occupiedSharedPath : null,
+      orchestratorSeats: [],
+    })).toMatchObject({
+      alreadyCompleted: false,
+      retitled: 1,
+      rekeyed: 0,
+      quarantinedRekeys: 1,
+    });
+
+    const jsonSnapshot = registry.snapshot();
+    const sqliteSnapshot = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" }).snapshot();
+    expect(sqliteSnapshot).toEqual(jsonSnapshot);
+    for (const snapshot of [jsonSnapshot, sqliteSnapshot]) {
+      expect(snapshot.conversations[legacy.id]!.generations.at(-1)).toMatchObject({
+        path: legacyPath,
+        launchProfile: expect.objectContaining({ title: "Repair the legacy conversation" }),
+      });
+      expect(snapshot.conversations[sharedOwner.id]!.generations.at(-1)!.launchProfile.title)
+        .toBe("Own the shared transcript");
+      expect(snapshot.identityMigrations[IDENTITY_WAVE_MIGRATION]).toEqual({
+        completedAt: NOW,
+        retitled: 1,
+        rekeyed: 0,
+        quarantinedRekeys: 1,
+        edgesStamped: 0,
+      });
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("receipt evidence retitles from the original launch prompt, not a later relay", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-launch-evidence-"));
   try {
@@ -1118,6 +1172,7 @@ test("the startup wrapper logs populated counters and persists migrated JSON and
       completedAt: NOW,
       retitled: 1,
       rekeyed: 1,
+      quarantinedRekeys: 0,
       edgesStamped: 2,
     });
   } finally {

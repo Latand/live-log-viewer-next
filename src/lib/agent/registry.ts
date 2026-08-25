@@ -494,6 +494,7 @@ export interface RegistryFile {
     completedAt: string;
     retitled: number;
     rekeyed: number;
+    quarantinedRekeys: number;
     edgesStamped: number;
   }>;
   importedResumePanes: boolean;
@@ -1292,14 +1293,17 @@ function normalizeIdentityMigrations(value: unknown): RegistryFile["identityMigr
   return Object.fromEntries(Object.entries(value).flatMap(([key, candidate]) => {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
     const marker = candidate as Record<string, unknown>;
+    const quarantinedRekeys = marker.quarantinedRekeys ?? 0;
     if (typeof marker.completedAt !== "string"
       || !Number.isSafeInteger(marker.retitled) || (marker.retitled as number) < 0
       || !Number.isSafeInteger(marker.rekeyed) || (marker.rekeyed as number) < 0
+      || !Number.isSafeInteger(quarantinedRekeys) || (quarantinedRekeys as number) < 0
       || !Number.isSafeInteger(marker.edgesStamped) || (marker.edgesStamped as number) < 0) return [];
     return [[key, {
       completedAt: marker.completedAt,
       retitled: marker.retitled as number,
       rekeyed: marker.rekeyed as number,
+      quarantinedRekeys: quarantinedRekeys as number,
       edgesStamped: marker.edgesStamped as number,
     }]];
   }));
