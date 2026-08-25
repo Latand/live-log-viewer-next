@@ -28,16 +28,20 @@ export interface OrchestratorSeatStatus {
   /** False once the active seat's transcript has left the disk — the operator
       closed the conversation card, so the panel returns to the draft. */
   exists: boolean;
+  /** Whether Claude resolves an operator-authored Viewer MCP definition for
+      the project cwd. Structured spawns can supply their own definition. */
+  viewerMcpRegistered: boolean;
 }
 
 /** Crash-safe read of the seat route's body: anything malformed reads as «no
     seat», which lands the panel on the draft rather than on a broken render. */
 export function parseSeatStatus(body: unknown): OrchestratorSeatStatus {
-  const raw = body as { seat?: unknown; pending?: unknown; exists?: unknown } | null;
+  const raw = body as { seat?: unknown; pending?: unknown; exists?: unknown; viewerMcpRegistered?: unknown } | null;
   return {
     seat: seatOf(raw?.seat),
     pending: seatOf(raw?.pending),
     exists: raw?.exists !== false,
+    viewerMcpRegistered: raw?.viewerMcpRegistered === true,
   };
 }
 

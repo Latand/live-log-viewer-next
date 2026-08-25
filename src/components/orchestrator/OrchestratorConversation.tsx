@@ -23,7 +23,7 @@ const noop = () => undefined;
  * conversation also has a card on the board behind the panel, and the one
  * hoisted composer must render HERE while both are on screen.
  */
-export function OrchestratorConversation({ file }: { file: FileEntry }) {
+export function OrchestratorConversation({ file, projectName }: { file: FileEntry; projectName: string }) {
   const { t } = useLocale();
   const { caps } = useAgentCapabilities(file);
   const deadHost = caps.surface === "dead";
@@ -43,7 +43,13 @@ export function OrchestratorConversation({ file }: { file: FileEntry }) {
         compact
       />
       <AgentControlStrip file={file} />
-      <TmuxComposer file={file} deadHost={deadHost} sendBlockedReason={sendBlockedReason} primaryPlace />
+      <TmuxComposer
+        file={file}
+        deadHost={deadHost}
+        sendBlockedReason={sendBlockedReason}
+        placeholder={t("composer.placeholderOrchestrator", { project: projectName })}
+        primaryPlace
+      />
     </div>
   );
 }

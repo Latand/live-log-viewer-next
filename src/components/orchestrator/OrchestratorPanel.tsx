@@ -113,7 +113,7 @@ export function OrchestratorPanel({
   onClose: () => void;
 }) {
   const { t } = useLocale();
-  const { status, failed, refresh } = useOrchestratorSeat(project);
+  const { status, failed, refresh } = useOrchestratorSeat(project, projectCwd);
   const [formError, setFormError] = useState<string | null>(null);
   const [mandate, setMandateState] = useState(() => readDraftField(project, "mandate") || ORCHESTRATOR_SYSTEM_PROMPT);
   /* The conversation the open rotate draft is replacing. Non-null IS the rotate
@@ -388,7 +388,7 @@ export function OrchestratorPanel({
               onCancel={() => setRotateFrom(null)}
             />
           ) : file ? (
-            <OrchestratorConversation file={file} />
+            <OrchestratorConversation file={file} projectName={projectName} />
           ) : (
             <Centered>
               <LoaderCircle className="h-5 w-5 animate-spin text-muted" aria-hidden />
@@ -414,6 +414,7 @@ export function OrchestratorPanel({
           projectName={projectName}
           cwd={projectCwd}
           launch={launch}
+          viewerMcpRegistered={status?.viewerMcpRegistered === true}
           onMandate={setMandate}
           onRestore={() => setMandate(ORCHESTRATOR_SYSTEM_PROMPT)}
           onConfirm={() => confirmCreate()}
@@ -521,6 +522,7 @@ function RotateDraft({
       projectName={projectName}
       cwd={cwd}
       launch={launch}
+      viewerMcpRegistered={status?.viewerMcpRegistered === true}
       onMandate={(value) => {
         setMandateState(value);
         writeField("Rotate", project, "mandate", value === seat.mandate ? "" : value);
@@ -552,6 +554,7 @@ function OrchestratorDraft({
   projectName,
   cwd,
   launch,
+  viewerMcpRegistered,
   onMandate,
   onRestore,
   onConfirm,
@@ -566,6 +569,7 @@ function OrchestratorDraft({
   projectName: string;
   cwd?: string;
   launch: ReturnType<typeof useAgentLaunchDraft>;
+  viewerMcpRegistered: boolean;
   onMandate: (value: string) => void;
   onRestore: () => void;
   onConfirm: () => void;
@@ -621,6 +625,14 @@ function OrchestratorDraft({
             </p>
           </div>
         )}
+
+        <p
+          className="shrink-0 rounded-control border border-border bg-canvas px-3 py-2 font-mono text-caption text-secondary"
+          data-viewer-mcp-status={viewerMcpRegistered ? "registered" : "missing"}
+          role="status"
+        >
+          {t(viewerMcpRegistered ? "orchPanel.viewerMcpRegistered" : "orchPanel.viewerMcpMissing")}
+        </p>
 
         <div className="shrink-0">
           <AgentLaunchControls draft={launch} disabled={submitting} stacked />

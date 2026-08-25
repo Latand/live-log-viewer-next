@@ -372,6 +372,7 @@ export const en = {
   "composer.placeholderSpawn": "prompt — the agent will start…",
   "composer.placeholderResolving": "message the agent — reconnecting to its session…",
   "composer.placeholderSend": "message the agent…",
+  "composer.placeholderOrchestrator": "what should get done in {project}?",
   "composer.textAria": "Text for the agent",
   /* Chat-first mobile composer (issue #419 reopened): the model/reasoning +
      attachment second row folds behind this compact primary-row action so the
@@ -1815,6 +1816,8 @@ export const en = {
   "orchPanel.draftTitle": "Create this project's orchestrator",
   "orchPanel.draftHint": "It runs in {project}, owns this board, and answers you here. The text below is delivered to it as its first message — edit it however you like.",
   "orchPanel.draftHintVacated": "The previous orchestrator's conversation is gone. Create a new one for {project}; the text below is delivered as its first message.",
+  "orchPanel.viewerMcpRegistered": "viewer MCP: registered ✓",
+  "orchPanel.viewerMcpMissing": "viewer MCP: run scripts/install-mcp.sh or claude mcp add viewer -- bun ./bin/mcp-server.mjs",
   "orchPanel.mandate": "Mandate",
   "orchPanel.mandateSent": "Sent as the first message",
   "orchPanel.restoreDefault": "Restore default",

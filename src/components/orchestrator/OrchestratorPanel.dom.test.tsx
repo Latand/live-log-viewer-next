@@ -84,6 +84,7 @@ interface SeatFile {
   seat: Record<string, unknown> | null;
   pending: Record<string, unknown> | null;
   exists: boolean;
+  viewerMcpRegistered?: boolean;
 }
 
 let seatStatus: SeatFile;
@@ -211,7 +212,7 @@ beforeEach(() => {
   resetOrchestratorSeatCacheForTests();
   resetOrchestratorIncumbentCacheForTests();
   tailLines.clear();
-  seatStatus = { seat: null, pending: null, exists: true };
+  seatStatus = { seat: null, pending: null, exists: true, viewerMcpRegistered: false };
   incumbentStatus = { project: "atlas", designated: false, rotation: null, context: null };
   seatPosts = [];
   rotatePosts = [];
@@ -303,6 +304,8 @@ test("with no orchestrator the panel is a draft prefilled with the default manda
   flushSync(() => undefined);
 
   expect(panelState(host)).toBe("draft");
+  expect(host.querySelector("[data-viewer-mcp-status]")?.textContent).toContain("scripts/install-mcp.sh");
+  expect(host.querySelector("[data-viewer-mcp-status]")?.textContent).toContain("claude mcp add viewer");
   const mandate = host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
   expect(mandate.value).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
   /* Cwd is the project's own root, stated and never typed. */
@@ -327,6 +330,14 @@ test("with no orchestrator the panel is a draft prefilled with the default manda
   expect(String(seatPosts[0]!.clientRequestId)).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
   /* An edited mandate is bespoke — it records no approved-prompt version. */
   expect(seatPosts[0]!.promptVersion).toBeUndefined();
+});
+
+test("the orchestrator draft confirms a resolved Viewer MCP registration", async () => {
+  seatStatus = { seat: null, pending: null, exists: true, viewerMcpRegistered: true };
+  const host = mount();
+  await settle();
+
+  expect(host.querySelector("[data-viewer-mcp-status]")?.textContent).toContain("viewer MCP: registered ✓");
 });
 
 test("an unedited mandate records the approved prompt version", async () => {
@@ -452,7 +463,7 @@ test("an active seat mounts the REAL conversation column — feed and composer, 
   expect(panelState(host)).toBe("live");
   expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
   expect(host.querySelector("[data-agent-control-strip]")).not.toBeNull();
-  expect(host.querySelector("textarea")).not.toBeNull();
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).placeholder).toBe("what should get done in Atlas?");
   /* No draft on a seated project: a second create is not offered at all. */
   expect(confirmButton(host)).toBeNull();
 });
