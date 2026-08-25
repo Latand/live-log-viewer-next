@@ -167,8 +167,6 @@ test("the header button toggles the dock and the choice survives a reload", asyn
 
   await act(async () => { toggle.click(); });
   expect(dock(host)).not.toBeNull();
-  /* Under the PROJECT's own key since #1149; `OPEN_KEY` itself only seeds a
-     project that has never answered, and nothing writes it. */
   expect(dom.localStorage.getItem(`${OPEN_KEY}:${PROJECT}`)).toBe("1");
   expect((host.querySelector("[data-orchestrator-toggle]") as HTMLButtonElement).getAttribute("aria-pressed")).toBe("true");
 

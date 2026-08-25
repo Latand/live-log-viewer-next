@@ -113,7 +113,9 @@ export function OrchestratorPanel({
   onClose: () => void;
 }) {
   const { t } = useLocale();
-  const { status, failed, refresh } = useOrchestratorSeat(project);
+  /* `remember`: the dock remounts on every project switch, so a revisited
+     project paints its last seat instead of a round-trip's loading (#1149). */
+  const { status, failed, refresh } = useOrchestratorSeat(project, true);
   const [formError, setFormError] = useState<string | null>(null);
   const [mandate, setMandateState] = useState(() => readDraftField(project, "mandate") || ORCHESTRATOR_SYSTEM_PROMPT);
   /* The conversation the open rotate draft is replacing. Non-null IS the rotate
