@@ -308,17 +308,14 @@ function addWindow(
   existingKeys: Set<string>,
   openWindowActive: boolean,
   emitEndBoundary: boolean,
-  respectEnabledAt: boolean = true,
-  allowExpired: boolean = false,
 ): void {
   if (!validWindow(window)) return;
-  if (respectEnabledAt && window.endedAt !== null && window.endedAt <= state.enabledAtMs) return;
-  if (!allowExpired && window.endedAt !== null && window.endedAt < now - CLOSED_STREAM_RETENTION_MS) return;
-  const start = respectEnabledAt ? Math.max(window.startedAt, state.enabledAtMs) : window.startedAt;
+  if (window.endedAt !== null && window.endedAt <= state.enabledAtMs) return;
+  if (window.endedAt !== null && window.endedAt < now - CLOSED_STREAM_RETENTION_MS) return;
+  const start = Math.max(window.startedAt, state.enabledAtMs);
   const existing = state.streams[streamKey];
   const retired = state.retiredStreams?.[streamKey];
-  if (respectEnabledAt
-    && window.endedAt === null && !openWindowActive && !existing && !retired
+  if (window.endedAt === null && !openWindowActive && !existing && !retired
     && source.lastActivityAtMs <= state.enabledAtMs) return;
   const lastProvenActivityAt = Math.min(now, Math.max(
     start,
@@ -609,8 +606,6 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       project: string;
       window: TurnBoundary;
       openWindowActive: boolean;
-      respectEnabledAt: boolean;
-      allowExpired: boolean;
     }> = [];
     let scan: { files: FileEntry[]; complete: boolean } = { files: [], complete: false };
     try {
@@ -651,8 +646,6 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
               project,
               window,
               openWindowActive,
-              respectEnabledAt: true,
-              allowExpired: false,
             });
           }
         }
@@ -720,8 +713,6 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
         existingKeys,
         observation.openWindowActive,
         !coveredBySameProject[index],
-        observation.respectEnabledAt,
-        observation.allowExpired,
       );
     }
   };
