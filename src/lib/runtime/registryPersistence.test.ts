@@ -9,6 +9,7 @@ import type { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import type { CodexAppServerHost } from "./codexAppServerHost";
 import type { HostState } from "./engineHost";
 import { bindClaudeHostPersistence, bindCodexHostPersistence, DEFAULT_CURSOR_DEBOUNCE_MS } from "./registry";
+import { beginLegacySpawnReceiptFixture } from "@/lib/agent/registryTestFixtures";
 
 const KEY = { engine: "codex" as const, sessionId: "coalesced-host" };
 
@@ -217,7 +218,7 @@ test("production-sized ten-lane persistence coalesces cursors and orders materia
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-persistence-production-"));
   const filename = path.join(directory, "agent-registry.json");
   const seed = new AgentRegistry(filename);
-  const template = seed.beginSpawn("codex", "/production-seed");
+  const template = beginLegacySpawnReceiptFixture(seed, "codex", "/production-seed");
   const production = seed.snapshot();
   for (let index = 1; index < 18_000; index += 1) {
     const launchId = `production-persistence-${String(index).padStart(5, "0")}`;

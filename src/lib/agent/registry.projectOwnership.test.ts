@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 
 import { AgentRegistry, normalizeRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const LLV_PROJECT = "-agents-tools-live-log-viewer-next";
 
@@ -13,7 +14,7 @@ function registry() {
   return new AgentRegistry(path.join(dir, "agent-registry.json"));
 }
 
-function spawnEntry(pathname: string, sessionId: string, cwd = "/home/latand") {
+function spawnEntry(pathname: string, sessionId: string, cwd = "/workspace/repository") {
   return {
     key: { engine: "codex" as const, sessionId },
     artifactPath: pathname,
@@ -30,13 +31,13 @@ function spawnEntry(pathname: string, sessionId: string, cwd = "/home/latand") {
 describe("durable project ownership", () => {
   test("an explicit operator spawn admits durable conversation ownership", () => {
     const store = registry();
-    const cwd = "/home/latand";
+    const cwd = "/workspace/repository";
     const begun = store.beginSpawnRequest({
       engine: "codex",
       cwd,
       accountId: "terra",
       explicitProject: LLV_PROJECT,
-      launchProfile: emptyLaunchProfile({ cwd }),
+      launchProfile: emptyLaunchProfile({ cwd, title: "Verify durable project ownership" }),
     });
     if (begun.kind !== "created") throw new Error("expected a fresh receipt");
     expect(begun.receipt.explicitProject).toBe(LLV_PROJECT);
@@ -61,9 +62,9 @@ describe("durable project ownership", () => {
 
   test("an ambiguous explicit project is rejected before any receipt exists", () => {
     const store = registry();
-    expect(() => store.beginSpawnRequest({
+    expect(() => beginLegacySpawnFixture(store, {
       engine: "codex",
-      cwd: "/home/latand",
+      cwd: "/workspace/repository",
       explicitProject: "not a/project",
     })).toThrow("explicit project is not a valid project key");
     expect(Object.keys(store.snapshot().receipts)).toHaveLength(0);
@@ -71,8 +72,8 @@ describe("durable project ownership", () => {
 
   test("a replayed attempt must repeat the same explicit project", () => {
     const store = registry();
-    const cwd = "/home/latand";
-    const first = store.beginSpawnRequest({
+    const cwd = "/workspace/repository";
+    const first = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd,
       clientAttemptId: "attempt_ownership_replay_01",
@@ -80,7 +81,7 @@ describe("durable project ownership", () => {
       explicitProject: LLV_PROJECT,
     });
     expect(first.kind).toBe("created");
-    const replay = store.beginSpawnRequest({
+    const replay = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd,
       clientAttemptId: "attempt_ownership_replay_01",
@@ -88,7 +89,7 @@ describe("durable project ownership", () => {
       explicitProject: LLV_PROJECT,
     });
     expect(replay.kind).toBe("replay");
-    const conflicting = store.beginSpawnRequest({
+    const conflicting = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd,
       clientAttemptId: "attempt_ownership_replay_01",
@@ -100,9 +101,9 @@ describe("durable project ownership", () => {
 
   test("ownership survives a resume successor and is never demoted by later receipts", () => {
     const store = registry();
-    const cwd = "/home/latand";
+    const cwd = "/workspace/repository";
     const sourcePath = "/transcripts/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
-    const begun = store.beginSpawnRequest({
+    const begun = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd,
       explicitProject: LLV_PROJECT,
@@ -133,7 +134,7 @@ describe("durable project ownership", () => {
 
     /* A later explicit receipt for the SAME conversation cannot rewrite the
        durable record — relocation is the only sanctioned mutation path. */
-    const second = store.beginSpawnRequest({
+    const second = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd,
       conversationId: begun.receipt.conversationId,
@@ -152,9 +153,9 @@ describe("durable project ownership", () => {
 
   test("a conflicted resume-successor settlement leaves an unowned conversation unowned", () => {
     const store = registry();
-    const cwd = "/home/latand";
+    const cwd = "/workspace/repository";
     /* Conversation A: settled without operator intent — durably unowned. */
-    const begunA = store.beginSpawnRequest({ engine: "codex", cwd });
+    const begunA = beginLegacySpawnFixture(store, { engine: "codex", cwd });
     if (begunA.kind !== "created") throw new Error("expected a fresh receipt");
     store.settleSpawn(
       begunA.receipt.launchId,
@@ -163,13 +164,13 @@ describe("durable project ownership", () => {
 
     /* Conversation B: two generations, so it can never be adopted as a
        scanner-allocated provisional owner of its successor path. */
-    const begunB = store.beginSpawnRequest({ engine: "codex", cwd });
+    const begunB = beginLegacySpawnFixture(store, { engine: "codex", cwd });
     if (begunB.kind !== "created") throw new Error("expected a fresh receipt");
     store.settleSpawn(
       begunB.receipt.launchId,
       spawnEntry("/transcripts/019f4906-7f67-7b72-9fbc-9ec3b5ad1330.jsonl", "019f4906-7f67-7b72-9fbc-9ec3b5ad1330", cwd),
     );
-    const resumeB = store.beginSpawnRequest({
+    const resumeB = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd,
       conversationId: begunB.receipt.conversationId,
@@ -186,7 +187,7 @@ describe("durable project ownership", () => {
     /* A resume-successor for A carrying explicit operator intent collides with
        B's owned path. The settlement conflicts — and the conflict must not
        persist ownership onto A. */
-    const resumeA = store.beginSpawnRequest({
+    const resumeA = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd,
       conversationId: begunA.receipt.conversationId,
@@ -209,22 +210,22 @@ describe("durable project ownership", () => {
 
   test("a launch settlement that loses a provisional-owner conflict admits no ownership", () => {
     const store = registry();
-    const cwd = "/home/latand";
+    const cwd = "/workspace/repository";
     /* Conversation A exists unowned; conversation B durably owns the contested
        path across two generations. */
-    const begunA = store.beginSpawnRequest({ engine: "codex", cwd });
+    const begunA = beginLegacySpawnFixture(store, { engine: "codex", cwd });
     if (begunA.kind !== "created") throw new Error("expected a fresh receipt");
     store.settleSpawn(
       begunA.receipt.launchId,
       spawnEntry("/transcripts/019f4907-0f67-7b72-9fbc-9ec3b5ad1333.jsonl", "019f4907-0f67-7b72-9fbc-9ec3b5ad1333", cwd),
     );
-    const begunB = store.beginSpawnRequest({ engine: "codex", cwd });
+    const begunB = beginLegacySpawnFixture(store, { engine: "codex", cwd });
     if (begunB.kind !== "created") throw new Error("expected a fresh receipt");
     store.settleSpawn(
       begunB.receipt.launchId,
       spawnEntry("/transcripts/019f4907-1f67-7b72-9fbc-9ec3b5ad1334.jsonl", "019f4907-1f67-7b72-9fbc-9ec3b5ad1334", cwd),
     );
-    const resumeB = store.beginSpawnRequest({
+    const resumeB = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd,
       conversationId: begunB.receipt.conversationId,
@@ -238,7 +239,7 @@ describe("durable project ownership", () => {
     );
     if (settledB.kind !== "settled") throw new Error("expected B's resume settlement");
 
-    const launchA = store.beginSpawnRequest({
+    const launchA = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd,
       conversationId: begunA.receipt.conversationId,
@@ -268,7 +269,7 @@ describe("durable project ownership", () => {
 
   test("legacy registry files normalize missing and malformed ownership to null", () => {
     const store = registry();
-    const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/home/latand", explicitProject: LLV_PROJECT });
+    const begun = beginLegacySpawnFixture(store, { engine: "codex", cwd: "/workspace/repository", explicitProject: LLV_PROJECT });
     if (begun.kind !== "created") throw new Error("expected a fresh receipt");
     store.settleSpawn(
       begun.receipt.launchId,

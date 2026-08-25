@@ -8,6 +8,7 @@ import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 
 import { configuredReviewerFallback, loadFlows, mergeSeededPresets, patchFlowRows, reconcileFlowConversationOwnership, reconcileFlowConversationOwnershipCooperatively, saveFlows, seededPresetsFromRoles } from "./store";
 import type { Flow, FlowPreset } from "./types";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 function commitTestSuccessor(
   registry: AgentRegistry,
@@ -428,7 +429,7 @@ test("a path-only flow resolves every resume generation in one reconciliation", 
     ];
     const conversation = registry.ensureConversation("codex", paths[0]!, "a");
     for (const pathname of paths.slice(1)) {
-      const begun = registry.beginSpawnRequest({
+      const begun = beginLegacySpawnFixture(registry, {
         engine: "codex",
         cwd: "/repo",
         accountId: "a",

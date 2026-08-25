@@ -7,8 +7,11 @@ import { NextRequest } from "next/server";
 
 import type { RuntimeHostClient } from "@/lib/runtime/client";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-admission-route-"));
+const codexBinary = path.join(sandbox, "codex-fixture");
+fs.writeFileSync(codexBinary, "#!/bin/sh\nprintf '[]'\n", { mode: 0o700 });
 const STRUCTURED_ENV = {
   LLV_STATE_DIR: path.join(sandbox, "state"),
   LLV_SPAWN_TRANSPORT: "structured",
@@ -16,6 +19,7 @@ const STRUCTURED_ENV = {
   LLV_RUNTIME_EVENTS: "1",
   LLV_RUNTIME_HOST_SOCKET: path.join(sandbox, "runtime.sock"),
   NEXT_PUBLIC_RUNTIME_UI: "1",
+  LLV_CODEX_BINARY: codexBinary,
 } as const;
 const previousEnv = Object.fromEntries(Object.keys(STRUCTURED_ENV).map((key) => [key, process.env[key]]));
 Object.assign(process.env, STRUCTURED_ENV);
@@ -95,7 +99,7 @@ function seedCaller(role: string | null, origin?: { kind: "agent"; conversationI
   const reviews = role === "reviewer"
     ? store.ensureConversation("codex", `/sessions/reviewed-${crypto.randomUUID()}.jsonl`, "terra").id
     : null;
-  const begun = store.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(store, {
     engine: "codex",
     cwd: "/repo",
     role,
@@ -117,7 +121,7 @@ function agentRequest(capability: string, body: Record<string, unknown>): NextRe
       "content-type": "application/json",
       "x-llv-spawn-capability": capability,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ title: "Exercise spawn route admission", mcpServers: [], ...body }),
   });
 }
 
