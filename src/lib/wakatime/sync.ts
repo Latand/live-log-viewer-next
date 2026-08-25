@@ -4,7 +4,6 @@ import path from "node:path";
 
 import { agentRegistry, conversationLookupFromSnapshot, type RegistryFile } from "@/lib/agent/registry";
 import { configFilePath, statePath } from "@/lib/configDir";
-import { FileClaudeDeliveryLedger } from "@/lib/runtime/claudeStreamBrokerHost";
 import {
   currentFileScan,
   persistedFileScanSnapshot,
@@ -111,10 +110,6 @@ export interface WakatimeSyncDependencies {
   recentTurnWindows(entry: FileEntry): RecentTurnWindows;
   readOperatorActions?(): Promise<DirectOperatorWakatimeAction[]> | DirectOperatorWakatimeAction[];
   acknowledgeOperatorActions?(keys: readonly string[]): Promise<void> | void;
-  claudeDeliveryIdentities?(sessionId: string): Array<{
-    engineMessageId: string;
-    operatorActionKey: string | null;
-  }>;
   readCredential(): Promise<WakatimeCredential | null> | WakatimeCredential | null;
   readState(): Promise<unknown | null> | unknown | null;
   writeState(state: WakatimeStateV1): Promise<void> | void;
@@ -650,24 +645,8 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
             fallbackProject: entry.project,
           }).project;
           if (!project) continue;
-          const claudeDeliveryIdentities = entry.engine === "claude"
-            ? new Map((deps.claudeDeliveryIdentities?.(generation.id) ?? [])
-              .map((identity) => [identity.engineMessageId, identity.operatorActionKey] as const))
-            : null;
-          const transcriptActions = [
-            ...(recent.operatorActions ?? []),
-            ...(recent.unprovenancedUserActions ?? []),
-          ];
-          for (const action of transcriptActions) {
-            let sourceKey = action.key;
-            if (entry.engine === "claude" && action.key.startsWith("claude:")) {
-              const engineMessageId = action.key.slice("claude:".length);
-              if (claudeDeliveryIdentities?.has(engineMessageId)) {
-                const operatorActionKey = claudeDeliveryIdentities.get(engineMessageId);
-                if (!operatorActionKey) continue;
-                sourceKey = operatorActionKey;
-              }
-            }
+          for (const action of recent.operatorActions ?? []) {
+            const sourceKey = action.key;
             const streamKey = /^[a-f0-9]{64}$/.test(sourceKey)
               ? sourceKey
               : digest("llv-wakatime-transcript-operator-v1", conversation.id, sourceKey);
@@ -1073,20 +1052,12 @@ export async function wakatimeProductionScan(
 }
 
 function productionDependencies(): WakatimeSyncDependencies {
-  const claudeDeliveryLedger = new FileClaudeDeliveryLedger();
   return {
     scan: () => wakatimeProductionScan(),
     registrySnapshot: () => agentRegistry().readOnlySnapshot(),
     recentTurnWindows: recentTurnWindowsFor,
     readOperatorActions: readDirectOperatorWakatimeActions,
     acknowledgeOperatorActions: acknowledgeDirectOperatorWakatimeActions,
-    claudeDeliveryIdentities: (sessionId) => claudeDeliveryLedger.load(sessionId)
-      .flatMap((state) => state.delivered && typeof state.engineMessageId === "string"
-        ? [{
-            engineMessageId: state.engineMessageId,
-            operatorActionKey: state.entry.operatorActionKey ?? null,
-          }]
-        : []),
     readCredential: readProductionWakatimeCredential,
     readState: readProductionState,
     writeState: writeProductionState,

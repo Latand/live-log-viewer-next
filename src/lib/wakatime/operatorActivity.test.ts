@@ -231,3 +231,27 @@ test("enabled direct recording accepts server-resolved spawn attribution", () =>
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("missing project attribution is rejected before operator state is created", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-unresolved-"));
+  const filename = path.join(directory, "operator-actions.json");
+  const snapshot = registry();
+  const conversation = snapshot.conversations.conversation_direct!;
+  conversation.projectOwnership = null;
+  conversation.generations[0]!.launchProfile.cwd = "";
+  conversation.generations[0]!.launchProfile.project = null;
+  try {
+    expect(() => recordDirectOperatorWakatimeActivity({
+      conversationId: "conversation_direct",
+      idempotencyKey: "unresolved-project-gesture",
+    }, {
+      filename,
+      enabled: () => true,
+      now: () => NOW,
+      registrySnapshot: () => snapshot,
+    })).toThrow("direct operator activity project is unavailable");
+    expect(fs.existsSync(filename)).toBe(false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

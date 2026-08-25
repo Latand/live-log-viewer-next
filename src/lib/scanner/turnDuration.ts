@@ -1,5 +1,5 @@
 import type { FileEntry, TurnBoundary } from "../types";
-import { isClaudeProtocolUser, isClaudeTurnWindowMeta } from "@/lib/claudeProtocolUser";
+import { isClaudeTurnWindowMeta } from "@/lib/claudeProtocolUser";
 import { decodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
 import { tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
@@ -15,9 +15,7 @@ const recentTurnWindowsCache = globalCache<[number, number, RecentTurnWindows]>(
 export interface RecentTurnWindows {
   windows: TurnBoundary[];
   operatorActions?: Array<{ key: string; atMs: number }>;
-  unprovenancedUserActions?: Array<{ key: string; atMs: number }>;
   operatorActionsAtMs?: number[];
-  unprovenancedUserActionsAtMs?: number[];
   assistantMessagesAtMs?: number[];
   prefixTruncated: boolean;
   complete: boolean;
@@ -191,11 +189,9 @@ export function recentTurnWindowsFromRecords(records: RecordLike[], codex: boole
 export function recentTurnActivityFromRecords(
   records: RecordLike[],
   codex: boolean,
-): Pick<RecentTurnWindows, "windows" | "operatorActions" | "unprovenancedUserActions" | "operatorActionsAtMs" | "unprovenancedUserActionsAtMs" | "assistantMessagesAtMs"> {
+): Pick<RecentTurnWindows, "windows" | "operatorActions" | "operatorActionsAtMs" | "assistantMessagesAtMs"> {
   const operatorActions = new Set<number>();
   const provenOperatorActions = new Map<string, number>();
-  const unprovenancedUserActions = new Set<number>();
-  const unprovenancedUserActionIdentities = new Map<string, number>();
   const assistantMessages = new Set<number>();
   for (const record of records) {
     const atMs = parseMillis(record.timestamp);
@@ -229,16 +225,6 @@ export function recentTurnActivityFromRecords(
         const key = `claude:${uuid}`;
         provenOperatorActions.set(key, Math.min(provenOperatorActions.get(key) ?? atMs, atMs));
       }
-    } else if (!isClaudeProtocolUser(record)) {
-      unprovenancedUserActions.add(atMs);
-      const uuid = stringValue(record.uuid);
-      if (uuid) {
-        const key = `claude:${uuid}`;
-        unprovenancedUserActionIdentities.set(
-          key,
-          Math.min(unprovenancedUserActionIdentities.get(key) ?? atMs, atMs),
-        );
-      }
     }
   }
   return {
@@ -248,13 +234,7 @@ export function recentTurnActivityFromRecords(
         .map(([key, actionAtMs]) => ({ key, atMs: actionAtMs }))
         .sort((left, right) => left.atMs - right.atMs || left.key.localeCompare(right.key)),
     } : {}),
-    ...(unprovenancedUserActionIdentities.size > 0 ? {
-      unprovenancedUserActions: [...unprovenancedUserActionIdentities]
-        .map(([key, actionAtMs]) => ({ key, atMs: actionAtMs }))
-        .sort((left, right) => left.atMs - right.atMs || left.key.localeCompare(right.key)),
-    } : {}),
     operatorActionsAtMs: [...operatorActions].sort((left, right) => left - right),
-    unprovenancedUserActionsAtMs: [...unprovenancedUserActions].sort((left, right) => left - right),
     assistantMessagesAtMs: [...assistantMessages].sort((left, right) => left - right),
   };
 }

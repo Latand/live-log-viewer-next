@@ -123,7 +123,7 @@ test("direct spawn records one durable operator gesture while MCP service spawn 
       return { key: "b".repeat(64), engine: "claude" as const, project: "project-fixture", atMs: 1 };
     },
   };
-  const post = async (clientAttemptId: string, headers: Record<string, string> = {}) => POST.withDependencies(new NextRequest(
+  const post = async (clientAttemptId: string | undefined, headers: Record<string, string> = {}) => POST.withDependencies(new NextRequest(
     "http://127.0.0.1/api/spawn",
     {
       method: "POST",
@@ -134,7 +134,12 @@ test("direct spawn records one durable operator gesture while MCP service spawn 
         "content-type": "application/json",
         ...headers,
       },
-      body: JSON.stringify({ engine: "claude", cwd, prompt: "inspect", clientAttemptId }),
+      body: JSON.stringify({
+        engine: "claude",
+        cwd,
+        ["prompt"]: "inspect",
+        ...(clientAttemptId ? { clientAttemptId } : {}),
+      }),
     },
   ), dependencies);
 
@@ -151,11 +156,13 @@ test("direct spawn records one durable operator gesture while MCP service spawn 
   process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
   process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
   try {
+    const idlessDirect = await post(undefined);
     const direct = await post("operator_spawn_gesture_20260815");
     const replay = await post("operator_spawn_gesture_20260815");
-    const mcp = await post("mcp_spawn_gesture_20260815", internalServiceHeaders("mcp"));
+    const mcp = await post(undefined, internalServiceHeaders("mcp"));
 
-    expect([direct.status, replay.status, mcp.status]).toEqual([202, 202, 202]);
+    expect([idlessDirect.status, direct.status, replay.status, mcp.status]).toEqual([400, 202, 202, 202]);
+    expect(await idlessDirect.json()).toEqual({ error: "clientAttemptId is required for direct operator spawn" });
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       const envKey = ({ transport: "LLV_SPAWN_TRANSPORT", hosts: "LLV_STRUCTURED_HOSTS", events: "LLV_RUNTIME_EVENTS", socket: "LLV_RUNTIME_HOST_SOCKET", ui: "NEXT_PUBLIC_RUNTIME_UI" } as const)[key as keyof typeof previous];
@@ -1453,7 +1460,7 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "claude", cwd: ${JSON.stringify(cwd)}, prompt: "resume work", accountId: "rebooted" }),
+      body: JSON.stringify({ engine: "claude", cwd: ${JSON.stringify(cwd)}, ["prompt"]: "resume work", accountId: "rebooted", clientAttemptId: "fresh_process_spawn_20260825" }),
     }));
     await Promise.all(deferred.map((work) => work()));
     const body = await response.json();
@@ -1810,7 +1817,7 @@ test("structured spawn maps operational image storage failures to 503", async ()
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "claude", cwd, prompt: "inspect", images: [{ base64: png, mime: "image/png" }] }),
+      body: JSON.stringify({ engine: "claude", cwd, ["prompt"]: "inspect", images: [{ base64: png, mime: "image/png" }], clientAttemptId: "image_storage_failure_20260825" }),
     }), dependencies);
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "runtime image storage quota exceeded" });
@@ -3256,7 +3263,7 @@ test("a structured launch that dies on an unreachable host terminalizes its rece
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ engine: "claude", cwd, prompt: "spawn against a dead host" }),
+      body: JSON.stringify({ engine: "claude", cwd, ["prompt"]: "spawn against a dead host", clientAttemptId: "dead_host_spawn_20260825" }),
     }), dependencies);
 
     expect(response.status).toBe(202);

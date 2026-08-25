@@ -730,17 +730,14 @@ describe("WakaTime activity sync", () => {
     fixture.sync.stop();
   });
 
-  test("one Claude Viewer gesture keeps its sidecar identity after acknowledgement and restart", async () => {
+  test("one Claude ingress sidecar keeps its identity after acknowledgement and restart", async () => {
     let clock = NOW + 10 * 60_000;
     const actionKey = "6".repeat(64);
-    const providerMessageId = "provider-message-one";
     const snapshot = registrySnapshot();
     snapshot.conversations.conversation_test!.engine = "claude";
     snapshot.conversations.conversation_test!.generations[0]!.id = "claude-session-one";
     const recent = {
       windows: [],
-      unprovenancedUserActions: [{ key: `claude:${providerMessageId}`, atMs: NOW }],
-      unprovenancedUserActionsAtMs: [NOW],
       prefixTruncated: false,
       complete: true,
     };
@@ -749,7 +746,6 @@ describe("WakaTime activity sync", () => {
       scan: async () => ({ files: [entry({ engine: "claude", root: "claude-projects", fmt: "claude" })], complete: true }),
       registrySnapshot: () => snapshot,
       recentTurnWindows: () => recent,
-      claudeDeliveryIdentities: () => [{ engineMessageId: providerMessageId, operatorActionKey: actionKey }],
     });
     first.setOperatorActions([{ key: actionKey, engine: "claude", project: "-repo", atMs: NOW }]);
 
@@ -767,48 +763,11 @@ describe("WakaTime activity sync", () => {
       scan: async () => ({ files: [entry({ engine: "claude", root: "claude-projects", fmt: "claude" })], complete: true }),
       registrySnapshot: () => snapshot,
       recentTurnWindows: () => recent,
-      claudeDeliveryIdentities: () => [{ engineMessageId: providerMessageId, operatorActionKey: actionKey }],
     });
     await restarted.sync.tick();
 
     expect(new Set(restarted.state()?.pending.map((event) => event.heartbeat.ai_session))).toEqual(new Set([actionKey]));
     restarted.sync.stop();
-  });
-
-  test("a legacy Claude terminal prompt creates one stable engagement without a ledger entry", async () => {
-    const providerMessageId = "legacy-terminal-message";
-    const snapshot = registrySnapshot();
-    snapshot.conversations.conversation_test!.engine = "claude";
-    snapshot.conversations.conversation_test!.generations[0]!.id = "claude-session-two";
-    const fixture = harness({
-      now: () => NOW + 10 * 60_000,
-      readState: async () => ({
-        version: 1,
-        enabledAtMs: NOW - 1,
-        credentialGeneration: null,
-        streams: {},
-        pending: [],
-        retry: { failures: 0, retryAtMs: 0, reason: null },
-        counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
-      }),
-      scan: async () => ({ files: [entry({ engine: "claude", root: "claude-projects", fmt: "claude" })], complete: true }),
-      registrySnapshot: () => snapshot,
-      recentTurnWindows: () => ({
-        windows: [],
-        unprovenancedUserActions: [{ key: `claude:${providerMessageId}`, atMs: NOW }],
-        unprovenancedUserActionsAtMs: [NOW],
-        prefixTruncated: false,
-        complete: true,
-      }),
-      claudeDeliveryIdentities: () => [],
-    });
-
-    await fixture.sync.tick();
-
-    const streams = new Set(fixture.state()?.pending.map((event) => event.heartbeat.ai_session));
-    expect(streams.size).toBe(1);
-    expect(projectDurationSeconds(fixture.state()!.pending.map((event) => event.heartbeat), "-repo")).toBe(10 * 60);
-    fixture.sync.stop();
   });
 
   test("an expired operator sidecar materializes its bounded interval and reports terminal handling", async () => {

@@ -40,7 +40,6 @@ import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
-import { UNRESOLVED_PROJECT } from "@/lib/projects/identity";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import { en } from "@/lib/i18n/en";
 import { uk } from "@/lib/i18n/uk";
@@ -344,13 +343,21 @@ export async function executeSpawnRequest(
   }
 
   const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
-  if (clientAttemptId && directOperatorActivityAuthority(req).ok) {
+  const recordsDirectOperatorActivity = directOperatorActivityAuthority(req).ok;
+  if (recordsDirectOperatorActivity && !clientAttemptId) {
+    return NextResponse.json({ error: "clientAttemptId is required for direct operator spawn" }, { status: 400 });
+  }
+  if (recordsDirectOperatorActivity) {
+    const project = explicitProject ?? projectForCwd(cwd);
+    if (!project) {
+      return NextResponse.json({ error: "project could not be resolved for direct operator spawn" }, { status: 400 });
+    }
     try {
       dependencies.recordOperatorActivity?.({
-        idempotencyKey: `spawn:${clientAttemptId}`,
+        idempotencyKey: `spawn:${clientAttemptId!}`,
         resolvedAttribution: {
           engine,
-          project: explicitProject ?? projectForCwd(cwd) ?? UNRESOLVED_PROJECT,
+          project,
         },
       });
     } catch {

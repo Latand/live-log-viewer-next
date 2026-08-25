@@ -64,14 +64,14 @@ function parseAction(value: unknown, key: string): DirectOperatorWakatimeAction 
     || value.key !== key
     || !/^[a-f0-9]{64}$/.test(key)
     || (value.engine !== "claude" && value.engine !== "codex")
-    || typeof value.project !== "string" || !value.project
+    || typeof value.project !== "string" || !value.project.trim() || value.project.trim() === UNRESOLVED_PROJECT
     || typeof value.atMs !== "number" || !Number.isSafeInteger(value.atMs) || value.atMs <= 0
     || (value.compatibilityFingerprint !== undefined
       && (typeof value.compatibilityFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(value.compatibilityFingerprint)))) return null;
   return {
     key,
     engine: value.engine,
-    project: value.project,
+    project: value.project.trim(),
     atMs: value.atMs,
     ...(typeof value.compatibilityFingerprint === "string"
       ? { compatibilityFingerprint: value.compatibilityFingerprint }
@@ -153,7 +153,8 @@ export function recordDirectOperatorWakatimeActivity(
   const resolvedAttribution = input.resolvedAttribution;
   if (resolvedAttribution
     && ((resolvedAttribution.engine !== "claude" && resolvedAttribution.engine !== "codex")
-      || !resolvedAttribution.project.trim())) {
+      || !resolvedAttribution.project.trim()
+      || resolvedAttribution.project === UNRESOLVED_PROJECT)) {
     throw new Error("direct operator activity attribution is invalid");
   }
   const lookup = resolvedAttribution
@@ -182,12 +183,15 @@ export function recordDirectOperatorWakatimeActivity(
     ?? (fallback?.engine === "claude" || fallback?.engine === "codex" ? fallback.engine : null);
   if (!engine) throw new Error("direct operator activity target is unavailable");
   const generation = conversation?.generations.at(-1);
-  const project = resolvedAttribution?.project.trim() ?? (resolveProjectAttribution({
+  const project = resolvedAttribution?.project.trim() ?? resolveProjectAttribution({
     projectOwnership: conversation?.projectOwnership,
     cwd: generation?.launchProfile.cwd || fallback?.cwd,
     launchProfileProject: generation?.launchProfile.project,
     fallbackProject: fallback?.project,
-  }).project ?? UNRESOLVED_PROJECT);
+  }).project;
+  if (!project || project === UNRESOLVED_PROJECT) {
+    throw new Error("direct operator activity project is unavailable");
+  }
   /* The authorized ingress supplies this identity once per gesture and reuses
      it for retry, resume, and fan-out. Keeping the target out of the digest makes those
      delivery shapes one operator action even when they address several

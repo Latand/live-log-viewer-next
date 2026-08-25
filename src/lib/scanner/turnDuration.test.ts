@@ -96,7 +96,6 @@ describe("lastTurnFromRecords — Claude", () => {
     );
 
     expect(result.operatorActionsAtMs).toEqual([ms("2026-07-14T07:03:00.000Z")]);
-    expect(result.unprovenancedUserActionsAtMs).toEqual([ms("2026-07-14T07:00:00.000Z")]);
     expect(result.assistantMessagesAtMs).toEqual([
       ms("2026-07-14T07:00:05.000Z"),
       ms("2026-07-14T07:05:00.000Z"),
@@ -138,7 +137,7 @@ describe("lastTurnFromRecords — Claude", () => {
     expect(result.operatorActions).toEqual([{ key: "claude:human-record-one", atMs: ms(at) }]);
   });
 
-  test("gives a legacy terminal prompt a stable candidate identity and excludes automated Claude lanes", () => {
+  test("gives a legacy terminal prompt no operator identity and excludes automated Claude lanes", () => {
     const at = "2026-07-14T07:03:00.000Z";
     const result = recentTurnActivityFromRecords([{
       ...claudeUser(at, "typed in a legacy terminal"),
@@ -159,10 +158,8 @@ describe("lastTurnFromRecords — Claude", () => {
       origin: { kind: "coordinator" },
     }], false);
 
-    expect(result.unprovenancedUserActions).toEqual([{
-      key: "claude:legacy-terminal-record",
-      atMs: ms(at),
-    }]);
+    expect(result.operatorActions).toBeUndefined();
+    expect(result.operatorActionsAtMs).toEqual([]);
   });
 
   test("enumerates every completed turn in chronological order", () => {
@@ -541,7 +538,6 @@ describe("lastTurnFromRecords — Codex", () => {
 
     expect(result.operatorActionsAtMs).toEqual([ms(at)]);
     expect(result.operatorActions).toEqual([{ key: actionKey, atMs: ms(at) }]);
-    expect(result.unprovenancedUserActionsAtMs).toEqual([]);
   });
 
   test("tracks a visible Codex assistant message in the current turn", () => {
@@ -689,7 +685,6 @@ test("a truncated transcript prefix reports the gap and never fabricates a turn 
       prefixTruncated: true,
       complete: true,
       operatorActionsAtMs: [],
-      unprovenancedUserActionsAtMs: [ms("2026-07-14T10:00:00.000Z")],
       assistantMessagesAtMs: [
         ms("2026-07-14T08:01:00.000Z"),
         ms("2026-07-14T10:01:00.000Z"),
