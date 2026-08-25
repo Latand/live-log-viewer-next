@@ -101,9 +101,10 @@ afterEach(() => {
 
 /** Everything the panel derives its state from, as two attributes: the seat
     answer (or the absence that renders as `loading`) and the incumbent's model,
-    which is what the header would name. */
+    which is what the header would name. `remember` is on because this stands in
+    for the DOCK, which is the surface a project switch remounts. */
 function Probe({ project }: { project: string }) {
-  const { status, failed } = useOrchestratorSeat(project);
+  const { status, failed } = useOrchestratorSeat(project, true);
   const { incumbent } = useOrchestratorIncumbent(project, Boolean(status?.seat));
   return (
     <div
@@ -218,4 +219,50 @@ test("a failed re-read keeps the project's own last answer, never another projec
   expect(dock.seat()).toBe("loading");
   await settle();
   expect(dock.seat()).toBe("unavailable");
+});
+
+/*
+ * The other half of the same guarantee: the cache is the DOCK's, and a surface
+ * that mounts once per project — the phone's pinned row — does not read from it.
+ * Sharing it there would trade nothing for something real: a seat that cannot
+ * be read would go on reporting the last one that could, on the one surface
+ * where «unavailable» is the whole warning.
+ */
+
+/** The phone's shape: the same hook, left at its default. */
+function FreshProbe({ project }: { project: string }) {
+  const { status, failed } = useOrchestratorSeat(project);
+  return <div data-seat={status ? status.seat?.conversationId ?? "vacant" : failed ? "unavailable" : "loading"} />;
+}
+
+test("a surface that does not ask to remember reads fresh, so an unreadable seat reads as unavailable", async () => {
+  seats.set("atlas", "conversation_atlas");
+
+  const host = dom.document.createElement("div");
+  dom.document.body.append(host);
+  const root = createRoot(host as unknown as HTMLElement);
+  roots.add(root);
+  const seat = () => host.querySelector("div[data-seat]")!.getAttribute("data-seat");
+
+  /* A dock elsewhere in the tab has already answered for this project... */
+  const dock = mountProbe();
+  dock.open("atlas");
+  await settle();
+  expect(dock.seat()).toBe("conversation_atlas");
+
+  /* ...and this surface still loads rather than borrowing that answer. */
+  flushSync(() => root.render(<FreshProbe project="atlas" />));
+  expect(seat()).toBe("loading");
+  await settle();
+  expect(seat()).toBe("conversation_atlas");
+
+  /* Remounted with every read failing — what a phone opened on a broken host
+     does. It reports the failure instead of the answer it once had. */
+  globalThis.fetch = (async () => {
+    throw new Error("network dropped");
+  }) as unknown as typeof fetch;
+  flushSync(() => root.render(<FreshProbe key="remount" project="atlas" />));
+  expect(seat()).toBe("loading");
+  await settle();
+  expect(seat()).toBe("unavailable");
 });
