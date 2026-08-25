@@ -62,7 +62,9 @@ export function validateRoleParams(
 }
 
 function renderScaffold(template: string, params: RoleParamValues): string {
-  return template.replace(/\{\{([A-Za-z][A-Za-z0-9]*)\}\}/g, (_match, key: string) => String(params[key] ?? ""));
+  return template
+    .replace(/\{\{([A-Za-z][A-Za-z0-9]*)\}\}/g, (_match, key: string) => String(params[key] ?? ""))
+    .replace(/^(Repository|Issue query|Urgent list):\s*\n/gm, "");
 }
 
 /**

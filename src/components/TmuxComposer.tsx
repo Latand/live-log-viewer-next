@@ -973,6 +973,9 @@ export interface TmuxComposerProps {
       is attempted while it is set, so no /api/tmux request can fire against an
       as-yet-unclassified host. */
   sendBlockedReason?: string | null;
+  /** Optional surface-specific placeholder, such as the orchestrator dock's
+      project-scoped prompt. Ordinary conversation cards keep their defaults. */
+  placeholder?: string;
   /** This surface is the operator's conversation WINDOW, not an incidental card
       of the same conversation, so the one hoisted composer belongs here even
       while a board card for it is also on screen (the orchestrator dock, #977).
@@ -1024,6 +1027,7 @@ function VoiceComposerCardSlot({ cardId, composerProps, primary }: { cardId: str
       pollPaused: composerProps.pollPaused ?? false,
       deadHost: composerProps.deadHost ?? false,
       sendBlockedReason: composerProps.sendBlockedReason ?? null,
+      placeholder: composerProps.placeholder,
     });
   });
   return <div ref={publishNode} data-testid="voice-composer-card-slot" className="contents" />;
@@ -1041,6 +1045,7 @@ export function TmuxComposerCore({
   pollPaused = false,
   deadHost = false,
   sendBlockedReason = null,
+  placeholder,
   dockNode,
 }: TmuxComposerProps & {
   /** Absent: render the form inline (the card owns the composer, as ever).
@@ -2175,13 +2180,13 @@ export function TmuxComposerCore({
   const composerBar = (
     <ComposerBar
       composer={composer}
-      placeholder={unresolvedOwnership
+      placeholder={placeholder ?? (unresolvedOwnership
         ? t("composer.placeholderResolving")
         : relayMode
           ? t("composer.placeholderRelay")
           : spawnMode
             ? t("composer.placeholderSpawn")
-            : t("composer.placeholderSend")}
+            : t("composer.placeholderSend"))}
       textareaAriaLabel={t("composer.textAria")}
       imageAriaLabel={t("composer.addImages")}
       sendLabelIdle={spawnMode ? t("composer.launchAgent") : t("composer.sendToAgent")}

@@ -89,6 +89,7 @@ export interface VoiceComposerCardProps {
   pollPaused: boolean;
   deadHost: boolean;
   sendBlockedReason: string | null;
+  placeholder?: string;
 }
 
 /**
@@ -147,7 +148,8 @@ export function publishVoiceComposerCardProps(cardId: string, props: VoiceCompos
     && current.file === props.file
     && current.pollPaused === props.pollPaused
     && current.deadHost === props.deadHost
-    && current.sendBlockedReason === props.sendBlockedReason) {
+    && current.sendBlockedReason === props.sendBlockedReason
+    && current.placeholder === props.placeholder) {
     return;
   }
   composerCardProps.set(cardId, props);

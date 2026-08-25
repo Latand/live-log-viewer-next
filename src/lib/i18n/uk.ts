@@ -369,6 +369,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.placeholderSpawn": "промпт — агент запуститься…",
   "composer.placeholderResolving": "написати агенту — відновлюємо з'єднання з сесією…",
   "composer.placeholderSend": "написати агенту…",
+  "composer.placeholderOrchestrator": "що зробити в {project}?",
   "composer.textAria": "Текст для агента",
   "composer.optionsShow": "Показати параметри повідомлення",
   "composer.optionsHide": "Сховати параметри повідомлення",
