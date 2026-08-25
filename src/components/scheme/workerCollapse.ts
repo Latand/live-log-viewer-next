@@ -1,40 +1,37 @@
 import type { Flow, Round } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
+import { DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES } from "@/lib/board/types";
 
 import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
-import { activityBand, isChildConversation, kidsIndex, projectKey, schemeAgeHorizonSeconds, subtree, withinPlacementHorizon } from "@/components/projectModel";
+import { activityBand, isChildConversation, projectKey, schemeAgeHorizonSeconds, withinPlacementHorizon } from "@/components/projectModel";
 import { IDENTITY_CLAIM_RESOLVER, transcriptClaimResolver, type TranscriptClaimResolver } from "@/components/transcriptClaims";
 
 /*
- * Worker-class auto-collapse (issue #112).
+ * Conversation auto-collapse (issues #112 and #1158).
  *
- * Orchestration sessions breed dozens of short-lived worker conversations —
- * flow implementers, headless reviewer rounds, pipeline stages, agent-spawned
- * subtasks. Each is only interesting while its round is active; once it goes
- * quiet it should fold into a compact per-flow / per-worktree stack instead of
- * holding a full board node.
+ * The board keeps active, attention-bearing, delivered-to, cursor-stage, open
+ * flow, and operator-pinned conversations expanded. Terminal or expired rows
+ * fold into compact origin stacks, including owner roots and reviewers.
  *
  * This module is the pure decision layer: given the scanned files, the flow /
  * pipeline lineage, and the durable pin set, it classifies each conversation
  * and derives the stacks the board renders. It writes nothing — the collapsed
  * placement is a deterministic function of the scan, so it survives reloads and
  * redeploys with no stored "collapsed" flag; the only durable state is the
- * user's manual-expand pin, carried by the board store's existing membership
- * lists (`expanded` / `manual`).
+ * user's pins and idle window, carried by the existing board preference store.
  */
 
 export type WorkerClass = "flow-reviewer" | "flow-implementer" | "pipeline-stage" | "spawned-worker" | "spawned-descendant";
 
-/** Default inactivity window before a non-reviewer worker collapses (issue
-    #112 asks for ~15 minutes, configurable). Reviewer rounds ignore this and
-    collapse the instant their round reaches a verdict. */
-export const DEFAULT_WORKER_COLLAPSE_IDLE_MS = 15 * 60 * 1000;
+/** Default board inactivity window. Terminal evidence still collapses
+    immediately; this window applies only to conversations that have not settled. */
+export const DEFAULT_WORKER_COLLAPSE_IDLE_MS = DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES * 60 * 1000;
 
 /**
  * Operator-tunable idle window. `NEXT_PUBLIC_*` is inlined into the client
  * bundle by Next, so the threshold can be retuned without touching this code; a
- * missing or malformed value falls back to the 15-minute default.
+ * missing or malformed value falls back to the two-hour default.
  */
 export function workerCollapseIdleMs(): number {
   const raw = typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_LLV_WORKER_COLLAPSE_MINUTES : undefined;
@@ -63,6 +60,7 @@ export function pipelineStageAgentPaths(
 
 export interface WorkerLineage {
   flows: readonly Flow[];
+  pipelines?: readonly Pipeline[];
   /** Output of {@link pipelineStageAgentPaths} — computed once per render. */
   pipelineStagePaths: ReadonlySet<string>;
   /** Resolves a flow's recorded member paths onto the projected spelling before
@@ -129,11 +127,9 @@ function flowMembership(
  * as an automated launch, so topology, not message-counting, decides ownership
  * here. Then pipeline stage ownership, then generic spawned lineage.
  *
- * A HANDOFF is never a worker: it is the owner continuing a conversation from
- * the composer (agents spawn through the spawn API, not the handoff flow). Its
- * first composer prompt is the owner's, yet the generic worker-launch allowance
- * would discount it — so, as with a parentless implementer, topology (the
- * `handoff` flag) decides ownership rather than the fragile message count.
+ * Durable flow and pipeline membership is checked before the legacy handoff
+ * marker. That ordering keeps orchestration stages worker-class even when an old
+ * compatibility record still carries a polluted handoff flag.
  *
  * FAIL TOWARD COLLAPSED (issue #136): the precise classes above miss workers
  * whenever the flow/pipeline attachment can't be resolved by path (a migrated or
@@ -141,18 +137,20 @@ function flowMembership(
  * `isChildConversation` kinds don't cover). The operator's board floods with
  * exactly those finished-but-uncollapsed cards. So any conversation that was
  * spawned *under something* — it carries a `parent` — is worker-class by
- * default: a `spawned-descendant`. This never overrides the owner exemption
- * (isCollapseExempt still pins user-authored / live / pinned cards) and never
- * touches a parentless root (owner-started conversations stay out of scope), but
- * it means a classification miss now folds the card instead of leaving it as a
- * full node.
+ * default: a `spawned-descendant`. Classification remains useful for stack labels;
+ * the view-collapse decision itself applies to every conversation through
+ * {@link keepExpanded}.
  */
 export function classifyWorker(file: FileEntry, lineage: WorkerLineage): WorkerClass | null {
-  if (file.handoff) return null;
+  const durableFlow = file.durableLineage?.memberships.find((membership) => membership.kind === "flow");
+  if (durableFlow?.role === "reviewer") return "flow-reviewer";
+  if (durableFlow?.role === "implementer") return "flow-implementer";
+  if (file.durableLineage?.memberships.some((membership) => membership.kind === "pipeline")) return "pipeline-stage";
   const membership = flowMembership(file, lineage.flows, lineage.resolveClaimPath);
   if (membership?.role === "reviewer") return "flow-reviewer";
   if (membership?.role === "implementer") return file.parent ? "flow-implementer" : null;
   if (lineage.pipelineStagePaths.has(file.path)) return "pipeline-stage";
+  if (file.handoff) return null;
   if (isChildConversation(file)) return "spawned-worker";
   return file.parent ? "spawned-descendant" : null;
 }
@@ -165,72 +163,95 @@ export function reviewerRoundFinished(round: Round): boolean {
 
 export interface CollapseContext extends WorkerLineage {
   nowMs: number;
-  idleMs: number;
+  /** Null disables age-only collapse. Settled conversations still fold. */
+  idleMs: number | null;
   /** Paths the user manually placed/expanded — a durable pin against collapse. */
   pinnedPaths: ReadonlySet<string>;
-  /** Transcripts an ACTIVE pipeline keeps as full-size real stage cards (#507
-      F2 full-pane set): the latest attempt of every current stage. They must
-      never fold into the idle-worker stack — an aged-idle passed stage on a
-      cursor-bearing pipeline stays the one real conversation card, with no
-      worker-stack duplicate. Older retries and completed/closed pipelines are
-      absent from this set, so their compaction is preserved (#507 final review).
-      Optional: an absent set means no extra protection (the pre-#507 behavior). */
+  /** Current cursor-stage transcripts of provisioning/running/needs-decision
+      pipelines. Completed prior stages follow the ordinary settled/idle rule. */
   protectedPaths?: ReadonlySet<string>;
+  /** Structured sends that are queued, held, or still being delivered. */
+  activeDeliveryConversationIds?: ReadonlySet<string>;
 }
 
 /**
- * Hard exemptions (issue #112): a conversation that must never auto-collapse
- * regardless of idle time. Owner attention (a human-authored message), any live
- * or mid-turn work, an in-flight account migration, and an explicit manual
- * placement each pin the card. These mirror the reaper's protection reasons so
- * the board and the process side never disagree about what is "just a worker".
+ * Terminal evidence used by the board projection. When the pipeline list loaded,
+ * a missing durable pipeline record counts as closed because closed pipelines are
+ * intentionally omitted while their transcript membership remains durable.
  */
-export function isCollapseExempt(file: FileEntry, context: CollapseContext): boolean {
-  if (file.userAuthored) return true;
-  /* Fail closed on unconfirmed authorship: the reaper has not scanned this
-     transcript since its latest write, so we cannot yet rule out an owner
-     message. Treat it as pinned until a cycle clears it (issue #112). */
-  if (file.authorshipUnverified) return true;
-  if (file.activity === "live" || file.activity === "stalled") return true;
-  if (file.proc === "running") return true;
-  if (file.pendingQuestion || file.waitingInput) return true;
-  if (file.migration && file.migration.phase !== "committed" && file.migration.phase !== "rolled-back") return true;
-  if (context.pinnedPaths.has(file.path)) return true;
-  /* An active pipeline's live stage card (#507 F2): its transcript is a real
-     conversation card in the colored group, so idle age must not fold it. */
-  if (context.protectedPaths?.has(file.path)) return true;
-  return false;
+export function conversationSettled(file: FileEntry, context: WorkerLineage): boolean {
+  if (file.proc === "killed" || file.proc === "done") return true;
+  if (file.authoritativeTurn?.state === "terminal") return true;
+  if (file.supersededBy) return true;
+  if (file.spawn?.state === "failed" || file.spawn?.state === "recovered") return true;
+  if (file.review?.verdict) return true;
+
+  const pipelineMembership = file.durableLineage?.memberships.find((membership) => membership.kind === "pipeline");
+  if (pipelineMembership && context.pipelines !== undefined) {
+    const pipeline = context.pipelines.find((candidate) => candidate.id === pipelineMembership.containerId);
+    if (!pipeline || pipeline.state === "completed" || pipeline.state === "closed") return true;
+  }
+
+  const membership = flowMembership(file, context.flows, context.resolveClaimPath);
+  return Boolean(membership?.role === "reviewer" && membership.round && reviewerRoundFinished(membership.round));
 }
 
 /**
- * Whether a single worker-class conversation should fold into a stack now.
- * Reviewer rounds collapse immediately on verdict; every other worker waits out
- * the idle window. Owner-touched / live / pinned conversations never collapse.
+ * The board's single expansion decision. Authorship fields belong to reaper
+ * safety and deliberately do not participate in this view projection.
+ */
+export function keepExpanded(file: FileEntry, context: CollapseContext): boolean {
+  if (file.activity === "live" || file.proc === "running") return true;
+  if (file.pendingQuestion || file.waitingInput) return true;
+  if ((file.migration?.heldDeliveries ?? 0) > 0) return true;
+  if (file.conversationId && context.activeDeliveryConversationIds?.has(file.conversationId)) return true;
+  if (context.protectedPaths?.has(file.path)) return true;
+  if (context.pinnedPaths.has(file.path)) return true;
+  if (conversationSettled(file, context)) return false;
+
+  const membership = flowMembership(file, context.flows, context.resolveClaimPath);
+  if (membership && membership.flow.state !== "closed") {
+    if (membership?.role === "reviewer" && membership.round && !reviewerRoundFinished(membership.round)) return true;
+    if (membership?.role === "implementer"
+      && membership.flow.state !== "approved"
+      && membership.flow.state !== "done_comment") return true;
+  }
+
+  if (context.idleMs === null) return true;
+  return context.nowMs - file.mtime * 1000 < context.idleMs;
+}
+
+/**
+ * Whether a conversation should fold into a stack now. Reviewer rounds collapse
+ * on terminal evidence; every unsettled conversation follows the idle window.
  */
 export function shouldCollapseWorker(file: FileEntry, context: CollapseContext): boolean {
-  /* Engine-native subagents (#142 S2) are owned by the tray projection, which
-     decides their promoted/folded surface — generic age-based worker collapse
-     must not also fold them into an origin stack, or a tray member would render
-     in two places. S2 claims them before this classifier ever runs. */
-  if (file.spawnOrigin === "engine") return false;
-  const klass = classifyWorker(file, context);
-  if (!klass) return false;
-  if (isCollapseExempt(file, context)) return false;
-  const membership = flowMembership(file, context.flows, context.resolveClaimPath);
-  if (klass === "flow-reviewer") {
-    /* Reviewers collapse exactly on verdict, never on the idle window: a
-       still-reviewing round stays put (it is the live loop), and a finished
-       round folds immediately. */
-    return Boolean(membership?.round && reviewerRoundFinished(membership.round));
+  /* Engine-native subagents use this same decision before tray placement. The
+     dashboard puts collapsedPaths in the tray's claimed set, so a settled row
+     folds into exactly one worker stack while live/pinned rows remain eligible
+     for the tray's promoted/full-card projection. */
+  if (file.spawn && file.spawn.state !== "failed" && file.spawn.state !== "recovered") return false;
+  if (file.migratedTo) return false;
+  if (file.engine !== "claude" && file.engine !== "codex") return false;
+  return !keepExpanded(file, context);
+}
+
+/** The one pipeline stage path protected by each active execution cursor.
+    Attempts retain their recorded spelling, so resolve each claim onto the
+    scanned corpus before the set is compared with `file.path`. */
+export function pipelineCursorStagePaths(
+  pipelines: readonly Pipeline[],
+  files: readonly { path: string }[] = [],
+): Set<string> {
+  const resolve = transcriptClaimResolver(files);
+  const paths = new Set<string>();
+  for (const pipeline of pipelines) {
+    if (!pipeline.cursor || !["provisioning", "running", "needs_decision"].includes(pipeline.state)) continue;
+    const run = pipeline.runs.find((candidate) => candidate.stageId === pipeline.cursor!.stageId);
+    const attempt = run?.attempts.filter((candidate) => !candidate.historical).at(-1);
+    if (attempt?.agentPath) paths.add(resolve(attempt.agentPath));
   }
-  if (klass === "flow-implementer") {
-    /* The implementer anchors its flow on the board. While the flow is open —
-       spawning, reviewing, or awaiting the owner's decision — it must stay
-       expanded even if its own transcript is momentarily idle. Only a closed
-       flow's implementer is a candidate, and then only past the idle window. */
-    if (!membership || membership.flow.state !== "closed" || membership.flow.restored) return false;
-  }
-  return context.nowMs - file.mtime * 1000 >= context.idleMs;
+  return paths;
 }
 
 export interface WorkerStack {
@@ -242,7 +263,7 @@ export interface WorkerStack {
   kind: "flow" | "pipeline" | "origin" | "worktree";
   /** Flow id / pipeline id / spawner (root-ancestor) path / worktree name. */
   id: string;
-  /** Collapse-eligible worker conversations, freshest first. */
+  /** Collapse-eligible conversations, freshest first. */
   items: FileEntry[];
 }
 
@@ -338,6 +359,9 @@ export interface ProtectedReviewerNodesInput {
   /** Durable manual placements/expansions — a reviewer the owner opened out of a
       worker stack must render even though it carries no authorship protection. */
   pinnedPaths: ReadonlySet<string>;
+  /** Result of the shared board expansion predicate. When present, legacy
+      authorship flags cannot rematerialize a reviewer that the rule collapsed. */
+  keepExpandedPaths?: ReadonlySet<string>;
   /** Board clock in epoch seconds for the automatic-placement age horizon.
       `0` (the default, and the server render) bounds nothing. */
   now?: number;
@@ -349,9 +373,9 @@ export interface ProtectedReviewerNodesInput {
  * Reviewer transcripts that must be materialized as standalone board nodes
  * because their owning flow has NO rendered round deck (issue #112).
  *
- * A reviewer the owner must keep — one carrying authorship protection (a real
- * user message, or unconfirmed authorship that fails closed) OR one the owner
- * explicitly opened out of a worker stack (a durable pin) — must never vanish.
+ * A reviewer admitted by the shared keep-expanded result still needs a surface.
+ * A durable operator pin always qualifies; legacy callers without that result
+ * retain the older authorship fallback.
  * An active flow normally renders it in its round deck, but a deck exists ONLY
  * when the flow's implementer is itself a PLACED node. The dashboard may hide or
  * leave the implementer unplaced (a closed flow never has a deck at all),
@@ -390,14 +414,13 @@ export function protectedReviewerNodes(input: ProtectedReviewerNodesInput): File
       if (input.renderedNodePaths.has(path) || input.hiddenPaths.has(path)) continue;
       const file = byPath.get(path);
       if (!file) continue;
-      /* Authorship protection never expires, so past the placement age horizon
-         it would keep a reviewer of a long-closed flow on the canvas forever.
-         An owner PIN is explicit intent and stays unbounded; live and running
-         work is exempt through the horizon itself. A bounded reviewer keeps its
-         row in «All conversations» and quiet history. */
+      const admittedBySharedRule = input.keepExpandedPaths?.has(path) ?? false;
+      if (input.keepExpandedPaths && !admittedBySharedRule) continue;
+      /* An owner pin is explicit intent and stays unbounded. Other legacy
+         materialization reasons remain inside the placement horizon. */
       const owned = input.pinnedPaths.has(path);
       if (!owned && !withinPlacementHorizon(file, input.now ?? 0, input.ageHorizonSeconds ?? schemeAgeHorizonSeconds())) continue;
-      if (owned || file.userAuthored || file.authorshipUnverified) {
+      if (admittedBySharedRule || owned || file.userAuthored || file.authorshipUnverified) {
         out.push(file);
         seen.add(path);
       }
@@ -431,56 +454,55 @@ function stackKeyFor(
     pipeline) lead, then spawner groups, then the worktree catch-all. */
 const STACK_KIND_RANK: Record<WorkerStack["kind"], number> = { flow: 0, pipeline: 1, origin: 2, worktree: 3 };
 
-export interface CollapsibleInput {
+export interface CollapseContextInput {
   files: readonly FileEntry[];
-  project: string;
   flows: readonly Flow[];
   pipelines?: readonly Pipeline[];
   /** Durable manual placements/expansions — pinned against collapse. */
   pinnedPaths: ReadonlySet<string>;
-  /** Active-pipeline full-pane transcripts protected from collapse (#507 F2);
-      see {@link CollapseContext.protectedPaths}. Optional — an empty set means
-      no protection, matching the pre-#507-final behavior. */
+  /** Active cursor-stage transcripts protected from collapse. */
   protectedPaths?: ReadonlySet<string>;
+  activeDeliveryConversationIds?: ReadonlySet<string>;
   nowMs: number;
-  idleMs?: number;
+  idleMs?: number | null;
+}
+
+export interface CollapsibleInput extends CollapseContextInput {
+  project: string;
 }
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
-function collapseContext(input: CollapsibleInput): CollapseContext {
+export function collapseContext(input: CollapseContextInput): CollapseContext {
   /* One resolver per pass: durable flow/pipeline records are matched against the
      projected corpus, whatever spelling each side happens to carry (#943). */
   const resolveClaimPath = transcriptClaimResolver(input.files);
   return {
     flows: input.flows,
+    pipelines: input.pipelines,
     resolveClaimPath,
     pipelineStagePaths: pipelineStageAgentPaths(input.pipelines ?? [], resolveClaimPath),
     nowMs: input.nowMs,
-    idleMs: input.idleMs ?? workerCollapseIdleMs(),
+    idleMs: input.idleMs === undefined ? workerCollapseIdleMs() : input.idleMs,
     pinnedPaths: input.pinnedPaths,
     protectedPaths: input.protectedPaths ?? EMPTY_PATHS,
+    activeDeliveryConversationIds: input.activeDeliveryConversationIds ?? EMPTY_PATHS,
   };
 }
 
 /**
- * The worker conversations of a project that should fold off the board now.
+ * The conversations of a project that should fold off the board now.
  *
- * A worker is collapsible only when it {@link shouldCollapseWorker} AND nothing
- * in its subtree is exempt — no live/mid-turn descendant, and no owner-authored
- * or pinned one. That subtree guard is the safety net for removing the card
- * from the scheme: folding a parent must never bury a child that is still
- * working or that the owner has touched (the hard exemption applies to the
- * whole subtree, not just the root).
+ * Each conversation is decided independently. A settled ancestor can fold while
+ * a live descendant opens its own group, which prevents idle lineage roots from
+ * consuming columns merely because active work exists below them.
  */
 export function collapsibleWorkerFiles(input: CollapsibleInput): FileEntry[] {
   const context = collapseContext(input);
-  const kids = kidsIndex(input.files as FileEntry[]);
   const out: FileEntry[] = [];
   for (const file of input.files) {
     if (projectKey(file) !== input.project) continue;
     if (!shouldCollapseWorker(file, context)) continue;
-    if (subtree(file, kids).some((descendant) => isCollapseExempt(descendant, context))) continue;
     out.push(file);
   }
   return out;

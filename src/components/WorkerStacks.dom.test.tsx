@@ -105,15 +105,21 @@ test("expands a flow stack and opens a folded reviewer round", () => {
   const stacks: WorkerStack[] = [{ key: "wstack::flow::f1", kind: "flow", id: "f1", items: [reviewer] }];
 
   const opened: FileEntry[] = [];
+  const windows: Array<number | null> = [];
   const { host } = mount(
-    <WorkerStacks stacks={stacks} files={[impl, reviewer]} flows={flows} onSelect={(file) => opened.push(file)} />,
+    <WorkerStacks stacks={stacks} files={[impl, reviewer]} flows={flows} idleCollapseMinutes={120} onIdleCollapseMinutesChange={(minutes) => windows.push(minutes)} onSelect={(file) => opened.push(file)} />,
   );
 
   /* The strip header carries the total count and starts collapsed. */
-  const header = host.querySelector('[data-testid="worker-stacks"] > button') as HTMLButtonElement;
+  const header = host.querySelector('[data-testid="worker-stacks"] button[aria-expanded]') as HTMLButtonElement;
   expect(header).toBeTruthy();
   expect(header.getAttribute("aria-expanded")).toBe("false");
-  expect(header.textContent).toContain("1");
+  expect(header.textContent).toContain("1 idle");
+  const windowSelect = host.querySelector('[data-testid="idle-collapse-window"]') as HTMLSelectElement;
+  expect(windowSelect.value).toBe("120");
+  windowSelect.value = "never";
+  flushSync(() => windowSelect.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event));
+  expect(windows).toEqual([null]);
 
   /* Open the strip; the flow stack row shows the implementer title as its label. */
   click(header);
@@ -167,7 +173,7 @@ test("a terminal direct review group's stack row carries the final verdict and a
   const { host } = mount(
     <WorkerStacks stacks={stacks} files={[quiet, reviewer]} flows={[groupFlow]} onSelect={() => {}} onExpandGroup={(item) => expanded.push(item)} />,
   );
-  click(host.querySelector('[data-testid="worker-stacks"] > button')!);
+  click(host.querySelector('[data-testid="worker-stacks"] button[aria-expanded]')!);
 
   /* The row header names the reviewed conversation and wears the group's
      final verdict chip. */
@@ -186,7 +192,7 @@ test("a terminal direct review group's stack row carries the final verdict and a
   const managed = mount(
     <WorkerStacks stacks={managedStacks} files={[quiet, reviewer]} flows={[flow({ id: "f1", implementerPath: "/quiet" })]} onSelect={() => {}} onExpandGroup={() => {}} />,
   );
-  click(managed.host.querySelector('[data-testid="worker-stacks"] > button')!);
+  click(managed.host.querySelector('[data-testid="worker-stacks"] button[aria-expanded]')!);
   expect(managed.host.querySelector("[data-review-group-expand]")).toBeNull();
 });
 
@@ -213,7 +219,28 @@ test("labels a worktree stack by its worktree name", () => {
   const worker = entry({ path: "/w", kind: "subagent", parent: "/root", worktree: "feat-x", title: "spawned worker" });
   const stacks: WorkerStack[] = [{ key: "wstack::worktree::feat-x", kind: "worktree", id: "feat-x", items: [worker] }];
   const { host } = mount(<WorkerStacks stacks={stacks} files={[worker]} flows={[]} onSelect={() => {}} />);
-  const header = host.querySelector('[data-testid="worker-stacks"] > button') as HTMLButtonElement;
+  const header = host.querySelector('[data-testid="worker-stacks"] button[aria-expanded]') as HTMLButtonElement;
   click(header);
   expect(Array.from(host.querySelectorAll("button")).some((b) => b.textContent?.includes("feat-x"))).toBe(true);
+});
+
+test("a folded reviewer that died without a verdict keeps the no-verdict badge", () => {
+  const reviewer = entry({
+    path: "/reviewer-no-verdict",
+    title: "review interrupted",
+    proc: "killed",
+    durableLineage: {
+      kind: "review",
+      role: "reviewer",
+      parentConversationId: "conversation-root",
+      reviewsConversationId: "conversation-root",
+      memberships: [],
+    },
+  });
+  const stacks: WorkerStack[] = [{ key: "wstack::origin::root", kind: "origin", id: "root", items: [reviewer] }];
+  const { host } = mount(<WorkerStacks stacks={stacks} files={[reviewer]} flows={[]} onSelect={() => {}} />);
+  click(host.querySelector('[data-testid="worker-stacks"] button[aria-expanded]')!);
+  const stackRow = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.includes("Spawned"))!;
+  click(stackRow);
+  expect(host.querySelector("[data-reviewer-no-verdict]")?.textContent).toBe("no verdict");
 });

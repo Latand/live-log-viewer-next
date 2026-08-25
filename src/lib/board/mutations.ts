@@ -1,4 +1,5 @@
 import type { BoardProjectStateV1 } from "@/lib/view/types";
+import { DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES } from "@/lib/board/types";
 
 export type BoardMutationV1 =
   | { kind: "close"; path: string }
@@ -14,7 +15,7 @@ export type BoardMutationV1 =
      source's, so adopting a fork that never drew a card cannot un-pin the
      survivor. */
   | { kind: "remap-paths"; pairs: Array<{ from: string; to: string }>; targetPlacementAuthoritative?: boolean }
-  | { kind: "set-presentation"; viewMode?: "scheme" | "list" | null; taskPanelOpen?: boolean }
+  | { kind: "set-presentation"; viewMode?: "scheme" | "list" | null; taskPanelOpen?: boolean; idleCollapseMinutes?: number | null }
   /* Crown favorites (issue #185): `id` is a durable conversation identity
      (`conversationId` when the backend supplies one, else the transcript path),
      kept apart from the path-keyed membership lists so it never passes through
@@ -81,6 +82,9 @@ function normalize(board: BoardProjectStateV1, aliases = aliasesOf(board)): Boar
          of the alias/hidden path machinery so a fold survives a resume. */
       foldedEngineChildIds: unique(board.prefs.foldedEngineChildIds ?? []),
       expandedEngineTrayParentIds: unique(board.prefs.expandedEngineTrayParentIds ?? []),
+      idleCollapseMinutes: board.prefs.idleCollapseMinutes === undefined
+        ? DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES
+        : board.prefs.idleCollapseMinutes,
     },
   };
 }
@@ -226,6 +230,7 @@ export function applyBoardMutations(board: BoardProjectStateV1, mutations: reado
           ...next.prefs,
           ...(mutation.viewMode === undefined ? {} : { viewMode: mutation.viewMode }),
           ...(mutation.taskPanelOpen === undefined ? {} : { taskPanelOpen: mutation.taskPanelOpen }),
+          ...(mutation.idleCollapseMinutes === undefined ? {} : { idleCollapseMinutes: mutation.idleCollapseMinutes }),
         },
       });
       continue;

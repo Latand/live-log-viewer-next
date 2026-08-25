@@ -8,10 +8,11 @@ import { canonicalProject } from "@/lib/projects/aliases";
 
 import { type BoardCausalHistory, canonicalizeKeyRevisions, stampKeyRevisions } from "@/lib/board/keys";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
+import { DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES, MAX_BOARD_IDLE_COLLAPSE_MINUTES } from "@/lib/board/types";
 import type { BoardFileV1, BoardProjectStateV1 } from "@/lib/view/types";
 
 export const BOARD_FILE = statePath("board.json");
-const EMPTY_PREFS: BoardProjectStateV1["prefs"] = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode: null, taskPanelOpen: false };
+const EMPTY_PREFS: BoardProjectStateV1["prefs"] = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], idleCollapseMinutes: DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES, viewMode: null, taskPanelOpen: false };
 const BOARD_LOCK_ATTEMPTS = 1_000;
 const BOARD_LOCK_WAIT_MS = 5;
 const BOARD_LOCK_STALE_MS = 30_000;
@@ -43,6 +44,8 @@ function projectState(value: unknown): value is BoardProjectStateV1 {
     (prefs!.favorites === undefined || stringArray(prefs!.favorites)) &&
     (prefs!.foldedEngineChildIds === undefined || stringArray(prefs!.foldedEngineChildIds)) &&
     (prefs!.expandedEngineTrayParentIds === undefined || stringArray(prefs!.expandedEngineTrayParentIds)) &&
+    (prefs!.idleCollapseMinutes === undefined || prefs!.idleCollapseMinutes === null
+      || (Number.isInteger(prefs!.idleCollapseMinutes) && prefs!.idleCollapseMinutes! > 0 && prefs!.idleCollapseMinutes! <= MAX_BOARD_IDLE_COLLAPSE_MINUTES)) &&
     (state.explicitManual === undefined || stringArray(state.explicitManual)) &&
     (state.pathAliases === undefined || aliases(state.pathAliases)) &&
     (state.keyRevisions === undefined || keyRevisions(state.keyRevisions)) &&
@@ -107,6 +110,9 @@ function read(filePath: string): BoardFileV1 {
         favorites: state.prefs.favorites ?? [],
         foldedEngineChildIds: state.prefs.foldedEngineChildIds ?? [],
         expandedEngineTrayParentIds: state.prefs.expandedEngineTrayParentIds ?? [],
+        idleCollapseMinutes: state.prefs.idleCollapseMinutes === undefined
+          ? DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES
+          : state.prefs.idleCollapseMinutes,
       },
     }])) };
   } catch (error) {
