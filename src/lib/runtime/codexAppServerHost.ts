@@ -64,6 +64,7 @@ import {
 type JsonObject = Record<string, unknown>;
 type PendingRpc = {
   method: string;
+  clientUserMessageId: string | null;
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
@@ -281,7 +282,6 @@ const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 5 * 60_000;
     Compaction is a model call over the whole thread, so the budget is generous;
     past it the operation terminalizes visibly rather than hanging (#862). */
 const DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS = 5 * 60_000;
-const ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER = 3;
 const LATE_HISTORY_RESPONSE_TTL_MULTIPLIER = 3;
 const MIN_LATE_HISTORY_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_HISTORY_RESPONSES = 32;
@@ -312,16 +312,13 @@ const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 export const MAX_APP_SERVER_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
 const MAX_LINE_BYTES = MAX_APP_SERVER_LINE_BYTES;
 /**
- * A full-history `thread/read`, a legacy `thread/resume`, or an individually
- * large history page can exceed `MAX_LINE_BYTES` (issue #794: one production
- * resume envelope reached ~55 MB). Awaited history responses and completion
- * notifications may pass through `CodexReplayFrameReducer`, which bounds every
- * string token while it streams. Every other oversized frame is skipped with a
- * surfaced diagnostic, keeping the host reachable after degraded output (#301).
+ * An individually large paginated history frame can exceed `MAX_LINE_BYTES`.
+ * Awaited page responses and completion notifications may pass through
+ * `CodexReplayFrameReducer`, which bounds every string token while it streams.
+ * Every other oversized frame is skipped with a surfaced diagnostic, keeping
+ * the host reachable after degraded output (#301).
  */
 const REPLAY_ENVELOPE_METHODS = new Set([
-  "thread/resume",
-  "thread/read",
   "thread/turns/list",
   "thread/items/list",
 ]);
@@ -465,14 +462,6 @@ function modelSupportsImageInput(value: unknown, requestedModel: string | undefi
   return Array.isArray(selected?.inputModalities) && selected.inputModalities.includes("image");
 }
 
-function resumedTurns(value: unknown): JsonObject[] {
-  const outer = record(value);
-  const thread = record(outer?.thread) ?? outer;
-  if (Array.isArray(thread?.turns)) return thread.turns.map(record).filter((turn): turn is JsonObject => turn !== null);
-  const page = record(thread?.initialTurnsPage);
-  return Array.isArray(page?.data) ? page.data.map(record).filter((turn): turn is JsonObject => turn !== null) : [];
-}
-
 function pagedTurns(value: unknown): JsonObject[] {
   const data = record(value)?.data;
   if (!Array.isArray(data)) throw new Error("thread/turns/list returned no data array");
@@ -539,11 +528,6 @@ function oversizedFrameDiagnostic(observedBytes: number, messageType: string): s
   return `Codex app-server emitted an oversized JSONL frame: observed ${observedBytes} bytes, bound ${MAX_LINE_BYTES} bytes, message type ${messageType}; the frame was skipped and the session may be missing its content`;
 }
 
-function isUnknownMethodError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /unknown variant|method not found/i.test(message);
-}
-
 function isInvalidCursorError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /cursor/i.test(message);
@@ -551,7 +535,7 @@ function isInvalidCursorError(error: unknown): boolean {
 
 function isThreadNotLoadedError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /thread not loaded/i.test(message);
+  return /thread not loaded|not materialized yet.*before first user message/i.test(message);
 }
 
 function itemReplayKey(value: unknown): string {
@@ -779,14 +763,9 @@ export class CodexAppServerHost implements EngineHost {
   private releasing = false;
   private released = false;
   private dead = false;
-  /** Sticky once the app-server rejects `thread/turns/list` as unknown; every
-      later history read goes straight to the legacy full-envelope path. */
-  private turnPaginationUnsupported = false;
-  /** Sticky fallback when item pagination is unavailable; full turn pages
-      remain protected by the bounded reducer. */
-  private itemPaginationUnsupported = false;
   private replayReductionRpcId: number | null = null;
   private replayReductionMethod: string | null = null;
+  private oversizedResumeRecoveryPending = false;
   private oversizedCompletionReconciliation: Promise<void> | null = null;
   private oversizedDiscard: { headText: string; bytes: number; reported: boolean } | null = null;
   private oversizedFrameDiagnostics = 0;
@@ -799,6 +778,7 @@ export class CodexAppServerHost implements EngineHost {
   private releasePromise: Promise<void> | null = null;
   private releaseCleanup: (() => void) | null;
   private writerFence: (() => boolean) | null = null;
+  private uncertainMutation: { method: string; clientId: string | null } | null = null;
   private ledgerFailed = false;
   private failure: Error | null = null;
   private readonly reapedPromise: Promise<void>;
@@ -997,33 +977,23 @@ export class CodexAppServerHost implements EngineHost {
 
   /**
    * History for a metadata-only resume, hydrated through bounded
-   * `thread/turns/list` pages (issue #301). A pre-pagination app-server ignores
-   * `excludeTurns` and replays history inline, so a non-empty inline envelope
-   * is authoritative and no page call is made. Current servers return a
+   * `thread/turns/list` pages (issue #301). Current servers return a
    * `turnsBackwardsCursor` that anchors the newest persisted turn. A stale
    * anchor restarts once from the current newest turn; collection has no side
    * effects, so a restart cannot duplicate history.
    */
   private async collectResumedTurns(result: unknown): Promise<JsonObject[]> {
-    const inline = resumedTurns(result);
-    if (inline.length > 0 || this.turnPaginationUnsupported) return inline;
+    const recoveringDroppedReplay = this.oversizedResumeRecoveryPending;
+    this.oversizedResumeRecoveryPending = false;
     const backwardsCursor = stringField(record(result), "turnsBackwardsCursor");
-    if (backwardsCursor === null) return inline;
+    if (backwardsCursor === null && !recoveringDroppedReplay) return [];
     const itemsBackwardsCursor = stringField(record(result), "itemsBackwardsCursor");
-    try {
-      return await this.retryOnceOnInvalidCursor((retry) =>
-        this.collectTurnPages(
-          retry ? null : backwardsCursor,
-          retry ? null : itemsBackwardsCursor,
-          retry || itemsBackwardsCursor !== null,
-        ));
-    } catch (error) {
-      if (isUnknownMethodError(error)) {
-        this.turnPaginationUnsupported = true;
-        return inline;
-      }
-      throw error;
-    }
+    return this.retryOnceOnInvalidCursor((retry) =>
+      this.collectTurnPages(
+        retry || recoveringDroppedReplay ? null : backwardsCursor,
+        retry || recoveringDroppedReplay ? null : itemsBackwardsCursor,
+        retry || recoveringDroppedReplay || itemsBackwardsCursor !== null,
+      ));
   }
 
   private async collectTurnPages(
@@ -1031,8 +1001,7 @@ export class CodexAppServerHost implements EngineHost {
     initialItemsCursor: string | null,
     hydrateItems: boolean,
   ): Promise<JsonObject[]> {
-    if (this.itemPaginationUnsupported) return this.collectTurnPagesByView(initialCursor, "full");
-    const turns = await this.collectTurnPagesByView(initialCursor, "notLoaded");
+    const turns = await this.collectTurnPagesByView(initialCursor);
     if (!hydrateItems) {
       for (const turn of turns) {
         turn.items = [];
@@ -1040,20 +1009,11 @@ export class CodexAppServerHost implements EngineHost {
       }
       return turns;
     }
-    try {
-      await this.hydrateTurnItems(turns, initialItemsCursor);
-      return turns;
-    } catch (error) {
-      if (!isUnknownMethodError(error)) throw error;
-      this.itemPaginationUnsupported = true;
-      return this.collectTurnPagesByView(initialCursor, "full");
-    }
+    await this.hydrateTurnItems(turns, initialItemsCursor);
+    return turns;
   }
 
-  private async collectTurnPagesByView(
-    initialCursor: string | null,
-    itemsView: "full" | "notLoaded",
-  ): Promise<JsonObject[]> {
+  private async collectTurnPagesByView(initialCursor: string | null): Promise<JsonObject[]> {
     /* Pages arrive newest-first. The first copy of a repeated turn has its
        freshest content; the last occurrence supplies its chronological
        position before the collected ids are reversed for reconciliation. */
@@ -1063,7 +1023,7 @@ export class CodexAppServerHost implements EngineHost {
     for (let page = 0; page < MAX_RESUME_TURN_PAGES; page += 1) {
       const result = record(await this.rpc("thread/turns/list", {
         threadId: this.identity.threadId,
-        itemsView,
+        itemsView: "notLoaded",
         sortDirection: "desc",
         limit: RESUME_TURNS_PAGE_LIMIT,
         ...(cursor !== null ? { cursor } : {}),
@@ -1185,7 +1145,7 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   async send(entry: QueueEntry): Promise<DeliveryReceipt> {
-    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation(true)) {
       return { outcome: "rejected", reason: "dead-host" };
     }
     const normalized = normalizeQueueEntry(entry);
@@ -1209,6 +1169,7 @@ export class CodexAppServerHost implements EngineHost {
       ...(normalized.origin ? { origin: normalized.origin } : {}),
     };
     if (!entry.id) throw new Error("queue entry id is required");
+    if (this.uncertainMutation) await this.reconcileUncertainMutation();
     const confirmed = await this.confirmedDelivery(entry);
     if (confirmed) return confirmed;
     const currentTurn = this.activeTurnId;
@@ -1962,7 +1923,8 @@ export class CodexAppServerHost implements EngineHost {
     this.writerFence = fence;
   }
 
-  private writerFenceAllowsActuation(): boolean {
+  private writerFenceAllowsActuation(allowUncertainDeliveryReconciliation = false): boolean {
+    if (this.uncertainMutation && !allowUncertainDeliveryReconciliation) return false;
     try { return this.writerFence?.() ?? true; }
     catch { return false; }
   }
@@ -2376,13 +2338,7 @@ export class CodexAppServerHost implements EngineHost {
   private async confirmedDelivery(entry: QueueEntry): Promise<DeliveryReceipt | null> {
     const known = this.confirmedDeliveries.get(entry.id);
     if (known) return this.confirmedReceipt(entry, known);
-    try {
-      await this.scanPersistedDeliveries(entry.id);
-    } catch (error) {
-      const message = safeError(error);
-      if (/not materialized yet/i.test(message) && /before first user message/i.test(message)) return null;
-      throw error;
-    }
+    await this.scanPersistedDeliveries(entry.id);
     if (this.dead) throw new Error(safeError(this.failure ?? "Codex app-server host is unavailable"));
     const recovered = this.confirmedDeliveries.get(entry.id);
     return recovered ? this.confirmedReceipt(entry, recovered) : null;
@@ -2390,37 +2346,15 @@ export class CodexAppServerHost implements EngineHost {
 
   /**
    * Hydrates confirmed deliveries from persisted history in recent-first
-   * bounded pages, stopping as soon as the entry is found (issue #301). Legacy
-   * servers and unloaded threads use the full `thread/read` fallback, whose
-   * single response frame grows with the whole session.
+   * bounded item pages, stopping as soon as the entry is found (issue #301).
+   * An unloaded thread has no persisted history visible to this host yet.
    */
   private async scanPersistedDeliveries(entryId: string): Promise<void> {
-    if (!this.itemPaginationUnsupported) {
-      try {
-        await this.retryOnceOnInvalidCursor(() => this.scanDeliveryItemPages(entryId));
-        return;
-      } catch (error) {
-        if (isUnknownMethodError(error)) this.itemPaginationUnsupported = true;
-        else if (!isThreadNotLoadedError(error)) throw error;
-      }
+    try {
+      await this.retryOnceOnInvalidCursor(() => this.scanDeliveryItemPages(entryId));
+    } catch (error) {
+      if (!isThreadNotLoadedError(error)) throw error;
     }
-    if (!this.turnPaginationUnsupported) {
-      try {
-        await this.retryOnceOnInvalidCursor(() => this.scanDeliveryTurnPages(entryId));
-        return;
-      } catch (error) {
-        /* `thread/turns/list` serves only loaded threads; `thread/read` reads
-           the rollout from disk, so an unloaded thread falls back without
-           marking pagination unsupported. */
-        if (isUnknownMethodError(error)) this.turnPaginationUnsupported = true;
-        else if (!isThreadNotLoadedError(error)) throw error;
-      }
-    }
-    const timeoutMs = this.activeTurnId
-      ? this.requestTimeoutMs * ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER
-      : this.requestTimeoutMs;
-    const thread = await this.rpc("thread/read", { threadId: this.identity.threadId, includeTurns: true }, timeoutMs);
-    this.rememberConfirmedDeliveries(resumedTurns(thread));
   }
 
   private async scanDeliveryItemPages(entryId: string): Promise<void> {
@@ -2440,24 +2374,6 @@ export class CodexAppServerHost implements EngineHost {
       if (cursor === null) return;
     }
     throw new Error("thread/items/list paged past the bounded delivery scan budget");
-  }
-
-  private async scanDeliveryTurnPages(entryId: string): Promise<void> {
-    let cursor: string | null = null;
-    for (let page = 0; page < MAX_RESUME_TURN_PAGES; page += 1) {
-      const result = record(await this.rpc("thread/turns/list", {
-        threadId: this.identity.threadId,
-        itemsView: "full",
-        sortDirection: "desc",
-        limit: RESUME_TURNS_PAGE_LIMIT,
-        ...(cursor !== null ? { cursor } : {}),
-      }));
-      this.rememberConfirmedDeliveries(pagedTurns(result));
-      if (this.confirmedDeliveries.has(entryId)) return;
-      cursor = stringField(result, "nextCursor");
-      if (cursor === null) return;
-    }
-    throw new Error("thread/turns/list paged past the bounded delivery scan budget");
   }
 
   private awaitDeliveryConfirmation(entry: QueueEntry, receipt: DeliveryReceipt): Promise<DeliveryReceipt> {
@@ -2508,6 +2424,27 @@ export class CodexAppServerHost implements EngineHost {
       throw new Error("Codex queue entry id belongs to a different payload");
     }
     return confirmed.receipt;
+  }
+
+  /**
+   * An oversized write acknowledgement leaves the operation's outcome
+   * uncertain while its persisted client id remains authoritative. Before any
+   * later delivery actuates, scan bounded item pages for that id. A match
+   * reopens the writer and lets the ordinary idempotency path return the
+   * original turn; absence keeps the write fence closed without killing the
+   * readable host.
+   */
+  private async reconcileUncertainMutation(): Promise<void> {
+    const uncertain = this.uncertainMutation;
+    if (!uncertain) return;
+    if (!uncertain.clientId) {
+      throw new Error(`${uncertain.method} outcome is uncertain; persisted delivery cannot be identified`);
+    }
+    await this.scanPersistedDeliveries(uncertain.clientId);
+    if (!this.confirmedDeliveries.has(uncertain.clientId)) {
+      throw new Error(`${uncertain.method} outcome is uncertain; persisted delivery is not visible yet`);
+    }
+    if (this.uncertainMutation === uncertain) this.uncertainMutation = null;
   }
 
   private rememberConfirmedDelivery(turnId: string, value: unknown): void {
@@ -2684,7 +2621,13 @@ export class CodexAppServerHost implements EngineHost {
         reject(error);
         if (MUTATING_RPC_METHODS.has(method)) this.fail(error);
       }, timeoutMs);
-      this.pending.set(id, { method, resolve, reject, timer });
+      this.pending.set(id, {
+        method,
+        clientUserMessageId: stringField(params, "clientUserMessageId"),
+        resolve,
+        reject,
+        timer,
+      });
       this.write({ jsonrpc: "2.0", id, method, params });
     });
   }
@@ -2942,8 +2885,8 @@ export class CodexAppServerHost implements EngineHost {
    * its awaiting request with the diagnostic, a server request is answered
    * with a JSON-RPC error so the app-server does not wait forever, and the
    * skip lands in the durable ledger so the degradation is visible. A
-   * mutating response keeps the existing uncertain-outcome fence: the host
-   * cannot safely accept another write after losing that acknowledgement.
+   * mutating response closes the writer until bounded persisted-history
+   * reconciliation proves its client id, while the host stays readable.
    */
   private reportOversizedFrame(headText: string, observedBytes: number): void {
     const head = headText.slice(0, OVERSIZED_FRAME_HEAD_CHARS);
@@ -2963,10 +2906,20 @@ export class CodexAppServerHost implements EngineHost {
       this.pending.delete(numericId);
       this.replayEnvelopeRequestIds.delete(numericId);
       clearTimeout(pending.timer);
+      if (pending.method === "thread/resume") {
+        this.emitOversizedFrameDiagnostic(diagnostic);
+        this.recoverOversizedResume(pending, diagnostic);
+        return;
+      }
       const error = new Error(`${diagnostic}${MUTATING_RPC_METHODS.has(pending.method) ? "; outcome is uncertain" : ""}`);
       pending.reject(error);
       this.emitOversizedFrameDiagnostic(diagnostic);
-      if (MUTATING_RPC_METHODS.has(pending.method)) this.fail(error);
+      if (MUTATING_RPC_METHODS.has(pending.method)) {
+        this.uncertainMutation = {
+          method: pending.method,
+          clientId: pending.clientUserMessageId,
+        };
+      }
     } else if (method !== null && idToken !== null) {
       const requestId = idToken.startsWith("\"") ? idToken.slice(1, -1) : Number(idToken);
       this.write({ jsonrpc: "2.0", id: requestId, error: { code: -32600, message: "oversized frame skipped by client" } });
@@ -2977,6 +2930,31 @@ export class CodexAppServerHost implements EngineHost {
     if (method && REDUCIBLE_OVERSIZED_NOTIFICATION_METHODS.has(method)) {
       this.scheduleOversizedCompletionReconciliation();
     }
+  }
+
+  /**
+   * A server that replays turns despite `excludeTurns: true` can overflow the
+   * resume response before adoption has an identity envelope. Recover only its
+   * bounded metadata, then rebuild history through the installed descending
+   * page APIs so the dropped replay cannot make the thread unreachable.
+   */
+  private recoverOversizedResume(pending: PendingRpc, diagnostic: string): void {
+    const recovery = (async () => {
+      const metadata = await this.rpc("thread/read", {
+        threadId: this.identity.threadId,
+        includeTurns: false,
+      });
+      const recovered = threadFromResult(metadata, "thread/read");
+      if (recovered.threadId !== this.identity.threadId) {
+        throw new Error("thread/read returned a different thread id");
+      }
+      this.oversizedResumeRecoveryPending = true;
+      return metadata;
+    })();
+    void recovery.then(
+      (result) => pending.resolve(result),
+      (error) => pending.reject(new Error(`${diagnostic}; metadata recovery failed: ${safeError(error)}`)),
+    );
   }
 
   private scheduleOversizedCompletionReconciliation(): void {

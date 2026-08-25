@@ -116,7 +116,6 @@ class FakeAppServer extends EventEmitter {
   autoResolveServerRequests = true;
   autoCompleteUserMessage = true;
   readTurns: unknown[] | null = null;
-  readError: string | null = null;
   mcpServers: Record<string, unknown> = {
     playwright: { command: "npx", enabled: true },
     "telegram-readonly": { command: "uv", enabled: true },
@@ -129,17 +128,15 @@ class FakeAppServer extends EventEmitter {
   realtimeAppendErrorAt: number | null = null;
   responseChunkBytes: number | null = null;
   oversizedTurnStartResult = false;
-  /** Serves `excludeTurns` resumes and `thread/turns/list`; false models a
-      pre-pagination app-server that ignores the resume flag and rejects the
-      list method with its real unknown-variant error. */
-  supportsTurnPagination = true;
-  supportsItemPagination = true;
+  oversizedTurnSteerResult = false;
+  resumeReplayTurns: unknown[] | null = null;
   resumeItemsBackwardsCursor = "resume-items-anchor";
   rejectFullTurnPages = false;
   invalidCursorErrorsRemaining = 0;
   malformedTurnPage = false;
   malformedItemPage = false;
   malformedItemEntry = false;
+  itemListError: string | null = null;
   /** Overrides the turn source served by `thread/turns/list` after construction,
       modeling history persisted underneath a live host. */
   turnsListSource: unknown[] | null = null;
@@ -229,17 +226,17 @@ class FakeAppServer extends EventEmitter {
           else this.notify(request.method, request.params);
         }
       }
-      const excludeTurns = method === "thread/resume"
-        && this.supportsTurnPagination
+      const requestedExcludeTurns = method === "thread/resume"
         && (message.params as { excludeTurns?: boolean } | undefined)?.excludeTurns === true;
+      const excludeTurns = requestedExcludeTurns && this.resumeReplayTurns === null;
       return this.respond(message.id, {
         thread: {
           id,
           ...(!this.omitThreadPath ? { path: this.threadPath ?? `/sessions/${id}.jsonl` } : {}),
-          turns: excludeTurns ? [] : this.turns,
+          turns: excludeTurns ? [] : (this.resumeReplayTurns ?? this.turns),
           ...(this.resumeStatus ? { status: this.resumeStatus } : {}),
         },
-        ...(excludeTurns ? {
+        ...(requestedExcludeTurns ? {
           turnsBackwardsCursor: this.turns.length > 0 ? "0" : null,
           itemsBackwardsCursor: this.turns.some((turn) =>
             turn !== null
@@ -253,9 +250,6 @@ class FakeAppServer extends EventEmitter {
       });
     }
     if (method === "thread/turns/list") {
-      if (!this.supportsTurnPagination) {
-        return this.respondError(message.id, "Invalid request: unknown variant `thread/turns/list`, expected one of `initialize`, `thread/start`");
-      }
       if (this.malformedTurnPage) return this.respond(message.id, { nextCursor: null });
       const params = (message.params ?? {}) as {
         cursor?: string | null;
@@ -287,9 +281,7 @@ class FakeAppServer extends EventEmitter {
       return this.respond(message.id, { data, nextCursor, backwardsCursor });
     }
     if (method === "thread/items/list") {
-      if (!this.supportsTurnPagination || !this.supportsItemPagination) {
-        return this.respondError(message.id, "Invalid request: unknown variant `thread/items/list`");
-      }
+      if (this.itemListError) return this.respondError(message.id, this.itemListError);
       if (this.malformedItemPage) return this.respond(message.id, { nextCursor: null });
       if (this.malformedItemEntry) return this.respond(message.id, { data: [{ turnId: this.threadId }], nextCursor: null });
       const params = (message.params ?? {}) as {
@@ -317,18 +309,21 @@ class FakeAppServer extends EventEmitter {
       return this.respond(message.id, { data, nextCursor, backwardsCursor });
     }
     if (method === "thread/read") {
-      if (this.readError) return this.respondError(message.id, this.readError);
+      const includeTurns = (message.params as { includeTurns?: boolean } | undefined)?.includeTurns === true;
       return this.respond(message.id, {
         thread: {
           id: this.threadId,
           ...(!this.omitThreadReadPath ? { path: this.threadPath ?? `/sessions/${this.threadId}.jsonl` } : {}),
-          turns: this.readTurns ?? this.turns,
+          turns: includeTurns ? (this.readTurns ?? this.turns) : [],
+          ...(this.resumeStatus ? { status: this.resumeStatus } : {}),
         },
       });
     }
     if (method === "turn/start") {
       const turnId = `turn-${++this.turn}`;
       if (this.oversizedTurnStartResult) {
+        this.persistUserMessage(message, turnId);
+        this.notify("turn/started", { threadId: this.threadId, turn: { id: turnId } });
         return this.respond(message.id, { turn: { id: turnId }, padding: "p".repeat(26 * 1024 * 1024) });
       }
       this.respond(message.id, { turn: { id: turnId } });
@@ -338,6 +333,10 @@ class FakeAppServer extends EventEmitter {
     }
     if (method === "turn/steer") {
       const turnId = (message.params as { expectedTurnId: string }).expectedTurnId;
+      if (this.oversizedTurnSteerResult) {
+        this.persistUserMessage(message, turnId);
+        return this.respond(message.id, { turnId, padding: "p".repeat(26 * 1024 * 1024) });
+      }
       this.respond(message.id, { turnId });
       this.completeUserMessage(message, turnId);
       return;
@@ -445,6 +444,24 @@ class FakeAppServer extends EventEmitter {
       turnId,
       item: { type: "userMessage", clientId: params.clientUserMessageId, content: params.input },
     });
+  }
+
+  private persistUserMessage(message: Record<string, unknown>, turnId: string): void {
+    const params = message.params as { clientUserMessageId?: string; input?: unknown };
+    if (!params.clientUserMessageId) return;
+    const source = [...(this.turnsListSource ?? this.turns)];
+    const item = { type: "userMessage", clientId: params.clientUserMessageId, content: params.input };
+    const index = source.findIndex((value) => value !== null
+      && typeof value === "object"
+      && !Array.isArray(value)
+      && (value as { id?: unknown }).id === turnId);
+    if (index >= 0) {
+      const turn = source[index] as Record<string, unknown>;
+      source[index] = { ...turn, items: [...(Array.isArray(turn.items) ? turn.items : []), item] };
+    } else {
+      source.push({ id: turnId, status: "inProgress", items: [item] });
+    }
+    this.turnsListSource = source;
   }
 }
 
@@ -1569,52 +1586,47 @@ describe("CodexAppServerHost", () => {
     })),
   });
 
-  test("recovery survives an oversized thread/resume replay envelope with a bounded ledger", async () => {
-    const threadId = "oversized-resume-thread";
-    const fatText = "x".repeat(1024 * 1024);
-    const server = new FakeAppServer(threadId, threadId, false, [fatReplayTurn("fat-turn", "fat-call", 26, fatText)]);
-    server.supportsTurnPagination = false;
-    const eventStore = new MemoryEventStore();
-    const host = await CodexAppServerHost.adopt(threadId, {
-      cwd: "/repo",
-      eventStore,
-      spawnProcess: fakeSpawn(server),
-    });
-
-    expect((await host.health()).status).not.toBe("dead");
-    const items = eventStore.load(threadId).filter((event) => event.kind === "item");
-    expect(items).toHaveLength(26);
-    const serialized = JSON.stringify(items);
-    expect(serialized).toContain("truncated");
-    expect(serialized.length).toBeLessThan(2 * 1024 * 1024);
-    expect(await host.send({ id: "post-recovery", text: "ping" })).toMatchObject({ outcome: "turn-started" });
-    await host.release();
-  });
-
-  test("the oversized replay envelope survives arriving in stream chunks", async () => {
-    const threadId = "chunked-resume-thread";
-    const fatText = "x".repeat(1024 * 1024);
-    const server = new FakeAppServer(threadId, threadId, false, [fatReplayTurn("chunk-turn", "chunk-call", 26, fatText)]);
-    server.supportsTurnPagination = false;
+  test("an overflowing thread/resume replay recovers metadata and paginates history", async () => {
+    const threadId = "overflowing-resume-thread";
+    const pagedTurns = [{
+      id: "persisted-turn",
+      status: "completed",
+      items: [{ id: "persisted-item", type: "agentMessage", text: "bounded history" }],
+    }];
+    const server = new FakeAppServer(threadId, threadId, false, pagedTurns);
+    const replayText = "x".repeat(16 * 1024);
+    server.resumeReplayTurns = [fatReplayTurn("overflowing-turn", "overflowing-item", 4_200, replayText)];
     server.responseChunkBytes = 64 * 1024;
     const eventStore = new MemoryEventStore();
-    const host = await CodexAppServerHost.adopt(threadId, {
-      cwd: "/repo",
-      eventStore,
-      spawnProcess: fakeSpawn(server),
-    });
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const host = await CodexAppServerHost.adopt(threadId, {
+        cwd: "/repo",
+        eventStore,
+        spawnProcess: fakeSpawn(server),
+      });
 
-    expect((await host.health()).status).not.toBe("dead");
-    expect(eventStore.load(threadId).filter((event) => event.kind === "item")).toHaveLength(26);
-    await host.release();
-  });
+      expect(server.requests.find((request) => request.method === "thread/read")?.params)
+        .toEqual({ threadId, includeTurns: false });
+      expect(server.requests.some((request) => request.method === "thread/turns/list")).toBeTrue();
+      expect(server.requests.some((request) => request.method === "thread/items/list")).toBeTrue();
+      expect(server.requests.some((request) => request.method === "thread/read"
+        && (request.params as { includeTurns?: boolean }).includeTurns === true)).toBeFalse();
+      expect(eventStore.load(threadId)).toContainEqual(expect.objectContaining({
+        kind: "item",
+        item: expect.objectContaining({ id: "persisted-item" }),
+      }));
+      expect((await host.health()).status).not.toBe("dead");
+      expect(await host.send({ id: "post-recovery", text: "ping" })).toMatchObject({ outcome: "turn-started" });
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
+  }, 30_000);
 
-  /* Production 2026-08-04: a 49 MB thread/resume envelope over a Cyrillic-heavy
-     thread stayed above the frame guard even with every string capped, so the
-     resume — and with it every account switch for the conversation — failed
-     with "oversized JSONL frame". The finished frame now shrinks its string
-     caps until it fits instead. */
-  test("a replay envelope still oversized after string reduction shrinks instead of failing the resume", async () => {
+  /* One legal paginated item can exceed the frame guard after the first
+     string-reduction pass. Progressive shrinking keeps the page admissible. */
+  test("an item page still oversized after string reduction shrinks without failing adoption", async () => {
     const threadId = "shrink-resume-thread";
     /* Every text part sits exactly at the string cap, so the first reduction
        pass keeps all ~25 MB and only the shrink passes can fit the frame. */
@@ -1644,7 +1656,7 @@ describe("CodexAppServerHost", () => {
     await host.release();
   }, 30_000);
 
-  test("inline image history in the replay envelope reaches the ledger only as a bounded reference", async () => {
+  test("inline image history in an item page reaches the ledger only as a bounded reference", async () => {
     const threadId = "image-replay-thread";
     const body = Buffer.alloc(1024 * 1024, 5).toString("base64");
     const server = new FakeAppServer(threadId, threadId, false, [{
@@ -1676,7 +1688,7 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("a queued send settles exactly once across an oversized thread/read confirmation replay", async () => {
+  test("a queued send settles exactly once across an oversized paginated confirmation", async () => {
     const threadId = "oversized-read-thread";
     const fatText = "y".repeat(1024 * 1024);
     const server = new FakeAppServer(threadId, threadId);
@@ -1873,44 +1885,6 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("a pre-pagination app-server still resumes from the inline history envelope", async () => {
-    const threadId = "legacy-resume-thread";
-    const server = new FakeAppServer(threadId, threadId, false, smallHistoryTurns(5));
-    server.supportsTurnPagination = false;
-    const eventStore = new MemoryEventStore();
-    const host = await CodexAppServerHost.adopt(threadId, {
-      cwd: "/repo",
-      eventStore,
-      spawnProcess: fakeSpawn(server),
-    });
-
-    expect(server.requests.some((request) => request.method === "thread/turns/list")).toBeFalse();
-    const items = eventStore.load(threadId).filter((event) => event.kind === "item");
-    expect(items).toHaveLength(5);
-    expect((await host.health()).status).not.toBe("dead");
-    await host.release();
-  });
-
-  test("turn pagination without item pagination falls back to full turn pages", async () => {
-    const threadId = "turn-pages-only-thread";
-    const server = new FakeAppServer(threadId, threadId, false, smallHistoryTurns(5));
-    server.supportsItemPagination = false;
-    const eventStore = new MemoryEventStore();
-    const host = await CodexAppServerHost.adopt(threadId, {
-      cwd: "/repo",
-      eventStore,
-      spawnProcess: fakeSpawn(server),
-    });
-
-    expect(server.requests.some((request) => request.method === "thread/items/list")).toBeTrue();
-    const turnPages = server.requests.filter((request) => request.method === "thread/turns/list");
-    expect(turnPages.map((request) => (request.params as { itemsView?: string }).itemsView))
-      .toEqual(["notLoaded", "full"]);
-    expect(eventStore.load(threadId).filter((event) => event.kind === "item")).toHaveLength(5);
-    expect((await host.health()).status).not.toBe("dead");
-    await host.release();
-  });
-
   test("delivery confirmation scans persisted history through bounded descending pages", async () => {
     const threadId = "paginated-confirmation-thread";
     const server = new FakeAppServer(threadId, threadId);
@@ -1941,15 +1915,10 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("delivery confirmation falls back to the legacy full read when pagination is unavailable", async () => {
-    const threadId = "legacy-confirmation-thread";
+  test("delivery confirmation treats an unloaded paginated thread as empty history", async () => {
+    const threadId = "unloaded-confirmation-thread";
     const server = new FakeAppServer(threadId, threadId);
-    server.supportsTurnPagination = false;
-    server.readTurns = [{
-      id: "persisted-turn",
-      status: "completed",
-      items: [{ type: "userMessage", clientId: "operation-recovered", content: [{ type: "text", text: "hello" }] }],
-    }];
+    server.itemListError = "thread not loaded";
     const host = await CodexAppServerHost.adopt(threadId, {
       cwd: "/repo",
       eventStore: new MemoryEventStore(),
@@ -1958,9 +1927,9 @@ describe("CodexAppServerHost", () => {
 
     expect(await host.send({ id: "operation-recovered", text: "hello" })).toEqual({
       outcome: "turn-started",
-      turnId: "persisted-turn",
+      turnId: "turn-1",
     });
-    expect(server.requests.some((request) => request.method === "thread/read")).toBeTrue();
+    expect(server.requests.some((request) => request.method === "thread/read")).toBeFalse();
     await host.release();
   });
 
@@ -2201,7 +2170,7 @@ describe("CodexAppServerHost", () => {
     }
   });
 
-  test("an oversized mutating response poisons the writer before retry", async () => {
+  test("an oversized turn/start response fences and reconciles without killing the host", async () => {
     const server = new FakeAppServer("oversized-turn-start-thread");
     server.oversizedTurnStartResult = true;
     const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -2213,14 +2182,44 @@ describe("CodexAppServerHost", () => {
         ...stubbedTermination(server),
       });
 
-      await expect(host.send({ id: "oversized-turn-start", text: "hi" }))
+      const entry = { id: "oversized-turn-start", text: "hi" };
+      await expect(host.send(entry))
         .rejects.toThrow(/oversized JSONL frame.*turn\/start.*outcome is uncertain/);
-      expect(await host.health()).toMatchObject({ status: "dead", activeTurnRef: null });
+      expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: "turn-1" });
 
-      server.oversizedTurnStartResult = false;
-      expect(await host.send({ id: "after-oversized-response", text: "again" }))
-        .toEqual({ outcome: "rejected", reason: "dead-host" });
+      expect(await host.send(entry)).toEqual({ outcome: "turn-started", turnId: "turn-1" });
       expect(server.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+      expect(await host.send({
+        id: "after-oversized-response",
+        text: "again",
+        expectedTurnId: "turn-1",
+      })).toEqual({ outcome: "steered", turnId: "turn-1" });
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("an oversized turn/steer response reconciles without duplicating the steer", async () => {
+    const server = new FakeAppServer("oversized-turn-steer-thread");
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const host = await CodexAppServerHost.start({
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(server),
+        ...stubbedTermination(server),
+      });
+      expect(await host.send({ id: "first-turn", text: "begin" }))
+        .toEqual({ outcome: "turn-started", turnId: "turn-1" });
+      server.oversizedTurnSteerResult = true;
+      const steer = { id: "oversized-steer", text: "continue", expectedTurnId: "turn-1" };
+
+      await expect(host.send(steer))
+        .rejects.toThrow(/oversized JSONL frame.*turn\/steer.*outcome is uncertain/);
+      expect((await host.health()).status).not.toBe("dead");
+      expect(await host.send(steer)).toMatchObject({ turnId: "turn-1" });
+      expect(server.requests.filter((request) => request.method === "turn/steer")).toHaveLength(1);
       await host.release();
     } finally {
       warn.mockRestore();
@@ -2499,7 +2498,7 @@ describe("CodexAppServerHost", () => {
 
   test("starts the first delivery when Codex reports an unmaterialized thread", async () => {
     const server = new FakeAppServer("fresh-delivery-thread");
-    server.readError = "thread fresh-delivery-thread is not materialized yet; includeTurns is unavailable before first user message";
+    server.itemListError = "thread fresh-delivery-thread is not materialized yet; history is unavailable before first user message";
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
       eventStore: new MemoryEventStore(),
@@ -3715,36 +3714,7 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("an active turn gives thread/read enough time to answer", async () => {
-    const ignoredMethods: string[] = [];
-    const server = new FakeAppServer("slow-read-thread", "slow-read-thread", false, [], undefined, null, ignoredMethods);
-    server.supportsTurnPagination = false;
-    const host = await CodexAppServerHost.start({
-      cwd: "/repo",
-      requestTimeoutMs: 20,
-      eventStore: new MemoryEventStore(),
-      spawnProcess: fakeSpawn(server),
-    });
-    expect(await host.send({ id: "first", text: "begin" })).toEqual({ outcome: "turn-started", turnId: "turn-1" });
-    ignoredMethods.push("thread/read");
-
-    const pending = host.send({ id: "slow-read-follow-up", text: "continue", expectedTurnId: "turn-1" })
-      .then((value) => ({ value }), (error: Error) => ({ error }));
-    await Bun.sleep(35);
-    const read = server.requests.findLast((request) => request.method === "thread/read")!;
-    server.stdout.write(`${JSON.stringify({
-      jsonrpc: "2.0",
-      id: read.id,
-      result: { thread: { id: "slow-read-thread", path: "/sessions/slow-read-thread.jsonl", turns: [] } },
-    })}\n`);
-    const result = await pending;
-
-    if ("error" in result) throw result.error;
-    expect(result.value).toEqual({ outcome: "steered", turnId: "turn-1" });
-    await host.release();
-  });
-
-  test("accepts a legal thread/read response above the legacy frame guard", async () => {
+  test("accepts a legal item page above the legacy frame guard", async () => {
     const server = new FakeAppServer("large-read-thread");
     server.readTurns = [{
       id: "historical-turn",
@@ -3760,36 +3730,6 @@ describe("CodexAppServerHost", () => {
     expect(await host.send({ id: "new-delivery", text: "continue" }))
       .toEqual({ outcome: "turn-started", turnId: "turn-1" });
     expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: "turn-1" });
-    await host.release();
-  });
-
-  test("a late timed-out thread/read response stays harmless after retry delivery", async () => {
-    const ignoredMethods = ["thread/read"];
-    const server = new FakeAppServer("late-read-thread", "late-read-thread", false, [], undefined, null, ignoredMethods);
-    server.supportsTurnPagination = false;
-    const host = await CodexAppServerHost.start({
-      cwd: "/repo",
-      requestTimeoutMs: 5,
-      eventStore: new MemoryEventStore(),
-      spawnProcess: fakeSpawn(server),
-    });
-    const entry = { id: "late-read-retry", text: "continue" };
-
-    await expect(host.send(entry)).rejects.toThrow("thread/read timed out");
-    const firstRead = server.requests.findLast((request) => request.method === "thread/read")!;
-    ignoredMethods.splice(0);
-
-    expect(await host.send(entry)).toEqual({ outcome: "turn-started", turnId: "turn-1" });
-    server.stdout.write(`${JSON.stringify({
-      jsonrpc: "2.0",
-      id: firstRead.id,
-      result: { thread: { id: "late-read-thread", path: "/sessions/late-read-thread.jsonl", turns: [] } },
-    })}\n`);
-    await Bun.sleep(0);
-
-    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: "turn-1" });
-    expect(server.signals).not.toContain("SIGTERM");
-    expect(server.requests.filter((request) => request.method === "turn/start" || request.method === "turn/steer")).toHaveLength(1);
     await host.release();
   });
 
