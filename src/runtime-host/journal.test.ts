@@ -648,6 +648,89 @@ test("snapshot omits stale terminal-session edges while durable rows remain", ()
   journal.close();
 });
 
+test("snapshot retains an old edge when a recent terminal checkpoint was compacted", () => {
+  const dir = sandbox("compacted-terminal-edge");
+  const filename = path.join(dir, "events.sqlite");
+  const day = 24 * 60 * 60 * 1_000;
+  let now = 0;
+  const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => now });
+  journal.executeOperation({
+    kind: "spawn",
+    conversationId: "child-compacted-terminal",
+    operationId: "operation-compacted-terminal",
+    idempotencyKey: "spawn-compacted-terminal",
+    engine: "codex",
+    cwd: "repo",
+    "prompt": "Run the fixture",
+    parentConversationId: "parent",
+    sessionId: "session-compacted-terminal",
+  });
+
+  now = 6 * day;
+  journal.append({
+    scope: runtimeScope("session", "child-compacted-terminal"),
+    kind: "session-status",
+    payload: { host: "dead", turn: "idle" },
+  });
+  journal.append({
+    scope: runtimeScope("session", "unrelated-session"),
+    kind: "session-status",
+    payload: { host: "hosted", turn: "idle" },
+  });
+  journal.compact(1);
+  now = 8 * day;
+
+  const raw = new Database(filename, { readonly: true });
+  expect(raw.query<{ count: number }, []>(`
+    SELECT COUNT(*) AS count
+    FROM entities AS session
+    JOIN events AS event ON event.seq = session.checkpoint_seq
+    WHERE session.kind = 'session' AND session.id = 'child-compacted-terminal'
+  `).get()?.count).toBe(0);
+  expect(raw.query<{ count: number }, []>(`
+    SELECT COUNT(*) AS count FROM entities WHERE kind = 'edge'
+  `).get()?.count).toBe(1);
+  raw.close();
+
+  expect(journal.snapshot().edges.map((edge) => edge.id))
+    .toEqual(["edge-operation-compacted-terminal"]);
+  journal.close();
+});
+
+test("journal backfills entity update times when reopening a legacy schema", () => {
+  const dir = sandbox("legacy-entity-update-time");
+  const filename = path.join(dir, "events.sqlite");
+  const initial = new RuntimeJournal(filename, { now: () => 123 });
+  initial.append({
+    scope: runtimeScope("session", "legacy-session"),
+    kind: "session-status",
+    payload: { host: "dead", turn: "idle" },
+  });
+  initial.close();
+
+  const legacy = new Database(filename);
+  legacy.exec(`
+    ALTER TABLE entities RENAME TO entities_with_update_time;
+    CREATE TABLE entities (
+      kind TEXT NOT NULL, id TEXT NOT NULL, revision INTEGER NOT NULL,
+      state_json TEXT NOT NULL, checkpoint_seq INTEGER NOT NULL,
+      PRIMARY KEY(kind, id)
+    );
+    INSERT INTO entities(kind, id, revision, state_json, checkpoint_seq)
+    SELECT kind, id, revision, state_json, checkpoint_seq FROM entities_with_update_time;
+    DROP TABLE entities_with_update_time;
+  `);
+  legacy.close();
+
+  const reopened = new RuntimeJournal(filename, { now: () => 999 });
+  const migrated = new Database(filename, { readonly: true });
+  expect(migrated.query<{ updated_at: number }, [string, string]>(`
+    SELECT updated_at FROM entities WHERE kind = ? AND id = ?
+  `).get("session", "legacy-session")?.updated_at).toBe(123);
+  migrated.close();
+  reopened.close();
+});
+
 test("issue 51 keeps tool work running until authoritative turn completion", () => {
   const dir = sandbox("terminal-axes");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
@@ -2830,6 +2913,43 @@ test("snapshotJson rebuilds only when the database has changed", () => {
   const second = journal.snapshotJson();
   expect(second).not.toBe(first);
   expect(JSON.parse(second).snapshotSeq).toBe(2);
+  journal.close();
+});
+
+test("snapshotJson expires terminal-session edges without a database change", () => {
+  const dir = sandbox("snapshot-cache-edge-expiry");
+  let now = 100;
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => now });
+  journal.executeOperation({
+    kind: "spawn",
+    conversationId: "child-expiring-edge",
+    operationId: "operation-expiring-edge",
+    idempotencyKey: "spawn-expiring-edge",
+    engine: "codex",
+    cwd: "repo",
+    "prompt": "Run the fixture",
+    parentConversationId: "parent",
+    sessionId: "session-expiring-edge",
+  });
+  journal.append({
+    scope: runtimeScope("session", "child-expiring-edge"),
+    kind: "session-status",
+    payload: { host: "dead", turn: "idle" },
+  });
+
+  const before = journal.snapshotJson();
+  const beforeSnapshot = JSON.parse(before) as ReturnType<RuntimeJournal["snapshot"]>;
+  expect(beforeSnapshot.edges.map((edge) => edge.id)).toEqual(["edge-operation-expiring-edge"]);
+  expect(journal.snapshotJson()).toBe(before);
+
+  now += RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS;
+  expect(journal.snapshotJson()).toBe(before);
+  now += 1;
+  const after = journal.snapshotJson();
+  const afterSnapshot = JSON.parse(after) as ReturnType<RuntimeJournal["snapshot"]>;
+  expect(afterSnapshot.snapshotSeq).toBe(beforeSnapshot.snapshotSeq);
+  expect(afterSnapshot.edges).toEqual([]);
+  expect(journal.snapshot().edges).toEqual([]);
   journal.close();
 });
 
