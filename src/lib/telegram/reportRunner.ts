@@ -95,6 +95,10 @@ export interface ReportRunnerPorts {
       every one of them bound to the credential generation the run verified
       (#1091). */
   readPort(credentialRef: string): TelegramReadPort;
+  /** Acquires the connection service's read lease for get_me plus the full
+      sequential source pass. Optional only for injected fixtures that never
+      enter the read path; a real read fails closed without it. */
+  beginReadPhase?(): Promise<() => void>;
   /** Runs the one-time id migration a pre-#1091 connection is owed: the
       ordinary health check, which re-reads the account through the login
       bridge and persists whatever id it reports. */
@@ -155,6 +159,10 @@ export const productionReportRunnerPorts: ReportRunnerPorts = {
     catch { return { version: 1, status: "error", credentialRef: null, identity: null, lastHealthCheckAt: null, errorCode: "session_unsafe", identityIdUpgradedAt: null }; }
   },
   readPort: (credentialRef) => connectorReadPort(credentialRef),
+  beginReadPhase: async () => {
+    const { telegramService } = await import("./service");
+    return await telegramService().beginReportReadPhase();
+  },
   migrateIdentity,
   spawn: launchReportConversation,
   reportRunConversation,
@@ -386,37 +394,42 @@ export class TelegramReportRunner {
        being verified, so the connector cannot answer this pass as a different
        account (#1091). */
     const port = this.ports.readPort(recorded.credentialRef);
-
-    /* A mismatch is the issue's `account-mismatch` outcome: no report, no
-       window advance, and — because this runs before the source pass — no read
-       of the wrong account's dialogs either. */
     let live: Awaited<ReturnType<TelegramReadPort["getMe"]>>;
-    try {
-      live = await port.getMe();
-    } catch {
-      this.ports.log("account_check_failed");
-      this.settle(runId, "failed", "account_check_failed", false);
-      return;
-    }
-    if (!sameTelegramAccount(live, recorded)) {
-      this.ports.log("account_mismatch");
-      this.settle(runId, "account-mismatch", null, false);
-      return;
-    }
-
     let sourcesPath: string;
+    if (!this.ports.beginReadPhase) throw new Error("Telegram report read lease is unavailable");
+    const releaseReadPhase = await this.ports.beginReadPhase();
     try {
-      const plan = await planReportSources(port, {
-        windowStart: window.startAt,
-        windowEnd: window.endAt,
-        groups: file.settings.groups,
-        promptVersion: DAILY_REPORT_PROMPT_VERSION,
-      });
-      sourcesPath = writeReportSources(runId, plan);
-    } catch {
-      this.ports.log("sources_failed");
-      this.settle(runId, "failed", "sources_failed", false);
-      return;
+      /* A mismatch is the issue's `account-mismatch` outcome: no report, no
+         window advance, and — because this runs before the source pass — no
+         read of the wrong account's dialogs either. */
+      try {
+        live = await port.getMe();
+      } catch {
+        this.ports.log("account_check_failed");
+        this.settle(runId, "failed", "account_check_failed", false);
+        return;
+      }
+      if (!sameTelegramAccount(live, recorded)) {
+        this.ports.log("account_mismatch");
+        this.settle(runId, "account-mismatch", null, false);
+        return;
+      }
+
+      try {
+        const plan = await planReportSources(port, {
+          windowStart: window.startAt,
+          windowEnd: window.endAt,
+          groups: file.settings.groups,
+          promptVersion: DAILY_REPORT_PROMPT_VERSION,
+        });
+        sourcesPath = writeReportSources(runId, plan);
+      } catch {
+        this.ports.log("sources_failed");
+        this.settle(runId, "failed", "sources_failed", false);
+        return;
+      }
+    } finally {
+      releaseReadPhase();
     }
 
     /* The source pass can take a minute; if the run was settled meanwhile —
