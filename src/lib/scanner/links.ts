@@ -631,6 +631,13 @@ async function attachLiveCodexParents(entries: FileEntry[], persist: boolean): P
 async function attachHandoffParents(entries: FileEntry[], persist: boolean): Promise<void> {
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   await forEachCooperatively(entries, (entry) => {
+    /* A projected managed stage may already carry its durable membership. Such a
+       relationship is spawn lineage, even if an old compatibility map contains
+       the same child path from a pre-fix pipeline launch. */
+    if (entry.durableLineage?.memberships.length) {
+      delete entry.handoff;
+      return;
+    }
     if (entry.parent) return;
     if (entry.root !== "claude-projects" && entry.root !== "codex-sessions") return;
     if (!entry.path.endsWith(".jsonl") || entry.path.includes(path.sep + "subagents" + path.sep)) return;

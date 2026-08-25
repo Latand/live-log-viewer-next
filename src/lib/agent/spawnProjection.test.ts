@@ -1217,6 +1217,47 @@ test("a rejected launch projects a terminal failed card with zero conversation a
   }
 });
 
+test("a pipeline stage placeholder carries durable spawn lineage without an operator handoff flag", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-lineage-projection-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      role: "builder",
+      origin: { kind: "container", container: "pipeline", containerId: "pipeline-fixture", creatorConversationId: parent.id },
+      memberships: [{
+        kind: "pipeline",
+        containerId: "pipeline-fixture",
+        role: "builder",
+        slot: "build:1",
+        stageId: "build",
+        stageOrder: 0,
+        round: 1,
+        parentConversationId: parent.id,
+      }],
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+
+    const card = preallocatedStructuredSpawnCards([scannedFile(parentPath)], registry.snapshot())[0]!;
+    expect(card.parent).toBe(parentPath);
+    expect(card.handoff).toBeUndefined();
+    expect(card.spawnOrigin).toBe("viewer");
+    expect(card.durableLineage).toMatchObject({
+      parentConversationId: parent.id,
+      memberships: [{ kind: "pipeline", containerId: "pipeline-fixture", stageId: "build" }],
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("terminal receipts age through history and retire at the 24h bound; non-terminal receipts always project (#342)", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-retire-"));
   const filename = path.join(directory, "agent-registry.json");

@@ -9,10 +9,12 @@ import { transcriptClaimResolver } from "@/components/transcriptClaims";
 import {
   classifyWorker,
   collapsibleWorkerFiles,
+  conversationSettled,
   computeWorkerStacks,
   DEFAULT_WORKER_COLLAPSE_IDLE_MS,
   groupWorkerStacks,
-  isCollapseExempt,
+  keepExpanded,
+  pipelineCursorStagePaths,
   pipelineOriginOf,
   pipelineStageAgentPaths,
   pipelineStagePipelineIds,
@@ -86,6 +88,16 @@ function flow(overrides: Partial<Flow> & { id: string; implementerPath: string }
 }
 
 const lineage = (flows: Flow[] = [], pipelineStagePaths = new Set<string>()) => ({ flows, pipelineStagePaths });
+const pipelineMembership = (containerId: string) => ({
+  kind: "pipeline" as const,
+  containerId,
+  role: "builder",
+  slot: "build:1",
+  stageId: "build",
+  stageOrder: 0,
+  round: 1,
+  parentConversationId: "conversation-root",
+});
 
 const ctx = (over: Partial<Parameters<typeof shouldCollapseWorker>[1]> = {}) => ({
   flows: [] as Flow[],
@@ -129,14 +141,23 @@ describe("classifyWorker", () => {
     expect(classifyWorker(codexChild, lineage())).toBe("spawned-worker");
   });
 
-  test("HARD CONSTRAINT: an owner-created handoff is never a worker (even as a flow implementer)", () => {
-    /* A handoff continues a conversation from the composer — owner-created — so
-       its first composer prompt must not be discounted into a collapse. */
+  test("durable flow membership classifies before a legacy handoff marker", () => {
     const handoff = entry({ path: "/h", parent: "/root", handoff: true });
     expect(classifyWorker(handoff, lineage())).toBeNull();
-    const handoffImplementer = entry({ path: "/h", parent: "/root", handoff: true });
+    const handoffImplementer = entry({
+      path: "/h",
+      parent: "/root",
+      handoff: true,
+      durableLineage: {
+        kind: "spawn",
+        role: "implementer",
+        parentConversationId: "conversation-root",
+        reviewsConversationId: null,
+        memberships: [{ kind: "flow", containerId: "f1", role: "implementer", slot: "implementer", stageId: null, stageOrder: null, round: null, parentConversationId: "conversation-root" }],
+      },
+    });
     const flows = [flow({ id: "f1", implementerPath: "/h", rounds: [] })];
-    expect(classifyWorker(handoffImplementer, lineage(flows))).toBeNull();
+    expect(classifyWorker(handoffImplementer, lineage(flows))).toBe("flow-implementer");
   });
 
   test("an owner-started root conversation is not worker-class", () => {
@@ -210,41 +231,44 @@ describe("reviewerRoundFinished", () => {
   });
 });
 
-describe("isCollapseExempt — hard exemptions", () => {
-  test("a user-authored message pins the card forever", () => {
-    const file = entry({ path: "/w", kind: "subagent", parent: "/r", userAuthored: true });
-    expect(isCollapseExempt(file, ctx())).toBe(true);
-    expect(shouldCollapseWorker(file, ctx())).toBe(false);
+describe("keepExpanded — one board rule", () => {
+  test("authorship protects reaping and does not veto view collapse", () => {
+    const file = entry({ path: "/w", kind: "subagent", parent: "/r", userAuthored: true, proc: "killed" });
+    expect(keepExpanded(file, ctx())).toBe(false);
+    expect(shouldCollapseWorker(file, ctx())).toBe(true);
   });
 
-  test("live / stalled / running / awaiting-input work is never collapsed", () => {
+  test("live / running / awaiting-input work stays expanded; stalled alone does not", () => {
     for (const over of [
       { activity: "live" as const },
-      { activity: "stalled" as const },
       { proc: "running" as const },
       { pendingQuestion: { kind: "text" } as unknown as FileEntry["pendingQuestion"] },
       { waitingInput: {} as unknown as FileEntry["waitingInput"] },
     ]) {
-      const file = entry({ path: "/w", kind: "subagent", parent: "/r", ...over });
-      expect(isCollapseExempt(file, ctx())).toBe(true);
+      const file = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 24 * 3600, ...over });
+      expect(keepExpanded(file, ctx())).toBe(true);
     }
+    const stalled = entry({ path: "/stalled", activity: "stalled", kind: "subagent", parent: "/r", mtime: NOW_SEC - 24 * 3600 });
+    expect(keepExpanded(stalled, ctx())).toBe(false);
   });
 
-  test("an in-flight account migration pins the card", () => {
-    const migrating = entry({
+  test("a held migration delivery keeps its target expanded", () => {
+    const held = entry({
       path: "/w",
       kind: "subagent",
       parent: "/r",
-      migration: { intentId: "i", trigger: "manual", phase: "verifying", targetAccountId: "a", failure: null },
+      mtime: NOW_SEC - 24 * 3600,
+      migration: { intentId: "i", trigger: "manual", phase: "verifying", targetAccountId: "a", heldDeliveries: 1, failure: null },
     });
-    expect(isCollapseExempt(migrating, ctx())).toBe(true);
-    const committed = entry({
+    expect(keepExpanded(held, ctx())).toBe(true);
+    const noDelivery = entry({
       path: "/w",
       kind: "subagent",
       parent: "/r",
-      migration: { intentId: "i", trigger: "manual", phase: "committed", targetAccountId: "a", failure: null },
+      mtime: NOW_SEC - 24 * 3600,
+      migration: { intentId: "i", trigger: "manual", phase: "verifying", targetAccountId: "a", heldDeliveries: 0, failure: null },
     });
-    expect(isCollapseExempt(committed, ctx())).toBe(false);
+    expect(keepExpanded(noDelivery, ctx())).toBe(false);
   });
 
   test("an explicit manual/expanded placement pins the card", () => {
@@ -252,16 +276,22 @@ describe("isCollapseExempt — hard exemptions", () => {
     expect(shouldCollapseWorker(file, ctx({ pinnedPaths: new Set(["/w"]) }))).toBe(false);
   });
 
-  test("HARD CONSTRAINT: unverified authorship fails closed", () => {
-    /* The reaper has not scanned since the last write, so authorship is
-       unconfirmed — pin the card until a cycle clears it. */
-    const file = entry({ path: "/w", kind: "subagent", parent: "/r", authorshipUnverified: true });
-    expect(isCollapseExempt(file, ctx())).toBe(true);
-    expect(shouldCollapseWorker(file, ctx())).toBe(false);
-    /* Even a finished reviewer round is held while authorship is unverified. */
+  test("unverified authorship does not keep a terminal reviewer expanded", () => {
     const reviewer = entry({ path: "/rev", authorshipUnverified: true, flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
     const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev", verdict: "APPROVE" })] })];
-    expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(false);
+    expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(true);
+  });
+
+  test("a queued structured delivery re-expands a settled target", () => {
+    const file = entry({ path: "/w", conversationId: "conversation-w", proc: "killed" });
+    expect(keepExpanded(file, ctx({ activeDeliveryConversationIds: new Set(["conversation-w"]) }))).toBe(true);
+  });
+
+  test("never disables idle-only collapse while terminal evidence still folds", () => {
+    const idle = entry({ path: "/idle", mtime: NOW_SEC - 24 * 3600 });
+    const terminal = entry({ path: "/terminal", mtime: NOW_SEC - 24 * 3600, proc: "done" });
+    expect(keepExpanded(idle, ctx({ idleMs: null }))).toBe(true);
+    expect(keepExpanded(terminal, ctx({ idleMs: null }))).toBe(false);
   });
 });
 
@@ -290,10 +320,7 @@ describe("shouldCollapseWorker", () => {
     expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(true);
   });
 
-  test("HARD CONSTRAINT: a user-authored message overrides reviewer immediate-collapse", () => {
-    /* The exemption is checked before the reviewer verdict short-circuit, so a
-       reviewer round that somehow carries a human message never folds — even
-       with an APPROVE verdict on the board. */
+  test("a user-authored reviewer still collapses on verdict", () => {
     const reviewer = entry({
       path: "/rev",
       activity: "recent",
@@ -302,10 +329,10 @@ describe("shouldCollapseWorker", () => {
       flow: { flowId: "f1", flowRole: "reviewer", round: 1 },
     });
     const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev", verdict: "APPROVE" })] })];
-    expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(false);
+    expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(true);
   });
 
-  test("HARD CONSTRAINT: a user-authored implementer never collapses however idle", () => {
+  test("a user-authored implementer follows the view rule after its flow closes", () => {
     const impl = entry({
       path: "/impl",
       parent: "/orchestrator",
@@ -314,20 +341,26 @@ describe("shouldCollapseWorker", () => {
     });
     // A closed flow would otherwise make its implementer a collapse candidate.
     const flows = [flow({ id: "f1", implementerPath: "/impl", state: "closed", closedAt: "2026-07-05T02:00:00Z" })];
-    expect(shouldCollapseWorker(impl, ctx({ flows }))).toBe(false);
+    expect(shouldCollapseWorker(impl, ctx({ flows }))).toBe(true);
   });
 
   test("a reviewer still reviewing is not collapsed, fresh or idle", () => {
     const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
     const fresh = entry({ path: "/rev", activity: "recent", mtime: NOW_SEC - 5, flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
-    const idle = entry({ path: "/rev", mtime: NOW_SEC - 60 * 60, flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
+    const idle = entry({ path: "/rev", mtime: NOW_SEC - 24 * 60 * 60, flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
     expect(shouldCollapseWorker(fresh, ctx({ flows }))).toBe(false);
     /* An unfinished round never folds on the idle window alone. */
     expect(shouldCollapseWorker(idle, ctx({ flows }))).toBe(false);
   });
 
+  test("a reviewer that died without a verdict collapses even while its round record is open", () => {
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
+    const reviewer = entry({ path: "/rev", proc: "killed", flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
+    expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(true);
+  });
+
   test("a flow implementer stays while its flow is open, collapses once closed", () => {
-    const impl = entry({ path: "/impl", parent: "/orchestrator", mtime: NOW_SEC - 60 * 60, flow: { flowId: "f1", flowRole: "implementer", round: null } });
+    const impl = entry({ path: "/impl", parent: "/orchestrator", mtime: NOW_SEC - 3 * 60 * 60, flow: { flowId: "f1", flowRole: "implementer", round: null } });
     const active = [flow({ id: "f1", implementerPath: "/impl", state: "needs_decision" })];
     const closed = [flow({ id: "f1", implementerPath: "/impl", state: "closed", closedAt: "2026-07-05T02:00:00Z" })];
     /* Awaiting the owner's decision — the anchor stays even though its own
@@ -339,7 +372,7 @@ describe("shouldCollapseWorker", () => {
 
   test("a non-reviewer worker collapses only past the idle window", () => {
     const fresh = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 60 });
-    const stale = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 16 * 60 });
+    const stale = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 121 * 60 });
     expect(shouldCollapseWorker(fresh, ctx())).toBe(false);
     expect(shouldCollapseWorker(stale, ctx())).toBe(true);
   });
@@ -359,6 +392,27 @@ describe("pipelineStageAgentPaths", () => {
       },
     ] as unknown as Parameters<typeof pipelineStageAgentPaths>[0];
     expect(pipelineStageAgentPaths(pipelines)).toEqual(new Set(["/a", "/b"]));
+  });
+
+  test("protects only the cursor attempt of an active pipeline", () => {
+    const pipelines = [{
+      state: "running",
+      cursor: { stageId: "build" },
+      runs: [
+        { stageId: "plan", attempts: [{ agentPath: "/plan", historical: false }] },
+        { stageId: "build", attempts: [{ agentPath: "/build-old", historical: true }, { agentPath: "/build", historical: false }] },
+      ],
+    }] as unknown as Pipeline[];
+    expect(pipelineCursorStagePaths(pipelines)).toEqual(new Set(["/build"]));
+  });
+
+  test("a durable member of an omitted closed pipeline is settled", () => {
+    const file = entry({
+      path: "/stage",
+      durableLineage: { kind: "spawn", role: "builder", parentConversationId: "conversation-root", reviewsConversationId: null, memberships: [pipelineMembership("closed-pipeline")] },
+    });
+    expect(conversationSettled(file, { flows: [], pipelines: [], pipelineStagePaths: new Set() })).toBe(true);
+    expect(conversationSettled(file, { flows: [], pipelines: undefined, pipelineStagePaths: new Set() })).toBe(false);
   });
 });
 
@@ -427,23 +481,23 @@ describe("claims across recorded path spellings (#943 follow-up)", () => {
   });
 });
 
-describe("collapsibleWorkerFiles — subtree guard", () => {
-  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 30 * 60, ...over });
+describe("collapsibleWorkerFiles — independent conversation projection", () => {
+  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 3 * 60 * 60, ...over });
 
-  test("does not fold a worker whose subtree holds a live descendant", () => {
+  test("folds an idle ancestor while its live descendant stays expanded", () => {
     const parent = stale({ path: "/p", kind: "subagent", parent: "/root" });
     const liveChild = entry({ path: "/p/c", kind: "subagent", parent: "/p", activity: "live" });
     const paths = collapsibleWorkerFiles({ files: [parent, liveChild], project: "demo", flows: [], pinnedPaths: new Set(), nowMs: NOW }).map((f) => f.path);
-    expect(paths).not.toContain("/p");
+    expect(paths).toContain("/p");
+    expect(paths).not.toContain("/p/c");
   });
 
-  test("does not fold a worker whose subtree holds a user-authored descendant", () => {
+  test("authorship on a descendant does not veto either view collapse", () => {
     const parent = stale({ path: "/p", kind: "subagent", parent: "/root" });
     const touchedChild = stale({ path: "/p/c", kind: "subagent", parent: "/p", userAuthored: true });
     const paths = collapsibleWorkerFiles({ files: [parent, touchedChild], project: "demo", flows: [], pinnedPaths: new Set(), nowMs: NOW }).map((f) => f.path);
-    /* Folding the parent off the board would bury the owner-touched child. */
-    expect(paths).not.toContain("/p");
-    expect(paths).not.toContain("/p/c");
+    expect(paths).toContain("/p");
+    expect(paths).toContain("/p/c");
   });
 
   test("folds a worker whose entire subtree is quiet", () => {
@@ -478,7 +532,7 @@ describe("collapsibleWorkerFiles — subtree guard", () => {
 });
 
 describe("computeWorkerStacks", () => {
-  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 30 * 60, ...over });
+  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 3 * 60 * 60, ...over });
 
   test("groups collapse-eligible workers per flow, then per worktree (from flows, no file.flow)", () => {
     // Files carry NO flow annotation (as /api/files serves them); classification
@@ -513,7 +567,7 @@ describe("computeWorkerStacks", () => {
     expect(stacks).toHaveLength(0);
   });
 
-  test("never collapses an owner-started root or a user-authored worker", () => {
+  test("owner roots and user-authored workers follow the same idle rule", () => {
     const root = stale({ path: "/root" });
     const touched = stale({ path: "/w", kind: "subagent", parent: "/root", userAuthored: true });
     const stacks = computeWorkerStacks({
@@ -524,7 +578,7 @@ describe("computeWorkerStacks", () => {
       pinnedPaths: new Set(),
       nowMs: NOW,
     });
-    expect(stacks).toHaveLength(0);
+    expect(stacks.flatMap((stack) => stack.items).map((file) => file.path).sort()).toEqual(["/root", "/w"]);
   });
 });
 
@@ -636,6 +690,12 @@ describe("protectedReviewerNodes", () => {
     expect(new Set(nodes({ files: [authored, unverified, clean], flows }))).toEqual(new Set(["/rev-authored", "/rev-unverified"]));
   });
 
+  test("the shared keep-expanded result blocks legacy authorship rematerialization", () => {
+    const authored = entry({ path: "/rev", userAuthored: true, proc: "killed" });
+    const flows = [closed({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
+    expect(nodes({ files: [authored], flows, keepExpandedPaths: new Set() })).toEqual([]);
+  });
+
   test("HARD CONSTRAINT: materializes a protected reviewer of an ACTIVE flow whose implementer is UNPLACED", () => {
     const authored = entry({ path: "/rev", userAuthored: true });
     const flows = [flow({ id: "f1", implementerPath: "/impl", state: "reviewing", rounds: [round({ reviewerPath: "/rev" })] })];
@@ -668,8 +728,8 @@ describe("protectedReviewerNodes", () => {
   });
 
   test("the placement age horizon bounds an authorship-protected reviewer", () => {
-    /* Authorship protection never expires, so without the horizon a reviewer of
-       a flow closed weeks ago keeps a standalone card forever. */
+    /* The legacy materializer has no shared predicate, so the placement horizon
+       still bounds its authorship fallback. */
     const aged = entry({ path: "/rev-aged", userAuthored: true, mtime: NOW_SEC - 400 * 3_600 });
     const fresh = entry({ path: "/rev-fresh", userAuthored: true, mtime: NOW_SEC - 3_600 });
     const flows = [

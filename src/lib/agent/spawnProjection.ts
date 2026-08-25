@@ -493,6 +493,9 @@ function spawnCard(
     ? snapshot.conversations[parentConversationId]?.generations.at(-1)?.path ?? null
     : null;
   const memberships = snapshot.memberships[conversationId] ?? [];
+  /* Container-owned launches carry their durable flow/pipeline lineage. The
+     handoff marker is reserved for an operator continuation from the composer. */
+  const operatorHandoff = Boolean(parentPath && scannedPaths.has(parentPath) && memberships.length === 0);
   return {
     path: `spawn:${receipt.launchId}`,
     root: receipt.engine === "codex" ? "codex-sessions" : "claude-projects",
@@ -509,7 +512,7 @@ function spawnCard(
     // A preallocated card is by definition a Viewer launch (issue #339).
     spawnOrigin: "viewer",
     parent: parentPath && scannedPaths.has(parentPath) ? parentPath : null,
-    ...(parentPath && scannedPaths.has(parentPath) ? { handoff: true } : {}),
+    ...(operatorHandoff ? { handoff: true } : {}),
     mtime: Date.parse(receipt.createdAt) / 1000,
     size: 0,
     activity: projectedActivity(spawn, receipt.createdAt, nowMs),

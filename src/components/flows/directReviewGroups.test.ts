@@ -360,10 +360,9 @@ describe("directReviewFlows", () => {
     expect(recentGroup[0]!.state).toBe("done_comment");
 
     /* Genuinely working latest rounds keep the actionable loop: live pane,
-       stalled turn, a running process, or a pending question/input prompt. */
+       a running process, or a pending question/input prompt. */
     for (const working of [
       { ...stale, activity: "live" as const },
-      { ...stale, activity: "stalled" as const },
       { ...stale, proc: "running" as const },
       { ...stale, pendingQuestion: { kind: "question" as const, toolUseId: "t", transcriptPath: "/reviewer-stale", pid: 1, paneTarget: null, askedAt: "2026-07-10T00:00:00.000Z" } },
       { ...stale, waitingInput: { since: 1, screenTail: "…", target: "%1", menu: null } },
@@ -372,6 +371,8 @@ describe("directReviewFlows", () => {
       expect(flows[0]!.rounds[0]!.error).toBeNull();
       expect(flows[0]!.state).toBe("reviewing");
     }
+    const stalled = directReviewFlows({ files: [builder, { ...stale, activity: "stalled" as const }], flows: [], tasks: [] });
+    expect(stalled[0]!.state).toBe("done_comment");
 
     /* A verdict-bearing latest round stays terminal history, unchanged. */
     const approved = {
@@ -383,31 +384,28 @@ describe("directReviewFlows", () => {
     expect(approvedGroup[0]!.state).toBe("done_comment");
   });
 
-  test("a FRESH failed-before-verdict latest round keeps the group actionable until the horizon passes (#289+#325)", () => {
-    /* The pinned spec: a round that failed before its verdict keeps the group
-       expanded — bounded by the shared 15-minute freshness horizon so days-old
-       dead reviewers still park (the 66ef346 production fix stays intact). */
+  test("terminal no-verdict reviewers park immediately; unresolved idle reviewers follow W", () => {
     const builder = entry({ path: "/builder", conversationId: "conversation-builder" });
-    const failed = directReviewer("/reviewer-fresh", { id: "conversation-r1", reviews: "conversation-builder", mtime: 10_000, activity: "recent", proc: "done" });
+    const stopped = directReviewer("/reviewer-stopped", { id: "conversation-r1", reviews: "conversation-builder", mtime: 10_000, activity: "recent", proc: "done" });
+    const unresolved = directReviewer("/reviewer-unresolved", { id: "conversation-r2", reviews: "conversation-builder", mtime: 10_000, activity: "recent", proc: null });
     const idleMs = 15 * 60_000;
 
-    /* 5 minutes after the reviewer stopped: fresh failure, actionable group. */
-    const fresh = directReviewFlows({ files: [builder, failed], flows: [], tasks: [], nowMs: 10_000_000 + 5 * 60_000, idleMs });
-    expect(fresh).toHaveLength(1);
-    expect(fresh[0]!.rounds[0]!.error).toBe("no verdict");
-    expect(fresh[0]!.state).toBe("reviewing");
-    expect(splitDirectReviewGroups(fresh).active).toHaveLength(1);
+    const terminal = directReviewFlows({ files: [builder, stopped], flows: [], tasks: [], nowMs: 10_000_000 + 5 * 60_000, idleMs });
+    expect(terminal[0]!.rounds[0]!.error).toBe("no verdict");
+    expect(terminal[0]!.state).toBe("done_comment");
 
-    /* Past the horizon the same group parks as compact history. */
-    const stale = directReviewFlows({ files: [builder, failed], flows: [], tasks: [], nowMs: 10_000_000 + idleMs, idleMs });
+    const fresh = directReviewFlows({ files: [builder, unresolved], flows: [], tasks: [], nowMs: 10_000_000 + 5 * 60_000, idleMs });
+    expect(fresh[0]!.rounds[0]!.error).toBeNull();
+    expect(fresh[0]!.state).toBe("reviewing");
+    const stale = directReviewFlows({ files: [builder, unresolved], flows: [], tasks: [], nowMs: 10_000_000 + idleMs, idleMs });
     expect(stale[0]!.rounds[0]!.error).toBe("no verdict");
     expect(stale[0]!.state).toBe("done_comment");
     expect(splitDirectReviewGroups(stale).history).toHaveLength(1);
+    const never = directReviewFlows({ files: [builder, unresolved], flows: [], tasks: [], nowMs: 10_000_000 + 24 * 60 * 60_000, idleMs: null });
+    expect(never[0]!.state).toBe("reviewing");
 
-    /* A durable verdict is terminal IMMEDIATELY — the horizon never delays the
-       collapse of a verdict-bearing group. */
     const approved = {
-      ...failed,
+      ...stopped,
       review: { verdict: "APPROVE" as const, findingsCount: 0, observedAt: "2026-07-10T02:00:00.000Z" },
     };
     const verdictGroup = directReviewFlows({ files: [builder, approved], flows: [], tasks: [], nowMs: 10_000_000 + 5 * 60_000, idleMs });

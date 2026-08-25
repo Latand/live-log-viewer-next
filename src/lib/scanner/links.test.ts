@@ -127,6 +127,32 @@ describe("linkEntries", () => {
     expect(normalized.conversationChildren.get("conversation_child")).toBe("conversation_parent");
   });
 
+  test("durable container membership clears a polluted compatibility handoff flag", async () => {
+    const child = entry(path.join(SANDBOX, "pipeline-stage.jsonl"), {
+      handoff: true,
+      durableLineage: {
+        kind: "spawn",
+        role: "builder",
+        parentConversationId: "conversation_parent",
+        reviewsConversationId: null,
+        memberships: [{
+          kind: "pipeline",
+          containerId: "pipeline-fixture",
+          role: "builder",
+          slot: "build:1",
+          stageId: "build",
+          stageOrder: 0,
+          round: 1,
+          parentConversationId: "conversation_parent",
+        }],
+      },
+    });
+
+    await linkEntries([child], { persist: false });
+
+    expect(child.handoff).toBeUndefined();
+  });
+
   test("links a native Codex spawn_agent child through parent_thread_id metadata", async () => {
     const parentId = "019f421e-02e1-\x373e0-9b77-bebde063f10a";
     const childId = "019f423a-d6e9-\x37903-b597-3e676b6ff3d4";
