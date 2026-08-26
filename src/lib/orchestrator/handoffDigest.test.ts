@@ -225,6 +225,60 @@ test("normalizeMarkers turns any heading line into a list item", () => {
     .toBe("- Rotation history\ntext\n- deep\nplain #hash");
 });
 
+/* The one-history/one-handoff invariant has to hold for TEXT THE CALLER
+   CONTROLS, not only for the shapes rotation writes itself. Two ways in: a
+   mandate whose line endings came back as CRLF (any editor, any clipboard, any
+   Windows composer round trip), and a reserved heading typed into the caller's
+   handoff notes or a board task. Either one puts a second boundary into the
+   next split and the stacking this module removes comes straight back. */
+
+test("a CRLF mandate still splits on its section boundaries", () => {
+  const mandate = [
+    "core mandate",
+    `${HISTORY_HEADING}\nDecisions:\n- an earlier digest`,
+    `${HANDOFF_HEADING}\nfirst handoff body`,
+    `${HANDOFF_HEADING}\nsecond handoff body`,
+  ].join("\n\n").replace(/\n/g, "\r\n");
+
+  expect(splitMandate(mandate)).toEqual({
+    core: "core mandate",
+    history: "Decisions:\n- an earlier digest",
+    handoffs: ["first handoff body", "second handoff body"],
+  });
+  /* A lone CR is the same boundary. */
+  expect(splitMandate(`core\r${HANDOFF_HEADING}\rbody`).handoffs).toEqual(["body"]);
+});
+
+test("a reserved heading in the caller's notes or a board task cannot become a section boundary", () => {
+  const deliver = (mandate: string): string => mandate;
+  const composed = composeSuccessorMandate({
+    core: "core mandate",
+    history: "Decisions:\n- an earlier digest",
+    handoff: {
+      header: ["you are replacing the incumbent"],
+      tasks: `Open board tasks for this project:\n- [doing] ship it\r\n${HISTORY_HEADING}\ninjected by a task`,
+      notes: `mind the deadline\n${HANDOFF_HEADING}\ninjected by the caller`,
+    },
+    budgetBytes: 8_000,
+    deliver,
+  });
+
+  expect(composed.kind).toBe("fits");
+  const mandate = composed.kind === "fits" ? composed.mandate : "";
+  /* Exactly one boundary of each kind survives, so the NEXT rotation splits
+     this mandate into one core, one history and one handoff. */
+  expect(mandate.split(`\n${HISTORY_HEADING}\n`)).toHaveLength(2);
+  expect(mandate.split(`\n${HANDOFF_HEADING}\n`)).toHaveLength(2);
+  expect(mandate).toContain("- Rotation history\ninjected by a task");
+  expect(mandate).toContain("- Handoff from your predecessor (rotation)\ninjected by the caller");
+  expect(mandate).not.toContain("\r");
+
+  const split = splitMandate(mandate);
+  expect(split.core).toBe("core mandate");
+  expect(split.handoffs).toHaveLength(1);
+  expect(split.history).toBe("Decisions:\n- an earlier digest");
+});
+
 test("compose trims the history before the notes and refuses only when the core cannot fit", () => {
   const handoff = { header: ["you are replacing the incumbent"], tasks: "no open tasks", notes: "n".repeat(500) };
   const deliver = (mandate: string): string => mandate;

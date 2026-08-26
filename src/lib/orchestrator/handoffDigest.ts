@@ -74,13 +74,32 @@ function truncateToBytes(value: string, maxBytes: number): { value: string; trun
 }
 
 /**
- * Marker hygiene: a digest or a prior handoff body that carries its own
- * Markdown heading would become a section boundary for the NEXT rotation's
- * split, and one stray line would resurrect the stacking this module exists to
- * remove. Headings become list items before anything is rendered.
+ * A section boundary is compared as a whole line, so the line endings have to
+ * agree first: a mandate that made a round trip through a CRLF surface splits
+ * into `"## Rotation history\r"` lines that match no heading, the split finds
+ * no sections, and every stacked handoff survives as "core" — the exact
+ * stacking this module exists to remove. CRLF and lone CR collapse to LF
+ * before any comparison or rendering.
+ */
+export function normalizeLineEndings(value: string): string {
+  return value.replace(/\r\n?/g, "\n");
+}
+
+/**
+ * Marker hygiene: any text that carries its own Markdown heading would become
+ * a section boundary for the NEXT rotation's split, and one stray line would
+ * resurrect the stacking this module exists to remove. Headings become list
+ * items before anything is rendered.
+ *
+ * This runs over every piece of the fresh block that is not composed here —
+ * the digest, prior handoff bodies, the caller's notes and the board task
+ * text — because all four are caller- or model-controlled and any of them can
+ * contain a line reading `## Rotation history`. The core mandate is exempt on
+ * purpose: it is the operator's own prose, its real headings must survive, and
+ * `splitMandate` has already proved it holds neither reserved heading.
  */
 export function normalizeMarkers(value: string): string {
-  return value.replace(/^#{1,6}[ \t]+/gm, "- ");
+  return normalizeLineEndings(value).replace(/^#{1,6}[ \t]+/gm, "- ");
 }
 
 export interface SplitMandate {
@@ -94,11 +113,12 @@ export interface SplitMandate {
 
 /**
  * Split a mandate on its section boundaries. A boundary is a line equal to a
- * section heading, so `### ` sub-headings inside a body — the fallback renders
- * them — never split. Applied to whichever base the rotation uses (the
- * request's mandate or the incumbent's stored one), because the desktop rotate
- * draft prefills its textarea from the stored mandate and posts the stacked
- * text back explicitly.
+ * section heading — after line endings are normalized, so a mandate that made a
+ * round trip through a CRLF surface still splits — and `### ` sub-headings
+ * inside a body (the fallback renders them) never split. Applied to whichever
+ * base the rotation uses (the request's mandate or the incumbent's stored one),
+ * because the desktop rotate draft prefills its textarea from the stored
+ * mandate and posts the stacked text back explicitly.
  */
 export function splitMandate(mandate: string): SplitMandate {
   const core: string[] = [];
@@ -114,7 +134,7 @@ export function splitMandate(mandate: string): SplitMandate {
     }
     body = [];
   };
-  for (const line of mandate.split("\n")) {
+  for (const line of normalizeLineEndings(mandate).split("\n")) {
     if (line === HISTORY_HEADING || line === HANDOFF_HEADING) {
       close();
       kind = line === HISTORY_HEADING ? "history" : "handoff";
@@ -156,6 +176,8 @@ export type ComposeOutcome =
   | { kind: "fits"; mandate: string; bytes: number; historyDropped: boolean; notesTruncatedTo: number | null }
   | { kind: "too_large"; bytes: number; budgetBytes: number };
 
+/** Assembles the pieces verbatim. Every argument reaches here already
+    normalized by `composeSuccessorMandate`, which is the one entry point. */
 function renderMandate(core: string, history: string | null, handoff: HandoffParts, notes: string | null): string {
   const block = [
     HANDOFF_HEADING,
@@ -178,24 +200,39 @@ function renderMandate(core: string, history: string | null, handoff: HandoffPar
  * successor's only route back to the full record.
  */
 export function composeSuccessorMandate(input: ComposeInput): ComposeOutcome {
+  /* Marker hygiene, applied ONCE up front. Everything the successor mandate
+     carries besides the operator's own core is caller-, board- or
+     model-controlled — the history body, the caller's handoff notes, the board
+     task text — and a single line reading `## Rotation history` inside any of
+     them would become a section boundary for the NEXT rotation's split.
+     Normalizing here rather than inside the render also keeps the notes trim
+     monotone: the search slices text whose heading markers are already gone,
+     so a longer slice never costs fewer bytes. */
+  const core = normalizeLineEndings(input.core);
+  const history = input.history === null ? null : normalizeMarkers(input.history);
+  const handoff: HandoffParts = {
+    header: input.handoff.header.map(normalizeMarkers),
+    tasks: input.handoff.tasks === null ? null : normalizeMarkers(input.handoff.tasks),
+    notes: input.handoff.notes === null ? null : normalizeMarkers(input.handoff.notes),
+  };
   const measure = (mandate: string): number => byteLength(input.deliver(mandate));
-  const full = renderMandate(input.core, input.history, input.handoff, input.handoff.notes);
+  const full = renderMandate(core, history, handoff, handoff.notes);
   const fullBytes = measure(full);
   if (fullBytes <= input.budgetBytes) {
     return { kind: "fits", mandate: full, bytes: fullBytes, historyDropped: false, notesTruncatedTo: null };
   }
-  if (input.history !== null) {
-    const dropped = renderMandate(input.core, null, input.handoff, input.handoff.notes);
+  if (history !== null) {
+    const dropped = renderMandate(core, null, handoff, handoff.notes);
     const droppedBytes = measure(dropped);
     if (droppedBytes <= input.budgetBytes) {
       return { kind: "fits", mandate: dropped, bytes: droppedBytes, historyDropped: true, notesTruncatedTo: null };
     }
   }
-  const historyDropped = input.history !== null;
-  const bare = renderMandate(input.core, null, input.handoff, null);
+  const historyDropped = history !== null;
+  const bare = renderMandate(core, null, handoff, null);
   const bareBytes = measure(bare);
   if (bareBytes > input.budgetBytes) return { kind: "too_large", bytes: bareBytes, budgetBytes: input.budgetBytes };
-  const notes = input.handoff.notes;
+  const notes = handoff.notes;
   if (!notes) return { kind: "fits", mandate: bare, bytes: bareBytes, historyDropped, notesTruncatedTo: null };
   const points = [...notes];
   let best = { mandate: bare, bytes: bareBytes, kept: 0 };
@@ -203,7 +240,7 @@ export function composeSuccessorMandate(input: ComposeInput): ComposeOutcome {
   let high = points.length - 1;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const candidate = renderMandate(input.core, null, input.handoff, `${points.slice(0, middle).join("")}${TRUNCATION_SUFFIX}`);
+    const candidate = renderMandate(core, null, handoff, `${points.slice(0, middle).join("")}${TRUNCATION_SUFFIX}`);
     const bytes = measure(candidate);
     if (bytes <= input.budgetBytes) {
       best = { mandate: candidate, bytes, kept: middle };

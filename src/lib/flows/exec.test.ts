@@ -622,3 +622,48 @@ test("runHeadlessCodexOnce kills and reports a hung child once its bounded timeo
   expect(result.status).toBe("timeout");
   expect(result.finalOutput).toBe("");
 });
+
+test("runHeadlessCodexOnce reports timeout even when the hung child already wrote its artifact", async () => {
+  const artifactDir = path.join(process.env.LLV_STATE_DIR!, "digest-artifact-then-hang");
+  const pidPath = path.join(process.env.LLV_STATE_DIR!, "artifact-then-hang.pid");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-artifact-then-hanging-codex");
+  /* Writes the last-message artifact, records its own pid, then hangs — the
+     shape that used to be read as `done` and rob the caller of its fallback. */
+  fs.writeFileSync(
+    executablePath,
+    [
+      `#!${process.execPath}`,
+      "await Bun.stdin.text();",
+      `const target = process.argv[process.argv.indexOf("--output-last-message") + 1];`,
+      `await Bun.write(target, "Decisions:\\n- half-written before the hang");`,
+      `await Bun.write(${JSON.stringify(pidPath)}, String(process.pid));`,
+      "setInterval(() => {}, 1_000);",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+
+  const result = await runHeadlessCodexOnce({
+    key: "orchestrator-handoff:artifact-then-hang",
+    cwd: path.join(artifactDir, "cwd"),
+    ["prompt"]: "compact these handoffs",
+    model: null,
+    effort: null,
+    account: null,
+    artifactDir,
+    timeoutMs: 400,
+    sandbox: "read-only",
+    runtime: { command: executablePath },
+  });
+
+  /* The artifact is on disk and non-empty, and the run is STILL a timeout: a
+     child killed mid-turn produced whatever it had flushed, not an answer. */
+  expect(fs.readFileSync(path.join(artifactDir, "last-message.md"), "utf8")).toContain("half-written");
+  expect(result.status).toBe("timeout");
+
+  /* Detached, so the child is its own group leader: the whole group is gone. */
+  const childPid = Number(fs.readFileSync(pidPath, "utf8"));
+  expect(Number.isInteger(childPid)).toBeTrue();
+  await waitForDeath(childPid);
+  expect(() => process.kill(-childPid, 0)).toThrow();
+});

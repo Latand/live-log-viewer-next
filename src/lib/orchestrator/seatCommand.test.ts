@@ -530,7 +530,28 @@ test("rotation with no incumbent refuses and points at create", async () => {
   expect(result.body.code).toBe("no_incumbent");
 });
 
-test("a pending replay completes with the ORIGINAL mandate, not a recomposed one", async () => {
+test("a STILL-LIVE pending replay completes with the ORIGINAL mandate, not a recomposed one", async () => {
+  /* No recorded error and no settlement to reconcile: the intent is genuinely
+     in flight, so its own key finishes IT — a retry that recomposed its text
+     must not deliver a second variant against the same spawn receipt. */
+  seedPendingLaunchIntent({ clientRequestId: "req_00000001", launchId: "launch_live" });
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: NEW_ID, path: null } };
+    },
+  });
+
+  await executeOrchestratorSeatRequest({ ...spawnRequest(), mandate: "recomposed differently" }, deps);
+
+  const prompts = recorded.spawns.map((body) => String(body.prompt));
+  expect(prompts).toHaveLength(1);
+  expect(prompts[0]).toStartWith("own the board");
+  expect(prompts[0]!.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
+  expect(prompts[0]).not.toContain("recomposed differently");
+});
+
+test("a same-key retry after a TERMINAL spawn rejection recomposes instead of respawning the failed mandate", async () => {
   let attempts = 0;
   const { deps, recorded } = dependencies({
     spawn: async (body) => {
@@ -542,13 +563,20 @@ test("a pending replay completes with the ORIGINAL mandate, not a recomposed one
     },
   });
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
-  /* The retry recomposes a different mandate; the durable intent's text wins. */
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe("transient");
+
+  /* Ambiguous failures keep the key client-side, so the retry arrives on the
+     SAME one. The errored intent is terminal: it is cleared, not replayed, and
+     the corrected mandate is the one that spawns (issue #1067 AC 5). */
   await executeOrchestratorSeatRequest({ ...spawnRequest(), mandate: "recomposed differently" }, deps);
+
   const prompts = recorded.spawns.map((body) => String(body.prompt));
-  expect(prompts[0]).toBe(prompts[1]);
-  expect(prompts[0]).toStartWith("own the board");
-  expect(prompts[0]!.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
-  expect(prompts[0]).not.toContain("recomposed differently");
+  expect(prompts).toHaveLength(2);
+  expect(prompts[1]).toStartWith("recomposed differently");
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(NEW_ID);
+  expect(pending).toBeNull();
+  expect(history).toMatchObject([{ reason: "terminal_error", seat: { intent: { clientRequestId: "req_00000001", error: "transient" } } }]);
 });
 
 test("rotation preserves the requested effort end to end into the successor spawn body", async () => {
@@ -1142,6 +1170,96 @@ test("AC5: an existing-mode designation whose delivery fails is cleared by the n
   expect(active?.conversationId).toBe(OLD_ID);
   expect(pending).toBeNull();
   expect(history[0]).toMatchObject({ reason: "terminal_error", seat: { intent: { clientRequestId: "req_00001046" } } });
+});
+
+/* A 5xx or a lost response classifies AMBIGUOUS client-side, so the draft KEEPS
+   its key and retries with it (`classifySeatFailure` in seatState.ts). That
+   retry used to hit the errored intent's same-key replay, which re-sent the
+   STORED mandate — the very text that had just failed — and left the failed row
+   in the blocking pending position: the permanent banner from the incident. */
+
+test("AC5: retrying a failed rotation with its OWN key delivers the recomposed mandate, not the one that failed", async () => {
+  await seatIncumbent(stackedMandate("own the board", 3), "req_00001060");
+
+  const envelopeError = "structured message text exceeds the 32000-byte envelope bound";
+  const failing = dependencies({
+    spawn: async (body) => {
+      failing.recorded.spawns.push(body);
+      return { status: 502, body: { error: envelopeError } };
+    },
+  });
+  const failed = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00001061",
+    handoffNotes: "first attempt",
+  }, failing.deps);
+
+  expect(failed.status).toBe(502);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe(envelopeError);
+
+  const successor = successorId(11);
+  const retry = dependencies({
+    spawn: async (body) => {
+      retry.recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successor, path: "/tmp/successor.jsonl" } };
+    },
+  });
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00001061",
+    handoffNotes: "second attempt",
+  }, retry.deps);
+
+  expect(rotated.status).toBe(200);
+  /* Recomposed, not replayed: the spawned prompt carries THIS attempt's notes,
+     one history section and one handoff — the stored mandate is gone. */
+  expect(retry.recorded.spawns).toHaveLength(1);
+  const prompt = String(retry.recorded.spawns[0]!.prompt);
+  expect(prompt).toContain("second attempt");
+  expect(prompt).not.toContain("first attempt");
+  expect(prompt.split(HANDOFF_HEADING)).toHaveLength(2);
+  expect(prompt.split(HISTORY_HEADING)).toHaveLength(2);
+
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(successor);
+  expect(pending).toBeNull();
+  expect(history).toMatchObject([{ reason: "terminal_error", seat: { intent: { clientRequestId: "req_00001061", error: envelopeError } } }]);
+});
+
+test("AC5: retrying a failed existing-mode designation with its OWN key clears it and delivers the edited mandate", async () => {
+  await seatIncumbent("own the board", "req_00001065");
+
+  const failing = dependencies({ deliver: async () => ({ ok: false, error: "host is dead" }) });
+  const failed = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "adopt me",
+    clientRequestId: "req_00001066",
+    conversationId: OLD_ID,
+  }, failing.deps);
+
+  expect(failed.status).toBe(502);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe("host is dead");
+
+  const { deps, recorded } = dependencies();
+  const retried = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "adopt me, corrected",
+    clientRequestId: "req_00001066",
+    conversationId: OLD_ID,
+  }, deps);
+
+  expect(retried.status).toBe(200);
+  expect(recorded.deliveries).toHaveLength(1);
+  expect(recorded.deliveries[0]!.text).toContain("adopt me, corrected");
+  /* Exactly-once survives the fresh intent: the message id is derived from the
+     key, so a first delivery that actually landed is still deduplicated. */
+  expect(recorded.deliveries[0]!.clientMessageId).toBe("orchmandate_req_00001066");
+
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(OLD_ID);
+  expect(active?.mandate).toContain("adopt me, corrected");
+  expect(pending).toBeNull();
+  expect(history).toMatchObject([{ reason: "terminal_error", seat: { intent: { clientRequestId: "req_00001066" } } }]);
 });
 
 /** Twelve rotations, each with the maximum handoff payload the caps allow. */

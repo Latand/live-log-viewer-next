@@ -57,6 +57,12 @@ import {
  * designation with no delivered mandate, or a delivered mandate with no
  * designation, cannot survive a retry.
  *
+ * An intent that recorded an error is the exception, and deliberately so
+ * (issue #1067): it is TERMINAL, so the next begin clears it into durable
+ * history and composes afresh rather than replaying the mandate that failed —
+ * which is why no failed designation stays pending. Exactly-once still holds
+ * there, because both delivery mechanisms above key on the request id itself.
+ *
  * Selecting an existing conversation never spawns: mode is decided by the
  * presence of `conversationId`, and the delivery path reuses the composer's
  * own resume machinery, so a dead selected session is revived rather than
@@ -433,8 +439,10 @@ export async function executeOrchestratorSeatRequest(
           error,
           code: "mandate_delivery_failed",
           /* Recoverable, not a dead end: the incumbent (if any) still holds the
-             seat, the intent is pending, and the selected conversation can be
-             resumed from the board before retrying the same request id. */
+             seat, and the selected conversation can be resumed from the board
+             before retrying. The intent this returns is TERMINAL (issue #1067)
+             — the next call to begin clears it, even under this same request
+             id, and delivers the mandate composed then rather than this one. */
           seat: orchestratorSeatFor(project).pending,
         },
       };
