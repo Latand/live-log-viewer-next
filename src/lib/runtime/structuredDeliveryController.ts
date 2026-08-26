@@ -543,6 +543,16 @@ export async function bindStructuredDeliveryQueue(
     const republished = await republishCurrentHosts();
     if (conversationId && !republished.has(conversationId)) await publishCurrentFallback(conversationId);
   };
+  /* Taking a seat and giving one up are the only two writers of a host's
+     lifecycle, and each writes both of its indexes — what a delivery resolves
+     the host from, and the record that owns it — in one step. Every entry of
+     one map therefore has its counterpart in the other at every yield point;
+     splitting those writes is what let a carried-over host resolve with no
+     registration behind it (#1191). */
+  const seatRegistration = (key: string, registration: HostRegistration): void => {
+    registrations.set(key, registration);
+    hosts.set(key, registration.host);
+  };
   /* Claiming a seat is one indivisible step, taken before anything awaits: it
      leaves both maps, cancels the registration still in flight behind it and
      drops its retry. A second release, a termination and that registration all
@@ -652,8 +662,6 @@ export async function bindStructuredDeliveryQueue(
        existed at the swap, and re-driving a released host would republish it. */
     if (abandoned()) return async () => {};
     if (superseded()) return await registerThroughSuccessor(item, ownsOperation);
-    hosts.set(key, item.host);
-    requestDrain();
     const observable = item.host as ObservableEngineHost;
     let deliveryState = deliveryStateKey(initialState);
     let projectedState = hostProjectionKey(initialState);
@@ -708,7 +716,8 @@ export async function bindStructuredDeliveryQueue(
     const registration: HostRegistration = seat
       ?? { key: item.key, host: item.host, attachment: null, cancelled: false };
     registration.attachment = { unsubscribe, stopEvents };
-    registrations.set(key, registration);
+    seatRegistration(key, registration);
+    requestDrain();
     return () => unregisterHost(key, item.host);
   };
   /* A carried-over host whose registration cannot commit yet — a producer-cursor
@@ -760,8 +769,7 @@ export async function bindStructuredDeliveryQueue(
   for (const item of inherited) {
     const id = sessionKeyId(item.key);
     if (registrations.has(id)) continue;
-    hosts.set(id, item.host);
-    registrations.set(id, { key: item.key, host: item.host, attachment: null, cancelled: false });
+    seatRegistration(id, { key: item.key, host: item.host, attachment: null, cancelled: false });
   }
   state.activeHosts = hosts;
   state.registerActiveHost = register;
