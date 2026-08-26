@@ -6,6 +6,7 @@ import { afterAll, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const previousStateDir = process.env.LLV_STATE_DIR;
 const previousCodexHome = process.env.LLV_CODEX_HOME;
@@ -31,7 +32,7 @@ function seedCaller(role: string): { capability: string; conversationId: ViewerC
   const reviews = role === "reviewer"
     ? store.ensureConversation("codex", `/sessions/reviewed-${crypto.randomUUID()}.jsonl`, "terra").id
     : null;
-  const begun = store.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(store, {
     engine: "codex",
     cwd: "/repo",
     role,

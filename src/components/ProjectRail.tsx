@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -21,6 +21,16 @@ import { buildProjectSummaries, OVERVIEW, partitionCrownedSummaries, type Projec
 import { PushBell } from "./PushBell";
 import { ResourcesFooter } from "./ResourcesFooter";
 import { fmtAge } from "./utils";
+
+/**
+ * Asks the rail to open the create-project form it already owns (issue #1162).
+ * The first-run overview's «Create a project» button dispatches it rather than
+ * carrying a second creation path; the rail, being mounted beside the board on
+ * the desktop, hears it. On the phone the rail lives behind the drawer, which
+ * that button opens instead — the labelled create button is the first control
+ * inside it.
+ */
+export const CREATE_PROJECT_FORM_EVENT = "llv:create-project-form";
 
 interface Props {
   files: FileEntry[];
@@ -54,7 +64,6 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
   const isMobile = useIsMobile();
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
   const summaries = useMemo(
     () => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines, projectDisplayNames),
     [files, now, workflows, projectCatalog, pipelines, projectDisplayNames],
@@ -72,6 +81,41 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
   );
   const totalLive = useMemo(() => summaries.reduce((sum, s) => sum + s.liveCount, 0), [summaries]);
   const totalAttention = useMemo(() => summaries.reduce((sum, s) => sum + s.attentionCount, 0), [summaries]);
+  /* First run (issue #1162): the catalog answered and named no project at all.
+     Distinct from a filter query that matched none, and from a failed fetch —
+     both of those keep their own treatment. */
+  const firstRun = loaded && catalogFailures === 0 && !summaries.length;
+  /* The phone's rail is not mounted beside the board — it exists only once
+     something opens the drawer, so nothing an event fired at tap time could
+     reach. It decides for itself instead: a rail sitting in a first run lists
+     no projects, and the only reason to have summoned it is what this form
+     does, so the form is open. That makes the overview's «Create a project»
+     button one tap on a phone too (issue #1162), and the labelled button above
+     the form still collapses it.
+     The tap can land before the catalog answers, so the rail arrives with
+     `loaded` false and the first run only becomes true a moment later. It
+     follows that transition — the repo's render-phase adjustment pattern — so
+     the form opens on the edge instead of being decided once at mount, which
+     had cost the operator a second tap. The edge fires once: a form the
+     operator has since collapsed stays collapsed. */
+  const mobileFirstRun = isMobile && firstRun && !!onCreateProject;
+  const [createOpen, setCreateOpen] = useState(mobileFirstRun);
+  const [seenMobileFirstRun, setSeenMobileFirstRun] = useState(mobileFirstRun);
+  if (mobileFirstRun !== seenMobileFirstRun) {
+    setSeenMobileFirstRun(mobileFirstRun);
+    if (mobileFirstRun) setCreateOpen(true);
+  }
+  /* The first-run overview's «Create a project» button steers this form
+     (issue #1162) instead of carrying a second creation path. The rail owns the
+     form, so it owns the event that opens it — the same one-window-event idiom
+     `llv:mcp-navigate` already uses between two mounted components. This is the
+     desktop half: there the rail is already mounted beside the board. */
+  useEffect(() => {
+    if (!onCreateProject) return;
+    const open = () => setCreateOpen(true);
+    window.addEventListener(CREATE_PROJECT_FORM_EVENT, open);
+    return () => window.removeEventListener(CREATE_PROJECT_FORM_EVENT, open);
+  }, [onCreateProject]);
 
   const railRow = (summary: ProjectSummary) => {
     const crowned = crownedProjects.has(summary.project);
@@ -175,17 +219,31 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
           onChange={(event) => setQuery(event.target.value)}
         />
         {onCreateProject ? (
+          /* Issue #1162: on a rail with no projects at all the icon is the only
+             thing on screen that starts anything, and an icon alone does not say
+             so — it carries its label there. A rail that already lists projects
+             keeps the icon-only button, which is legible from its neighbours. */
           <button
             type="button"
-            className={`flex shrink-0 items-center justify-center rounded-[9px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-              isMobile ? "min-h-11 min-w-11" : "w-7"
-            } ${createOpen ? "text-primary" : ""}`}
+            data-testid="rail-create-project"
+            className={[
+              "flex shrink-0 items-center justify-center gap-1.5 rounded-[9px] border bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+              isMobile ? "min-h-11" : "",
+              firstRun
+                ? "border-accent/45 px-2.5 text-[12px] font-semibold text-accent hover:bg-accent/10"
+                : [
+                  "border-border text-muted hover:text-primary",
+                  isMobile ? "min-w-11" : "w-7",
+                  createOpen ? "text-primary" : "",
+                ].join(" "),
+            ].join(" ")}
             title={t("rail.createProject")}
             aria-label={t("rail.createProject")}
             aria-expanded={createOpen}
             onClick={() => setCreateOpen((value) => !value)}
           >
-            <FolderPlus className="h-3.5 w-3.5" aria-hidden />
+            <FolderPlus className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            {firstRun ? <span className="truncate">{t("rail.createProject")}</span> : null}
           </button>
         ) : null}
       </div>
@@ -261,7 +319,12 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
           catalogFailures > 0 ? (
             <CatalogFailureNotice failures={catalogFailures} size="inline" />
           ) : loaded ? (
-            <div className="px-3 py-4 text-center text-[12px] text-muted">{t("common.nothingFound")}</div>
+            /* Issue #1162: «Nothing found» answers a filter query. A first run
+               has nothing to find — the labelled create button above says what
+               to do instead, and the overview carries the full statement. */
+            query.trim() ? (
+              <div className="px-3 py-4 text-center text-[12px] text-muted">{t("common.nothingFound")}</div>
+            ) : null
           ) : (
             <div className="flex items-center justify-center gap-2 px-3 py-4 text-[12px] text-muted">
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden />

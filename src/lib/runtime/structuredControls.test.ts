@@ -10,6 +10,7 @@ import { procBackend } from "@/lib/proc";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import { dispatchStructuredControl } from "./structuredControls";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-controls-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
@@ -26,7 +27,7 @@ function structuredConversation(
   const pathname = path.join(sandbox, `${id}.jsonl`);
   const registry = options.registry
     ?? new AgentRegistry(path.join(sandbox, `${id}.registry.json`), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine,
     cwd: sandbox,
     transport: "structured",

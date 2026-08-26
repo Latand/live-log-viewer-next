@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 /* This suite exercises the close path's host teardown, which terminates agent
    processes. Everything it touches is a throwaway registry inside this sandbox
@@ -51,7 +52,7 @@ function hostedConversation(options: { status?: "live" | "dead"; hosted?: boolea
   const id = crypto.randomUUID();
   const pathname = path.join(sandbox, `${id}.jsonl`);
   const registry = new AgentRegistry(path.join(sandbox, `${id}.registry.json`), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd: sandbox, transport: "structured", accountId: "codex-subscription" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd: sandbox, transport: "structured", accountId: "codex-subscription" });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const settled = registry.settleSpawn(begun.receipt.launchId, {
     key: { engine: "codex", sessionId: id },

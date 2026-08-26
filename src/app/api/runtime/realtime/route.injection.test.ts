@@ -18,6 +18,7 @@ import {
 } from "@/lib/runtime/realtimeInjection";
 
 import { POST } from "./route";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 /**
  * The gate on the endpoint itself, not only in the policy.
@@ -141,7 +142,7 @@ test("a project with no seat resolves no designated manager", () => {
 
 test("the realtime target conversation resolves its durable project before reading the seat", () => {
   const cwd = path.dirname(process.env.LLV_STATE_DIR!);
-  const begun = agentRegistry().beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(agentRegistry(), {
     engine: "codex",
     cwd,
     clientAttemptId: "realtime_project_target_1",

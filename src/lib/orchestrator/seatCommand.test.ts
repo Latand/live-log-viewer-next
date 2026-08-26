@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { defaultModelFor } from "@/lib/agent/models";
+import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { MAX_STRUCTURED_TEXT_BYTES } from "@/lib/runtime/structuredContent";
 
@@ -18,8 +20,13 @@ import {
   ORCHESTRATOR_SYSTEM_PROMPT,
 } from "./prompt";
 import { setRetireManagerForTests } from "./retire";
-import { executeOrchestratorRotation, executeOrchestratorSeatRequest, type SeatCommandDependencies } from "./seatCommand";
-import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor } from "./seats";
+import {
+  executeOrchestratorRotation,
+  executeOrchestratorSeatRequest,
+  productionSeatCommandDependencies,
+  type SeatCommandDependencies,
+} from "./seatCommand";
+import { activeOrchestratorSeats, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "./seats";
 
 let sandbox = "";
 let previousStateDir: string | undefined;
@@ -42,6 +49,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setRetireManagerForTests(null);
+  setAgentRegistryForTests(null);
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(sandbox, { recursive: true, force: true });
@@ -55,10 +63,11 @@ interface Recorded {
   spawns: Record<string, unknown>[];
   deliveries: { conversationId: string; clientMessageId: string; text: string }[];
   digests: HandoffDigestRequest[];
+  identityStamps: OrchestratorSeat[];
 }
 
 function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps: SeatCommandDependencies; recorded: Recorded } {
-  const recorded: Recorded = { spawns: [], deliveries: [], digests: [] };
+  const recorded: Recorded = { spawns: [], deliveries: [], digests: [], identityStamps: [] };
   const deps: SeatCommandDependencies = {
     spawn: async (body) => {
       recorded.spawns.push(body);
@@ -76,6 +85,7 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
       project: "proj-a",
       engine: "claude",
     }),
+    stampRegistryIdentity: (seat) => { recorded.identityStamps.push(seat); },
     projectTasks: () => [],
     /* No test in this file reaches the real summarizer: the seam is injected,
        so nothing here spawns a process, opens a socket, or reads an account. */
@@ -84,6 +94,7 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
       return { kind: "fallback", reason: "unavailable" };
     },
     launchSettlement: () => ({ kind: "unknown" }),
+    runtimeIdentity: () => ({ engine: null, model: null }),
     now: () => AT,
     ...overrides,
   };
@@ -92,7 +103,14 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
 
 /** Durable residue of an accepting request that died between begin and
     activate: a pending spawn intent holding the launch receipt id. */
-function seedPendingLaunchIntent(input: { clientRequestId: string; launchId: string | null; error?: string | null }): void {
+function seedPendingLaunchIntent(input: {
+  clientRequestId: string;
+  launchId: string | null;
+  error?: string | null;
+  engine?: string | null;
+  model?: string | null;
+  legacyRuntimeShape?: boolean;
+}): void {
   fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
     schemaVersion: 1,
     nextSeatEpoch: 2,
@@ -103,6 +121,10 @@ function seedPendingLaunchIntent(input: { clientRequestId: string; launchId: str
         seatEpoch: 1,
         conversationId: null,
         path: null,
+        ...(input.legacyRuntimeShape ? {} : {
+          engine: input.engine ?? null,
+          model: input.model ?? null,
+        }),
         mandate: "own the board",
         promptVersion: null,
         predecessorConversationId: null,
@@ -112,6 +134,30 @@ function seedPendingLaunchIntent(input: { clientRequestId: string; launchId: str
         activatedAt: null,
       },
     },
+    revocations: [],
+  }), "utf8");
+}
+
+function seedLegacyActiveSeat(clientRequestId: string): void {
+  fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
+    schemaVersion: 1,
+    nextSeatEpoch: 2,
+    seats: {
+      "proj-a": {
+        project: "proj-a",
+        seatEpoch: 1,
+        conversationId: NEW_ID,
+        path: "/tmp/new.jsonl",
+        mandate: "own the board",
+        promptVersion: null,
+        predecessorConversationId: null,
+        state: "active",
+        intent: { clientRequestId, mode: "spawn", launchId: "launch_legacy", error: null },
+        designatedAt: AT,
+        activatedAt: AT,
+      },
+    },
+    pending: {},
     revocations: [],
   }), "utf8");
 }
@@ -134,6 +180,7 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(recorded.spawns[0]).toMatchObject({
     role: "orchestrator",
     project: "proj-a",
+    title: "orchestrator · own the board",
     clientAttemptId: "req_00000001",
   });
   expect(String(recorded.spawns[0]!.prompt)).toStartWith("own the board");
@@ -142,6 +189,107 @@ test("spawn mode designates and injects together: mandate rides the spawn prompt
   expect(active?.conversationId).toBe(NEW_ID);
   expect(active?.mandate).toBe("own the board");
   expect(pending).toBeNull();
+});
+
+test("spawn mode freezes omitted runtime fields to the resolved orchestrator defaults", async () => {
+  const { deps, recorded } = dependencies();
+  const result = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_00000003",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(result.status).toBe(200);
+  expect(recorded.spawns[0]).toMatchObject({ engine: "claude", model: "opus" });
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({
+    engine: "claude",
+    model: "opus",
+    runtimeIdentityFrozen: true,
+  });
+});
+
+test("a seat designated after the identity wave stamps registry role, membership, and rotation lineage", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const oldPath = path.join(sandbox, "old.jsonl");
+  const newPath = path.join(sandbox, "new.jsonl");
+  const oldConversation = registry.ensureConversation("claude", oldPath, null);
+  const newConversation = registry.ensureConversation("codex", newPath, null);
+  registry.runIdentityWaveMigration({
+    now: AT,
+    transcriptTitle: () => null,
+    sharedPathForLegacy: () => null,
+    orchestratorSeats: [],
+  });
+  const { deps } = dependencies({
+    conversationTarget: (conversationId) => ({
+      kind: "eligible",
+      conversationId,
+      path: conversationId === oldConversation.id ? oldPath : newPath,
+      cwd: sandbox,
+      project: "proj-a",
+      engine: "claude",
+    }),
+    stampRegistryIdentity: (seat) => { registry.stampOrchestratorSeatIdentity(seat); },
+  });
+
+  await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the first wave",
+    clientRequestId: "req_00001001",
+    conversationId: oldConversation.id,
+  }, deps);
+  await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the next wave",
+    clientRequestId: "req_00001002",
+    conversationId: newConversation.id,
+  }, deps);
+
+  const snapshot = registry.snapshot();
+  expect(snapshot.identityMigrations["identity-wave-a-d-913"]).toBeDefined();
+  expect(snapshot.conversations[oldConversation.id]).toMatchObject({ agentRole: "orchestrator", delegationDepth: 0 });
+  expect(snapshot.conversations[newConversation.id]).toMatchObject({ agentRole: "orchestrator", delegationDepth: 0 });
+  expect(snapshot.memberships[newConversation.id]).toContainEqual(expect.objectContaining({
+    kind: "orchestrator",
+    containerId: "proj-a",
+    parentConversationId: oldConversation.id,
+  }));
+  expect(snapshot.lineageEdges[newConversation.id]).toMatchObject({
+    parentConversationId: oldConversation.id,
+    role: "orchestrator",
+  });
+});
+
+test("a completed seat replay repairs a failed registry stamp without revalidating the target", async () => {
+  let stampAttempts = 0;
+  let targetReads = 0;
+  const { deps, recorded } = dependencies({
+    conversationTarget: (conversationId) => {
+      targetReads += 1;
+      return targetReads === 1
+        ? { kind: "eligible", conversationId, path: path.join(sandbox, "existing.jsonl"), cwd: sandbox, project: "proj-a", engine: "claude" as const }
+        : null;
+    },
+    stampRegistryIdentity: () => {
+      stampAttempts += 1;
+      if (stampAttempts === 1) throw new Error("temporary registry write failure");
+    },
+  });
+  const request = {
+    project: "proj-a",
+    mandate: "own repairs",
+    clientRequestId: "req_00001003",
+    conversationId: OLD_ID,
+  };
+
+  await expect(executeOrchestratorSeatRequest(request, deps)).rejects.toThrow("temporary registry write failure");
+  const replay = await executeOrchestratorSeatRequest(request, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: OLD_ID } });
+  expect(stampAttempts).toBe(2);
+  expect(targetReads).toBe(1);
+  expect(recorded.deliveries).toHaveLength(1);
 });
 
 test("a caller-edited current-version mandate receives the status directive without changing stored text", async () => {
@@ -161,6 +309,51 @@ test("a caller-edited current-version mandate receives the status directive with
     mandate,
     promptVersion: ORCHESTRATOR_PROMPT_VERSION,
   });
+});
+
+test("a completed seat replay preserves the incumbent engine and model from its durable intent", async () => {
+  const { deps, recorded } = dependencies();
+  const request = {
+    ...spawnRequest("req_00001005"),
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  };
+
+  expect((await executeOrchestratorSeatRequest(request, deps)).status).toBe(200);
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({
+    conversationId: NEW_ID,
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: request.project,
+    mandate: request.mandate,
+    clientRequestId: request.clientRequestId,
+    cwd: request.cwd,
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(recorded.spawns).toHaveLength(1);
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
+});
+
+test("a legacy active seat replay recovers incumbent runtime metadata", async () => {
+  const clientRequestId = "req_legacy_active";
+  seedLegacyActiveSeat(clientRequestId);
+  const { deps } = dependencies({
+    runtimeIdentity: () => ({ engine: "codex", model: "gpt-5.6-sol" }),
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId,
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
 });
 
 test("an admitted asynchronous spawn activates the seat from its durable conversation id", async () => {
@@ -275,6 +468,51 @@ test("selecting an EXISTING conversation delivers a caller-edited current-versio
     conversationId: OLD_ID,
     mandate: "updated mandate",
     promptVersion: ORCHESTRATOR_PROMPT_VERSION,
+  });
+});
+
+test("adopting a model-less Codex conversation records its engine-specific effective model", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  setAgentRegistryForTests(registry);
+  const transcript = path.join(sandbox, "model-less-codex.jsonl");
+  fs.writeFileSync(transcript, "", "utf8");
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: sandbox,
+    role: "orchestrator",
+    launchProfile: { title: "Adopt model-less Codex conversation" },
+  });
+  if (begun.kind !== "created") throw new Error("expected a spawn receipt");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "model-less-codex" },
+    artifactPath: transcript,
+    cwd: sandbox,
+    accountId: null,
+    launchProfile: begun.receipt.launchProfile,
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const target = productionSeatCommandDependencies.conversationTarget(begun.receipt.conversationId);
+  if (!target || target.kind !== "eligible") throw new Error("expected an eligible Codex target");
+  const { deps } = dependencies({
+    conversationTarget: productionSeatCommandDependencies.conversationTarget,
+    runtimeIdentity: productionSeatCommandDependencies.runtimeIdentity,
+  });
+
+  const result = await executeOrchestratorSeatRequest({
+    project: target.project,
+    mandate: "Own the Codex project",
+    clientRequestId: "req_model_less_codex_1",
+    conversationId: begun.receipt.conversationId,
+  }, deps);
+
+  expect(result.status).toBe(200);
+  expect(orchestratorSeatFor(target.project).active).toMatchObject({
+    engine: "codex",
+    model: defaultModelFor("codex"),
   });
 });
 
@@ -534,7 +772,7 @@ test("a STILL-LIVE pending replay completes with the ORIGINAL mandate, not a rec
   /* No recorded error and no settlement to reconcile: the intent is genuinely
      in flight, so its own key finishes IT — a retry that recomposed its text
      must not deliver a second variant against the same spawn receipt. */
-  seedPendingLaunchIntent({ clientRequestId: "req_00000001", launchId: "launch_live" });
+  seedPendingLaunchIntent({ clientRequestId: "req_00000001", launchId: "launch_live", engine: "claude", model: "opus" });
   const { deps, recorded } = dependencies({
     spawn: async (body) => {
       recorded.spawns.push(body);
@@ -573,10 +811,45 @@ test("a same-key retry after a TERMINAL spawn rejection recomposes instead of re
   const prompts = recorded.spawns.map((body) => String(body.prompt));
   expect(prompts).toHaveLength(2);
   expect(prompts[1]).toStartWith("recomposed differently");
+  /* The successor title is derived from the mandate that actually spawned, so
+     the recomposed retry is titled by ITS text, not the failed one's. */
+  expect(recorded.spawns.map((body) => body.title)).toEqual([
+    "orchestrator · own the board",
+    "orchestrator · recomposed differently",
+  ]);
   const { active, pending, history } = orchestratorSeatFor("proj-a");
   expect(active?.conversationId).toBe(NEW_ID);
   expect(pending).toBeNull();
   expect(history).toMatchObject([{ reason: "terminal_error", seat: { intent: { clientRequestId: "req_00000001", error: "transient" } } }]);
+});
+
+test("a STILL-LIVE pending pre-spawn replay keeps the ORIGINAL engine and model", async () => {
+  /* Runtime identity is frozen at designation (PR #916). A live pending intent
+     is finished by its own key, so a retry naming a different engine/model must
+     spawn the identity the seat already carries. */
+  seedPendingLaunchIntent({
+    clientRequestId: "req_00000001",
+    launchId: "launch_live",
+    engine: "claude",
+    model: "opus",
+  });
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: NEW_ID, path: null } };
+    },
+  });
+
+  await executeOrchestratorSeatRequest({
+    ...spawnRequest(),
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  }, deps);
+
+  expect(recorded.spawns.map((body) => ({ engine: body.engine, model: body.model }))).toEqual([
+    { engine: "claude", model: "opus" },
+  ]);
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "claude", model: "opus" });
 });
 
 test("rotation preserves the requested effort end to end into the successor spawn body", async () => {
@@ -695,6 +968,84 @@ test("replaying the accepting request's own key after its launch settled converg
   expect(recorded.spawns).toEqual([]);
   expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
   expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+});
+
+test("creator-death reconciliation restores seat metadata from the pending intent", async () => {
+  seedPendingLaunchIntent({
+    clientRequestId: "req_00000052",
+    launchId: "launch_52",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+  });
+  const { deps } = dependencies({
+    launchSettlement: () => ({ kind: "settled", conversationId: NEW_ID, path: "/tmp/new.jsonl", launchId: "launch_52" }),
+    spawn: async () => {
+      throw new Error("a settled accepted launch must reconcile from durable state, never spawn again");
+    },
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_00000052",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
+});
+
+test("a legacy pending seat recovers runtime metadata from its launch settlement", async () => {
+  seedPendingLaunchIntent({
+    clientRequestId: "req_legacy_pending",
+    launchId: "launch_legacy_pending",
+    legacyRuntimeShape: true,
+  });
+  const { deps } = dependencies({
+    launchSettlement: () => ({
+      kind: "settled",
+      conversationId: NEW_ID,
+      path: "/tmp/new.jsonl",
+      launchId: "launch_legacy_pending",
+      engine: "codex",
+      model: "gpt-5.6-sol",
+    }),
+  });
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_legacy_pending",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({ status: 200, body: { replayed: true, conversationId: NEW_ID } });
+  expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "codex", model: "gpt-5.6-sol" });
+});
+
+test("an unsettled legacy pending seat fails closed when runtime provenance is unavailable", async () => {
+  seedPendingLaunchIntent({
+    clientRequestId: "req_legacy_unknown",
+    launchId: "launch_legacy_unknown",
+    legacyRuntimeShape: true,
+  });
+  const { deps, recorded } = dependencies();
+
+  const replay = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "own the board",
+    clientRequestId: "req_legacy_unknown",
+    engine: "codex",
+    model: "gpt-5.6-sol",
+    cwd: "/tmp",
+  }, deps);
+
+  expect(replay).toMatchObject({
+    status: 409,
+    body: { code: "legacy_runtime_identity_unavailable" },
+  });
+  expect(recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toContain("runtime identity");
 });
 
 test("a pending intent whose launch terminally failed records the failure and stops blocking a fresh designation", async () => {
