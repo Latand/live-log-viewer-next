@@ -1,11 +1,12 @@
 import { roleNameById } from "@/components/builderCopy";
-import { formatRateLimitTime } from "@/components/rateLimit";
+import { rateLimitText } from "@/components/rateLimit";
 import type { Locale, TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
+import { attentionId } from "../attention";
+
 /**
- * What a waiting agent is actually blocked on, and the ONE line that says it
- * (issue #1167).
+ * The ONE line every attention surface shows for a waiting agent (issue #1167).
  *
  * The dock badge, the toast and the island popover all answer the same
  * question — «what do you owe this agent?» — and each used to answer it in its
@@ -15,100 +16,81 @@ import type { FileEntry } from "@/lib/types";
  * different things, so the derivation lives here once and every surface reads
  * it.
  *
- * The precedence below MIRRORS `attentionId`'s, deliberately and in the same
- * order: the surface that NAMES a wait has to be talking about the signal the
- * queue COUNTED. `attentionId` stays the only authority on whether a
- * conversation is waiting at all (a stalled transcript needs a live process and
- * a fresh mtime before it counts) — this module only names what it found, so a
- * caller asks the queue first and asks for words second.
+ * `attentionId` is the eligibility authority, and this module CALLS it rather
+ * than re-deciding: a conversation the queue does not count is a conversation
+ * this line refuses to name. That gate is load-bearing for the stalled tier,
+ * whose signal needs a live process and a fresh mtime before it is anyone's to
+ * answer — without it a toast left up over an abandoned session announced
+ * «interrupted or awaiting permission» while the popover behind it held no such
+ * row, which is the one-signal-two-descriptions defect this issue exists to
+ * remove.
  */
-export type AttentionDecision =
-  /** A structured question, named by the agent's OWN label for it — never by
-      the question body, which is a paragraph written to be read inside the
-      conversation and truncates into nonsense on a badge. Null header means the
-      agent shipped none, and the generic wording stands in. */
-  | { kind: "question"; header: string | null }
-  /** A plan awaiting approval. */
-  | { kind: "plan" }
-  /** An engine or account wall, with the reset moment when one was reported. */
-  | { kind: "rate-limit"; resetAt: number | null }
-  /** A terminal prompt. Deliberately payload-free: the only text a scraped
-      prompt offers is the menu it is drawing («❯ 1. Yes»), which names the
-      OPTIONS rather than the decision. */
-  | { kind: "permission" }
-  /** An interrupted turn — no question on screen, but nobody is working. */
-  | { kind: "stalled" };
+
+/** The role a pipeline stage records when its stage carries no role at all
+    (`engine.ts` writes `roleId ?? "agent"`). It is the ABSENCE of a role
+    spelled as a word, so it attributes nothing and never reaches the line. */
+const UNNAMED_ROLE = "agent";
 
 /**
- * The decision a conversation is blocked on, or null when it carries no signal.
+ * Who is waiting, when the conversation's evidence names a role.
  *
- * Precedence, identical to `attentionId`'s: a structured question, then a
- * rate-limit wall, then the screen-scrape fallback, then the stalled state.
- *
- * Each kind is named from a FIXED vocabulary — the agent's own question header,
- * or one of three localized phrases. Nothing is lifted out of a question body
- * or off a scraped screen: a line assembled from whatever the terminal happened
- * to be drawing is not a decision the operator can recognize, and it is what
- * put «❯ 1. Yes» in front of them as the name of a wait.
- */
-export function attentionDecision(file: FileEntry): AttentionDecision | null {
-  const pending = file.pendingQuestion;
-  if (pending) {
-    if (pending.kind === "plan") return { kind: "plan" };
-    const header = pending.questions?.[0]?.header?.trim();
-    return { kind: "question", header: header || null };
-  }
-  if (file.rateLimit) return { kind: "rate-limit", resetAt: file.rateLimit.resetAt };
-  if (file.waitingInput) return { kind: "permission" };
-  if (file.activity === "stalled") return { kind: "stalled" };
-  return null;
-}
-
-/** The decision alone, without attribution. */
-function decisionText(t: TFunction, locale: Locale, decision: AttentionDecision): string {
-  switch (decision.kind) {
-    case "question":
-      return decision.header ?? t("attention.decisionQuestion");
-    case "plan":
-      return t("attention.decisionPlan");
-    case "rate-limit":
-      /* The wording the rate-limit badge already uses, so the wall reads the
-         same wherever the operator meets it. */
-      return decision.resetAt
-        ? t("rateLimit.badgeUntil", { time: formatRateLimitTime(decision.resetAt, locale) })
-        : t("rateLimit.badge");
-    case "permission":
-      return t("attention.decisionPermission");
-    case "stalled":
-      return t("status.stalled");
-  }
-}
-
-/**
- * Who is waiting, when the conversation carries a durable role.
- *
- * Only the conversation's OWN role counts (`durableLineage.role` — the launch
- * receipt's `agentRole`, or the durable spawn edge behind it). Container
- * memberships are deliberately not consulted: a stage slot names the agent's
- * place in a pipeline rather than the job it is doing, and «Member» beside a
- * decision tells the operator nothing they did not already know.
+ * The same fail-open ladder the registry walks in `conversationAgentRole`: the
+ * conversation's own role first (`durableLineage.role` already collapses the
+ * launch receipt's `agentRole` and the durable spawn edge behind it), then its
+ * newest container membership — the read model keeps memberships in the order
+ * the registry appended them, so the last row is the newest. A stage slot is
+ * real evidence of the job an agent was given; dropping it left a pipeline
+ * builder's question attributed to nobody.
  */
 function roleLabel(t: TFunction, file: FileEntry): string | null {
-  const role = file.durableLineage?.role;
+  const lineage = file.durableLineage;
+  const direct = lineage?.role?.trim();
+  const role = direct
+    || lineage?.memberships.filter((membership) => {
+      const value = membership.role.trim();
+      return value && value !== UNNAMED_ROLE;
+    }).at(-1)?.role.trim();
   return role ? roleNameById(t, role) : null;
 }
 
 /**
- * The one line every attention surface shows: the decision, plus the agent's
- * role when the conversation names one. Null when there is no signal to name —
- * a surface with a stale target (a toast still up after its question was
- * answered elsewhere) falls back to its own generic wording rather than
- * inventing a decision.
+ * The wait itself, from a FIXED vocabulary — the agent's own question header,
+ * or one of three localized phrases, or the rate-limit badge's own wording.
+ *
+ * Nothing is lifted out of a question body or off a scraped screen: a line
+ * assembled from whatever the terminal happened to be drawing names the OPTIONS
+ * rather than the decision, and it is what put «❯ 1. Yes» in front of the
+ * operator as the name of a wait.
+ *
+ * The ladder is `attentionId`'s precedence, in its order, over a file that
+ * already qualified — which is what makes the stalled tail honest rather than a
+ * catch-all.
  */
-export function decisionLine(t: TFunction, locale: Locale, file: FileEntry): string | null {
-  const decision = attentionDecision(file);
-  if (!decision) return null;
+function decisionText(t: TFunction, locale: Locale, file: FileEntry): string {
+  const pending = file.pendingQuestion;
+  if (pending) {
+    if (pending.kind === "plan") return t("attention.decisionPlan");
+    /* Never the question BODY: it is a paragraph written to be read inside the
+       conversation, and it truncates into nonsense on a badge. */
+    return pending.questions?.[0]?.header?.trim() || t("attention.decisionQuestion");
+  }
+  if (file.rateLimit) return rateLimitText(t, locale, file.rateLimit);
+  if (file.waitingInput) return t("attention.decisionPermission");
+  return t("status.stalled");
+}
+
+/**
+ * The decision a conversation owes the operator, plus its role when the
+ * evidence names one — or null when the queue counts no wait here at all.
+ *
+ * A surface holding a stale target (a toast still up after its question was
+ * answered elsewhere, an agent that exited mid-turn) falls back to its own
+ * generic wording rather than inventing a decision. `now` is epoch SECONDS and
+ * defaults to the wall clock, exactly as `attentionId` does.
+ */
+export function decisionLine(t: TFunction, locale: Locale, file: FileEntry, now?: number): string | null {
+  if (attentionId(file, now) === null) return null;
+  const decision = decisionText(t, locale, file);
   const role = roleLabel(t, file);
-  const text = decisionText(t, locale, decision);
-  return role ? `${text} · ${role}` : text;
+  return role ? `${decision} · ${role}` : decision;
 }

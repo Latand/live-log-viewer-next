@@ -132,7 +132,10 @@ test("mobile keeps the compact count and a 44px Next, and hides the desktop-only
  * Viewer wires them (keys over the project queue, Next over the global one).
  * ------------------------------------------------------------------------- */
 
-const NOW = 1_800_000_000;
+/* The wall clock: a row re-derives its decision line on render, and the stalled
+   tier only counts while a process is behind the transcript and the signal is
+   fresh — so its fixtures age against the same clock the render reads. */
+const NOW = Math.floor(Date.now() / 1000);
 
 function entry(path: string, project: string, since: number): FileEntry {
   return {

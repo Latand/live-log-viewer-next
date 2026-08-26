@@ -30,7 +30,7 @@ Object.assign(globalThis, {
 
 const { AttentionToast } = await import("./AttentionToast");
 const { AttentionQueueRow } = await import("./AttentionIsland");
-const { buildAttentionQueue } = await import("../attention");
+const { buildAttentionQueue, STALLED_ATTENTION_TTL } = await import("../attention");
 type FileEntry = import("@/lib/types").FileEntry;
 
 let root: Root | null = null;
@@ -61,7 +61,10 @@ const click = (element: Element) =>
     element.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as never);
   });
 
-const NOW = 1_800_000_000;
+/* The wall clock, because the components derive attention eligibility on it:
+   a stalled transcript counts only while a process is behind it and the signal
+   is fresh, so its fixtures have to age against the same clock the render uses. */
+const NOW = Math.floor(Date.now() / 1000);
 
 function file(overrides: Partial<FileEntry> = {}): FileEntry {
   return {
@@ -172,6 +175,29 @@ test("the toast title and the island popover row are the SAME line, for every ki
 test("a toast still up after its question was answered elsewhere falls back rather than inventing a decision", async () => {
   const host = await render(<AttentionToast file={file()} mobile={false} onOpen={() => {}} onDismiss={() => {}} />);
   expect(title(host)).toBe("Agent is waiting for a reply");
+});
+
+/**
+ * The toast holds a file the operator has not dismissed, so it outlives its own
+ * signal routinely — and it must never name a decision the popover behind it
+ * does not list. An interrupted transcript is only a wait while a process is
+ * still behind it and the signal is fresh; past either, the toast falls back to
+ * the generic wording instead of announcing a prompt nobody is holding.
+ */
+const ABANDONED: Array<[string, Partial<FileEntry>]> = [
+  ["the agent already exited", { activity: "stalled", proc: "done", mtime: NOW - 60 }],
+  ["the interruption is dead context", { activity: "stalled", proc: "running", mtime: NOW - STALLED_ATTENTION_TTL - 60 }],
+];
+
+test("an interrupted turn nobody is behind names no decision, on the toast or in the queue", async () => {
+  for (const [, overrides] of ABANDONED) {
+    const entry = file(overrides as Partial<FileEntry>);
+    expect(buildAttentionQueue([entry], NOW)).toHaveLength(0);
+
+    const host = await render(<AttentionToast file={entry} mobile={false} onOpen={() => {}} onDismiss={() => {}} />);
+    expect(title(host)).toBe("Agent is waiting for a reply");
+    await unmount();
+  }
 });
 
 test("open and dismiss stay separate targets, on the phone at full tap height", async () => {
