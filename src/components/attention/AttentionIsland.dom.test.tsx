@@ -19,7 +19,7 @@ Object.assign(globalThis, {
   localStorage: dom.localStorage,
 });
 
-const { AttentionIsland } = await import("./AttentionIsland");
+const { AttentionIsland, AttentionQueueRow } = await import("./AttentionIsland");
 const { advanceAttentionCycle, buildAttentionQueue } = await import("../attention");
 type FileEntry = import("@/lib/types").FileEntry;
 type AttentionItem = import("../attention").AttentionItem;
@@ -132,7 +132,10 @@ test("mobile keeps the compact count and a 44px Next, and hides the desktop-only
  * Viewer wires them (keys over the project queue, Next over the global one).
  * ------------------------------------------------------------------------- */
 
-const NOW = 1_800_000_000;
+/* The wall clock: a row re-derives its decision line on render, and the stalled
+   tier only counts while a process is behind the transcript and the signal is
+   fresh — so its fixtures age against the same clock the render reads. */
+const NOW = Math.floor(Date.now() / 1000);
 
 function entry(path: string, project: string, since: number): FileEntry {
   return {
@@ -236,4 +239,62 @@ test("an emptied queue leaves both routes quiet", async () => {
   expect(document.querySelector("[data-attention-next]")).toBeNull();
   expect(document.querySelector("[data-attention-zero]")).not.toBeNull();
   expect(served).toEqual([]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * The popover rows NAME the decision (issue #1167). The count says how many
+ * agents are waiting; a row that only repeats the conversation title still
+ * leaves the operator to open each one to find out what it wants.
+ * ------------------------------------------------------------------------- */
+
+function pendingQuestion(header: string): FileEntry["pendingQuestion"] {
+  return {
+    kind: "question",
+    toolUseId: `tool-${header}`,
+    transcriptPath: "/alpha-question",
+    pid: 4242,
+    paneTarget: null,
+    askedAt: "2026-08-25T10:00:00.000Z",
+    questions: [{ header, question: `${header}?`, multiSelect: false, options: [] }],
+  } as FileEntry["pendingQuestion"];
+}
+
+function questionItem(overrides: Partial<FileEntry> = {}): AttentionItem {
+  const file = { ...entry("/alpha-question", "alpha", NOW - 120), waitingInput: null, pendingQuestion: pendingQuestion("Rollout window"), ...overrides } as FileEntry;
+  return buildAttentionQueue([file], NOW)[0]!;
+}
+
+test("a queue row carries the decision line, the title, the project and the age", async () => {
+  const item = questionItem({
+    title: "Ship the rollout",
+    durableLineage: { kind: "spawn", role: "builder", parentConversationId: null, reviewsConversationId: null, memberships: [] },
+  } as Partial<FileEntry>);
+  const opened: string[] = [];
+  const host = await render(<AttentionQueueRow item={item} onOpen={() => opened.push(item.id)} />);
+
+  const row = host.querySelector("[data-attention-row]")!;
+  expect(row.getAttribute("data-attention-row")).toBe(item.id);
+  expect(row.textContent).toContain("Ship the rollout");
+  /* The one shared line: the decision, then who is asking. */
+  expect(host.querySelector("[data-attention-decision]")!.textContent).toBe("Rollout window · Builder");
+  expect(row.textContent).toContain("alpha");
+
+  await click(row);
+  expect(opened).toEqual([item.id]);
+});
+
+test("a terminal prompt and a stalled agent each keep their own wording", async () => {
+  /* The prompt is named by its KIND, never by the menu the terminal happens to
+     be drawing: «❯ 1. Yes» names the options, and a row that says it has told
+     the operator nothing about what they are being asked to allow. */
+  const terminal = buildAttentionQueue([entry("/alpha-terminal", "alpha", NOW - 60)], NOW)[0]!;
+  let host = await render(<AttentionQueueRow item={terminal} onOpen={() => {}} />);
+  expect(host.querySelector("[data-attention-decision]")!.textContent).toBe("permission prompt");
+  await act(async () => { root?.unmount(); });
+  document.body.replaceChildren();
+
+  const stalledFile = { ...entry("/alpha-stalled", "alpha", NOW - 60), waitingInput: null, activity: "stalled", proc: "running", mtime: NOW - 60 } as FileEntry;
+  const stalled = buildAttentionQueue([stalledFile], NOW)[0]!;
+  host = await render(<AttentionQueueRow item={stalled} onOpen={() => {}} />);
+  expect(host.querySelector("[data-attention-decision]")!.textContent).toBe("interrupted or awaiting permission");
 });

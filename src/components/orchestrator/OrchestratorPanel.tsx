@@ -10,6 +10,8 @@ import {
   type LaunchAccountCatalog,
   type LaunchDraftStorage,
 } from "@/components/draft/AgentLaunchControls";
+import { refreshRuntime } from "@/hooks/useRuntime";
+import { requestFilesRefresh } from "@/lib/filesEvents";
 import { useLocale, type MessageKey } from "@/lib/i18n";
 import {
   ORCHESTRATOR_PROMPT_VERSION,
@@ -19,18 +21,24 @@ import {
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
+import { decisionLine } from "../attention/decision";
 import { IncumbentHeader } from "./IncumbentHeader";
-import type { OrchestratorIncumbent } from "./incumbent";
+import { incumbentHostLive, type OrchestratorIncumbent } from "./incumbent";
 import { OrchestratorConversation } from "./OrchestratorConversation";
 import {
   deriveOrchestratorPanelState,
   deriveRotateDraftState,
   orchestratorQuietBannerEligible,
+  resolveSeatFile,
+  SEAT_BIND_TIMEOUT_MS,
+  seatBadgeOf,
+  seatBindPending,
   seatRequestSettled,
   type OrchestratorPanelState,
   type OrchestratorSeatStatus,
   type RotationHint,
-  type SeatLiveness,
+  type SeatBadge,
+  type SeatBindFailure,
   type SeatTransition,
 } from "./seatState";
 import { useOrchestratorIncumbent } from "./useOrchestratorIncumbent";
@@ -148,26 +156,71 @@ export function OrchestratorPanel({
 
   const seatConversationId = status?.seat?.conversationId ?? null;
   const seated = Boolean(seatConversationId && status?.exists);
-  const file = useMemo(
-    () => (seatConversationId
-      ? files.find((entry) => entry.conversationId === seatConversationId)
-        ?? files.find((entry) => entry.path === status?.seat?.path)
-        ?? null
-      : null),
-    [files, seatConversationId, status?.seat?.path],
-  );
-  const surface = useSeatSurface(file);
   /* The incumbent's wear is only a question while there IS an incumbent; a
      project sitting on its draft asks nothing. */
-  const { incumbent: read, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, seated);
+  const { incumbent: read, stale: readStale, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, seated);
   /* A reading is only about the conversation it names. Right after a rotation
      the seat has already advanced to the successor while this slower poll still
      describes the predecessor — showing that as «the incumbent» would put the
      retired orchestrator's model and context in the successor's header. */
   const incumbent = read && read.conversationId === seatConversationId ? read : null;
+  /* The DURABLE id is the key, and the status read's `transcriptPath` is that id
+     resolved through the registry's current generation — which is what binds a
+     seat whose recorded path was replaced by a re-host (issue #1182). The
+     recorded path stays a hint, tried last. */
+  const seatPath = status?.seat?.path ?? null;
+  const currentPath = incumbent?.transcriptPath ?? null;
+  const file = useMemo(
+    () => resolveSeatFile({ files, conversationId: seatConversationId, seatPath, currentPath }),
+    [files, seatConversationId, seatPath, currentPath],
+  );
+  const surface = useSeatSurface(file);
+  /* How long this seat has gone unbound, so «opening…» can be BOUNDED. */
+  const bindPending = seated && seatBindPending(file, surface);
+  const unboundForMs = useUnboundFor(bindPending, seatConversationId ?? "");
   useEffect(() => {
     if (seated) void refreshIncumbent();
   }, [seatConversationId, seated, refreshIncumbent]);
+  /* A seat this reading could not bind asks for a FRESH one, off the poll's own
+     cadence: that cadence is set for context wear, which moves over tens of
+     minutes, while `transcriptPath` — the durable id resolved through the
+     registry's current generation — is the very thing a re-hosted seat needs
+     re-read (#1182). Gated on a reading already being in hand, so it never
+     races the first read above, and hung on the EDGE, so a seat that stays
+     unbound re-asks once rather than on every commit. */
+  const unboundWithReading = bindPending && incumbent !== null;
+  useEffect(() => {
+    if (unboundWithReading) void refreshIncumbent();
+  }, [unboundWithReading, refreshIncumbent]);
+  /* Liveness is only evidence while someone is still answering for it. The
+     header may keep a cached reading — an engine and a context percent from a
+     minute ago beat a row of dashes — but a cached «alive» carried across the
+     very restart this panel is waiting out, with every refresh since failing, is
+     a MEMORY. Accusing the seat of failing to bind on it would report a fault
+     the server was never asked to confirm, so the bound stays silent and
+     «opening…» stands until a status read answers again (issue #1182). */
+  const hostLive = !readStale && incumbentHostLive(incumbent);
+  /**
+   * Re-bind: re-run EVERY read resolution is composed of.
+   *
+   * The two orchestrator endpoints say which conversation the seat holds and
+   * where its current generation lives; neither one is what a bounded wait is
+   * missing. `catalog` is missing the file catalog — the board's own read, which
+   * `requestFilesRefresh()` re-runs through the seam `useFiles` listens on — and
+   * `surface` is missing the runtime plane's host for a transcript already in
+   * hand, which is `refreshRuntime()`. Re-reading only the seat and the status
+   * would leave whichever half was actually absent exactly as absent, so the
+   * button would spin and change nothing (issue #1182).
+   *
+   * It designates, rotates and spawns nothing: recovering from a restart must
+   * never cost the operator a seat.
+   */
+  const rebind = () => {
+    void refresh();
+    void refreshIncumbent();
+    requestFilesRefresh();
+    void refreshRuntime();
+  };
 
   const create = useSeatConfirm({ url: "/api/orchestrator/seat", project, storage: draftStorage, field: "requestId", status, refresh });
   const rotate = useSeatConfirm({ url: "/api/orchestrator/rotate", project, storage: rotateStorage, field: "requestId", status, refresh });
@@ -183,6 +236,8 @@ export function OrchestratorPanel({
     file,
     surface,
     incumbent,
+    hostLive,
+    unboundForMs,
   });
   /**
    * A rotation whose outcome is not yet settled KEEPS the panel, even after the
@@ -278,7 +333,7 @@ export function OrchestratorPanel({
           <span className="truncate text-body font-semibold text-primary">{t("orchPanel.title")}</span>
           <span className="truncate text-caption text-muted" title={projectName}>{projectName}</span>
         </span>
-        <StateBadge state={state} />
+        <StateBadge state={state} file={file} />
         <button
           type="button"
           onClick={onClose}
@@ -379,6 +434,23 @@ export function OrchestratorPanel({
                   {t("orchPanel.resumable")}
                 </p>
               ) : null}
+              {/* Bound to a transcript, but the runtime plane never resolved a
+                  host for it: the conversation renders and the panel says why
+                  its controls are still «opening», rather than leaving a badge
+                  the operator can only read as a stuck seat (#1182). Both ways
+                  forward ride here too — a bounded wait offers the same pair
+                  whichever half is missing, and rotation is neither of them. */}
+              {state.bindFailure === "surface" ? (
+                <p
+                  data-orchestrator-bind="surface"
+                  className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-sunken px-3 py-1.5 text-ui text-secondary"
+                  role="status"
+                >
+                  {t("orchPanel.bindStalledSurface")}
+                  <RebindButton onRebind={rebind} />
+                  <OpenOnBoardLink conversationId={state.conversationId} />
+                </p>
+              ) : null}
             </>
           )}
           {rotating ? (
@@ -398,15 +470,16 @@ export function OrchestratorPanel({
             <OrchestratorConversation file={file} projectName={projectName} />
           ) : (
             <Centered>
-              <LoaderCircle className="h-5 w-5 animate-spin text-muted" aria-hidden />
-              <p className="text-body font-semibold text-primary" role="status">{t("orchPanel.resolving")}</p>
-              <p className="max-w-[300px] text-ui text-muted">{t("orchPanel.resolvingHint")}</p>
-              <a
-                href={"#c=" + encodeURIComponent(state.conversationId)}
-                className="text-ui font-semibold text-accent underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              >
-                {t("orchPanel.openOnBoard")}
-              </a>
+              {state.bindFailure ? (
+                <BindFailure reason={state.bindFailure} onRebind={rebind} />
+              ) : (
+                <>
+                  <LoaderCircle className="h-5 w-5 animate-spin text-muted" aria-hidden />
+                  <p className="text-body font-semibold text-primary" role="status">{t("orchPanel.resolving")}</p>
+                  <p className="max-w-[300px] text-ui text-muted">{t("orchPanel.resolvingHint")}</p>
+                </>
+              )}
+              <OpenOnBoardLink conversationId={state.conversationId} />
             </Centered>
           )}
         </div>
@@ -784,29 +857,42 @@ function OrchestratorDraft({
 
 const QUIET_BADGE = "border-border bg-canvas text-muted";
 const DANGER_BADGE = "border-danger/40 bg-danger-soft text-danger";
+const WARNING_BADGE = "border-warning/45 bg-warning-soft text-warning";
 
-/** One row per liveness, so a tone can never drift from the word beside it —
-    and green is claimed ONLY by a conversation that is actually hosted. */
-const LIVENESS_BADGE: Record<SeatLiveness, { tone: string; key: MessageKey }> = {
+/** One row per badge, so a tone can never drift from the word beside it — green
+    is claimed ONLY by a conversation that is actually hosted, and the warning
+    tone the rest of the app spends on a wait is what «needs you» wears. */
+const SEAT_BADGE: Record<SeatBadge, { tone: string; key: MessageKey }> = {
+  "needs-you": { tone: WARNING_BADGE, key: "orchPanel.badgeNeedsYou" },
   live: { tone: "border-success/45 bg-success-soft text-success", key: "orchPanel.badgeLive" },
-  stalled: { tone: "border-warning/45 bg-warning-soft text-warning", key: "orchPanel.badgeStalled" },
+  stalled: { tone: WARNING_BADGE, key: "orchPanel.badgeStalled" },
   resumable: { tone: QUIET_BADGE, key: "orchPanel.badgeResumable" },
   dead: { tone: DANGER_BADGE, key: "orchPanel.badgeDead" },
   resolving: { tone: QUIET_BADGE, key: "orchPanel.badgeResolving" },
 };
 
-function StateBadge({ state }: { state: OrchestratorPanelState }) {
-  const { t } = useLocale();
-  const live = state.kind === "live" ? LIVENESS_BADGE[state.liveness] : null;
-  const tone = live
-    ? live.tone
+/**
+ * The badge, and — when the seat is holding a decision up at the operator — the
+ * decision itself in its tooltip (issue #1167).
+ *
+ * The word comes from `seatBadgeOf`, which ranks a pending decision ahead of
+ * the liveness; the line comes from the SAME `decisionLine` the toast and the
+ * island popover read, so the dock can never name a wait differently from the
+ * surfaces the operator reached it through.
+ */
+function StateBadge({ state, file }: { state: OrchestratorPanelState; file: FileEntry | null }) {
+  const { t, locale } = useLocale();
+  const seatBadge = state.kind === "live" ? seatBadgeOf(state) : null;
+  const badge = seatBadge ? SEAT_BADGE[seatBadge] : null;
+  const tone = badge
+    ? badge.tone
     : state.kind === "intent-error"
       ? DANGER_BADGE
       : state.kind === "creating"
         ? "border-accent/45 bg-accent-soft text-accent"
         : QUIET_BADGE;
-  const label = live
-    ? t(live.key)
+  const label = badge
+    ? t(badge.key)
     : t(state.kind === "creating"
       ? "orchPanel.badgeCreating"
       : state.kind === "intent-error"
@@ -814,8 +900,18 @@ function StateBadge({ state }: { state: OrchestratorPanelState }) {
         : state.kind === "draft"
           ? "orchPanel.badgeNone"
           : "orchPanel.badgeReading");
+  /* The tooltip follows the badge: a seat the badge calls «needs you» carries
+     the decision behind it, and every other badge is already its own whole
+     answer. */
+  const decision = seatBadge === "needs-you" && file ? decisionLine(t, locale, file) : null;
   return (
-    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-caption font-semibold ${tone}`}>{label}</span>
+    <span
+      data-orchestrator-badge={seatBadge ?? state.kind}
+      title={decision ?? undefined}
+      className={`shrink-0 rounded-full border px-2 py-0.5 text-caption font-semibold ${tone}`}
+    >
+      {label}
+    </span>
   );
 }
 
@@ -881,14 +977,82 @@ function Centered({ children }: { children: React.ReactNode }) {
   );
 }
 
+const SECONDARY_BUTTON = "inline-flex h-8 items-center gap-1.5 rounded-control border border-border bg-card px-3 text-ui font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40";
+
 function SecondaryButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="inline-flex h-8 items-center gap-1.5 rounded-control border border-border bg-card px-3 text-ui font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-    >
+    <button type="button" onClick={onClick} className={SECONDARY_BUTTON}>
       {children}
     </button>
   );
+}
+
+/** The board still has the conversation while the dock cannot bind it, so this
+    rides with every bounded reason — not only with the one that leaves the panel
+    with nothing else to show (issue #1182). */
+function OpenOnBoardLink({ conversationId }: { conversationId: string }) {
+  const { t } = useLocale();
+  return (
+    <a
+      href={"#c=" + encodeURIComponent(conversationId)}
+      data-orchestrator-open-board
+      className="text-ui font-semibold text-accent underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+    >
+      {t("orchPanel.openOnBoard")}
+    </a>
+  );
+}
+
+/** Re-run resolution — all four of its reads, including the two a bounded wait
+    is actually missing (see `rebind`). It re-reads and nothing else: recovering
+    from a restart must never cost the operator a rotation (issue #1182). */
+function RebindButton({ onRebind }: { onRebind: () => void }) {
+  const { t } = useLocale();
+  return (
+    <button type="button" data-orchestrator-rebind onClick={onRebind} title={t("orchPanel.rebindTitle")} className={SECONDARY_BUTTON}>
+      <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+      {t("orchPanel.rebind")}
+    </button>
+  );
+}
+
+/** «Opening the conversation…» has run past its bound and the status read says
+    the host is alive: what the panel owes the operator now is the reason, not a
+    longer spin (issue #1182). */
+function BindFailure({ reason, onRebind }: { reason: SeatBindFailure; onRebind: () => void }) {
+  const { t } = useLocale();
+  return (
+    <div data-orchestrator-bind={reason} className="flex flex-col items-center gap-2">
+      <TriangleAlert className="h-6 w-6 text-warning" aria-hidden />
+      <p className="max-w-[300px] text-body font-semibold text-primary" role="status">{t("orchPanel.bindStalled")}</p>
+      <p className="max-w-[300px] text-ui text-muted">
+        {t(reason === "surface" ? "orchPanel.bindStalledSurface" : "orchPanel.bindStalledCatalog")}
+      </p>
+      <RebindButton onRebind={onRebind} />
+    </div>
+  );
+}
+
+/**
+ * How long the dock has been unable to bind the seat's conversation: null until
+ * {@link SEAT_BIND_TIMEOUT_MS} has passed, then that bound as the elapsed floor
+ * (issue #1182).
+ *
+ * ONE timer per wait, and ONE repaint. The panel has to say something different
+ * when the bound is crossed; it never counts seconds at the operator, so there
+ * is nothing finer to measure. The wait is identified by `key`, and the cleanup
+ * ends it — a seat that binds, and a different seat, each start their own wait
+ * with the full grace period instead of inheriting the last one's verdict.
+ */
+function useUnboundFor(pending: boolean, key: string): number | null {
+  const [bounded, setBounded] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pending) return;
+    const timer = setTimeout(() => setBounded(key), SEAT_BIND_TIMEOUT_MS);
+    return () => {
+      clearTimeout(timer);
+      setBounded(null);
+    };
+  }, [pending, key]);
+  return pending && bounded === key ? SEAT_BIND_TIMEOUT_MS : null;
 }

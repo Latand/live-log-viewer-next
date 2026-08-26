@@ -32,6 +32,16 @@ export interface IncumbentRotation {
   thresholdUnknown: boolean;
 }
 
+/** The liveness plane's answer for the seat's conversation, as the status read
+    reports it. `hostState` is the affirmative one: «alive» is the server saying
+    a host is running for this durable id, whatever the file catalog has managed
+    to show yet (issue #1182). */
+export interface IncumbentLiveness {
+  lifecycle: string;
+  hostState: string;
+  silentForMs: number | null;
+}
+
 export interface IncumbentTranscript {
   bytes: number | null;
   messageCount: number | null;
@@ -51,6 +61,12 @@ export interface OrchestratorIncumbent {
   effort: string | null;
   accountId: string | null;
   cwd: string | null;
+  /** The transcript the REGISTRY currently writes this conversation to — the
+      durable id resolved through its newest generation, server-side. The seat's
+      own recorded path freezes at activation, so after a re-host this is the
+      only thing that names the conversation the operator is watching (#1182). */
+  transcriptPath: string | null;
+  liveness: IncumbentLiveness | null;
   context: IncumbentContext | null;
   transcriptFacts: IncumbentTranscript | null;
   rotation: IncumbentRotation | null;
@@ -77,10 +93,29 @@ export function parseIncumbent(body: unknown): OrchestratorIncumbent | null {
     effort: str(raw.effort),
     accountId: str(raw.accountId),
     cwd: str(raw.cwd),
+    transcriptPath: str(raw.transcriptPath),
+    liveness: livenessOf(raw.liveness),
     context: contextOf(raw.context),
     transcriptFacts: transcriptOf(raw.transcriptFacts),
     rotation: rotationOf(raw.rotation),
   };
+}
+
+function livenessOf(value: unknown): IncumbentLiveness | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  return {
+    lifecycle: str(raw.lifecycle) ?? "",
+    hostState: str(raw.hostState) ?? "",
+    silentForMs: num(raw.silentForMs),
+  };
+}
+
+/** Whether the status read AFFIRMS a live host for the seat it describes. Only
+    «alive» counts: «unknown» is the plane not having answered, and reading that
+    as live would turn a legitimate wait into an accusation (#1182). */
+export function incumbentHostLive(incumbent: OrchestratorIncumbent | null): boolean {
+  return Boolean(incumbent?.designated) && incumbent?.liveness?.hostState === "alive";
 }
 
 function contextOf(value: unknown): IncumbentContext | null {
