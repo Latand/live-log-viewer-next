@@ -14,7 +14,9 @@ import {
   resolveSeatFile,
   ROTATION_CONTEXT_PERCENT,
   SEAT_BIND_TIMEOUT_MS,
+  seatBadgeOf,
   seatRequestSettled,
+  type OrchestratorPanelState,
   type OrchestratorSeatStatus,
 } from "./seatState";
 
@@ -64,6 +66,10 @@ function file(overrides: Partial<FileEntry> = {}): FileEntry {
 }
 
 const base = { statusFailed: false, submitting: false, submitFailure: null, file: null, surface: null };
+
+/** A fixed «now» for the one derivation that reads a clock: the attention
+    queue's stalled tier, which ages out (`STALLED_ATTENTION_TTL`). */
+const NOW = 1_760_000_100;
 
 describe("the panel names every state in the map (#977)", () => {
   test("no answer yet is loading, and a failed read says so instead of inviting a second orchestrator", () => {
@@ -471,5 +477,57 @@ describe("«opening» is bounded once the status read says the host is alive (#1
     /* Bound and classified — there is no wait to bound. */
     expect(deriveOrchestratorPanelState({ ...stuck, file: file(), surface: "live-root", unboundForMs: 10 * SEAT_BIND_TIMEOUT_MS }))
       .toMatchObject({ liveness: "live", bindFailure: null });
+  });
+});
+
+describe("a decision the operator owes outranks every word for «it is running» (#1167)", () => {
+  const asked = {
+    kind: "question" as const,
+    toolUseId: "tool-use-orch",
+    transcriptPath: "/transcripts/orchestrator.jsonl",
+    pid: 4242,
+    paneTarget: null,
+    askedAt: "2026-08-25T10:00:00.000Z",
+    questions: [{ header: "Rollout window", question: "Approve the proposed rollout window", multiSelect: false, options: [] }],
+  };
+  const seated = { ...base, status: status({ seat: seat() }), now: NOW };
+
+  test("a hosted seat with a question on screen carries the attention id and badges «needs you»", () => {
+    const state = deriveOrchestratorPanelState({ ...seated, file: file({ pendingQuestion: asked }), surface: "live-root" });
+    expect(state).toMatchObject({ kind: "live", liveness: "live", attention: "tool-use-orch" });
+    expect(seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>)).toBe("needs-you");
+  });
+
+  test("a quiet seat is still the liveness word — nothing is owed", () => {
+    const state = deriveOrchestratorPanelState({ ...seated, file: file(), surface: "live-root" });
+    expect(state).toMatchObject({ kind: "live", liveness: "live", attention: null });
+    expect(seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>)).toBe("live");
+  });
+
+  test("a stalled seat with a terminal prompt is «needs you» too: both livenesses it outranks are hosted", () => {
+    const waiting = file({
+      activity: "stalled",
+      waitingInput: { since: NOW - 120, screenTail: "> 1. Yes", target: "llv:0.0", menu: null },
+    });
+    const state = deriveOrchestratorPanelState({ ...seated, file: waiting, surface: "live-root" });
+    expect(state).toMatchObject({ liveness: "stalled" });
+    expect(seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>)).toBe("needs-you");
+  });
+
+  test("a gone or resumable host keeps its own badge: a decision nobody can answer must not hide the recovery", () => {
+    for (const [surface, liveness] of [["dead", "dead"], ["resume", "resumable"], ["unresolved", "resolving"]] as const) {
+      const state = deriveOrchestratorPanelState({ ...seated, file: file({ pendingQuestion: asked }), surface });
+      expect(state).toMatchObject({ liveness, attention: "tool-use-orch" });
+      expect(seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>)).toBe(liveness);
+    }
+  });
+
+  test("the attention read is the QUEUE's: an abandoned open turn with no live process owes nothing", () => {
+    const abandoned = file({ activity: "stalled", proc: "done", mtime: NOW - 60 });
+    expect(deriveOrchestratorPanelState({ ...seated, file: abandoned, surface: "live-root" })).toMatchObject({ attention: null });
+    const held = file({ activity: "stalled", proc: "running", mtime: NOW - 60 });
+    expect(deriveOrchestratorPanelState({ ...seated, file: held, surface: "live-root" })).toMatchObject({
+      attention: `/transcripts/orchestrator.jsonl:stalled:${NOW - 60}`,
+    });
   });
 });

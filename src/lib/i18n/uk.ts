@@ -1830,6 +1830,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "orchPanel.rotationStrong": "Наполегливо рекомендовано ротацію",
   "orchPanel.rotationContext": "контекст на {percent}% вікна моделі",
   "orchPanel.rotationDead": "його хост зник",
+  "orchPanel.badgeNeedsYou": "потребує тебе",
   "orchPanel.badgeLive": "живий",
   "orchPanel.badgeStalled": "тиша",
   "orchPanel.badgeResumable": "завершив",
@@ -1980,6 +1981,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "attention.popoverTitle": "Чекають на тебе",
   "attention.filterOn": "Показати лише тих, хто чекає на тебе (F)",
   "attention.filterOff": "Показати всі вузли (F)",
+  "attention.decisionQuestion": "питання",
+  "attention.decisionPlan": "затвердження плану",
+  "attention.decisionPermission": "запит дозволу",
 
   "mobile.noConvos": "Розмов поки нема",
   "mobile.map": "Карта",

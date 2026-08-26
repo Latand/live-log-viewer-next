@@ -32,6 +32,7 @@ const state: Extract<OrchestratorPanelState, { kind: "live" }> = {
   seat,
   conversationId: seat.conversationId!,
   liveness: "stalled",
+  attention: null,
   bindFailure: null,
   rotation: null,
   transition: null,
