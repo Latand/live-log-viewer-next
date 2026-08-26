@@ -7,8 +7,11 @@ import { NextRequest } from "next/server";
 
 import type { RuntimeHostClient } from "@/lib/runtime/client";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-admission-route-"));
+const codexBinary = path.join(sandbox, "codex-fixture");
+fs.writeFileSync(codexBinary, "#!/bin/sh\nprintf '[]'\n", { mode: 0o700 });
 const STRUCTURED_ENV = {
   LLV_STATE_DIR: path.join(sandbox, "state"),
   LLV_SPAWN_TRANSPORT: "structured",
@@ -16,6 +19,7 @@ const STRUCTURED_ENV = {
   LLV_RUNTIME_EVENTS: "1",
   LLV_RUNTIME_HOST_SOCKET: path.join(sandbox, "runtime.sock"),
   NEXT_PUBLIC_RUNTIME_UI: "1",
+  LLV_CODEX_BINARY: codexBinary,
 } as const;
 const previousEnv = Object.fromEntries(Object.keys(STRUCTURED_ENV).map((key) => [key, process.env[key]]));
 Object.assign(process.env, STRUCTURED_ENV);
@@ -95,7 +99,7 @@ function seedCaller(role: string | null, origin?: { kind: "agent"; conversationI
   const reviews = role === "reviewer"
     ? store.ensureConversation("codex", `/sessions/reviewed-${crypto.randomUUID()}.jsonl`, "terra").id
     : null;
-  const begun = store.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(store, {
     engine: "codex",
     cwd: "/repo",
     role,
@@ -117,7 +121,7 @@ function agentRequest(capability: string, body: Record<string, unknown>): NextRe
       "content-type": "application/json",
       "x-llv-spawn-capability": capability,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ title: "Exercise spawn route admission", mcpServers: [], ...body }),
   });
 }
 
@@ -126,7 +130,7 @@ test("an authenticated reviewer caller receives a typed 403 with a durable termi
   const caller = seedCaller("reviewer");
   const response = await POST.withDependencies(agentRequest(caller.capability, {
     cwd,
-    prompt: "spawn a helper",
+    ["prompt"]: "spawn a helper",
     src: caller.path,
     role: "builder",
   }), dependencies(cwd));
@@ -149,7 +153,7 @@ test("a verifier caller is rejected identically", async () => {
   const caller = seedCaller("verifier");
   const response = await POST.withDependencies(agentRequest(caller.capability, {
     cwd,
-    prompt: "spawn a helper",
+    ["prompt"]: "spawn a helper",
     src: caller.path,
     role: "builder",
   }), dependencies(cwd));
@@ -166,7 +170,7 @@ test("a caller at the depth ceiling receives a typed nesting 403 before any chil
 
   const allowedResponse = await POST.withDependencies(agentRequest(depth1.capability, {
     cwd,
-    prompt: "one more helper",
+    ["prompt"]: "one more helper",
     src: depth1.path,
     role: "builder",
   }), dependencies(cwd));
@@ -174,7 +178,7 @@ test("a caller at the depth ceiling receives a typed nesting 403 before any chil
 
   const response = await POST.withDependencies(agentRequest(depth2.capability, {
     cwd,
-    prompt: "too deep",
+    ["prompt"]: "too deep",
     src: depth2.path,
     role: "builder",
   }), dependencies(cwd));
@@ -189,7 +193,7 @@ test("reviewer and verifier launches cannot enable subagents on any lane", async
   const operator = rotateOperatorSpawnCapability();
   const operatorResponse = await POST(agentRequest(operator, {
     cwd: "/repo",
-    prompt: "review",
+    ["prompt"]: "review",
     src: "/caller.jsonl",
     role: "reviewer",
     roleParams: { diffSource: "PR #1" },
@@ -218,7 +222,7 @@ test("a non-reviewer agent caller keeps spawning normally", async () => {
   const caller = seedCaller("builder");
   const response = await POST.withDependencies(agentRequest(caller.capability, {
     cwd,
-    prompt: "delegate",
+    ["prompt"]: "delegate",
     src: caller.path,
     role: "builder",
   }), dependencies(cwd));
@@ -237,7 +241,7 @@ test("an agent capability caller without src spawns with an inferred durable par
   const caller = seedCaller("builder");
   const response = await POST.withDependencies(agentRequest(caller.capability, {
     cwd,
-    prompt: "delegate without src",
+    ["prompt"]: "delegate without src",
     role: "builder",
     clientAttemptId: "inferred_parent_20260719_a1",
   }), dependencies(cwd));
@@ -261,7 +265,7 @@ test("an agent capability caller without src spawns with an inferred durable par
      inferred parent — the digest keys on the resolved parent selector. */
   const replay = await POST.withDependencies(agentRequest(caller.capability, {
     cwd,
-    prompt: "delegate without src",
+    ["prompt"]: "delegate without src",
     role: "builder",
     clientAttemptId: "inferred_parent_20260719_a1",
   }), dependencies(cwd));
@@ -277,7 +281,7 @@ test("an explicit src is recorded explicit and a mismatched src stays rejected (
   const caller = seedCaller("builder");
   const explicit = await POST.withDependencies(agentRequest(caller.capability, {
     cwd,
-    prompt: "delegate with src",
+    ["prompt"]: "delegate with src",
     src: caller.path,
     role: "builder",
   }), dependencies(cwd));
@@ -289,7 +293,7 @@ test("an explicit src is recorded explicit and a mismatched src stays rejected (
   const other = seedCaller("builder");
   const mismatched = await POST.withDependencies(agentRequest(caller.capability, {
     cwd,
-    prompt: "spoofed parent",
+    ["prompt"]: "spoofed parent",
     src: other.path,
     role: "builder",
   }), dependencies(cwd));
@@ -302,7 +306,7 @@ test("an operator capability caller without src proceeds as a silent root (#341)
   const operator = rotateOperatorSpawnCapability();
   const response = await POST.withDependencies(agentRequest(operator, {
     cwd,
-    prompt: "pipeline launch without src",
+    ["prompt"]: "pipeline launch without src",
     role: "builder",
   }), dependencies(cwd));
 

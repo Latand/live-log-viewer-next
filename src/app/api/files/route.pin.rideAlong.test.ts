@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { FileEntry } from "@/lib/types";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 /*
  * Clicking a row in «All conversations» runs `board.restore(path)`, which asks
@@ -126,7 +127,7 @@ test("a pinned conversation with a launch receipt folds it into one card", async
      `spawn:` card only when none is present. A ride-along row that arrives
      after that decision leaves the operator with two cards for one
      conversation — the pinned row without its chips, and a spawn placeholder. */
-  agentRegistry().beginSpawnRequest({
+  beginLegacySpawnFixture(agentRegistry(), {
     engine: "codex",
     cwd: "/repo/project-11",
     transport: "structured",
