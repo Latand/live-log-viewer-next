@@ -3,13 +3,23 @@ name: Dependabot lockfile refresh
 # Dependabot's npm ecosystem rewrites package.json and never regenerates
 # bun.lock, so with the lockfile-integrity rule from #1156 every dependency pull
 # request fails `bun install --frozen-lockfile` before anyone can read it
-# (#1183). This job regenerates bun.lock on the Dependabot branch and commits it
-# through the repository GITHUB_TOKEN.
+# (#1183). This job regenerates bun.lock on the Dependabot branch and pushes it
+# with the repository GITHUB_TOKEN.
 #
-# Two things keep the write narrow. The branch must be unprotected, checked
-# before any step can write. And the commit is a fast-forward from the exact
-# revision this run inspected, so a branch that moved mid-run is refused rather
-# than overwritten with a lockfile resolved from the package.json it replaced.
+# `pull_request_target` is the event this has to run on. GitHub gives a workflow
+# Dependabot triggered through `pull_request` a read-only GITHUB_TOKEN, and
+# `pull_request_target` is the one pull-request event its restriction list omits
+# (the exception is a pull request whose *base* branch Dependabot created, which
+# a pull request against the default branch never is). It also reads the
+# workflow file from the base branch, so a Dependabot pull request opened before
+# this merged is covered without being rebased first.
+#
+# That event runs a trusted workflow beside an untrusted head, so the write is
+# kept narrow three ways. The pull request must be Dependabot's own, from a
+# branch of this repository. The head branch must be unprotected, checked before
+# anything else runs. And `bun install --lockfile-only` resolves the bumped
+# ranges without unpacking a package, so nothing the pull request bumped ever
+# executes in the job that can write to the branch.
 #
 # GitHub raises no `synchronize` for a push made with that token, so the gates
 # would never see the commit this job just wrote. The last step therefore
@@ -18,7 +28,7 @@ name: Dependabot lockfile refresh
 # revision it did not inspect.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, reopened, synchronize]
 
 permissions:
@@ -46,9 +56,9 @@ jobs:
       # `contents: write` is job-scoped, so refusing a protected branch has to be
       # a step, and it comes first: nothing this job does may touch a branch a
       # protection rule covers, however the branch is named and whoever opened
-      # the pull request. GitHub refuses the ref update below for such a branch
-      # anyway; this reports the reason instead of a REST error, and stops
-      # before the branch's package.json is installed.
+      # the pull request. The push below is refused for such a branch anyway;
+      # this reports the reason instead of a rejected push, and stops before the
+      # branch's package.json is installed.
       - name: Refuse a protected head branch
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,10 +73,19 @@ jobs:
             exit 1
           fi
 
+      # The head is the only revision whose package.json can be resolved, so it
+      # is what gets checked out. `allow-unsafe-pr-checkout` is deliberately not
+      # set: checkout refuses a fork head under `pull_request_target` unless it
+      # is, and the guard above already makes a fork unreachable, so that refusal
+      # stays armed as the second line if the guard is ever loosened.
+      #
+      # Unlike the checkouts that only read code, this one keeps its
+      # credentials, because the push below is the point of the job. What makes
+      # that safe is the install: `--lockfile-only` runs nothing from the branch.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 1
-          persist-credentials: false
+          persist-credentials: true
           ref: ${{ github.event.pull_request.head.sha }}
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -92,47 +111,43 @@ jobs:
           fi
           printf 'refreshed=true\n' >> "$GITHUB_OUTPUT"
 
-      # The git data API commits as the bot the token already belongs to, which
-      # is why this workflow writes no author identity of its own.
+      # The commit names bun.lock explicitly, so it carries that file and nothing
+      # else whatever the install touched, and it is authored by the GitHub
+      # Actions bot the token belongs to — no identity of a person is written.
+      # The bot's address is assembled from its own user record and this server's
+      # host rather than spelled out: an address literal does not belong in a
+      # public repository, and a commit made on GitHub Enterprise should
+      # attribute to that server's bot rather than to github.com's.
       #
-      # The commit's parent is the revision the install read, and the ref update
-      # asks for a fast-forward, so GitHub itself refuses to move a branch that
-      # is no longer that revision. The lockfile a run resolved therefore only
-      # ever lands on the package.json it was resolved from: a Dependabot
-      # force-push arriving mid-run leaves the branch untouched, and the run its
-      # push starts resolves the lockfile again.
+      # The push is an ordinary one from the revision the install read, so Git
+      # itself refuses a branch that has moved: a Dependabot force-push arriving
+      # mid-run leaves the branch untouched, and the run that push starts
+      # resolves the lockfile again. That race is the branch working as intended,
+      # so it ends in a notice; any other refusal fails the job.
       - name: Commit the refreshed lockfile
         if: steps.lockfile.outputs.refreshed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: |
           set -euo pipefail
 
-          branch_head="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${HEAD_REF}" --jq '.object.sha')"
-          if [[ "$branch_head" != "$HEAD_SHA" ]]; then
-            echo "::notice::${HEAD_REF} moved to ${branch_head}; the run for that revision refreshes the lockfile"
-            exit 0
+          bot='github-actions[bot]'
+          bot_id="$(gh api "users/${bot}" --jq '.id')"
+          noreply_host="users.noreply.${GITHUB_SERVER_URL#https://}"
+
+          git -c "user.name=${bot}" -c "user.email=${bot_id}+${bot}@${noreply_host}" \
+            commit -m 'chore(deps): refresh bun.lock' -- bun.lock
+
+          if ! rejection="$(git push origin "HEAD:refs/heads/${HEAD_REF}" 2>&1)"; then
+            printf '%s\n' "$rejection" >&2
+            if grep -qE 'non-fast-forward|fetch first|stale info' <<<"$rejection"; then
+              echo "::notice::${HEAD_REF} moved while the lockfile was resolving; the run for its new head refreshes it"
+              exit 0
+            fi
+            exit 1
           fi
-
-          base_tree="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${HEAD_SHA}" --jq '.tree.sha')"
-
-          blob="$(base64 -w 0 bun.lock \
-            | jq -Rc '{ content: ., encoding: "base64" }' \
-            | gh api --method POST "repos/${GITHUB_REPOSITORY}/git/blobs" --input - --jq '.sha')"
-
-          tree="$(jq -nc --arg base "$base_tree" --arg blob "$blob" \
-            '{ base_tree: $base, tree: [{ path: "bun.lock", mode: "100644", type: "blob", sha: $blob }] }' \
-            | gh api --method POST "repos/${GITHUB_REPOSITORY}/git/trees" --input - --jq '.sha')"
-
-          commit="$(jq -nc --arg tree "$tree" --arg parent "$HEAD_SHA" \
-            '{ message: "chore(deps): refresh bun.lock", tree: $tree, parents: [$parent] }' \
-            | gh api --method POST "repos/${GITHUB_REPOSITORY}/git/commits" --input - --jq '.sha')"
-
-          jq -nc --arg sha "$commit" '{ sha: $sha, force: false }' \
-            | gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${HEAD_REF}" --input - --jq '.object.sha'
 
       - name: Run the gates on the refreshed head
         if: steps.lockfile.outputs.refreshed == 'true'
@@ -144,6 +159,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh workflow run supply-chain.yml --ref "$HEAD_REF"
-          gh workflow run privacy-publication.yml --ref "$HEAD_REF"
-          gh workflow run privacy-tracker-audit.yml --ref "$HEAD_REF" -f "publication_number=${PR_NUMBER}"
+          # A dispatch reads the workflow file from the branch it names, and a
+          # Dependabot pull request opened before this change merged carries an
+          # older copy of these three without the trigger. The refreshed lockfile
+          # still stands in that case; the gates run when the branch next moves,
+          # so the refusal is reported rather than fatal.
+          dispatch() {
+            if ! gh workflow run "$1" --ref "$HEAD_REF" "${@:2}"; then
+              echo "::warning::${1} on ${HEAD_REF} refused a dispatch; re-run the checks on the refreshed head"
+            fi
+          }
+
+          dispatch supply-chain.yml
+          dispatch privacy-publication.yml
+          dispatch privacy-tracker-audit.yml -f "publication_number=${PR_NUMBER}"
