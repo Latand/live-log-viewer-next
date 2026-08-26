@@ -44,12 +44,11 @@ const UNNAMED_ROLE = "agent";
  */
 function roleLabel(t: TFunction, file: FileEntry): string | null {
   const lineage = file.durableLineage;
-  const direct = lineage?.role?.trim();
-  const role = direct
-    || lineage?.memberships.filter((membership) => {
-      const value = membership.role.trim();
-      return value && value !== UNNAMED_ROLE;
-    }).at(-1)?.role.trim();
+  const seat = lineage?.memberships.findLast((membership) => {
+    const named = membership.role.trim();
+    return named !== "" && named !== UNNAMED_ROLE;
+  });
+  const role = lineage?.role?.trim() || seat?.role.trim();
   return role ? roleNameById(t, role) : null;
 }
 
