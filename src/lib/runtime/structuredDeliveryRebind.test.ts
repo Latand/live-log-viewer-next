@@ -26,6 +26,7 @@ for (const [name, directory] of Object.entries(isolatedEnvironment)) {
 }
 
 const { AgentRegistry } = await import("@/lib/agent/registry");
+const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 const { RuntimeJournal } = await import("@/runtime-host/journal");
 const { createFakeDeliveryLedger, FakeEngineHost } = await import("./fixtures/fakeEngineHost");
 const {
@@ -34,8 +35,11 @@ const {
   publishStructuredDeliveryHost,
   structuredDeliveryPublicationState,
 } = await import("./structuredDeliveryController");
+const { kickStructuredDeliveryQueue } = await import("./structuredDeliverySignal");
 const { adoptStructuredHostsAtStartup } = await import("./startup");
+type AgentRegistry = InstanceType<typeof AgentRegistry>;
 type RuntimeHostClient = import("./client").RuntimeHostClient;
+type SessionKey = import("@/lib/agent/sessionKey").SessionKey;
 
 afterAll(() => {
   for (const [name, value] of Object.entries(ambientEnvironment)) {
@@ -54,6 +58,8 @@ function runtimeClient(journal: InstanceType<typeof RuntimeJournal>): RuntimeHos
     operation: async (event) => journal.append(event),
     command: async (command) => journal.executeOperation(command),
     operationStatus: async (operationId: string) => journal.operationResult(operationId),
+    producerCursor: async (producerKind: string, eventKeyPrefix: string) =>
+      journal.producerCursor(producerKind, eventKeyPrefix),
     effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
     transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
   } as RuntimeHostClient;
@@ -61,6 +67,62 @@ function runtimeClient(journal: InstanceType<typeof RuntimeJournal>): RuntimeHos
 
 function structuredHost() {
   return Object.assign(new FakeEngineHost(createFakeDeliveryLedger()), { onStateChange: () => () => {} });
+}
+
+/** Seeds the conversation and structured-host entry a delivery needs to resolve
+    a published host, and answers the conversation id with the session key the
+    delivery queue will look the host up under. */
+function seedConversation(
+  registry: AgentRegistry,
+  directory: string,
+  name: string,
+): { conversationId: string; key: SessionKey } {
+  const artifactPath = path.join(directory, `${name}.jsonl`);
+  const launchProfile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "rebind-fixture-account",
+    launchProfile,
+    turn: { state: "idle", source: "assistant", terminalAt: null },
+    observedAt: "2026-08-26T10:00:00.000Z",
+  }]);
+  const conversation = Object.values(registry.snapshot().conversations)[0];
+  const generation = conversation?.generations.at(-1);
+  if (!conversation || !generation) throw new Error("seeded conversation is missing");
+  const key: SessionKey = { engine: "codex", sessionId: generation.id };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "rebind-fixture-account",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:rebind-fixture-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  return { conversationId: conversation.id, key };
+}
+
+async function settles(assertion: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (assertion()) return;
+    await Bun.sleep(5);
+  }
+  throw new Error("rebind condition did not settle");
 }
 
 function fixture(name: string) {
@@ -165,5 +227,53 @@ test("retiring the publication leaves the controller rebinding, not unbound (#11
   await bindStructuredDeliveryQueue([], { registry, client: null });
   expect(structuredDeliveryPublicationState()).toBe("rebinding");
 
+  await close();
+});
+
+test("a publication paused inside the predecessor lands on the controller that replaced it (#1191)", async () => {
+  const { registry, journal, directory, client, close } = fixture("in-flight-swap");
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  const { conversationId, key } = seedConversation(registry, directory, "in-flight-swap-session");
+  let releaseOwnership!: () => void;
+  const ownershipGate = new Promise<void>((resolve) => { releaseOwnership = resolve; });
+  let ownershipEntered!: () => void;
+  const ownershipStarted = new Promise<void>((resolve) => { ownershipEntered = resolve; });
+  let gated = true;
+  const ownsOperation = async () => {
+    if (!gated) return true;
+    gated = false;
+    ownershipEntered();
+    await ownershipGate;
+    return true;
+  };
+
+  const host = structuredHost();
+  const publication = publishStructuredDeliveryHost({ key, host }, ownsOperation);
+  await ownershipStarted;
+
+  /* The whole rebind lands while that publication is parked inside the
+     predecessor's registration: the successor is installed and the predecessor
+     retired, so a continuation that committed into its captured maps would
+     report a host the live controller does not have. */
+  await bindStructuredDeliveryQueue([], { registry, client });
+  releaseOwnership();
+  const unregister = await publication;
+
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+  journal.executeOperation({
+    kind: "send",
+    operationId: "operation-in-flight-swap",
+    idempotencyKey: "in-flight-swap",
+    conversationId,
+    text: "the first delivery after the swap",
+    policy: "queue",
+  });
+  await kickStructuredDeliveryQueue();
+  await settles(() => journal.operationResult("operation-in-flight-swap")?.receipt.status === "delivered");
+  expect(host.ledger.writes.map((entry) => entry.id)).toEqual(["operation-in-flight-swap"]);
+
+  await unregister();
+  expect(hasStructuredDeliveryHost(key)).toBe(false);
   await close();
 });

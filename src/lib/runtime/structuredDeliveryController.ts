@@ -533,10 +533,27 @@ export async function bindStructuredDeliveryQueue(
     }
     await refreshCurrentProjection(conversationId);
   };
+  /* This generation no longer owns the publication: a swap installed a
+     successor and retired it, or it was retired outright. */
+  const superseded = (): boolean => stopped || state.activeQueue !== queue;
+  /* A registration that started here and resumed after a swap must not commit
+     into maps the retirement already cleared: the successor would not know the
+     host while the caller was told it is live (#1191). Re-drive the item
+     through whoever owns the publication now; with nobody owning it, the
+     caller learns the controller is unavailable and can retry. */
+  const registerThroughSuccessor = async (
+    item: StructuredDeliveryHost,
+    ownsOperation?: () => Promise<boolean>,
+  ): Promise<() => Promise<void>> => {
+    const successor = state.registerActiveHost;
+    if (!successor || successor === register) throw new StructuredDeliveryControllerUnavailableError();
+    return await successor(item, ownsOperation);
+  };
   const register = async (
     item: StructuredDeliveryHost,
     ownsOperation?: () => Promise<boolean>,
   ): Promise<() => Promise<void>> => {
+    if (superseded()) return await registerThroughSuccessor(item, ownsOperation);
     if (ownsOperation && !await ownsOperation()) return async () => {};
     const key = sessionKeyId(item.key);
     const current = registrations.get(key);
@@ -572,6 +589,10 @@ export async function bindStructuredDeliveryQueue(
       await restoreCurrentProjection();
       return restoreCurrentProjection;
     }
+    /* The last yield point before the commit. Nothing below awaits, so a
+       registration either lands whole in a generation that is still live or is
+       handed on before it leaves a trace in a retired one. */
+    if (superseded()) return await registerThroughSuccessor(item, ownsOperation);
     hosts.set(key, item.host);
     requestDrain();
     const observable = item.host as ObservableEngineHost;
