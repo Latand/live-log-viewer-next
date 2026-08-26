@@ -11,9 +11,23 @@ import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { resolveSpawnRole } from "@/lib/roles/registry";
+import { MAX_STRUCTURED_TEXT_BYTES } from "@/lib/runtime/structuredContent";
 import { derivedSpawnTitle } from "@/lib/title";
 
 import { loadTasks } from "@/lib/tasks/store";
+import {
+  boundHistoryBody,
+  composeSuccessorMandate,
+  fallbackHistory,
+  launchOverheadBytes,
+  mandatePreflight,
+  mandateTooLargeBody,
+  splitMandate,
+  summarizeHandoffsHeadless,
+  type HandoffDigestOutcome,
+  type HandoffDigestRequest,
+  type HandoffParts,
+} from "./handoffDigest";
 import { orchestratorMandateForDelivery } from "./prompt";
 import {
   beginOrchestratorSeatIntent,
@@ -46,6 +60,12 @@ import {
  * designation with no delivered mandate, or a delivered mandate with no
  * designation, cannot survive a retry.
  *
+ * An intent that recorded an error is the exception, and deliberately so
+ * (issue #1067): it is TERMINAL, so the next begin clears it into durable
+ * history and composes afresh rather than replaying the mandate that failed —
+ * which is why no failed designation stays pending. Exactly-once still holds
+ * there, because both delivery mechanisms above key on the request id itself.
+ *
  * Selecting an existing conversation never spawns: mode is decided by the
  * presence of `conversationId`, and the delivery path reuses the composer's
  * own resume machinery, so a dead selected session is revived rather than
@@ -62,6 +82,11 @@ export interface SeatCommandDependencies {
   conversationTarget(conversationId: string): ExistingConversationTarget | null;
   /** Bounded open work for a rotation handoff; empty when unknown. */
   projectTasks(project: string): { id: string; status: string; text: string }[];
+  /** Compact the predecessor's prior handoffs into ONE bounded history
+      section. Never blocks rotation: every unhappy path — no account, timeout,
+      error, empty or over-budget output — answers `fallback` with its reason,
+      and a thrown error is treated the same way. */
+  summarizeHandoffs(request: HandoffDigestRequest): Promise<HandoffDigestOutcome>;
   /** Durable outcome of the spawn a pending intent's request attempted, read
       from the launch receipt, for reconciling an accepted launch whose
       accepting request died before activation. */
@@ -89,7 +114,18 @@ export type LaunchSettlement =
   | { kind: "unknown" };
 
 export type ExistingConversationTarget =
-  | { kind: "eligible"; conversationId: string; path: string; cwd: string; project: string; engine?: string | null; model?: string | null }
+  | {
+      kind: "eligible";
+      conversationId: string;
+      path: string;
+      cwd: string;
+      project: string;
+      /* The handoff summarizer parses the predecessor's transcript tail, and
+         the two engines write different row shapes, so the engine is narrow
+         and always present here. */
+      engine: "claude" | "codex";
+      model?: string | null;
+    }
   | { kind: "ineligible"; code: "conversation_ineligible" | "invalid_cwd" | "missing_transcript" | "missing_project"; error: string };
 
 /** Issue #903: the spawn fallback must never be this server process's own
@@ -201,6 +237,7 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
   projectTasks: (project) => loadTasks()
     .filter((task) => task.project === project && task.status !== "done")
     .map((task) => ({ id: task.id, status: task.status, text: task.text })),
+  summarizeHandoffs: (request) => summarizeHandoffsHeadless(request),
   launchSettlement: ({ launchId, clientRequestId }) => {
     /* The seat spawn path always sends the intent's clientRequestId as the
        spawn clientAttemptId, so the durable receipt is found by it even when
@@ -238,7 +275,24 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
 };
 
 const CLIENT_REQUEST_ID = /^[A-Za-z0-9_-]{8,128}$/;
-const MANDATE_MAX_BYTES = 64_000;
+
+/** The seat a caller composed against is no longer the seated one, so its
+    replacement would revoke an orchestrator it never read. */
+function incumbentChangedResult(
+  project: string,
+  expectedSeatEpoch: number,
+  current: OrchestratorSeat | null,
+): SeatCommandResult {
+  return {
+    status: 409,
+    body: {
+      error: `the orchestrator seat for ${project} changed while this rotation composed its handoff (designation epoch ${expectedSeatEpoch} is no longer current); rotate again to hand off from the seated orchestrator`,
+      code: "incumbent_changed",
+      currentSeatEpoch: current?.seatEpoch ?? null,
+      currentConversationId: current?.conversationId ?? null,
+    },
+  };
+}
 
 export interface SeatCommandResult {
   status: number;
@@ -397,9 +451,6 @@ export async function executeOrchestratorSeatRequest(
   const project = canonicalOrchestratorProject(namedProject);
   const mandate = typeof rawBody.mandate === "string" ? rawBody.mandate : "";
   if (!mandate.trim()) return { status: 400, body: { error: "mandate is required" } };
-  if (Buffer.byteLength(mandate, "utf8") > MANDATE_MAX_BYTES) {
-    return { status: 413, body: { error: "mandate is too large" } };
-  }
   const clientRequestId = text(rawBody.clientRequestId);
   if (!CLIENT_REQUEST_ID.test(clientRequestId)) {
     return { status: 400, body: { error: "clientRequestId must be 8-128 URL-safe characters" } };
@@ -412,11 +463,38 @@ export async function executeOrchestratorSeatRequest(
     ? rawBody.promptVersion
     : null;
 
+  /* Issue #1067: the ONE size bound is the delivery bound. An oversized
+     mandate used to pass a 64 KB API check, become a pending intent, and then
+     die at the 32000-byte structured envelope — leaving a designation that
+     could never be delivered and never stopped being pending. Measured here,
+     before either begin, so no durable intent can exist for a mandate that
+     cannot be delivered. */
+  const preflight = mandatePreflight(mandate, existingConversationId ? "existing" : "spawn", rawBody.roleParams);
+  if (!preflight.ok) return { status: 413, body: mandateTooLargeBody(preflight) };
+
   const reconciliation = reconcilePendingSeatIntent(project, dependencies);
   if (reconciliation) await reconciliation;
 
   const completedReplay = reconcileCompletedSeatReplay(project, clientRequestId, dependencies);
   if (completedReplay) return replayedSeatResponse(completedReplay);
+
+  /* Issue #1067: rotation reads its incumbent, then awaits the summarizer, and
+     the reconciliation directly above can seat a launch that settled during
+     that wait — an intent that was still `unknown` when the rotation read the
+     project. Checked HERE, after reconciliation and with no await point left
+     before the durable begin, so a rotation can never replace a seat it never
+     read. It sits below the completed-replay short-circuit on purpose: a
+     rotation replaying its OWN finished intent is idempotent, not stale.
+     Callers that composed against no particular seat omit the field. */
+  const expectedIncumbentSeatEpoch = typeof rawBody.expectedIncumbentSeatEpoch === "number"
+    ? rawBody.expectedIncumbentSeatEpoch
+    : null;
+  if (expectedIncumbentSeatEpoch !== null) {
+    const seated = orchestratorSeatFor(project).active;
+    if (!seated || seated.seatEpoch !== expectedIncumbentSeatEpoch) {
+      return incumbentChangedResult(project, expectedIncumbentSeatEpoch, seated);
+    }
+  }
 
   if (existingConversationId) {
     const target = dependencies.conversationTarget(existingConversationId);
@@ -480,8 +558,10 @@ export async function executeOrchestratorSeatRequest(
           error,
           code: "mandate_delivery_failed",
           /* Recoverable, not a dead end: the incumbent (if any) still holds the
-             seat, the intent is pending, and the selected conversation can be
-             resumed from the board before retrying the same request id. */
+             seat, and the selected conversation can be resumed from the board
+             before retrying. The intent this returns is TERMINAL (issue #1067)
+             — the next call to begin clears it, even under this same request
+             id, and delivers the mandate composed then rather than this one. */
           seat: orchestratorSeatFor(project).pending,
         },
       };
@@ -643,7 +723,7 @@ const HANDOFF_NOTES_CAP = 2_000;
  * Rotation (two-axis contract): hand the seat to a fresh successor.
  *
  * The handoff is BOUNDED and durable-state-based: the successor's launch
- * prompt carries the incumbent's mandate, the predecessor's identity and
+ * prompt carries the incumbent's core mandate, the predecessor's identity and
  * transcript path (the complete record of its decisions — reviewable whether
  * the incumbent is alive or dead, which matters because a dead incumbent is a
  * common reason to rotate), the project's open board tasks, and any caller
@@ -651,6 +731,11 @@ const HANDOFF_NOTES_CAP = 2_000;
  * predecessor loses MANAGER-LEVEL authority only — its session, host, card and
  * ordinary Viewer access are untouched (axis 1) — and both cards stay linked
  * by the bidirectional lineage the seat store records.
+ *
+ * The handoff is also COMPACTED (issue #1067): the successor's mandate carries
+ * the core mandate, one bounded "Rotation history" section standing in for
+ * every earlier handoff, and this rotation's fresh handoff — so a seat that has
+ * rotated a dozen times designates exactly as cheaply as one that never has.
  *
  * Never automatic: context pressure only ever produces a recommendation
  * (`./health`), and this function runs solely when explicitly called.
@@ -682,26 +767,63 @@ export async function executeOrchestratorRotation(
   const predecessor = predecessorTarget?.kind === "eligible" ? predecessorTarget : null;
   const tasks = dependencies.projectTasks(project).slice(0, HANDOFF_TASK_CAP);
   const notes = text(rawBody.handoffNotes).slice(0, HANDOFF_NOTES_CAP);
-  const handoff = [
-    "## Handoff from your predecessor (rotation)",
-    `You are replacing orchestrator conversation ${incumbent.conversationId} for project ${project}. Its manager authority is revoked; its session and card remain on the board, linked to yours.`,
-    predecessor?.path ?? incumbent.path
-      ? `Your predecessor's full transcript — decisions, blockers, in-flight work — is at: ${predecessor?.path ?? incumbent.path}. Review its recent turns before acting.`
-      : "Your predecessor's transcript path is not recorded; reconstruct state from the board before acting.",
-    tasks.length
+  const handoff: HandoffParts = {
+    header: [
+      `You are replacing orchestrator conversation ${incumbent.conversationId} for project ${project}. Its manager authority is revoked; its session and card remain on the board, linked to yours.`,
+      predecessor?.path ?? incumbent.path
+        ? `Your predecessor's full transcript — decisions, blockers, in-flight work — is at: ${predecessor?.path ?? incumbent.path}. Review its recent turns before acting.`
+        : "Your predecessor's transcript path is not recorded; reconstruct state from the board before acting.",
+    ],
+    tasks: tasks.length
       ? `Open board tasks for this project:\n${tasks.map((task) => `- [${task.status}] ${task.text.slice(0, HANDOFF_TASK_TEXT_CAP)} (${task.id})`).join("\n")}`
       : "No open board tasks are recorded for this project.",
-    ...(notes ? [`Notes from the caller:\n${notes}`] : []),
-  ].join("\n\n");
+    notes: notes || null,
+  };
 
-  const baseMandate = text(rawBody.mandate) || incumbent.mandate;
+  /* Awaited ONLY when there is something to summarize. A rotation with nothing
+     to compact must reach its durable `begin` with no await point, which is
+     what serializes it against a concurrent designation for the same project. */
+  const composition = composeRotationMandate({
+    project,
+    clientRequestId,
+    base: text(rawBody.mandate) || incumbent.mandate,
+    handoff,
+    predecessor: predecessor ? { path: predecessor.path, engine: predecessor.engine } : null,
+    roleParams: rawBody.roleParams,
+  }, dependencies);
+  const composed = composition instanceof Promise ? await composition : composition;
+  const rotatedFrom = {
+    conversationId: incumbent.conversationId,
+    path: predecessor?.path ?? incumbent.path,
+    seatEpoch: incumbent.seatEpoch,
+  };
+  /* The summarizer is an await point of up to HANDOFF_DIGEST_TIMEOUT_MS, and
+     everything above — the incumbent, its mandate, the handoff header — was
+     read BEFORE it. A designation that settled during that wait owns the seat
+     now, and `replaceIncumbent: true` would revoke it on the strength of a
+     stale read: the newer orchestrator would lose its authority to a successor
+     carrying the superseded mandate, with the newer one's own handoff never
+     written. Rotation replaces only the incumbent it actually read; anything
+     else is a conflict the caller resolves by rotating again, which recomposes
+     from the current seat. */
+  const current = orchestratorSeatFor(project).active;
+  if (!current || current.conversationId !== incumbent.conversationId || current.seatEpoch !== incumbent.seatEpoch) {
+    const conflict = incumbentChangedResult(project, incumbent.seatEpoch, current);
+    return { status: conflict.status, body: { ...conflict.body, rotatedFrom } };
+  }
+  if (composed.kind === "too_large") return { status: 413, body: { ...composed.body, rotatedFrom } };
+
   const outcome = await executeOrchestratorSeatRequest({
     project,
-    mandate: `${baseMandate}\n\n${handoff}`,
+    mandate: composed.mandate,
     clientRequestId,
     /* Rotation IS the explicit replacement, so it carries the opt-in the plain
        spawn-mode guard requires. */
     replaceIncumbent: true,
+    /* ...but only of the seat this rotation actually read. The check above ran
+       BEFORE the seat request's own reconciliation; this is what that request
+       re-checks after it, which is the last read before the durable begin. */
+    expectedIncumbentSeatEpoch: incumbent.seatEpoch,
     promptVersion: incumbent.promptVersion,
     ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
     ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),
@@ -722,7 +844,113 @@ export async function executeOrchestratorRotation(
     status: outcome.status,
     body: {
       ...outcome.body,
-      rotatedFrom: { conversationId: incumbent.conversationId, path: predecessor?.path ?? incumbent.path, seatEpoch: incumbent.seatEpoch },
+      rotatedFrom,
+      ...(composed.handoff ? { handoff: composed.handoff } : {}),
+    },
+  };
+}
+
+type RotationMandate =
+  | { kind: "composed"; mandate: string; handoff: Record<string, unknown> | null }
+  | { kind: "too_large"; body: Record<string, unknown> };
+
+/**
+ * Issue #1067: the successor mandate is CORE + ONE history section + the fresh
+ * handoff, never the incumbent's full text with another handoff appended.
+ * Prior handoffs — however many stacked up before this change — are compacted
+ * into the single history section, so the mandate's size is a function of the
+ * core and the caps, not of how many rotations preceded it.
+ *
+ * Rotation never blocks on the summarizer: it gets one bounded try, and every
+ * other outcome renders the deterministic verbatim tail instead. When even the
+ * trimmed composition cannot be delivered, this refuses BEFORE the seat request
+ * creates an intent, so the incumbent keeps its seat and nothing goes pending.
+ */
+interface RotationComposition {
+  project: string;
+  clientRequestId: string;
+  base: string;
+  handoff: HandoffParts;
+  predecessor: { path: string; engine: "claude" | "codex" } | null;
+  roleParams: unknown;
+}
+
+function composeRotationMandate(
+  input: RotationComposition,
+  dependencies: SeatCommandDependencies,
+): RotationMandate | Promise<RotationMandate> {
+  /* A retry of an in-flight intent delivers the stored mandate verbatim
+     (`executeOrchestratorSeatRequest` replays it), so recomposing here would
+     only spend another summarizer run on text nobody reads. */
+  const pending = orchestratorSeatFor(input.project).pending;
+  if (pending && pending.intent.clientRequestId === input.clientRequestId && pending.intent.error === null) {
+    return { kind: "composed", mandate: pending.mandate, handoff: null };
+  }
+  const split = splitMandate(input.base);
+  /* First rotation: no prior handoffs to compact, so no summarizer run — the
+     fresh handoff already names the predecessor's transcript. */
+  if (split.history === null && split.handoffs.length === 0) {
+    return renderRotationMandate(input, split.core, null, "none", null);
+  }
+  return (async (): Promise<RotationMandate> => {
+    let outcome: HandoffDigestOutcome;
+    try {
+      outcome = await dependencies.summarizeHandoffs({
+        project: input.project,
+        clientRequestId: input.clientRequestId,
+        priorHistory: split.history,
+        priorHandoffs: split.handoffs,
+        predecessor: input.predecessor,
+      });
+    } catch {
+      outcome = { kind: "fallback", reason: "error" };
+    }
+    if (outcome.kind === "digest") {
+      return renderRotationMandate(input, split.core, boundHistoryBody(outcome.text), "digest", null);
+    }
+    console.warn(`orchestrator rotation for ${input.project} used the verbatim handoff fallback: ${outcome.reason}`);
+    return renderRotationMandate(input, split.core, fallbackHistory(split.history, split.handoffs, outcome.reason), "fallback", outcome.reason);
+  })();
+}
+
+/** Core + history + fresh handoff, measured as delivered and trimmed to the
+    envelope, or refused when even the trimmed composition cannot fit. */
+function renderRotationMandate(
+  input: RotationComposition,
+  core: string,
+  history: string | null,
+  source: "digest" | "fallback" | "none",
+  reason: string | null,
+): RotationMandate {
+  const overhead = launchOverheadBytes("spawn", input.roleParams);
+  const composed = composeSuccessorMandate({
+    core,
+    history,
+    handoff: input.handoff,
+    budgetBytes: MAX_STRUCTURED_TEXT_BYTES - overhead,
+    deliver: orchestratorMandateForDelivery,
+  });
+  if (composed.kind === "too_large") {
+    return {
+      kind: "too_large",
+      body: mandateTooLargeBody({
+        ok: false,
+        bytes: composed.bytes,
+        overhead,
+        bound: MAX_STRUCTURED_TEXT_BYTES,
+        excess: composed.bytes - composed.budgetBytes,
+      }),
+    };
+  }
+  return {
+    kind: "composed",
+    mandate: composed.mandate,
+    handoff: {
+      history: source,
+      reason,
+      historyDropped: composed.historyDropped,
+      notesTruncatedTo: composed.notesTruncatedTo,
+      mandateBytes: composed.bytes,
     },
   };
 }

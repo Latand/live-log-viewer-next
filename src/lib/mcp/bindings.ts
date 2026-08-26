@@ -1687,6 +1687,8 @@ async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDepen
     transcriptPath: result.path ?? null,
     seat: result.seat ?? null,
     rotatedFrom: result.rotatedFrom ?? null,
+    /* Whether the prior handoffs were summarized or kept verbatim, and why. */
+    handoff: result.handoff ?? null,
     replayed: result.replayed === true,
   });
 }

@@ -392,13 +392,15 @@ export type BeginSeatIntentResult =
 /**
  * Persist the designate-and-inject intent BEFORE any side effect. Idempotent on
  * `clientRequestId`: a replay of a completed intent short-circuits to the active
- * seat (deliver nothing twice), and a replay of a pending one returns it for the
- * caller to finish. A NEW key is blocked (`in_progress`) only by a genuinely
- * in-flight pending intent — one with no terminal error whose epoch is at or
- * above the project's active seat. An ABANDONED pending intent — terminal
+ * seat (deliver nothing twice), and a replay of a STILL-LIVE pending one returns
+ * it for the caller to finish. A NEW key is blocked (`in_progress`) only by a
+ * genuinely in-flight pending intent — one with no terminal error whose epoch is
+ * at or above the project's active seat. An ABANDONED pending intent — terminal
  * `intent.error` recorded, or epoch below the active seat — is TERMINALIZED in
  * the same write: moved out of the blocking `pending` position into the bounded
- * durable `history`, never deleted, and the new intent proceeds.
+ * durable `history`, never deleted, and the new intent proceeds. A terminal
+ * error outranks the idempotency key, so the intent that failed is cleared by
+ * the very next begin whichever key sends it (issue #1067 AC 5).
  */
 export function beginOrchestratorSeatIntent(input: {
   project: string;
@@ -419,7 +421,17 @@ export function beginOrchestratorSeatIntent(input: {
       return { kind: "completed", seat: active };
     }
     const pending = file.pending[project];
-    if (pending && pending.intent.clientRequestId === input.clientRequestId) {
+    /* TERMINAL BEATS IDEMPOTENT (issue #1067 AC 5). A recorded `intent.error` is
+       the intent's FINAL state, so the row is not handed back for the caller to
+       "finish" — not even to the key that created it. Replaying it re-delivers
+       the STORED mandate, which is exactly the text that failed: a rotation that
+       had already recomposed a mandate small enough to deliver would send the
+       oversized one again, and the failed row would keep its blocking `pending`
+       position forever behind a dead banner. Whoever begins next, same key or
+       new, moves it into history and starts a fresh intent. Exactly-once still
+       holds where it matters: delivery is deduplicated by the clientRequestId-
+       derived `clientMessageId` and a spawn by its `clientAttemptId` receipt. */
+    if (pending && pending.intent.error === null && pending.intent.clientRequestId === input.clientRequestId) {
       return { kind: "replay", seat: pending };
     }
     let terminalized: OrchestratorSeatTerminalization | undefined;
@@ -547,8 +559,12 @@ export function repairOrchestratorSeatRuntimeIdentity(input: {
   });
 }
 
-/** Record why a pending intent could not complete; the seat stays pending and
-    recoverable, and the previous active seat (if any) stays authoritative. */
+/** Record why a pending intent could not complete; the previous active seat
+    (if any) stays authoritative. The recorded error is the intent's TERMINAL
+    state (issue #1067): the row keeps its `pending` position only until the
+    next `beginOrchestratorSeatIntent` for the project, which moves it into
+    `history` as `terminal_error` and proceeds. Nothing has to expire it, and
+    no designation stays pending forever. */
 export function failOrchestratorSeatIntent(project: string, clientRequestId: string, error: string): void {
   withAccountMutationLock(() => {
     const file = readOrchestratorSeatFile();
