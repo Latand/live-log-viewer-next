@@ -1110,7 +1110,7 @@ test("the dock renders the delivered mandate as the seat's own card, not as the 
     textDigest: messageTextDigest(delivered),
     deliveredAt: "2026-08-13T10:00:01.000Z",
     origin: "agent",
-    mandate: { version: 3 },
+    mandate: { kind: "version", version: ORCHESTRATOR_PROMPT_VERSION },
   }];
 
   const host = await mountLive();
@@ -1119,7 +1119,7 @@ test("the dock renders the delivered mandate as the seat's own card, not as the 
   expect(card).not.toBeNull();
   /* The seat's own recorded prompt version, carried by the delivery evidence —
      which is why the board's pane names the same mandate the same way. */
-  expect(card!.textContent).toContain("Mandate v3");
+  expect(card!.textContent).toContain(`Mandate v${ORCHESTRATOR_PROMPT_VERSION}`);
   expect(card!.textContent).toContain("sent at seat creation");
   /* Folded away, and the rotation handoff is a section of the SAME card. */
   expect(host.textContent).not.toContain("You are the viewer's built-in Manager");

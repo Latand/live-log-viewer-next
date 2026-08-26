@@ -351,7 +351,7 @@ const SEAT_MANDATE = "You are the orchestrator for this project.\n\nOwn the boar
 test("a delivered mandate replaces the operator bubble it used to be rendered as", () => {
   setLocale("en");
   const [html] = renderAll([{ kind: "user", ts: at(1_000), text: SEAT_MANDATE }], {
-    occurrences: [occurrence(SEAT_MANDATE, at(0), { origin: "agent", mandate: { version: 4 } })],
+    occurrences: [occurrence(SEAT_MANDATE, at(0), { origin: "agent", mandate: { kind: "version", version: 4 } })],
   });
   expect(html).toContain("data-mandate-card");
   expect(html).toContain("Mandate v4");
@@ -381,11 +381,23 @@ test("a claude row delivered as the mandate becomes the card instead of a system
     text: SEAT_MANDATE,
     deliveredMessage: { engineMessageId: ENGINE_MESSAGE_ID, ts: at(2_000) },
   }, {
-    occurrences: [occurrence(SEAT_MANDATE, at(2_000), { origin: "agent", mandate: { version: null } })],
+    occurrences: [occurrence(SEAT_MANDATE, at(2_000), { origin: "agent", mandate: { kind: "custom" } })],
   });
   expect(html).toContain("data-mandate-card");
   /* A bespoke mandate reads the same on this surface as in the dock. */
   expect(html).toContain("Mandate custom");
+});
+
+test("a mandate the server could not name is still the card, with no qualifier", () => {
+  setLocale("en");
+  const [html] = renderAll([{ kind: "user", ts: at(1_000), text: SEAT_MANDATE }], {
+    occurrences: [occurrence(SEAT_MANDATE, at(0), { origin: "agent", mandate: { kind: "unqualified" } })],
+  });
+  expect(html).toContain("data-mandate-card");
+  expect(html).toContain("Mandate");
+  expect(html).not.toContain("Mandate v");
+  expect(html).not.toContain("custom");
+  expect(html).not.toContain("bg-user");
 });
 
 test("an agent relay that carries the mandate text stays the internal card", () => {

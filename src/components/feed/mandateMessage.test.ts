@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
+import { ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE, ORCHESTRATOR_SYSTEM_PROMPT, orchestratorMandateForDelivery } from "@/lib/orchestrator/prompt";
 
 import { mandateMessage } from "./mandateMessage";
 
@@ -48,4 +48,32 @@ test("the same words quoted inside a mandate never split it", () => {
   const quoting = "Read the section titled ## Handoff from your predecessor before you answer.";
   expect(mandateMessage(quoting).handoff).toBeNull();
   expect(mandateMessage(quoting).mandate).toBe(quoting);
+});
+
+test("a bespoke rotation keeps the appended status directive in the mandate, not in the handoff", () => {
+  /* The shape delivery actually produces for an operator-edited rotation:
+     the caller's own text, then the handoff, and THEN the initial-status
+     directive, which delivery appends to any mandate that does not already
+     carry it. The last section is the mandate's, on the far side of the
+     handoff. */
+  const bespoke = "You run the conveyor for atlas. Ship issue #7 first.";
+  const delivered = orchestratorMandateForDelivery(`${bespoke}\n\n${HANDOFF}`);
+  const message = mandateMessage(delivered);
+
+  expect(message.handoff).toBe(HANDOFF);
+  expect(message.handoff).not.toContain("## Initial visible status");
+  expect(message.mandate).toContain(bespoke);
+  expect(message.mandate).toContain(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE);
+  expect(message.lines).toBe(delivered.split("\n").length);
+});
+
+test("handoffs stacked by successive rotations stay one disclosure", () => {
+  /* Each rotation appends its handoff to the mandate it inherited, so an
+     unrotated-away lineage arrives as consecutive sections. */
+  const second = HANDOFF.replace("conv-A", "conv-B");
+  const message = mandateMessage(`${ORCHESTRATOR_SYSTEM_PROMPT}\n\n${HANDOFF}\n\n${second}`);
+
+  expect(message.handoff).toContain("conv-A");
+  expect(message.handoff).toContain("conv-B");
+  expect(message.mandate).toBe(ORCHESTRATOR_SYSTEM_PROMPT.trim());
 });

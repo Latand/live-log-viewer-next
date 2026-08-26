@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
-import { ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
+import { ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE, ORCHESTRATOR_SYSTEM_PROMPT, orchestratorMandateForDelivery } from "@/lib/orchestrator/prompt";
 import type { DeliveredMessageProvenance } from "@/lib/runtime/messageOrigin";
 import { messageTextDigest } from "@/lib/runtime/messageTextDigest";
 
@@ -85,7 +85,7 @@ function expand(container: HTMLElement, index: number): void {
 
 test("the delivered mandate renders as a card in place of the operator's bubble", () => {
   const text = ORCHESTRATOR_SYSTEM_PROMPT;
-  const container = renderRow(text, { origin: "agent", mandate: { version: 9 } });
+  const container = renderRow(text, { origin: "agent", mandate: { kind: "version", version: 9 } });
 
   expect(container.querySelector("[data-mandate-card]")).not.toBeNull();
   /* The user bubble's own surface is gone: this is not the operator talking. */
@@ -100,7 +100,7 @@ test("the delivered mandate renders as a card in place of the operator's bubble"
 });
 
 test("the card holds the mandate back until it is expanded", () => {
-  const container = renderRow(ORCHESTRATOR_SYSTEM_PROMPT, { origin: "agent", mandate: { version: 9 } });
+  const container = renderRow(ORCHESTRATOR_SYSTEM_PROMPT, { origin: "agent", mandate: { kind: "version", version: 9 } });
 
   expect(container.textContent).not.toContain("You are the viewer's built-in Manager");
   expand(container, 0);
@@ -108,7 +108,7 @@ test("the card holds the mandate back until it is expanded", () => {
 });
 
 test("a rotation handoff opens as a second section of the same card", () => {
-  const container = renderRow(`${ORCHESTRATOR_SYSTEM_PROMPT}\n\n${HANDOFF}`, { origin: "agent", mandate: { version: 9 } });
+  const container = renderRow(`${ORCHESTRATOR_SYSTEM_PROMPT}\n\n${HANDOFF}`, { origin: "agent", mandate: { kind: "version", version: 9 } });
 
   expect(container.querySelectorAll("[data-mandate-card]")).toHaveLength(1);
   expect(container.querySelectorAll("details")).toHaveLength(2);
@@ -124,9 +124,45 @@ test("a rotation handoff opens as a second section of the same card", () => {
 test("a bespoke mandate reads as custom, on the board's conversation pane as in the dock", () => {
   /* The pane behind the dock mounts the same feed with the same evidence, and
      the seat's own record of a bespoke mandate travels with the delivery. */
-  const container = renderRow("You run the conveyor here. Ship issue #7 first.", { origin: "agent", mandate: { version: null } });
+  const container = renderRow("You run the conveyor here. Ship issue #7 first.", { origin: "agent", mandate: { kind: "custom" } });
   const header = container.querySelector("[data-mandate-card]")!.textContent ?? "";
   expect(header).toContain("Mandate custom");
+});
+
+test("a mandate nothing could name is still the card, claiming no version", () => {
+  /* The seat record behind the delivery is gone — compacted, or unreadable —
+     so the identity that reserved the delivery is all the evidence left. It is
+     enough: the row stops posing as the operator's, and the card names no
+     mandate in particular rather than inventing one. */
+  const text = ORCHESTRATOR_SYSTEM_PROMPT;
+  const container = renderRow(text, { origin: "agent", mandate: { kind: "unqualified" } });
+
+  const header = container.querySelector("[data-mandate-card]")!.textContent ?? "";
+  expect(header).toContain("Mandate");
+  expect(header).not.toContain("Mandate v");
+  expect(header).not.toContain("custom");
+  expect(header).toContain(`${text.split("\n").length} lines`);
+  expect(header).toContain("sent at seat creation");
+  expect(container.innerHTML).not.toContain("bg-user");
+});
+
+test("a bespoke rotation's appended status directive belongs to the mandate, not to the handoff", () => {
+  /* The shape delivery produces for an operator-edited rotation. */
+  const bespoke = "You run the conveyor here. Ship issue #7 first.";
+  const container = renderRow(
+    orchestratorMandateForDelivery(`${bespoke}\n\n${HANDOFF}`),
+    { origin: "agent", mandate: { kind: "custom" } },
+  );
+
+  expand(container, 1);
+  expect(container.textContent).toContain("You are replacing orchestrator conversation");
+  expect(container.textContent).not.toContain("Your first turn after receiving this mandate");
+
+  expand(container, 0);
+  expect(container.textContent).toContain(bespoke);
+  expect(container.textContent).toContain("Your first turn after receiving this mandate");
+  /* Guarding the sentence above against a reworded directive. */
+  expect(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE).toContain("Your first turn after receiving this mandate");
 });
 
 test("an ordinary operator message keeps its bubble, and so does a paste of the mandate itself", () => {

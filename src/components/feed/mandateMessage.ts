@@ -5,7 +5,7 @@
  * identity of the delivery that created it, and the provenance seam projects
  * that fact onto exactly that row. This module only reads the text of a row
  * already known to be one, and answers the two things the card shows: how long
- * the whole delivery is, and where the rotation handoff starts.
+ * the whole delivery is, and which part of it is the rotation handoff.
  *
  * Pure and render-time only: no transcript byte changes, and nothing here is
  * stored.
@@ -15,6 +15,10 @@
     the compact history variant. Matched at the start of a line, so the same
     words quoted inside a mandate never split it. */
 const HANDOFF_HEADINGS = ["## Handoff from your predecessor", "## Rotation history"] as const;
+
+/** Any top-level markdown heading — where one section of the delivery ends and
+    the next begins. */
+const SECTION_HEADING = /^#{1,2} /;
 
 export interface MandateMessage {
   /** Lines of the WHOLE delivered message, sections included — the size the
@@ -26,19 +30,38 @@ export interface MandateMessage {
   handoff: string | null;
 }
 
-/** Offset of the handoff heading that opens a line, or -1. */
-function handoffStart(text: string): number {
+/**
+ * Where the rotation handoff starts and ends, or null when there is none.
+ *
+ * A handoff runs from its own heading to the next OTHER section's, not to the
+ * end of the delivery: a rotation composes the handoff after the mandate, and
+ * delivery then appends the initial-status directive to any mandate that does
+ * not already carry it — so on a bespoke rotation the final section of the
+ * message belongs to the mandate, on the far side of the handoff.
+ *
+ * Handoffs that stack — each rotation appends one to the mandate it inherited —
+ * are consecutive sections of the same lineage, and stay one disclosure.
+ */
+function handoffSpan(text: string): { start: number; end: number } | null {
   let offset = 0;
+  let start = -1;
   for (const line of text.split("\n")) {
-    if (HANDOFF_HEADINGS.some((heading) => line.startsWith(heading))) return offset;
+    const isHandoff = HANDOFF_HEADINGS.some((heading) => line.startsWith(heading));
+    if (start < 0) {
+      if (isHandoff) start = offset;
+    } else if (!isHandoff && SECTION_HEADING.test(line)) {
+      return { start, end: offset };
+    }
     offset += line.length + 1;
   }
-  return -1;
+  return start < 0 ? null : { start, end: text.length };
 }
 
 export function mandateMessage(text: string): MandateMessage {
   const lines = text.split("\n").length;
-  const start = handoffStart(text);
-  if (start < 0) return { lines, mandate: text.trim(), handoff: null };
-  return { lines, mandate: text.slice(0, start).trimEnd(), handoff: text.slice(start).trim() };
+  const span = handoffSpan(text);
+  if (!span) return { lines, mandate: text.trim(), handoff: null };
+  /* Whatever the handoff interrupted is one mandate again. */
+  const mandate = [text.slice(0, span.start).trim(), text.slice(span.end).trim()].filter(Boolean).join("\n\n");
+  return { lines, mandate, handoff: text.slice(span.start, span.end).trim() };
 }

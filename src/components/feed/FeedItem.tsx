@@ -2,6 +2,8 @@
 
 import { memo } from "react";
 
+import type { MandateDelivery } from "@/lib/runtime/messageOrigin";
+
 import { Brain, ChevronUp, Command, Check, Mail, Mic, Sparkle, X } from "../icons";
 import { hhmm } from "../utils";
 import { MESSAGE_ACTION } from "./actionStyles";
@@ -49,13 +51,13 @@ function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
     /* A selected-context capture exists only on operator composer sends. */
     if (item.selectedContext) return item;
     const resolved = provenance.forItem(item);
-    if (resolved?.mandate) return mandateCard(item.ts, item.text, resolved.mandate.version);
+    if (resolved?.mandate) return mandateCard(item.ts, item.text, resolved.mandate);
     if (resolved?.origin === "agent") return internalCard(item.ts, item.text, resolved.senderRole);
     return item;
   }
   if (item.kind !== "sysmsg" || !item.deliveredMessage) return item;
   const resolved = provenance.forItem(item);
-  if (resolved?.mandate) return mandateCard(item.deliveredMessage.ts, item.text, resolved.mandate.version);
+  if (resolved?.mandate) return mandateCard(item.deliveredMessage.ts, item.text, resolved.mandate);
   if (resolved?.origin === "agent") return internalCard(item.deliveredMessage.ts, item.text, resolved.senderRole);
   if (resolved?.origin === "operator") {
     return {
@@ -68,8 +70,8 @@ function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
   return item;
 }
 
-function mandateCard(ts: unknown, text: string, version: number | null): Item {
-  return { kind: "mandate", ts, text, version };
+function mandateCard(ts: unknown, text: string, mandate: MandateDelivery): Item {
+  return { kind: "mandate", ts, text, mandate };
 }
 
 function internalCard(ts: unknown, text: string, senderRole: string | undefined): Item {

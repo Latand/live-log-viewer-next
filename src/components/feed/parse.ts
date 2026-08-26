@@ -10,7 +10,7 @@ import { isClaudeProtocolUser, isClaudeSdkDeliveredUser } from "@/lib/claudeProt
 import { getLocale, translate } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { decodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
-import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
+import type { MandateDelivery, MessageOrigin } from "@/lib/runtime/messageOrigin";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import { isViewerMcpServer } from "@/lib/mcp/presentation";
 import type { FileEntry } from "@/lib/types";
@@ -218,10 +218,10 @@ export type CmdGroupItem = {
 /** Render-time only (#1166): the parser never emits this. `resolveDeliveredItem`
     mints it for a row the delivery evidence names as an orchestrator seat's own
     mandate, so 8 KB of seat scaffold stops posing as something the operator
-    typed. `version` is what that seat recorded — a number for an approved
-    default, null for a bespoke one. Nothing about the transcript changes — this
-    kind exists only between the resolver and the card. */
-export type MandateItem = { kind: "mandate"; ts: unknown; text: string; version: number | null };
+    typed. `mandate` is which mandate the evidence proved it to be — and it may
+    prove nothing beyond the row being one. Nothing about the transcript
+    changes: this kind exists only between the resolver and the card. */
+export type MandateItem = { kind: "mandate"; ts: unknown; text: string; mandate: MandateDelivery };
 export type Item =
   | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude"; sourceId?: string }
   | { kind: "user"; ts: unknown; text: string; selectedContext?: SelectedContextRef }

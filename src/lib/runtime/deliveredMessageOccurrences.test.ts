@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import type { RegistryFile } from "@/lib/agent/registry";
 import type { HeldDelivery } from "@/lib/accounts/migration/contracts";
 
+import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 
 import { deliveredMessageOccurrences, heldDeliveryOccurrences, orchestratorMandateDeliveries } from "./deliveredMessageOccurrences";
@@ -217,14 +218,17 @@ test("each source degrades to absence on its own, and the result is settlement-o
 
 /*
  * #1166: a seat is created by DELIVERING its mandate, so those 8 KB reach the
- * transcript as an ordinary message. The seat record names that delivery by its
- * client-message identity — the adoption message under the designation's own
- * request id, the spawn's first prompt under its launch id — and only the exact
- * delivery a seat reserved projects the mandate fact.
+ * transcript as an ordinary message. The DELIVERY's own identity is what says
+ * so — the adoption message under the identity `seatCommand.ts` reserves, the
+ * spawn's first prompt under the launch id a seat recorded — and only the exact
+ * delivery so identified projects the mandate fact. The seat record, when there
+ * still is one, adds which mandate it was.
  */
 
-const MANDATE_TEXT = "You are the orchestrator for atlas. Own the board.";
+const MANDATE_TEXT = ORCHESTRATOR_SYSTEM_PROMPT;
 const SEAT_MANDATE_DIGEST = messageTextDigest(MANDATE_TEXT);
+/** What an operator writes instead of the approved default. */
+const BESPOKE_MANDATE = "You run the conveyor for atlas. Ship issue #7 first, and report when it merges.";
 
 function seat(overrides: Partial<OrchestratorSeat> & { intent: OrchestratorSeat["intent"] }): OrchestratorSeat {
   return {
@@ -233,7 +237,7 @@ function seat(overrides: Partial<OrchestratorSeat> & { intent: OrchestratorSeat[
     conversationId: "conversation_worker",
     path: TRANSCRIPT,
     mandate: MANDATE_TEXT,
-    promptVersion: 3,
+    promptVersion: ORCHESTRATOR_PROMPT_VERSION,
     predecessorConversationId: null,
     state: "active",
     designatedAt: "2026-08-24T08:59:00.000Z",
@@ -241,6 +245,9 @@ function seat(overrides: Partial<OrchestratorSeat> & { intent: OrchestratorSeat[
     ...overrides,
   };
 }
+
+/** The approved default's version, as the projection proves it. */
+const APPROVED: { kind: "version"; version: number } = { kind: "version", version: ORCHESTRATOR_PROMPT_VERSION };
 
 function seatFile(seats: OrchestratorSeat[], history: OrchestratorSeat[] = []) {
   return {
@@ -273,15 +280,15 @@ function mandateRecord(overrides: Partial<HeldDelivery> & { id: string }): HeldD
 test("the seat's own delivery identities are the mandate ids, in both delivery modes", () => {
   const mandates = orchestratorMandateDeliveries(seatFile([
     seat({ intent: { clientRequestId: ADOPTION_REQUEST_ID, mode: "existing", launchId: null, error: null } }),
-    seat({ promptVersion: null, intent: { clientRequestId: "req-atlas-spawn", mode: "spawn", launchId: SPAWN_LAUNCH_ID, error: null } }),
+    seat({ mandate: BESPOKE_MANDATE, promptVersion: null, intent: { clientRequestId: "req-atlas-spawn", mode: "spawn", launchId: SPAWN_LAUNCH_ID, error: null } }),
   ]));
-  expect(mandates.get(ADOPTION_MANDATE_ID)).toEqual({ version: 3 });
-  expect(mandates.get(`spawn_${SPAWN_LAUNCH_ID}`)).toEqual({ version: null });
+  expect(mandates.get(ADOPTION_MANDATE_ID)).toEqual(APPROVED);
+  expect(mandates.get(`spawn_${SPAWN_LAUNCH_ID}`)).toEqual({ kind: "custom" });
   /* A spawn-mode intent that never got a launch id names no spawn delivery. */
   expect([...mandates.keys()]).toEqual([ADOPTION_MANDATE_ID, "orchmandate_req-atlas-spawn", `spawn_${SPAWN_LAUNCH_ID}`]);
 });
 
-test("a mandate delivery projects the seat's recorded version, with no authorship stamp on the record", () => {
+test("a mandate delivery projects the approved default it carried, with no authorship stamp on the record", () => {
   const mandates = orchestratorMandateDeliveries(seatFile([
     seat({ intent: { clientRequestId: ADOPTION_REQUEST_ID, mode: "existing", launchId: null, error: null } }),
   ]));
@@ -294,22 +301,40 @@ test("a mandate delivery projects the seat's recorded version, with no authorshi
     textDigest: SEAT_MANDATE_DIGEST,
     deliveredAt: "2026-08-24T09:00:01.000Z",
     origin: "agent",
-    mandate: { version: 3 },
+    mandate: APPROVED,
     clientMessageId: ADOPTION_MANDATE_ID,
   }]);
 });
 
-test("a bespoke mandate projects a null version, which is what the card reads as custom", () => {
-  const mandates = orchestratorMandateDeliveries(seatFile([], [
-    seat({ promptVersion: null, intent: { clientRequestId: "req-atlas-spawn", mode: "spawn", launchId: SPAWN_LAUNCH_ID, error: null } }),
+test("a bespoke mandate reads as custom even when the seat kept the incumbent's version number", () => {
+  /* An operator-edited ROTATION: `executeOrchestratorRotation` composes the
+     caller's own text with the handoff and passes the INCUMBENT's
+     promptVersion through, so the number says v9 about text nobody approved.
+     The stored mandate itself is the evidence that settles it. */
+  const rotated = `${BESPOKE_MANDATE}\n\n## Handoff from your predecessor (rotation)\n\nYou are replacing conversation_predecessor.`;
+  const mandates = orchestratorMandateDeliveries(seatFile([
+    seat({ mandate: rotated, intent: { clientRequestId: ADOPTION_REQUEST_ID, mode: "existing", launchId: null, error: null } }),
   ]));
-  const occurrences = heldDeliveryOccurrences(
-    TRANSCRIPT,
-    snapshot([mandateRecord({ id: "d-spawn-prompt", clientMessageId: `spawn_${SPAWN_LAUNCH_ID}` })]),
-    mandates,
-  );
-  expect(occurrences).toHaveLength(1);
-  expect(occurrences[0]!.mandate).toEqual({ version: null });
+  expect(mandates.get(ADOPTION_MANDATE_ID)).toEqual({ kind: "custom" });
+});
+
+test("an unedited rotation is still the approved default the incumbent held", () => {
+  /* The mirror of the case above: no caller text, so the seat kept the
+     default and only appended a handoff to it. */
+  const rotated = `${ORCHESTRATOR_SYSTEM_PROMPT}\n\n## Handoff from your predecessor (rotation)\n\nYou are replacing conversation_predecessor.`;
+  const mandates = orchestratorMandateDeliveries(seatFile([
+    seat({ mandate: rotated, intent: { clientRequestId: ADOPTION_REQUEST_ID, mode: "existing", launchId: null, error: null } }),
+  ]));
+  expect(mandates.get(ADOPTION_MANDATE_ID)).toEqual(APPROVED);
+});
+
+test("a seat based on a default this checkout no longer carries claims no version at all", () => {
+  /* Its text cannot be checked against the one approved default that ships
+     here, so the card names it a mandate and stops there. */
+  const mandates = orchestratorMandateDeliveries(seatFile([
+    seat({ mandate: BESPOKE_MANDATE, promptVersion: ORCHESTRATOR_PROMPT_VERSION - 1, intent: { clientRequestId: ADOPTION_REQUEST_ID, mode: "existing", launchId: null, error: null } }),
+  ]));
+  expect(mandates.get(ADOPTION_MANDATE_ID)).toEqual({ kind: "unqualified" });
 });
 
 test("identical bytes delivered under any other identity are not the seat's mandate", () => {
@@ -338,15 +363,31 @@ test("the mandate fact reaches the wire; the identity that carried it does not",
     seat({ intent: { clientRequestId: ADOPTION_REQUEST_ID, mode: "existing", launchId: null, error: null } }),
   ]);
   expect(deliveredMessageOccurrences(TRANSCRIPT, { registrySnapshot, orchestratorSeats, relayOccurrences: () => [] })).toEqual([
-    { textDigest: SEAT_MANDATE_DIGEST, deliveredAt: "2026-08-24T09:00:01.000Z", origin: "agent", mandate: { version: 3 } },
+    { textDigest: SEAT_MANDATE_DIGEST, deliveredAt: "2026-08-24T09:00:01.000Z", origin: "agent", mandate: APPROVED },
   ]);
 });
 
-test("an unreadable seat store leaves the mandate row rendering exactly as it does today", () => {
+test("the reserved adoption identity is a mandate on its own, with no seat record behind it", () => {
+  /* The seat store is unreadable, and a retention-compacted or plainly absent
+     record reads the same way. The identity `seatCommand.ts` reserved still
+     says the seat delivered this, so the row is the card — it just names no
+     particular mandate. */
   const registrySnapshot = () => snapshot([mandateRecord({ id: "d-seat-mandate", clientMessageId: ADOPTION_MANDATE_ID })]);
+  const unqualified: DeliveredMessageOccurrence[] = [
+    { textDigest: SEAT_MANDATE_DIGEST, deliveredAt: "2026-08-24T09:00:01.000Z", origin: "agent", mandate: { kind: "unqualified" } },
+  ];
   expect(deliveredMessageOccurrences(TRANSCRIPT, {
     registrySnapshot,
     orchestratorSeats: () => { throw new Error("seat store unavailable"); },
     relayOccurrences: () => [],
-  })).toEqual([]);
+  })).toEqual(unqualified);
+  expect(deliveredMessageOccurrences(TRANSCRIPT, { registrySnapshot, orchestratorSeats: noSeats, relayOccurrences: () => [] }))
+    .toEqual(unqualified);
+});
+
+test("a spawn's first prompt without its seat record stays the message it was", () => {
+  /* `spawn_<launchId>` is every delegated launch's identity, so with no seat
+     claiming this one there is nothing to say it carried a mandate. */
+  const registrySnapshot = () => snapshot([mandateRecord({ id: "d-spawn-prompt", clientMessageId: `spawn_${SPAWN_LAUNCH_ID}` })]);
+  expect(deliveredMessageOccurrences(TRANSCRIPT, { registrySnapshot, orchestratorSeats: noSeats, relayOccurrences: () => [] })).toEqual([]);
 });
