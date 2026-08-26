@@ -40,7 +40,27 @@ export interface DeliveredMessageProvenance {
   /** Carried through for operator rows so the bubble renders the same
       selected-card badge the composer showed at submission (#844). */
   selectedContext?: SelectedContextRef;
+  /** Present when THIS delivery is an orchestrator seat's mandate (#1166).
+      A seat is created by delivering its mandate, so the 8 KB lands in the
+      transcript as an ordinary message; the delivery's own client-message
+      identity is what sets this. Render-time only: nothing about the transcript
+      or the delivery changes. */
+  mandate?: MandateDelivery;
 }
+
+/**
+ * WHICH mandate a delivery carried, as far as the evidence proves it (#1166).
+ *
+ * `version` names an approved default and `custom` the operator's own text.
+ * `unqualified` is the honest third answer, and the reason this is a union
+ * rather than a nullable number: the delivery IS a seat's mandate — its
+ * identity says so — and nothing available names which one. The card then says
+ * "Mandate" and claims nothing further.
+ */
+export type MandateDelivery =
+  | { kind: "version"; version: number }
+  | { kind: "custom" }
+  | { kind: "unqualified" };
 
 /**
  * One delivered message's occurrence evidence: the join for deliveries that
