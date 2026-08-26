@@ -1,0 +1,196 @@
+name: Dependabot lockfile refresh
+
+# Dependabot's npm ecosystem rewrites package.json and never regenerates
+# bun.lock, so with the lockfile-integrity rule from #1156 every dependency pull
+# request fails `bun install --frozen-lockfile` before anyone can read it
+# (#1183). This job regenerates bun.lock on the Dependabot branch and pushes it
+# with the repository GITHUB_TOKEN.
+#
+# `pull_request_target` is the event this has to run on. GitHub gives a workflow
+# Dependabot triggered through `pull_request` a read-only GITHUB_TOKEN, and
+# `pull_request_target` is the one pull-request event its restriction list omits
+# (the exception is a pull request whose *base* branch Dependabot created, which
+# a pull request against the default branch never is). It also reads the
+# workflow file from the base branch, so a Dependabot pull request opened before
+# this merged is covered without being rebased first.
+#
+# That event runs a trusted workflow beside an untrusted head, so the write is
+# kept narrow three ways. The pull request must be Dependabot's own, from a
+# branch of this repository. The head branch must be unprotected, checked before
+# anything else runs. And `bun install --lockfile-only` resolves the bumped
+# ranges without unpacking a package, so nothing the pull request bumped ever
+# executes in the job that can write to the branch.
+#
+# GitHub raises no `synchronize` for a push made with that token — it starts no
+# workflow run of any kind for it — so the gates would never see the commit this
+# job just wrote. The last step therefore dispatches them against the branch: a
+# dispatched run reads the branch head, which is the exact commit its check run
+# lands on, so it can never report on a revision it did not inspect. A gate that
+# refuses the dispatch fails this job, because the alternative is a refreshed
+# head sitting green over required checks that never started.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-lockfile-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  refresh-lockfile:
+    # The one job in this repository that holds a write token, so the trigger is
+    # the fence: a pull request opened by Dependabot from a branch of this
+    # repository. A branch a person named `dependabot/…`, and any fork, never
+    # reaches the token.
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && startsWith(github.event.pull_request.head.ref, 'dependabot/')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      # `contents: write` is job-scoped, so refusing a protected branch has to be
+      # a step, and it comes first: nothing this job does may touch a branch a
+      # protection rule covers, however the branch is named and whoever opened
+      # the pull request. The push below is refused for such a branch anyway;
+      # this reports the reason instead of a rejected push, and stops before the
+      # branch's package.json is installed.
+      - name: Refuse a protected head branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          protected="$(gh api "repos/${GITHUB_REPOSITORY}/branches/${HEAD_REF}" --jq '.protected')"
+          if [[ "$protected" != "false" ]]; then
+            echo "::error::${HEAD_REF} is protected (protected=${protected}); refusing to write to it"
+            exit 1
+          fi
+
+      # The head is the only revision whose package.json can be resolved, so it
+      # is what gets checked out. `allow-unsafe-pr-checkout` is deliberately not
+      # set: checkout refuses a fork head under `pull_request_target` unless it
+      # is, and the guard above already makes a fork unreachable, so that refusal
+      # stays armed as the second line if the guard is ever loosened.
+      #
+      # Unlike the checkouts that only read code, this one keeps its
+      # credentials, because the push below is the point of the job. What makes
+      # that safe is the install: `--lockfile-only` runs nothing from the branch.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.3
+
+      # `--lockfile-only` resolves the bumped ranges and writes bun.lock without
+      # unpacking a package, so nothing the pull request bumped executes in a job
+      # that can write to the branch.
+      - name: Regenerate bun.lock
+        run: bun install --lockfile-only
+
+      - name: Report whether bun.lock moved
+        id: lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- bun.lock; then
+            echo "bun.lock already resolves the bumped ranges"
+            printf 'refreshed=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf 'refreshed=true\n' >> "$GITHUB_OUTPUT"
+
+      # The commit names bun.lock explicitly, so it carries that file and nothing
+      # else whatever the install touched, and it is authored by the GitHub
+      # Actions bot the token belongs to — no identity of a person is written.
+      # The bot's address is assembled from its own user record and this server's
+      # host rather than spelled out: an address literal does not belong in a
+      # public repository, and a commit made on GitHub Enterprise should
+      # attribute to that server's bot rather than to github.com's.
+      #
+      # The push is an ordinary one from the revision the install read, so Git
+      # itself refuses a branch that has moved: a Dependabot force-push arriving
+      # mid-run leaves the branch untouched, and the run that push starts
+      # resolves the lockfile again. That race is the branch working as intended,
+      # so it ends in a notice; any other refusal fails the job.
+      - name: Commit the refreshed lockfile
+        if: steps.lockfile.outputs.refreshed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bot='github-actions[bot]'
+          bot_id="$(gh api "users/${bot}" --jq '.id')"
+          noreply_host="users.noreply.${GITHUB_SERVER_URL#https://}"
+
+          git -c "user.name=${bot}" -c "user.email=${bot_id}+${bot}@${noreply_host}" \
+            commit -m 'chore(deps): refresh bun.lock' -- bun.lock
+
+          if ! rejection="$(git push origin "HEAD:refs/heads/${HEAD_REF}" 2>&1)"; then
+            printf '%s\n' "$rejection" >&2
+            if grep -qE 'non-fast-forward|fetch first|stale info' <<<"$rejection"; then
+              echo "::notice::${HEAD_REF} moved while the lockfile was resolving; the run for its new head refreshes it"
+              exit 0
+            fi
+            exit 1
+          fi
+
+      # A dispatch reads the workflow file from the branch it names, so a
+      # Dependabot pull request opened before these three carried
+      # `workflow_dispatch` refuses one. That refusal is what this step exists
+      # to report, not something to log past: the head is now a commit no gate
+      # has read, and nothing else raises an event for it — GitHub starts no
+      # workflow run at all for a push made with the repository GITHUB_TOKEN,
+      # which is the whole reason the dispatch is here. A refused dispatch
+      # therefore fails the refresh, so the branch carries a red check rather
+      # than a head sitting green over required contexts that never started.
+      # `@dependabot rebase` puts the trigger on the branch and the next run
+      # dispatches cleanly.
+      - name: Run the gates on the refreshed head
+        if: steps.lockfile.outputs.refreshed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          refused=()
+
+          dispatch() {
+            local workflow="$1"
+            shift
+            if ! gh workflow run "$workflow" --ref "$HEAD_REF" "$@"; then
+              refused+=("$workflow")
+            fi
+          }
+
+          # Each gate is attempted before the step decides, so one workflow's
+          # refusal does not cost the branch the runs the other two would have
+          # started, and the error names every gate that is missing one. `gh`
+          # has already written its own reason for each refusal to the log.
+          dispatch supply-chain.yml
+          dispatch privacy-publication.yml
+          dispatch privacy-tracker-audit.yml -f "publication_number=${PR_NUMBER}"
+
+          if (( ${#refused[@]} > 0 )); then
+            echo "::error::${HEAD_REF} refused a dispatch of ${refused[*]}; its refreshed head carries no run of those gates"
+            exit 1
+          fi
