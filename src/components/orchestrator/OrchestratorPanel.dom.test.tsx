@@ -72,6 +72,7 @@ mock.module("@/hooks/useLogTail", () => ({
 }));
 
 const { OrchestratorPanel } = await import("./OrchestratorPanel");
+const { SEAT_BIND_TIMEOUT_MS } = await import("./seatState");
 const { SEAT_POLL_MS, resetOrchestratorSeatCacheForTests } = await import("./useOrchestratorSeat");
 const { resetOrchestratorIncumbentCacheForTests } = await import("./useOrchestratorIncumbent");
 
@@ -96,6 +97,9 @@ let seatResponses: { status: number; body: Record<string, unknown> | null; throw
 let rotateResponses: { status: number; body: Record<string, unknown> | null; throws?: boolean }[];
 /** `GET /api/orchestrator/seat/status`, the incumbent read (#978). */
 let incumbentStatus: Record<string, unknown> | null;
+/** How many times that read has been answered — Re-bind is only a re-bind if it
+    actually re-runs resolution (#1182). */
+let incumbentReads: number;
 const realFetch = globalThis.fetch;
 
 function answer(queue: { status: number; body: Record<string, unknown> | null; throws?: boolean }[]): Response {
@@ -118,6 +122,7 @@ function installFetch(): void {
     /* Both reads are per-project, and only atlas has an orchestrator here, so
        a switch away genuinely lands on another project's own answer. */
     if (url.startsWith("/api/orchestrator/seat/status")) {
+      incumbentReads += 1;
       const target = new URL(url, "http://localhost").searchParams.get("project");
       return { ok: true, status: 200, json: async () => (target === "atlas" ? incumbentStatus : { project: target, designated: false, rotation: null, context: null }) } as Response;
     }
@@ -214,6 +219,7 @@ beforeEach(() => {
   tailLines.clear();
   seatStatus = { seat: null, pending: null, exists: true, viewerMcpRegistered: false };
   incumbentStatus = { project: "atlas", designated: false, rotation: null, context: null };
+  incumbentReads = 0;
   seatPosts = [];
   rotatePosts = [];
   spawnPosts = 0;
@@ -249,6 +255,7 @@ function mount(files: FileEntry[] = []): HTMLElement {
   ));
   return host as unknown as HTMLElement;
 }
+
 
 /** The panel reopened on a later seat read — a reload, or coming back to the
     project. Draft state (including an unsettled submission's key) lives in
@@ -597,6 +604,55 @@ test("an active seat mounts the REAL conversation column — feed and composer, 
   /* No draft on a seated project: a second create is not offered at all. */
   expect(confirmButton(host)).toBeNull();
 });
+
+test("a re-hosted seat binds to its successor transcript through the status read, with no rotation (#1182)", async () => {
+  /* The viewer came back and the conversation is being written to a NEW
+     transcript the catalog carries under its own native id: neither the seat's
+     recorded path nor its recorded id names anything in view. The status read
+     resolves the durable id to the registry's current generation, which is the
+     only thing that can bind the two. */
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent({ transcriptPath: "/transcripts/orch.successor.jsonl", liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
+  const successor = { ...orchestratorFile, path: "/transcripts/orch.successor.jsonl", name: "orch.successor.jsonl", conversationId: "conversation_orch_successor" } as FileEntry;
+
+  const host = mount([successor]);
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("live");
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch_successor"]')).not.toBeNull();
+  expect(host.textContent).not.toContain("Opening the conversation");
+  /* Nothing was rotated to get here. */
+  expect(rotatePosts).toHaveLength(0);
+});
+
+test("a bind that never lands stops spinning: the panel names the reason and offers Re-bind (#1182)", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent({ liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
+
+  /* Nothing in the catalog answers for this seat, on any key. */
+  const host = mount([]);
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(host)).toBe("live");
+  expect(host.textContent).toContain("Opening the conversation");
+  expect(host.querySelector("[data-orchestrator-rebind]")).toBeNull();
+
+  /* Past the bound, «opening» is no longer an honest answer. */
+  await new Promise((resolve) => setTimeout(resolve, SEAT_BIND_TIMEOUT_MS + 250));
+  await settle();
+  flushSync(() => undefined);
+
+  expect(host.querySelector("[data-orchestrator-bind]")?.getAttribute("data-orchestrator-bind")).toBe("catalog");
+  expect(host.textContent).toContain("file catalog");
+  /* Both ways forward, and rotation is neither of them. */
+  expect(host.textContent).toContain("Open it on the board");
+  const before = incumbentReads;
+  flushSync(() => (host.querySelector("[data-orchestrator-rebind]") as HTMLButtonElement).click());
+  await settle();
+  expect(incumbentReads).toBeGreaterThan(before);
+  expect(rotatePosts).toHaveLength(0);
+}, SEAT_BIND_TIMEOUT_MS + 20_000);
 
 test("a seat whose transcript is gone returns the panel to the draft", async () => {
   seatStatus = { seat: activeSeat(), pending: null, exists: false };
