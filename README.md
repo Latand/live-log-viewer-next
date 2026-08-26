@@ -36,6 +36,22 @@ and shown above the terminal output).
 ![The chat feed: user bubbles, assistant prose, and tool-call cards with
 statuses and expandable output](docs/media/chat-feed.png)
 
+### Hand a project to an orchestrator
+
+![The orchestrator dock beside its project board](docs/media/orchestrator-dock.png)
+
+Each project can designate one agent as its **orchestrator**. Press
+**Orchestrator** in the project header, tell it what you want shipped, and it
+opens a lane per issue, spawns the implementer, runs a fresh reviewer each
+round and merges on APPROVE. Its mandate and any handoff from a predecessor are
+written for you — there is no "you are an orchestrator" prompt to compose — and
+you come back to the board when an agent needs a decision.
+
+[docs/orchestrator.md](docs/orchestrator.md) walks the whole flow on a fresh
+install: the dock, the board, pipelines, tasks, the attention queue, the
+model/effort matrix the conveyor uses, and when three tasks a week does not
+need any of it.
+
 ### Spawn agents from the board
 
 Each project is a pannable, zoomable scheme — root conversations on top,
