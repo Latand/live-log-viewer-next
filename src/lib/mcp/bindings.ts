@@ -1447,9 +1447,13 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
   });
   /* The trailer is the ONLY thing that says a report was answered — the drain
      cursor says only that it was read aloud — so it is recorded the moment the
-     answer actually reaches the manager (#1168). Idempotent, so a directive
+     answer actually reaches the manager (#1168). Scoped by the project and seat
+     this directive was just routed to, because a report seq is log-global: the
+     store settles the ref only if it names a decision request THIS seat filed,
+     so a ref that names nothing yet cannot pre-answer a later report and a
+     directive cannot clear another project's ask. Idempotent, so a directive
      retry under the same derived id settles the same seq once. */
-  if (trailer) recordBridgeDirectiveAnswer(trailer.ref);
+  if (trailer) recordBridgeDirectiveAnswer(trailer.ref, { project, seatConversationId: manager.conversationId });
   return {
     directiveId: deliveryId,
     managerConversationId: manager.conversationId,

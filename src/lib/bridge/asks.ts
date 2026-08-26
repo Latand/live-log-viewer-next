@@ -2,6 +2,7 @@ import type { BridgeAsk, FileEntry } from "@/lib/types";
 
 import {
   bridgeReportOriginLabel,
+  isBridgeDecisionRequestClass,
   BRIDGE_ASK_TTL_SECONDS,
   type BridgeReportLogV1,
   type BridgeReportV1,
@@ -52,18 +53,14 @@ function isManagerVoice(report: BridgeReportV1): boolean {
   return bridgeReportOriginLabel(report.origin) === null;
 }
 
-/** Whether the row is the manager asking the operator to decide something. */
-function isDecisionRequest(report: BridgeReportV1): boolean {
-  return report.class === "blocked" || report.class === "question";
-}
-
 /**
  * The identity #1168 puts on the attention item: the caller's own report key.
  *
- * Rows written before the log kept the key — and a key too long to keep
- * verbatim — fall back to the derived id, which is what identified them before
- * this existed. Both are stable across re-reads, which is the property the
- * queue needs.
+ * Every decision request written since the log kept keys carries one verbatim —
+ * a key it could not keep is refused at append rather than reshaped, so there is
+ * no live path to the fallback. Rows written BEFORE the field existed still ask,
+ * under the derived id that identified them then. Both are stable across
+ * re-reads, which is the property the queue needs.
  */
 function askIdentity(report: BridgeReportV1): string {
   return report.key ?? report.id;
@@ -113,7 +110,7 @@ export function openBridgeAsks(
   for (const report of newestByProject.values()) {
     const seat = report.targetSeatConversationId;
     if (!seat) continue;
-    if (!isDecisionRequest(report)) continue;
+    if (!isBridgeDecisionRequestClass(report.class)) continue;
     if (answered.has(report.seq)) continue;
     const at = Date.parse(report.at);
     /* An unparseable time cannot be aged, and an ask nothing can retire is

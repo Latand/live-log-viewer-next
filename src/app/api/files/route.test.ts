@@ -3225,7 +3225,7 @@ test("issue 1168: the seat's open bridge ask rides the files payload and clears 
 
   /* Nothing above opened a gateway channel or moved a cursor: this reaches the
      operator with the voice gateway off, which is the whole point of #1168. */
-  recordBridgeDirectiveAnswer(filed!.seq);
+  recordBridgeDirectiveAnswer(filed!.seq, { project: "repo", seatConversationId: seat.id });
   const answered = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
   expect(answered.files.find((entry) => entry.path === seatPath)?.bridgeAsk).toBeUndefined();
 });

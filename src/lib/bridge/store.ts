@@ -15,6 +15,7 @@ import {
   BRIDGE_REPORT_KEY_MAX_CHARS,
   BRIDGE_REPORT_LOG_SCHEMA_VERSION,
   BRIDGE_RETIRED_ID_CAPACITY,
+  isBridgeDecisionRequestClass,
   isStoredBridgeReportClass,
   LEGACY_CONFIRMATION_CLASS,
   MANAGER_RECORD_REF,
@@ -88,16 +89,24 @@ export function bridgeReportId(key: string): string {
 }
 
 /**
- * The caller `key` as the row keeps it (#1168): verbatim, or not at all.
+ * Refuse a key the row could not keep verbatim, before the log is touched
+ * (#1168).
  *
- * A key is now read back out as an attention item id, so it has to be bounded
- * like every other caller-written field here. It is never truncated to fit —
- * two long keys sharing a prefix would then share one attention identity — so
- * an oversized key is dropped and its row is identified by the hashed `id`,
- * which is derived from the full key regardless.
+ * The key leaves the log again as the attention item's id, so a row must never
+ * carry one the store had to reshape to fit — a truncation would collide two
+ * long keys sharing a prefix into a single attention identity, and a hashed
+ * fallback would silently break "id = report key". The whole input list is
+ * checked ahead of the transaction so a rejected key costs the caller its error
+ * and never a half-written batch.
  */
-export function bridgeReportKeyForRecord(key: string): string | undefined {
-  return key.length <= BRIDGE_REPORT_KEY_MAX_CHARS ? key : undefined;
+function assertStorableKeys(inputs: readonly BridgeReportInput[]): void {
+  for (const input of inputs) {
+    if (input.key.length > BRIDGE_REPORT_KEY_MAX_CHARS) {
+      throw new Error(
+        `a bridge report key is at most ${BRIDGE_REPORT_KEY_MAX_CHARS} characters (this one is ${input.key.length}); it identifies the report to the operator, so it is refused rather than shortened`,
+      );
+    }
+  }
 }
 
 /**
@@ -404,6 +413,7 @@ export function appendBridgeReports(
   inputs: readonly BridgeReportInput[],
 ): { appended: BridgeReportV1[]; skipped: number } {
   if (inputs.length === 0) return { appended: [], skipped: 0 };
+  assertStorableKeys(inputs);
   return withFileTransactionSync(bridgeReportLogPath(), BRIDGE_LOG_BUSY, () => {
     const file = readLog();
     const known = new Set<string>([...file.reports.map((report) => report.id), ...file.retired]);
@@ -417,13 +427,15 @@ export function appendBridgeReports(
       }
       known.add(id);
       file.lastSeq += 1;
-      const storedKey = bridgeReportKeyForRecord(input.key);
       const report: BridgeReportV1 = {
         id,
         seq: file.lastSeq,
         at: input.at,
         class: input.class,
-        ...(storedKey ? { key: storedKey } : {}),
+        /* The verbatim key is kept for the classes that become an attention
+           item and for no others (#1168): a `status` row is identified by its
+           hashed `id` exactly as it was before this field existed. */
+        ...(isBridgeDecisionRequestClass(input.class) ? { key: input.key } : {}),
         body: bridgeReportBody(input.body),
         ...(input.origin ? { origin: normalizeOrigin(input.origin) } : {}),
         ...("project" in input ? { project: typeof input.project === "string" ? input.project : null } : {}),
@@ -481,7 +493,7 @@ export function appendBridgeReports(
 }
 
 /**
- * Record that a directive answered report `ref` (#1168).
+ * Record that `scope`'s directive answered report `ref` (#1168).
  *
  * The gateway's trailer is the only thing that can say a `question` was
  * ANSWERED — the cursor says only that it was read aloud — so the answer has to
@@ -489,12 +501,26 @@ export function appendBridgeReports(
  * channel: the seq it names is already log-global, and the attention queue then
  * needs exactly one file to know whether a report is still asking.
  *
+ * Log-global is also why the seq alone may never be taken at face value. The
+ * ref is resolved against the log INSIDE the write transaction and recorded only
+ * when it names a decision request this directive's own seat filed:
+ *
+ * - a ref naming nothing yet would sit in the file waiting to pre-answer
+ *   whatever report later takes that seq, silencing a question nobody replied to;
+ * - a ref naming another project's row would let one project's directive clear
+ *   another project's ask, because the number carries no ownership of its own;
+ * - a ref naming a `status` row settles nothing that was ever asking.
+ *
  * Idempotent, so a directive retry under the same derived id costs nothing.
  */
-export function recordBridgeDirectiveAnswer(ref: number): void {
+export function recordBridgeDirectiveAnswer(ref: number, scope: BridgeChannelScope): void {
   if (!Number.isInteger(ref) || ref < 1) return;
   withFileTransactionSync(bridgeReportLogPath(), BRIDGE_LOG_BUSY, () => {
     const file = readLog();
+    const answered = file.reports.find((report) => report.seq === ref);
+    if (!answered || !isBridgeDecisionRequestClass(answered.class)) return;
+    if (answered.project !== scope.project) return;
+    if (answered.targetSeatConversationId !== scope.seatConversationId) return;
     const refs = file.answeredRefs ?? [];
     if (refs.includes(ref)) return;
     file.answeredRefs = normalizeAnsweredRefs([...refs, ref]);

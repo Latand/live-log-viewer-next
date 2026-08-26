@@ -13,7 +13,7 @@ import {
   recordBridgeDirectiveAnswer,
   recordManagerReport as recordBridgeReport,
 } from "./service";
-import { appendBridgeReports, drainBridgeReports, openBridgeChannel, readBridgeChannel } from "./store";
+import { appendBridgeReports, drainBridgeReports, openBridgeChannel, readBridgeChannel, readBridgeReportLog } from "./store";
 import type { BridgeReportInput } from "./types";
 
 /**
@@ -297,7 +297,7 @@ test("a directive that answers the report's seq clears the ask", () => {
   });
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
 
-  recordBridgeDirectiveAnswer(appended!.seq);
+  recordBridgeDirectiveAnswer(appended!.seq, SCOPE);
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
 
   /* Durable: the answer survives a later append, which rewrites the log file. */
@@ -313,8 +313,78 @@ test("answering a different seq leaves the ask standing", () => {
     at: NOW.toISOString(),
     body: "which base branch?",
   });
-  recordBridgeDirectiveAnswer(appended!.seq + 41);
+  recordBridgeDirectiveAnswer(appended!.seq + 41, SCOPE);
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
+});
+
+/**
+ * A report seq is LOG-GLOBAL — the number itself says nothing about whose
+ * report it is, or whether that report exists yet. So an answer is recorded
+ * only after the ref has been resolved against the log to a decision request
+ * the answering seat's own project filed. The three cases below are the three
+ * ways a bare number would have silenced a question nobody replied to.
+ */
+
+test("a ref that names nothing yet cannot pre-answer the report that later takes that seq", () => {
+  sandbox();
+  /* Nothing has been filed: seq 1 does not exist. Recorded blindly, it would
+     sit in the log waiting for the first report to arrive and be born answered. */
+  recordBridgeDirectiveAnswer(1, SCOPE);
+
+  const appended = recordManagerReport({
+    key: "lane-9-question",
+    class: "question",
+    at: NOW.toISOString(),
+    body: "which base branch?",
+  });
+  expect(appended!.seq).toBe(1);
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
+});
+
+test("another project's directive cannot clear this project's ask", () => {
+  sandbox();
+  const appended = recordManagerReport({
+    key: "lane-9-question",
+    class: "question",
+    at: NOW.toISOString(),
+    body: "which base branch?",
+  });
+
+  recordBridgeDirectiveAnswer(appended!.seq, {
+    project: "repo-project-b",
+    seatConversationId: "conversation_manager_b",
+  });
+  /* Same seq, wrong owner on both axes — and the seat alone is not enough
+     either, since a seq is global across projects. */
+  recordBridgeDirectiveAnswer(appended!.seq, {
+    project: SCOPE.project,
+    seatConversationId: "conversation_manager_b",
+  });
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
+
+  recordBridgeDirectiveAnswer(appended!.seq, SCOPE);
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
+});
+
+test("a ref naming a report that was never asking settles nothing, and a retry settles once", () => {
+  sandbox();
+  const progress = recordManagerReport({ key: "lane-9-progress", class: "status", at: NOW.toISOString(), body: "moving" });
+  const question = recordManagerReport({
+    key: "lane-9-question",
+    class: "question",
+    at: NOW.toISOString(),
+    body: "which base branch?",
+  });
+
+  recordBridgeDirectiveAnswer(progress!.seq, SCOPE);
+  expect(readBridgeReportLog().answeredRefs ?? []).toEqual([]);
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
+
+  /* A directive retry re-presents the same ref; the log records it once. */
+  recordBridgeDirectiveAnswer(question!.seq, SCOPE);
+  recordBridgeDirectiveAnswer(question!.seq, SCOPE);
+  expect(readBridgeReportLog().answeredRefs).toEqual([question!.seq]);
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
 });
 
 test("re-appending the same report key produces no second ask", () => {

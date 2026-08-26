@@ -119,21 +119,42 @@ test("a manager retry under one key yields one seq and one log entry (§7.5)", (
   expect(log.lastSeq).toBe(1);
 });
 
-test("the row keeps the caller's key verbatim, and drops it rather than truncate it (#1168)", () => {
+test("a decision request keeps the caller's key verbatim; other classes keep none (#1168)", () => {
   sandbox();
   openBridgeChannel(ROOT_ID);
-  const oversized = "k".repeat(BRIDGE_REPORT_KEY_MAX_CHARS + 1);
-  const appended = appendBridgeReports([report("lane-4-blocked"), report(oversized)]);
+  const appended = appendBridgeReports([
+    report("lane-4-blocked", { class: "blocked" }),
+    report("stage-7-progress", { class: "status" }),
+  ]);
 
-  /* The key leaves the log as an attention item id, so it round-trips exactly. */
+  /* The key leaves the log again as the attention item's id, so it round-trips
+     exactly for the classes that become one. */
   expect(appended.appended[0]!.key).toBe("lane-4-blocked");
   expect(readBridgeReportLog().reports[0]!.key).toBe("lane-4-blocked");
-  /* Past the cap it is dropped, never shortened: two long keys sharing a prefix
-     would otherwise share one attention identity. The hashed id still comes
-     from the FULL key, so idempotent re-append is untouched. */
+  /* A class that never enters the queue is identified by its hashed id alone,
+     exactly as it was before the field existed. */
   expect(appended.appended[1]!.key).toBeUndefined();
-  expect(appended.appended[1]!.id).toBe(bridgeReportId(oversized));
-  expect(appendBridgeReports([report(oversized)]).skipped).toBe(1);
+  expect(appended.appended[1]!.id).toBe(bridgeReportId("stage-7-progress"));
+});
+
+test("a key too long to keep verbatim is refused before anything is appended (#1168)", () => {
+  sandbox();
+  openBridgeChannel(ROOT_ID);
+  appendBridgeReports([report("lane-4-blocked", { class: "blocked" })]);
+
+  /* Neither shortened into an identity two reports could share nor demoted to
+     the hash — both would break "the item id is the report key" for a report
+     the log had already accepted. The whole batch fails, so the well-formed
+     sibling filed alongside it does not land either. */
+  const oversized = "k".repeat(BRIDGE_REPORT_KEY_MAX_CHARS + 1);
+  expect(() => appendBridgeReports([
+    report("lane-5-blocked", { class: "blocked" }),
+    report(oversized, { class: "blocked" }),
+  ])).toThrow(new RegExp(`at most ${BRIDGE_REPORT_KEY_MAX_CHARS} characters`));
+
+  const log = readBridgeReportLog();
+  expect(log.reports.map((entry) => entry.key)).toEqual(["lane-4-blocked"]);
+  expect(log.lastSeq).toBe(1);
 });
 
 test("the drain returns one bounded batch oldest first and reports what is left", () => {

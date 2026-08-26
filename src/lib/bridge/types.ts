@@ -59,14 +59,15 @@ export const BRIDGE_ASK_TTL_SECONDS = 2 * 3600;
 /** §3: report bodies are bounded. Measured in UTF-8 bytes, not code units. */
 export const BRIDGE_REPORT_BODY_MAX_BYTES = 2_048;
 /**
- * How long a caller `key` may be and still be kept verbatim on its row (#1168).
+ * The longest caller `key` a report may be filed under (#1168).
  *
- * The key is caller-supplied text that now leaves the log as an attention item
- * id, so it is bounded like everything else a caller writes here. Truncating it
- * is the one thing that must NOT happen: two long keys sharing a prefix would
- * then share an attention identity. A key past the cap is simply not kept, and
- * its row keeps asking under the hashed `id` — which stays derived from the
- * FULL key, so idempotent re-append is unaffected either way.
+ * The key is caller-supplied text that leaves the log again as the attention
+ * item's id, so it is bounded like everything else a caller writes here — and
+ * this bound REFUSES rather than reshapes. Truncating would let two long keys
+ * sharing a prefix collide into one attention identity, and falling back to the
+ * hashed id would break "id = report key" for exactly the reports the queue
+ * exists to carry. So an oversized key is rejected at the tool schema and again
+ * at append, before any row exists to be identified.
  */
 export const BRIDGE_REPORT_KEY_MAX_CHARS = 256;
 
@@ -102,6 +103,16 @@ export type BridgeStoredReportClass = BridgeReportClass | typeof LEGACY_CONFIRMA
 
 export function isStoredBridgeReportClass(value: unknown): value is BridgeStoredReportClass {
   return isBridgeReportClass(value) || value === LEGACY_CONFIRMATION_CLASS;
+}
+
+/**
+ * The two classes in which the manager is ASKING rather than reporting: `blocked`
+ * ("I cannot proceed") and `question` ("I need an answer"). They are the only
+ * rows that open an attention item, the only rows whose caller key is kept
+ * verbatim, and the only rows a directive can answer (#1168).
+ */
+export function isBridgeDecisionRequestClass(value: BridgeStoredReportClass): boolean {
+  return value === "blocked" || value === "question";
 }
 
 /**
@@ -149,9 +160,10 @@ export interface BridgeReportV1 {
   /** Derived from the caller's stable `key`; a re-append is a no-op. */
   id: string;
   /** The caller's own `key`, verbatim — the identity #1168 puts on the
-      attention item, which the hashed `id` cannot spell back out. Absent on
-      rows written before this field existed and on a key past
-      {@link BRIDGE_REPORT_KEY_MAX_CHARS}; readers fall back to `id`. */
+      attention item, which the hashed `id` cannot spell back out. Kept only on
+      the decision-request classes, which are the only rows that become an
+      attention item; absent on every other class and on rows written before
+      this field existed, where readers fall back to `id`. */
   key?: string;
   at: string;
   class: BridgeStoredReportClass;
