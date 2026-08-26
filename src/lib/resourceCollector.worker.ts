@@ -5,8 +5,8 @@ import { parentPort } from "node:worker_threads";
 
 import { createTranscriptHostObserver } from "./agent/transcriptHost";
 import { procBackend } from "./proc";
-import { agentProcesses } from "./scanner/process";
-import { buildResourceSnapshot, lastResourceBuildDiagnostic, lastResourceTargetRefs, lastStructuredHostTargetRefs, RESOURCE_WORKER_OUTPUT_MAX_BYTES, type ResourceWorkerFileObservation, type StructuredHostRecord } from "./resources";
+import { agentProcesses, readStructuredHostStamp } from "./scanner/process";
+import { buildResourceSnapshot, lastResourceBuildDiagnostic, lastResourceTargetRefs, RESOURCE_WORKER_OUTPUT_MAX_BYTES, type ResourceWorkerFileObservation, type StructuredHostRecord } from "./resources";
 import { overlayResourceSessionTitles } from "./session/titleProjection";
 import { captureTmuxAttachReferences, panePidMap, tmuxServerPid } from "./tmux";
 import { RESOURCE_STRUCTURED_HOST_LIMIT, type FileEntry } from "./types";
@@ -119,16 +119,11 @@ async function collect(message: unknown): Promise<void> {
       listAgentProcesses: agentProcesses,
       directoryExists: (directory) => existsSync(directory),
       processIdentity: procBackend.processIdentity,
+      hostStamp: readStructuredHostStamp,
     });
     const diagnostic = lastResourceBuildDiagnostic();
     if (!diagnostic) throw new Error("resource worker completed without diagnostics");
-    send({
-      type: "observation",
-      payload,
-      diagnostic,
-      targets: lastResourceTargetRefs(),
-      hostTargets: lastStructuredHostTargetRefs(),
-    });
+    send({ type: "observation", payload, diagnostic, targets: lastResourceTargetRefs() });
   } catch (error) {
     send({ type: "failure", error: error instanceof Error ? error.message : String(error) });
   }

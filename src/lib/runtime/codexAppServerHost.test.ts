@@ -8,6 +8,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/process";
 import { saveTelegramSession, TELEGRAM_CONNECTOR_TOKEN_ENV } from "@/lib/telegram/sessionStore";
 
 import { CodexAppServerHost, redactCodexHostDiagnostic } from "./codexAppServerHost";
@@ -1308,7 +1309,14 @@ describe("CodexAppServerHost", () => {
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server, captured),
     });
-    expect(captured.options?.env).toEqual({ NODE_ENV: "test", PATH: process.env.PATH, CODEX_HOME: "/codex-home" });
+    /* The allowlisted env, plus the provenance stamp the resources rail needs
+       to tell this host from any other process wearing the same argv (#1199). */
+    expect(captured.options?.env).toEqual({
+      NODE_ENV: "test",
+      PATH: process.env.PATH,
+      CODEX_HOME: "/codex-home",
+      [STRUCTURED_HOST_STAMP_ENV]: structuredHostStamp(),
+    });
     expect(host.identity).toEqual({ threadId: "thread-149", path: "/sessions/thread-149.jsonl" });
 
     const first = host.attach(0);

@@ -51,7 +51,7 @@ function host(over: Partial<ResourceSession> & Pick<ResourceSession, "target">):
 
 interface KillCall {
   url: string;
-  body: { action?: string; target?: string; includeSeat?: boolean };
+  body: { action?: string; target?: string; includeSeat?: boolean; intent?: string; idleHours?: number };
 }
 
 function stubFetch(): KillCall[] {
@@ -156,7 +156,7 @@ test("a per-row kill posts the host target to the structured kill endpoint", asy
 
   expect(calls).toEqual([{
     url: "/api/runtime/hosts",
-    body: { action: "kill", target: "structured:claude:lane", includeSeat: true },
+    body: { action: "kill", target: "structured:claude:lane", intent: "row", includeSeat: true },
   }]);
 });
 
@@ -173,7 +173,11 @@ test("kill idle skips the live host and the unticked orchestrator seat", async (
   click(bulk);
   await settle();
 
-  expect(calls.map((call) => call.body.target)).toEqual(["structured:claude:lane"]);
+  /* The threshold travels with the request: the server re-proves the idle age
+     against it rather than trusting the snapshot the rail polled. */
+  expect(calls.map((call) => call.body)).toEqual([
+    { action: "kill", target: "structured:claude:lane", intent: "idle", includeSeat: false, idleHours: 2 },
+  ]);
 });
 
 test("ticking an orchestrator seat brings it into the bulk kills", async () => {
@@ -189,9 +193,9 @@ test("ticking an orchestrator seat brings it into the bulk kills", async () => {
   click(bulk);
   await settle();
 
-  expect(calls.map((call) => [call.body.target, call.body.includeSeat])).toEqual([
-    ["structured:claude:lane", false],
-    ["structured:codex:seat", true],
+  expect(calls.map((call) => [call.body.target, call.body.includeSeat, call.body.intent])).toEqual([
+    ["structured:claude:lane", false, "idle"],
+    ["structured:codex:seat", true, "idle"],
   ]);
 });
 
@@ -209,5 +213,5 @@ test("kill all arms first, then force-kills the live hosts too but never an unti
 
   click(buttonLabelled(view, "Confirm"));
   await settle();
-  expect(calls.map((call) => call.body.target)).toEqual(["structured:claude:live"]);
+  expect(calls.map((call) => [call.body.target, call.body.intent])).toEqual([["structured:claude:live", "all"]]);
 });

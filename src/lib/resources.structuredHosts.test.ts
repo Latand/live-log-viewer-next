@@ -6,15 +6,15 @@ import path from "node:path";
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 
 import { procBackend } from "@/lib/proc";
-import type { AgentProcess } from "@/lib/scanner/process";
+import { structuredHostStamp, type AgentProcess } from "@/lib/scanner/process";
 import type { FileEntry, ResourceSession } from "@/lib/types";
 
 import {
   allowedStructuredHostTarget,
   buildResourceSnapshot,
-  consumeStructuredHostTarget,
-  lastStructuredHostTargetRefs,
-  noteStructuredHostTargets,
+  consumeKillTarget,
+  lastResourceTargetRefs,
+  noteSessionTargets,
   resetResourcesForTests,
   type ResourceSnapshotDependencies,
   type StructuredHostRecord,
@@ -98,6 +98,9 @@ function dependencies(over: Partial<ResourceSnapshotDependencies> = {}): Resourc
     listAgentProcesses: () => [],
     directoryExists: () => true,
     processIdentity: (pid) => `${pid}:start`,
+    /* Scan-discovered hosts have to prove the viewer spawned them; these
+       fixtures stand in for processes carrying this viewer's own stamp. */
+    hostStamp: () => structuredHostStamp(),
     ...over,
   };
 }
@@ -166,6 +169,11 @@ test("ownership separates a held host from a released one and from a vanished wo
     ["structured:claude:let-go", "released"],
     ["structured:claude:gone", "orphaned"],
   ]);
+  /* None of these records ever captured a start identity. The rows still get
+     one — the identity observed with the pid now — because a null would hand
+     the kill fence a pid the kernel may recycle under it. */
+  expect(lastResourceTargetRefs().map(({ ref }) => (ref as { startIdentity: string }).startIdentity))
+    .toEqual(["10:start", "11:start", "12:start"]);
 });
 
 test("a host process no record covers is listed as orphaned so it can be reclaimed", async () => {
@@ -206,7 +214,28 @@ test("the operator's own CLIs and account-migration successors never enter the l
   }));
 
   expect(payload.sessions).toEqual([]);
-  expect(lastStructuredHostTargetRefs()).toEqual([]);
+  expect(lastResourceTargetRefs()).toEqual([]);
+});
+
+test("a process wearing the same command line without this viewer's stamp is nobody's to kill", async () => {
+  const payload = await buildResourceSnapshot(true, dependencies({
+    /* Byte-for-byte the argv a host runs — another agent harness, a desktop
+       client, a second viewer installation. Only the environment tells them
+       apart, and only this viewer's own stamp gets in. */
+    listAgentProcesses: () => [
+      agent({ pid: 9_001, engine: "codex", argv: CODEX_HOST_ARGV }),
+      agent({ pid: 9_002, argv: CLAUDE_BROKER_ARGV }),
+      agent({ pid: 9_003, argv: CLAUDE_BROKER_ARGV }),
+    ],
+    proc: {
+      systemMemory: () => null,
+      ppidMap: () => new Map(),
+      processMemory: () => memory([9_001, 9_002, 9_003]),
+    },
+    hostStamp: (pid) => (pid === 9_003 ? structuredHostStamp() : pid === 9_002 ? "/some/other/viewer/state" : null),
+  }));
+
+  expect(payload.sessions.map((session) => session.target)).toEqual(["structured:pid:9003"]);
 });
 
 test("a record whose process exited or was recycled is dropped", async () => {
@@ -243,13 +272,14 @@ test("the kill allowlist holds exactly the listed hosts and a consumed target ca
       processMemory: () => new Map([[4_100, { rssBytes: 2, swapBytes: 0 }], [5_000, { rssBytes: 1, swapBytes: 0 }]]),
     },
   }));
-  noteStructuredHostTargets(lastStructuredHostTargetRefs());
+  noteSessionTargets(lastResourceTargetRefs());
 
-  expect(lastStructuredHostTargetRefs().map(({ target }) => target).sort()).toEqual([
+  expect(lastResourceTargetRefs().map(({ target }) => target).sort()).toEqual([
     `structured:claude:${CLAUDE_SESSION}`,
     "structured:codex:seat",
   ]);
   expect(allowedStructuredHostTarget("structured:codex:seat")).toEqual({
+    kind: "structured",
     pid: 5_000,
     startIdentity: "5000:start",
     engine: "codex",
@@ -262,7 +292,7 @@ test("the kill allowlist holds exactly the listed hosts and a consumed target ca
   });
   expect(allowedStructuredHostTarget("structured:codex:not-listed")).toBeNull();
 
-  consumeStructuredHostTarget("structured:codex:seat");
+  consumeKillTarget("structured:codex:seat");
   expect(allowedStructuredHostTarget("structured:codex:seat")).toBeNull();
 });
 
@@ -337,7 +367,7 @@ test("the collector worker turns a host record into a listed row with kill autho
   const observation = JSON.parse(stdout) as {
     type: string;
     payload: { sessions: Array<Record<string, unknown>> };
-    hostTargets: Array<{ target: string; ref: Record<string, unknown> }>;
+    targets: Array<{ target: string; ref: Record<string, unknown> }>;
   };
   expect(observation.type).toBe("observation");
   const row = observation.payload.sessions.find((session) => session.target === "structured:claude:worker-host");
@@ -355,7 +385,8 @@ test("the collector worker turns a host record into a listed row with kill autho
   });
   expect(row?.rssBytes as number).toBeGreaterThan(0);
   expect(row?.procCount as number).toBeGreaterThanOrEqual(2);
-  expect(observation.hostTargets.find((target) => target.target === "structured:claude:worker-host")?.ref).toMatchObject({
+  expect(observation.targets.find((target) => target.target === "structured:claude:worker-host")?.ref).toMatchObject({
+    kind: "structured",
     pid,
     startIdentity,
     engine: "claude",

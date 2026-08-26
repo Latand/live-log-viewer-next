@@ -3800,3 +3800,46 @@ describe("transcript ownership (issue #891 phase 0)", () => {
     expect(store.transcriptAccountId("codex", "/sessions/rollout-unseen.jsonl")).toBeNull();
   });
 });
+
+describe("structured host retirement (issue #1199)", () => {
+  function hostedEntry(process: { pid: number; startIdentity: string | null } | null) {
+    return {
+      ...spawnEntry("/repo/019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl"),
+      structuredHost: {
+        kind: "codex-app-server" as const,
+        endpoint: "stdio:live",
+        process,
+        eventCursor: 0,
+        protocolVersion: null,
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+    };
+  }
+
+  test("retiring a row leaves a replacement generation's host alone", () => {
+    const store = registry();
+    store.upsert(hostedEntry({ pid: 424_242, startIdentity: "424242:replacement" }));
+
+    /* The rail's kill ended the host it listed; by the time it retires the
+       row, a successor already claimed the seat and wrote its own process
+       into it. Clearing it now would strand a live host with no row. */
+    expect(store.terminateStructuredHost(KEY, { pid: 424_100, startIdentity: "424100:killed" })).toBeFalse();
+    expect(store.readOnlySnapshot().entries[`codex:${KEY.sessionId}`]?.structuredHost?.process?.pid).toBe(424_242);
+
+    expect(store.terminateStructuredHost(KEY, { pid: 424_242, startIdentity: "424242:replacement" })).toBeTrue();
+    const retired = store.readOnlySnapshot().entries[`codex:${KEY.sessionId}`];
+    expect(retired?.structuredHost).toBeNull();
+    expect(retired?.status).toBe("dead");
+  });
+
+  test("a row that names no process at all is still the caller's to clear", () => {
+    const store = registry();
+    store.upsert(hostedEntry(null));
+
+    expect(store.terminateStructuredHost(KEY, { pid: 424_100, startIdentity: "424100:killed" })).toBeTrue();
+    expect(store.readOnlySnapshot().entries[`codex:${KEY.sessionId}`]?.structuredHost).toBeNull();
+  });
+});

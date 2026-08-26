@@ -1,6 +1,14 @@
+import { spawn } from "node:child_process";
+
 import { expect, test } from "bun:test";
 
-import { accountMigrationHostArgv, structuredHostEngine } from "./process";
+import {
+  accountMigrationHostArgv,
+  readStructuredHostStamp,
+  STRUCTURED_HOST_STAMP_ENV,
+  structuredHostEngine,
+  structuredHostStamp,
+} from "./process";
 
 const CLAUDE_BROKER = [
   "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -31,4 +39,37 @@ test("an account-migration successor is recognised so bulk kills leave it alone"
   expect(accountMigrationHostArgv([...CLAUDE_BROKER, "--resume", "/t.jsonl", "--fork-session"])).toBe(true);
   expect(accountMigrationHostArgv(CLAUDE_BROKER)).toBe(false);
   expect(accountMigrationHostArgv(CODEX_APP_SERVER)).toBe(false);
+});
+
+test("only the stamp this viewer writes marks a process as its own host", async () => {
+  const stamped = spawn("/bin/sh", ["-c", "sleep 30"], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, [STRUCTURED_HOST_STAMP_ENV]: structuredHostStamp() },
+  });
+  const foreign = spawn("/bin/sh", ["-c", "sleep 30"], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, [STRUCTURED_HOST_STAMP_ENV]: "/some/other/viewer/state" },
+  });
+  const bare = spawn("/bin/sh", ["-c", "sleep 30"], { detached: true, stdio: "ignore" });
+  const children = [stamped, foreign, bare];
+  try {
+    /* The environment is written before exec, so it is readable as soon as
+       the pid exists; give the spawn a beat regardless. */
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const stampOf = (child: typeof stamped) => readStructuredHostStamp(child.pid ?? 0);
+
+    expect(stampOf(stamped)).toBe(structuredHostStamp());
+    expect(stampOf(foreign)).not.toBe(structuredHostStamp());
+    expect(stampOf(bare)).toBeNull();
+  } finally {
+    for (const child of children) {
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  }
 });

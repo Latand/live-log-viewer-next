@@ -10,6 +10,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
+import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/process";
 import { saveTelegramSession, TELEGRAM_CONNECTOR_TOKEN_ENV } from "@/lib/telegram/sessionStore";
 
 import {
@@ -351,7 +352,13 @@ describe("ClaudeStreamBrokerHost", () => {
       spawnProcess: fakeSpawn(child, captured),
     });
 
-    expect(captured.options?.env).toEqual({ NODE_ENV: "test", PATH: process.env.PATH });
+    /* The allowlisted env, plus the provenance stamp the resources rail needs
+       to tell this host from any other process wearing the same argv (#1199). */
+    expect(captured.options?.env).toEqual({
+      NODE_ENV: "test",
+      PATH: process.env.PATH,
+      [STRUCTURED_HOST_STAMP_ENV]: structuredHostStamp(),
+    });
     expect(captured.args).toContain("--input-format");
     expect(captured.args).toContain("--output-format");
     expect(captured.args).not.toContain("--safe-mode");
@@ -1150,6 +1157,7 @@ describe("ClaudeStreamBrokerHost", () => {
       NODE_ENV: "test",
       PATH: process.env.PATH,
       CLAUDE_CONFIG_DIR: configDir,
+      [STRUCTURED_HOST_STAMP_ENV]: structuredHostStamp(),
     });
     expect(await host.send({ id: "managed-entry", text: "managed prompt" })).toEqual({ outcome: "turn-started", turnId: "managed-entry" });
     expect(child.inputs).toHaveLength(0);

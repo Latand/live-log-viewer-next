@@ -62,14 +62,16 @@ test("kill all takes live hosts too — that is the point of the clean slate", (
   expect(bulkKillTargets(sessions, new Set()).map((item) => item.target)).toEqual(["live", "idle"]);
 });
 
-test("the footer counts hosts, idle hosts and the memory they hold", () => {
+test("the footer counts hosts, idle hosts and the resident memory they hold", () => {
   const sessions = [
     session({ target: "a", kind: "structured", rssBytes: 600, swapBytes: 40, lastActiveAt: hoursAgo(6) }),
-    session({ target: "b", kind: "structured", rssBytes: 300, swapBytes: 0, activity: "live" }),
+    session({ target: "b", kind: "structured", rssBytes: 300, swapBytes: 7, activity: "live" }),
     session({ target: "c", rssBytes: 100, swapBytes: 0, lastActiveAt: hoursAgo(3) }),
   ];
 
-  expect(resourceCounts(sessions, 2, NOW)).toEqual({ hosts: 3, idle: 2, bytes: 1_040 });
+  /* Resident only: the swapped-out pages of these hosts are not RAM they are
+     holding, and the Swap row above already reports that pressure. */
+  expect(resourceCounts(sessions, 2, NOW)).toEqual({ hosts: 3, idle: 2, bytes: 1_000 });
 });
 
 test("a row without a kind is a legacy tmux pane", () => {

@@ -17,7 +17,14 @@ import {
   type ResourceObservation,
 } from "@/lib/resourceCollector";
 import { descendantPids } from "@/lib/proc/memory";
-import { accountMigrationHostArgv, agentProcesses, structuredHostEngine, type AgentProcess } from "@/lib/scanner/process";
+import {
+  accountMigrationHostArgv,
+  agentProcesses,
+  readStructuredHostStamp,
+  structuredHostEngine,
+  structuredHostStamp,
+  type AgentProcess,
+} from "@/lib/scanner/process";
 import { overlayResourceSessionTitles } from "@/lib/session/titleProjection";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { captureTmuxAttachReferences, type TmuxAttachReference } from "@/lib/tmux";
@@ -143,7 +150,7 @@ function captureSystemMemory(proc: Pick<ProcBackend, "systemMemory"> = procBacke
 
 /** What the kill path needs to take a snapshot session down safely: the
     stable `%N` pane id to address, and the pane pid to verify it against. */
-export type KillTargetRef = TmuxAttachReference;
+export type KillTargetRef = TmuxAttachReference | StructuredHostKillRef;
 
 /**
  * One structured host as the registry knows it, assembled by the viewer and
@@ -176,13 +183,18 @@ export interface StructuredHostRecord {
 
 /**
  * Server-held authority for one structured kill. It carries the process fence
- * (pid plus start identity) and everything the kill route needs to refuse a
- * target on its own terms — the seat opt-in above all — so a client can never
- * widen what a listed row authorizes.
+ * (pid plus the start identity observed with it, never null — an unverifiable
+ * process grants no authority at all) and everything the kill route needs to
+ * refuse a target on its own terms, so a client can never widen what a listed
+ * row authorizes.
  */
 export interface StructuredHostKillRef {
+  /** Discriminates this ref from a pane reference in the one target map.
+      A ref without it is a tmux pane, which is what every observation
+      persisted before structured hosts were listed carries. */
+  kind: "structured";
   pid: number;
-  startIdentity: string | null;
+  startIdentity: string;
   engine: "claude" | "codex";
   sessionId: string | null;
   conversationId: string | null;
@@ -190,6 +202,10 @@ export interface StructuredHostKillRef {
   turnBusy: boolean;
   owned: boolean;
   lastActiveAt: string | null;
+}
+
+export function isStructuredHostKillRef(ref: KillTargetRef): ref is StructuredHostKillRef {
+  return (ref as Partial<StructuredHostKillRef>).kind === "structured";
 }
 
 /** Structured rows carry this prefix so a pane target and a host target can
@@ -201,8 +217,6 @@ const globalStore = globalThis as unknown as {
   __llvResourcesReaderVersion?: number;
   __llvResourceTargets?: Map<string, KillTargetRef>;
   __llvLastResourceTargets?: Array<{ target: string; ref: KillTargetRef }>;
-  __llvStructuredHostTargets?: Map<string, StructuredHostKillRef>;
-  __llvLastStructuredHostTargets?: Array<{ target: string; ref: StructuredHostKillRef }>;
   __llvResourceTargetsGeneration?: number;
   __llvResourceTargetEpoch?: number;
   __llvLastResourceBuild?: ResourceBuildDiagnostic;
@@ -232,35 +246,16 @@ function rememberResourceTargets(sessions: Iterable<{ target: string; ref: KillT
   globalStore.__llvLastResourceTargets = [...sessions].map(({ target, ref }) => ({ target, ref }));
 }
 
-/**
- * The same server-held allowlist, for structured hosts. A kill request names a
- * target the last snapshot listed; anything else — the operator's own shell,
- * the viewer, the runtime host, a migration worker — has no entry here and is
- * refused before a single signal is composed.
- */
-export function noteStructuredHostTargets(hosts: Iterable<{ target: string; ref: StructuredHostKillRef }>): void {
-  const map = new Map<string, StructuredHostKillRef>();
-  for (const { target, ref } of hosts) map.set(target, ref);
-  globalStore.__llvStructuredHostTargets = map;
-  rememberStructuredHostTargets([...map].map(([target, ref]) => ({ target, ref })));
-}
-
-function rememberStructuredHostTargets(hosts: Iterable<{ target: string; ref: StructuredHostKillRef }>): void {
-  globalStore.__llvLastStructuredHostTargets = [...hosts].map(({ target, ref }) => ({ target, ref }));
-}
-
 /** Applies a served observation exactly once in generation order. A consumed
     target therefore cannot return through a late observation. */
 export function applyResourceTargets(
   generation: number,
   sessions: Iterable<{ target: string; ref: KillTargetRef }>,
   collectionEpoch = globalStore.__llvResourceTargetEpoch ?? 0,
-  hosts: Iterable<{ target: string; ref: StructuredHostKillRef }> = [],
 ): void {
   if (collectionEpoch !== (globalStore.__llvResourceTargetEpoch ?? 0)) return;
   if (generation <= (globalStore.__llvResourceTargetsGeneration ?? 0)) return;
   noteSessionTargets(sessions);
-  noteStructuredHostTargets(hosts);
   globalStore.__llvResourceTargetsGeneration = generation;
 }
 
@@ -271,10 +266,13 @@ export function lastResourceTargetRefs(): Array<{ target: string; ref: KillTarge
   return globalStore.__llvLastResourceTargets?.map(({ target, ref }) => ({ target, ref: { ...ref } })) ?? [];
 }
 
-/** Snapshot pane ref recorded for `target`, or null when it was never listed. */
-export function allowedKillTarget(target: string): KillTargetRef | null {
+/** Snapshot pane ref recorded for `target`, or null when it was never listed
+    — or when the row it names is a structured host, which the tmux kill and
+    attach paths have nothing to do with. */
+export function allowedKillTarget(target: string): TmuxAttachReference | null {
   if (target === "") return null;
-  return globalStore.__llvResourceTargets?.get(target) ?? null;
+  const ref = globalStore.__llvResourceTargets?.get(target) ?? null;
+  return ref === null || isStructuredHostKillRef(ref) ? null : ref;
 }
 
 /** Drops `target` from the allowlist after a kill: the coordinates are free
@@ -285,23 +283,14 @@ export function consumeKillTarget(target: string): void {
   }
 }
 
-/** Structured host refs from the observation most recently derived here. */
-export function lastStructuredHostTargetRefs(): Array<{ target: string; ref: StructuredHostKillRef }> {
-  return globalStore.__llvLastStructuredHostTargets?.map(({ target, ref }) => ({ target, ref: { ...ref } })) ?? [];
-}
-
-/** Snapshot host ref recorded for `target`, or null when it was never listed. */
+/** Snapshot host ref recorded for `target`, or null when it was never listed
+    (the operator's own shell, the viewer, the runtime host and the migration
+    workers are never listed, so nothing can name them) or when the row it
+    names is a tmux pane. */
 export function allowedStructuredHostTarget(target: string): StructuredHostKillRef | null {
   if (target === "") return null;
-  return globalStore.__llvStructuredHostTargets?.get(target) ?? null;
-}
-
-/** Drops `target` after a kill so a repeated POST cannot pass the gate against
-    a pid the kernel has since handed to something else. */
-export function consumeStructuredHostTarget(target: string): void {
-  if (globalStore.__llvStructuredHostTargets?.delete(target)) {
-    globalStore.__llvResourceTargetEpoch = (globalStore.__llvResourceTargetEpoch ?? 0) + 1;
-  }
+  const ref = globalStore.__llvResourceTargets?.get(target) ?? null;
+  return ref !== null && isStructuredHostKillRef(ref) ? ref : null;
 }
 
 /** The resources rail may list duplicate panes for cleanup. Only the host
@@ -345,6 +334,9 @@ export interface ResourceSnapshotDependencies {
   directoryExists?(directory: string): boolean;
   /** Liveness and recycled-pid fence for a recorded host process. */
   processIdentity?(pid: number): string | null;
+  /** Viewer provenance a live process carries, for the scan-discovered hosts
+      no registry record covers. */
+  hostStamp?(pid: number): string | null;
 }
 
 /** The registry read behind the inventory, loaded on demand: the contained
@@ -367,6 +359,7 @@ const resourceSnapshotDependencies: ResourceSnapshotDependencies = {
   listAgentProcesses: agentProcesses,
   directoryExists: (directory) => existsSync(directory),
   processIdentity: (pid) => procBackend.processIdentity(pid),
+  hostStamp: readStructuredHostStamp,
 };
 
 export type ResourceFileObservation = Readonly<Pick<FileEntry,
@@ -411,18 +404,24 @@ async function structuredHostTrees(
   fresh: boolean,
   ppids: Map<number, number>,
   dependencies: ResourceSnapshotDependencies,
-): Promise<Array<{ record: StructuredHostRecord; tree: number[] }>> {
+): Promise<Array<{ record: StructuredHostRecord & { startIdentity: string }; tree: number[] }>> {
   const records = (await dependencies.readStructuredHosts?.(fresh)) ?? [];
   const identity = dependencies.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
-  const live: StructuredHostRecord[] = [];
+  const stampOf = dependencies.hostStamp ?? readStructuredHostStamp;
+  const ourStamp = structuredHostStamp();
+  const live: Array<StructuredHostRecord & { startIdentity: string }> = [];
   const claimed = new Set<number>();
   for (const record of records) {
     if (!Number.isSafeInteger(record.pid) || record.pid <= 1 || claimed.has(record.pid)) continue;
+    /* The identity observed now, not the one the record stored: a row is only
+       ever shown — and only ever killable — while the pid still belongs to the
+       process the viewer means, and a record that never captured an identity
+       must not inherit a null that would disable that fence downstream. */
     const observed = identity(record.pid);
     if (observed === null) continue;
     if (record.startIdentity !== null && record.startIdentity !== observed) continue;
     claimed.add(record.pid);
-    live.push(record);
+    live.push({ ...record, startIdentity: observed });
     if (live.length >= RESOURCE_STRUCTURED_HOST_LIMIT) break;
   }
   for (const candidate of dependencies.listAgentProcesses?.(fresh) ?? []) {
@@ -430,13 +429,19 @@ async function structuredHostTrees(
     if (claimed.has(candidate.pid) || accountMigrationHostArgv(candidate.argv)) continue;
     const engine = structuredHostEngine(candidate.argv);
     if (engine === null) continue;
+    /* No registry record vouches for this process, so its own environment has
+       to: the command line is public, and a Codex client or another harness
+       wearing it is nobody's to kill. Only this viewer's stamp gets in. */
+    if (stampOf(candidate.pid) !== ourStamp) continue;
+    const observed = identity(candidate.pid);
+    if (observed === null) continue;
     claimed.add(candidate.pid);
     live.push({
       id: `pid:${candidate.pid}`,
       engine,
       sessionId: null,
       pid: candidate.pid,
-      startIdentity: identity(candidate.pid),
+      startIdentity: observed,
       cwd: candidate.cwd,
       path: null,
       conversationId: null,
@@ -541,7 +546,6 @@ export async function buildResourceSnapshot(
       }
     });
 
-    const hostRefs: Array<{ target: string; ref: StructuredHostKillRef }> = [];
     for (const { record, tree } of structuredTrees) {
       const entry = record.path ? byPath.get(record.path) ?? null : null;
       const lastActiveAt = entry ? isoFromUnix(entry.mtime) : null;
@@ -575,9 +579,10 @@ export async function buildResourceSnapshot(
         seat: record.seat,
         turnBusy: record.turnBusy,
       });
-      hostRefs.push({
+      killRefs.push({
         target,
         ref: {
+          kind: "structured",
           pid: record.pid,
           startIdentity: record.startIdentity,
           engine: record.engine,
@@ -593,7 +598,6 @@ export async function buildResourceSnapshot(
 
     sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
     rememberResourceTargets(killRefs);
-    rememberStructuredHostTargets(hostRefs);
 
     globalStore.__llvLastResourceBuild = { fresh, status: "complete", durationMs: performance.now() - startedAt, phases };
     return { system, sessions };
@@ -612,10 +616,9 @@ export type CollectedResources = {
   diagnostic: ResourceBuildDiagnostic;
   hostCount: number;
   treeCount: number;
+  /** Kill authority for the rows this payload listed: a pane reference for a
+      tmux row, a structured host reference for a host row. */
   targets: Array<{ target: string; ref: KillTargetRef }>;
-  /** Structured host kill authority. Absent on observations persisted before
-      structured hosts were listed, which had no host rows to authorize. */
-  hostTargets?: Array<{ target: string; ref: StructuredHostKillRef }>;
   targetEpoch?: number;
 };
 
@@ -976,7 +979,6 @@ function collectedResources(
   diagnostic: ResourceBuildDiagnostic,
   targets: Array<{ target: string; ref: KillTargetRef }> = [],
   targetEpoch = globalStore.__llvResourceTargetEpoch ?? 0,
-  hostTargets: Array<{ target: string; ref: StructuredHostKillRef }> = [],
 ): CollectedResources {
   return {
     payload,
@@ -984,21 +986,12 @@ function collectedResources(
     hostCount: payload.sessions.length,
     treeCount: payload.sessions.reduce((total, session) => total + session.procCount, 0),
     targets,
-    /* Omitted when empty so a deployment with no structured hosts serializes
-       exactly as it did before they were listed. */
-    ...(hostTargets.length > 0 ? { hostTargets } : {}),
     targetEpoch,
   };
 }
 
 type ResourceWorkerMessage =
-  | {
-      type: "observation";
-      payload: ResourcesPayload;
-      diagnostic: ResourceBuildDiagnostic;
-      targets: Array<{ target: string; ref: KillTargetRef }>;
-      hostTargets: Array<{ target: string; ref: StructuredHostKillRef }>;
-    }
+  | { type: "observation"; payload: ResourcesPayload; diagnostic: ResourceBuildDiagnostic; targets: Array<{ target: string; ref: KillTargetRef }> }
   | { type: "failure"; error: string };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -1072,7 +1065,11 @@ function validResourceDiagnostic(value: unknown): value is ResourceBuildDiagnost
 }
 
 function validKillTargetRef(value: unknown): value is KillTargetRef {
-  if (!record(value) || !exactKeys(value, ["tmuxServerPid", "tmuxServerStartIdentity", "paneId", "panePid", "paneStartIdentity"])) return false;
+  if (!record(value)) return false;
+  /* A ref with no kind is a pane: that is what every observation persisted
+     before host rows existed carries, and it must keep parsing unchanged. */
+  if (value.kind !== undefined) return validStructuredHostKillRef(value);
+  if (!exactKeys(value, ["tmuxServerPid", "tmuxServerStartIdentity", "paneId", "panePid", "paneStartIdentity"])) return false;
   return Number.isSafeInteger(value.tmuxServerPid) && (value.tmuxServerPid as number) > 0
     && nullableString(value.tmuxServerStartIdentity)
     && typeof value.paneId === "string" && /^%\d+$/.test(value.paneId)
@@ -1090,10 +1087,14 @@ function validResourceTarget(value: unknown): value is { target: string; ref: Ki
 
 function validStructuredHostKillRef(value: unknown): value is StructuredHostKillRef {
   if (!record(value) || !exactKeys(value, [
-    "pid", "startIdentity", "engine", "sessionId", "conversationId", "seat", "turnBusy", "owned", "lastActiveAt",
+    "kind", "pid", "startIdentity", "engine", "sessionId", "conversationId", "seat", "turnBusy", "owned", "lastActiveAt",
   ])) return false;
-  return Number.isSafeInteger(value.pid) && (value.pid as number) > 1
-    && nullableString(value.startIdentity)
+  return value.kind === "structured"
+    && Number.isSafeInteger(value.pid) && (value.pid as number) > 1
+    /* Never nullable: kill authority is bound to the identity observed with
+       the pid, and a null would hand the fence a pid the kernel may have
+       recycled since (#1199). */
+    && typeof value.startIdentity === "string" && value.startIdentity.length > 0
     && (value.engine === "claude" || value.engine === "codex")
     && nullableString(value.sessionId)
     && nullableString(value.conversationId)
@@ -1104,34 +1105,8 @@ function validStructuredHostKillRef(value: unknown): value is StructuredHostKill
     && (value.lastActiveAt === null || Number.isFinite(Date.parse(value.lastActiveAt as string)));
 }
 
-function validStructuredHostTarget(value: unknown): value is { target: string; ref: StructuredHostKillRef } {
-  return record(value)
-    && exactKeys(value, ["target", "ref"])
-    && typeof value.target === "string"
-    && value.target.length > 0
-    && validStructuredHostKillRef(value.ref);
-}
-
-/** Host authority is only ever granted for a row the same payload listed, and
-    only for the pid that row showed. */
-function structuredHostTargetsMatchPayload(
-  payload: ResourcesPayload,
-  hostTargets: Array<{ target: string; ref: StructuredHostKillRef }>,
-): boolean {
-  const structuredByTarget = new Map<string, ResourceSession>();
-  for (const session of payload.sessions) {
-    if (session.kind !== "structured") continue;
-    if (structuredByTarget.has(session.target)) return false;
-    structuredByTarget.set(session.target, session);
-  }
-  const seen = new Set<string>();
-  return hostTargets.every(({ target, ref }) => {
-    if (seen.has(target)) return false;
-    seen.add(target);
-    return structuredByTarget.get(target)?.panePid === ref.pid;
-  });
-}
-
+/** Authority is only ever granted for a row the same payload listed, on the
+    transport that row declared, and only for the pid the row showed. */
 function resourceTargetsMatchPayload(
   payload: ResourcesPayload,
   targets: Array<{ target: string; ref: KillTargetRef }>,
@@ -1145,12 +1120,16 @@ function resourceTargetsMatchPayload(
   return targets.every(({ target, ref }) => {
     if (seen.has(target)) return false;
     seen.add(target);
-    return sessionsByTarget.get(target)?.panePid === ref.panePid;
+    const session = sessionsByTarget.get(target);
+    if (!session) return false;
+    return isStructuredHostKillRef(ref)
+      ? session.kind === "structured" && session.panePid === ref.pid
+      : session.kind !== "structured" && session.panePid === ref.panePid;
   });
 }
 
 function validCollectedResources(value: unknown): value is CollectedResources {
-  if (!record(value) || !exactKeys(value, ["payload", "diagnostic", "hostCount", "treeCount", "targets"], ["targetEpoch", "hostTargets"])
+  if (!record(value) || !exactKeys(value, ["payload", "diagnostic", "hostCount", "treeCount", "targets"], ["targetEpoch"])
     || !validResourcesPayload(value.payload)
     || !validResourceDiagnostic(value.diagnostic)
     || !Number.isSafeInteger(value.hostCount) || (value.hostCount as number) < 0
@@ -1158,13 +1137,7 @@ function validCollectedResources(value: unknown): value is CollectedResources {
     || (value.targetEpoch !== undefined && (!Number.isSafeInteger(value.targetEpoch) || (value.targetEpoch as number) < 0))
     || !Array.isArray(value.targets)
     || value.targets.length > RESOURCE_OBSERVATION_MAX_TARGETS
-    || !value.targets.every(validResourceTarget)
-    || (value.hostTargets !== undefined
-      && (!Array.isArray(value.hostTargets)
-        || value.hostTargets.length > RESOURCE_STRUCTURED_HOST_LIMIT
-        || !value.hostTargets.every(validStructuredHostTarget)))) return false;
-  if (value.hostTargets !== undefined
-    && !structuredHostTargetsMatchPayload(value.payload, value.hostTargets as Array<{ target: string; ref: StructuredHostKillRef }>)) return false;
+    || !value.targets.every(validResourceTarget)) return false;
   return value.diagnostic.status === "complete"
     && resourceTargetsMatchPayload(value.payload, value.targets)
     && value.hostCount === value.payload.sessions.length
@@ -1181,23 +1154,14 @@ function resourceWorkerMessage(value: unknown): ResourceWorkerMessage | null {
       ? candidate as ResourceWorkerMessage
       : null;
   }
-  /* `hostTargets` is optional on the wire: a worker binary left over from an
-     older build emits none, and the viewer then simply grants no host kill
-     authority for that observation instead of discarding it whole. */
-  const hostTargets = candidate.hostTargets ?? [];
-  if (candidate.type !== "observation" || !exactKeys(candidate, ["type", "payload", "diagnostic", "targets"], ["hostTargets"])
+  if (candidate.type !== "observation" || !exactKeys(candidate, ["type", "payload", "diagnostic", "targets"])
     || !validResourcesPayload(candidate.payload)
     || !validResourceDiagnostic(candidate.diagnostic)
     || !Array.isArray(candidate.targets)
     || candidate.targets.length > RESOURCE_OBSERVATION_MAX_TARGETS
-    || !candidate.targets.every(validResourceTarget)
-    || !Array.isArray(hostTargets)
-    || hostTargets.length > RESOURCE_STRUCTURED_HOST_LIMIT
-    || !hostTargets.every(validStructuredHostTarget)) return null;
-  if (candidate.diagnostic.status !== "complete"
-    || !resourceTargetsMatchPayload(candidate.payload, candidate.targets)
-    || !structuredHostTargetsMatchPayload(candidate.payload, hostTargets as Array<{ target: string; ref: StructuredHostKillRef }>)) return null;
-  return { ...candidate, hostTargets } as ResourceWorkerMessage;
+    || !candidate.targets.every(validResourceTarget)) return null;
+  if (candidate.diagnostic.status !== "complete" || !resourceTargetsMatchPayload(candidate.payload, candidate.targets)) return null;
+  return candidate as ResourceWorkerMessage;
 }
 
 export function parsePersistedResourceObservation(raw: string): ResourceObservation<CollectedResources> | null {
@@ -2161,7 +2125,7 @@ async function collectResourcesInWorker(
         }
         finish({
           type: "success",
-          value: collectedResources(message.payload, message.diagnostic, message.targets, targetEpoch, message.hostTargets),
+          value: collectedResources(message.payload, message.diagnostic, message.targets, targetEpoch),
         });
         output = "";
       }
@@ -2252,12 +2216,7 @@ function resourceReadFromResult(
   }
   const { payload, diagnostic } = observation.value;
   if (!failure && observation.collectorId === result.collectorId && observation.value.targetEpoch !== undefined) {
-    applyResourceTargets(
-      observation.generation,
-      observation.value.targets,
-      observation.value.targetEpoch,
-      observation.value.hostTargets ?? [],
-    );
+    applyResourceTargets(observation.generation, observation.value.targets, observation.value.targetEpoch);
   }
   if (failure) {
     return {
@@ -2320,7 +2279,7 @@ export function createResourcesReader(
       const payload = await build(fresh);
       const diagnostic = diagnosticForBuild();
       if (!diagnostic) throw new Error("resource build completed without diagnostics");
-      return collectedResources(payload, diagnostic, lastResourceTargetRefs(), targetEpoch, lastStructuredHostTargetRefs());
+      return collectedResources(payload, diagnostic, lastResourceTargetRefs(), targetEpoch);
     } : (fresh = false) => collectResourcesInWorker(
       fresh,
       options.readFiles,
@@ -2434,8 +2393,6 @@ export function resetResourcesForTests(): void {
   globalStore.__llvResourcesReaderVersion = undefined;
   globalStore.__llvResourceTargets = undefined;
   globalStore.__llvLastResourceTargets = undefined;
-  globalStore.__llvStructuredHostTargets = undefined;
-  globalStore.__llvLastStructuredHostTargets = undefined;
   globalStore.__llvResourceTargetsGeneration = undefined;
   globalStore.__llvResourceTargetEpoch = undefined;
   globalStore.__llvLastResourceBuild = undefined;

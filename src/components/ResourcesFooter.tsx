@@ -232,7 +232,7 @@ export function ResourcesFooter() {
   );
 }
 
-/** Kills one row, on whichever transport owns it.
+/** Kills one row, on whichever transport owns it, for one named gesture.
     A structured host goes to /api/runtime/hosts, which ends it through the
     runtime when it still holds it and by process group otherwise, then retires
     the registry row. A tmux pane keeps the kill-target action: the server
@@ -240,12 +240,24 @@ export function ResourcesFooter() {
     pid before killing, so the kill survives window renumbering mid-bulk.
     Both sides refuse a target the last snapshot did not list.
     Returns the error text, if any. */
-async function killSession(session: ResourceSession, includeSeat = false): Promise<string | null> {
+async function killSession(
+  session: ResourceSession,
+  gesture: { intent: "row" | "idle" | "all"; includeSeat: boolean; idleHours?: number },
+): Promise<string | null> {
   const res = isStructuredHost(session)
     ? await fetch("/api/runtime/hosts", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "kill", target: session.target, includeSeat }),
+        body: JSON.stringify({
+          action: "kill",
+          target: session.target,
+          /* The gesture travels with the request: the server re-reads the
+             promises it makes (settled turn, quiet transcript, untouched
+             orchestrator seat) instead of trusting the polled snapshot. */
+          intent: gesture.intent,
+          includeSeat: gesture.includeSeat,
+          ...(gesture.intent === "idle" ? { idleHours: gesture.idleHours } : {}),
+        }),
       })
     : await fetch("/api/tmux", {
         method: "POST",
@@ -299,7 +311,7 @@ export function CleanupPanel({
     markBusy(session.target, true);
     try {
       /* A per-row kill is the explicit gesture the seat rule asks for. */
-      const failure = await killSession(session, true);
+      const failure = await killSession(session, { intent: "row", includeSeat: true });
       if (failure) setError(failure);
       await onRefresh();
     } finally {
@@ -308,10 +320,14 @@ export function CleanupPanel({
     }
   };
 
-  const killEach = async (targets: ResourceSession[]) => {
+  const killEach = async (targets: ResourceSession[], intent: "idle" | "all", idleHours?: number) => {
     for (const session of targets) {
       markBusy(session.target, true);
-      const failure = await killSession(session, tickedSeats.has(session.target));
+      const failure = await killSession(session, {
+        intent,
+        includeSeat: tickedSeats.has(session.target),
+        ...(idleHours === undefined ? {} : { idleHours }),
+      });
       if (failure) setError(failure);
     }
     await onRefresh();
@@ -324,7 +340,7 @@ export function CleanupPanel({
     setKillAllArmed(false);
     setBulkBusy(true);
     try {
-      await killEach(targets);
+      await killEach(targets, "idle", bulkHours);
     } finally {
       setBusy(new Set());
       setBulkBusy(false);
@@ -343,7 +359,7 @@ export function CleanupPanel({
     setError(null);
     setKillAllBusy(true);
     try {
-      await killEach(targets);
+      await killEach(targets, "all");
     } finally {
       setBusy(new Set());
       setKillAllBusy(false);

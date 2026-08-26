@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { ROOTS } from "./roots";
 
@@ -129,13 +130,36 @@ export function argvEngine(argv: string[]): AgentEngine | null {
 }
 
 /**
+ * The environment stamp the viewer puts on every structured host it spawns.
+ *
+ * Argv shape alone proves nothing about who started a process: `codex
+ * app-server` and a `claude` stream-json run are public command lines that
+ * other tools on the machine use too (a Codex desktop client, another agent
+ * harness). Only a stamp the viewer itself wrote can say "this host is mine",
+ * and the value is the viewer's own state dir, so two installations sharing a
+ * machine never claim — or kill — each other's hosts.
+ */
+export const STRUCTURED_HOST_STAMP_ENV = "LLV_STRUCTURED_HOST";
+
+/** The stamp this viewer writes, and the only value it accepts back. */
+export function structuredHostStamp(): string {
+  return statePath();
+}
+
+/** The stamp `pid` carries, or null when it carries none (and on backends
+    that cannot read another process's environment at all). */
+export function readStructuredHostStamp(pid: number): string | null {
+  return procBackend.readEnvVar(pid, STRUCTURED_HOST_STAMP_ENV);
+}
+
+/**
  * Engine of a structured host process — the pane-less shape the runtime spawns
  * and speaks to over stdio — or null for anything else wearing the same
  * binary. Both signatures are ones no human types: the Claude broker is the
  * only `claude` run that reads `stream-json` off stdin, and `app-server` is the
- * only Codex subcommand the viewer ever starts. That exactness is what keeps
- * the operator's own `claude`/`codex` sessions out of the resources list, and
- * therefore out of every kill it offers.
+ * only Codex subcommand the viewer ever starts. Shape is a necessary condition,
+ * never a sufficient one: callers that grant kill authority on a scan alone
+ * must also see this viewer's stamp on the process (`readStructuredHostStamp`).
  */
 export function structuredHostEngine(argv: string[]): AgentEngine | null {
   const engine = argvEngine(argv);

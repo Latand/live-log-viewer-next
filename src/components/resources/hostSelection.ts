@@ -46,7 +46,10 @@ export function bulkKillTargets(
   return sessions.filter((session) => killable(session, ticked));
 }
 
-/** What the footer summarises: how many hosts, how many idle, how much memory. */
+/** What the footer summarises: how many hosts, how many idle, and the resident
+    memory they hold. Resident only — swap is the pressure the RAM/Swap rows
+    above already report, and adding it here would overstate what killing these
+    hosts gives back. */
 export function resourceCounts(
   sessions: readonly ResourceSession[],
   hours: number,
@@ -55,6 +58,6 @@ export function resourceCounts(
   return {
     hosts: sessions.length,
     idle: idleKillTargets(sessions, hours, nowSeconds, new Set()).length,
-    bytes: sessions.reduce((total, session) => total + session.rssBytes + session.swapBytes, 0),
+    bytes: sessions.reduce((total, session) => total + session.rssBytes, 0),
   };
 }
