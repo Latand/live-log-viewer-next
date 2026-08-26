@@ -1,4 +1,4 @@
-import { cp, readdir, rm } from "node:fs/promises";
+import { cp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -17,6 +17,28 @@ const standaloneDir = join(root, ".next", "standalone");
 const staticDir = join(root, ".next", "static");
 const distDir = join(root, "dist");
 const distStandaloneDir = join(distDir, "standalone");
+const runtimeHostBundle = join(distDir, "runtime-host.mjs");
+
+const standaloneServerBootstrap = `const { spawn } = require("node:child_process");
+
+if (process.versions.bun) {
+  require("./server.bun.js");
+} else {
+  const bun = process.env.LLV_BUN_EXECUTABLE || "bun";
+  const child = spawn(bun, ["--bun", __filename, ...process.argv.slice(2)], {
+    env: process.env,
+    stdio: "inherit",
+  });
+  child.once("error", (error) => {
+    console.error(\`Failed to start the Bun server runtime: \${error.message}\`);
+    process.exitCode = 1;
+  });
+  child.once("exit", (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exitCode = code ?? 1;
+  });
+}
+`;
 
 function runNextBuild() {
   return new Promise((resolve, reject) => {
@@ -67,6 +89,28 @@ function runMcpBuild() {
   });
 }
 
+function runRuntimeHostBuild() {
+  return new Promise((resolve, reject) => {
+    const bun = process.env.LLV_BUN_EXECUTABLE || "bun";
+    const child = spawn(bun, [
+      "build",
+      "src/runtime-host/main.ts",
+      "--target=bun",
+      "--format=esm",
+      `--outfile=${runtimeHostBundle}`,
+    ], viewerChildProcessOptions({
+      cwd: root,
+      env: withoutWakatimeCredential(process.env),
+      stdio: "inherit",
+    }));
+    child.on("error", (error) => reject(new Error(`Failed to start ${bun}: ${error.message}`)));
+    child.on("exit", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(signal ? `Runtime host build stopped after signal ${signal}.` : `Runtime host build failed with exit code ${code}.`));
+    });
+  });
+}
+
 async function findStandaloneServer(dir) {
   const directServer = join(dir, "server.js");
   if (existsSync(directServer)) {
@@ -103,10 +147,13 @@ async function main() {
     await rm(join(distStandaloneDir, ".claude"), { recursive: true, force: true });
   }
   await cp(staticDir, join(distStandaloneDir, ".next", "static"), { recursive: true });
+  await rename(join(distStandaloneDir, "server.js"), join(distStandaloneDir, "server.bun.js"));
+  await writeFile(join(distStandaloneDir, "server.js"), standaloneServerBootstrap);
+  await runRuntimeHostBuild();
   await runMcpBuild();
 
-  if (!existsSync(join(distStandaloneDir, "server.js"))) {
-    throw new Error("Prepack did not produce dist/standalone/server.js.");
+  if (!existsSync(join(distStandaloneDir, "server.js")) || !existsSync(runtimeHostBundle)) {
+    throw new Error("Prepack did not produce the standalone server and runtime host bundles.");
   }
 }
 

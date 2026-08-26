@@ -5,6 +5,9 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
+import { overlayBridgeAsks } from "@/lib/bridge/asks";
+import { seatIdentityResolver } from "@/lib/bridge/seatIdentity";
+import { bridgeAsksForSeats } from "@/lib/bridge/service";
 import { pinnedIdentityEntries } from "@/lib/scanner/pinRideAlong";
 import { identityAlive, livenessProbe } from "@/lib/agent/accountLiveness";
 import {
@@ -787,6 +790,19 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     if (file.project === "project_unresolved") file.projectUnresolved = true;
   }
   markTiming("files-project-catalog");
+  /* The orchestrator seat's open decision request (issue #1168). The bridge
+     report log had exactly one reader — the voice gateway — so a `blocked` or
+     `question` report reached the operator only if that channel happened to be
+     up. Stamped here, on the seat's own row, it becomes an ordinary hard block
+     in the attention queue. `bridgeAsksForSeats` fails closed on its own, so an
+     unreadable log costs the ask and never this poll. */
+  overlayBridgeAsks(
+    projected.files,
+    bridgeAsksForSeats({
+      canonicalConversationId: seatIdentityResolver(conversationLookup.canonicalConversationId),
+    }),
+  );
+  markTiming("files-bridge-asks");
   const visibleProjects = [
     ...projected.files.map((file) => file.project),
     ...effectiveProjectCatalog.map((entry) => entry.project),

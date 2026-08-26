@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry, conversationLookupFromSnapshot, CORRUPT_HELD_DELIVERY_IMAGES_ERROR, DeliveryReservationConflictError, SPAWN_STARTING_ADMISSION_LEASE_MS, SupersedenceConflictError } from "@/lib/agent/registry";
+import { withLegacySpawnFixtureTitles } from "@/lib/agent/registryTestFixtures";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { structuredContent } from "@/lib/runtime/structuredContent";
 
@@ -12,7 +13,7 @@ const KEY = { engine: "codex" as const, sessionId: "019f4906-3f67-\x37b72-9fbc-9
 
 function registry(ownerAlive: (owner: { pid: number; startIdentity: string | null }) => boolean = () => true) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-"));
-  return new AgentRegistry(path.join(dir, "agent-registry.json"), ownerAlive);
+  return withLegacySpawnFixtureTitles(new AgentRegistry(path.join(dir, "agent-registry.json"), ownerAlive));
 }
 
 function spawnEntry(pathname: string, accountId = "terra") {

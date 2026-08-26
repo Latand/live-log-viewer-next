@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { viewerMcpServerEntry } from "./agent/spawnPolicy";
 import { headlessCodexThreadConfig } from "./codexHeadlessConfig";
 
 test("headless Codex threads allow only the registered Viewer MCP server", () => {
@@ -20,9 +21,12 @@ test("headless Codex threads allow only the registered Viewer MCP server", () =>
   });
 });
 
-test("configurations without Viewer disable every registered MCP server", () => {
+test("configurations without Viewer add the packaged server and disable every unrelated MCP server", () => {
   expect(headlessCodexThreadConfig({ config: { mcp_servers: { docs: {} } } })).toEqual({
-    mcp_servers: { docs: { enabled: false } },
+    mcp_servers: {
+      docs: { enabled: false },
+      viewer: { ...viewerMcpServerEntry(), enabled: true, default_tools_approval_mode: "approve" },
+    },
     features: { plugins: false, apps: false, multi_agent: false, realtime_conversation: true },
     include_apps_instructions: false,
   });

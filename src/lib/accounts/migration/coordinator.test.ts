@@ -5,12 +5,13 @@ import path from "node:path";
 
 import { AgentRegistry, MigrationRevisionError, type ConversationObservation } from "@/lib/agent/registry";
 import { boardFor, mutateBoard, setBoardFileForTests } from "@/lib/board/store";
+import { terminalizeStaleUndeliverableHeldDeliveries } from "@/lib/reaperRuntime";
 import { tailRecordsResult } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
 import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
 
 import { advanceConversationMigration, createMigrationIntent, drainHeldDeliveries, previewMigration, reconcileMigrationInventory, reconcileMigrations } from "./coordinator";
-import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
+import { emptyLaunchProfile, type MigrationEngine, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import { oauthFailureWithRecoveryTail } from "./fixtures/claudeRecoveryTail";
 import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
 import { MIGRATION_DELIVERY_CANCELLATION_PREFIX } from "./intentLiveness";
@@ -211,6 +212,85 @@ afterEach(() => {
 });
 
 describe("durable account migration coordinator", () => {
+  test("generic scanner titles stay writable until one semantic title freezes", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "semantic-title.jsonl");
+    fs.writeFileSync(pathname, "{}\n");
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, { title: "Codex session" })]);
+    expect(store.conversationForPath(pathname)?.generations.at(-1)?.launchProfile.title).toBeNull();
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, { title: "Implement semantic spawn titles" })]);
+    expect(store.conversationForPath(pathname)?.generations.at(-1)?.launchProfile.title).toBe("Implement semantic spawn titles");
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, { title: "A later scanner guess" })]);
+    expect(store.conversationForPath(pathname)?.generations.at(-1)?.launchProfile.title).toBe("Implement semantic spawn titles");
+  });
+
+  for (const engine of ["claude", "codex"] as const satisfies readonly MigrationEngine[]) {
+    for (const sourceTitle of [null, engine === "claude" ? "Claude session" : "Codex session"] as const) {
+      test(`${engine} successors freeze one semantic profile from a ${sourceTitle === null ? "null" : "generic"} source title`, async () => {
+        const store = registry();
+        const sourcePath = path.join(path.dirname(store.filename), `${engine}-${sourceTitle === null ? "null" : "generic"}-source.jsonl`);
+        store.reconcileConversations([{
+          ...observation(sourcePath, "account-a", "idle"),
+          engine,
+          launchProfile: emptyLaunchProfile({
+            cwd: "/repo",
+            title: sourceTitle,
+            goal: { objective: "Ship identity continuity", status: "active", tokensUsed: null, timeUsedSeconds: null },
+          }),
+        }]);
+        const conversation = store.conversationForPath(sourcePath)!;
+        store.requestConversationReseat(conversation.id, "account-b");
+        const expectedTitle = "migration successor · Ship identity continuity";
+        const observedProfiles: Array<{ phase: string; title: string | null }> = [];
+        const successorPath = path.join(path.dirname(store.filename), `${engine}-semantic-successor.jsonl`);
+        const successorProvider: SuccessorProviderPort = {
+          virtualSource: true,
+          async create(input) {
+            observedProfiles.push({ phase: "create", title: input.source.launchProfile.title });
+            expect(store.conversation(conversation.id)?.migration?.successorLaunchProfile?.title).toBe(expectedTitle);
+            store.reconcileConversations([{
+              ...observation(sourcePath, "account-a", "idle"),
+              engine,
+              launchProfile: emptyLaunchProfile({
+                cwd: "/repo",
+                title: "A later semantic source title",
+                goal: { objective: "Ship identity continuity", status: "active", tokensUsed: null, timeUsedSeconds: null },
+              }),
+            }]);
+            return {
+              operationId: input.operationId,
+              nativeId: `${engine}-semantic-successor`,
+              path: successorPath,
+              continuityPaths: [],
+              historyHash: `${engine}-semantic-history`,
+              host: engine === "claude"
+                ? { kind: "claude-stream", identity: `${engine}-semantic-successor`, epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" }
+                : { kind: "codex-app-server", identity: `${engine}-semantic-successor`, epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+            };
+          },
+          async verify(_receipt, input) {
+            observedProfiles.push({ phase: "verify", title: input.launchProfile.title });
+          },
+          async publishHost(_receipt, input) {
+            observedProfiles.push({ phase: "publish", title: input.launchProfile.title });
+          },
+        };
+
+        const committed = await advanceConversationMigration(conversation.id, store, successorProvider);
+
+        expect(observedProfiles).toEqual([
+          { phase: "create", title: expectedTitle },
+          { phase: "verify", title: expectedTitle },
+          { phase: "publish", title: expectedTitle },
+        ]);
+        expect(committed.generations.at(-1)?.launchProfile.title).toBe(expectedTitle);
+      });
+    }
+  }
+
   test("inventory builds path ownership from one registry snapshot", async () => {
     const store = registry();
     const firstPath = path.join(path.dirname(store.filename), "first.jsonl");
@@ -2553,20 +2633,54 @@ describe("durable account migration coordinator", () => {
     });
   });
 
-  test("reconciliation terminalizes an assigned delivery owned by a rolled-back migration", async () => {
+  /** Builds a conversation whose migration rolled back an hour ago (#972),
+      plus one held delivery the rollback owned and one held delivery sent
+      afterwards. The rollback timestamp is backdated on disk because the
+      registry stamps it with the real clock, and the trap under test needs
+      deliveries that are clearly younger than the rollback. */
+  function rolledBackResidue(pathname: string, requestId: string) {
     const store = registry();
-    store.reconcileConversations([observation("/rolled-back-source.jsonl", "a", "idle")]);
-    const conversation = store.conversationForPath("/rolled-back-source.jsonl")!;
+    store.reconcileConversations([observation(pathname, "a", "idle")]);
+    const conversation = store.conversationForPath(pathname)!;
     store.commitMigrationIntent({
       engine: "codex",
       targetId: "b",
       origin: "manual",
-      requestId: "rolled-back-assigned",
+      requestId,
       expectedRevision: store.engineRouting("codex").revision,
     });
     const revision = store.conversation(conversation.id)!.migration!.revision;
     store.rollbackConversationMigration(conversation.id, revision);
-    const assigned = store.holdDelivery(conversation.id, "fixture payload", "rolled-back-assigned");
+    const rolledBackAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    const snapshot = store.snapshot();
+    snapshot.conversations[conversation.id]!.migration!.updatedAt = rolledBackAt;
+    const heldRecord = (id: string, createdAt: string) => ({
+      id,
+      conversationId: conversation.id,
+      text: "fixture payload",
+      createdAt,
+      clientMessageId: id,
+      payloadKind: "text",
+      runtimeImages: [],
+      contentDigest: null,
+      artifactPaths: [],
+      state: "held",
+      generationId: null,
+      attempts: 0,
+      assignedAt: null,
+      deliveredAt: null,
+      error: null,
+    }) as unknown as (typeof snapshot.heldDeliveries)[string];
+    snapshot.heldDeliveries["owned-by-rollback"] =
+      heldRecord("owned-by-rollback", new Date(Date.parse(rolledBackAt) - 60 * 60_000).toISOString());
+    snapshot.heldDeliveries["held-after-rollback"] = heldRecord("held-after-rollback", new Date().toISOString());
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+    return { store: new AgentRegistry(store.filename), conversation };
+  }
+
+  test("reconciliation settles only the deliveries a rolled-back migration owned (issue 972)", async () => {
+    const { store, conversation } = rolledBackResidue("/rolled-back-source.jsonl", "rolled-back-owned");
+    const assigned = store.holdDelivery(conversation.id, "sent after the rollback", "post-rollback-assigned");
     expect(assigned).toMatchObject({ state: "assigned", attempts: 0 });
 
     const delivered: string[] = [];
@@ -2577,14 +2691,105 @@ describe("durable account migration coordinator", () => {
       },
     }, store);
 
-    expect(delivered).toEqual([]);
-    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({
+    expect(delivered).toEqual(["post-rollback-assigned"]);
+    expect(store.snapshot().heldDeliveries["owned-by-rollback"]).toMatchObject({
       state: "failed",
       attempts: 0,
       generationId: null,
       deliveredAt: null,
       error: expect.stringContaining("rolled back"),
     });
+    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "delivered", attempts: 1, error: null });
+    expect(store.snapshot().heldDeliveries["held-after-rollback"]).toMatchObject({ state: "held", attempts: 0, error: null });
+  });
+
+  test("reconciliation spares the same reservation reauthorized after rollback (issue 972)", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/rolled-back-reauthorized.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/rolled-back-reauthorized.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "rolled-back-reauthorized",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const original = store.holdDelivery(conversation.id, "send again", "rolled-back-reauthorized");
+    const revision = store.conversation(conversation.id)!.migration!.revision;
+    store.rollbackConversationMigration(conversation.id, revision);
+    const reauthorized = store.holdDelivery(conversation.id, "send again", "rolled-back-reauthorized");
+
+    await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+
+    expect(reauthorized.id).toBe(original.id);
+    expect(store.snapshot().heldDeliveries[reauthorized.id]).toMatchObject({
+      state: "delivered",
+      attempts: 1,
+      error: null,
+    });
+  });
+
+  test("reconciliation rechecks rollback ownership after reading pending deliveries (issue 972)", async () => {
+    const { store, conversation } = rolledBackResidue(
+      "/rolled-back-reauthorized-race.jsonl",
+      "rolled-back-reauthorized-race",
+    );
+    const pendingDeliveries = store.pendingDeliveries.bind(store);
+    const reauthorized = { id: null as string | null };
+    store.pendingDeliveries = (conversationId) => {
+      const pending = pendingDeliveries(conversationId);
+      if (!reauthorized.id && pending.some((item) => item.id === "owned-by-rollback")) {
+        reauthorized.id = store.holdDelivery(
+          conversation.id,
+          "fixture payload",
+          "owned-by-rollback",
+        ).id;
+      }
+      return pending;
+    };
+
+    await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+
+    expect(reauthorized.id).toBe("owned-by-rollback");
+    expect(store.snapshot().heldDeliveries[reauthorized.id!]).toMatchObject({
+      state: "delivered",
+      attempts: 1,
+      error: null,
+    });
+  });
+
+  test("post-rollback deliveries survive coordinator, settling sweep, and the next coordinator tick (issue 972)", async () => {
+    const { store, conversation } = rolledBackResidue("/rolled-back-repeat.jsonl", "rolled-back-repeat");
+    const assigned = store.holdDelivery(conversation.id, "sent after the rollback", "post-rollback-repeat");
+    const port = { async deliver() { return "delivered" as const; } };
+
+    await reconcileMigrations(provider([]), port, store);
+    await reconcileMigrations(provider([]), port, store);
+    terminalizeStaleUndeliverableHeldDeliveries(store);
+    await reconcileMigrations(provider([]), port, store);
+
+    expect(store.conversation(conversation.id)?.migration).toMatchObject({ phase: "rolled-back" });
+    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "delivered", attempts: 1, error: null });
+    expect(store.snapshot().heldDeliveries["held-after-rollback"]).toMatchObject({ state: "held", attempts: 0, error: null });
+  });
+
+  test("reaper-first ordering: reconciliation spares post-rollback deliveries while residue remains (issue 972)", async () => {
+    const { store, conversation } = rolledBackResidue("/rolled-back-reaper-first.jsonl", "rolled-back-reaper-first");
+    const assigned = store.holdDelivery(conversation.id, "sent after the rollback", "post-rollback-reaper-first");
+
+    expect(terminalizeStaleUndeliverableHeldDeliveries(store)).toEqual(["owned-by-rollback"]);
+    expect(store.conversation(conversation.id)?.migration).toMatchObject({ phase: "rolled-back" });
+    const delivered: string[] = [];
+    await reconcileMigrations(provider([]), {
+      async deliver({ clientMessageId }) {
+        delivered.push(clientMessageId);
+        return "delivered";
+      },
+    }, store);
+
+    expect(delivered).toEqual(["post-rollback-reaper-first"]);
+    expect(store.snapshot().heldDeliveries[assigned.id]).toMatchObject({ state: "delivered", attempts: 1, error: null });
+    expect(store.snapshot().heldDeliveries["held-after-rollback"]).toMatchObject({ state: "held", attempts: 0, error: null });
   });
 
   test("a fresh explicit delivery after cancellation still requires current generation ownership", () => {

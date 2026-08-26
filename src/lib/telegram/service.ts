@@ -1,10 +1,11 @@
 import crypto from "node:crypto";
 
 import { processTelegramAdapter, type TelegramAdapter, type TelegramEnrollmentEvent, type TelegramEnrollmentHandle } from "./adapter";
-import { ensureTelegramConnector, stopTelegramConnector, type ConnectorEnsureResult } from "./connector";
+import { ensureTelegramConnector, stopTelegramConnector, stopTelegramConnectorForSession, telegramConnectorOwnsSession, type ConnectorEnsureResult } from "./connector";
 import type { TelegramAccountIdentity, TelegramErrorCode, TelegramStatusPayload } from "./contracts";
 import { registerTelegramHosts, unregisterTelegramHosts, type TelegramHostRegistrationResult } from "./hostRegistration";
 import { telegramApiCredentials } from "./packaging";
+import { connectorReadPort } from "./reportSources";
 import {
   deleteTelegramSession,
   readTelegramConnection,
@@ -31,7 +32,8 @@ import {
 export interface TelegramServicePorts {
   adapter: TelegramAdapter;
   ensureConnector(session: StoredTelegramSession): Promise<ConnectorEnsureResult>;
-  stopConnector(): Promise<void> | void;
+  readConnectorIdentity(session: StoredTelegramSession): Promise<TelegramAccountIdentity | null>;
+  stopConnector(session?: StoredTelegramSession): Promise<boolean | void> | boolean | void;
   registerHosts(): TelegramHostRegistrationResult;
   unregisterHosts(): void;
   now(): number;
@@ -43,7 +45,8 @@ export interface TelegramServicePorts {
 const productionPorts: TelegramServicePorts = {
   adapter: processTelegramAdapter,
   ensureConnector: (session) => ensureTelegramConnector(session),
-  stopConnector: stopTelegramConnector,
+  readConnectorIdentity: (session) => connectorReadPort(session.credentialRef).getMe(),
+  stopConnector: (session) => session ? stopTelegramConnectorForSession(session) : stopTelegramConnector(),
   registerHosts: () => registerTelegramHosts(),
   unregisterHosts: () => unregisterTelegramHosts(),
   now: Date.now,
@@ -71,6 +74,9 @@ export class TelegramConnectionService {
   private lifecycleGeneration = 0;
   private lifecycleActive = false;
   private readonly lifecycleQueue: LifecycleJob[] = [];
+  private reportReaders = 0;
+  private healthActive = false;
+  private readonly healthWaiters: Array<() => void> = [];
 
   constructor(private readonly ports: TelegramServicePorts = productionPorts) {}
 
@@ -385,6 +391,35 @@ export class TelegramConnectionService {
     this.deleteCredentialsAndPublishDisconnected(connectorStopped);
   }
 
+  /** Holds the shared connector from the report's account check through its
+      sequential source pass. A report waits for an in-flight health check;
+      fresh health polls serve cached status while any report holds the lease. */
+  async beginReportReadPhase(): Promise<() => void> {
+    while (this.healthActive) {
+      await new Promise<void>((resolve) => { this.healthWaiters.push(resolve); });
+    }
+    this.reportReaders += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.reportReaders = Math.max(0, this.reportReaders - 1);
+    };
+  }
+
+  private tryBeginHealthCheck(): (() => void) | null {
+    if (this.reportReaders > 0 || this.healthActive) return null;
+    this.healthActive = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.healthActive = false;
+      const waiters = this.healthWaiters.splice(0);
+      for (const resume of waiters) resume();
+    };
+  }
+
   /** Health check against the stored session; updates the durable status. */
   checkHealth(): Promise<TelegramStatusPayload> {
     const expectedGeneration = this.lifecycleGeneration;
@@ -396,6 +431,16 @@ export class TelegramConnectionService {
   }
 
   private async runHealthCheck(generation: number): Promise<void> {
+    const releaseHealthCheck = this.tryBeginHealthCheck();
+    if (!releaseHealthCheck) return;
+    try {
+      await this.runHealthCheckWithConnector(generation);
+    } finally {
+      releaseHealthCheck();
+    }
+  }
+
+  private async runHealthCheckWithConnector(generation: number): Promise<void> {
     let session: ReturnType<typeof readTelegramSession>;
     try {
       session = readTelegramSession();
@@ -421,43 +466,53 @@ export class TelegramConnectionService {
       }
       return;
     }
-    /* The bridge uses the same StringSession as the shared connector. Release
-       the long-lived owner before the short health client acquires the
-       vendored per-session lock and connects. */
-    try { await this.ports.stopConnector(); }
-    catch {
-      this.recordError("connector_failed");
-      return;
+    let connector: ConnectorEnsureResult;
+    try {
+      connector = await this.ports.ensureConnector(session);
+    } catch {
+      connector = { ok: false, code: "connector_failed" };
     }
-    const result = await this.ports.adapter.checkSession(session.sessionString);
     if (!this.lifecycleIsCurrent(generation)) return;
     const checkedAt = new Date(this.ports.now()).toISOString();
-    if (result.status === "connected") {
-      /* A healthy account only reads as connected once the shared connector
-         also stands verified — the same gate enrollment applies. A failure
-         here keeps the session (the account is fine) and surfaces the code;
-         the next fresh health check retries without a rescan. */
-      let connector: Awaited<ReturnType<TelegramServicePorts["ensureConnector"]>>;
+    if (connector.ok) {
+      let identity: TelegramAccountIdentity | null;
       try {
-        connector = await this.ports.ensureConnector(session);
+        identity = await this.ports.readConnectorIdentity(session);
       } catch {
-        connector = { ok: false, code: "connector_failed" };
+        identity = null;
       }
       if (!this.lifecycleIsCurrent(generation)) return;
-      /* The account answered, so this is the read the id migration is owed —
-         whether or not the connector or host registration behind it succeeds
-         (#1091). */
-      const recorded = recordedIdentityAfterHealthCheck(connection, result.identity, checkedAt);
-      if (!connector.ok) {
-        writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, ...recorded, lastHealthCheckAt: checkedAt, errorCode: connector.code });
+      if (!identity) {
+        const replacement = await this.replaceFailedConnector(session, generation);
+        if (!replacement) return;
+        writeTelegramConnection({ ...connection, status: "error", credentialRef: session.credentialRef, lastHealthCheckAt: checkedAt, errorCode: replacement.ok ? "connector_failed" : replacement.code });
         return;
       }
+      const recorded = recordedIdentityAfterHealthCheck(connection, identity, checkedAt);
       if (!this.registerVerifiedHosts()) {
-        await this.cleanupFailedRegistration();
+        try { this.ports.unregisterHosts(); } catch { /* partial cleanup only */ }
         writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, ...recorded, lastHealthCheckAt: checkedAt, errorCode: "host_registration_failed" });
         return;
       }
       writeTelegramConnection({ version: 1, status: "connected", credentialRef: session.credentialRef, ...recorded, lastHealthCheckAt: checkedAt, errorCode: null });
+      return;
+    }
+
+    /* A concurrent supervisor operation can invalidate this ensure while its
+       replacement already runs. In that case the bridge must stay away from
+       the per-session lock and the next poll can verify the winner. */
+    if (telegramConnectorOwnsSession(session)) {
+      writeTelegramConnection({ ...connection, status: "error", credentialRef: session.credentialRef, lastHealthCheckAt: checkedAt, errorCode: connector.code });
+      return;
+    }
+    /* A failed readiness probe has left no recorded connector. Only then may
+       the short-lived bridge take the vendored per-session lock, preserving
+       expiry detection without killing a healthy process. */
+    const result = await this.ports.adapter.checkSession(session.sessionString);
+    if (!this.lifecycleIsCurrent(generation)) return;
+    if (result.status === "connected") {
+      const recorded = recordedIdentityAfterHealthCheck(connection, result.identity, checkedAt);
+      writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, ...recorded, lastHealthCheckAt: checkedAt, errorCode: connector.code });
       return;
     }
     if (result.status === "expired") {
@@ -465,6 +520,38 @@ export class TelegramConnectionService {
       return;
     }
     writeTelegramConnection({ version: 1, status: "error", credentialRef: session.credentialRef, identity: connection.identity, lastHealthCheckAt: checkedAt, errorCode: result.code, identityIdUpgradedAt: connection.identityIdUpgradedAt });
+  }
+
+  private currentHealthSession(session: StoredTelegramSession, generation: number): StoredTelegramSession | null {
+    if (!this.lifecycleIsCurrent(generation)) return null;
+    try {
+      const current = readTelegramSession();
+      return current?.credentialRef === session.credentialRef ? current : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async replaceFailedConnector(
+    session: StoredTelegramSession,
+    generation: number,
+  ): Promise<ConnectorEnsureResult | null> {
+    let current = this.currentHealthSession(session, generation);
+    if (!current) return null;
+    try {
+      await this.ports.stopConnector(current);
+    } catch {
+      return { ok: false, code: "connector_failed" };
+    }
+    current = this.currentHealthSession(session, generation);
+    if (!current) return null;
+    let replacement: ConnectorEnsureResult;
+    try {
+      replacement = await this.ports.ensureConnector(current);
+    } catch {
+      replacement = { ok: false, code: "connector_failed" };
+    }
+    return this.currentHealthSession(session, generation) ? replacement : null;
   }
 
   /** Remote logout. Success removes the local session too; failure PRESERVES

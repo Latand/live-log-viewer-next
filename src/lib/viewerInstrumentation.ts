@@ -88,6 +88,7 @@ interface CurrentReleaseControllerLoaders {
 
 interface ViewerRuntimeActivationSteps {
   initializeOperatorCapability: () => Promise<void>;
+  runIdentityMigration?: () => Promise<void> | void;
   startWakatime: () => Promise<void>;
   startStructuredHosts: (() => void) | null;
   startControllers: () => Promise<void>;
@@ -380,6 +381,36 @@ export async function startWakatimeIntegrationIfEnabled(
   }
 }
 
+export function runIdentityWaveMigrationWithoutBlockingStartup(
+  run: () => unknown,
+  log: (...args: unknown[]) => void = console.error,
+  options: {
+    maxAttempts?: number;
+    initialRetryMs?: number;
+    schedule?: (callback: () => void, delayMs: number) => ActivationTimer;
+  } = {},
+): void {
+  const maxAttempts = Math.max(1, Math.floor(options.maxAttempts ?? 3));
+  const initialRetryMs = Math.max(0, options.initialRetryMs ?? 5_000);
+  const schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+  let attempts = 0;
+  const attempt = () => {
+    attempts += 1;
+    try {
+      run();
+    } catch (error) {
+      if (attempts >= maxAttempts) {
+        log("[identity-wave] registry migration failed; retry limit reached", { attempt: attempts, error });
+        return;
+      }
+      const retryInMs = initialRetryMs * (2 ** (attempts - 1));
+      log("[identity-wave] registry migration failed; retry scheduled", { attempt: attempts, retryInMs, error });
+      schedule(attempt, retryInMs).unref?.();
+    }
+  };
+  attempt();
+}
+
 async function startWakatimeWorker(): Promise<void> {
   if (wakatimeWorkerStore.__llvWakatimeWorker) return;
   const cwd = process.cwd();
@@ -389,7 +420,10 @@ async function startWakatimeWorker(): Promise<void> {
   const launch = fs.existsSync(source) && fs.existsSync(bunContainer)
     ? { executable: bunContainer, workerPath: source }
     : fs.existsSync(bundled)
-      ? { executable: process.execPath, workerPath: bundled }
+      ? {
+          executable: process.versions.bun ? process.execPath : (process.env.LLV_BUN_EXECUTABLE || "bun"),
+          workerPath: bundled,
+        }
       : { executable: process.execPath, workerPath: source };
   const { spawn } = await import("node:child_process");
   const useNice = fs.existsSync("/usr/bin/nice");
@@ -478,6 +512,7 @@ export async function completeViewerRuntimeActivation(
   steps: ViewerRuntimeActivationSteps,
 ): Promise<void> {
   await steps.initializeOperatorCapability();
+  await steps.runIdentityMigration?.();
   await steps.startWakatime();
   steps.publishHotStateActivation();
   steps.startStructuredHosts?.();
@@ -499,6 +534,10 @@ export async function registerViewerRuntime(): Promise<void> {
     let activatedAuthority: HotStateAuthority | null = null;
     await completeViewerRuntimeActivation({
       initializeOperatorCapability: initializeOperatorSpawnCapabilityAtStartup,
+      runIdentityMigration: async () => {
+        const { runIdentityWaveMigrationAtStartup } = await import("@/lib/agent/identityWaveStartup");
+        runIdentityWaveMigrationWithoutBlockingStartup(runIdentityWaveMigrationAtStartup);
+      },
       startWakatime: startWakatimeIntegrationIfEnabled,
       startStructuredHosts: structuredHostsEnabled()
         ? () => {

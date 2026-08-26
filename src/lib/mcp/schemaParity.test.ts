@@ -80,6 +80,7 @@ function boundedArgs(
   const args: Record<string, unknown> = { clientRequestId };
   if (toolName === "spawn_agent") {
     Object.assign(args, {
+      title: "Review MCP schema parity",
       cwd: ".",
       ["prompt"]: "Review PR #1.",
       role: spec.role,
@@ -385,6 +386,7 @@ test("spawn_agent rejects unknown roles at the protocol boundary while valid rol
         name: "spawn_agent",
         arguments: {
           clientRequestId: `spawn-valid-${role}`,
+          title: `Run ${role} schema check`,
           cwd: ".",
           "prompt": "Run the assigned check.",
           role,
@@ -398,6 +400,7 @@ test("spawn_agent rejects unknown roles at the protocol boundary while valid rol
       name: "spawn_agent",
       arguments: {
         clientRequestId: "spawn-unknown-role",
+        title: "Reject unknown spawn role",
         cwd: ".",
         "prompt": "Run the assigned check.",
         role: "unknown-role",

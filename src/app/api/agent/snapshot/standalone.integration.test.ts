@@ -9,6 +9,7 @@ import { AgentRegistry, normalizeRegistry } from "@/lib/agent/registry";
 import { SqliteAgentRegistryStore } from "@/lib/agent/sqliteRegistryStore";
 import type { FileEntry } from "@/lib/types";
 import type { PresencePayloadV1, ViewerSnapshotV1 } from "@/lib/view/types";
+import { beginLegacySpawnReceiptFixture } from "@/lib/agent/registryTestFixtures";
 
 const standaloneServer = path.join(process.cwd(), ".next", "standalone", "server.js");
 const required = process.env.LLV_REQUIRE_STANDALONE_SNAPSHOT_TEST === "1";
@@ -127,7 +128,7 @@ function seedProductionRegistry(
 ): { store: SqliteAgentRegistryStore; churnLaunchId: string } {
   const filename = path.join(stateDir, "agent-registry.json");
   const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
-  const begun = seed.beginSpawn("codex", "/fixture/repository");
+  const begun = beginLegacySpawnReceiptFixture(seed, "codex", "/fixture/repository");
   const settlement = seed.settleSpawn(begun.launchId, {
     key: { engine: "codex", sessionId: syntheticSessionId(0) },
     artifactPath: "/fixture/transcripts/session-0.jsonl",

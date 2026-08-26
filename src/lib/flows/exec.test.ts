@@ -9,7 +9,7 @@ import { procBackend } from "@/lib/proc";
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so exec/store load dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-exec-test-"));
-const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventStream, startHeadlessReview, terminateHeadlessReviewerGroup, terminateHeadlessReviewerGroupAndWait } = await import("./exec");
+const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, runHeadlessCodexOnce, scanEventStream, startHeadlessReview, terminateHeadlessReviewerGroup, terminateHeadlessReviewerGroupAndWait } = await import("./exec");
 const { reviewerPrompt } = await import("./prompts");
 const { outputPathFor, stdoutPathFor } = await import("./store");
 const { WAKATIME_CREDENTIAL_ENV } = await import("../wakatime/credential");
@@ -539,4 +539,206 @@ test("restart reconstruction: dead run with no output at all times out past the 
   const started = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const status = headlessReviewStatus("flow-e", 1, { reviewerPid: 999_999_999, reviewerIdentity: "999999999:gone", spawnStartedAt: started }, "codex");
   expect(status?.status).toBe("timeout");
+});
+
+/* Issue #1067: the one-shot summarizer the orchestrator rotation runs shares
+   this runner's account, process-group and artifact discipline. */
+
+test("a read-only one-shot command drops the sandbox bypass and keeps the empty MCP server table", () => {
+  const built = reviewerCommand(
+    { engine: "codex", model: "gpt-5.6-luna", effort: "low" },
+    "digest request",
+    "/out/last-message.md",
+    "/tmp/empty",
+    null,
+    null,
+    undefined,
+    { sandbox: "read-only" },
+  );
+
+  expect(built.args).toContain("-s");
+  expect(built.args).toContain("read-only");
+  expect(built.args).toContain("--skip-git-repo-check");
+  expect(built.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  /* Unchanged from the reviewer shape: no user config (so no MCP servers), a
+     single agent, the prompt on stdin, and the model on the command line. */
+  expect(built.args).toContain("--ignore-user-config");
+  expect(built.args).toContain("--disable");
+  expect(built.args).toContain("multi_agent");
+  expect(built.args).toContain("-m");
+  expect(built.args).toContain("gpt-5.6-luna");
+  expect(built.stdin).toStartWith("digest request");
+});
+
+test("runHeadlessCodexOnce resolves done from the last-message artifact", async () => {
+  const artifactDir = path.join(process.env.LLV_STATE_DIR!, "digest-done");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-digest-codex");
+  fs.writeFileSync(
+    executablePath,
+    `#!${process.execPath}\nawait Bun.stdin.text();\nconst target = process.argv[process.argv.indexOf("--output-last-message") + 1];\nawait Bun.write(target, "Decisions:\\n- compacted the history");\n`,
+    { mode: 0o700 },
+  );
+
+  const result = await runHeadlessCodexOnce({
+    key: "orchestrator-handoff:done",
+    cwd: path.join(artifactDir, "cwd"),
+    ["prompt"]: "compact these handoffs",
+    model: null,
+    effort: null,
+    account: null,
+    artifactDir,
+    timeoutMs: 10_000,
+    sandbox: "read-only",
+    runtime: { command: executablePath },
+  });
+
+  expect(result.status).toBe("done");
+  expect(result.finalOutput).toContain("compacted the history");
+  expect(result.code).toBe(0);
+});
+
+test("runHeadlessCodexOnce kills and reports a hung child once its bounded timeout fires", async () => {
+  const artifactDir = path.join(process.env.LLV_STATE_DIR!, "digest-timeout");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-hanging-codex");
+  fs.writeFileSync(
+    executablePath,
+    `#!${process.execPath}\nawait Bun.stdin.text();\nsetInterval(() => {}, 1_000);\n`,
+    { mode: 0o700 },
+  );
+
+  const result = await runHeadlessCodexOnce({
+    key: "orchestrator-handoff:timeout",
+    cwd: path.join(artifactDir, "cwd"),
+    ["prompt"]: "compact these handoffs",
+    model: null,
+    effort: null,
+    account: null,
+    artifactDir,
+    timeoutMs: 200,
+    sandbox: "read-only",
+    runtime: { command: executablePath },
+  });
+
+  expect(result.status).toBe("timeout");
+  expect(result.finalOutput).toBe("");
+});
+
+test("runHeadlessCodexOnce reports timeout even when the hung child already wrote its artifact", async () => {
+  const artifactDir = path.join(process.env.LLV_STATE_DIR!, "digest-artifact-then-hang");
+  const pidPath = path.join(process.env.LLV_STATE_DIR!, "artifact-then-hang.pid");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-artifact-then-hanging-codex");
+  /* Writes the last-message artifact, records its own pid, then hangs — the
+     shape that used to be read as `done` and rob the caller of its fallback. */
+  fs.writeFileSync(
+    executablePath,
+    [
+      `#!${process.execPath}`,
+      "await Bun.stdin.text();",
+      `const target = process.argv[process.argv.indexOf("--output-last-message") + 1];`,
+      `await Bun.write(target, "Decisions:\\n- half-written before the hang");`,
+      `await Bun.write(${JSON.stringify(pidPath)}, String(process.pid));`,
+      "setInterval(() => {}, 1_000);",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+
+  const result = await runHeadlessCodexOnce({
+    key: "orchestrator-handoff:artifact-then-hang",
+    cwd: path.join(artifactDir, "cwd"),
+    ["prompt"]: "compact these handoffs",
+    model: null,
+    effort: null,
+    account: null,
+    artifactDir,
+    timeoutMs: 400,
+    sandbox: "read-only",
+    runtime: { command: executablePath },
+  });
+
+  /* The artifact is on disk and non-empty, and the run is STILL a timeout: a
+     child killed mid-turn produced whatever it had flushed, not an answer. */
+  expect(fs.readFileSync(path.join(artifactDir, "last-message.md"), "utf8")).toContain("half-written");
+  expect(result.status).toBe("timeout");
+
+  /* Detached, so the child is its own group leader: the whole group is gone. */
+  const childPid = Number(fs.readFileSync(pidPath, "utf8"));
+  expect(Number.isInteger(childPid)).toBeTrue();
+  await waitForDeath(childPid);
+  expect(() => process.kill(-childPid, 0)).toThrow();
+});
+
+/* Issue #1067: `last-message.md` is Codex's completed-turn artifact, but a
+   child that writes it and then dies did NOT complete its turn. Reading that
+   as `done` handed the orchestrator digest a partial answer AND denied it the
+   deterministic fallback, exactly as the timeout case above. */
+
+test("runHeadlessCodexOnce reports failed when the child wrote its artifact and exited non-zero", async () => {
+  const artifactDir = path.join(process.env.LLV_STATE_DIR!, "digest-artifact-then-exit-1");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-failing-codex");
+  fs.writeFileSync(
+    executablePath,
+    [
+      `#!${process.execPath}`,
+      "await Bun.stdin.text();",
+      `const target = process.argv[process.argv.indexOf("--output-last-message") + 1];`,
+      `await Bun.write(target, "Decisions:\\n- written before the error");`,
+      "process.exit(1);",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+
+  const result = await runHeadlessCodexOnce({
+    key: "orchestrator-handoff:exit-1",
+    cwd: path.join(artifactDir, "cwd"),
+    ["prompt"]: "compact these handoffs",
+    model: null,
+    effort: null,
+    account: null,
+    artifactDir,
+    timeoutMs: 10_000,
+    sandbox: "read-only",
+    runtime: { command: executablePath },
+  });
+
+  /* The artifact is on disk and non-empty, and the run is STILL a failure. */
+  expect(fs.readFileSync(path.join(artifactDir, "last-message.md"), "utf8")).toContain("written before the error");
+  expect(result.status).toBe("failed");
+  expect(result.code).toBe(1);
+});
+
+test("runHeadlessCodexOnce reports failed when the child wrote its artifact and died by signal", async () => {
+  const artifactDir = path.join(process.env.LLV_STATE_DIR!, "digest-artifact-then-signal");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-signalled-codex");
+  fs.writeFileSync(
+    executablePath,
+    [
+      `#!${process.execPath}`,
+      "await Bun.stdin.text();",
+      `const target = process.argv[process.argv.indexOf("--output-last-message") + 1];`,
+      `await Bun.write(target, "Decisions:\\n- written before the signal");`,
+      `process.kill(process.pid, "SIGKILL");`,
+      "setInterval(() => {}, 1_000);",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+
+  const result = await runHeadlessCodexOnce({
+    key: "orchestrator-handoff:signal",
+    cwd: path.join(artifactDir, "cwd"),
+    ["prompt"]: "compact these handoffs",
+    model: null,
+    effort: null,
+    account: null,
+    artifactDir,
+    timeoutMs: 10_000,
+    sandbox: "read-only",
+    runtime: { command: executablePath },
+  });
+
+  expect(fs.readFileSync(path.join(artifactDir, "last-message.md"), "utf8")).toContain("written before the signal");
+  expect(result.status).toBe("failed");
+  expect(result.signal).toBe("SIGKILL");
 });

@@ -8,12 +8,14 @@ import { persistProjectAliases } from "@/lib/projects/aliases";
 import {
   ORCHESTRATOR_SEAT_HISTORY_CAP,
   activeOrchestratorSeats,
+  activeOrchestratorSeatsForMigration,
   beginOrchestratorSeatIntent,
   completeOrchestratorSeatIntent,
   failOrchestratorSeatIntent,
   orchestratorRevocations,
   orchestratorSeatFor,
   readOrchestratorSeatFile,
+  rekeyOrchestratorSeatPaths,
 } from "./seats";
 
 let sandbox = "";
@@ -203,11 +205,41 @@ test("a genuinely in-flight intent — no error, epoch at or above the active se
   expect(orchestratorSeatFor("proj-a").history).toEqual([]);
 });
 
-test("an errored pending intent replayed by its OWN key is still returned for the caller to finish", () => {
-  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
-  failOrchestratorSeatIntent("proj-a", "req_0000001", "transient");
-  const replay = beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+/* Issue #1067 AC 5: a recorded intent error is TERMINAL, and terminal outranks
+   the idempotency key. The old contract handed the errored row back as a
+   `replay` for its own key to "finish", which re-delivered the stored mandate —
+   the very text that failed — and kept the failed row in the blocking pending
+   position, which is the permanent "last designation failed" banner in the
+   incident. The next begin now clears it whichever key sends it. */
+test("an errored pending intent is terminalized by its OWN key, not replayed", () => {
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "oversized", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  failOrchestratorSeatIntent("proj-a", "req_0000001", "structured message text exceeds the 32000-byte envelope bound");
+
+  const again = beginOrchestratorSeatIntent({ project: "proj-a", mandate: "recomposed and small", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+
+  expect(again.kind).toBe("begun");
+  /* The fresh intent carries the RECOMPOSED mandate, not the stored one. */
+  expect(again.seat.mandate).toBe("recomposed and small");
+  expect(again.seat.intent.error).toBeNull();
+  if (again.kind === "begun") expect(again.terminalized?.reason).toBe("terminal_error");
+  const seats = orchestratorSeatFor("proj-a");
+  expect(seats.history).toMatchObject([{
+    reason: "terminal_error",
+    seat: { mandate: "oversized", intent: { clientRequestId: "req_0000001" } },
+  }]);
+  /* One pending row, and it is the new one — nothing hangs. */
+  expect(seats.pending?.seatEpoch).toBe(again.seat.seatEpoch);
+  expect(seats.pending?.intent.error).toBeNull();
+});
+
+test("a still-live pending intent is replayed by its own key so the caller can finish it", () => {
+  const begun = beginOrchestratorSeatIntent({ project: "proj-a", mandate: "run the board", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+
+  const replay = beginOrchestratorSeatIntent({ project: "proj-a", mandate: "ignored on replay", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+
   expect(replay.kind).toBe("replay");
+  expect(replay.seat.seatEpoch).toBe(begun.seat.seatEpoch);
+  expect(replay.seat.mandate).toBe("run the board");
   expect(orchestratorSeatFor("proj-a").history).toEqual([]);
 });
 
@@ -247,6 +279,7 @@ test("the epoch counter postdates history epochs so a recovered file never reiss
 test("a malformed file reads as empty and the epoch counter postdates everything on file", () => {
   fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), "{not json", "utf8");
   expect(activeOrchestratorSeats()).toEqual([]);
+  expect(() => activeOrchestratorSeatsForMigration()).toThrow("orchestrator seat evidence is malformed");
 
   beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
   completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
@@ -254,6 +287,62 @@ test("a malformed file reads as empty and the epoch counter postdates everything
   raw.nextSeatEpoch = 0;
   fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify(raw), "utf8");
   expect(readOrchestratorSeatFile().nextSeatEpoch).toBe(2);
+});
+
+test("identity migration rekeys the active seat path idempotently", () => {
+  const legacyPath = path.join(sandbox, "legacy.jsonl");
+  const sharedPath = path.join(sandbox, "shared.jsonl");
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({
+    project: "proj-a",
+    clientRequestId: "req_0000001",
+    conversationId: "conversation_a",
+    path: legacyPath,
+    now: AT,
+  });
+
+  rekeyOrchestratorSeatPaths([{ legacyPath, sharedPath }]);
+  rekeyOrchestratorSeatPaths([{ legacyPath, sharedPath }]);
+  expect(orchestratorSeatFor("proj-a").active?.path).toBe(sharedPath);
+});
+
+test("whole-file rewrites preserve explicit legacy-unfrozen runtime provenance", () => {
+  fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify({
+    schemaVersion: 1,
+    nextSeatEpoch: 2,
+    seats: {
+      "proj-a": {
+        project: "proj-a",
+        seatEpoch: 1,
+        conversationId: "conversation_a",
+        path: null,
+        engine: null,
+        model: null,
+        runtimeIdentityFrozen: false,
+        mandate: "legacy seat",
+        promptVersion: null,
+        predecessorConversationId: null,
+        state: "active",
+        intent: { clientRequestId: "req_legacy_1", mode: "spawn", launchId: null, error: null },
+        designatedAt: AT,
+        activatedAt: AT,
+      },
+    },
+    pending: {},
+    revocations: [],
+  }), "utf8");
+
+  expect(orchestratorSeatFor("proj-a").active?.runtimeIdentityFrozen).toBe(false);
+  beginOrchestratorSeatIntent({
+    project: "proj-b",
+    mandate: "rewrite the seat file",
+    clientRequestId: "req_rewrite_1",
+    mode: "spawn",
+    engine: "claude",
+    model: "opus",
+    now: AT,
+  });
+  expect(orchestratorSeatFor("proj-a").active?.runtimeIdentityFrozen).toBe(false);
 });
 
 test("seats are independent per project", () => {

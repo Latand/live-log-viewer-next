@@ -6,6 +6,8 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { seatIdentityResolver } from "@/lib/bridge/seatIdentity";
+import { recordBridgeDirectiveAnswer, recordManagerReport } from "@/lib/bridge/service";
 import { createManualProject, setProjectCrown } from "@/lib/projects/curation";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
@@ -14,6 +16,7 @@ import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { createFilesClientCache } from "@/hooks/useFiles";
+import { beginLegacySpawnFixture, beginLegacySpawnReceiptFixture, withLegacySpawnFixtureTitles } from "@/lib/agent/registryTestFixtures";
 
 let scans = 0;
 let scanOptions: unknown;
@@ -50,7 +53,7 @@ beforeEach(() => {
   // touches the real ~/.config/agent-log-viewer state.
   stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-state-"));
   process.env.LLV_STATE_DIR = stateDir;
-  setAgentRegistryForTests(new AgentRegistry(path.join(registryRoot, "registry.json")));
+  setAgentRegistryForTests(withLegacySpawnFixtureTitles(new AgentRegistry(path.join(registryRoot, "registry.json"))));
   resetFilesRouteCacheForTests();
   resetFilesProjectionCacheForTests();
   scans = 0;
@@ -649,7 +652,7 @@ test("issue 798: a files GET reads the registry once, threads it to titles, and 
 
 test("volatile registry diagnostics do not invalidate an otherwise stable files ETag", async () => {
   const filename = path.join(registryRoot, "registry.json");
-  new AgentRegistry(filename).beginSpawn("codex", "/seed");
+  beginLegacySpawnReceiptFixture(new AgentRegistry(filename), "codex", "/seed");
   let now = 1_000;
   const registry = new AgentRegistry(filename, undefined, undefined, {
     sqliteMode: "read",
@@ -657,7 +660,7 @@ test("volatile registry diagnostics do not invalidate an otherwise stable files 
     mirrorCheckpointMs: 120_000,
     scheduleMirrorCheckpoint: () => ({ unref() {} }),
   });
-  registry.beginSpawn("codex", "/writer-rate-sample");
+  beginLegacySpawnReceiptFixture(registry, "codex", "/writer-rate-sample");
   setAgentRegistryForTests(registry);
   const first = await GET(new Request("http://127.0.0.1/api/files"));
   const etag = first.headers.get("etag");
@@ -674,7 +677,7 @@ test("volatile registry diagnostics do not invalidate an otherwise stable files 
 test("production-sized SQLite registry keeps cold and warm files probes within budget", async () => {
   const filename = path.join(registryRoot, "production-registry.json");
   const seed = new AgentRegistry(filename);
-  const template = seed.beginSpawn("codex", "/production-seed");
+  const template = beginLegacySpawnReceiptFixture(seed, "codex", "/production-seed");
   const production = seed.snapshot();
   for (let index = 1; index < 18_000; index += 1) {
     const launchId = `production-seed-${String(index).padStart(5, "0")}`;
@@ -2359,7 +2362,7 @@ test("a cross-project lineage stub inherits its owner's explicit project", async
   const parentPath = path.join(stateDir, "parent-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1411.jsonl");
   const childPath = path.join(stateDir, "child-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1412.jsonl");
   fs.writeFileSync(parentPath, "{}\n");
-  const parentSpawn = registry.beginSpawnRequest({
+  const parentSpawn = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd: homeRootCwd,
     accountId: "terra",
@@ -2377,7 +2380,7 @@ test("a cross-project lineage stub inherits its owner's explicit project", async
     claimOwner: null,
     pendingAction: null,
   });
-  const childSpawn = registry.beginSpawnRequest({
+  const childSpawn = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd: homeRootCwd,
     accountId: "terra",
@@ -2412,7 +2415,7 @@ test("a staged structured card stays binding until its initial message is admitt
   const registry = agentRegistry();
   const cwd = process.cwd();
   const artifactPath = path.join(stateDir, "e9e8a4b4.jsonl");
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2458,7 +2461,7 @@ test("transcript discovery suppresses the preallocated card for the same convers
   const registry = agentRegistry();
   const cwd = process.cwd();
   const artifactPath = path.join(stateDir, "9173e9a2.jsonl");
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2712,7 +2715,7 @@ test("lineage projection uses one registry revision during provisional parent ad
     observedAt: "2026-07-12T12:00:00.000Z",
   }]);
   const provisionalParent = registry.conversationForPath(parentPath)!;
-  const migration = registry.beginSpawnRequest({
+  const migration = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd: "/repo",
     conversationId: canonicalParent.id,
@@ -2785,7 +2788,7 @@ test("a Viewer root with three engine-native children projects viewer/engine pro
 
   // The Viewer launch settles a spawn receipt onto the root conversation, so the
   // root is receipt-owned even though it carries no parent lineage edge.
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: null });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd: "/repo", accountId: null });
   if (begun.kind !== "created") throw new Error("expected create");
   registry.settleSpawn(begun.receipt.launchId, {
     key: { engine: "codex", sessionId: parentSid },
@@ -3198,4 +3201,77 @@ test("crowned and manually created projects flow through the files payload", asy
   } finally {
     fs.rmSync(manualRoot, { recursive: true, force: true });
   }
+});
+
+/** The production seat resolver: the registry's own alias chain, exactly as
+    `/api/files` and the MCP relay both take their seat identities through. */
+const registrySeatIdentity = seatIdentityResolver((id) => agentRegistry().canonicalConversationId(id));
+
+test("issue 1168: the seat's open bridge ask rides the files payload and clears on the answering directive", async () => {
+  const seatPath = "/sessions/orchestrator-seat.jsonl";
+  const seat = agentRegistry().ensureConversation("codex", seatPath, null);
+  scannedFiles = [file(seatPath), file("/sessions/worker.jsonl")];
+  const filed = recordManagerReport({
+    key: "lane-4-blocked",
+    class: "blocked",
+    at: new Date().toISOString(),
+    project: "repo",
+    targetSeatConversationId: seat.id,
+    body: "cannot proceed: the lane needs a base branch",
+  });
+
+  const asking = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
+  expect(asking.files.find((entry) => entry.path === seatPath)?.bridgeAsk).toEqual({
+    id: "lane-4-blocked",
+    at: filed!.at,
+  });
+  /* The ask belongs to the seat alone — no other scanned row carries it. */
+  expect(asking.files.find((entry) => entry.path === "/sessions/worker.jsonl")?.bridgeAsk).toBeUndefined();
+
+  /* Nothing above opened a gateway channel or moved a cursor: this reaches the
+     operator with the voice gateway off, which is the whole point of #1168. */
+  recordBridgeDirectiveAnswer(filed!.seq, { project: "repo", seatConversationId: seat.id }, registrySeatIdentity);
+  const answered = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
+  expect(answered.files.find((entry) => entry.path === seatPath)?.bridgeAsk).toBeUndefined();
+});
+
+test("issue 1168: a seat rekeyed since it filed keeps one identity — the ask reaches its card and the directive still clears it", async () => {
+  /* The reviewer's HIGH: the projection resolved a recorded seat through the
+     registry so a migrated conversation's ask lands on the card that exists,
+     while the settlement compared raw ids. The rekey that made the item visible
+     was therefore the rekey that made it unanswerable, and the queue kept a
+     decision request nothing in the log could retire. */
+  const seatPath = "/sessions/orchestrator-seat-rekeyed.jsonl";
+  const registry = agentRegistry();
+  const seat = registry.ensureConversation("codex", seatPath, null);
+  const preMigrationSeatId = "conversation_seat_before_migration";
+  const realSnapshot = registry.readOnlySnapshot.bind(registry);
+  registry.readOnlySnapshot = () => {
+    const snapshot = realSnapshot();
+    return {
+      ...snapshot,
+      conversationAliases: { ...snapshot.conversationAliases, [preMigrationSeatId]: seat.id },
+    };
+  };
+
+  scannedFiles = [file(seatPath)];
+  /* Routed under the id the seat had WHEN IT ASKED — the log is history and is
+     never rewritten by a migration. */
+  const filed = recordManagerReport({
+    key: "lane-4-blocked",
+    class: "blocked",
+    at: new Date().toISOString(),
+    project: "repo",
+    targetSeatConversationId: preMigrationSeatId,
+    body: "cannot proceed: the lane needs a base branch",
+  });
+
+  const asking = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
+  expect(asking.files.find((entry) => entry.path === seatPath)?.bridgeAsk?.id).toBe("lane-4-blocked");
+
+  /* The relay only ever knows the seat by the identity the seat authority hands
+     it, which is the canonical one. */
+  recordBridgeDirectiveAnswer(filed!.seq, { project: "repo", seatConversationId: seat.id }, registrySeatIdentity);
+  const answered = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
+  expect(answered.files.find((entry) => entry.path === seatPath)?.bridgeAsk).toBeUndefined();
 });

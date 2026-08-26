@@ -7,6 +7,7 @@ import { applySpawnedConversationSnapshot } from "@/hooks/useFiles";
 import { requestFilesRefresh } from "@/lib/filesEvents";
 import { useLocale } from "@/lib/i18n";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
+import { derivedSpawnTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -74,7 +75,8 @@ export function MobileOrchestratorRow({
   onOpenConversation: (file: FileEntry) => void;
 }) {
   const { t } = useLocale();
-  const { status, failed, refresh } = useOrchestratorSeat(project);
+  const projectCwd = useMemo(() => draftWorkingDirectory(files, project), [files, project]);
+  const { status, failed, refresh } = useOrchestratorSeat(project, projectCwd || undefined);
   const [submitting, setSubmitting] = useState(false);
   /* The guard is SYNCHRONOUS: two taps in one event batch both read the same
      render's `submitting`, so a state flag alone lets the second through. The
@@ -101,11 +103,6 @@ export function MobileOrchestratorRow({
   const surface = useSeatSurface(file);
   const state = deriveOrchestratorPanelState({ status, statusFailed: failed, submitting, submitFailure, file, surface });
   const view = orchestratorRowView(state, { conversationReady: Boolean(file) });
-  /* The project's own newest checkout, exactly as the board's drafts resolve it.
-     Empty simply omits the field, and the seat route resolves the project's own
-     root itself — the operator never types a directory on a phone. */
-  const projectCwd = useMemo(() => draftWorkingDirectory(files, project), [files, project]);
-
   /* A key kept through an unknown outcome is released the moment the seat read
      says where it landed. Held any longer it becomes a trap: the seat command
      answers a replay of a COMPLETED intent with the old seat, so the next
@@ -169,6 +166,7 @@ export function MobileOrchestratorRow({
         if (outcome.kind === "launched") {
           const provisional = provisionalSpawnFile(
             createSpawnAttempt(clientRequestId, at, {
+              title: derivedSpawnTitle("orchestrator", text, project),
               engine: payload.engine,
               model: payload.model,
               cwd: projectCwd,
@@ -305,6 +303,7 @@ export function MobileOrchestratorRow({
           state={state}
           file={file}
           pendingMandate={status?.pending?.mandate ?? ""}
+          viewerMcpRegistered={status?.viewerMcpRegistered === true}
           submitting={submitting}
           onConfirm={(payload) => void confirm(payload)}
           onRecheck={() => void refresh()}

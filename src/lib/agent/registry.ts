@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
+import { durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import {
   emptyLaunchProfile,
@@ -31,10 +32,18 @@ import {
   MIGRATION_DELIVERY_CANCELLATION_PREFIX,
   migrationIntentCanEnroll,
   ROLLED_BACK_MIGRATION_DELIVERY_REASON,
+  rolledBackMigrationOwnsDelivery,
   STOPPED_MIGRATION_DELIVERY_REASON,
 } from "@/lib/accounts/migration/intentLiveness";
 
 import type { AgentEngine, ResumeSpec } from "./cli";
+import {
+  applyIdentityWaveMigration,
+  stampOrchestratorLineage,
+  type IdentityWaveMigrationInput,
+  type IdentityWaveMigrationResult,
+  type IdentityWaveSeat,
+} from "./identityWaveMigration";
 import { mcpServersForStoredSession, reboundAssembledMcpGrants, reboundEntryMcpGrant, reboundStoredMcpGrants, type McpGrantPolicy } from "./mcpAllowlist";
 import { liveAccountConversationIds, type AccountLivenessOptions } from "./accountLiveness";
 import { loadSpawnNestingPolicy } from "./nestingPolicy";
@@ -55,7 +64,11 @@ import {
   resolveRegistryBackend,
   type RegistryBackendResolution,
 } from "./registryBackendIdentity";
-import { SqliteAgentRegistryStore, type SqliteRegistrySnapshot } from "./sqliteRegistryStore";
+import {
+  SqliteAgentRegistryStore,
+  type SqliteRegistryReplacement,
+  type SqliteRegistrySnapshot,
+} from "./sqliteRegistryStore";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
 import { parseMessageOrigin } from "@/lib/runtime/messageOrigin";
 import { assertStructuredTextEnvelope, parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
@@ -160,6 +173,11 @@ export interface SpawnReceipt {
   clientAttemptId: string | null;
   /** SHA-256 of the public launch shape. Prompt/image contents never enter this identity field. */
   requestDigest: string | null;
+  /** The identity wave replaced this receipt's generic launch title. */
+  identityWaveTitleBackfill?: true;
+  /** Active orchestrator identity captured while an accepted launch still has
+      only its reserved conversation id. Settlement consumes it once. */
+  pendingOrchestratorSeatIdentity?: IdentityWaveSeat | null;
   /** Launch transport fixed when the idempotent reservation is created. */
   transport: "tmux" | "structured" | null;
   /** Process that owns pre-host structured admission. A replacement may take
@@ -268,7 +286,7 @@ export interface SpawnLineageEdge {
 
 export interface DurableConversationMembership {
   conversationId: ViewerConversationId;
-  kind: "flow" | "pipeline";
+  kind: "flow" | "pipeline" | "orchestrator";
   containerId: string;
   role: string;
   slot: string;
@@ -472,6 +490,13 @@ export interface RegistryFile {
   receipts: Record<string, SpawnReceipt>;
   lineageEdges: Record<string, SpawnLineageEdge>;
   memberships: Record<string, DurableConversationMembership[]>;
+  identityMigrations: Record<string, {
+    completedAt: string;
+    retitled: number;
+    rekeyed: number;
+    quarantinedRekeys: number;
+    edgesStamped: number;
+  }>;
   importedResumePanes: boolean;
   /** Compatibility evidence only. It never authorizes a pane until the live
       resolver proves server, process, engine, and transcript ownership. */
@@ -782,7 +807,7 @@ function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfi
     /* The plugin grant was decided at spawn from the session's origin; a
        resume replays the durable value and can never widen it (issue #687). */
     plugins: current.plugins ?? [],
-    title: requested.title ?? current.title,
+    title: durableSemanticTitle(current.title) ?? durableSemanticTitle(requested.title),
     project: requested.project ?? current.project,
     parentConversationId: requested.parentConversationId ?? current.parentConversationId,
     role: current.role === "root" || requested.role === "root" ? "root" : "worker",
@@ -877,6 +902,7 @@ function conversationMigrationForIntent(
     errorCode: null,
     operationId: crypto.randomUUID(),
     sourceGenerationId: source.id,
+    successorLaunchProfile: null,
     providerReceipt: null,
     pendingContinuityPaths,
     boardProject,
@@ -935,6 +961,24 @@ function terminalizeHeldDelivery(
   delivery.error = terminalReason.slice(0, 240);
   failInitialSpawnReceiptForDelivery(file, delivery);
   syncDeliveryOperationOwnerState(file, delivery);
+}
+
+function terminalizeRolledBackMigrationDelivery(
+  file: RegistryFile,
+  deliveryId: string,
+  intentId: string,
+  reason: string,
+): HeldDelivery | null {
+  const delivery = file.heldDeliveries[deliveryId];
+  if (!delivery || !["held", "assigned", "delivery-uncertain"].includes(delivery.state)) return null;
+  const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+  const migration = conversation?.migration;
+  if (!migration
+    || migration.phase !== "rolled-back"
+    || migration.intentId !== intentId
+    || !rolledBackMigrationOwnsDelivery(delivery, migration.updatedAt)) return null;
+  terminalizeHeldDelivery(file, delivery, reason);
+  return clone(delivery);
 }
 
 function reconfigureMigrationRequestId(owner: { operationId: string; revision: number }): string {
@@ -1030,6 +1074,7 @@ const EMPTY: RegistryFile = {
   receipts: {},
   lineageEdges: {},
   memberships: {},
+  identityMigrations: {},
   importedResumePanes: false,
   legacyResumePanes: { serverPid: null, panes: {} },
   conversations: {},
@@ -1210,7 +1255,7 @@ function normalizeMemberships(value: unknown): RegistryFile["memberships"] {
     const valid = rows.flatMap((candidate): DurableConversationMembership[] => {
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
       const row = candidate as Partial<DurableConversationMembership>;
-      if ((row.kind !== "flow" && row.kind !== "pipeline")
+      if ((row.kind !== "flow" && row.kind !== "pipeline" && row.kind !== "orchestrator")
         || typeof row.containerId !== "string" || !row.containerId
         || typeof row.role !== "string" || !row.role
         || typeof row.slot !== "string" || !row.slot) return [];
@@ -1241,6 +1286,27 @@ function normalizeMemberships(value: unknown): RegistryFile["memberships"] {
     if (valid.length) normalized[conversationId] = valid;
   }
   return normalized;
+}
+
+function normalizeIdentityMigrations(value: unknown): RegistryFile["identityMigrations"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([key, candidate]) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+    const marker = candidate as Record<string, unknown>;
+    const quarantinedRekeys = marker.quarantinedRekeys ?? 0;
+    if (typeof marker.completedAt !== "string"
+      || !Number.isSafeInteger(marker.retitled) || (marker.retitled as number) < 0
+      || !Number.isSafeInteger(marker.rekeyed) || (marker.rekeyed as number) < 0
+      || !Number.isSafeInteger(quarantinedRekeys) || (quarantinedRekeys as number) < 0
+      || !Number.isSafeInteger(marker.edgesStamped) || (marker.edgesStamped as number) < 0) return [];
+    return [[key, {
+      completedAt: marker.completedAt,
+      retitled: marker.retitled as number,
+      rekeyed: marker.rekeyed as number,
+      quarantinedRekeys: quarantinedRekeys as number,
+      edgesStamped: marker.edgesStamped as number,
+    }]];
+  }));
 }
 
 function normalizeProviderReceipt(value: ProviderReceipt | null | undefined): ProviderReceipt | null {
@@ -1288,6 +1354,11 @@ function normalizeConversation(value: RegistryConversation, policy?: McpGrantPol
   const current = generations.at(-1);
   const legacyContinuity = (value.migration as (ConversationMigration & { continuityPaths?: unknown }) | null)?.continuityPaths;
   const providerReceipt = normalizeProviderReceipt(value.migration?.providerReceipt);
+  const successorLaunchProfile = value.migration?.successorLaunchProfile
+    && typeof value.migration.successorLaunchProfile === "object"
+    && !Array.isArray(value.migration.successorLaunchProfile)
+    ? emptyLaunchProfile(value.migration.successorLaunchProfile, policy)
+    : null;
   const pendingContinuityPaths = Array.isArray(value.migration?.pendingContinuityPaths)
     ? value.migration.pendingContinuityPaths.filter((pathname): pathname is string => typeof pathname === "string")
     : value.migration?.phase !== "committed" && providerReceipt
@@ -1299,6 +1370,7 @@ function normalizeConversation(value: RegistryConversation, policy?: McpGrantPol
       errorCode: value.migration.errorCode ?? null,
       operationId: value.migration.operationId ?? `${value.migration.intentId}:${value.id}:${value.migration.revision}`,
       sourceGenerationId: value.migration.sourceGenerationId ?? current?.id ?? "",
+      successorLaunchProfile,
       providerReceipt,
       pendingContinuityPaths,
       boardProject: typeof value.migration.boardProject === "string" ? value.migration.boardProject : null,
@@ -2121,7 +2193,7 @@ function recordMembership(
   input: DurableMembershipInput,
   createdAt: string,
 ): DurableConversationMembership {
-  if ((input.kind !== "flow" && input.kind !== "pipeline") || !input.containerId.trim() || !input.role.trim() || !input.slot.trim()) {
+  if ((input.kind !== "flow" && input.kind !== "pipeline" && input.kind !== "orchestrator") || !input.containerId.trim() || !input.role.trim() || !input.slot.trim()) {
     throw new Error("durable membership is invalid");
   }
   const canonicalConversationId = resolveConversationAlias(file, conversationId);
@@ -2448,6 +2520,26 @@ function normalizeQueuedPinnedSpawn(value: unknown, policy?: McpGrantPolicy): Qu
   };
 }
 
+function normalizePendingOrchestratorSeatIdentity(value: unknown): IdentityWaveSeat | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const seat = value as Partial<IdentityWaveSeat>;
+  if (typeof seat.project !== "string" || !seat.project
+    || !Number.isInteger(seat.seatEpoch) || (seat.seatEpoch ?? 0) < 1
+    || typeof seat.conversationId !== "string" || !seat.conversationId.startsWith("conversation_")
+    || (seat.predecessorConversationId !== null && typeof seat.predecessorConversationId !== "string")
+    || typeof seat.designatedAt !== "string"
+    || (seat.activatedAt !== null && typeof seat.activatedAt !== "string")) return null;
+  return {
+    project: seat.project,
+    seatEpoch: seat.seatEpoch!,
+    conversationId: seat.conversationId,
+    predecessorConversationId: seat.predecessorConversationId ?? null,
+    designatedAt: seat.designatedAt,
+    activatedAt: seat.activatedAt ?? null,
+    path: typeof seat.path === "string" ? seat.path : null,
+  };
+}
+
 function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnReceipt {
   const state = value.state === "completed" || value.state === "failed" || value.state === "pane-bound" || value.state === "host-verified" || value.state === "prompt-delivered" || value.state === "path-pending" || value.state === "conflicted"
     ? value.state
@@ -2459,6 +2551,8 @@ function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnRe
     ...value,
     clientAttemptId: typeof value.clientAttemptId === "string" ? value.clientAttemptId : null,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : null,
+    ...(value.identityWaveTitleBackfill === true ? { identityWaveTitleBackfill: true as const } : {}),
+    pendingOrchestratorSeatIdentity: normalizePendingOrchestratorSeatIdentity(value.pendingOrchestratorSeatIdentity),
     transport: value.transport === "tmux" || value.transport === "structured" ? value.transport : null,
     admissionOwner: value.admissionOwner
       && Number.isInteger(value.admissionOwner.pid)
@@ -2649,6 +2743,7 @@ export function normalizeRegistry(value: unknown, policy?: McpGrantPolicy): Regi
         ? Object.fromEntries(Object.entries(parsed.lineageEdges).map(([id, edge]) => [id, normalizeLineageEdge(edge)]))
         : {},
       memberships: normalizeMemberships(parsed.memberships),
+      identityMigrations: normalizeIdentityMigrations(parsed.identityMigrations),
       importedResumePanes: parsed.importedResumePanes === true,
       legacyResumePanes: legacy && typeof legacy === "object" && "panes" in legacy
         ? { serverPid: typeof (legacy as { serverPid?: unknown }).serverPid === "number" ? (legacy as { serverPid: number }).serverPid : null, panes: ((legacy as { panes?: unknown }).panes as Record<string, ResumePaneRecord>) ?? {} }
@@ -3494,8 +3589,20 @@ export class AgentRegistry {
       if (changed) writeAtomicPayload(this.filename, payload);
       if (sqlite && !changed) this.assertSqliteParity();
       if (sqlite && changed) {
-        this.beforeDualWriteMutationReplace?.();
-        const replacement = this.sqliteStore!.replace(file, sqlite.revision);
+        let replacement: SqliteRegistryReplacement;
+        try {
+          this.beforeDualWriteMutationReplace?.();
+          replacement = this.sqliteStore!.replace(file, sqlite.revision);
+        } catch (error) {
+          const durableSqlite = this.sqliteStore!.snapshot();
+          if (durableSqlite.revision === sqlite.revision) {
+            if (original.payload === null) writeAtomic(this.filename, original.file, sqlite.revision);
+            else writeAtomicPayload(this.filename, original.payload);
+          } else {
+            this.mirrorSqliteSnapshot(durableSqlite);
+          }
+          throw error;
+        }
         if (!replacement.replaced) {
           this.mirrorSqliteSnapshot(replacement);
           throw new RegistryParityError(
@@ -3632,9 +3739,11 @@ export class AgentRegistry {
         if (conversationId === supersedes) throw new Error("a conversation cannot supersede itself");
       }
       const existingConversation = conversationId ? file.conversations[conversationId] : null;
+      const requestedTitle = input.launchProfile?.title;
       const requestedProfile = emptyLaunchProfile({
         cwd: input.cwd,
         ...(input.launchProfile ?? {}),
+        title: durableSemanticTitle(requestedTitle),
         ...(explicitProject ? { project: explicitProject } : {}),
         parentConversationId,
       });
@@ -3660,6 +3769,9 @@ export class AgentRegistry {
       if (input.clientAttemptId) {
         const existing = Object.values(file.receipts).find((receipt) => receipt.clientAttemptId === input.clientAttemptId);
         if (existing) {
+          const existingTitle = durableSemanticTitle(existing.launchProfile.title);
+          const requestedTitle = durableSemanticTitle(profile.title);
+          const titleCompatible = !existingTitle || !requestedTitle || existingTitle === requestedTitle;
           const compatible = existing.requestDigest === (input.requestDigest ?? null)
             && existing.engine === input.engine
             && existing.cwd === input.cwd
@@ -3667,10 +3779,36 @@ export class AgentRegistry {
             && existing.accountPin === (input.accountPin === true)
             && existing.explicitProject === explicitProject
             && (existing.supersedes?.conversationId ?? null) === supersedes
-            && existing.launchProfile.permissionMode === profile.permissionMode;
+            && existing.launchProfile.permissionMode === profile.permissionMode
+            && titleCompatible;
+          if (compatible && !existingTitle && requestedTitle) {
+            existing.launchProfile.title = requestedTitle;
+            const existingConversationId = resolveConversationAlias(file, existing.conversationId);
+            const titledConversation = file.conversations[existingConversationId];
+            if (titledConversation) {
+              const ownedPaths = new Set(titledConversation.generations.map((generation) => generation.path));
+              for (const generation of titledConversation.generations) {
+                if (!durableSemanticTitle(generation.launchProfile.title)) generation.launchProfile.title = requestedTitle;
+              }
+              for (const entry of Object.values(file.entries)) {
+                if (ownedPaths.has(entry.artifactPath) && entry.launchProfile && !durableSemanticTitle(entry.launchProfile.title)) {
+                  entry.launchProfile.title = requestedTitle;
+                }
+              }
+              for (const receipt of Object.values(file.receipts)) {
+                if (resolveConversationAlias(file, receipt.conversationId) === existingConversationId
+                  && !durableSemanticTitle(receipt.launchProfile.title)) {
+                  receipt.launchProfile.title = requestedTitle;
+                }
+              }
+              titledConversation.updatedAt = now();
+              file.conversationRevision[titledConversation.engine] += 1;
+            }
+          }
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
       }
+      if (!durableSemanticTitle(profile.title)) throw new Error(SPAWN_TITLE_REQUIRED_ERROR);
       /* Origin admission (#393): reviewer isolation and bounded nesting run
          inside the same mutation that writes the receipt, so no call site —
          present or future MCP — can race or bypass it. Successor purposes are
@@ -3746,6 +3884,7 @@ export class AgentRegistry {
         launchId: crypto.randomUUID(),
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
+        pendingOrchestratorSeatIdentity: null,
         transport: input.transport ?? null,
         admissionOwner: input.transport === "structured" || input.ownStartingActuation === true
           ? { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }
@@ -3980,6 +4119,27 @@ export class AgentRegistry {
 
   rememberMembership(conversationId: ViewerConversationId, membership: DurableMembershipInput): DurableConversationMembership {
     return this.mutate((file) => clone(recordMembership(file, conversationId, membership, now())));
+  }
+
+  runIdentityWaveMigration(input: IdentityWaveMigrationInput): IdentityWaveMigrationResult {
+    if (input.dryRun) {
+      return applyIdentityWaveMigration(clone(this.readOnlySnapshot()), { ...input, dryRun: true });
+    }
+    return withAccountMutationLock(() => this.mutate((file) => applyIdentityWaveMigration(file, input)));
+  }
+
+  stampOrchestratorSeatIdentity(seat: IdentityWaveSeat): boolean {
+    return this.mutate((file) => {
+      const stamped = stampOrchestratorLineage(file, seat, seat.activatedAt ?? seat.designatedAt);
+      if (stamped.changed && stamped.engine) file.conversationRevision[stamped.engine] += 1;
+      if (stamped.engine) return stamped.changed;
+      const receipt = Object.values(file.receipts).find((candidate) => candidate.conversationId === seat.conversationId);
+      if (!receipt) return false;
+      const pending = normalizePendingOrchestratorSeatIdentity(seat);
+      if (!pending || isDeepStrictEqual(receipt.pendingOrchestratorSeatIdentity, pending)) return false;
+      receipt.pendingOrchestratorSeatIdentity = pending;
+      return true;
+    });
   }
 
   beginSpawn(engine: AgentEngine, cwd: string, launchProfile: Partial<LaunchProfile> = {}): SpawnReceipt {
@@ -4297,6 +4457,13 @@ export class AgentRegistry {
       file.conversationRevision[conversation.engine] += 1;
       file.engineRouting[conversation.engine].revision += 1;
     }
+    const settledGeneration = conversation.generations.find((generation) => generation.path === entry.artifactPath);
+    const receiptTitle = durableSemanticTitle(receipt.launchProfile.title, 120);
+    if (settledGeneration && receiptTitle && !durableSemanticTitle(settledGeneration.launchProfile.title, 120)) {
+      settledGeneration.launchProfile.title = receiptTitle;
+      file.conversationRevision[conversation.engine] += 1;
+      file.engineRouting[conversation.engine].revision += 1;
+    }
     /* A spawn that began before an account switch remains attributable to its
        birth account. The already-active engine-wide migration intent still
        applies to the new conversation through the existing coordinator
@@ -4316,6 +4483,7 @@ export class AgentRegistry {
         errorCode: null,
         operationId: crypto.randomUUID(),
         sourceGenerationId: source.id,
+        successorLaunchProfile: null,
         providerReceipt: null,
         pendingContinuityPaths: [],
         boardProject: null,
@@ -4336,6 +4504,12 @@ export class AgentRegistry {
     file.entries[sessionKeyId(entry.key)] = full;
     receipt.key = entry.key;
     receipt.artifactPath = entry.artifactPath;
+    if (receipt.pendingOrchestratorSeatIdentity) {
+      const pendingSeat = receipt.pendingOrchestratorSeatIdentity;
+      const stamped = stampOrchestratorLineage(file, pendingSeat, pendingSeat.activatedAt ?? pendingSeat.designatedAt);
+      receipt.pendingOrchestratorSeatIdentity = null;
+      if (stamped.changed && stamped.engine) file.conversationRevision[stamped.engine] += 1;
+    }
     const lineage = file.lineageEdges[receipt.conversationId];
     if (lineage) {
       lineage.childSessionKey = entry.key;
@@ -5128,7 +5302,10 @@ export class AgentRegistry {
               id: nativeGenerationId(observation.path),
               path: observation.path,
               accountId: observation.accountId,
-              launchProfile: emptyLaunchProfile(observation.launchProfile),
+              launchProfile: emptyLaunchProfile({
+                ...observation.launchProfile,
+                title: durableSemanticTitle(observation.launchProfile.title),
+              }),
               historyHash: null,
               host: null,
               createdAt,
@@ -5172,7 +5349,7 @@ export class AgentRegistry {
           permissionMode: generation.launchProfile.permissionMode ?? observation.launchProfile.permissionMode,
           readOnly: generation.launchProfile.readOnly ?? observation.launchProfile.readOnly,
           mcpServers: generation.launchProfile.mcpServers,
-          title: generation.launchProfile.title ?? observation.launchProfile.title,
+          title: durableSemanticTitle(generation.launchProfile.title) ?? durableSemanticTitle(observation.launchProfile.title),
           project: observation.launchProfile.project ?? generation.launchProfile.project,
           parentConversationId: lineage?.source === "viewer-spawn"
             ? lineage.parentConversationId
@@ -5788,6 +5965,7 @@ export class AgentRegistry {
         errorCode: migration.errorCode ?? null,
         operationId: migration.operationId ?? `${migration.intentId}:${canonicalId}:${migration.revision}`,
         sourceGenerationId: migration.sourceGenerationId ?? source?.id ?? "",
+        successorLaunchProfile: migration.successorLaunchProfile ?? null,
         providerReceipt: migration.providerReceipt ?? null,
         pendingContinuityPaths: migration.pendingContinuityPaths ?? [],
         boardProject: migration.boardProject ?? null,
@@ -5803,7 +5981,7 @@ export class AgentRegistry {
     id: ViewerConversationId,
     expectedRevision: number,
     expectedPhases: ConversationMigration["phase"][],
-    patch: Partial<Pick<ConversationMigration, "phase" | "error" | "errorCode" | "providerReceipt" | "targetId" | "revision">>,
+    patch: Partial<Pick<ConversationMigration, "phase" | "error" | "errorCode" | "providerReceipt" | "successorLaunchProfile" | "targetId" | "revision">>,
   ): RegistryConversation {
     return this.mutate((file) => {
       const conversation = file.conversations[resolveConversationAlias(file, id)];
@@ -5948,6 +6126,9 @@ export class AgentRegistry {
           ? current.operationId
           : crypto.randomUUID(),
         sourceGenerationId: source.id,
+        successorLaunchProfile: current.revision === intent.revision
+          ? current.successorLaunchProfile ?? null
+          : null,
         providerReceipt: null,
         pendingContinuityPaths: current.phase === "committed" ? [] : current.pendingContinuityPaths,
         boardProject: current.boardProject,
@@ -6050,6 +6231,15 @@ export class AgentRegistry {
           }
           if (conversation.migration?.intentId !== id || conversation.migration.phase === "committed") continue;
           queueAbandonedMigrationCleanup(file, conversation, intent.updatedAt);
+          if (conversation.migration.phase === "rolled-back") {
+            /* Preserve the original rollback window. A later intent timeout may
+               settle only deliveries still provably owned by that window. */
+            for (const delivery of Object.values(file.heldDeliveries)) {
+              if (resolveConversationAlias(file, delivery.conversationId) !== conversation.id) continue;
+              terminalizeRolledBackMigrationDelivery(file, delivery.id, id, stoppedDeliveryReason);
+            }
+            continue;
+          }
           conversation.migration = { ...conversation.migration, phase: "rolled-back", error: null, errorCode: null, updatedAt: intent.updatedAt };
           terminalizeCancelledMigrationDeliveries(file, conversation, stoppedDeliveryReason.slice(0, 240));
         }
@@ -6300,6 +6490,13 @@ export class AgentRegistry {
     });
   }
 
+  /** Atomically fences rollback ownership against the current reservation and
+      migration row. A concurrent exact resend updates `assignedAt` before this
+      mutation and therefore cannot be cancelled from an older snapshot. */
+  terminalizeRolledBackMigrationDelivery(id: string, intentId: string, reason: string): HeldDelivery | null {
+    return this.mutate((file) => terminalizeRolledBackMigrationDelivery(file, id, intentId, reason));
+  }
+
   compactDeliveryReservations(): number {
     return this.mutate((file) => compactDeliveryReservations(file, undefined, this.now()));
   }
@@ -6543,6 +6740,26 @@ export class AgentRegistry {
       conversation.updatedAt = rolledAt;
       advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(conversation);
+    });
+  }
+
+  /** Disarms rolled-back residue (#972) after its delivery fence is no longer
+      needed. Phase, intent, and pending-delivery checks share one mutation so
+      neither a concurrent re-enrollment nor a freshly admitted delivery can be
+      exposed to the coordinator's no-migration orphan cleanup. */
+  clearRolledBackConversationMigration(id: ViewerConversationId, intentId: string): boolean {
+    return this.mutate((file) => {
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
+      const migration = conversation?.migration;
+      if (!conversation || !migration || migration.phase !== "rolled-back" || migration.intentId !== intentId) return false;
+      const hasPendingDelivery = Object.values(file.heldDeliveries).some((delivery) =>
+        resolveConversationAlias(file, delivery.conversationId) === conversation.id
+        && ["held", "assigned", "delivery-uncertain"].includes(delivery.state));
+      if (hasPendingDelivery) return false;
+      conversation.migration = null;
+      conversation.updatedAt = now();
+      file.conversationRevision[conversation.engine] += 1;
+      return true;
     });
   }
 }

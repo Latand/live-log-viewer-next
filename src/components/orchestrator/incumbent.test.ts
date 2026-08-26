@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { parseIncumbent } from "./incumbent";
+import { incumbentHostLive, parseIncumbent } from "./incumbent";
 
 /* The panel's read of `GET /api/orchestrator/seat/status` (#978). The header
    renders numbers an operator judges rotation by, so a body it cannot trust must
@@ -16,6 +16,8 @@ const body = {
   effort: "high",
   accountId: "work",
   cwd: "/repos/atlas",
+  transcriptPath: "/transcripts/orchestrator.successor.jsonl",
+  liveness: { lifecycle: "running", hostState: "alive", silentForMs: 12 },
   transcriptFacts: { bytes: 2_100_000, messageCount: 812, toolCount: 1_930, compactionCount: 1 },
   context: { tokens: 620_000, limit: 1_000_000, percent: 62, estimated: false, basis: "provider-reported usage", policy: "claude-opus-1m" },
   rotation: { recommended: true, level: "strongly_recommend", advisory: "STRONGLY_RECOMMEND_ROTATION", reasons: ["context usage 620,000 tokens"], threshold: {}, thresholdUnknown: false },
@@ -34,6 +36,21 @@ test("a well-formed reading keeps every field the header renders from", () => {
   expect(incumbent.context).toMatchObject({ tokens: 620_000, percent: 62, estimated: false });
   expect(incumbent.rotation).toMatchObject({ recommended: true, level: "strongly_recommend", reasons: ["context usage 620,000 tokens"] });
   expect(incumbent.transcriptFacts).toMatchObject({ bytes: 2_100_000, compactionCount: 1 });
+  /* The dock binds through these two: the durable id resolved to the generation
+     the registry currently writes, and the plane's word that it is hosted. Drop
+     either and a re-hosted seat is back to matching on a frozen path (#1182). */
+  expect(incumbent.transcriptPath).toBe("/transcripts/orchestrator.successor.jsonl");
+  expect(incumbent.liveness).toEqual({ lifecycle: "running", hostState: "alive", silentForMs: 12 });
+  expect(incumbentHostLive(incumbent)).toBe(true);
+});
+
+test("only an affirmative «alive» is a live host — an unanswered plane is not (#1182)", () => {
+  expect(incumbentHostLive(null)).toBe(false);
+  expect(incumbentHostLive(parseIncumbent({ ...body, liveness: undefined }))).toBe(false);
+  expect(incumbentHostLive(parseIncumbent({ ...body, liveness: { lifecycle: "starting", hostState: "unknown" } }))).toBe(false);
+  expect(incumbentHostLive(parseIncumbent({ ...body, liveness: { lifecycle: "gone", hostState: "gone" } }))).toBe(false);
+  /* A live host on a seat the server calls vacant describes nobody. */
+  expect(incumbentHostLive(parseIncumbent({ ...body, designated: false }))).toBe(false);
 });
 
 test("a body that names no project is not a reading at all", () => {

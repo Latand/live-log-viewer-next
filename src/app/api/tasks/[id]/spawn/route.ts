@@ -24,6 +24,7 @@ import { applyAssignmentPatches, pinnedAccountId, type AssignmentPatch, type Tas
 import { isoNow } from "@/lib/tasks/helpers";
 import { loadTasks, mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask, TaskAssignment } from "@/lib/tasks/types";
+import { isGenericSessionTitle } from "@/lib/title";
 import { spawnAgentWithPrompt, type SpawnedPane } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
@@ -283,13 +284,14 @@ async function postTaskSpawn(
       return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
     }
   }
+  const taskTitle = task.text.split("\n")[0]?.trim() ?? "";
   const spec = {
     ...specBase,
     launchProfile: emptyLaunchProfile({
       ...(specBase.launchProfile ?? {}),
       cwd: cwdResult.cwd,
       project,
-      title: task.text.split("\n")[0]?.trim() || null,
+      title: taskTitle && !isGenericSessionTitle(taskTitle) ? taskTitle : `Task ${task.id}`,
     }),
   };
   const begun = registry.beginSpawnRequest({

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { parseBridgeTrailer } from "@/lib/bridge/directive";
-import { recordManagerReport } from "@/lib/bridge/service";
+import { bridgeAsksForSeats, recordManagerReport } from "@/lib/bridge/service";
 import { drainBridgeReports, openBridgeChannel } from "@/lib/bridge/store";
 import { authorizedManagerSeats } from "@/lib/orchestrator/authority";
 import {
@@ -70,7 +70,10 @@ function sandbox(withManager = true): void {
   }
 }
 
-function bindings(callerProject: string | null = "proj-voice") {
+function bindings(
+  callerProject: string | null = "proj-voice",
+  canonicalSeatConversationId?: (conversationId: string) => string,
+) {
   posted = [];
   const control: ViewerControlDependencies = {
     async post(pathname, body, headers) {
@@ -83,6 +86,7 @@ function bindings(callerProject: string | null = "proj-voice") {
   return viewerMcpBindings(undefined, control, {
     callerProject: () => callerProject,
     authorizedSeats: realSeatAuthority,
+    ...(canonicalSeatConversationId ? { canonicalSeatConversationId } : {}),
   } as never);
 }
 
@@ -147,6 +151,83 @@ test("the user's words travel as prose, with the correlation trailer on its own 
   const body = String(posted[0]!.body.text);
   expect(body.startsWith("he says hold it until the test is fixed")).toBe(true);
   expect(parseBridgeTrailer(body)).toEqual({ ref: seq });
+});
+
+/**
+ * #1168 — the trailer is what SETTLES the manager's open ask, so the relay path
+ * has to record it against the seat it just delivered to. A report seq is
+ * log-global: recorded on the number alone, one project's directive would close
+ * another project's decision request.
+ */
+test("the trailer settles the ask of the seat this directive reached, and no other project's", async () => {
+  sandbox();
+  seatProject("proj-other", "conversation_manager_other");
+  const tools = bindings();
+  const asked = recordManagerReport({
+    key: "lane-4-blocked",
+    class: "blocked",
+    at: new Date().toISOString(),
+    project: "proj-voice",
+    targetSeatConversationId: "conversation_manager",
+    body: "cannot proceed: pick a base branch",
+  });
+  expect([...bridgeAsksForSeats().keys()]).toEqual(["conversation_manager"]);
+
+  /* Delivered — and pointedly not settling the other project's report. */
+  await tools.bridge_directive({
+    clientRequestId: "d-cross",
+    rootTurnId: "turn_cross",
+    utterance: 0,
+    instruction: "go ahead",
+    project: "proj-other",
+    ref: asked!.seq,
+  });
+  expect(posted).toHaveLength(1);
+  expect(bridgeAsksForSeats().size).toBe(1);
+
+  await tools.bridge_directive({
+    clientRequestId: "d-answer",
+    rootTurnId: "turn_answer",
+    utterance: 0,
+    instruction: "cut it from main",
+    project: "proj-voice",
+    ref: asked!.seq,
+  });
+  expect(bridgeAsksForSeats().size).toBe(0);
+});
+
+test("a seat rekeyed since it asked is still the seat this directive settles (#1168 final review, HIGH 1)", async () => {
+  /* The relay knows the seat only by the identity the seat authority hands it.
+     The LOG knows it by whatever it was called when the report was routed, and
+     a migration rekeys the conversation between those two moments. The
+     attention projection already resolves the recorded id through the registry
+     — so unless this path resolves both sides the same way, the rekey that put
+     the ask on the operator's card is the rekey that made it unanswerable. */
+  sandbox();
+  const preMigrationSeatId = "conversation_manager_before_migration";
+  const tools = bindings("proj-voice", (id) => (id === preMigrationSeatId ? "conversation_manager" : id));
+  const asked = recordManagerReport({
+    key: "lane-4-blocked",
+    class: "blocked",
+    at: new Date().toISOString(),
+    project: "proj-voice",
+    targetSeatConversationId: preMigrationSeatId,
+    body: "cannot proceed: pick a base branch",
+  });
+  const resolver = (id: string) => (id === preMigrationSeatId ? "conversation_manager" : id);
+  expect([...bridgeAsksForSeats({ canonicalConversationId: resolver }).keys()]).toEqual(["conversation_manager"]);
+
+  await tools.bridge_directive({
+    clientRequestId: "d-rekeyed",
+    rootTurnId: "turn_rekeyed",
+    utterance: 0,
+    instruction: "cut it from main",
+    project: "proj-voice",
+    ref: asked!.seq,
+  });
+
+  expect(posted).toHaveLength(1);
+  expect(bridgeAsksForSeats({ canonicalConversationId: resolver }).size).toBe(0);
 });
 
 test("with no orchestrator designated for the caller's project the directive is refused, not delivered somewhere else", async () => {

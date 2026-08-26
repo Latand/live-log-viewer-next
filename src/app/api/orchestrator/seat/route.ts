@@ -1,8 +1,10 @@
 import fs from "node:fs";
+import os from "node:os";
 
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireOperatorAuthority } from "@/lib/agent/operatorAuthority";
+import { viewerMcpRegistered } from "@/lib/agent/spawnPolicy";
 import { executeOrchestratorSeatRequest } from "@/lib/orchestrator/seatCommand";
 import { orchestratorSeatFor, type OrchestratorSeat } from "@/lib/orchestrator/seats";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -21,16 +23,20 @@ interface SeatStatus {
   /** Whether the active seat's transcript is still on disk; false invites a
       resume or a replacement from the same draft surface. */
   exists: boolean;
+  viewerMcpRegistered: boolean;
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse<SeatStatus | ApiError>> {
   const project = req.nextUrl.searchParams.get("project")?.trim() ?? "";
   if (!project) return NextResponse.json({ error: "project is required" }, { status: 400 });
+  const cwd = req.nextUrl.searchParams.get("cwd")?.trim() || undefined;
+  const home = process.env.HOME?.trim() || os.homedir();
   const { active, pending } = orchestratorSeatFor(project);
   return NextResponse.json({
     seat: active,
     pending,
     exists: active !== null && (active.path === null || fs.existsSync(active.path)),
+    viewerMcpRegistered: viewerMcpRegistered(home, cwd),
   });
 }
 

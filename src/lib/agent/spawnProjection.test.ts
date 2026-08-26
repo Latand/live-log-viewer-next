@@ -5,6 +5,7 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { beginLegacySpawnFixture, withLegacySpawnFixtureTitles } from "@/lib/agent/registryTestFixtures";
 import { activityVerdict } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
 
@@ -12,6 +13,10 @@ import { AgentRegistry } from "./registry";
 import { preallocatedStructuredSpawnCards, projectLaunchConversations } from "./spawnProjection";
 
 const SETTLED_SESSION_ID = "019f7b8a-" + "9f75-7dc0-b231-17f7eadd7fe0";
+
+function legacyRegistry(...args: ConstructorParameters<typeof AgentRegistry>): AgentRegistry {
+  return withLegacySpawnFixtureTitles(new AgentRegistry(...args));
+}
 
 function scannedFile(pathname: string): FileEntry {
   return {
@@ -47,8 +52,8 @@ function observeArtifact(registry: AgentRegistry, artifactPath: string, cwd: str
 }
 
 function settledLaunch(directory: string, artifactPath: string) {
-  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({
+  const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd: directory,
     transport: "structured",
@@ -134,7 +139,7 @@ test("issue 1108 review: an unbound launch against an existing conversation keep
   const priorPath = path.join(directory, "prior-generation.jsonl");
   try {
     fs.writeFileSync(priorPath, `${JSON.stringify({ type: "user", message: "prior generation" })}\n`);
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const existing = registry.ensureConversation("codex", priorPath, "work");
     const begun = registry.beginSpawnRequest({
       engine: "codex",
@@ -332,7 +337,7 @@ test("issue 1108 review: stale terminal turn evidence yields to an artifact chan
     scanned and running. */
 function lateSuccessLaunch(directory: string): { registry: AgentRegistry; artifactPath: string; launchId: string; conversationId: string; createdAt: number } {
   const artifactPath = path.join(directory, "late-success.jsonl");
-  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   const begun = registry.beginSpawnRequest({
     engine: "codex", cwd: directory, transport: "structured", accountId: "work",
     launchProfile: emptyLaunchProfile({ cwd: directory }),
@@ -446,7 +451,7 @@ test("issue 922: launch facts project canonical conversation and exact native ge
   const artifactPath = path.join(directory, `${nativeId}.jsonl`);
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "synthetic kickoff" })}\n`);
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
       engine: "codex", cwd: directory, transport: "structured", accountId: "work",
       launchProfile: emptyLaunchProfile({ cwd: directory }),
@@ -506,7 +511,7 @@ test("issue 560 P1#5: routes keep every retained launch id — a second launch n
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-launch-routes-multi-"));
   const filename = path.join(directory, "agent-registry.json");
   try {
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const first = registry.beginSpawnRequest({
       engine: "codex", cwd: directory, transport: "structured", accountId: "work",
       launchProfile: emptyLaunchProfile({ cwd: directory }),
@@ -531,7 +536,7 @@ test("issue 560 P1#5: routes keep every retained launch id — a second launch n
     };
     fs.writeFileSync(filename, JSON.stringify(raw));
 
-    const snapshot = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" }).snapshot();
+    const snapshot = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" }).snapshot();
     const routes = projectLaunchConversations([], snapshot).routes;
 
     /* BOTH launch links resolve to the conversation: the newer one AND the aged
@@ -546,7 +551,7 @@ test("issue 560 P1#5: routes keep every retained launch id — a second launch n
 test("issue 569: a launch with no materialized transcript still projects the conversation window itself", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-late-success-unmaterialized-"));
   try {
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
       engine: "codex", cwd: directory, transport: "structured", accountId: "work",
       launchProfile: emptyLaunchProfile({ cwd: directory }),
@@ -565,7 +570,7 @@ test("issue 569: a launch with no materialized transcript still projects the con
 test("issue 614: a transcript-less launch projects the queued prompt as the first user bubble across multiple polls", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-614-pre-transcript-prompt-"));
   try {
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
       engine: "codex", cwd: directory, transport: "structured", accountId: "work",
       launchProfile: emptyLaunchProfile({ cwd: directory }),
@@ -609,7 +614,7 @@ test("issues 614 and 1108: a readable transcript omitted by a scoped scan keeps 
   const artifactPath = path.join(directory, "019f8dbe_e6cc_9e62_40df_06fb8f88b8a1.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "LLV614_CANONICAL_PROBE_20260723" })}\n`);
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
       engine: "codex", cwd: directory, transport: "structured", accountId: "work",
       launchProfile: emptyLaunchProfile({ cwd: directory }),
@@ -665,7 +670,7 @@ test("issue 615 HIGH1: the launch prompt projects from the durable display paylo
   const artifactPath = path.join(directory, "019f8dbe_e6cc_9e62_40df_06fb8f88b8b2.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "scaffold\n\nLLV615_RAW_PROMPT" })}\n`);
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
       engine: "codex", cwd: directory, transport: "structured", accountId: "work",
       launchProfile: emptyLaunchProfile({ cwd: directory }),
@@ -741,7 +746,7 @@ test("issue 615 HIGH1: the durable display payload survives restart and never le
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-615-display-restart-"));
   const filename = path.join(directory, "agent-registry.json");
   try {
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
       engine: "codex", cwd: directory, transport: "structured", accountId: "work",
       launchProfile: emptyLaunchProfile({ cwd: directory }),
@@ -750,7 +755,7 @@ test("issue 615 HIGH1: the durable display payload survives restart and never le
     if (begun.kind !== "created") throw new Error("expected structured launch creation");
 
     /* A refresh/restart rehydrates the durable payload from disk unchanged. */
-    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const restarted = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     expect(restarted.snapshot().receipts[begun.receipt.launchId]?.launchDisplay)
       .toEqual({ prompt: "LLV615_RAW_PROMPT", images: 0, echo: "LLV615_RAW_PROMPT" });
 
@@ -771,7 +776,7 @@ test("terminal synthetic spawn cards join compact history after the scanner fres
   const filename = path.join(directory, "agent-registry.json");
   const artifactPath = path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe4.jsonl");
   try {
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const recovered = registry.beginSpawnRequest({
       engine: "codex",
       cwd: directory,
@@ -825,7 +830,7 @@ test("a legacy completed receipt with a recorded transcript stays materialized a
   const artifactPath = path.join(directory, "019f678d_951e_77f1_bc6a_c3175a6a7bd4.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "legacy completed transcript" })}\n`);
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
       engine: "codex",
       cwd: directory,
@@ -857,7 +862,7 @@ test("a legacy completed receipt with a recorded transcript stays materialized a
     legacy.receipts[begun.receipt.launchId]!.createdAt = "2026-07-15T20:00:00.000Z";
     fs.writeFileSync(filename, JSON.stringify(legacy));
 
-    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const restarted = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     expect(restarted.snapshot().receipts[begun.receipt.launchId]?.artifactLifecycle).toBe("materialized");
     expect(preallocatedStructuredSpawnCards([], restarted.snapshot())).toEqual([]);
   } finally {
@@ -871,7 +876,7 @@ test("SQLite import backfills a rollout-era pending lifecycle from durable inven
   const artifactPath = path.join(directory, "019f678d_951e_77f1_bc6a_c3175a6a7bd5.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "legacy sqlite transcript" })}\n`);
-    const jsonRegistry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const jsonRegistry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const begun = jsonRegistry.beginSpawnRequest({
       engine: "codex",
       cwd: directory,
@@ -903,9 +908,9 @@ test("SQLite import backfills a rollout-era pending lifecycle from durable inven
     rolloutEra.receipts[begun.receipt.launchId]!.createdAt = "2026-07-15T20:00:00.000Z";
     fs.writeFileSync(filename, JSON.stringify(rolloutEra));
 
-    const imported = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    const imported = legacyRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
     expect(imported.snapshot().receipts[begun.receipt.launchId]?.artifactLifecycle).toBe("materialized");
-    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    const restarted = legacyRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
     expect(preallocatedStructuredSpawnCards([], restarted.snapshot())).toEqual([]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -918,7 +923,7 @@ test("another generation's newer observation cannot materialize a pending launch
   const firstPath = path.join(directory, "019f678d_951e_77f1_bc6a_c3175a6a7bd6.jsonl");
   const successorPath = path.join(directory, "019f678d_951e_77f1_bc6a_c3175a6a7bd7.jsonl");
   try {
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const conversation = registry.ensureConversation("codex", firstPath, "work");
     observeArtifact(registry, firstPath, directory);
     const begun = registry.beginSpawnRequest({
@@ -958,7 +963,7 @@ test("another generation's newer observation cannot materialize a pending launch
       .find((generation) => generation.path === successorPath)!.createdAt = "2026-07-17T10:00:00.000Z";
     fs.writeFileSync(filename, JSON.stringify(persisted));
 
-    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const restarted = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     expect(restarted.snapshot().receipts[begun.receipt.launchId]?.artifactLifecycle).toBe("pending");
     /* Pinned inside the 24 h retirement window (#342): scan-lag protection is
        about the recent horizon; an aged terminal receipt retires instead. */
@@ -974,7 +979,7 @@ test("a deleted settled structured transcript stays absent after JSON restart", 
   const artifactPath = path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe1.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "settled" })}\n`);
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
       engine: "codex",
       cwd: directory,
@@ -1002,7 +1007,7 @@ test("a deleted settled structured transcript stays absent after JSON restart", 
     observeArtifact(registry, artifactPath, directory);
 
     fs.unlinkSync(artifactPath);
-    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const restarted = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
 
     expect(preallocatedStructuredSpawnCards([], restarted.snapshot())).toEqual([]);
   } finally {
@@ -1015,7 +1020,7 @@ test("a pending launch remains visible until inventory materializes its transcri
   const filename = path.join(directory, "agent-registry.json");
   const artifactPath = path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe2.jsonl");
   try {
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const begun = registry.beginSpawnRequest({
       engine: "codex",
       cwd: directory,
@@ -1045,7 +1050,7 @@ test("a pending launch remains visible until inventory materializes its transcri
     observeArtifact(registry, artifactPath, directory);
     fs.unlinkSync(artifactPath);
 
-    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const restarted = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     expect(preallocatedStructuredSpawnCards([], restarted.snapshot())).toEqual([]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -1058,7 +1063,7 @@ test("SQLite restart preserves materialized transcript deletion and pending laun
   const artifactPath = path.join(directory, "019f7b8a_9f75_7dc0_b231_17f7eadd7fe3.jsonl");
   try {
     fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: "sqlite" })}\n`);
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
     const settled = registry.beginSpawnRequest({
       engine: "codex",
       cwd: directory,
@@ -1093,7 +1098,7 @@ test("SQLite restart preserves materialized transcript deletion and pending laun
     observeArtifact(registry, artifactPath, directory);
     fs.unlinkSync(artifactPath);
 
-    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    const restarted = legacyRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
     const cards = preallocatedStructuredSpawnCards([], restarted.snapshot());
 
     expect(cards).toHaveLength(1);
@@ -1110,8 +1115,8 @@ test("inventory materialization stays scoped to the observed engine", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-engine-scope-"));
   const artifactPath = path.join(directory, "shared.jsonl");
   try {
-    const registry = new AgentRegistry(path.join(directory, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-    const codex = registry.beginSpawnRequest({
+    const registry = legacyRegistry(path.join(directory, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const codex = beginLegacySpawnFixture(registry, {
       engine: "codex",
       cwd: directory,
       transport: "structured",
@@ -1119,7 +1124,7 @@ test("inventory materialization stays scoped to the observed engine", () => {
       clientAttemptId: "engine_scope_codex_20260717_a1",
       requestDigest: "1".repeat(64),
     });
-    const claude = registry.beginSpawnRequest({
+    const claude = beginLegacySpawnFixture(registry, {
       engine: "claude",
       cwd: directory,
       transport: "structured",
@@ -1143,7 +1148,7 @@ test("a rejected launch projects a terminal failed card with zero conversation a
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-rejection-"));
   const filename = path.join(directory, "agent-registry.json");
   try {
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const rootBegun = registry.beginSpawnRequest({
       engine: "codex",
       cwd: directory,
@@ -1217,11 +1222,224 @@ test("a rejected launch projects a terminal failed card with zero conversation a
   }
 });
 
+test("a pipeline stage placeholder carries durable spawn lineage without an operator handoff flag", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-lineage-projection-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      role: "builder",
+      origin: { kind: "container", container: "pipeline", containerId: "pipeline-fixture", creatorConversationId: parent.id },
+      memberships: [{
+        kind: "pipeline",
+        containerId: "pipeline-fixture",
+        role: "builder",
+        slot: "build:1",
+        stageId: "build",
+        stageOrder: 0,
+        round: 1,
+        parentConversationId: parent.id,
+      }],
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+
+    const card = preallocatedStructuredSpawnCards([scannedFile(parentPath)], registry.snapshot())[0]!;
+    expect(card.parent).toBe(parentPath);
+    expect(card.handoff).toBeUndefined();
+    expect(card.spawnOrigin).toBe("viewer");
+    expect(card.durableLineage).toMatchObject({
+      parentConversationId: parent.id,
+      memberships: [{ kind: "pipeline", containerId: "pipeline-fixture", stageId: "build" }],
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an agent-authenticated child with launch display stays caller-owned", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-caller-owned-display-projection-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      parentSource: "inferred-caller",
+      role: "builder",
+      origin: { kind: "agent", conversationId: parent.id },
+      launchDisplay: { prompt: "Review the projection", images: 0, echo: "Review the projection" },
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+
+    const card = preallocatedStructuredSpawnCards([scannedFile(parentPath)], registry.snapshot())[0]!;
+    expect(begun.receipt.delegationDepth).toBe(1);
+    expect(card.parent).toBe(parentPath);
+    expect(card.handoff).toBeUndefined();
+    expect(card.durableLineage).toMatchObject({
+      role: "builder",
+      parentConversationId: parent.id,
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an operator handoff placeholder keeps its provenance after later flow enrollment", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-enrolled-handoff-placeholder-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      parentSource: "explicit",
+      role: "builder",
+      origin: { kind: "operator" },
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    registry.rememberMembership(begun.receipt.conversationId, {
+      kind: "flow",
+      containerId: "flow-fixture",
+      role: "implementer",
+      slot: "implementer",
+      stageId: null,
+      stageOrder: 0,
+      round: null,
+      parentConversationId: null,
+    });
+
+    const card = preallocatedStructuredSpawnCards([scannedFile(parentPath)], registry.snapshot())[0]!;
+
+    expect(card.parent).toBe(parentPath);
+    expect(card.handoff).toBe(true);
+    expect(card.durableLineage?.memberships).toEqual([
+      expect.objectContaining({ kind: "flow", containerId: "flow-fixture", role: "implementer" }),
+    ]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("materialized handoffs and historical stages stay input-immutable", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-enrolled-operator-handoff-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  const pipelineSessionId = "historical-pipeline-stage";
+  const pipelineArtifactPath = path.join(directory, `${pipelineSessionId}.jsonl`);
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      parentSource: "explicit",
+      role: "builder",
+      origin: { kind: "operator" },
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId: SETTLED_SESSION_ID },
+      artifactPath,
+      cwd: directory,
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      status: "unhosted",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    registry.rememberMembership(begun.receipt.conversationId, {
+      kind: "flow",
+      containerId: "flow-fixture",
+      role: "implementer",
+      slot: "implementer",
+      stageId: null,
+      stageOrder: 0,
+      round: null,
+      parentConversationId: null,
+    });
+    const pipelineBegun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      role: "builder",
+      memberships: [{
+        kind: "pipeline",
+        containerId: "pipeline-fixture",
+        role: "builder",
+        slot: "build:1",
+        stageId: "build",
+        stageOrder: 0,
+        round: 1,
+        parentConversationId: parent.id,
+      }],
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (pipelineBegun.kind !== "created") throw new Error("expected historical stage launch creation");
+    registry.settleSpawn(pipelineBegun.receipt.launchId, {
+      key: { engine: "codex", sessionId: pipelineSessionId },
+      artifactPath: pipelineArtifactPath,
+      cwd: directory,
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      status: "unhosted",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    const stage = scannedFile(artifactPath);
+    stage.parent = parentPath;
+    stage.handoff = true;
+    const pipelineStage = scannedFile(pipelineArtifactPath);
+    pipelineStage.parent = parentPath;
+    pipelineStage.handoff = true;
+    const files = [scannedFile(parentPath), stage, pipelineStage];
+    const before = structuredClone(files);
+    const snapshot = registry.snapshot();
+    const snapshotBefore = structuredClone(snapshot);
+
+    projectLaunchConversations(files, snapshot);
+
+    expect(files).toEqual(before);
+    expect(snapshot).toEqual(snapshotBefore);
+    expect(stage.handoff).toBe(true);
+    expect(pipelineStage.handoff).toBe(true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("terminal receipts age through history and retire at the 24h bound; non-terminal receipts always project (#342)", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-retire-"));
   const filename = path.join(directory, "agent-registry.json");
   try {
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const failed = registry.beginSpawnRequest({
       engine: "codex",
       cwd: "/repo",
@@ -1260,7 +1478,7 @@ test("the production placeholder baseline converges by projection alone with a l
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-baseline-"));
   const filename = path.join(directory, "agent-registry.json");
   try {
-    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const registry = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const parent = registry.ensureConversation("codex", path.join(directory, "parent-019f0000_0000_7000_8000_000000000342.jsonl"), "work");
     const seed = (index: number, terminal: "completed" | "failed") => {
       const begun = registry.beginSpawnRequest({
@@ -1326,7 +1544,7 @@ test("the production placeholder baseline converges by projection alone with a l
     expect(preallocatedStructuredSpawnCards([], before, afterRetirement)).toEqual([]);
 
     /* Restart: a fresh load projects identically and loses nothing. */
-    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const restarted = legacyRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     const after = restarted.snapshot();
     expect(inventory(after)).toEqual(beforeInventory);
     expect(preallocatedStructuredSpawnCards([], after, afterRetirement)).toEqual([]);

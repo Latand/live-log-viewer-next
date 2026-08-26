@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 
-import type { DeliveredMessageOccurrence, DeliveredMessageProvenance } from "@/lib/runtime/messageOrigin";
+import type { DeliveredMessageOccurrence, DeliveredMessageProvenance, MandateDelivery } from "@/lib/runtime/messageOrigin";
 import { messageOriginRole } from "@/lib/runtime/messageOrigin";
 import { parseSelectedContextRef } from "@/lib/selection/selectedContext";
 
@@ -75,16 +75,32 @@ export function setMessageProvenanceRetryScheduleForTests(delays: readonly numbe
   retryDelaysMs = delays ?? DEFAULT_RETRY_DELAYS_MS;
 }
 
+/** The seat-mandate projection of one delivery (#1166). The qualifier is the
+    only thing a malformed payload can cost: a delivery the server called a
+    mandate stays one, and the card falls back to naming no version rather than
+    inventing one or handing the row back to the operator's bubble. */
+function parseMandate(value: unknown): MandateDelivery | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { kind, version } = value as Record<string, unknown>;
+  if (kind === "custom") return { kind: "custom" };
+  if (kind !== "version" && kind !== "unqualified") return null;
+  return kind === "version" && typeof version === "number" && Number.isInteger(version)
+    ? { kind: "version", version }
+    : { kind: "unqualified" };
+}
+
 function parseProvenance(entry: unknown): DeliveredMessageProvenance | null {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
   const body = entry as Record<string, unknown>;
   if (body.origin !== "operator" && body.origin !== "agent") return null;
   const senderRole = messageOriginRole(body.senderRole);
   const selectedContext = parseSelectedContextRef(body.selectedContext);
+  const mandate = parseMandate(body.mandate);
   return {
     origin: body.origin,
     ...(senderRole ? { senderRole } : {}),
     ...(selectedContext ? { selectedContext } : {}),
+    ...(mandate ? { mandate } : {}),
   };
 }
 
@@ -290,7 +306,10 @@ export function useDeliveredMessageProvenance(path: string | null, items: readon
   const assignmentKey = useMemo(() => {
     const parts: string[] = [];
     for (const [item, provenance] of assignment) {
-      parts.push(`${itemSerial(item)}:${provenance.origin}:${provenance.senderRole ?? ""}:${provenance.selectedContext ? "ctx" : ""}`);
+      const mandate = provenance.mandate
+        ? `mandate:${provenance.mandate.kind === "version" ? provenance.mandate.version : provenance.mandate.kind}`
+        : "";
+      parts.push(`${itemSerial(item)}:${provenance.origin}:${provenance.senderRole ?? ""}:${provenance.selectedContext ? "ctx" : ""}:${mandate}`);
     }
     return parts.join("\n");
   }, [assignment]);

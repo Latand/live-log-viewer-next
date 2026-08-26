@@ -53,6 +53,12 @@ describe("board store", () => {
     expect(legacy.prefs.foldedEngineChildIds).toEqual([]);
     expect(legacy.prefs.expandedEngineTrayParentIds).toEqual([]);
   });
+  test("idle-collapse preference defaults to two hours and persists never", () => {
+    const file = temporaryFile();
+    expect(boardFor("viewer", file).prefs.idleCollapseMinutes).toBe(120);
+    mutateBoard("viewer", 0, [{ kind: "set-presentation", idleCollapseMinutes: null }], file);
+    expect(boardFor("viewer", file).prefs.idleCollapseMinutes).toBeNull();
+  });
   test("durable writes fsync the board file and parent directory", async () => {
     const file = temporaryFile();
     const modulePath = path.join(import.meta.dir, "store.ts");

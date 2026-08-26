@@ -1,7 +1,7 @@
 "use client";
 
 import { Bot, LoaderCircle, RefreshCw, RotateCcw, TriangleAlert, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   AgentLaunchControls,
@@ -10,6 +10,8 @@ import {
   type LaunchAccountCatalog,
   type LaunchDraftStorage,
 } from "@/components/draft/AgentLaunchControls";
+import { refreshRuntime } from "@/hooks/useRuntime";
+import { requestFilesRefresh } from "@/lib/filesEvents";
 import { useLocale, type MessageKey } from "@/lib/i18n";
 import {
   ORCHESTRATOR_PROMPT_VERSION,
@@ -19,18 +21,24 @@ import {
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
+import { decisionLine } from "../attention/decision";
 import { IncumbentHeader } from "./IncumbentHeader";
-import type { OrchestratorIncumbent } from "./incumbent";
+import { incumbentHostLive, type OrchestratorIncumbent } from "./incumbent";
 import { OrchestratorConversation } from "./OrchestratorConversation";
 import {
   deriveOrchestratorPanelState,
   deriveRotateDraftState,
   orchestratorQuietBannerEligible,
+  resolveSeatFile,
+  SEAT_BIND_TIMEOUT_MS,
+  seatBadgeOf,
+  seatBindPending,
   seatRequestSettled,
   type OrchestratorPanelState,
   type OrchestratorSeatStatus,
   type RotationHint,
-  type SeatLiveness,
+  type SeatBadge,
+  type SeatBindFailure,
   type SeatTransition,
 } from "./seatState";
 import { useOrchestratorIncumbent } from "./useOrchestratorIncumbent";
@@ -76,10 +84,13 @@ const flowStorage = (flow: string, project: string): LaunchDraftStorage => ({
  *
  * ONE panel, every state designed (`./seatState`):
  *
- *  - `draft` — the same launch pickers every other draft offers, plus the
- *    default mandate in a textarea the operator edits freely. The edited text
- *    IS what gets delivered; there is no second «mandate» concept anywhere in
- *    the UI, and no cwd field — the project's own root is the cwd.
+ *  - `draft` — three sentences saying what this thing is, the same launch
+ *    pickers every other draft offers, and the default mandate in a textarea
+ *    the operator edits freely — folded behind its own disclosure (#1163), so
+ *    the draft opens on what the orchestrator does rather than on 58 lines of
+ *    rules. The edited text IS what gets delivered; there is no second
+ *    «mandate» concept anywhere in the UI, and no cwd field — the project's own
+ *    root is the cwd.
  *  - `creating` — the durable receipt, while the seat intent settles.
  *  - `intent-error` — the stored terminal error, ABOVE the draft it came from,
  *    so the operator can read it, fix the mandate, and retry in place. Never
@@ -113,7 +124,7 @@ export function OrchestratorPanel({
   onClose: () => void;
 }) {
   const { t } = useLocale();
-  const { status, failed, refresh } = useOrchestratorSeat(project);
+  const { status, failed, refresh } = useOrchestratorSeat(project, projectCwd);
   const [formError, setFormError] = useState<string | null>(null);
   const [mandate, setMandateState] = useState(() => readDraftField(project, "mandate") || ORCHESTRATOR_SYSTEM_PROMPT);
   /* The conversation the open rotate draft is replacing. Non-null IS the rotate
@@ -145,26 +156,71 @@ export function OrchestratorPanel({
 
   const seatConversationId = status?.seat?.conversationId ?? null;
   const seated = Boolean(seatConversationId && status?.exists);
-  const file = useMemo(
-    () => (seatConversationId
-      ? files.find((entry) => entry.conversationId === seatConversationId)
-        ?? files.find((entry) => entry.path === status?.seat?.path)
-        ?? null
-      : null),
-    [files, seatConversationId, status?.seat?.path],
-  );
-  const surface = useSeatSurface(file);
   /* The incumbent's wear is only a question while there IS an incumbent; a
      project sitting on its draft asks nothing. */
-  const { incumbent: read, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, seated);
+  const { incumbent: read, stale: readStale, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, seated);
   /* A reading is only about the conversation it names. Right after a rotation
      the seat has already advanced to the successor while this slower poll still
      describes the predecessor — showing that as «the incumbent» would put the
      retired orchestrator's model and context in the successor's header. */
   const incumbent = read && read.conversationId === seatConversationId ? read : null;
+  /* The DURABLE id is the key, and the status read's `transcriptPath` is that id
+     resolved through the registry's current generation — which is what binds a
+     seat whose recorded path was replaced by a re-host (issue #1182). The
+     recorded path stays a hint, tried last. */
+  const seatPath = status?.seat?.path ?? null;
+  const currentPath = incumbent?.transcriptPath ?? null;
+  const file = useMemo(
+    () => resolveSeatFile({ files, conversationId: seatConversationId, seatPath, currentPath }),
+    [files, seatConversationId, seatPath, currentPath],
+  );
+  const surface = useSeatSurface(file);
+  /* How long this seat has gone unbound, so «opening…» can be BOUNDED. */
+  const bindPending = seated && seatBindPending(file, surface);
+  const unboundForMs = useUnboundFor(bindPending, seatConversationId ?? "");
   useEffect(() => {
     if (seated) void refreshIncumbent();
   }, [seatConversationId, seated, refreshIncumbent]);
+  /* A seat this reading could not bind asks for a FRESH one, off the poll's own
+     cadence: that cadence is set for context wear, which moves over tens of
+     minutes, while `transcriptPath` — the durable id resolved through the
+     registry's current generation — is the very thing a re-hosted seat needs
+     re-read (#1182). Gated on a reading already being in hand, so it never
+     races the first read above, and hung on the EDGE, so a seat that stays
+     unbound re-asks once rather than on every commit. */
+  const unboundWithReading = bindPending && incumbent !== null;
+  useEffect(() => {
+    if (unboundWithReading) void refreshIncumbent();
+  }, [unboundWithReading, refreshIncumbent]);
+  /* Liveness is only evidence while someone is still answering for it. The
+     header may keep a cached reading — an engine and a context percent from a
+     minute ago beat a row of dashes — but a cached «alive» carried across the
+     very restart this panel is waiting out, with every refresh since failing, is
+     a MEMORY. Accusing the seat of failing to bind on it would report a fault
+     the server was never asked to confirm, so the bound stays silent and
+     «opening…» stands until a status read answers again (issue #1182). */
+  const hostLive = !readStale && incumbentHostLive(incumbent);
+  /**
+   * Re-bind: re-run EVERY read resolution is composed of.
+   *
+   * The two orchestrator endpoints say which conversation the seat holds and
+   * where its current generation lives; neither one is what a bounded wait is
+   * missing. `catalog` is missing the file catalog — the board's own read, which
+   * `requestFilesRefresh()` re-runs through the seam `useFiles` listens on — and
+   * `surface` is missing the runtime plane's host for a transcript already in
+   * hand, which is `refreshRuntime()`. Re-reading only the seat and the status
+   * would leave whichever half was actually absent exactly as absent, so the
+   * button would spin and change nothing (issue #1182).
+   *
+   * It designates, rotates and spawns nothing: recovering from a restart must
+   * never cost the operator a seat.
+   */
+  const rebind = () => {
+    void refresh();
+    void refreshIncumbent();
+    requestFilesRefresh();
+    void refreshRuntime();
+  };
 
   const create = useSeatConfirm({ url: "/api/orchestrator/seat", project, storage: draftStorage, field: "requestId", status, refresh });
   const rotate = useSeatConfirm({ url: "/api/orchestrator/rotate", project, storage: rotateStorage, field: "requestId", status, refresh });
@@ -180,6 +236,8 @@ export function OrchestratorPanel({
     file,
     surface,
     incumbent,
+    hostLive,
+    unboundForMs,
   });
   /**
    * A rotation whose outcome is not yet settled KEEPS the panel, even after the
@@ -202,8 +260,10 @@ export function OrchestratorPanel({
       seat command then completes that intent with ITS original mandate, so the
       text sent here cannot become a second variant. */
   const confirmCreate = (replayRequestId?: string | null) => {
-    const text = mandate.trim();
-    if (!text) {
+    /* Trim ASKS whether there is a mandate at all. It never ANSWERS with one:
+       what the textarea holds is what the orchestrator is sent, byte for byte,
+       blank lines and all (PRD #976 decision 3). */
+    if (!mandate.trim()) {
       setFormError(t("orchPanel.mandateRequired"));
       return;
     }
@@ -211,7 +271,7 @@ export function OrchestratorPanel({
     void create.submit({
       body: {
         project,
-        mandate: text,
+        mandate,
         engine: launch.engine,
         ...(launch.model ? { model: launch.model } : {}),
         ...(launch.effort ? { effort: launch.effort } : {}),
@@ -222,8 +282,10 @@ export function OrchestratorPanel({
            seat route resolves the project's newest checkout itself. */
         ...(projectCwd ? { cwd: projectCwd } : {}),
         /* Only an UNEDITED mandate is a version of the approved prompt; an
-           edited one is bespoke and records no version. */
-        ...(text === ORCHESTRATOR_SYSTEM_PROMPT.trim() ? { promptVersion: ORCHESTRATOR_PROMPT_VERSION } : {}),
+           edited one is bespoke and records no version. The predicate is the
+           one the summary reads from, so «untouched» means the same thing in
+           the body as it does on screen. */
+        ...(mandate === ORCHESTRATOR_SYSTEM_PROMPT ? { promptVersion: ORCHESTRATOR_PROMPT_VERSION } : {}),
         /* The seat OUTLIVES its conversation: closing the card leaves the
            record designated, and a plain spawn over a designated seat is
            refused as an accidental rotation. That refusal is right in general
@@ -232,7 +294,7 @@ export function OrchestratorPanel({
            «returns to draft» promise is one the button can keep. */
         ...(state.kind === "draft" && state.vacated ? { replaceIncumbent: true } : {}),
       },
-      launch: { draft: launch, cwd: projectCwd ?? "", firstMessage: text },
+      launch: { draft: launch, cwd: projectCwd ?? "", firstMessage: mandate },
     }, replayRequestId);
   };
 
@@ -271,7 +333,7 @@ export function OrchestratorPanel({
           <span className="truncate text-body font-semibold text-primary">{t("orchPanel.title")}</span>
           <span className="truncate text-caption text-muted" title={projectName}>{projectName}</span>
         </span>
-        <StateBadge state={state} />
+        <StateBadge state={state} file={file} />
         <button
           type="button"
           onClick={onClose}
@@ -372,6 +434,23 @@ export function OrchestratorPanel({
                   {t("orchPanel.resumable")}
                 </p>
               ) : null}
+              {/* Bound to a transcript, but the runtime plane never resolved a
+                  host for it: the conversation renders and the panel says why
+                  its controls are still «opening», rather than leaving a badge
+                  the operator can only read as a stuck seat (#1182). Both ways
+                  forward ride here too — a bounded wait offers the same pair
+                  whichever half is missing, and rotation is neither of them. */}
+              {state.bindFailure === "surface" ? (
+                <p
+                  data-orchestrator-bind="surface"
+                  className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-sunken px-3 py-1.5 text-ui text-secondary"
+                  role="status"
+                >
+                  {t("orchPanel.bindStalledSurface")}
+                  <RebindButton onRebind={rebind} />
+                  <OpenOnBoardLink conversationId={state.conversationId} />
+                </p>
+              ) : null}
             </>
           )}
           {rotating ? (
@@ -388,18 +467,19 @@ export function OrchestratorPanel({
               onCancel={() => setRotateFrom(null)}
             />
           ) : file ? (
-            <OrchestratorConversation file={file} />
+            <OrchestratorConversation file={file} projectName={projectName} />
           ) : (
             <Centered>
-              <LoaderCircle className="h-5 w-5 animate-spin text-muted" aria-hidden />
-              <p className="text-body font-semibold text-primary" role="status">{t("orchPanel.resolving")}</p>
-              <p className="max-w-[300px] text-ui text-muted">{t("orchPanel.resolvingHint")}</p>
-              <a
-                href={"#c=" + encodeURIComponent(state.conversationId)}
-                className="text-ui font-semibold text-accent underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              >
-                {t("orchPanel.openOnBoard")}
-              </a>
+              {state.bindFailure ? (
+                <BindFailure reason={state.bindFailure} onRebind={rebind} />
+              ) : (
+                <>
+                  <LoaderCircle className="h-5 w-5 animate-spin text-muted" aria-hidden />
+                  <p className="text-body font-semibold text-primary" role="status">{t("orchPanel.resolving")}</p>
+                  <p className="max-w-[300px] text-ui text-muted">{t("orchPanel.resolvingHint")}</p>
+                </>
+              )}
+              <OpenOnBoardLink conversationId={state.conversationId} />
             </Centered>
           )}
         </div>
@@ -409,11 +489,13 @@ export function OrchestratorPanel({
           state={state}
           mandate={mandate}
           edited={mandate !== ORCHESTRATOR_SYSTEM_PROMPT}
+          baseVersion={ORCHESTRATOR_PROMPT_VERSION}
           formError={formError}
           submitting={create.submitting}
           projectName={projectName}
           cwd={projectCwd}
           launch={launch}
+          viewerMcpRegistered={status?.viewerMcpRegistered === true}
           onMandate={setMandate}
           onRestore={() => setMandate(ORCHESTRATOR_SYSTEM_PROMPT)}
           onConfirm={() => confirmCreate()}
@@ -490,8 +572,9 @@ function RotateDraft({
   const cwd = (incumbent?.cwd ?? null) ?? projectCwd;
 
   const confirm = () => {
-    const text = mandate.trim();
-    if (!text) {
+    /* Emptiness is the only question trim answers here too — the successor's
+       mandate is posted exactly as it was typed. */
+    if (!mandate.trim()) {
       setFormError(t("orchPanel.mandateRequired"));
       return;
     }
@@ -499,14 +582,14 @@ function RotateDraft({
     void flow.submit({
       body: {
         project,
-        mandate: text,
+        mandate,
         engine: launch.engine,
         ...(launch.model ? { model: launch.model } : {}),
         ...(launch.effort ? { effort: launch.effort } : {}),
         ...(launch.engine === "codex" && launch.speed ? { fast: launch.speed === "fast" } : {}),
         ...(launch.launchAccountId ? { accountId: launch.launchAccountId } : {}),
       },
-      launch: { draft: launch, cwd: cwd ?? "", firstMessage: text },
+      launch: { draft: launch, cwd: cwd ?? "", firstMessage: mandate },
     });
   };
 
@@ -516,11 +599,13 @@ function RotateDraft({
       state={state}
       mandate={mandate}
       edited={mandate !== seat.mandate}
+      baseVersion={seat.promptVersion}
       formError={formError}
       submitting={flow.submitting}
       projectName={projectName}
       cwd={cwd}
       launch={launch}
+      viewerMcpRegistered={status?.viewerMcpRegistered === true}
       onMandate={(value) => {
         setMandateState(value);
         writeField("Rotate", project, "mandate", value === seat.mandate ? "" : value);
@@ -547,11 +632,13 @@ function OrchestratorDraft({
   state,
   mandate,
   edited,
+  baseVersion,
   formError,
   submitting,
   projectName,
   cwd,
   launch,
+  viewerMcpRegistered,
   onMandate,
   onRestore,
   onConfirm,
@@ -561,11 +648,16 @@ function OrchestratorDraft({
   state: Extract<OrchestratorPanelState, { kind: "draft" } | { kind: "intent-error" }>;
   mandate: string;
   edited: boolean;
+  /** The version of the mandate this draft STARTED from — the built-in prompt's
+      for a create, the incumbent's for a rotation. Only meaningful while the
+      text is untouched; an edited mandate is bespoke and claims no version. */
+  baseVersion: number | null;
   formError: string | null;
   submitting: boolean;
   projectName: string;
   cwd?: string;
   launch: ReturnType<typeof useAgentLaunchDraft>;
+  viewerMcpRegistered: boolean;
   onMandate: (value: string) => void;
   onRestore: () => void;
   onConfirm: () => void;
@@ -574,6 +666,28 @@ function OrchestratorDraft({
   const { t } = useLocale();
   const errored = state.kind === "intent-error";
   const rotate = mode === "rotate";
+  /* The rules are collapsed by default: they are the part an operator rarely
+     changes, and 58 lines of them ahead of the pickers is what made this draft
+     unreadable (#1163).
+     The disclosure keeps its OWN open state — the operator's toggle is theirs
+     to keep — and this only ever nudges it open, when there is something in
+     there to read: a mandate already edited (typed here, or restored from a
+     previous visit), or a designation that failed on text about to be fixed.
+     The two reasons are watched SEPARATELY, on their own arrival. Folded into
+     one `edited || errored` boolean they hide each other: after an edit has
+     opened the disclosure and the operator has folded it back, the boolean is
+     already true when the designation fails, the effect never re-runs, and the
+     text the error is about stays behind a click. */
+  const rules = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    if (edited && rules.current) rules.current.open = true;
+  }, [edited]);
+  useEffect(() => {
+    if (errored && rules.current) rules.current.open = true;
+  }, [errored]);
+  /* Only untouched text is a version of anything; an edited mandate is the
+     operator's own and says so instead of claiming a version it isn't. */
+  const version = edited ? null : baseVersion;
   return (
     <form
       className="flex min-h-0 flex-1 flex-col"
@@ -614,56 +728,97 @@ function OrchestratorDraft({
             <h2 className="text-title font-semibold text-primary">
               {t(rotate ? "orchPanel.rotateHeading" : "orchPanel.draftTitle")}
             </h2>
-            <p className="mt-1 text-ui leading-4 text-muted">
-              {rotate
-                ? t("orchPanel.rotateHint")
-                : t(state.kind === "draft" && state.vacated ? "orchPanel.draftHintVacated" : "orchPanel.draftHint", { project: projectName })}
-            </p>
+            {rotate ? (
+              <p className="mt-1 text-ui leading-4 text-muted">{t("orchPanel.rotateHint")}</p>
+            ) : state.kind === "draft" && state.vacated ? (
+              <p className="mt-1 text-ui leading-4 text-muted">{t("orchPanel.draftHintVacated", { project: projectName })}</p>
+            ) : null}
           </div>
         )}
+
+        {/* What this thing IS, in plain sentences, before any picker: you talk
+            to it the way you would talk to a colleague, it runs the work, and it
+            acts on its own unless the rules below say otherwise (#1163). A
+            rotation is not an introduction — that operator already has one. */}
+        {rotate ? null : (
+          <p className="shrink-0 text-ui leading-5 text-secondary" data-orchestrator-intro>
+            {t("orchPanel.introTalk")}{" "}
+            {t("orchPanel.introRuns")}{" "}
+            {t("orchPanel.introReports")}
+          </p>
+        )}
+
+        <p
+          className="shrink-0 rounded-control border border-border bg-canvas px-3 py-2 font-mono text-caption text-secondary"
+          data-viewer-mcp-status={viewerMcpRegistered ? "registered" : "missing"}
+          role="status"
+        >
+          {t(viewerMcpRegistered ? "orchPanel.viewerMcpRegistered" : "orchPanel.viewerMcpMissing")}
+        </p>
 
         <div className="shrink-0">
           <AgentLaunchControls draft={launch} disabled={submitting} stacked />
         </div>
 
-        <div className="flex min-h-[220px] flex-1 flex-col gap-1">
-          <div className="flex min-h-6 items-center gap-2">
-            <label className="text-label font-semibold text-muted" htmlFor="orchestrator-mandate">
-              {t("orchPanel.mandate")}
-            </label>
-            {edited ? (
-              <button
-                type="button"
-                onClick={onRestore}
-                disabled={submitting}
-                className="inline-flex items-center gap-1 rounded-control border border-border bg-canvas px-2 py-0.5 text-caption font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
-              >
-                <RotateCcw className="h-3 w-3" aria-hidden /> {t(rotate ? "orchPanel.restoreIncumbent" : "orchPanel.restoreDefault")}
-              </button>
-            ) : null}
-            <span className="ml-auto shrink-0 text-caption text-muted">{t("orchPanel.mandateSent")}</span>
+        {/* Collapsed, the rules are one line the operator can ignore; open, they
+            are the same textarea they have always been. Confirm posts what this
+            field holds either way — the disclosure hides the text, it never
+            edits it (PRD #976 decision 3). */}
+        <details
+          ref={rules}
+          className="shrink-0 rounded-control border border-border bg-card/60"
+          data-orchestrator-mandate-details
+        >
+          <summary className="min-h-7 cursor-pointer select-none list-item px-3 py-1.5 text-label font-semibold text-secondary marker:text-muted hover:text-primary">
+            {version === null ? t("orchPanel.mandateSummaryCustom") : t("orchPanel.mandateSummary", { version })}
+          </summary>
+          <div className="flex flex-col gap-1 border-t border-border px-3 py-2">
+            <div className="flex min-h-6 items-center gap-2">
+              {edited ? (
+                <button
+                  type="button"
+                  onClick={onRestore}
+                  disabled={submitting}
+                  className="inline-flex items-center gap-1 rounded-control border border-border bg-canvas px-2 py-0.5 text-caption font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+                >
+                  <RotateCcw className="h-3 w-3" aria-hidden /> {t(rotate ? "orchPanel.restoreIncumbent" : "orchPanel.restoreDefault")}
+                </button>
+              ) : null}
+              <span className="ml-auto shrink-0 text-caption text-muted">{t("orchPanel.mandateSent")}</span>
+            </div>
+            <textarea
+              id="orchestrator-mandate"
+              data-orchestrator-mandate
+              aria-label={t("orchPanel.mandate")}
+              value={mandate}
+              disabled={submitting}
+              onChange={(event) => onMandate(event.target.value)}
+              spellCheck={false}
+              /* The mandate is PROSE the agent reads, so it is sans (design
+                 system §1.1 mono rule) — the only mono here is the cwd below,
+                 which is a path. */
+              className="min-h-[220px] w-full resize-none rounded-surface border border-border bg-sunken px-3 py-2.5 text-ui leading-[1.45] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+            />
           </div>
-          <textarea
-            id="orchestrator-mandate"
-            data-orchestrator-mandate
-            value={mandate}
-            disabled={submitting}
-            onChange={(event) => onMandate(event.target.value)}
-            spellCheck={false}
-            /* The mandate is PROSE the agent reads, so it is sans (design
-               system §1.1 mono rule) — the only mono here is the cwd below,
-               which is a path. */
-            className="min-h-[200px] w-full flex-1 resize-none rounded-surface border border-border bg-sunken px-3 py-2.5 text-ui leading-[1.45] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
-          />
-          {cwd ? (
-            <p className="truncate font-mono text-caption text-muted" title={cwd}>
-              {t(rotate ? "orchPanel.cwdInherited" : "orchPanel.cwd", { cwd })}
-            </p>
-          ) : null}
-        </div>
+        </details>
+
+        {/* The directory is a fact about the LAUNCH, not about the rules, so it
+            stays visible while they are folded away. */}
+        {cwd ? (
+          <p className="shrink-0 truncate font-mono text-caption text-muted" title={cwd}>
+            {t(rotate ? "orchPanel.cwdInherited" : "orchPanel.cwd", { cwd })}
+          </p>
+        ) : null}
       </div>
 
       <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-sunken px-4 py-3">
+        {/* Words, and only words (#1163): one task is better served by one agent
+            the operator talks to directly, and this pays off when several things
+            run at once while they are elsewhere. Nothing here counts anything,
+            and nothing here stands between them and the button. */}
+        {rotate || errored ? null : (
+          <p className="text-ui leading-4 text-muted" data-orchestrator-one-task>{t("orchPanel.oneTask")}</p>
+        )}
         {formError ? (
           <p className="text-ui font-semibold text-danger" role="alert">{formError}</p>
         ) : null}
@@ -702,29 +857,42 @@ function OrchestratorDraft({
 
 const QUIET_BADGE = "border-border bg-canvas text-muted";
 const DANGER_BADGE = "border-danger/40 bg-danger-soft text-danger";
+const WARNING_BADGE = "border-warning/45 bg-warning-soft text-warning";
 
-/** One row per liveness, so a tone can never drift from the word beside it —
-    and green is claimed ONLY by a conversation that is actually hosted. */
-const LIVENESS_BADGE: Record<SeatLiveness, { tone: string; key: MessageKey }> = {
+/** One row per badge, so a tone can never drift from the word beside it — green
+    is claimed ONLY by a conversation that is actually hosted, and the warning
+    tone the rest of the app spends on a wait is what «needs you» wears. */
+const SEAT_BADGE: Record<SeatBadge, { tone: string; key: MessageKey }> = {
+  "needs-you": { tone: WARNING_BADGE, key: "orchPanel.badgeNeedsYou" },
   live: { tone: "border-success/45 bg-success-soft text-success", key: "orchPanel.badgeLive" },
-  stalled: { tone: "border-warning/45 bg-warning-soft text-warning", key: "orchPanel.badgeStalled" },
+  stalled: { tone: WARNING_BADGE, key: "orchPanel.badgeStalled" },
   resumable: { tone: QUIET_BADGE, key: "orchPanel.badgeResumable" },
   dead: { tone: DANGER_BADGE, key: "orchPanel.badgeDead" },
   resolving: { tone: QUIET_BADGE, key: "orchPanel.badgeResolving" },
 };
 
-function StateBadge({ state }: { state: OrchestratorPanelState }) {
-  const { t } = useLocale();
-  const live = state.kind === "live" ? LIVENESS_BADGE[state.liveness] : null;
-  const tone = live
-    ? live.tone
+/**
+ * The badge, and — when the seat is holding a decision up at the operator — the
+ * decision itself in its tooltip (issue #1167).
+ *
+ * The word comes from `seatBadgeOf`, which ranks a pending decision ahead of
+ * the liveness; the line comes from the SAME `decisionLine` the toast and the
+ * island popover read, so the dock can never name a wait differently from the
+ * surfaces the operator reached it through.
+ */
+function StateBadge({ state, file }: { state: OrchestratorPanelState; file: FileEntry | null }) {
+  const { t, locale } = useLocale();
+  const seatBadge = state.kind === "live" ? seatBadgeOf(state) : null;
+  const badge = seatBadge ? SEAT_BADGE[seatBadge] : null;
+  const tone = badge
+    ? badge.tone
     : state.kind === "intent-error"
       ? DANGER_BADGE
       : state.kind === "creating"
         ? "border-accent/45 bg-accent-soft text-accent"
         : QUIET_BADGE;
-  const label = live
-    ? t(live.key)
+  const label = badge
+    ? t(badge.key)
     : t(state.kind === "creating"
       ? "orchPanel.badgeCreating"
       : state.kind === "intent-error"
@@ -732,8 +900,18 @@ function StateBadge({ state }: { state: OrchestratorPanelState }) {
         : state.kind === "draft"
           ? "orchPanel.badgeNone"
           : "orchPanel.badgeReading");
+  /* The tooltip follows the badge: a seat the badge calls «needs you» carries
+     the decision behind it, and every other badge is already its own whole
+     answer. */
+  const decision = seatBadge === "needs-you" && file ? decisionLine(t, locale, file) : null;
   return (
-    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-caption font-semibold ${tone}`}>{label}</span>
+    <span
+      data-orchestrator-badge={seatBadge ?? state.kind}
+      title={decision ?? undefined}
+      className={`shrink-0 rounded-full border px-2 py-0.5 text-caption font-semibold ${tone}`}
+    >
+      {label}
+    </span>
   );
 }
 
@@ -799,14 +977,82 @@ function Centered({ children }: { children: React.ReactNode }) {
   );
 }
 
+const SECONDARY_BUTTON = "inline-flex h-8 items-center gap-1.5 rounded-control border border-border bg-card px-3 text-ui font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40";
+
 function SecondaryButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="inline-flex h-8 items-center gap-1.5 rounded-control border border-border bg-card px-3 text-ui font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-    >
+    <button type="button" onClick={onClick} className={SECONDARY_BUTTON}>
       {children}
     </button>
   );
+}
+
+/** The board still has the conversation while the dock cannot bind it, so this
+    rides with every bounded reason — not only with the one that leaves the panel
+    with nothing else to show (issue #1182). */
+function OpenOnBoardLink({ conversationId }: { conversationId: string }) {
+  const { t } = useLocale();
+  return (
+    <a
+      href={"#c=" + encodeURIComponent(conversationId)}
+      data-orchestrator-open-board
+      className="text-ui font-semibold text-accent underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+    >
+      {t("orchPanel.openOnBoard")}
+    </a>
+  );
+}
+
+/** Re-run resolution — all four of its reads, including the two a bounded wait
+    is actually missing (see `rebind`). It re-reads and nothing else: recovering
+    from a restart must never cost the operator a rotation (issue #1182). */
+function RebindButton({ onRebind }: { onRebind: () => void }) {
+  const { t } = useLocale();
+  return (
+    <button type="button" data-orchestrator-rebind onClick={onRebind} title={t("orchPanel.rebindTitle")} className={SECONDARY_BUTTON}>
+      <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+      {t("orchPanel.rebind")}
+    </button>
+  );
+}
+
+/** «Opening the conversation…» has run past its bound and the status read says
+    the host is alive: what the panel owes the operator now is the reason, not a
+    longer spin (issue #1182). */
+function BindFailure({ reason, onRebind }: { reason: SeatBindFailure; onRebind: () => void }) {
+  const { t } = useLocale();
+  return (
+    <div data-orchestrator-bind={reason} className="flex flex-col items-center gap-2">
+      <TriangleAlert className="h-6 w-6 text-warning" aria-hidden />
+      <p className="max-w-[300px] text-body font-semibold text-primary" role="status">{t("orchPanel.bindStalled")}</p>
+      <p className="max-w-[300px] text-ui text-muted">
+        {t(reason === "surface" ? "orchPanel.bindStalledSurface" : "orchPanel.bindStalledCatalog")}
+      </p>
+      <RebindButton onRebind={onRebind} />
+    </div>
+  );
+}
+
+/**
+ * How long the dock has been unable to bind the seat's conversation: null until
+ * {@link SEAT_BIND_TIMEOUT_MS} has passed, then that bound as the elapsed floor
+ * (issue #1182).
+ *
+ * ONE timer per wait, and ONE repaint. The panel has to say something different
+ * when the bound is crossed; it never counts seconds at the operator, so there
+ * is nothing finer to measure. The wait is identified by `key`, and the cleanup
+ * ends it — a seat that binds, and a different seat, each start their own wait
+ * with the full grace period instead of inheriting the last one's verdict.
+ */
+function useUnboundFor(pending: boolean, key: string): number | null {
+  const [bounded, setBounded] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pending) return;
+    const timer = setTimeout(() => setBounded(key), SEAT_BIND_TIMEOUT_MS);
+    return () => {
+      clearTimeout(timer);
+      setBounded(null);
+    };
+  }, [pending, key]);
+  return pending && bounded === key ? SEAT_BIND_TIMEOUT_MS : null;
 }

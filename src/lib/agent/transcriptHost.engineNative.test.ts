@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { reconcileObservedTranscriptHosts, type TranscriptHost } from "@/lib/agent/transcriptHost";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const ROOT_SID = ["019f4906", "3f67", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
 const ROOT_PATH = `/home/user/.claude/projects/-repo/${ROOT_SID}.jsonl`;
@@ -30,7 +31,7 @@ function evidence(): TmuxHostEvidence {
 
 test("a same-pane engine-native child never steals the Viewer launch receipt (issue #339)", () => {
   const store = registry();
-  const begun = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+  const begun = beginLegacySpawnFixture(store, { engine: "claude", cwd: "/repo", accountId: "work" });
   if (begun.kind !== "created") throw new Error("expected create");
   store.bindSpawnPane(begun.receipt.launchId, {
     endpoint: "/tmp",

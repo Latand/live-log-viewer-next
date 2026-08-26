@@ -13,6 +13,7 @@ import {
   establishHotStateCutoverBoundary,
   initializeHotStateStoresAtStartup,
   initializeOperatorSpawnCapabilityAtStartup,
+  runIdentityWaveMigrationWithoutBlockingStartup,
   runStructuredHostStartup,
   scheduleAccountMigrationController,
   startCurrentReleaseControllers,
@@ -62,6 +63,38 @@ test("WakaTime startup failure stays local and secret-safe", async () => {
     (...args) => { logs.push(args); },
   );
   expect(logs).toEqual([["[wakatime] startup_failed", {}]]);
+});
+
+test("identity-wave evidence failure leaves later startup phases available", () => {
+  const events: unknown[][] = [];
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+  let attempts = 0;
+  runIdentityWaveMigrationWithoutBlockingStartup(
+    () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary evidence read failure");
+    },
+    (...args) => { events.push(args); },
+    {
+      initialRetryMs: 25,
+      schedule: (callback, delayMs) => {
+        scheduled.push({ callback, delayMs });
+        return { unref() {} };
+      },
+    },
+  );
+  events.push(["controllers-started"]);
+
+  expect(events).toEqual([[
+    "[identity-wave] registry migration failed; retry scheduled",
+    { attempt: 1, retryInMs: 25, error: expect.any(Error) },
+  ], ["controllers-started"]]);
+  expect(scheduled).toHaveLength(1);
+  expect(scheduled[0]!.delayMs).toBe(25);
+
+  scheduled[0]!.callback();
+  expect(attempts).toBe(2);
+  expect(scheduled).toHaveLength(1);
 });
 
 test("node bootstrap discards WakaTime credentials before runtime imports and explicitly isolated Bun children", async () => {
@@ -230,6 +263,29 @@ test("a current release monitors rollback fences while activation is still pendi
   expect(checkpoints).toBe(1);
   rejectActivation(new Error("injected activation failure"));
   await expect(activation).rejects.toThrow("injected activation failure");
+});
+
+test("runtime activation completes the identity wave before publishing hot-state readiness", async () => {
+  const events: string[] = [];
+  await completeViewerRuntimeActivation({
+    initializeOperatorCapability: async () => { events.push("operator-capability"); },
+    runIdentityMigration: () => { events.push("identity-wave"); },
+    startWakatime: async () => { events.push("wakatime"); },
+    publishHotStateActivation: () => { events.push("hot-state-ready"); },
+    startStructuredHosts: () => { events.push("structured-hosts"); },
+    startControllers: async () => { events.push("controllers"); },
+    publishViewerReleaseReady: () => { events.push("release-ready"); },
+  });
+
+  expect(events).toEqual([
+    "operator-capability",
+    "identity-wave",
+    "wakatime",
+    "hot-state-ready",
+    "structured-hosts",
+    "controllers",
+    "release-ready",
+  ]);
 });
 
 test("hot-state activation beats a slow structured-host startup and the promote deadline", async () => {
