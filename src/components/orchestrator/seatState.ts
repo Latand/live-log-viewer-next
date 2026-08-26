@@ -1,3 +1,4 @@
+import { currentConversationFile } from "@/lib/accounts/identity";
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
@@ -129,6 +130,74 @@ export const ROTATION_CONTEXT_PERCENT = 50;
  */
 export type SeatLiveness = "resolving" | "live" | "stalled" | "resumable" | "dead";
 
+/**
+ * Why a seat the server calls LIVE has still not reached this panel, once the
+ * wait has run past {@link SEAT_BIND_TIMEOUT_MS} (issue #1182).
+ *
+ *  - `catalog` — nothing in the file catalog answers for the seat's
+ *    conversation, on its durable id, on the registry's current path, or on the
+ *    path the seat recorded.
+ *  - `surface` — the transcript is here, but the runtime plane has not resolved
+ *    a host for it, so the capability matrix can classify nothing.
+ *
+ * Null means there is nothing to explain: either the seat bound, or the wait is
+ * still young, or the status read has not affirmed a live host — «opening» is
+ * an honest answer in all three.
+ */
+export type SeatBindFailure = "catalog" | "surface";
+
+/**
+ * How long «opening the conversation…» is allowed to stand.
+ *
+ * Binding normally takes one poll. Past this the panel stops narrating a
+ * transition that is not happening and states what is actually missing, with a
+ * re-bind — an unbounded spinner is what made a restart look like a seat that
+ * had to be ROTATED away (issue #1182).
+ */
+export const SEAT_BIND_TIMEOUT_MS = 10_000;
+
+/**
+ * The catalog entry that CURRENTLY carries the seat's conversation (#1182).
+ *
+ * The seat freezes the transcript path it was activated at. A re-host or a
+ * migration moves the conversation onto a successor transcript, so that path
+ * ages into a HINT: matching on it alone leaves the dock waiting forever for a
+ * generation that has already been replaced, which is what a rotation was
+ * accidentally curing.
+ *
+ * The durable conversation id is the key, and it is tried through everything
+ * that can resolve it:
+ *
+ *  1. the catalog's own current generation for that id
+ *     (`currentConversationFile` — never an archived predecessor, never a
+ *     launch placeholder over a materialized transcript);
+ *  2. `currentPath`, the registry's newest generation for that id as
+ *     `GET /api/orchestrator/seat/status` resolved it server-side — the bridge
+ *     when the successor entered the catalog under its own native id;
+ *  3. the seat's recorded path, last, and re-resolved through whatever
+ *     conversation the entry it names belongs to.
+ */
+export function resolveSeatFile(input: {
+  files: readonly FileEntry[];
+  /** The seat's durable conversation id; null means there is no seat to bind. */
+  conversationId: string | null;
+  seatPath: string | null;
+  currentPath: string | null;
+}): FileEntry | null {
+  if (!input.conversationId) return null;
+  const byId = currentConversationFile(input.files, input.conversationId);
+  if (byId) return byId;
+  for (const path of [input.currentPath, input.seatPath]) {
+    if (!path) continue;
+    const entry = input.files.find((file) => file.path === path);
+    if (!entry) continue;
+    /* The entry a path names may itself be a retired generation; its own id
+       resolves forward to the one the operator is watching. */
+    return (entry.conversationId ? currentConversationFile(input.files, entry.conversationId) : null) ?? entry;
+  }
+  return null;
+}
+
 /** A transition riding alongside a live incumbent, so a failed or in-flight
     designation is visible without the conversation disappearing. */
 export type SeatTransition =
@@ -140,6 +209,9 @@ export interface OrchestratorLiveState {
   seat: OrchestratorSeat;
   conversationId: string;
   liveness: SeatLiveness;
+  /** Why a `resolving` seat the server calls live has not bound, once the wait
+      is past its bound; null whenever «opening» is still an honest answer. */
+  bindFailure: SeatBindFailure | null;
   rotation: RotationHint | null;
   transition: SeatTransition | null;
 }
@@ -177,6 +249,12 @@ export function deriveOrchestratorPanelState(input: {
       keeps the panel on slice A's own derivation, so the advisory never blinks
       out while the slower read catches up. */
   incumbent?: OrchestratorIncumbent | null;
+  /** The status read AFFIRMS a live host for this seat (`incumbentHostLive`).
+      Only then is an unbound panel a fault rather than a transition. */
+  hostLive?: boolean;
+  /** How long the dock has been unable to bind this seat's conversation, or
+      null while it is bound (issue #1182). */
+  unboundForMs?: number | null;
 }): OrchestratorPanelState {
   const { status } = input;
   const active = status?.seat && status.exists ? status.seat : null;
@@ -191,6 +269,12 @@ export function deriveOrchestratorPanelState(input: {
       seat: active,
       conversationId: active.conversationId,
       liveness,
+      bindFailure: bindFailureOf({
+        liveness,
+        hostLive: input.hostLive === true,
+        file: input.file,
+        unboundForMs: input.unboundForMs ?? null,
+      }),
       rotation: rotationHintOf(input.file, liveness, input.incumbent ?? null),
       transition: input.submitting
         ? { kind: "creating", launchId: pending?.intent.launchId ?? null }
@@ -305,6 +389,31 @@ function livenessOf(file: FileEntry | null, surface: StripSurface | null): SeatL
      say «opening» rather than claim either liveness. */
   if (!file || surface === null || surface === "unresolved") return "resolving";
   return file.activity === "stalled" ? "stalled" : "live";
+}
+
+/**
+ * Whether the dock has NOT bound the seat's conversation yet — the same reading
+ * `livenessOf` turns into `resolving`, exported so the panel can TIME the wait
+ * without re-deriving the whole state to ask (issue #1182).
+ */
+export function seatBindPending(file: FileEntry | null, surface: StripSurface | null): boolean {
+  return livenessOf(file, surface) === "resolving";
+}
+
+/** What an over-long wait is actually waiting for. Silent while the seat is
+    bound, while the wait is young, and while the status read has not affirmed a
+    live host — a slow spawn is not a fault to be reported. */
+function bindFailureOf(input: {
+  liveness: SeatLiveness;
+  hostLive: boolean;
+  file: FileEntry | null;
+  unboundForMs: number | null;
+}): SeatBindFailure | null {
+  if (input.liveness !== "resolving" || !input.hostLive) return null;
+  if (input.unboundForMs === null || input.unboundForMs < SEAT_BIND_TIMEOUT_MS) return null;
+  /* A transcript in hand means resolution got that far and the runtime plane is
+     the one still silent; nothing in hand means the catalog never answered. */
+  return input.file ? "surface" : "catalog";
 }
 
 /**

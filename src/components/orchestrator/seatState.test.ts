@@ -11,7 +11,9 @@ import {
   newSeatRequestId,
   orchestratorQuietBannerEligible,
   parseSeatStatus,
+  resolveSeatFile,
   ROTATION_CONTEXT_PERCENT,
+  SEAT_BIND_TIMEOUT_MS,
   seatRequestSettled,
   type OrchestratorSeatStatus,
 } from "./seatState";
@@ -233,6 +235,8 @@ describe("the server's own rotation recommendation is what the panel says (#978)
     effort: null,
     accountId: "work",
     cwd: "/repos/atlas",
+    transcriptPath: "/transcripts/orchestrator.jsonl",
+    liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 },
     context: { tokens: 620_000, limit: 1_000_000, percent: 62, estimated: false, basis: "provider-reported usage" },
     transcriptFacts: { bytes: 1024, messageCount: 10, toolCount: 4, compactionCount: 0 },
     rotation: { recommended: false, level: "none", reasons: [], thresholdUnknown: false },
@@ -400,4 +404,72 @@ test("a minted request id satisfies the seat route's own gate", () => {
   for (let index = 0; index < 20; index += 1) {
     expect(newSeatRequestId()).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
   }
+});
+
+describe("the dock binds the seat by its durable conversation id (#1182)", () => {
+  const successorPath = "/transcripts/orchestrator.successor.jsonl";
+
+  test("a recorded path the catalog no longer carries still binds, because the id does", () => {
+    /* The seat froze the path it was activated at; the conversation has since
+       been re-hosted onto a new transcript under the SAME durable id. */
+    const successor = file({ path: successorPath, name: "orchestrator.successor.jsonl" });
+    expect(resolveSeatFile({
+      files: [successor],
+      conversationId: "conversation_orchestrator",
+      seatPath: "/transcripts/orchestrator.jsonl",
+      currentPath: null,
+    })).toBe(successor);
+  });
+
+  test("a successor generation the catalog knows under another id binds through the status read's current path", () => {
+    /* The re-hosted generation entered the catalog keyed by the native session
+       it is now written under, so nothing about the seat's recorded id or path
+       matches it. `GET /api/orchestrator/seat/status` resolves the durable id
+       to exactly this path through the registry, which is the bridge. */
+    const successor = file({ path: successorPath, name: "orchestrator.successor.jsonl", conversationId: "conversation_successor" });
+    expect(resolveSeatFile({
+      files: [successor],
+      conversationId: "conversation_orchestrator",
+      seatPath: "/transcripts/orchestrator.jsonl",
+      currentPath: successorPath,
+    })).toBe(successor);
+  });
+
+  test("the recorded path is a hint: it binds when nothing better answers, and never outranks the id", () => {
+    const recorded = file();
+    const successor = file({ path: successorPath, name: "orchestrator.successor.jsonl" });
+    /* Only the hint is left. */
+    expect(resolveSeatFile({ files: [recorded], conversationId: "conversation_orchestrator", seatPath: recorded.path, currentPath: null })).toBe(recorded);
+    /* The recorded path is an archived predecessor of the live generation, so
+       the id's current entry wins over the entry the path names. */
+    const archived = file({ migratedTo: successorPath } as Partial<FileEntry>);
+    expect(resolveSeatFile({ files: [archived, successor], conversationId: "conversation_orchestrator", seatPath: archived.path, currentPath: null })).toBe(successor);
+    /* No seat at all binds nothing, whatever the catalog holds. */
+    expect(resolveSeatFile({ files: [successor], conversationId: null, seatPath: successorPath, currentPath: successorPath })).toBeNull();
+  });
+});
+
+describe("«opening» is bounded once the status read says the host is alive (#1182)", () => {
+  const stuck = { ...base, status: status({ seat: seat() }), hostLive: true };
+
+  test("under the bound it is still opening; over it, the panel names what is missing", () => {
+    expect(deriveOrchestratorPanelState({ ...stuck, unboundForMs: SEAT_BIND_TIMEOUT_MS - 1 }))
+      .toMatchObject({ kind: "live", liveness: "resolving", bindFailure: null });
+    expect(deriveOrchestratorPanelState({ ...stuck, unboundForMs: SEAT_BIND_TIMEOUT_MS }))
+      .toMatchObject({ kind: "live", liveness: "resolving", bindFailure: "catalog" });
+  });
+
+  test("a bound transcript whose host the runtime plane has not resolved names THAT instead", () => {
+    expect(deriveOrchestratorPanelState({ ...stuck, file: file(), surface: "unresolved", unboundForMs: SEAT_BIND_TIMEOUT_MS }))
+      .toMatchObject({ kind: "live", liveness: "resolving", bindFailure: "surface" });
+  });
+
+  test("nothing is claimed while the wait is legitimate: no live host, or the seat already bound", () => {
+    /* The status read has not reported a live host, so «opening» is honest. */
+    expect(deriveOrchestratorPanelState({ ...stuck, hostLive: false, unboundForMs: 10 * SEAT_BIND_TIMEOUT_MS }))
+      .toMatchObject({ bindFailure: null });
+    /* Bound and classified — there is no wait to bound. */
+    expect(deriveOrchestratorPanelState({ ...stuck, file: file(), surface: "live-root", unboundForMs: 10 * SEAT_BIND_TIMEOUT_MS }))
+      .toMatchObject({ liveness: "live", bindFailure: null });
+  });
 });
