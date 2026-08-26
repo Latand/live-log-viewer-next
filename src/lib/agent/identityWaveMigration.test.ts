@@ -11,7 +11,10 @@ import {
   orchestratorSeatFor,
 } from "@/lib/orchestrator/seats";
 
-import { AgentRegistry } from "./registry";
+import { STAGING_MODE_ENV } from "@/lib/staging";
+
+import { AgentRegistry, RegistryReadError, setAgentRegistryForTests } from "./registry";
+import { defaultRegistrySqliteFilename, publishRegistryBackendIdentity } from "./registryBackendIdentity";
 import { IDENTITY_WAVE_MIGRATION } from "./identityWaveMigration";
 import { sessionKeyFromTranscript } from "./sessionKey";
 import {
@@ -21,6 +24,102 @@ import {
 } from "./identityWaveStartup";
 
 const NOW = "2026-08-05T12:00:00.000Z";
+
+/** Every durable byte under a state root: directories, symlink targets and
+    file contents. Two equal trees mean nothing on disk changed. */
+function durableStateTree(root: string): string[] {
+  const entries: string[] = [];
+  const visit = (current: string, relative: string) => {
+    const stat = fs.lstatSync(current);
+    if (stat.isDirectory()) {
+      entries.push(`directory:${relative || "."}`);
+      for (const child of fs.readdirSync(current).sort()) {
+        visit(path.join(current, child), relative ? path.join(relative, child) : child);
+      }
+      return;
+    }
+    if (stat.isSymbolicLink()) {
+      entries.push(`symlink:${relative}:${fs.readlinkSync(current)}`);
+      return;
+    }
+    entries.push(`file:${relative}:${fs.readFileSync(current).toString("base64")}`);
+  };
+  visit(root, "");
+  return entries;
+}
+
+const STARTUP_ENV_KEYS = [
+  "LLV_STATE_DIR",
+  "LLV_IDENTITY_WAVE_DRY_RUN",
+  "LLV_CLAUDE_HOME",
+  "LLV_AGENT_REGISTRY_SQLITE",
+  STAGING_MODE_ENV,
+] as const;
+
+type RegistrySingletonHost = typeof process & { __llvAgentRegistry?: AgentRegistry | null };
+
+/** Runs `body` the way the Viewer startup runs the wave: process env, the
+    process-wide registry singleton reset so the default dependency path is
+    the one under test, and every durable root inside the temporary tree. */
+function withProductionShapedDryRun<T>(
+  directory: string,
+  registryBackendEnv: string | undefined,
+  body: (stateDirectory: string) => T,
+): T {
+  const previousEnv = Object.fromEntries(STARTUP_ENV_KEYS.map((key) => [key, process.env[key]]));
+  const previousRegistry = (process as RegistrySingletonHost).__llvAgentRegistry ?? null;
+  const stateDirectory = path.join(directory, "state");
+  process.env.LLV_STATE_DIR = stateDirectory;
+  process.env.LLV_IDENTITY_WAVE_DRY_RUN = "1";
+  process.env.LLV_CLAUDE_HOME = path.join(directory, "claude-home");
+  if (registryBackendEnv === undefined) delete process.env.LLV_AGENT_REGISTRY_SQLITE;
+  else process.env.LLV_AGENT_REGISTRY_SQLITE = registryBackendEnv;
+  delete process.env[STAGING_MODE_ENV];
+  setAgentRegistryForTests(null);
+  try {
+    return body(stateDirectory);
+  } finally {
+    setAgentRegistryForTests(previousRegistry);
+    for (const key of STARTUP_ENV_KEYS) {
+      if (previousEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnv[key];
+    }
+  }
+}
+
+function constructedRegistrySingleton(): AgentRegistry | null {
+  return (process as RegistrySingletonHost).__llvAgentRegistry ?? null;
+}
+
+/** A JSON registry holding one placeholder-titled conversation whose
+    transcript carries a semantic title, so a dry-run reports `retitled: 1`. */
+function seedPlaceholderRegistry(directory: string, filename: string): { seeded: string } {
+  const transcriptPath = path.join(directory, "legacy.jsonl");
+  fs.writeFileSync(transcriptPath, `${JSON.stringify({ type: "ai-title", aiTitle: "Preview the identity repair" })}\n`);
+  const seed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+  const conversation = seed.ensureConversation("claude", transcriptPath, null);
+  const seeded = seed.snapshot();
+  seeded.conversations[conversation.id]!.generations.at(-1)!.launchProfile.title = "Claude session";
+  const payload = `${JSON.stringify(seeded)}\n`;
+  fs.writeFileSync(filename, payload);
+  return { seeded: payload };
+}
+
+/** The state a `sqlite`-mode writer leaves behind and is still holding open:
+    the store after its first-boot import, the published identity descriptor
+    and the revision-stamped rollback mirror. The mirror is re-serialized
+    pretty-printed so that any writer construction, which rewrites the mirror
+    in its own compact form, shows up as changed bytes. */
+function seedPublishedSqliteState(directory: string, stateDirectory: string): { filename: string; store: AgentRegistry } {
+  const filename = path.join(stateDirectory, "agent-registry.json");
+  seedPlaceholderRegistry(directory, filename);
+  const store = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  publishRegistryBackendIdentity(filename, "sqlite", defaultRegistrySqliteFilename(filename));
+  const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: unknown };
+  expect(Number.isInteger(mirror._sqliteRevision)).toBe(true);
+  fs.writeFileSync(filename, `${JSON.stringify(mirror, null, 2)}\n`);
+  return { filename, store };
+}
 
 function verifiedSharedPath(sharedPath: string) {
   return { sharedPath, identityEquivalent: true };
@@ -349,7 +448,7 @@ test("source-file identity proves a shared transcript across distinct roots", ()
   }
 });
 
-test("startup dry-run leaves the complete durable state tree unchanged", () => {
+test("an injected-registry startup dry-run leaves the complete durable state tree unchanged", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-dry-run-state-"));
   const previousStateDir = process.env.LLV_STATE_DIR;
   try {
@@ -366,29 +465,8 @@ test("startup dry-run leaves the complete durable state tree unchanged", () => {
     fs.mkdirSync(path.join(stateDirectory, "preserved"), { recursive: true });
     fs.writeFileSync(path.join(stateDirectory, "preserved", "sentinel.json"), "{\"preserved\":true}\n");
 
-    const stateTree = (): string[] => {
-      const entries: string[] = [];
-      const visit = (current: string, relative: string) => {
-        const stat = fs.lstatSync(current);
-        if (stat.isDirectory()) {
-          entries.push(`directory:${relative || "."}`);
-          for (const child of fs.readdirSync(current).sort()) {
-            visit(path.join(current, child), relative ? path.join(relative, child) : child);
-          }
-          return;
-        }
-        if (stat.isSymbolicLink()) {
-          entries.push(`symlink:${relative}:${fs.readlinkSync(current)}`);
-          return;
-        }
-        entries.push(`file:${relative}:${fs.readFileSync(current).toString("base64")}`);
-      };
-      visit(stateDirectory, "");
-      return entries;
-    };
-
     const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
-    const before = stateTree();
+    const before = durableStateTree(stateDirectory);
     const result = runIdentityWaveMigrationAtStartup({
       registry,
       seats: () => [],
@@ -400,10 +478,82 @@ test("startup dry-run leaves the complete durable state tree unchanged", () => {
     });
 
     expect(result).toMatchObject({ dryRun: true, alreadyCompleted: false, retitled: 1 });
-    expect(stateTree()).toEqual(before);
+    expect(durableStateTree(stateDirectory)).toEqual(before);
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a production-shaped dry-run with default dependencies constructs no registry and leaves the state tree unchanged", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-default-dry-run-"));
+  try {
+    withProductionShapedDryRun(directory, "off", (stateDirectory) => {
+      const filename = path.join(stateDirectory, "agent-registry.json");
+      const { seeded } = seedPlaceholderRegistry(directory, filename);
+      /* Pretty-printed on purpose: startup compaction rewrites a registry whose
+         bytes differ from its own serialization, so a writer construction
+         shows up as changed bytes even when its content is unchanged. */
+      fs.writeFileSync(filename, `${JSON.stringify(JSON.parse(seeded), null, 2)}\n`);
+      fs.mkdirSync(path.join(stateDirectory, "preserved"), { recursive: true });
+      fs.writeFileSync(path.join(stateDirectory, "preserved", "sentinel.json"), "{\"preserved\":true}\n");
+      const before = durableStateTree(stateDirectory);
+
+      const result = runIdentityWaveMigrationAtStartup();
+
+      expect(result).toMatchObject({ dryRun: true, alreadyCompleted: false, retitled: 1, rekeyed: 0, quarantinedRekeys: 0, edgesStamped: 0 });
+      expect(durableStateTree(stateDirectory)).toEqual(before);
+      expect(fs.existsSync(path.join(stateDirectory, "agent-registry.backend.json"))).toBe(false);
+      expect(fs.existsSync(defaultRegistrySqliteFilename(filename))).toBe(false);
+      expect(constructedRegistrySingleton()).toBeNull();
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a dry-run under a published SQLite backend previews the stamped mirror without opening the store", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-sqlite-dry-run-"));
+  try {
+    withProductionShapedDryRun(directory, undefined, (stateDirectory) => {
+      const { store } = seedPublishedSqliteState(directory, stateDirectory);
+      const before = durableStateTree(stateDirectory);
+
+      const result = runIdentityWaveMigrationAtStartup();
+
+      expect(result).toMatchObject({ dryRun: true, alreadyCompleted: false, retitled: 1 });
+      expect(durableStateTree(stateDirectory)).toEqual(before);
+      expect(constructedRegistrySingleton()).toBeNull();
+      expect(store.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]).toBeUndefined();
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a dry-run under a SQLite backend refuses an unstamped or absent rollback mirror", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-identity-wave-sqlite-dry-run-refusal-"));
+  try {
+    withProductionShapedDryRun(directory, undefined, (stateDirectory) => {
+      const { filename, store } = seedPublishedSqliteState(directory, stateDirectory);
+      const mirror = JSON.parse(fs.readFileSync(filename, "utf8")) as Record<string, unknown>;
+      delete mirror._sqliteRevision;
+      fs.writeFileSync(filename, `${JSON.stringify(mirror)}\n`);
+      const unstamped = durableStateTree(stateDirectory);
+
+      expect(() => runIdentityWaveMigrationAtStartup()).toThrow(RegistryReadError);
+      expect(() => runIdentityWaveMigrationAtStartup()).toThrow(/carries no SQLite revision stamp/);
+      expect(durableStateTree(stateDirectory)).toEqual(unstamped);
+
+      fs.rmSync(filename);
+      const absent = durableStateTree(stateDirectory);
+      expect(() => runIdentityWaveMigrationAtStartup()).toThrow(/rollback mirror is absent/);
+      expect(durableStateTree(stateDirectory)).toEqual(absent);
+      expect(constructedRegistrySingleton()).toBeNull();
+      expect(store.snapshot().identityMigrations[IDENTITY_WAVE_MIGRATION]).toBeUndefined();
+    });
+  } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
