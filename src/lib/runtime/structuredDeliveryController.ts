@@ -36,6 +36,10 @@ interface ControllerState {
   activeRegistry: AgentRegistry | null;
   activeHosts: Map<string, EngineHost> | null;
   registerActiveHost: ((item: StructuredDeliveryHost, ownsOperation?: () => Promise<boolean>) => Promise<() => Promise<void>>) | null;
+  /* The hosts this generation currently serves, as re-registrable items. A
+     successor takes them over at the swap, so a rebind never leaves a
+     conversation without a resolvable host (#1191). */
+  activeRegistrations: (() => readonly StructuredDeliveryHost[]) | null;
   republishActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   releaseActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   terminateActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
@@ -51,6 +55,7 @@ const state: ControllerState = controllerStore.__llvStructuredDeliveryController
   activeRegistry: null,
   activeHosts: null,
   registerActiveHost: null,
+  activeRegistrations: null,
   republishActiveHost: null,
   releaseActiveHost: null,
   terminateActiveHost: null,
@@ -105,6 +110,7 @@ function retireStructuredDeliveryPublication(): void {
   state.activeRegistry = null;
   state.activeHosts = null;
   state.registerActiveHost = null;
+  state.activeRegistrations = null;
   state.republishActiveHost = null;
   state.releaseActiveHost = null;
   state.terminateActiveHost = null;
@@ -646,8 +652,28 @@ export async function bindStructuredDeliveryQueue(
     registrations.set(key, { key: item.key, host: item.host, unsubscribe, stopEvents });
     return () => unregisterHost(key, item.host);
   };
+  /* Host resolution must not gap across the hand-over (#1191). Publishing an
+     empty successor and registering its hosts afterwards left every delivery
+     admitted in between resolving nothing, which settles the receipt `failed`
+     with "structured host recovery did not start". Seeding is synchronous — no
+     await stands between it and the installation below — so the successor
+     answers for every host the predecessor was already serving from the
+     instant it goes live. Each one is registered in full afterwards, which
+     replaces the seed with a registration of this generation: state
+     subscription, event pump and projection.
+
+     Only the predecessor's hosts are carried. An adopted host is a publication
+     this bind has yet to make, and one whose registration fails — a
+     producer-cursor transport fault, an evicted replay window — must stay
+     unpublished so the startup retry can make it properly. */
+  const inherited = state.activeRegistrations?.() ?? [];
+  for (const item of inherited) {
+    const id = sessionKeyId(item.key);
+    if (!hosts.has(id)) hosts.set(id, item.host);
+  }
   state.activeHosts = hosts;
   state.registerActiveHost = register;
+  state.activeRegistrations = () => [...registrations.values()].map(({ key, host }) => ({ key, host }));
   state.republishActiveHost = async (key) => {
     const registration = registrations.get(sessionKeyId(key));
     if (!registration) return false;
@@ -657,6 +683,10 @@ export async function bindStructuredDeliveryQueue(
     const id = sessionKeyId(key);
     const registered = registrations.get(id);
     if (!registered) {
+      /* A host carried over at the swap answers from `hosts` before its own
+         registration lands. Drop it here too, or the seed would keep resolving
+         a host this release just gave up. */
+      hosts.delete(id);
       const discardedEntry = registry.readOnlySnapshot().entries[id] ?? null;
       await refreshCurrentProjection(discardedEntry ? conversationIdForEntry(registry, discardedEntry) : null);
       return false;
@@ -671,7 +701,12 @@ export async function bindStructuredDeliveryQueue(
   state.terminateActiveHost = async (key) => {
     const id = sessionKeyId(key);
     const registered = registrations.get(id);
-    if (!registered) return false;
+    if (!registered) {
+      /* Same reason as the release path: a seeded carry-over must not survive
+         a termination the caller falls back to handling in the registry. */
+      hosts.delete(id);
+      return false;
+    }
     await registered.host.release();
     registry.terminateStructuredHost(key);
     await unregisterHost(id, registered.host);
@@ -700,6 +735,7 @@ export async function bindStructuredDeliveryQueue(
       state.activeRegistry = null;
       state.activeHosts = null;
       state.registerActiveHost = null;
+      state.activeRegistrations = null;
       state.republishActiveHost = null;
       state.releaseActiveHost = null;
       state.terminateActiveHost = null;
@@ -739,6 +775,23 @@ export async function bindStructuredDeliveryQueue(
      `state.activeQueue !== queue` and unwinds only its own timers, host
      subscriptions and event pumps — it cannot null the live publication. */
   retirePredecessor();
+  /* The carried-over hosts resolve from the seed already; this gives each one a
+     registration in this generation. It runs whether or not startup work is
+     deferred, because startup's own completion only covers the set it adopts,
+     and a host the predecessor picked up after its adoption pass belongs to
+     neither set. */
+  for (const item of inherited) {
+    /* One host that cannot be re-registered — an evicted replay window, a
+       control-plane fault — must not take the bind down with it. The seed
+       already resolves it, so delivery keeps working while only its projection
+       falls behind; failing the bind here would retire nothing and leave the
+       startup retry re-entering the same throw. */
+    try {
+      await register(item);
+    } catch (error) {
+      console.error("[structured delivery] carried-over host kept its seat without a fresh registration", error);
+    }
+  }
   if (!dependencies.deferStartupWork) await complete(adopted);
 }
 

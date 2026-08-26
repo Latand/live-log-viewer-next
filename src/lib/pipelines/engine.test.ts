@@ -1725,29 +1725,139 @@ test("transient structured spawn handshakes retry twice before parking (#1056)",
   expect(parked.stateDetail).toContain("2 retries");
 });
 
+/* The controller wait must never be slept through: the pipelines phase holds
+   the pipeline mutation, and a tick that blocks in it for the whole budget is
+   what pushed the flow pipeline controller past its 15s deadline (#1191). */
+const forbiddenSleep = async (milliseconds: number) => {
+  throw new Error(`stage activation slept ${milliseconds}ms inside the pipelines phase`);
+};
+
+/* Freezes the harness wall clock so a bounded, wall-clock wait can be driven
+   step by step. The default clock advances on every `now()` read, which would
+   make the elapsed budget depend on how many times a tick happens to ask. */
+function frozenWallClock(h: ReturnType<typeof harness>) {
+  let wall = Date.parse(h.ports.now());
+  h.ports.now = () => new Date(wall).toISOString();
+  return (milliseconds: number) => { wall += milliseconds; };
+}
+
 test("stage activation rides out a controller that is unavailable for a few seconds (#1191)", async () => {
   const h = harness();
   await create(h.ports);
   await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
   const baseSpawn = h.ports.spawnAgent;
   let spawnCalls = 0;
-  const delays: number[] = [];
+  const scheduled: number[] = [];
+  const slept: number[] = [];
+  const attemptIds: string[] = [];
   h.ports.spawnAgent = async (input, onReserved) => {
     spawnCalls += 1;
+    attemptIds.push(input.clientAttemptId);
     if (spawnCalls <= 3) throw new Error("structured delivery controller is unavailable");
     return baseSpawn(input, onReserved);
   };
   Object.assign(h.ports, {
-    sleep: async (milliseconds: number) => { delays.push(milliseconds); },
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: async (milliseconds: number) => { slept.push(milliseconds); },
+  });
+
+  /* Each tick makes exactly one attempt and hands the wait to a scheduled
+     tick; nothing sleeps inside the pipelines phase. */
+  for (let round = 0; round < 4; round += 1) {
+    await tickPipelines([], h.ports);
+    if (round === 3) break;
+    const waiting = loadPipelines()[0]!;
+    expect(waiting.state).toBe("running");
+    expect(waiting.stateDetail).toBeNull();
+    expect(waiting.cursor).toMatchObject({ stageId: "plan", state: "pending" });
+    expect(waiting.runs[0]!.attempts.at(-1)!.state).toBe("pending");
+    advance(scheduled.at(-1)!);
+  }
+
+  expect(spawnCalls).toBe(4);
+  expect(scheduled).toEqual([1_000, 2_000, 4_000]);
+  expect(slept).toEqual([]);
+  /* Each retry keeps a launch identity of its own even though the wait now
+     spans ticks, so no attempt collides with the receipt of the one before. */
+  expect(new Set(attemptIds).size).toBe(4);
+  expect(attemptIds.slice(1).map((id) => id.split("_pipeline_")[0])).toEqual([
+    "handshake_retry_1",
+    "handshake_retry_2",
+    "handshake_retry_3",
+  ]);
+  const running = loadPipelines()[0]!;
+  expect(running).toMatchObject({
+    state: "running",
+    stateDetail: null,
+    cursor: { stageId: "plan", state: "running" },
+  });
+  /* The wait record is spent, so a later stall starts its own budget. */
+  expect(running.runs[0]!.attempts.at(-1)!.controllerWait).toBeUndefined();
+});
+
+test("a stage waiting on the controller does not spin the pipelines phase (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  frozenWallClock(h);
+  h.ports.spawnAgent = async () => { throw new Error("structured delivery controller is unavailable"); };
+  Object.assign(h.ports, { scheduleTick: () => {}, sleep: forbiddenSleep });
+  let ticks = 0;
+  const unregister = registerPipelineTick(async () => { ticks += 1; });
+  try {
+    await tickPipelines([], h.ports);
+    expect(loadPipelines()[0]!.cursor).toMatchObject({ stageId: "plan", state: "pending" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    /* The pending cursor belongs to a wait that is not due; re-ticking it at
+       once would loop the controller through passes that can only defer it. */
+    expect(ticks).toBe(0);
+  } finally {
+    unregister();
+  }
+});
+
+test("a controller that is between publications is never spawned into (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  const baseSpawn = h.ports.spawnAgent;
+  let spawnCalls = 0;
+  const scheduled: number[] = [];
+  h.ports.spawnAgent = async (input, onReserved) => {
+    spawnCalls += 1;
+    return baseSpawn(input, onReserved);
+  };
+  Object.assign(h.ports, {
+    structuredDeliveryPublication: () => "rebinding" as const,
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: forbiddenSleep,
   });
 
   await tickPipelines([], h.ports);
 
-  expect(spawnCalls).toBe(4);
-  expect(delays).toEqual([1_000, 2_000, 4_000]);
+  /* The spawn only fails at durable host publication, so an attempt issued
+     against a rebinding controller burns a real engine launch first. */
+  expect(spawnCalls).toBe(0);
+  expect(scheduled).toEqual([1_000]);
   expect(loadPipelines()[0]!).toMatchObject({
     state: "running",
     stateDetail: null,
+    cursor: { stageId: "plan", state: "pending" },
+  });
+
+  /* Before the booked wait falls due nothing is retried. */
+  await tickPipelines([], h.ports);
+  expect(scheduled).toEqual([1_000]);
+
+  advance(1_000);
+  Object.assign(h.ports, { structuredDeliveryPublication: () => "ready" as const });
+  await tickPipelines([], h.ports);
+
+  expect(spawnCalls).toBe(1);
+  expect(loadPipelines()[0]!).toMatchObject({
+    state: "running",
     cursor: { stageId: "plan", state: "running" },
   });
 });
@@ -1756,24 +1866,65 @@ test("a controller that never returns parks the stage with the wait it spent (#1
   const h = harness();
   await create(h.ports);
   await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
   let spawnCalls = 0;
-  const delays: number[] = [];
+  const scheduled: number[] = [];
+  const slept: number[] = [];
   h.ports.spawnAgent = async () => {
     spawnCalls += 1;
     throw new Error("structured delivery controller is unavailable");
   };
   Object.assign(h.ports, {
-    sleep: async (milliseconds: number) => { delays.push(milliseconds); },
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: async (milliseconds: number) => { slept.push(milliseconds); },
+  });
+
+  for (let round = 0; round < 8 && loadPipelines()[0]!.state === "running"; round += 1) {
+    await tickPipelines([], h.ports);
+    if (scheduled.length > 0) advance(scheduled.at(-1)!);
+  }
+
+  const parked = loadPipelines()[0]!;
+  /* The budget is wall-clock, so the schedule stops exactly on it. */
+  expect(scheduled).toEqual([1_000, 2_000, 4_000, 8_000, 8_000, 7_000]);
+  expect(scheduled.reduce((total, delay) => total + delay, 0)).toBe(30_000);
+  expect(spawnCalls).toBe(scheduled.length + 1);
+  /* Nothing was slept through inside the pipelines phase. */
+  expect(slept).toEqual([]);
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("structured delivery controller is unavailable");
+  expect(parked.stateDetail).toContain("6 retries over 30s");
+});
+
+test("the controller wait counts the time a failing spawn attempt spent (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  let spawnCalls = 0;
+  const scheduled: number[] = [];
+  h.ports.spawnAgent = async () => {
+    spawnCalls += 1;
+    /* Durable host setup runs for 20s before it reaches host publication. */
+    advance(20_000);
+    throw new Error("structured delivery controller is unavailable");
+  };
+  Object.assign(h.ports, {
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: forbiddenSleep,
   });
 
   await tickPipelines([], h.ports);
+  advance(scheduled.at(-1)!);
+  await tickPipelines([], h.ports);
 
+  /* Two attempts have burned 40s of wall clock between them, so the budget is
+     spent even though the booked backoff only came to 1s. */
   const parked = loadPipelines()[0]!;
-  expect(delays.reduce((total, delay) => total + delay, 0)).toBe(30_000);
-  expect(spawnCalls).toBe(delays.length + 1);
+  expect(spawnCalls).toBe(2);
+  expect(scheduled).toEqual([1_000]);
   expect(parked.state).toBe("needs_decision");
-  expect(parked.stateDetail).toContain("structured delivery controller is unavailable");
-  expect(parked.stateDetail).toContain("waited 30s");
+  expect(parked.stateDetail).toContain("1 retries over 41s");
 });
 
 test("a process without a delivery controller publication defers stage activation (#1191)", async () => {

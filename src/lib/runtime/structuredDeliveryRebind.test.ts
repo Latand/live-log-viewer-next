@@ -277,3 +277,87 @@ test("a publication paused inside the predecessor lands on the controller that r
   expect(hasStructuredDeliveryHost(key)).toBe(false);
   await close();
 });
+
+test("a rebind keeps serving the hosts the predecessor already had (#1191)", async () => {
+  const { registry, journal, directory, client, close } = fixture("handover-carry");
+  await bindStructuredDeliveryQueue([], { registry, client });
+  const { conversationId, key } = seedConversation(registry, directory, "handover-carry-session");
+  const host = structuredHost();
+  await publishStructuredDeliveryHost({ key, host });
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+
+  /* Startup binds with an empty adoption set and completes it later, so a
+     successor that starts hostless serves nothing until that completion lands.
+     The predecessor's hosts are handed over instead. */
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+  journal.executeOperation({
+    kind: "send",
+    operationId: "operation-handover-carry",
+    idempotencyKey: "handover-carry",
+    conversationId,
+    text: "the first delivery after the hand-over",
+    policy: "queue",
+  });
+  await kickStructuredDeliveryQueue();
+  await settles(() => journal.operationResult("operation-handover-carry")?.receipt.status === "delivered");
+  expect(host.ledger.writes.map((entry) => entry.id)).toEqual(["operation-handover-carry"]);
+
+  await close();
+});
+
+test("a delivery admitted while the successor is still registering lands exactly once (#1191)", async () => {
+  const { registry, journal, directory, client, close } = fixture("handover-window");
+  await bindStructuredDeliveryQueue([], { registry, client });
+  const { conversationId, key } = seedConversation(registry, directory, "handover-window-session");
+  const host = structuredHost();
+  await publishStructuredDeliveryHost({ key, host });
+
+  let releaseCursor!: () => void;
+  const cursorGate = new Promise<void>((resolve) => { releaseCursor = resolve; });
+  let cursorEntered!: () => void;
+  const cursorStarted = new Promise<void>((resolve) => { cursorEntered = resolve; });
+  let gated = true;
+  const gatedClient = {
+    ...client,
+    producerCursor: async (producerKind: string, eventKeyPrefix: string) => {
+      if (gated) {
+        gated = false;
+        cursorEntered();
+        await cursorGate;
+      }
+      return journal.producerCursor(producerKind, eventKeyPrefix);
+    },
+  } as RuntimeHostClient;
+
+  const rebind = bindStructuredDeliveryQueue([], { registry, client: gatedClient });
+  /* Racing the rebind keeps this deterministic either way: a build that never
+     re-registers the carried-over host finishes the bind instead of entering
+     the gate, and fails the assertion below rather than hanging. */
+  await Promise.race([cursorStarted, rebind]);
+
+  /* The successor owns the publication and its registration of this host is
+     still in flight. The host must already resolve, or the delivery admitted
+     here settles `failed` with "structured host recovery did not start". */
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+  journal.executeOperation({
+    kind: "send",
+    operationId: "operation-handover-window",
+    idempotencyKey: "handover-window",
+    conversationId,
+    text: "admitted mid-registration",
+    policy: "queue",
+  });
+  await kickStructuredDeliveryQueue();
+  await settles(() => journal.operationResult("operation-handover-window")?.receipt.status === "delivered");
+
+  releaseCursor();
+  await rebind;
+
+  /* Completing the registration neither loses the host nor re-delivers. */
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+  expect(host.ledger.writes.map((entry) => entry.id)).toEqual(["operation-handover-window"]);
+
+  await close();
+});
