@@ -7,6 +7,7 @@ import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 import { hardenedRedact } from "@/lib/view/compactText";
 
 import {
+  BRIDGE_ANSWERED_REF_CAPACITY,
   BRIDGE_CHANNEL_SCHEMA_VERSION,
   BRIDGE_DRAIN_BATCH_MAX,
   BRIDGE_REPORT_BODY_MAX_BYTES,
@@ -170,7 +171,20 @@ function emptyLog(): BridgeReportLogV1 {
     trimmedThroughByChannel: {},
     reports: [],
     retired: [],
+    answeredRefs: [],
   };
+}
+
+/** Recorded answers, sorted and bounded. Unlike a report row a malformed entry
+    here is noise rather than damage — it can only fail to clear an ask, never
+    invent one — so it drops instead of stopping the read. */
+function normalizeAnsweredRefs(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const refs = new Set<number>();
+  for (const entry of value) {
+    if (Number.isInteger(entry) && (entry as number) > 0) refs.add(entry as number);
+  }
+  return [...refs].sort((left, right) => left - right).slice(-BRIDGE_ANSWERED_REF_CAPACITY);
 }
 
 /** Every recorded row must survive the round trip. A row that does not is
@@ -211,6 +225,7 @@ function normalizeLog(value: unknown, target: string): BridgeReportLogV1 {
       : {},
     reports,
     retired: Array.isArray(file.retired) ? file.retired.filter((id): id is string => typeof id === "string") : [],
+    answeredRefs: normalizeAnsweredRefs(file.answeredRefs),
   };
 }
 
@@ -445,6 +460,28 @@ export function appendBridgeReports(
     }
     writeJsonDurably(bridgeReportLogPath(), file);
     return { appended, skipped };
+  });
+}
+
+/**
+ * Record that a directive answered report `ref` (#1168).
+ *
+ * The gateway's trailer is the only thing that can say a `question` was
+ * ANSWERED — the cursor says only that it was read aloud — so the answer has to
+ * outlive the turn that carried it. It lands in the report log rather than in a
+ * channel: the seq it names is already log-global, and the attention queue then
+ * needs exactly one file to know whether a report is still asking.
+ *
+ * Idempotent, so a directive retry under the same derived id costs nothing.
+ */
+export function recordBridgeDirectiveAnswer(ref: number): void {
+  if (!Number.isInteger(ref) || ref < 1) return;
+  withFileTransactionSync(bridgeReportLogPath(), BRIDGE_LOG_BUSY, () => {
+    const file = readLog();
+    const refs = file.answeredRefs ?? [];
+    if (refs.includes(ref)) return;
+    file.answeredRefs = normalizeAnsweredRefs([...refs, ref]);
+    writeJsonDurably(bridgeReportLogPath(), file);
   });
 }
 

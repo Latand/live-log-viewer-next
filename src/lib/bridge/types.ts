@@ -43,6 +43,19 @@ export type ManagerRecordRef = typeof MANAGER_RECORD_REF;
 export const BRIDGE_REPORT_CAPACITY = 500;
 /** Retired ids kept so a trimmed report cannot be re-appended by a late replay. */
 export const BRIDGE_RETIRED_ID_CAPACITY = 2_000;
+/** Answered report seqs kept alongside the log (#1168). Bounded for the same
+    reason `retired` is: the file is state, not history. */
+export const BRIDGE_ANSWERED_REF_CAPACITY = 500;
+/**
+ * How long an unanswered `blocked`/`question` report keeps asking (#1168).
+ *
+ * The same reasoning `STALLED_ATTENTION_TTL` carries, and the same two hours:
+ * the attention queue answers "who needs me right now", and a decision request
+ * the operator has already settled some other way — in the orchestrator's own
+ * conversation, in person — must not sit in the queue forever with nothing in
+ * the log able to retire it.
+ */
+export const BRIDGE_ASK_TTL_SECONDS = 2 * 3600;
 /** §3: report bodies are bounded. Measured in UTF-8 bytes, not code units. */
 export const BRIDGE_REPORT_BODY_MAX_BYTES = 2_048;
 
@@ -171,6 +184,11 @@ export interface BridgeReportLogV1 {
   trimmedThroughByChannel?: Record<string, number>;
   reports: BridgeReportV1[];
   retired: string[];
+  /** Report seqs a gateway directive answered with `[bridge ref=<seq>]`
+      (#1168). Kept here rather than on a channel because a seq is already
+      log-global, and because the attention queue must read ONE file to know
+      whether a report is still asking. */
+  answeredRefs?: number[];
 }
 
 export interface BridgeChannelV1 {

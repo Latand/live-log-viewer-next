@@ -171,6 +171,67 @@ describe("buildAttentionQueue", () => {
   });
 });
 
+/* #1168 — the orchestrator's own `blocked`/`question` bridge reports. The
+   gateway used to be the only thing that ever read them, so with the voice
+   channel off "I need a decision" reached the operator as prose and nothing
+   else. The server stamps the open ask onto the seat's entry; the queue turns
+   it into a first-class hard block. */
+describe("bridge asks", () => {
+  const ASK = { id: "rpt_decide", seq: 12, class: "blocked" as const, at: new Date((NOW - 900) * 1000).toISOString(), summary: "pick a base branch" };
+
+  test("an open ask is a blocked item keyed by the report, dated by the report", () => {
+    const seat = entry({ path: "/seat", bridgeAsk: ASK });
+    expect(attentionId(seat, NOW)).toBe("rpt_decide");
+    expect(buildAttentionQueue([seat], NOW)).toMatchObject([
+      { id: "rpt_decide", tier: "blocked", since: NOW - 900, project: "demo" },
+    ]);
+  });
+
+  test("the ask outranks the seat's own local prompt", () => {
+    const seat = entry({
+      path: "/seat",
+      bridgeAsk: ASK,
+      pendingQuestion: question("toolu_local", NOW - 10),
+      activity: "stalled",
+      proc: "running",
+    });
+    expect(attentionId(seat, NOW)).toBe("rpt_decide");
+    expect(buildAttentionQueue([seat], NOW)[0]!.since).toBe(NOW - 900);
+  });
+
+  test("it sorts inside the hard-blocked segment, ahead of a stalled tail", () => {
+    const files = [
+      entry({ path: "/stall", activity: "stalled", proc: "running", mtime: NOW - 7000 }),
+      entry({ path: "/fresh-q", pendingQuestion: question("toolu_q", NOW - 5) }),
+      entry({ path: "/seat", bridgeAsk: ASK }),
+    ];
+    const queue = buildAttentionQueue(files, NOW);
+    expect(queue.map((item) => item.file.path)).toEqual(["/seat", "/fresh-q", "/stall"]);
+    expect(queue.map((item) => item.tier)).toEqual(["blocked", "blocked", "stalled"]);
+  });
+
+  test("the project filter keeps the seat inside its own project queue", () => {
+    const files = [
+      entry({ path: "/seat", project: "alpha", bridgeAsk: ASK }),
+      entry({ path: "/other", project: "beta", bridgeAsk: { ...ASK, id: "rpt_other" } }),
+    ];
+    expect(buildAttentionQueue(files, NOW, "alpha").map((item) => item.id)).toEqual(["rpt_decide"]);
+  });
+
+  test("re-reading the same ask yields the same single item", () => {
+    const seat = entry({ path: "/seat", bridgeAsk: ASK });
+    const first = buildAttentionQueue([seat], NOW);
+    const second = buildAttentionQueue([entry({ path: "/seat", bridgeAsk: { ...ASK } })], NOW);
+    expect(second).toHaveLength(1);
+    expect(second[0]!.id).toBe(first[0]!.id);
+  });
+
+  test("no ask leaves an otherwise quiet seat out of the queue", () => {
+    expect(buildAttentionQueue([entry({ path: "/seat" })], NOW)).toEqual([]);
+    expect(buildAttentionQueue([entry({ path: "/seat", bridgeAsk: null })], NOW)).toEqual([]);
+  });
+});
+
 describe("nextAttention", () => {
   const queue = buildAttentionQueue(
     [

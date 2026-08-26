@@ -46,7 +46,7 @@ import {
 } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
-import { recordManagerReport } from "@/lib/bridge/service";
+import { recordBridgeDirectiveAnswer, recordManagerReport } from "@/lib/bridge/service";
 import { bridgeDirectiveBody, bridgeDirectiveId, type BridgeTrailer } from "@/lib/bridge/directive";
 import { isBridgeReportClass } from "@/lib/bridge/types";
 import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orchestrator/authority";
@@ -1445,6 +1445,11 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
        names the gateway (or attributed caller role), never the operator. */
     origin: mcpSenderOrigin(dependencies),
   });
+  /* The trailer is the ONLY thing that says a report was answered — the drain
+     cursor says only that it was read aloud — so it is recorded the moment the
+     answer actually reaches the manager (#1168). Idempotent, so a directive
+     retry under the same derived id settles the same seq once. */
+  if (trailer) recordBridgeDirectiveAnswer(trailer.ref);
   return {
     directiveId: deliveryId,
     managerConversationId: manager.conversationId,

@@ -7,8 +7,10 @@ import { rememberAcknowledgedVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 import {
   acknowledgeBridgeDelivery,
+  bridgeAsksForSeats,
   bridgeTurnStartPrelude,
   pendingBridgeDelivery,
+  recordBridgeDirectiveAnswer,
   recordManagerReport as recordBridgeReport,
 } from "./service";
 import { appendBridgeReports, drainBridgeReports, openBridgeChannel, readBridgeChannel } from "./store";
@@ -249,4 +251,86 @@ test("a batch of only non-manager rows carries no manager-voice header at all", 
   const prelude = bridgeTurnStartPrelude({ rootIdentity, now: NOW, scope: SCOPE });
   expect(prelude!.text).not.toContain("the manager reported");
   expect(prelude!.text).toContain("NOT the manager");
+});
+
+/**
+ * #1168 — the attention queue's half of this service, exercised end to end over
+ * the real durable log. The point of every case below is that NOTHING here
+ * touches the gateway: no channel is opened, no batch is drained, no cursor
+ * moves. A blocked manager must reach the operator with the voice channel off.
+ */
+
+test("a blocked report becomes an open ask for its seat, with the gateway never involved", () => {
+  sandbox();
+  const appended = recordManagerReport({
+    key: "lane-9-blocked",
+    class: "blocked",
+    at: NOW.toISOString(),
+    body: "cannot proceed: the lane needs a base branch",
+  });
+
+  const asks = bridgeAsksForSeats({ now: NOW });
+  expect(asks.get(SCOPE.seatConversationId)).toMatchObject({
+    id: appended!.id,
+    seq: appended!.seq,
+    class: "blocked",
+    at: NOW.toISOString(),
+    summary: "cannot proceed: the lane needs a base branch",
+  });
+  /* No channel file was created and no cursor moved: the queue reads the log,
+     never the gateway's position in it. */
+  expect(readBridgeChannel(SCOPE)).toBeNull();
+});
+
+test("a directive that answers the report's seq clears the ask", () => {
+  sandbox();
+  const appended = recordManagerReport({
+    key: "lane-9-question",
+    class: "question",
+    at: NOW.toISOString(),
+    body: "which base branch?",
+  });
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
+
+  recordBridgeDirectiveAnswer(appended!.seq);
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
+
+  /* Durable: the answer survives a later append, which rewrites the log file. */
+  recordManagerReport({ key: "lane-9-progress", class: "status", at: NOW.toISOString(), body: "moving" });
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
+});
+
+test("answering a different seq leaves the ask standing", () => {
+  sandbox();
+  const appended = recordManagerReport({
+    key: "lane-9-question",
+    class: "question",
+    at: NOW.toISOString(),
+    body: "which base branch?",
+  });
+  recordBridgeDirectiveAnswer(appended!.seq + 41);
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
+});
+
+test("re-appending the same report key produces no second ask", () => {
+  sandbox();
+  const input: BridgeReportInput = {
+    key: "lane-9-blocked",
+    class: "blocked",
+    at: NOW.toISOString(),
+    body: "cannot proceed",
+  };
+  const first = recordManagerReport(input);
+  expect(recordManagerReport(input)).toBeNull();
+
+  const asks = bridgeAsksForSeats({ now: NOW });
+  expect(asks.size).toBe(1);
+  expect(asks.get(SCOPE.seatConversationId)?.id).toBe(first!.id);
+});
+
+test("an unreadable report log costs the ask, never the caller", () => {
+  const dir = sandbox();
+  fs.mkdirSync(path.join(dir, "state"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "state", "bridge-reports.json"), "{ truncated");
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
 });

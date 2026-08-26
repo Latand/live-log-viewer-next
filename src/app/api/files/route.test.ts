@@ -6,6 +6,7 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { recordBridgeDirectiveAnswer, recordManagerReport } from "@/lib/bridge/service";
 import { createManualProject, setProjectCrown } from "@/lib/projects/curation";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
@@ -3199,4 +3200,34 @@ test("crowned and manually created projects flow through the files payload", asy
   } finally {
     fs.rmSync(manualRoot, { recursive: true, force: true });
   }
+});
+
+test("issue 1168: the seat's open bridge ask rides the files payload and clears on the answering directive", async () => {
+  const seatPath = "/sessions/orchestrator-seat.jsonl";
+  const seat = agentRegistry().ensureConversation("codex", seatPath, null);
+  scannedFiles = [file(seatPath), file("/sessions/worker.jsonl")];
+  const filed = recordManagerReport({
+    key: "lane-4-blocked",
+    class: "blocked",
+    at: new Date().toISOString(),
+    project: "repo",
+    targetSeatConversationId: seat.id,
+    body: "cannot proceed: the lane needs a base branch",
+  });
+
+  const asking = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
+  expect(asking.files.find((entry) => entry.path === seatPath)?.bridgeAsk).toMatchObject({
+    id: filed!.id,
+    seq: filed!.seq,
+    class: "blocked",
+    summary: "cannot proceed: the lane needs a base branch",
+  });
+  /* The ask belongs to the seat alone — no other scanned row carries it. */
+  expect(asking.files.find((entry) => entry.path === "/sessions/worker.jsonl")?.bridgeAsk).toBeUndefined();
+
+  /* Nothing above opened a gateway channel or moved a cursor: this reaches the
+     operator with the voice gateway off, which is the whole point of #1168. */
+  recordBridgeDirectiveAnswer(filed!.seq);
+  const answered = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
+  expect(answered.files.find((entry) => entry.path === seatPath)?.bridgeAsk).toBeUndefined();
 });

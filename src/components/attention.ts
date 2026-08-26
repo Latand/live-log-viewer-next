@@ -20,7 +20,9 @@ import { projectKey } from "./projectModel";
  *
  * The FileEntry-derived queue below only ever emits «blocked»/«stalled» (its
  * historical behavior is byte-identical); «unowned»/«heuristic» come from the
- * runtime bus's structured attentions.
+ * runtime bus's structured attentions. An orchestrator's open bridge ask
+ * (issue #1168) joins the «blocked» tier: a manager that filed
+ * `blocked`/`question` is a hard block by its own declaration.
  */
 export type AttentionTier = "unowned" | "blocked" | "heuristic" | "stalled";
 
@@ -38,7 +40,7 @@ export interface AttentionItem {
   file: FileEntry;
   project: string;
   tier: AttentionTier;
-  /** Epoch seconds the wait started: askedAt | waitingInput.since | mtime. */
+  /** Epoch seconds the wait started: bridgeAsk.at | askedAt | waitingInput.since | mtime. */
   since: number;
 }
 
@@ -55,13 +57,20 @@ function isoSeconds(iso: string): number | null {
 
 /**
  * The shared attention identity of a file, by signal precedence:
- * a structured question wins, followed by a rate-limit wall, the screen-scrape
- * fallback, and the stalled state. The id doubles as the
- * dedupe key of the toast and push pipelines, so the formats here must stay
- * byte-identical to the historical inline derivations (`push-sent.json`
- * entries survive the refactor).
+ * an orchestrator's open bridge ask wins, then a structured question, a
+ * rate-limit wall, the screen-scrape fallback, and the stalled state. The id
+ * doubles as the dedupe key of the toast and push pipelines, so the formats
+ * here must stay byte-identical to the historical inline derivations
+ * (`push-sent.json` entries survive the refactor).
  */
 export function attentionId(file: FileEntry, now: number = Date.now() / 1000): string | null {
+  /* First, and above the file's own signals (issue #1168). A bridge ask is the
+     manager saying, in as many words, that it cannot go on without the
+     operator — the one signal on this board that was ESCALATED rather than
+     inferred. The report's own id carries through as the queue identity, so
+     re-reading the log cannot enqueue the same decision twice. Nothing
+     historical is shadowed: no entry carried this field before. */
+  if (file.bridgeAsk) return file.bridgeAsk.id;
   if (file.pendingQuestion) return file.pendingQuestion.toolUseId;
   if (file.rateLimit) {
     return `${file.path}:rate-limited:${file.rateLimit.resetAt ?? "unknown"}`;
@@ -92,14 +101,18 @@ export function buildAttentionQueue(
     if (project !== undefined && projectKey(file) !== project) continue;
     const id = attentionId(file, now);
     if (id === null) continue;
-    const tier: AttentionTier = file.pendingQuestion || file.rateLimit || file.waitingInput ? "blocked" : "stalled";
-    const since = file.pendingQuestion
-      ? (isoSeconds(file.pendingQuestion.askedAt) ?? file.mtime)
-      : file.rateLimit
-        ? file.mtime
-      : file.waitingInput
-        ? file.waitingInput.since
-        : file.mtime;
+    const tier: AttentionTier = file.bridgeAsk || file.pendingQuestion || file.rateLimit || file.waitingInput
+      ? "blocked"
+      : "stalled";
+    const since = file.bridgeAsk
+      ? (isoSeconds(file.bridgeAsk.at) ?? file.mtime)
+      : file.pendingQuestion
+        ? (isoSeconds(file.pendingQuestion.askedAt) ?? file.mtime)
+        : file.rateLimit
+          ? file.mtime
+          : file.waitingInput
+            ? file.waitingInput.since
+            : file.mtime;
     items.push({ id, file, project: projectKey(file), tier, since });
   }
   return items.sort(

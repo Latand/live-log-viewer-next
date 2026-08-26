@@ -107,8 +107,13 @@ const STALE_FOCUS_REPLAY_MS = 8_000;
     put lands the tab back on the silent default view this fix exists to kill. */
 const UNKNOWN_FRAGMENT_NOTICE_MS = 6_000;
 
-/** One-line reason a queue item waits: question header, screen tail, or the stalled wording. */
+/** One-line reason a queue item waits: the manager's own ask, a question
+    header, a screen tail, or the stalled wording. */
 function attentionSnippet(t: TFunction, item: AttentionItem): string {
+  /* Same precedence `attentionId` applies, so the row's words belong to the
+     signal the row was enqueued under (issue #1168). */
+  const ask = item.file.bridgeAsk;
+  if (ask) return ask.summary || t("status.awaitingDecision");
   const q = item.file.pendingQuestion;
   if (q) {
     if (q.kind === "plan") return t("status.awaitingPlan");
