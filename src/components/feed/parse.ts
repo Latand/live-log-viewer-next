@@ -215,9 +215,16 @@ export type CmdGroupItem = {
       live), which the card reads to auto-collapse exactly once (issue #475). */
   active: boolean;
 };
+/** Render-time only (#1166): the parser never emits this. `resolveDeliveredItem`
+    mints it for a row whose text IS a delivered orchestrator seat mandate, so
+    8 KB of seat scaffold stops posing as something the operator typed. Nothing
+    about the transcript changes — this kind exists only between the resolver
+    and the card. */
+export type MandateItem = { kind: "mandate"; ts: unknown; text: string };
 export type Item =
   | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude"; sourceId?: string }
   | { kind: "user"; ts: unknown; text: string; selectedContext?: SelectedContextRef }
+  | MandateItem
   | VoiceTurnItem
   | { kind: "svc"; text: string }
   | { kind: "note"; text: string }

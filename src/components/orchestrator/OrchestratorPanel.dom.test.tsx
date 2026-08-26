@@ -1079,6 +1079,36 @@ test("the draft a closed conversation returns to can actually create — it says
   expect(seatPosts[0]!.replaceIncumbent).toBeUndefined();
 }, SEAT_POLL_MS + 4_000);
 
+/* #1166: the seat DELIVERS the mandate, so it lands in the transcript as an
+   ordinary message and the feed used to render those 8 KB as the operator's own
+   bubble — 180 characters and a character count, as if they had said it. The
+   dock knows which mandate created this seat, so the card can name it. */
+test("the dock renders the delivered mandate as the seat's own card, not as the operator's bubble", async () => {
+  const delivered = [
+    ORCHESTRATOR_SYSTEM_PROMPT,
+    "## Handoff from your predecessor (rotation)",
+    "You are replacing orchestrator conversation conversation_predecessor for project atlas.",
+  ].join("\n\n");
+  tailLines.set(orchestratorFile.path, [
+    JSON.stringify({ type: "user", uuid: "row-mandate-1", timestamp: "2026-08-13T10:00:02.000Z", message: { role: "user", content: delivered } }),
+  ]);
+
+  const host = await mountLive();
+
+  const card = host.querySelector("[data-mandate-card]");
+  expect(card).not.toBeNull();
+  /* The seat's own recorded prompt version, carried into the feed by the dock;
+     the board's pane renders the same card without one. */
+  expect(card!.textContent).toContain("Mandate v3");
+  expect(card!.textContent).toContain("sent at seat creation");
+  /* Folded away, and the rotation handoff is a section of the SAME card. */
+  expect(host.textContent).not.toContain("You are the viewer's built-in Manager");
+  expect(host.textContent).not.toContain("You are replacing orchestrator conversation");
+  expect(card!.textContent).toContain("Rotation handoff");
+  /* The operator's bubble is gone from the row entirely. */
+  expect(host.innerHTML).not.toContain("bg-user");
+});
+
 test("coming back to a project paints its conversation in the first commit, transcript and all", async () => {
   seatStatus = { seat: activeSeat(), pending: null, exists: true };
   incumbentStatus = incumbent();

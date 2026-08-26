@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { setLocale } from "@/lib/i18n";
+import { ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import { encodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
 import type { DeliveredMessageOccurrence, DeliveredMessageProvenance } from "@/lib/runtime/messageOrigin";
 import { messageTextDigest } from "@/lib/runtime/messageTextDigest";
@@ -335,4 +336,45 @@ test("a ledger-resolved relay consumes its occurrence, so an identical operator 
   expect(relay).toContain("internal");
   expect(operator).toContain("bg-user");
   expect(operator).not.toContain("internal");
+});
+
+/*
+ * #1166 rides the same seam: a delivered orchestrator mandate is one more
+ * classification of a row, asked AFTER the delivery evidence — so it can only
+ * ever claim a row that would otherwise be the operator's own bubble or a
+ * scaffold system row.
+ */
+
+const SEAT_MANDATE = `${ORCHESTRATOR_SYSTEM_PROMPT}\n\n${ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE}`;
+
+test("a delivered mandate replaces the operator bubble it used to be rendered as", () => {
+  setLocale("en");
+  const [html] = renderAll([{ kind: "user", ts: at(500), text: SEAT_MANDATE }], {});
+  expect(html).toContain("data-mandate-card");
+  expect(html).not.toContain("bg-user");
+  /* And the operator's own words about the mandate stay the operator's. */
+  const [talking] = renderAll([{ kind: "user", ts: at(500), text: "re-read your mandate before answering" }], {});
+  expect(talking).toContain("bg-user");
+  expect(talking).not.toContain("data-mandate-card");
+});
+
+test("a claude row delivered with no ledger evidence becomes the mandate card instead of a system row", () => {
+  setLocale("en");
+  const html = renderWithProvenance({
+    kind: "sysmsg",
+    label: "system",
+    text: SEAT_MANDATE,
+    deliveredMessage: { engineMessageId: ENGINE_MESSAGE_ID, ts: at(2_000) },
+  }, {});
+  expect(html).toContain("data-mandate-card");
+});
+
+test("an agent relay that carries the mandate text stays the internal card", () => {
+  setLocale("en");
+  const [html] = renderAll([{ kind: "user", ts: at(1_000), text: SEAT_MANDATE }], {
+    occurrences: [occurrence(SEAT_MANDATE, at(0), { origin: "agent", senderRole: "orchestrator" })],
+  });
+  expect(html).toContain("internal");
+  expect(html).toContain("orchestrator");
+  expect(html).not.toContain("data-mandate-card");
 });
