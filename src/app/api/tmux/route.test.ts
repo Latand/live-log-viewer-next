@@ -319,6 +319,38 @@ test("#1202 the operator's own message retires that conversation's reply drafts,
   }
 });
 
+test("#1202 a message re-delivered under its own client id spares drafts offered since it was admitted", async () => {
+  const { readReplySuggestions, recordReplySuggestions } = await import("@/lib/suggestions/store");
+  const conversationId = "conversation_asked_then_retried";
+  const previousFiles = completedFiles;
+  completedFiles = [{ path: PATHNAME, conversationId }];
+  delivery = async () => ({ ok: true, outcome: "delivered-to-live", target: "agents:4.0" });
+  const offer = (label: string) => recordReplySuggestions({
+    conversationId,
+    replies: [{ label, text: `${label}.` }],
+    origin: { kind: "manager", conversationId, role: "orchestrator" },
+  });
+  const send = () => POST(post({ path: PATHNAME, text: "hold then", clientMessageId: "operator-retried-send" }));
+  try {
+    offer("hold");
+    expect((await send()).status).toBe(200);
+    expect(readReplySuggestions(conversationId)).toBeNull();
+    /* The record's clock has millisecond resolution and the route stamps the
+       admission itself, so the next offer has to land in a later millisecond
+       for "offered since" to mean anything. */
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    /* The manager asked something else while the client was still retrying the
+       delivery it already had accepted. The retry answers the OLD question, so
+       the drafts under the new one have to survive it. */
+    const offeredSince = offer("ship it");
+    expect((await send()).status).toBe(200);
+    expect(readReplySuggestions(conversationId)?.setId).toBe(offeredSince.set.setId);
+  } finally {
+    completedFiles = previousFiles;
+  }
+});
+
 test("/api/tmux delivery is unaffected when WakaTime recording is disabled", async () => {
   operatorActivityEnabled = false;
   operatorActivityRequests = [];

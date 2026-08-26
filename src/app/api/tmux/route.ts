@@ -357,7 +357,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
      a pane that may be closed, unmounted or on another device. An agent's send
      through this same route is not an answer and leaves the set standing. */
   if (operatorAction.byOperator) {
-    retireReplySuggestionsOnOperatorMessage(operatorAction.conversationId, acceptedAt);
+    /* The client's own message id rides along: a delivery retried under the
+       key it already used answers the question that was standing the FIRST
+       time it was accepted, so the record clears against that moment and
+       leaves whatever has been offered since alone. */
+    retireReplySuggestionsOnOperatorMessage(operatorAction.conversationId, acceptedAt, clientMessageId);
   }
 
   if (structuredHostsEnabled()) {

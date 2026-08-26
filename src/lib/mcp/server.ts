@@ -1680,7 +1680,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "Offer the operator ready-made replies to your own message: 1\u20136 short drafts that render as pills under your latest turn in the dock and the board's conversation pane. Tapping one drops its text into their composer for editing \u2014 the Viewer never sends it, and nothing here decides anything.",
     "Call it after every message that asks the operator something or proposes a course of action, with 2\u20134 short, distinct drafts written in the operator's own language. The set REPLACES whatever you offered last for that conversation, and the operator's next message clears it.",
     "Authority is the same as request_attention's, and for the same reason \u2014 this writes into the surface they are answering in: the operator's own session or a designated orchestrator seat. A worker or unidentified caller is refused (SUGGEST_REPLIES_NOT_PERMITTED) with nothing recorded.",
-    "conversationId defaults to your own conversation, which is where the drafts belong when you are the one asking; a designated seat may name only its own, and another conversation is refused.",
+    "The drafts always land under your OWN message: conversationId defaults to your conversation, and naming any other one is refused. To offer drafts elsewhere, ask that conversation's own session to offer them.",
   ].join(" "),
   bridge_report: "Append one bounded report to the durable bridge log for the voice gateway to relay. Callable from any session; the origin is labeled server-side and a non-orchestrator report is visibly attributed to its own session.",
   bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
@@ -2078,7 +2078,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   suggest_replies: z.object({
     clientRequestId: clientRequestIdSchema,
     conversationId: z.string().min(1).optional()
-      .describe("Durable conversation whose composer these drafts belong under. Defaults to the calling conversation."),
+      .describe("Durable conversation whose composer these drafts belong under. Defaults to the calling conversation, and must BE it \u2014 another conversation is refused."),
     replies: z.array(replyDraftSchema).min(MIN_REPLY_SUGGESTIONS).max(MAX_REPLY_SUGGESTIONS)
       .describe(`${MIN_REPLY_SUGGESTIONS}\u2013${MAX_REPLY_SUGGESTIONS} drafts, ordered as the operator should read them. Two to four distinct ones is the usual shape.`),
     replaces: z.literal(true).optional()

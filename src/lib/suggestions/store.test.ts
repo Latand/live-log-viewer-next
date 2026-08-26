@@ -13,6 +13,7 @@ import {
 } from "./store";
 import {
   MAX_REPLY_SUGGESTIONS,
+  REPLY_SUGGESTION_ADMISSION_CAPACITY,
   REPLY_SUGGESTION_CONVERSATION_CAPACITY,
   ReplySuggestionValidationError,
 } from "./types";
@@ -43,6 +44,18 @@ const MANAGER = { kind: "manager", conversationId: "conversation_seat", role: "o
 
 function record(conversationId: string, replies: { label: string; text: string }[], at = "2026-08-26T10:00:00.000Z") {
   return recordReplySuggestions({ conversationId, replies, origin: MANAGER, at: new Date(at) });
+}
+
+/**
+ * Every write to the record blocked, at the shared file transaction's own
+ * queue: the lock enqueues under a directory beside the record, and a plain
+ * file in its place refuses the mkdir. Answers the path to unblock with.
+ */
+function blockWrites(): string {
+  const queuePath = `${replySuggestionsFile()}.write-locks`;
+  fs.rmSync(queuePath, { recursive: true, force: true });
+  fs.writeFileSync(queuePath, "blocked", "utf8");
+  return queuePath;
 }
 
 test("a recorded set is readable back for its conversation and nobody else's", () => {
@@ -77,22 +90,115 @@ test("the operator's message retires the set that was standing when they sent it
   const sentAt = new Date("2026-08-26T10:02:00.000Z");
   record("conversation_a", [{ label: "yes", text: "Yes." }], "2026-08-26T10:00:00.000Z");
 
-  expect(retireReplySuggestionsOnOperatorMessage("conversation_a", sentAt)).toBe(true);
+  expect(retireReplySuggestionsOnOperatorMessage("conversation_a", sentAt).cleared).toBe(true);
   expect(readReplySuggestions("conversation_a")).toBeNull();
 
   /* Offered while the send was in flight: it answers a question the operator
      has not read yet, so their message must not take it down — the delayed
      clear that used to arrive later and wipe the manager's newest offer. */
   const fresh = record("conversation_a", [{ label: "hold", text: "Hold." }], "2026-08-26T10:03:00.000Z");
-  expect(retireReplySuggestionsOnOperatorMessage("conversation_a", sentAt)).toBe(false);
+  expect(retireReplySuggestionsOnOperatorMessage("conversation_a", sentAt).cleared).toBe(false);
   expect(readReplySuggestions("conversation_a")?.setId).toBe(fresh.set.setId);
   expect(clearReplySuggestions("conversation_a", { offeredAtOrBefore: new Date("2026-08-26T10:04:00.000Z") })).toBe(true);
   expect(readReplySuggestions("conversation_a")).toBeNull();
 });
 
+test("a message re-delivered under the key it already used clears against its FIRST admission", () => {
+  const firstAdmission = new Date("2026-08-26T10:02:00.000Z");
+  record("conversation_a", [{ label: "yes", text: "Yes." }], "2026-08-26T10:00:00.000Z");
+
+  expect(retireReplySuggestionsOnOperatorMessage("conversation_a", firstAdmission, "client-message-7").cleared).toBe(true);
+
+  /* The manager asked something else while the client was still retrying its
+     delivery. The retry is the SAME message: it cannot have answered a
+     question that did not exist when the operator pressed send. */
+  const fresh = record("conversation_a", [{ label: "hold", text: "Hold." }], "2026-08-26T10:03:00.000Z");
+  const replay = retireReplySuggestionsOnOperatorMessage(
+    "conversation_a",
+    new Date("2026-08-26T10:05:00.000Z"),
+    "client-message-7",
+  );
+
+  expect(replay.cleared).toBe(false);
+  expect(readReplySuggestions("conversation_a")?.setId).toBe(fresh.set.setId);
+  /* One remembered admission for the key, not one per delivery. */
+  expect(readReplySuggestionsFile().admissions.filter((entry) => entry.key === "client-message-7")).toHaveLength(1);
+
+  /* A genuinely different message still retires what is standing. */
+  expect(retireReplySuggestionsOnOperatorMessage(
+    "conversation_a",
+    new Date("2026-08-26T10:06:00.000Z"),
+    "client-message-8",
+  ).cleared).toBe(true);
+  expect(readReplySuggestions("conversation_a")).toBeNull();
+});
+
+test("a message key is remembered even when the conversation had no drafts to retire", () => {
+  /* The replay that must not clear a newer set is just as likely to follow a
+     message that answered nothing — so the admission is recorded either way. */
+  expect(retireReplySuggestionsOnOperatorMessage(
+    "conversation_a",
+    new Date("2026-08-26T10:00:00.000Z"),
+    "client-message-9",
+  ).cleared).toBe(false);
+
+  const offered = record("conversation_a", [{ label: "hold", text: "Hold." }], "2026-08-26T10:01:00.000Z");
+  expect(retireReplySuggestionsOnOperatorMessage(
+    "conversation_a",
+    new Date("2026-08-26T10:02:00.000Z"),
+    "client-message-9",
+  ).cleared).toBe(false);
+  expect(readReplySuggestions("conversation_a")?.setId).toBe(offered.set.setId);
+});
+
+test("only the recent message keys are kept: the record is a replay window, not a history", () => {
+  for (let index = 0; index < REPLY_SUGGESTION_ADMISSION_CAPACITY + 5; index += 1) {
+    retireReplySuggestionsOnOperatorMessage(
+      "conversation_a",
+      new Date(Date.UTC(2026, 7, 26, 10, 0, index)),
+      `client-message-${index}`,
+    );
+  }
+
+  expect(readReplySuggestionsFile().admissions).toHaveLength(REPLY_SUGGESTION_ADMISSION_CAPACITY);
+});
+
+test("a retirement that cannot be written hides the answered set and lands on the next read", () => {
+  record("conversation_a", [{ label: "yes", text: "Yes." }], "2026-08-26T10:00:00.000Z");
+  /* The shared file transaction queues under a directory beside the record; a
+     file sitting in its place is a write the store cannot take — a busy lock,
+     a full disk and a read-only state dir all arrive here the same way. */
+  const queuePath = blockWrites();
+
+  const retirement = retireReplySuggestionsOnOperatorMessage("conversation_a", new Date("2026-08-26T10:02:00.000Z"), "blocked-1");
+  expect(retirement).toEqual({ cleared: false, pending: true });
+  /* The operator's message landed and the drafts are gone from the surface
+     that reads them, even though the record still holds the set. */
+  expect(readReplySuggestions("conversation_a")).toBeNull();
+  expect(readReplySuggestionsFile().sets).toHaveLength(1);
+
+  fs.rmSync(queuePath);
+  /* The retry rides the next read: the record catches up without anyone
+     sending a second message. */
+  expect(readReplySuggestions("conversation_a")).toBeNull();
+  expect(readReplySuggestionsFile().sets).toHaveLength(0);
+});
+
+test("a set offered after a retirement the record could not write is still shown", () => {
+  record("conversation_a", [{ label: "yes", text: "Yes." }], "2026-08-26T10:00:00.000Z");
+  const queuePath = blockWrites();
+  expect(retireReplySuggestionsOnOperatorMessage("conversation_a", new Date("2026-08-26T10:02:00.000Z"), "blocked-2").pending).toBe(true);
+  fs.rmSync(queuePath);
+
+  /* Held retirements answer one question, not the conversation: the manager's
+     next offer is not covered by them. */
+  const fresh = record("conversation_a", [{ label: "hold", text: "Hold." }], "2026-08-26T10:03:00.000Z");
+  expect(readReplySuggestions("conversation_a")?.setId).toBe(fresh.set.setId);
+});
+
 test("retiring is quiet about a conversation with nothing to retire", () => {
-  expect(retireReplySuggestionsOnOperatorMessage("conversation_quiet", new Date())).toBe(false);
-  expect(retireReplySuggestionsOnOperatorMessage("", new Date())).toBe(false);
+  expect(retireReplySuggestionsOnOperatorMessage("conversation_quiet", new Date()).cleared).toBe(false);
+  expect(retireReplySuggestionsOnOperatorMessage("", new Date())).toEqual({ cleared: false, pending: false });
 });
 
 test("the record survives on disk under the state dir", () => {

@@ -123,11 +123,25 @@ test("the newest set replaces the previous one and says which set it replaced", 
   expect(readReplySuggestionsFile().sets).toHaveLength(1);
 });
 
-test("the operator's own session may offer drafts for a conversation it names", async () => {
-  const result = await serviceAs(ROOT).callTool("suggest_replies", call({ conversationId: "conversation_other" })) as McpToolResult;
+test("the operator's own session offers drafts under its own message, and nowhere else", async () => {
+  const own = await serviceAs(ROOT).callTool("suggest_replies", call()) as McpToolResult;
 
-  expect(result.ok).toBe(true);
-  expect(readReplySuggestions("conversation_other")?.origin.kind).toBe("gateway");
+  expect(own.ok).toBe(true);
+  expect(readReplySuggestions("conversation_root")?.origin.kind).toBe("gateway");
+
+  /* No cross-board exception, for anyone: a set written into a pane the caller
+     is not speaking in answers a question that pane never asked — and would
+     not even surface there on its own, because a conversation re-reads its
+     drafts when ITS OWN transcript moves. */
+  const elsewhere = await serviceAs(ROOT).callTool("suggest_replies", call({
+    clientRequestId: "suggest-root-elsewhere",
+    conversationId: "conversation_other",
+  })) as McpToolResult & { details?: { code?: string; refusedAs?: string } };
+
+  expect(elsewhere.ok).toBe(false);
+  expect(elsewhere.details?.code).toBe("SUGGEST_REPLIES_NOT_PERMITTED");
+  expect(elsewhere.details?.refusedAs).toBe("cross-conversation");
+  expect(readReplySuggestions("conversation_other")).toBeNull();
 });
 
 test("a worker session is refused, and nothing durable is written", async () => {

@@ -124,7 +124,7 @@ test("#1202 an operator's structured message retires that conversation's reply d
     enqueue: async () => null,
     retireReplySuggestions: (conversationId, at) => {
       retired.push({ conversationId, at: at.getTime() });
-      return true;
+      return { cleared: true, pending: false };
     },
   };
   setCallerConversationResolverForTests(() => "conversation_agent");
@@ -153,6 +153,55 @@ test("#1202 an operator's structured message retires that conversation's reply d
     expect(retired[0]!.at).toBeGreaterThanOrEqual(before);
   } finally {
     setCallerConversationResolverForTests(null);
+  }
+});
+
+test("#1202 a structured message re-delivered under its own key spares drafts offered since it was admitted", async () => {
+  /* The client retries a send it already had accepted — same idempotency key,
+     minutes later. The manager has asked something else in between, and that
+     question the operator has never seen must survive the retry. */
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-suggestions-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  const { readReplySuggestions, recordReplySuggestions } = await import("@/lib/suggestions/store");
+  /* No stub: the durable store IS the thing under test here. */
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => null,
+    enqueue: async () => null,
+  };
+  const conversationId = "conversation_asked_twice";
+  const send = (idempotencyKey: string) => handleRuntimeCommand(
+    request({ conversationId, text: "hold the deploy then", idempotencyKey }),
+    "send",
+    dependencies,
+  );
+  try {
+    recordReplySuggestions({
+      conversationId,
+      replies: [{ label: "hold", text: "Hold. Explain the rollback first." }],
+      origin: { kind: "manager", conversationId, role: "orchestrator" },
+      at: new Date(Date.now() - 60_000),
+    });
+    await send("operator-answer-replayed");
+    expect(readReplySuggestions(conversationId)).toBeNull();
+    /* The route stamps the admission on the wall clock the record compares
+       against, so the next offer has to land in a later millisecond. */
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const offeredSince = recordReplySuggestions({
+      conversationId,
+      replies: [{ label: "ship it", text: "Ship it." }],
+      origin: { kind: "manager", conversationId, role: "orchestrator" },
+    });
+    await send("operator-answer-replayed");
+
+    expect(readReplySuggestions(conversationId)?.setId).toBe(offeredSince.set.setId);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
 

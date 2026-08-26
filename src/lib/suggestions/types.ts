@@ -32,6 +32,16 @@ export const MAX_REPLY_TEXT_BYTES = 2_000;
     so the record only ever holds the recent, still-unanswered ones. */
 export const REPLY_SUGGESTION_CONVERSATION_CAPACITY = 64;
 
+/** Operator messages whose admission moment is remembered, across every
+    conversation. Only a message being re-delivered under a key it already used
+    consults one, so this is a short replay window, not a history. */
+export const REPLY_SUGGESTION_ADMISSION_CAPACITY = 128;
+
+/** Bound on a remembered message key. The send paths already cap their own
+    idempotency keys; the record refuses to grow past the same bound whatever
+    reaches it. */
+export const MAX_OPERATOR_MESSAGE_KEY_CHARS = 128;
+
 export interface ReplySuggestion {
   /** What the pill says — a few words the operator reads at a glance. */
   label: string;
@@ -58,11 +68,29 @@ export interface ReplySuggestionSetV1 {
   replies: ReplySuggestion[];
 }
 
+/**
+ * When one operator message was FIRST admitted (#1202 review round 2).
+ *
+ * A message the client re-delivers under the key it already used is the SAME
+ * message: it answers the question that was standing when it was first
+ * accepted, and nothing the manager has offered since. Without this the second
+ * delivery clears on its own clock and takes down drafts the operator has
+ * never read — so the moment is remembered per key and reused by every replay.
+ */
+export interface ReplySuggestionAdmissionV1 {
+  conversationId: string;
+  /** The send path's own idempotency key for that message. */
+  key: string;
+  /** When the message was first admitted, on the clock the sets' `at` uses. */
+  at: string;
+}
+
 export interface ReplySuggestionsFileV1 {
   schemaVersion: number;
   revision: number;
   updatedAt: string;
   sets: ReplySuggestionSetV1[];
+  admissions: ReplySuggestionAdmissionV1[];
 }
 
 /** A set the store refused. `code` names the violated rule so the MCP failure

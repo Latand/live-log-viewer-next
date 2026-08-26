@@ -2798,9 +2798,9 @@ async function requestAttention(
  * Everything durable about a set is decided here rather than by the caller:
  * WHO offered it (server attribution, the same chain the attention record and
  * the bridge log's origin trust), WHICH conversation it belongs under (the
- * caller's own unless it names another), and WHETHER it may be offered at all.
- * The set replaces the conversation's previous one; the operator's next
- * message is what clears it.
+ * caller's own — a named one has to BE the caller's own), and WHETHER it may
+ * be offered at all. The set replaces the conversation's previous one; the
+ * operator's next message is what clears it.
  */
 function suggestReplies(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpToolPayload {
   /* The authority gate, BEFORE anything is written or even resolved: this puts
@@ -2810,9 +2810,10 @@ function suggestReplies(args: McpToolArgs, dependencies: ViewerMcpDomainDependen
   const authority = dependencies.attentionAuthority();
   const seats = dependencies.authorizedSeats?.() ?? authorizedManagerSeats(productionManagerAuthoritySources());
   const canonical = dependencies.canonicalSeatConversationId ?? productionCanonicalSeatConversationId;
-  /* Identity AND target in one verdict: a seat offers drafts under its own
-     message, so naming another conversation is refused here — the operator's
-     own root/gateway session is the only caller that may address the board. */
+  /* Identity AND target in one verdict: drafts are offered under the caller's
+     OWN message, so naming another conversation is refused here — for a seat
+     and for the root session alike, because a set written into somebody else's
+     pane answers a question its own surface never asked. */
   const named = text(args.conversationId);
   const admission = permitReplySuggestions(authority, seats, named || null, canonical);
   if (!admission.allowed) {

@@ -132,7 +132,15 @@ export async function handleRuntimeCommand(
        moment of acceptance, so a set offered while this request was in flight
        survives it. */
     if ((command.kind === "send" || command.kind === "steer") && byOperator) {
-      (dependencies.retireReplySuggestions ?? retireReplySuggestionsOnOperatorMessage)(command.conversationId, new Date());
+      /* Keyed by the command's own idempotency key, so a re-delivery of the
+         same message clears against its first admission rather than against
+         the clock of the retry — which would retire drafts offered in
+         between, under a question this message never answered. */
+      (dependencies.retireReplySuggestions ?? retireReplySuggestionsOnOperatorMessage)(
+        command.conversationId,
+        new Date(),
+        command.idempotencyKey,
+      );
     }
     if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
       const admitted = await dependencies.enqueue({

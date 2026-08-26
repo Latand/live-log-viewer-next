@@ -199,13 +199,14 @@ export function permitAttentionHandoff(
  * validated designated orchestrator seat. Workers and unidentified callers are
  * refused with nothing written.
  *
- * The TARGET is gated too, which attention has no equivalent of: a designated
- * seat may only offer drafts under ITS OWN conversation. A seat is entitled to
- * put words in front of the operator where the operator is answering IT — not
- * to write into a pane belonging to another agent, or another project, whose
- * question the operator would then answer in sentences a third party wrote.
- * The operator's own root/gateway session keeps the whole board, because it is
- * the operator: it speaks for them wherever they are.
+ * The TARGET is gated too, which attention has no equivalent of, and it is
+ * gated for EVERY caller including the root: drafts are offered under YOUR OWN
+ * message, in the conversation the operator is answering YOU in. Writing them
+ * into somebody else's pane would put words under a question a third party
+ * asked — and would not even reach that pane on its own, because a surface
+ * re-reads its drafts when ITS transcript moves, which a call made elsewhere
+ * does not do. So a target that is not the caller's own conversation is
+ * refused rather than written somewhere nothing will look.
  *
  * Identities are compared through the registry's alias chain, so a seat that
  * was rekeyed by an account migration still recognises its own conversation.
@@ -225,7 +226,6 @@ export function permitReplySuggestions(
       conversation must compare equal. */
   canonical: (conversationId: string) => string = (conversationId) => conversationId,
 ): ReplySuggestionsVerdict {
-  if (authority.kind === "root") return { allowed: true, via: "root" };
   if (authority.kind === "unidentified") {
     return {
       allowed: false,
@@ -233,21 +233,24 @@ export function permitReplySuggestions(
       error: "suggest_replies writes drafts into the operator's composer, and no durable evidence names this caller; only the root session or the designated orchestrator may offer them",
     };
   }
-  if (!seats.some((seat) => seat.conversationId === authority.conversationId)) {
+  if (authority.kind !== "root" && !seats.some((seat) => seat.conversationId === authority.conversationId)) {
     return {
       allowed: false,
       refusedAs: "worker",
       error: "suggest_replies writes drafts into the operator's composer; a worker session may not offer them — signal the orchestrator or the root session instead",
     };
   }
-  if (targetConversationId !== null && canonical(targetConversationId) !== canonical(authority.conversationId)) {
+  const via = authority.kind === "root" ? "root" as const : "orchestrator" as const;
+  if (targetConversationId === null) return { allowed: true, via };
+  const own = authority.conversationId;
+  if (!own || canonical(targetConversationId) !== canonical(own)) {
     return {
       allowed: false,
       refusedAs: "cross-conversation",
-      error: "suggest_replies offers drafts under your own message; a designated seat may not write them into another conversation — omit conversationId, or ask that conversation's own seat",
+      error: "suggest_replies offers drafts under your own message; they may not be written into another conversation — omit conversationId, or ask that conversation's own session to offer them",
     };
   }
-  return { allowed: true, via: "orchestrator" };
+  return { allowed: true, via };
 }
 
 /** The shape {@link import("./server").createMcpToolService} consults. Kept
