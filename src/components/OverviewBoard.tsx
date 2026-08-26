@@ -12,8 +12,9 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { CatalogFailureNotice } from "./CatalogFailureNotice";
-import { Search } from "./icons";
+import { FolderPlus, Search } from "./icons";
 import { buildBranchGroups, buildProjectSummaries, projectKey } from "./projectModel";
+import { CREATE_PROJECT_FORM_EVENT } from "./ProjectRail";
 import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
 
 interface Props {
@@ -234,12 +235,43 @@ export function OverviewBoard({ files, projectCatalog, projectDisplayNames = {},
         })}
         {/* Issue #696: a failed fetch and a genuinely empty installation must
             not render the same screen. While the catalog is unreachable the
-            board states the failure and offers the recovery action; the idle
-            "No logs yet" copy is held back until a fetch actually succeeds. */}
+            board states the failure and offers the recovery action; the
+            first-run panel is held back until a fetch actually succeeds. */}
         {degraded ? (
           <CatalogFailureNotice failures={catalogFailures} className={`col-span-full ${summaries.length ? "mt-1" : "mt-[12vh]"}`} />
-        ) : !summaries.length ? (
-          <div className="col-span-full mt-[20vh] text-center text-muted">{t("overview.empty")}</div>
+        ) : !allSummaries.length ? (
+          /* First run (issue #1162). A board with nothing on it used to state
+             the fact and stop there; it now says where sessions come from and
+             offers the one next step. The button steers the rail's existing
+             create form rather than opening a second creation path.
+             `allSummaries`, not the archived-filtered list: an installation
+             whose only projects are shelved has had projects, and the header
+             says so — «No projects yet» would contradict its own «1 archived»
+             two rows above. */
+          <div
+            data-testid="overview-first-run"
+            className="col-span-full mt-[14vh] flex flex-col items-center gap-2.5 px-4 text-center"
+          >
+            <span className="text-[15px] font-bold text-primary">{t("overview.firstRunTitle")}</span>
+            <span className="max-w-[440px] text-[12px] text-secondary">{t("overview.firstRunBody")}</span>
+            <button
+              type="button"
+              data-testid="overview-create-project"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-[10px] border border-accent/45 bg-card px-4 text-[13px] font-bold text-accent shadow-1 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              onClick={() => {
+                /* Desktop: the rail is mounted beside the board, so it hears
+                   this and opens the create form it already owns. Phone: that
+                   rail does not exist yet, so nothing could hear an event —
+                   opening the drawer mounts it, and a rail arriving into a
+                   first run opens the same form itself. One tap either way. */
+                if (isMobile) onMenu?.();
+                else window.dispatchEvent(new Event(CREATE_PROJECT_FORM_EVENT));
+              }}
+            >
+              <FolderPlus className="h-4 w-4" aria-hidden /> {t("overview.firstRunCreate")}
+            </button>
+            <span className="max-w-[440px] text-[11.5px] text-muted">{t("overview.firstRunElsewhere")}</span>
+          </div>
         ) : null}
       </div>
     </div>

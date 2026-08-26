@@ -11,7 +11,7 @@ import type { FileEntry } from "@/lib/types";
 import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
 
 import { advanceConversationMigration, createMigrationIntent, drainHeldDeliveries, previewMigration, reconcileMigrationInventory, reconcileMigrations } from "./coordinator";
-import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
+import { emptyLaunchProfile, type MigrationEngine, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import { oauthFailureWithRecoveryTail } from "./fixtures/claudeRecoveryTail";
 import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
 import { MIGRATION_DELIVERY_CANCELLATION_PREFIX } from "./intentLiveness";
@@ -212,6 +212,85 @@ afterEach(() => {
 });
 
 describe("durable account migration coordinator", () => {
+  test("generic scanner titles stay writable until one semantic title freezes", async () => {
+    const store = registry();
+    const pathname = path.join(path.dirname(store.filename), "semantic-title.jsonl");
+    fs.writeFileSync(pathname, "{}\n");
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, { title: "Codex session" })]);
+    expect(store.conversationForPath(pathname)?.generations.at(-1)?.launchProfile.title).toBeNull();
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, { title: "Implement semantic spawn titles" })]);
+    expect(store.conversationForPath(pathname)?.generations.at(-1)?.launchProfile.title).toBe("Implement semantic spawn titles");
+
+    await reconcileMigrationInventory(store, [inventoryEntry(pathname, { title: "A later scanner guess" })]);
+    expect(store.conversationForPath(pathname)?.generations.at(-1)?.launchProfile.title).toBe("Implement semantic spawn titles");
+  });
+
+  for (const engine of ["claude", "codex"] as const satisfies readonly MigrationEngine[]) {
+    for (const sourceTitle of [null, engine === "claude" ? "Claude session" : "Codex session"] as const) {
+      test(`${engine} successors freeze one semantic profile from a ${sourceTitle === null ? "null" : "generic"} source title`, async () => {
+        const store = registry();
+        const sourcePath = path.join(path.dirname(store.filename), `${engine}-${sourceTitle === null ? "null" : "generic"}-source.jsonl`);
+        store.reconcileConversations([{
+          ...observation(sourcePath, "account-a", "idle"),
+          engine,
+          launchProfile: emptyLaunchProfile({
+            cwd: "/repo",
+            title: sourceTitle,
+            goal: { objective: "Ship identity continuity", status: "active", tokensUsed: null, timeUsedSeconds: null },
+          }),
+        }]);
+        const conversation = store.conversationForPath(sourcePath)!;
+        store.requestConversationReseat(conversation.id, "account-b");
+        const expectedTitle = "migration successor · Ship identity continuity";
+        const observedProfiles: Array<{ phase: string; title: string | null }> = [];
+        const successorPath = path.join(path.dirname(store.filename), `${engine}-semantic-successor.jsonl`);
+        const successorProvider: SuccessorProviderPort = {
+          virtualSource: true,
+          async create(input) {
+            observedProfiles.push({ phase: "create", title: input.source.launchProfile.title });
+            expect(store.conversation(conversation.id)?.migration?.successorLaunchProfile?.title).toBe(expectedTitle);
+            store.reconcileConversations([{
+              ...observation(sourcePath, "account-a", "idle"),
+              engine,
+              launchProfile: emptyLaunchProfile({
+                cwd: "/repo",
+                title: "A later semantic source title",
+                goal: { objective: "Ship identity continuity", status: "active", tokensUsed: null, timeUsedSeconds: null },
+              }),
+            }]);
+            return {
+              operationId: input.operationId,
+              nativeId: `${engine}-semantic-successor`,
+              path: successorPath,
+              continuityPaths: [],
+              historyHash: `${engine}-semantic-history`,
+              host: engine === "claude"
+                ? { kind: "claude-stream", identity: `${engine}-semantic-successor`, epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" }
+                : { kind: "codex-app-server", identity: `${engine}-semantic-successor`, epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+            };
+          },
+          async verify(_receipt, input) {
+            observedProfiles.push({ phase: "verify", title: input.launchProfile.title });
+          },
+          async publishHost(_receipt, input) {
+            observedProfiles.push({ phase: "publish", title: input.launchProfile.title });
+          },
+        };
+
+        const committed = await advanceConversationMigration(conversation.id, store, successorProvider);
+
+        expect(observedProfiles).toEqual([
+          { phase: "create", title: expectedTitle },
+          { phase: "verify", title: expectedTitle },
+          { phase: "publish", title: expectedTitle },
+        ]);
+        expect(committed.generations.at(-1)?.launchProfile.title).toBe(expectedTitle);
+      });
+    }
+  }
+
   test("inventory builds path ownership from one registry snapshot", async () => {
     const store = registry();
     const firstPath = path.join(path.dirname(store.filename), "first.jsonl");

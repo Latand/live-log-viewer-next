@@ -6,6 +6,7 @@ import path from "node:path";
 import { emptyLaunchProfile, type ProviderReceipt, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { AgentRegistry, type AgentRegistrySqliteMode, type ConversationObservation } from "./registry";
+import { beginLegacySpawnFixture, beginLegacySpawnReceiptFixture } from "@/lib/agent/registryTestFixtures";
 
 /*
  * Issue #97 — one-click successor reseat of a rate-limited conversation.
@@ -302,7 +303,7 @@ test("a new spawn during a conversation reseat is never adopted into the drain",
     claimOwner: null,
     pendingAction: null,
   });
-  const spawn = store.beginSpawn("codex", "/repo/checkout");
+  const spawn = beginLegacySpawnReceiptFixture(store, "codex", "/repo/checkout");
   const settled = store.settleSpawn(spawn.launchId, spawnEntry("019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326", "/sessions/unrelated-spawn.jsonl"));
   expect(settled.kind).toBe("settled");
   expect(store.conversationForPath("/sessions/unrelated-spawn.jsonl")!.migration).toBeNull();
@@ -316,7 +317,7 @@ test("a new spawn during a conversation reseat is never adopted into the drain",
     requestId: "engine-wide-after-reseat",
     expectedRevision: store.engineRouting("codex").revision,
   });
-  const second = store.beginSpawn("codex", "/repo/checkout");
+  const second = beginLegacySpawnReceiptFixture(store, "codex", "/repo/checkout");
   expect(store.settleSpawn(second.launchId, spawnEntry("019f4906-3f67-\x37b72-9fbc-9ec3b5ad1327", "/sessions/adopted-spawn.jsonl")).kind).toBe("settled");
   expect(store.conversationForPath("/sessions/adopted-spawn.jsonl")!.migration).toMatchObject({ targetId: "engine-target" });
 });
@@ -342,7 +343,7 @@ test("a stale engine intent cannot adopt a future spawn", () => {
   fs.writeFileSync(filename, JSON.stringify(snapshot));
 
   const restarted = new AgentRegistry(filename);
-  const spawn = restarted.beginSpawn("codex", "/repo/checkout");
+  const spawn = beginLegacySpawnReceiptFixture(restarted, "codex", "/repo/checkout");
   const settled = restarted.settleSpawn(spawn.launchId, {
     key: { engine: "codex", sessionId: "future-spawn" },
     artifactPath: "/sessions/future-spawn.jsonl",
@@ -373,7 +374,7 @@ test("stopped and non-active-target intents cannot adopt unrelated spawns", () =
     else store.setEngineRouting("codex", "other-active-account");
 
     const pathname = `/sessions/${state}-spawn.jsonl`;
-    const spawn = store.beginSpawn("codex", "/repo/checkout");
+    const spawn = beginLegacySpawnReceiptFixture(store, "codex", "/repo/checkout");
     const settled = store.settleSpawn(spawn.launchId, {
       key: { engine: "codex", sessionId: `${state}-spawn` },
       artifactPath: pathname,
@@ -402,7 +403,7 @@ test("an explicit account pin stays outside an active engine drain while an unpi
     expectedRevision: store.engineRouting("codex").revision,
   });
 
-  const pinned = store.beginSpawnRequest({
+  const pinned = beginLegacySpawnFixture(store, {
     engine: "codex",
     cwd: "/repo/checkout",
     transport: "structured",
@@ -432,7 +433,7 @@ test("an explicit account pin stays outside an active engine drain while an unpi
     migration: null,
   });
 
-  const unpinned = store.beginSpawnRequest({
+  const unpinned = beginLegacySpawnFixture(store, {
     engine: "codex",
     cwd: "/repo/checkout",
     transport: "structured",
@@ -470,7 +471,7 @@ test("resume generation rollover cannot revive delivery cancelled by Stop", () =
   });
   const held = store.holdDelivery(id, "fixture", "held-before-resume");
   store.setMigrationIntentState(intent.id, "stopped", intent.revision);
-  const resume = store.beginSpawnRequest({
+  const resume = beginLegacySpawnFixture(store, {
     engine: "codex",
     cwd: "/repo/checkout",
     accountId: "limited",

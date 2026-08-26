@@ -116,7 +116,11 @@ export const en = {
   "dash.pipelinesUnavailable": "Pipelines are temporarily unavailable: the pipelines state file could not be read. Other panels stay live.",
   "dash.loadingBoard": "Loading the board…",
   "dash.emptyTitle": "The scheme is empty for now",
-  "dash.emptyHint": "Open the switchboard in the bottom-right corner and click a conversation — it will appear here",
+  "dash.emptyStartHere": "Start here: Orchestrator — tell it what you want done in {project}.",
+  "dash.emptyOneAgent": "Or spawn one agent for one task (Create → Agent).",
+  /* The empty project's second offer names the menu path it stands in for, so
+     the same route is findable again from the header once the board fills. */
+  "dash.emptyAgentCta": "Create → Agent",
   "dash.viewScheme": "scheme",
   "dash.viewList": "conversations",
   "dash.viewSchemeMenu": "View: scheme",
@@ -1803,7 +1807,10 @@ export const en = {
   "overview.archived": "· {count} archived",
   "overview.moreLive": "{count} more live",
   "overview.quiet": "quiet · last activity {age}",
-  "overview.empty": "No logs yet",
+  "overview.firstRunTitle": "No projects yet",
+  "overview.firstRunBody": "Sessions from ~/.claude/projects and ~/.codex/sessions appear here as they happen",
+  "overview.firstRunCreate": "Create a project",
+  "overview.firstRunElsewhere": "…or run any claude / codex session inside a repo.",
 
   // Catalog fetch failure (issue #696) — never the idle empty-state copy
   "catalog.unreachable": "catalog unavailable",

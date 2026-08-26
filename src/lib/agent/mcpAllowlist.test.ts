@@ -27,6 +27,7 @@ import {
   type StoredGrantFile,
   type McpGrantPolicy,
 } from "./mcpAllowlist";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 /** A policy shaped like the one tranche 2 will ship, so the origin rules are
     exercised against a connector that is genuinely grantable. Proving them
@@ -278,7 +279,7 @@ function settleAs(store: AgentRegistry, launchId: string, label: string) {
 }
 
 function settledParent(store: AgentRegistry, mcpServers: string[], label = "nested-parent") {
-  const parent = store.beginSpawnRequest({
+  const parent = beginLegacySpawnFixture(store, {
     engine: "codex",
     cwd: "/repo",
     launchProfile: { mcpServers },
@@ -295,7 +296,7 @@ test("a nested spawn resets its parent allowlist while resume preserves it", () 
     const store = new AgentRegistry(path.join(directory, "registry.json"));
     const parentId = settledParent(store, ["viewer"]);
 
-    const child = store.beginSpawnRequest({
+    const child = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd: "/repo",
       parentConversationId: parentId,
@@ -303,7 +304,7 @@ test("a nested spawn resets its parent allowlist while resume preserves it", () 
     });
     expect(child.receipt.launchProfile.mcpServers).toEqual(["viewer"]);
 
-    const resumed = store.beginSpawnRequest({
+    const resumed = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd: "/repo",
       conversationId: parentId,
@@ -408,14 +409,14 @@ test("a delegated conversation cannot keep a hand-edited grant across resume or 
     expect(snapshot.entries[entryRowKey("nested-parent")]?.launchProfile?.mcpServers).toEqual(["viewer", "test-connector"]);
     expect(snapshot.conversations[parentId]!.generations.at(-1)!.launchProfile.mcpServers).toEqual(["viewer", "test-connector"]);
 
-    const resumedWorker = reloaded.beginSpawnRequest({
+    const resumedWorker = beginLegacySpawnFixture(reloaded, {
       engine: "codex",
       cwd: "/repo",
       conversationId: workerId as never,
       purpose: "resume-successor",
     });
     expect(resumedWorker.receipt.launchProfile.mcpServers).toEqual(["viewer"]);
-    const resumedRoot = reloaded.beginSpawnRequest({
+    const resumedRoot = beginLegacySpawnFixture(reloaded, {
       engine: "codex",
       cwd: "/repo",
       conversationId: parentId as never,
@@ -437,14 +438,14 @@ test("a tampered receipt cannot carry a grant into settlement or attach", () => 
     /* Two receipts admitted and left UNSETTLED, so the widening path is the
        live one: settlement copies `receipt.launchProfile` onto the conversation
        generation and the entry row, and attach reads it back from there. */
-    const worker = store.beginSpawnRequest({
+    const worker = beginLegacySpawnFixture(store, {
       engine: "codex",
       cwd: "/repo",
       role: "builder",
       parentConversationId: parentId,
       origin: { kind: "agent", conversationId: parentId },
     });
-    const root = store.beginSpawnRequest({ engine: "codex", cwd: "/repo" });
+    const root = beginLegacySpawnFixture(store, { engine: "codex", cwd: "/repo" });
 
     tamperJsonGrant(registryPath, ["viewer", "test-connector"]);
 
@@ -475,7 +476,7 @@ test("a tampered receipt cannot carry a grant into settlement or attach", () => 
 });
 
 function settledDelegatedChild(store: AgentRegistry, parentId: string, label: string) {
-  const child = store.beginSpawnRequest({
+  const child = beginLegacySpawnFixture(store, {
     engine: "codex",
     cwd: "/repo",
     role: "builder",
@@ -826,7 +827,7 @@ function forgeSqliteReceiptOrigin(sqlitePath: string, launchId: string, forgery:
     fields are the only thing describing it — and precisely where trusting them
     would let the row authorise itself. */
 function admittedDelegatedChild(store: AgentRegistry, parentId: string) {
-  const child = store.beginSpawnRequest({
+  const child = beginLegacySpawnFixture(store, {
     engine: "codex",
     cwd: "/repo",
     role: "builder",
@@ -845,7 +846,7 @@ test("a receipt forged into root shape is denied by the lineage it cannot rewrit
     const store = new AgentRegistry(registryPath, undefined, undefined, storage);
     const rootId = settledParent(store, ["viewer"]);
     const worker = admittedDelegatedChild(store, rootId);
-    const honestRoot = store.beginSpawnRequest({ engine: "codex", cwd: "/repo" });
+    const honestRoot = beginLegacySpawnFixture(store, { engine: "codex", cwd: "/repo" });
 
     /* The worker rewrites its receipt's role, depth and parent into root shape
        and helps itself to a connector. Its lineage edge is untouched. */
@@ -1322,7 +1323,7 @@ test("every SQLite store mutation entry point re-decides grants before it can pe
     const rootId = settledParent(registry, ["viewer"], `entrypoint-parent-${label}`);
     const workerId = settledDelegatedChild(registry, rootId, `entrypoint-worker-${label}`);
     const forged = admittedDelegatedChild(registry, rootId).launchId;
-    const honest = registry.beginSpawnRequest({ engine: "codex", cwd: "/repo" }).receipt.launchId;
+    const honest = beginLegacySpawnFixture(registry, { engine: "codex", cwd: "/repo" }).receipt.launchId;
     return { directory, sqlitePath, registry, rootId, workerId, forged, honest };
   };
 

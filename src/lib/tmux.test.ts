@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { freshSpecFor } from "@/lib/agent/cli";
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { agentRegistry } from "@/lib/agent/registry";
 import {
   cdCommandForCwd,
@@ -537,6 +538,11 @@ describe("structured transport prohibits legacy tmux Claude launches", () => {
     await withStructuredTransport(async () => {
       const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-no-tmux-claude-"));
       const spec = freshSpecFor("claude", cwd);
+      spec.launchProfile = emptyLaunchProfile({
+        ...spec.launchProfile,
+        cwd,
+        title: "Verify structured Claude refusal",
+      });
       await expect(spawnAgentWithPrompt(spec, "hello")).rejects.toThrow(
         /structured transport prohibits legacy tmux Claude launches/,
       );
@@ -547,6 +553,24 @@ describe("structured transport prohibits legacy tmux Claude launches", () => {
       expect(receipts[0]!.error).toMatch(/structured transport prohibits legacy tmux Claude launches/);
       fs.rmSync(cwd, { recursive: true, force: true });
     });
+  });
+
+  test("the receipt fallback rejects a titleless launch before actuation", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-titleless-fallback-"));
+    const spec = {
+      command: "codex",
+      cwd,
+      windowName: "codex-new",
+      engine: "codex" as const,
+      launchProfile: emptyLaunchProfile({ cwd }),
+    };
+    await expect(spawnAgentWithPrompt(spec, "hello")).rejects.toThrow(
+      "title is required for every new spawn",
+    );
+    const receipts = Object.values(agentRegistry().snapshot().receipts)
+      .filter((receipt) => receipt.cwd === cwd);
+    expect(receipts).toHaveLength(0);
+    fs.rmSync(cwd, { recursive: true, force: true });
   });
 
   test("refusal covers interactive resume specs and spares the migration print-mode fork and tmux transport", () => {

@@ -10,7 +10,7 @@ const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/re
 const { GET: getAccounts } = await import("@/app/api/accounts/route");
 const { buildFilesResponse } = await import("@/app/api/files/response");
 const registry = new AgentRegistry(path.join(root, "registry.json"));
-registry.beginSpawn("codex", "/repo");
+registry.beginSpawn("codex", "/repo", { title: "Verify account migration GET purity" });
 const getFiles = (request: Request) => buildFilesResponse(request, {
   listFilesWithProjectCatalog: async () => ({ files: [], projectCatalog: [], complete: true }),
 });
@@ -37,7 +37,9 @@ afterAll(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test("GET accounts and files preserve registry bytes exactly", async () => {
+test("GET accounts and files preserve durable state bytes exactly", async () => {
+  const initialized = await getFiles(new Request("http://127.0.0.1/api/files"));
+  expect(initialized.status).toBe(200);
   const before = stateBytes();
   const accounts = await getAccounts();
   expect(accounts.status).toBe(200);
