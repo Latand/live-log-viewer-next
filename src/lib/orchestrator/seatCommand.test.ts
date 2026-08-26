@@ -5,7 +5,15 @@ import path from "node:path";
 
 import { defaultModelFor } from "@/lib/agent/models";
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { resolveSpawnRole } from "@/lib/roles/registry";
+import { MAX_STRUCTURED_TEXT_BYTES } from "@/lib/runtime/structuredContent";
 
+import {
+  HANDOFF_HEADING,
+  HISTORY_BUDGET_BYTES,
+  HISTORY_HEADING,
+  type HandoffDigestRequest,
+} from "./handoffDigest";
 import {
   ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE,
   ORCHESTRATOR_PROMPT_VERSION,
@@ -54,11 +62,12 @@ const OLD_ID = "conversation_44444444-4444-4444-8444-444444444444";
 interface Recorded {
   spawns: Record<string, unknown>[];
   deliveries: { conversationId: string; clientMessageId: string; text: string }[];
+  digests: HandoffDigestRequest[];
   identityStamps: OrchestratorSeat[];
 }
 
 function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps: SeatCommandDependencies; recorded: Recorded } {
-  const recorded: Recorded = { spawns: [], deliveries: [], identityStamps: [] };
+  const recorded: Recorded = { spawns: [], deliveries: [], digests: [], identityStamps: [] };
   const deps: SeatCommandDependencies = {
     spawn: async (body) => {
       recorded.spawns.push(body);
@@ -74,9 +83,16 @@ function dependencies(overrides: Partial<SeatCommandDependencies> = {}): { deps:
       path: `/tmp/${conversationId.slice(-4)}.jsonl`,
       cwd: "/workspace",
       project: "proj-a",
+      engine: "claude",
     }),
     stampRegistryIdentity: (seat) => { recorded.identityStamps.push(seat); },
     projectTasks: () => [],
+    /* No test in this file reaches the real summarizer: the seam is injected,
+       so nothing here spawns a process, opens a socket, or reads an account. */
+    summarizeHandoffs: async (request) => {
+      recorded.digests.push(request);
+      return { kind: "fallback", reason: "unavailable" };
+    },
     launchSettlement: () => ({ kind: "unknown" }),
     runtimeIdentity: () => ({ engine: null, model: null }),
     now: () => AT,
@@ -212,6 +228,7 @@ test("a seat designated after the identity wave stamps registry role, membership
       path: conversationId === oldConversation.id ? oldPath : newPath,
       cwd: sandbox,
       project: "proj-a",
+      engine: "claude",
     }),
     stampRegistryIdentity: (seat) => { registry.stampOrchestratorSeatIdentity(seat); },
   });
@@ -251,7 +268,7 @@ test("a completed seat replay repairs a failed registry stamp without revalidati
     conversationTarget: (conversationId) => {
       targetReads += 1;
       return targetReads === 1
-        ? { kind: "eligible", conversationId, path: path.join(sandbox, "existing.jsonl"), cwd: sandbox, project: "proj-a" }
+        ? { kind: "eligible", conversationId, path: path.join(sandbox, "existing.jsonl"), cwd: sandbox, project: "proj-a", engine: "claude" as const }
         : null;
     },
     stampRegistryIdentity: () => {
@@ -509,6 +526,7 @@ test("a replayed adoption keeps its original target during an ABA-shaped retry",
       path: `/tmp/${conversationId.slice(-4)}.jsonl`,
       cwd: "/workspace",
       project: "proj-a",
+      engine: "claude",
     }),
     deliver: async (input) => {
       recorded.deliveries.push({ conversationId: input.conversationId, clientMessageId: input.clientMessageId, text: input.text });
@@ -750,32 +768,28 @@ test("rotation with no incumbent refuses and points at create", async () => {
   expect(result.body.code).toBe("no_incumbent");
 });
 
-test("a pending replay completes with the ORIGINAL mandate, not a recomposed one", async () => {
-  let attempts = 0;
+test("a STILL-LIVE pending replay completes with the ORIGINAL mandate, not a recomposed one", async () => {
+  /* No recorded error and no settlement to reconcile: the intent is genuinely
+     in flight, so its own key finishes IT — a retry that recomposed its text
+     must not deliver a second variant against the same spawn receipt. */
+  seedPendingLaunchIntent({ clientRequestId: "req_00000001", launchId: "launch_live", engine: "claude", model: "opus" });
   const { deps, recorded } = dependencies({
     spawn: async (body) => {
       recorded.spawns.push(body);
-      attempts += 1;
-      return attempts === 1
-        ? { status: 500, body: { error: "transient" } }
-        : { status: 200, body: { ok: true, conversationId: NEW_ID, path: null } };
+      return { status: 200, body: { ok: true, conversationId: NEW_ID, path: null } };
     },
   });
-  await executeOrchestratorSeatRequest(spawnRequest(), deps);
-  /* The retry recomposes a different mandate; the durable intent's text wins. */
+
   await executeOrchestratorSeatRequest({ ...spawnRequest(), mandate: "recomposed differently" }, deps);
+
   const prompts = recorded.spawns.map((body) => String(body.prompt));
-  expect(prompts[0]).toBe(prompts[1]);
+  expect(prompts).toHaveLength(1);
   expect(prompts[0]).toStartWith("own the board");
   expect(prompts[0]!.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
   expect(prompts[0]).not.toContain("recomposed differently");
-  expect(recorded.spawns.map((body) => body.title)).toEqual([
-    "orchestrator · own the board",
-    "orchestrator · own the board",
-  ]);
 });
 
-test("a pending pre-spawn replay keeps the ORIGINAL engine and model", async () => {
+test("a same-key retry after a TERMINAL spawn rejection recomposes instead of respawning the failed mandate", async () => {
   let attempts = 0;
   const { deps, recorded } = dependencies({
     spawn: async (body) => {
@@ -787,6 +801,45 @@ test("a pending pre-spawn replay keeps the ORIGINAL engine and model", async () 
     },
   });
   await executeOrchestratorSeatRequest(spawnRequest(), deps);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe("transient");
+
+  /* Ambiguous failures keep the key client-side, so the retry arrives on the
+     SAME one. The errored intent is terminal: it is cleared, not replayed, and
+     the corrected mandate is the one that spawns (issue #1067 AC 5). */
+  await executeOrchestratorSeatRequest({ ...spawnRequest(), mandate: "recomposed differently" }, deps);
+
+  const prompts = recorded.spawns.map((body) => String(body.prompt));
+  expect(prompts).toHaveLength(2);
+  expect(prompts[1]).toStartWith("recomposed differently");
+  /* The successor title is derived from the mandate that actually spawned, so
+     the recomposed retry is titled by ITS text, not the failed one's. */
+  expect(recorded.spawns.map((body) => body.title)).toEqual([
+    "orchestrator · own the board",
+    "orchestrator · recomposed differently",
+  ]);
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(NEW_ID);
+  expect(pending).toBeNull();
+  expect(history).toMatchObject([{ reason: "terminal_error", seat: { intent: { clientRequestId: "req_00000001", error: "transient" } } }]);
+});
+
+test("a STILL-LIVE pending pre-spawn replay keeps the ORIGINAL engine and model", async () => {
+  /* Runtime identity is frozen at designation (PR #916). A live pending intent
+     is finished by its own key, so a retry naming a different engine/model must
+     spawn the identity the seat already carries. */
+  seedPendingLaunchIntent({
+    clientRequestId: "req_00000001",
+    launchId: "launch_live",
+    engine: "claude",
+    model: "opus",
+  });
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: NEW_ID, path: null } };
+    },
+  });
+
   await executeOrchestratorSeatRequest({
     ...spawnRequest(),
     engine: "codex",
@@ -794,7 +847,6 @@ test("a pending pre-spawn replay keeps the ORIGINAL engine and model", async () 
   }, deps);
 
   expect(recorded.spawns.map((body) => ({ engine: body.engine, model: body.model }))).toEqual([
-    { engine: "claude", model: "opus" },
     { engine: "claude", model: "opus" },
   ]);
   expect(orchestratorSeatFor("proj-a").active).toMatchObject({ engine: "claude", model: "opus" });
@@ -1125,4 +1177,633 @@ test("rotation rejects an explicit successor model outside the engine catalog be
   expect(rotated.body.error).toBe("invalid claude model id \"claude-fable-5\"; valid claude model ids: opus, fable, sonnet, haiku");
   expect(recorded.spawns).toHaveLength(1);
   expect(orchestratorSeatFor("proj-a")).toMatchObject({ active: { conversationId: NEW_ID }, pending: null });
+});
+
+/* Issue #1067: rotation used to append a fresh handoff to the incumbent's FULL
+   mandate, so handoffs stacked verbatim until the designation crossed the
+   32000-byte structured envelope and died pending forever. Everything below
+   pins the bounded composition that replaced it. */
+
+/** Invented conversation ids, assembled from parts so no id-shaped literal
+    enters a public artifact. */
+const successorId = (index: number): string =>
+  `conversation_${"5".repeat(8)}-${"5".repeat(4)}-4${"5".repeat(3)}-8${"5".repeat(3)}-${String(index).padStart(12, "0")}`;
+
+const handoffToken = (index: number): string => `handoff-note-${String(index).padStart(2, "0")}`;
+
+/** One prior handoff section in the exact shape rotation writes them. */
+function handoffSection(index: number): string {
+  return [
+    HANDOFF_HEADING,
+    `You are replacing orchestrator conversation ${OLD_ID} for project proj-a. Its manager authority is revoked.`,
+    "No open board tasks are recorded for this project.",
+    `Notes from the caller:\n${handoffToken(index)}`,
+  ].join("\n\n");
+}
+
+function stackedMandate(core: string, count: number): string {
+  return [core, ...Array.from({ length: count }, (_, index) => handoffSection(index + 1))].join("\n\n");
+}
+
+/** What spawn mode actually asserts against the envelope: the orchestrator
+    role scaffold, a blank line, and the mandate. */
+function launchBytes(prompt: string): number {
+  const role = resolveSpawnRole({ role: "orchestrator", roleParams: { mode: "standard" } });
+  const scaffold = role.ok && role.value ? role.value.scaffold : "";
+  return Buffer.byteLength(`${scaffold}\n\n${prompt}`, "utf8");
+}
+
+function historySection(mandate: string): string {
+  const start = mandate.indexOf(HISTORY_HEADING);
+  if (start < 0) return "";
+  const end = mandate.indexOf(HANDOFF_HEADING, start);
+  return mandate.slice(start, end < 0 ? undefined : end).trim();
+}
+
+async function seatIncumbent(mandate: string, clientRequestId: string): Promise<void> {
+  const { deps } = dependencies();
+  const seeded = await executeOrchestratorSeatRequest({ ...spawnRequest(clientRequestId), mandate }, deps);
+  expect(seeded.status).toBe(200);
+}
+
+test("AC1: three stacked handoffs compact into ONE rotation history section", async () => {
+  const core = "own the board";
+  await seatIncumbent(stackedMandate(core, 3), "req_00001001");
+
+  const successor = successorId(1);
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successor, path: "/tmp/successor.jsonl" } };
+    },
+    summarizeHandoffs: async (request) => {
+      recorded.digests.push(request);
+      return { kind: "digest", text: "Decisions:\n- kept the digest token" };
+    },
+  });
+
+  const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001002" }, deps);
+
+  expect(rotated.status).toBe(200);
+  const prompt = String(recorded.spawns[0]!.prompt);
+  expect(prompt).toStartWith(core);
+  /* Exactly one of each section, and the stacked bodies are gone. */
+  expect(prompt.split(HISTORY_HEADING)).toHaveLength(2);
+  expect(prompt.split(HANDOFF_HEADING)).toHaveLength(2);
+  expect(prompt).toContain("kept the digest token");
+  for (const index of [1, 2, 3]) expect(prompt).not.toContain(handoffToken(index));
+  /* The summarizer saw every prior handoff and the predecessor's transcript. */
+  expect(recorded.digests).toHaveLength(1);
+  expect(recorded.digests[0]).toMatchObject({
+    project: "proj-a",
+    priorHistory: null,
+    predecessor: { path: "/tmp/3333.jsonl", engine: "claude" },
+  });
+  expect(recorded.digests[0]!.priorHandoffs).toHaveLength(3);
+  /* The STORED successor mandate has the same shape, so the next rotation
+     starts from a compact base rather than a growing one. */
+  const stored = orchestratorSeatFor("proj-a").active!.mandate;
+  expect(stored.split(HISTORY_HEADING)).toHaveLength(2);
+  expect(stored.split(HANDOFF_HEADING)).toHaveLength(2);
+  expect(rotated.body.handoff).toMatchObject({ history: "digest", reason: null, historyDropped: false });
+});
+
+test("AC1: the desktop draft's explicit stacked mandate compacts the same way", async () => {
+  const core = "own the board";
+  await seatIncumbent("own the board", "req_00001005");
+
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(2), path: "/tmp/successor.jsonl" } };
+    },
+    summarizeHandoffs: async (request) => {
+      recorded.digests.push(request);
+      return { kind: "digest", text: "Decisions:\n- digest from the posted draft" };
+    },
+  });
+
+  /* The rotate draft prefills its textarea from the stored mandate, so the
+     stacked text usually arrives in the REQUEST, not from the store. */
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00001006",
+    mandate: stackedMandate(core, 3),
+  }, deps);
+
+  expect(rotated.status).toBe(200);
+  const prompt = String(recorded.spawns[0]!.prompt);
+  expect(prompt).toStartWith(core);
+  expect(prompt.split(HISTORY_HEADING)).toHaveLength(2);
+  expect(prompt.split(HANDOFF_HEADING)).toHaveLength(2);
+  expect(prompt).toContain("digest from the posted draft");
+  for (const index of [1, 2, 3]) expect(prompt).not.toContain(handoffToken(index));
+  expect(recorded.digests[0]!.priorHandoffs).toHaveLength(3);
+});
+
+test("AC1: a second rotation feeds the previous digest and only the newest handoff to the summarizer", async () => {
+  await seatIncumbent(stackedMandate("own the board", 2), "req_00001010");
+
+  const first = dependencies({
+    spawn: async () => ({ status: 200, body: { ok: true, conversationId: successorId(3), path: "/tmp/successor-1.jsonl" } }),
+    summarizeHandoffs: async () => ({ kind: "digest", text: "Decisions:\n- first generation digest" }),
+  });
+  expect((await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001011" }, first.deps)).status).toBe(200);
+
+  const second = dependencies({
+    spawn: async () => ({ status: 200, body: { ok: true, conversationId: successorId(4), path: "/tmp/successor-2.jsonl" } }),
+    summarizeHandoffs: async (request) => {
+      second.recorded.digests.push(request);
+      return { kind: "digest", text: "Decisions:\n- second generation digest" };
+    },
+  });
+  const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001012" }, second.deps);
+
+  expect(rotated.status).toBe(200);
+  expect(second.recorded.digests).toHaveLength(1);
+  expect(second.recorded.digests[0]!.priorHistory).toContain("first generation digest");
+  /* Only the previous rotation's own handoff is left to summarize — the older
+     ones live inside the digest now. */
+  expect(second.recorded.digests[0]!.priorHandoffs).toHaveLength(1);
+});
+
+test("AC1: a first rotation renders no history section and never calls the summarizer", async () => {
+  await seatIncumbent("own the board", "req_00001015");
+
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(5), path: "/tmp/successor.jsonl" } };
+    },
+  });
+  const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001016" }, deps);
+
+  expect(rotated.status).toBe(200);
+  expect(recorded.digests).toEqual([]);
+  expect(String(recorded.spawns[0]!.prompt)).not.toContain(HISTORY_HEADING);
+  expect(rotated.body.handoff).toMatchObject({ history: "none", reason: null, historyDropped: false });
+});
+
+test("AC3: a failed summarizer falls back to the latest two handoffs, verbatim and within budget", async () => {
+  await seatIncumbent(stackedMandate("own the board", 4), "req_00001020");
+
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(6), path: "/tmp/successor.jsonl" } };
+    },
+    summarizeHandoffs: async () => ({ kind: "fallback", reason: "timeout" }),
+  });
+
+  const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001021" }, deps);
+
+  expect(rotated.status).toBe(200);
+  const prompt = String(recorded.spawns[0]!.prompt);
+  expect(prompt).toContain(handoffToken(4));
+  expect(prompt).toContain(handoffToken(3));
+  expect(prompt).not.toContain(handoffToken(1));
+  expect(prompt).not.toContain(handoffToken(2));
+  expect(prompt.split(HISTORY_HEADING)).toHaveLength(2);
+  expect(prompt.split(HANDOFF_HEADING)).toHaveLength(2);
+  expect(Buffer.byteLength(historySection(prompt), "utf8"))
+    .toBeLessThanOrEqual(HISTORY_BUDGET_BYTES + Buffer.byteLength(`${HISTORY_HEADING}\n`, "utf8"));
+  expect(rotated.body.handoff).toMatchObject({ history: "fallback", reason: "timeout", historyDropped: false });
+});
+
+test("AC3: a throwing summarizer never blocks the rotation", async () => {
+  await seatIncumbent(stackedMandate("own the board", 2), "req_00001025");
+
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(7), path: "/tmp/successor.jsonl" } };
+    },
+    summarizeHandoffs: async () => { throw new Error("headless runner is unreachable"); },
+  });
+
+  const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001026" }, deps);
+
+  expect(rotated.status).toBe(200);
+  expect(rotated.body.handoff).toMatchObject({ history: "fallback", reason: "error" });
+  expect(String(recorded.spawns[0]!.prompt)).toContain(handoffToken(2));
+  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(successorId(7));
+});
+
+test("AC4: an oversized mandate is refused with an actionable 413 before any intent exists", async () => {
+  const { deps, recorded } = dependencies();
+  const oversized = "x".repeat(MAX_STRUCTURED_TEXT_BYTES);
+
+  const spawnMode = await executeOrchestratorSeatRequest({ ...spawnRequest("req_00001030"), mandate: oversized }, deps);
+
+  expect(spawnMode.status).toBe(413);
+  expect(spawnMode.body).toMatchObject({ code: "mandate_too_large", bound: MAX_STRUCTURED_TEXT_BYTES });
+  expect(Number(spawnMode.body.overhead)).toBeGreaterThan(0);
+  expect(Number(spawnMode.body.excess))
+    .toBe(Number(spawnMode.body.bytes) + Number(spawnMode.body.overhead) - MAX_STRUCTURED_TEXT_BYTES);
+  expect(String(spawnMode.body.error)).toContain("shorten the mandate by at least");
+  /* Nothing was attempted and nothing is pending: the mandate never became a
+     durable intent that would fail delivery on every retry. */
+  expect(recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a")).toMatchObject({ active: null, pending: null });
+
+  const existingMode = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: oversized,
+    clientRequestId: "req_00001031",
+    conversationId: OLD_ID,
+  }, deps);
+
+  /* Existing-mode delivery asserts the text alone, so it carries no overhead. */
+  expect(existingMode.status).toBe(413);
+  expect(existingMode.body).toMatchObject({ code: "mandate_too_large", overhead: 0 });
+  expect(recorded.deliveries).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+});
+
+test("AC4: rotation drops the history, then trims the notes, and refuses only when the core alone cannot be delivered", async () => {
+  await seatIncumbent("own the board", "req_00001035");
+
+  const { deps, recorded } = dependencies({
+    spawn: async (body) => {
+      recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(8), path: "/tmp/successor.jsonl" } };
+    },
+    summarizeHandoffs: async () => ({ kind: "digest", text: "d".repeat(4_000) }),
+  });
+
+  const trimmed = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00001036",
+    mandate: stackedMandate("c".repeat(29_000), 2),
+    handoffNotes: "n".repeat(2_000),
+  }, deps);
+
+  expect(trimmed.status).toBe(200);
+  const prompt = String(recorded.spawns[0]!.prompt);
+  expect(prompt).not.toContain(HISTORY_HEADING);
+  expect(prompt).toContain("…[truncated]");
+  expect(launchBytes(prompt)).toBeLessThanOrEqual(MAX_STRUCTURED_TEXT_BYTES);
+  expect(trimmed.body.handoff).toMatchObject({ history: "digest", historyDropped: true });
+  expect(Number((trimmed.body.handoff as Record<string, unknown>).notesTruncatedTo)).toBeLessThan(2_000);
+
+  /* A core that leaves no room for even a minimal handoff is refused outright
+     — with the incumbent still seated and nothing pending. */
+  const seatedBefore = orchestratorSeatFor("proj-a").active?.conversationId;
+  const refused = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00001037",
+    mandate: "c".repeat(31_000),
+  }, deps);
+
+  expect(refused.status).toBe(413);
+  expect(refused.body).toMatchObject({ code: "mandate_too_large", bound: MAX_STRUCTURED_TEXT_BYTES });
+  expect(refused.body.rotatedFrom).toMatchObject({ conversationId: seatedBefore });
+  expect(recorded.spawns).toHaveLength(1);
+  const { active, pending } = orchestratorSeatFor("proj-a");
+  expect(pending).toBeNull();
+  expect(active?.conversationId).toBe(seatedBefore);
+});
+
+test("AC5: a designation whose delivery fails is terminal and the next rotation clears it", async () => {
+  await seatIncumbent("own the board", "req_00001040");
+
+  const envelopeError = "structured message text exceeds the 32000-byte envelope bound";
+  const failing = dependencies({
+    spawn: async () => ({ status: 413, body: { error: envelopeError } }),
+  });
+  const failed = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001041" }, failing.deps);
+
+  expect(failed.status).toBe(413);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe(envelopeError);
+  expect(orchestratorSeatFor("proj-a").active?.conversationId).toBe(NEW_ID);
+
+  const successor = successorId(9);
+  const healthy = dependencies({
+    spawn: async () => ({ status: 200, body: { ok: true, conversationId: successor, path: "/tmp/successor.jsonl" } }),
+  });
+  const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001042" }, healthy.deps);
+
+  expect(rotated.status).toBe(200);
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(successor);
+  /* No dead banner survives: the failed intent is terminalized into history. */
+  expect(pending).toBeNull();
+  expect(history[0]).toMatchObject({
+    reason: "terminal_error",
+    seat: { intent: { clientRequestId: "req_00001041", error: envelopeError } },
+  });
+});
+
+test("AC5: an existing-mode designation whose delivery fails is cleared by the next create", async () => {
+  await seatIncumbent("own the board", "req_00001045");
+
+  const failing = dependencies({ deliver: async () => ({ ok: false, error: "host is dead" }) });
+  const failed = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "adopt me",
+    clientRequestId: "req_00001046",
+    conversationId: OLD_ID,
+  }, failing.deps);
+
+  expect(failed.status).toBe(502);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe("host is dead");
+
+  const { deps } = dependencies();
+  const created = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "adopt me properly",
+    clientRequestId: "req_00001047",
+    conversationId: OLD_ID,
+  }, deps);
+
+  expect(created.status).toBe(200);
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(OLD_ID);
+  expect(pending).toBeNull();
+  expect(history[0]).toMatchObject({ reason: "terminal_error", seat: { intent: { clientRequestId: "req_00001046" } } });
+});
+
+/* A 5xx or a lost response classifies AMBIGUOUS client-side, so the draft KEEPS
+   its key and retries with it (`classifySeatFailure` in seatState.ts). That
+   retry used to hit the errored intent's same-key replay, which re-sent the
+   STORED mandate — the very text that had just failed — and left the failed row
+   in the blocking pending position: the permanent banner from the incident. */
+
+test("AC5: retrying a failed rotation with its OWN key delivers the recomposed mandate, not the one that failed", async () => {
+  await seatIncumbent(stackedMandate("own the board", 3), "req_00001060");
+
+  const envelopeError = "structured message text exceeds the 32000-byte envelope bound";
+  const failing = dependencies({
+    spawn: async (body) => {
+      failing.recorded.spawns.push(body);
+      return { status: 502, body: { error: envelopeError } };
+    },
+  });
+  const failed = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00001061",
+    handoffNotes: "first attempt",
+  }, failing.deps);
+
+  expect(failed.status).toBe(502);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe(envelopeError);
+
+  const successor = successorId(11);
+  const retry = dependencies({
+    spawn: async (body) => {
+      retry.recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successor, path: "/tmp/successor.jsonl" } };
+    },
+  });
+  const rotated = await executeOrchestratorRotation({
+    project: "proj-a",
+    clientRequestId: "req_00001061",
+    handoffNotes: "second attempt",
+  }, retry.deps);
+
+  expect(rotated.status).toBe(200);
+  /* Recomposed, not replayed: the spawned prompt carries THIS attempt's notes,
+     one history section and one handoff — the stored mandate is gone. */
+  expect(retry.recorded.spawns).toHaveLength(1);
+  const prompt = String(retry.recorded.spawns[0]!.prompt);
+  expect(prompt).toContain("second attempt");
+  expect(prompt).not.toContain("first attempt");
+  expect(prompt.split(HANDOFF_HEADING)).toHaveLength(2);
+  expect(prompt.split(HISTORY_HEADING)).toHaveLength(2);
+
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(successor);
+  expect(pending).toBeNull();
+  expect(history).toMatchObject([{ reason: "terminal_error", seat: { intent: { clientRequestId: "req_00001061", error: envelopeError } } }]);
+});
+
+test("AC5: retrying a failed existing-mode designation with its OWN key clears it and delivers the edited mandate", async () => {
+  await seatIncumbent("own the board", "req_00001065");
+
+  const failing = dependencies({ deliver: async () => ({ ok: false, error: "host is dead" }) });
+  const failed = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "adopt me",
+    clientRequestId: "req_00001066",
+    conversationId: OLD_ID,
+  }, failing.deps);
+
+  expect(failed.status).toBe(502);
+  expect(orchestratorSeatFor("proj-a").pending?.intent.error).toBe("host is dead");
+
+  const { deps, recorded } = dependencies();
+  const retried = await executeOrchestratorSeatRequest({
+    project: "proj-a",
+    mandate: "adopt me, corrected",
+    clientRequestId: "req_00001066",
+    conversationId: OLD_ID,
+  }, deps);
+
+  expect(retried.status).toBe(200);
+  expect(recorded.deliveries).toHaveLength(1);
+  expect(recorded.deliveries[0]!.text).toContain("adopt me, corrected");
+  /* Exactly-once survives the fresh intent: the message id is derived from the
+     key, so a first delivery that actually landed is still deduplicated. */
+  expect(recorded.deliveries[0]!.clientMessageId).toBe("orchmandate_req_00001066");
+
+  const { active, pending, history } = orchestratorSeatFor("proj-a");
+  expect(active?.conversationId).toBe(OLD_ID);
+  expect(active?.mandate).toContain("adopt me, corrected");
+  expect(pending).toBeNull();
+  expect(history).toMatchObject([{ reason: "terminal_error", seat: { intent: { clientRequestId: "req_00001066" } } }]);
+});
+
+/** Twelve rotations, each with the maximum handoff payload the caps allow. */
+async function rotateTwelveTimes(
+  project: string,
+  summarizeHandoffs: SeatCommandDependencies["summarizeHandoffs"],
+): Promise<string[]> {
+  const seeded = dependencies({
+    conversationTarget: (conversationId) => ({ kind: "eligible", conversationId, path: "/tmp/incumbent.jsonl", cwd: "/workspace", project, engine: "claude" }),
+  });
+  const created = await executeOrchestratorSeatRequest({
+    ...spawnRequest(`req_${project}_seed_0001`),
+    project,
+    mandate: ORCHESTRATOR_SYSTEM_PROMPT,
+  }, seeded.deps);
+  expect(created.status).toBe(200);
+
+  const prompts: string[] = [];
+  for (let rotation = 1; rotation <= 12; rotation += 1) {
+    const { deps } = dependencies({
+      conversationTarget: (conversationId) => ({ kind: "eligible", conversationId, path: "/tmp/incumbent.jsonl", cwd: "/workspace", project, engine: "claude" }),
+      spawn: async (body) => {
+        prompts.push(String(body.prompt));
+        return { status: 200, body: { ok: true, conversationId: successorId(100 + rotation), path: "/tmp/successor.jsonl" } };
+      },
+      projectTasks: () => Array.from({ length: 12 }, (_, index) => ({
+        id: `task_${index + 1}`,
+        status: "doing",
+        text: "t".repeat(200),
+      })),
+      summarizeHandoffs,
+    });
+    const rotated = await executeOrchestratorRotation({
+      project,
+      clientRequestId: `req_${project}_rot_${String(rotation).padStart(4, "0")}`,
+      handoffNotes: "n".repeat(2_000),
+    }, deps);
+    expect(rotated.status).toBe(200);
+  }
+  return prompts;
+}
+
+test("AC6: twelve rotations keep every successor mandate inside the structured envelope", async () => {
+  const summarized = await rotateTwelveTimes("proj-a", async () => ({ kind: "digest", text: "d".repeat(3_800) }));
+  const fellBack = await rotateTwelveTimes("proj-b", async () => ({ kind: "fallback", reason: "exhausted" }));
+
+  expect(summarized).toHaveLength(12);
+  expect(fellBack).toHaveLength(12);
+  for (const prompt of [...summarized, ...fellBack]) {
+    expect(launchBytes(prompt)).toBeLessThanOrEqual(MAX_STRUCTURED_TEXT_BYTES);
+    expect(prompt.split(HANDOFF_HEADING)).toHaveLength(2);
+  }
+  /* The first rotation has nothing to compact; every later one carries exactly
+     one history section however many rotations preceded it. */
+  for (const prompt of [...summarized.slice(1), ...fellBack.slice(1)]) {
+    expect(prompt.split(HISTORY_HEADING)).toHaveLength(2);
+  }
+});
+
+test("a rotation whose summarizer is slow cannot revoke the designation that settled while it waited", async () => {
+  await seatIncumbent(stackedMandate("own the board", 2), "req_00001200");
+  const superseded = orchestratorSeatFor("proj-a").active!;
+
+  let enterSummarizer = (): void => {};
+  const entered = new Promise<void>((resolve) => { enterSummarizer = resolve; });
+  let releaseSummarizer = (): void => {};
+  const released = new Promise<void>((resolve) => { releaseSummarizer = resolve; });
+
+  const stale = dependencies({
+    spawn: async (body) => {
+      stale.recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(20), path: "/tmp/stale-successor.jsonl" } };
+    },
+    summarizeHandoffs: async (request) => {
+      stale.recorded.digests.push(request);
+      enterSummarizer();
+      await released;
+      return { kind: "digest", text: "Decisions:\n- composed against the superseded incumbent" };
+    },
+  });
+  const rotating = executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001201" }, stale.deps);
+  await entered;
+
+  /* A newer designation settles WHILE the rotation is parked in its summarizer,
+     so the rotation's incumbent, its mandate and its handoff are all stale. */
+  const newer = dependencies({
+    spawn: async () => ({ status: 200, body: { ok: true, conversationId: successorId(21), path: "/tmp/newer.jsonl" } }),
+  });
+  const seated = await executeOrchestratorSeatRequest({
+    ...spawnRequest("req_00001202"),
+    mandate: "own the board, freshly designated",
+    replaceIncumbent: true,
+  }, newer.deps);
+  expect(seated.status).toBe(200);
+
+  releaseSummarizer();
+  const rotated = await rotating;
+
+  /* Refused with the conflict, not silently applied on top of the newer seat. */
+  expect(rotated.status).toBe(409);
+  expect(rotated.body).toMatchObject({
+    code: "incumbent_changed",
+    currentConversationId: successorId(21),
+    rotatedFrom: { conversationId: superseded.conversationId, seatEpoch: superseded.seatEpoch },
+  });
+  /* No successor was spawned for it and no intent is left pending. */
+  expect(stale.recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+  /* The newer orchestrator still holds the seat, unrevoked. */
+  const active = orchestratorSeatFor("proj-a").active!;
+  expect(active.conversationId).toBe(successorId(21));
+  expect(active.seatEpoch).toBeGreaterThan(superseded.seatEpoch);
+  expect(activeOrchestratorSeats().map((seat) => seat.conversationId)).toEqual([successorId(21)]);
+  expect(orchestratorRevocations().some((revocation) => revocation.conversationId === successorId(21))).toBeFalse();
+  /* Rotating again recomposes from the seated orchestrator and succeeds. */
+  const retried = dependencies({
+    spawn: async (body) => {
+      retried.recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(22), path: "/tmp/retried.jsonl" } };
+    },
+  });
+  const second = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001203" }, retried.deps);
+  expect(second.status).toBe(200);
+  expect(String(retried.recorded.spawns[0]!.prompt)).toStartWith("own the board, freshly designated");
+  expect(orchestratorSeatFor("proj-a").active!.conversationId).toBe(successorId(22));
+});
+
+/** A second designation already in flight beside the seated incumbent: its
+    launch was accepted, but the request that accepted it never activated the
+    intent, so only reconciliation can seat it. */
+function seedPendingBesideIncumbent(input: { clientRequestId: string; launchId: string }): void {
+  const file = path.join(sandbox, "orchestrator-seats.json");
+  const state = JSON.parse(fs.readFileSync(file, "utf8")) as { nextSeatEpoch: number; pending: Record<string, unknown> };
+  state.pending["proj-a"] = {
+    project: "proj-a",
+    seatEpoch: state.nextSeatEpoch,
+    conversationId: null,
+    path: null,
+    engine: "claude",
+    model: "opus",
+    runtimeIdentityFrozen: true,
+    mandate: "own the board, freshly designated",
+    promptVersion: null,
+    predecessorConversationId: null,
+    state: "pending",
+    intent: { clientRequestId: input.clientRequestId, mode: "spawn", launchId: input.launchId, error: null },
+    designatedAt: AT,
+    activatedAt: null,
+  };
+  state.nextSeatEpoch += 1;
+  fs.writeFileSync(file, JSON.stringify(state), "utf8");
+}
+
+test("a pending launch that settles DURING summarization is seated, and the stale rotation cannot replace it", async () => {
+  await seatIncumbent(stackedMandate("own the board", 2), "req_00001210");
+  const superseded = orchestratorSeatFor("proj-a").active!;
+  const newer = successorId(30);
+  seedPendingBesideIncumbent({ clientRequestId: "req_00001211", launchId: "launch_newer" });
+
+  /* The settlement flips exactly once, inside the summarizer: UNKNOWN when the
+     rotation reconciles and reads its incumbent, SETTLED by the time it
+     composes. No timers, no interleaved requests — just the durable receipt
+     changing under a rotation that is parked on an await. */
+  let summarized = false;
+  const stale = dependencies({
+    spawn: async (body) => {
+      stale.recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(31), path: "/tmp/stale-successor.jsonl" } };
+    },
+    summarizeHandoffs: async (request) => {
+      stale.recorded.digests.push(request);
+      summarized = true;
+      return { kind: "digest", text: "Decisions:\n- composed against the superseded incumbent" };
+    },
+    launchSettlement: () => (summarized
+      ? { kind: "settled", conversationId: newer, path: "/tmp/newer.jsonl", launchId: "launch_newer" }
+      : { kind: "unknown" }),
+  });
+
+  const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001212" }, stale.deps);
+
+  expect(rotated.status).toBe(409);
+  expect(rotated.body).toMatchObject({
+    code: "incumbent_changed",
+    rotatedFrom: { conversationId: superseded.conversationId, seatEpoch: superseded.seatEpoch },
+  });
+  /* Nothing was spawned for the stale rotation and no intent is left pending. */
+  expect(stale.recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+  /* The reconciled designation holds the seat, unrevoked. */
+  const active = orchestratorSeatFor("proj-a").active!;
+  expect(active.conversationId).toBe(newer);
+  expect(active.seatEpoch).toBeGreaterThan(superseded.seatEpoch);
+  expect(activeOrchestratorSeats().map((seat) => seat.conversationId)).toEqual([newer]);
+  expect(orchestratorRevocations().some((revocation) => revocation.conversationId === newer)).toBeFalse();
 });
