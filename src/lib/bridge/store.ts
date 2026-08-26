@@ -12,7 +12,6 @@ import {
   BRIDGE_DRAIN_BATCH_MAX,
   BRIDGE_REPORT_BODY_MAX_BYTES,
   BRIDGE_REPORT_CAPACITY,
-  BRIDGE_REPORT_KEY_MAX_CHARS,
   BRIDGE_REPORT_LOG_SCHEMA_VERSION,
   BRIDGE_RETIRED_ID_CAPACITY,
   isBridgeDecisionRequestClass,
@@ -26,6 +25,7 @@ import {
   type BridgeReportLogV1,
   type BridgeReportOrigin,
   type BridgeReportV1,
+  type CanonicalSeatConversationId,
 } from "./types";
 
 /**
@@ -86,27 +86,6 @@ export class BridgeStateCorruptError extends Error {
 
 export function bridgeReportId(key: string): string {
   return `rpt_${crypto.createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
-}
-
-/**
- * Refuse a key the row could not keep verbatim, before the log is touched
- * (#1168).
- *
- * The key leaves the log again as the attention item's id, so a row must never
- * carry one the store had to reshape to fit — a truncation would collide two
- * long keys sharing a prefix into a single attention identity, and a hashed
- * fallback would silently break "id = report key". The whole input list is
- * checked ahead of the transaction so a rejected key costs the caller its error
- * and never a half-written batch.
- */
-function assertStorableKeys(inputs: readonly BridgeReportInput[]): void {
-  for (const input of inputs) {
-    if (input.key.length > BRIDGE_REPORT_KEY_MAX_CHARS) {
-      throw new Error(
-        `a bridge report key is at most ${BRIDGE_REPORT_KEY_MAX_CHARS} characters (this one is ${input.key.length}); it identifies the report to the operator, so it is refused rather than shortened`,
-      );
-    }
-  }
 }
 
 /**
@@ -413,7 +392,6 @@ export function appendBridgeReports(
   inputs: readonly BridgeReportInput[],
 ): { appended: BridgeReportV1[]; skipped: number } {
   if (inputs.length === 0) return { appended: [], skipped: 0 };
-  assertStorableKeys(inputs);
   return withFileTransactionSync(bridgeReportLogPath(), BRIDGE_LOG_BUSY, () => {
     const file = readLog();
     const known = new Set<string>([...file.reports.map((report) => report.id), ...file.retired]);
@@ -511,16 +489,34 @@ export function appendBridgeReports(
  *   another project's ask, because the number carries no ownership of its own;
  * - a ref naming a `status` row settles nothing that was ever asking.
  *
+ * The seat fence compares CANONICAL identities on both sides, through the
+ * caller's resolver. The recorded seat is whatever the conversation was called
+ * when the report was routed and the scope's is whatever the seat authority
+ * calls it now, so raw equality fails after an account migration rekeys it —
+ * and it fails on the one side that matters, because the attention projection
+ * canonicalizes too and had already moved the ask onto the live card. The
+ * resolver travels in rather than being read here so this stays a pure durable
+ * store; passing it is not optional, because an identity resolver nobody
+ * supplied is exactly the raw comparison this fence exists to stop being.
+ *
  * Idempotent, so a directive retry under the same derived id costs nothing.
  */
-export function recordBridgeDirectiveAnswer(ref: number, scope: BridgeChannelScope): void {
+export function recordBridgeDirectiveAnswer(
+  ref: number,
+  scope: BridgeChannelScope,
+  canonicalSeatConversationId: CanonicalSeatConversationId,
+): void {
   if (!Number.isInteger(ref) || ref < 1) return;
   withFileTransactionSync(bridgeReportLogPath(), BRIDGE_LOG_BUSY, () => {
     const file = readLog();
     const answered = file.reports.find((report) => report.seq === ref);
     if (!answered || !isBridgeDecisionRequestClass(answered.class)) return;
     if (answered.project !== scope.project) return;
-    if (answered.targetSeatConversationId !== scope.seatConversationId) return;
+    const recordedSeat = answered.targetSeatConversationId;
+    /* An unrouted row is the log's quarantine: it opened no ask, so there is
+       nothing here for a directive to settle. */
+    if (!recordedSeat) return;
+    if (canonicalSeatConversationId(recordedSeat) !== canonicalSeatConversationId(scope.seatConversationId)) return;
     const refs = file.answeredRefs ?? [];
     if (refs.includes(ref)) return;
     file.answeredRefs = normalizeAnsweredRefs([...refs, ref]);

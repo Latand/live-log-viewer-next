@@ -57,10 +57,38 @@ describe("openBridgeAsks", () => {
     expect(asks.get(SEAT)).toEqual({ id: "lane-4-blocked", at: NOW.toISOString() });
   });
 
-  test("a row written before the log kept keys still asks, under its derived id", () => {
+  test("a row written before the log kept keys opens nothing at all", () => {
+    /* #1168 asks for `id = the report key`, verbatim, on EVERY emitted item.
+       A legacy row has no key to carry and the hashed `id` cannot be spelled
+       back out into one, so the row stays out of this projection rather than
+       being enqueued under an identity that is not the one the contract names.
+       It is bounded damage: keyless rows predate the field, the log's capacity
+       retires them, and the seat's next report opens an ask that does comply. */
     const legacy = report({ seq: 4, class: "blocked" });
     delete legacy.key;
-    expect(openBridgeAsks(log([legacy]), { now: NOW }).get(SEAT)?.id).toBe("rpt_4");
+    expect(openBridgeAsks(log([legacy]), { now: NOW }).size).toBe(0);
+
+    /* An empty key is no key either — nothing may reach a card under "". */
+    expect(openBridgeAsks(log([report({ seq: 5, class: "blocked", key: "" })]), { now: NOW }).size).toBe(0);
+
+    /* …and it is still the project's last word, so it supersedes the ask the
+       seat was carrying rather than letting a stale one resurface. */
+    const superseding = report({ seq: 6, class: "blocked" });
+    delete superseding.key;
+    expect(openBridgeAsks(log([report({ seq: 2, key: "old-ask", class: "blocked" }), superseding]), { now: NOW }).size).toBe(0);
+  });
+
+  test("every emitted item carries the report key it was filed under, and nothing else can be one", () => {
+    const asks = openBridgeAsks(
+      log([
+        report({ seq: 1, key: "ask-a", class: "blocked" }),
+        report({ seq: 2, key: "ask-b", class: "question", project: OTHER_PROJECT, targetSeatConversationId: OTHER_SEAT }),
+      ]),
+      { now: NOW },
+    );
+    expect([...asks.values()].map((ask) => ask.id)).toEqual(["ask-a", "ask-b"]);
+    /* The hashed id never leaks in as a substitute. */
+    expect([...asks.values()].some((ask) => ask.id.startsWith("rpt_"))).toBe(false);
   });
 
   test("classes that are not a decision request open nothing", () => {

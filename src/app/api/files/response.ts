@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
 import { overlayBridgeAsks } from "@/lib/bridge/asks";
+import { seatIdentityResolver } from "@/lib/bridge/seatIdentity";
 import { bridgeAsksForSeats } from "@/lib/bridge/service";
 import { pinnedIdentityEntries } from "@/lib/scanner/pinRideAlong";
 import { identityAlive, livenessProbe } from "@/lib/agent/accountLiveness";
@@ -798,9 +799,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   overlayBridgeAsks(
     projected.files,
     bridgeAsksForSeats({
-      canonicalConversationId: (conversationId) => conversationId.startsWith("conversation_")
-        ? conversationLookup.canonicalConversationId(conversationId as `conversation_${string}`)
-        : conversationId,
+      canonicalConversationId: seatIdentityResolver(conversationLookup.canonicalConversationId),
     }),
   );
   markTiming("files-bridge-asks");

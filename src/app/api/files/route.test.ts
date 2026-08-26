@@ -6,6 +6,7 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { seatIdentityResolver } from "@/lib/bridge/seatIdentity";
 import { recordBridgeDirectiveAnswer, recordManagerReport } from "@/lib/bridge/service";
 import { createManualProject, setProjectCrown } from "@/lib/projects/curation";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
@@ -3202,6 +3203,10 @@ test("crowned and manually created projects flow through the files payload", asy
   }
 });
 
+/** The production seat resolver: the registry's own alias chain, exactly as
+    `/api/files` and the MCP relay both take their seat identities through. */
+const registrySeatIdentity = seatIdentityResolver((id) => agentRegistry().canonicalConversationId(id));
+
 test("issue 1168: the seat's open bridge ask rides the files payload and clears on the answering directive", async () => {
   const seatPath = "/sessions/orchestrator-seat.jsonl";
   const seat = agentRegistry().ensureConversation("codex", seatPath, null);
@@ -3225,7 +3230,48 @@ test("issue 1168: the seat's open bridge ask rides the files payload and clears 
 
   /* Nothing above opened a gateway channel or moved a cursor: this reaches the
      operator with the voice gateway off, which is the whole point of #1168. */
-  recordBridgeDirectiveAnswer(filed!.seq, { project: "repo", seatConversationId: seat.id });
+  recordBridgeDirectiveAnswer(filed!.seq, { project: "repo", seatConversationId: seat.id }, registrySeatIdentity);
+  const answered = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
+  expect(answered.files.find((entry) => entry.path === seatPath)?.bridgeAsk).toBeUndefined();
+});
+
+test("issue 1168: a seat rekeyed since it filed keeps one identity — the ask reaches its card and the directive still clears it", async () => {
+  /* The reviewer's HIGH: the projection resolved a recorded seat through the
+     registry so a migrated conversation's ask lands on the card that exists,
+     while the settlement compared raw ids. The rekey that made the item visible
+     was therefore the rekey that made it unanswerable, and the queue kept a
+     decision request nothing in the log could retire. */
+  const seatPath = "/sessions/orchestrator-seat-rekeyed.jsonl";
+  const registry = agentRegistry();
+  const seat = registry.ensureConversation("codex", seatPath, null);
+  const preMigrationSeatId = "conversation_seat_before_migration";
+  const realSnapshot = registry.readOnlySnapshot.bind(registry);
+  registry.readOnlySnapshot = () => {
+    const snapshot = realSnapshot();
+    return {
+      ...snapshot,
+      conversationAliases: { ...snapshot.conversationAliases, [preMigrationSeatId]: seat.id },
+    };
+  };
+
+  scannedFiles = [file(seatPath)];
+  /* Routed under the id the seat had WHEN IT ASKED — the log is history and is
+     never rewritten by a migration. */
+  const filed = recordManagerReport({
+    key: "lane-4-blocked",
+    class: "blocked",
+    at: new Date().toISOString(),
+    project: "repo",
+    targetSeatConversationId: preMigrationSeatId,
+    body: "cannot proceed: the lane needs a base branch",
+  });
+
+  const asking = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
+  expect(asking.files.find((entry) => entry.path === seatPath)?.bridgeAsk?.id).toBe("lane-4-blocked");
+
+  /* The relay only ever knows the seat by the identity the seat authority hands
+     it, which is the canonical one. */
+  recordBridgeDirectiveAnswer(filed!.seq, { project: "repo", seatConversationId: seat.id }, registrySeatIdentity);
   const answered = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
   expect(answered.files.find((entry) => entry.path === seatPath)?.bridgeAsk).toBeUndefined();
 });

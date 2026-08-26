@@ -58,18 +58,6 @@ export const BRIDGE_ANSWERED_REF_CAPACITY = 500;
 export const BRIDGE_ASK_TTL_SECONDS = 2 * 3600;
 /** §3: report bodies are bounded. Measured in UTF-8 bytes, not code units. */
 export const BRIDGE_REPORT_BODY_MAX_BYTES = 2_048;
-/**
- * The longest caller `key` a report may be filed under (#1168).
- *
- * The key is caller-supplied text that leaves the log again as the attention
- * item's id, so it is bounded like everything else a caller writes here — and
- * this bound REFUSES rather than reshapes. Truncating would let two long keys
- * sharing a prefix collide into one attention identity, and falling back to the
- * hashed id would break "id = report key" for exactly the reports the queue
- * exists to carry. So an oversized key is rejected at the tool schema and again
- * at append, before any row exists to be identified.
- */
-export const BRIDGE_REPORT_KEY_MAX_CHARS = 256;
 
 /**
  * The fixed, small set of things the manager may tell the gateway. Deliberately
@@ -154,6 +142,13 @@ export function bridgeReportOriginLabel(origin: BridgeReportOrigin | undefined):
   return origin.conversationId ? `${who} ${origin.conversationId}` : who;
 }
 
+/**
+ * Resolves a recorded seat identity to the conversation id the registry calls
+ * it now (#1168). Both the ask projection and a directive's settlement run
+ * EVERY seat identity through the same one — see `seatIdentity.ts`.
+ */
+export type CanonicalSeatConversationId = (conversationId: string) => string;
+
 export interface BridgeReportV1 {
   /** Monotonic, never reused — THE cursor unit. */
   seq: number;
@@ -163,7 +158,8 @@ export interface BridgeReportV1 {
       attention item, which the hashed `id` cannot spell back out. Kept only on
       the decision-request classes, which are the only rows that become an
       attention item; absent on every other class and on rows written before
-      this field existed, where readers fall back to `id`. */
+      this field existed, which open no ask at all rather than being enqueued
+      under some other identity. */
   key?: string;
   at: string;
   class: BridgeStoredReportClass;

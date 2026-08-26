@@ -6,6 +6,7 @@ import {
   BRIDGE_ASK_TTL_SECONDS,
   type BridgeReportLogV1,
   type BridgeReportV1,
+  type CanonicalSeatConversationId,
 } from "./types";
 
 /**
@@ -54,24 +55,35 @@ function isManagerVoice(report: BridgeReportV1): boolean {
 }
 
 /**
- * The identity #1168 puts on the attention item: the caller's own report key.
+ * The identity #1168 puts on the attention item: the caller's own report key,
+ * verbatim, or nothing.
  *
- * Every decision request written since the log kept keys carries one verbatim —
- * a key it could not keep is refused at append rather than reshaped, so there is
- * no live path to the fallback. Rows written BEFORE the field existed still ask,
- * under the derived id that identified them then. Both are stable across
- * re-reads, which is the property the queue needs.
+ * The acceptance criterion is `id = the report key`, so there is no substitute
+ * to fall back to — the hashed `id` is a digest and cannot be spelled back out
+ * into the key it was derived from. A row that carries no key therefore opens
+ * no ask at all rather than reaching the operator's card under an identity the
+ * contract does not name.
+ *
+ * Only rows written BEFORE the log kept keys are in that position; the store
+ * writes every decision request's key through verbatim, so nothing appended
+ * since can land here. Excluding them is bounded: the log's capacity retires
+ * them, the seat's next report opens a compliant ask, and the seat keeps every
+ * other attention signal it had before this projection existed.
  */
-function askIdentity(report: BridgeReportV1): string {
-  return report.key ?? report.id;
+function askIdentity(report: BridgeReportV1): string | null {
+  const key = report.key?.trim();
+  return key ? key : null;
 }
 
 export interface OpenBridgeAskOptions {
   now: Date;
   ttlSeconds?: number;
   /** Resolves a report's recorded seat to the conversation identity the file
-      scan carries, so an account migration's rekey does not orphan the ask. */
-  canonicalConversationId?: (conversationId: string) => string;
+      scan carries, so an account migration's rekey does not orphan the ask. The
+      SAME resolver settles a directive's ref (`recordBridgeDirectiveAnswer`):
+      one side canonicalizing while the other compares raw ids is how a rekeyed
+      seat's ask outlives the directive that answered it. */
+  canonicalConversationId?: CanonicalSeatConversationId;
 }
 
 /**
@@ -117,7 +129,9 @@ export function openBridgeAsks(
        worse than one that never opened. */
     if (!Number.isFinite(at)) continue;
     if (options.now.getTime() - at > ttlMs) continue;
-    asks.set(canonical(seat), { id: askIdentity(report), at: report.at });
+    const id = askIdentity(report);
+    if (id === null) continue;
+    asks.set(canonical(seat), { id, at: report.at });
   }
   return asks;
 }

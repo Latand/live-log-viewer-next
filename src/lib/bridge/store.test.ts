@@ -18,7 +18,6 @@ import {
   BRIDGE_DRAIN_BATCH_MAX,
   BRIDGE_REPORT_BODY_MAX_BYTES,
   BRIDGE_REPORT_CAPACITY,
-  BRIDGE_REPORT_KEY_MAX_CHARS,
   MANAGER_RECORD_REF,
   type BridgeReportInput,
 } from "./types";
@@ -137,24 +136,39 @@ test("a decision request keeps the caller's key verbatim; other classes keep non
   expect(appended.appended[1]!.id).toBe(bridgeReportId("stage-7-progress"));
 });
 
-test("a key too long to keep verbatim is refused before anything is appended (#1168)", () => {
+test("a long report key is accepted for every class, exactly as it was before #1168", () => {
   sandbox();
   openBridgeChannel(ROOT_ID);
-  appendBridgeReports([report("lane-4-blocked", { class: "blocked" })]);
 
-  /* Neither shortened into an identity two reports could share nor demoted to
-     the hash — both would break "the item id is the report key" for a report
-     the log had already accepted. The whole batch fails, so the well-formed
-     sibling filed alongside it does not land either. */
-  const oversized = "k".repeat(BRIDGE_REPORT_KEY_MAX_CHARS + 1);
-  expect(() => appendBridgeReports([
-    report("lane-5-blocked", { class: "blocked" }),
-    report(oversized, { class: "blocked" }),
-  ])).toThrow(new RegExp(`at most ${BRIDGE_REPORT_KEY_MAX_CHARS} characters`));
+  /* #1168 needed the key kept VERBATIM, and nothing on this path reshapes one:
+     it is either stored whole or (for the classes that never become an
+     attention item) not stored at all. So the length policy the issue's first
+     pass added bounded nothing that would otherwise have been broken, while it
+     narrowed the acceptance contract of four report classes that have nothing
+     to do with the attention queue. It is gone; a caller's key is a caller's
+     key again. */
+  const long = `lane-${"k".repeat(400)}`;
+  const appended = appendBridgeReports([
+    report(long, { class: "status" }),
+    report(`${long}-done`, { class: "completed" }),
+    report(`${long}-failed`, { class: "failed" }),
+    report(`${long}-verdict`, { class: "review_verdict" }),
+    report(`${long}-blocked`, { class: "blocked" }),
+    report(`${long}-question`, { class: "question" }),
+  ]);
+  expect(appended.appended).toHaveLength(6);
+  expect(readBridgeReportLog().lastSeq).toBe(6);
 
-  const log = readBridgeReportLog();
-  expect(log.reports.map((entry) => entry.key)).toEqual(["lane-4-blocked"]);
-  expect(log.lastSeq).toBe(1);
+  /* And the decision requests still carry theirs back out whole — the property
+     the queue's identity actually depends on. */
+  expect(readBridgeReportLog().reports.map((entry) => entry.key)).toEqual([
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    `${long}-blocked`,
+    `${long}-question`,
+  ]);
 });
 
 test("the drain returns one bounded batch oldest first and reports what is left", () => {

@@ -9,7 +9,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { FOCUS_TARGET_SHAPES } from "@/lib/attention/targets";
-import { BRIDGE_REPORT_KEY_MAX_CHARS } from "@/lib/bridge/types";
 import { statePath } from "@/lib/configDir";
 import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { DEFAULT_STALL_AFTER_MS } from "@/lib/lifecycle/liveness";
@@ -2047,7 +2046,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
   }).passthrough(),
   bridge_report: z.object({
     clientRequestId: clientRequestIdSchema,
-    key: z.string().min(1).max(BRIDGE_REPORT_KEY_MAX_CHARS).describe(`Stable identity of this report. The same key always yields one log entry, so a retry after a host death is a no-op. At most ${BRIDGE_REPORT_KEY_MAX_CHARS} characters: a blocked/question report is shown to the operator under this key, so an oversized one is refused rather than shortened.`),
+    key: z.string().min(1).describe("Stable identity of this report. The same key always yields one log entry, so a retry after a host death is a no-op."),
     class: z.enum(["status", "completed", "failed", "blocked", "review_verdict", "question"]),
     body: z.string().min(1).describe("Short prose for the gateway to relay. Bounded to 2 KB and secret-redacted at write. Never transcript payloads or raw tool output."),
     correlatesDirective: z.string().optional().describe("clientRequestId of the directive this answers."),

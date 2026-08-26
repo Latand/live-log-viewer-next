@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 
 import { rememberAcknowledgedVoiceDelivery } from "@/lib/runtime/voiceDelivery";
+import type { FileEntry } from "@/lib/types";
 
+import { overlayBridgeAsks } from "./asks";
+import { seatIdentityResolver } from "./seatIdentity";
 import {
   acknowledgeBridgeDelivery,
   bridgeAsksForSeats,
@@ -45,10 +48,37 @@ const ROOT_ID = "root_service_0001";
 const NOW = new Date("2026-07-27T12:00:00.000Z");
 
 const rootIdentity = () => ROOT_ID;
+/** The registry with nothing rekeyed: every seat identity resolves to itself. */
+const noRekey = seatIdentityResolver((id) => id);
 const SCOPE = {
   project: "repo-project-a",
   seatConversationId: "conversation_manager_a",
 };
+
+/** The scanned row `/api/files` projects for a seat, reduced to the fields the
+    ask overlay reads. */
+function fileEntry(conversationId: string): FileEntry {
+  return {
+    path: "/sessions/seat.jsonl",
+    root: "claude-projects",
+    name: "seat.jsonl",
+    project: SCOPE.project,
+    title: "seat",
+    engine: "claude",
+    kind: "session",
+    fmt: "claude",
+    parent: null,
+    mtime: 0,
+    size: 0,
+    activity: "idle",
+    proc: null,
+    pid: null,
+    model: null,
+    pendingQuestion: null,
+    waitingInput: null,
+    conversationId,
+  };
+}
 
 function recordManagerReport(input: BridgeReportInput) {
   return recordBridgeReport({
@@ -297,7 +327,7 @@ test("a directive that answers the report's seq clears the ask", () => {
   });
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
 
-  recordBridgeDirectiveAnswer(appended!.seq, SCOPE);
+  recordBridgeDirectiveAnswer(appended!.seq, SCOPE, noRekey);
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
 
   /* Durable: the answer survives a later append, which rewrites the log file. */
@@ -313,7 +343,7 @@ test("answering a different seq leaves the ask standing", () => {
     at: NOW.toISOString(),
     body: "which base branch?",
   });
-  recordBridgeDirectiveAnswer(appended!.seq + 41, SCOPE);
+  recordBridgeDirectiveAnswer(appended!.seq + 41, SCOPE, noRekey);
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
 });
 
@@ -329,7 +359,7 @@ test("a ref that names nothing yet cannot pre-answer the report that later takes
   sandbox();
   /* Nothing has been filed: seq 1 does not exist. Recorded blindly, it would
      sit in the log waiting for the first report to arrive and be born answered. */
-  recordBridgeDirectiveAnswer(1, SCOPE);
+  recordBridgeDirectiveAnswer(1, SCOPE, noRekey);
 
   const appended = recordManagerReport({
     key: "lane-9-question",
@@ -353,16 +383,16 @@ test("another project's directive cannot clear this project's ask", () => {
   recordBridgeDirectiveAnswer(appended!.seq, {
     project: "repo-project-b",
     seatConversationId: "conversation_manager_b",
-  });
+  }, noRekey);
   /* Same seq, wrong owner on both axes — and the seat alone is not enough
      either, since a seq is global across projects. */
   recordBridgeDirectiveAnswer(appended!.seq, {
     project: SCOPE.project,
     seatConversationId: "conversation_manager_b",
-  });
+  }, noRekey);
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
 
-  recordBridgeDirectiveAnswer(appended!.seq, SCOPE);
+  recordBridgeDirectiveAnswer(appended!.seq, SCOPE, noRekey);
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
 });
 
@@ -376,13 +406,13 @@ test("a ref naming a report that was never asking settles nothing, and a retry s
     body: "which base branch?",
   });
 
-  recordBridgeDirectiveAnswer(progress!.seq, SCOPE);
+  recordBridgeDirectiveAnswer(progress!.seq, SCOPE, noRekey);
   expect(readBridgeReportLog().answeredRefs ?? []).toEqual([]);
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
 
   /* A directive retry re-presents the same ref; the log records it once. */
-  recordBridgeDirectiveAnswer(question!.seq, SCOPE);
-  recordBridgeDirectiveAnswer(question!.seq, SCOPE);
+  recordBridgeDirectiveAnswer(question!.seq, SCOPE, noRekey);
+  recordBridgeDirectiveAnswer(question!.seq, SCOPE, noRekey);
   expect(readBridgeReportLog().answeredRefs).toEqual([question!.seq]);
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
 });
@@ -409,4 +439,70 @@ test("an unreadable report log costs the ask, never the caller", () => {
   fs.mkdirSync(path.join(dir, "state"), { recursive: true });
   fs.writeFileSync(path.join(dir, "state", "bridge-reports.json"), "{ truncated");
   expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
+});
+
+/**
+ * The seat identity an ask is compared under has to be ONE identity (#1168
+ * final review, HIGH 1).
+ *
+ * `openBridgeAsks` already resolves a recorded seat through the registry so a
+ * migrated conversation's ask lands on the card the operator can actually see.
+ * The settlement side compared raw ids, so the same rekey that moved the ask
+ * onto the live card made the answering directive unable to reach it: the item
+ * stayed in the queue forever with nothing left in the log able to retire it.
+ * Both sides run every seat identity through the SAME resolver here.
+ */
+
+const MIGRATED_SEAT = "conversation_manager_a_migrated";
+/** The registry's answer after the seat was rekeyed — the shape both surfaces
+    take their identities through. */
+const afterRekey = seatIdentityResolver((id) => (id === SCOPE.seatConversationId ? MIGRATED_SEAT : id));
+
+test("an ask filed under a seat's pre-rekey id is cleared by the directive answered against its canonical id", () => {
+  sandbox();
+  const asked = recordManagerReport({
+    key: "lane-9-question",
+    class: "question",
+    at: NOW.toISOString(),
+    body: "which base branch?",
+  });
+
+  /* The projection moved the ask onto the CANONICAL card… */
+  const asks = bridgeAsksForSeats({ now: NOW, canonicalConversationId: afterRekey });
+  expect([...asks.keys()]).toEqual([MIGRATED_SEAT]);
+  const seatEntry = fileEntry(MIGRATED_SEAT);
+  overlayBridgeAsks([seatEntry], asks);
+  expect(seatEntry.bridgeAsk?.id).toBe("lane-9-question");
+
+  /* …so the directive settling it names the canonical seat too, which is the
+     only identity `authorizedManagerSeats` hands the relay. */
+  recordBridgeDirectiveAnswer(asked!.seq, { project: SCOPE.project, seatConversationId: MIGRATED_SEAT }, afterRekey);
+
+  const cleared = bridgeAsksForSeats({ now: NOW, canonicalConversationId: afterRekey });
+  expect(cleared.size).toBe(0);
+  expect(readBridgeReportLog().answeredRefs).toEqual([asked!.seq]);
+  const clearedEntry = fileEntry(MIGRATED_SEAT);
+  overlayBridgeAsks([clearedEntry], cleared);
+  expect(clearedEntry.bridgeAsk).toBeUndefined();
+});
+
+test("canonicalizing does not widen the fence: another seat's directive still settles nothing", () => {
+  sandbox();
+  const asked = recordManagerReport({
+    key: "lane-9-question",
+    class: "question",
+    at: NOW.toISOString(),
+    body: "which base branch?",
+  });
+
+  /* A seat the resolver leaves alone is a DIFFERENT seat, canonical or not. */
+  recordBridgeDirectiveAnswer(asked!.seq, { project: SCOPE.project, seatConversationId: "conversation_manager_b" }, afterRekey);
+  /* …and the project fence still holds under the same resolver. */
+  recordBridgeDirectiveAnswer(asked!.seq, { project: "repo-project-b", seatConversationId: MIGRATED_SEAT }, afterRekey);
+  expect(bridgeAsksForSeats({ now: NOW, canonicalConversationId: afterRekey }).size).toBe(1);
+
+  /* …and a `status` row under the right seat is still not something to answer. */
+  const progress = recordManagerReport({ key: "lane-9-progress", class: "status", at: NOW.toISOString(), body: "moving" });
+  recordBridgeDirectiveAnswer(progress!.seq, { project: SCOPE.project, seatConversationId: MIGRATED_SEAT }, afterRekey);
+  expect(readBridgeReportLog().answeredRefs).toEqual([]);
 });
