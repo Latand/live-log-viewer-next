@@ -49,6 +49,11 @@ const PROJECTION_STATE_FILES = [
   "project-curation.json",
   "worktree-map.json",
   "reaper-state.json",
+  /* The orchestrator's open ask is derived from this log (issue #1168), so a
+     report filed — or answered — between two identical scans has to invalidate
+     the projection. Without it the ask would appear, and clear, only when some
+     unrelated store happened to move. */
+  "bridge-reports.json",
 ] as const;
 const projectionCacheStore = globalThis as typeof globalThis & {
   __llvFilesProjectionCache?: Map<string, CachedProjection>;

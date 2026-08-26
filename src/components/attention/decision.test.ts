@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { BRIDGE_ASK_TTL_SECONDS } from "@/lib/bridge/types";
 import { translate, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -246,5 +247,30 @@ describe("the naming follows the queue's own precedence, so one wait is never tw
     expect(line(file({ ...all, pendingQuestion: null }))).toBe("rate-limited");
     expect(line(file({ ...all, pendingQuestion: null, rateLimit: null }))).toBe("permission prompt");
     expect(line(file({ ...all, pendingQuestion: null, rateLimit: null, waitingInput: null }))).toBe("interrupted or awaiting permission");
+  });
+});
+
+/*
+ * The orchestrator's own ask (issue #1168) sits above the seat's transcript in
+ * `attentionId`'s ladder, so it has to sit above it here too — otherwise the
+ * row is enqueued under the manager's escalation while the toast beside it
+ * names whatever the seat happens to be prompting for. The ask ages out on the
+ * queue's clock rather than on a poll, and the words age out with it.
+ */
+describe("an escalated bridge ask names the decision, and stops naming it when it expires", () => {
+  const ask = (agoSeconds: number) => ({ id: "lane-4-blocked", at: new Date((NOW - agoSeconds) * 1000).toISOString() });
+
+  test("an open ask outranks the seat's own prompt", () => {
+    const seat = file({ bridgeAsk: ask(900), pendingQuestion: question() });
+    expect(line(seat)).toBe("the orchestrator is waiting on your decision");
+  });
+
+  test("an expired ask hands the words back to the signal the queue fell through to", () => {
+    const seat = file({ bridgeAsk: ask(BRIDGE_ASK_TTL_SECONDS + 1), pendingQuestion: question() });
+    expect(line(seat)).toBe("Hero frame");
+  });
+
+  test("nothing else is disturbed: a seat with no ask keeps its historical wording", () => {
+    expect(line(file({ pendingQuestion: question() }))).toBe("Hero frame");
   });
 });
