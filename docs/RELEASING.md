@@ -76,6 +76,16 @@ Deployment state is available through `POST /api/runtime/deployments`, `GET /api
 
 The legacy direct Compose replacement workflow is unsupported after listener migration.
 
+## Dependency updates
+
+Dependabot opens one grouped npm pull request a week, plus security updates as they land ([`.github/dependabot.yml`](../.github/dependabot.yml)). Its npm ecosystem rewrites `package.json` and leaves `bun.lock` alone, which the lockfile-integrity rule in [`supply-chain.yml`](../.github/workflows/supply-chain.yml) rejects and `bun install --frozen-lockfile` refuses outright, so [`dependabot-lockfile.yml`](../.github/workflows/dependabot-lockfile.yml) runs `bun install --lockfile-only` on the Dependabot branch and commits the result as `chore(deps): refresh bun.lock` through the repository `GITHUB_TOKEN`. The commit carries the GitHub Actions bot as its author because the contents API takes the identity from the token.
+
+GitHub raises no `synchronize` for a push made with that token, so nothing would inspect the commit the refresh just wrote. The refresh dispatches `supply-chain.yml`, `privacy-publication.yml` and `privacy-tracker-audit.yml` against the branch afterwards; each dispatched run reads the branch head, which is the commit its own check run lands on. Those three workflows accept `workflow_dispatch` for that reason alone, and their pull-request paths are untouched.
+
+The refresh runs only for a pull request opened by `dependabot[bot]` from a branch of this repository, and it is the only job here that receives `contents: write`. A branch a person named `dependabot/…` does not reach it.
+
+A Dependabot pull request opened before this workflow merged does not carry the file on its own branch, and a `pull_request` workflow runs from the branch, so comment `@dependabot rebase` on it once to pull the workflow in. Dependabot stops rebasing a pull request once anything else has pushed to it, so refresh the branch before the lockfile commit lands rather than after.
+
 ## Package release
 
 High-severity dependency exceptions require a reason and expiry in [`security/audit-allowlist.json`](../security/audit-allowlist.json); expired entries fail the audit gate.
