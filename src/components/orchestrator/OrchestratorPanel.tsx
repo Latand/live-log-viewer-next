@@ -10,6 +10,8 @@ import {
   type LaunchAccountCatalog,
   type LaunchDraftStorage,
 } from "@/components/draft/AgentLaunchControls";
+import { refreshRuntime } from "@/hooks/useRuntime";
+import { requestFilesRefresh } from "@/lib/filesEvents";
 import { useLocale, type MessageKey } from "@/lib/i18n";
 import {
   ORCHESTRATOR_PROMPT_VERSION,
@@ -196,11 +198,26 @@ export function OrchestratorPanel({
      the server was never asked to confirm, so the bound stays silent and
      «opening…» stands until a status read answers again (issue #1182). */
   const hostLive = !readStale && incumbentHostLive(incumbent);
-  /* Re-bind: re-run resolution from both reads it is composed of. It designates,
-     rotates and spawns nothing — recovering a restart must never cost a seat. */
+  /**
+   * Re-bind: re-run EVERY read resolution is composed of.
+   *
+   * The two orchestrator endpoints say which conversation the seat holds and
+   * where its current generation lives; neither one is what a bounded wait is
+   * missing. `catalog` is missing the file catalog — the board's own read, which
+   * `requestFilesRefresh()` re-runs through the seam `useFiles` listens on — and
+   * `surface` is missing the runtime plane's host for a transcript already in
+   * hand, which is `refreshRuntime()`. Re-reading only the seat and the status
+   * would leave whichever half was actually absent exactly as absent, so the
+   * button would spin and change nothing (issue #1182).
+   *
+   * It designates, rotates and spawns nothing: recovering from a restart must
+   * never cost the operator a seat.
+   */
   const rebind = () => {
     void refresh();
     void refreshIncumbent();
+    requestFilesRefresh();
+    void refreshRuntime();
   };
 
   const create = useSeatConfirm({ url: "/api/orchestrator/seat", project, storage: draftStorage, field: "requestId", status, refresh });
@@ -961,9 +978,9 @@ function OpenOnBoardLink({ conversationId }: { conversationId: string }) {
   );
 }
 
-/** Re-run resolution. It re-reads the seat and the status the durable id is
-    resolved through, and does nothing else — recovering from a restart must
-    never cost the operator a rotation (issue #1182). */
+/** Re-run resolution — all four of its reads, including the two a bounded wait
+    is actually missing (see `rebind`). It re-reads and nothing else: recovering
+    from a restart must never cost the operator a rotation (issue #1182). */
 function RebindButton({ onRebind }: { onRebind: () => void }) {
   const { t } = useLocale();
   return (

@@ -4,6 +4,8 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
+import type { RuntimeSessionView } from "@/hooks/useRuntime";
+import { FILES_CHANGED_EVENT } from "@/lib/filesEvents";
 import { setLocale } from "@/lib/i18n";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import type { FileEntry } from "@/lib/types";
@@ -52,16 +54,29 @@ const actualLogTail = await import("@/hooks/useLogTail");
     holding a running conversation at `unresolved` — the half of «opening…» that
     is not the catalog's (#1182). */
 let runtimePlaneOn: boolean;
+/** The host the plane resolves for the seat's transcript right now — null is the
+    plane holding it at `unresolved`. */
+let runtimeSession: RuntimeSessionView | null;
+/** What the plane would answer if someone ASKED it: `refreshRuntime()` is the
+    only thing that moves it, so a panel that never calls that seam sees
+    `runtimeSession` stay exactly where it was (#1182). */
+let runtimeAnswer: RuntimeSessionView | null;
+let runtimeRefreshes: number;
 mock.module("@/hooks/useRuntime", () => ({
   ...actualRuntimeHooks,
   useRuntimeBusState: () => ({ enabled: false, connection: "off", resyncedAt: null, lastEventAt: null, store: emptyStore() }),
   useRuntime: () => ({ enabled: false, connection: "off", resyncedAt: null, store: emptyStore() }),
   useRuntimeEnabled: () => runtimePlaneOn,
-  useRuntimeSession: () => null,
+  useRuntimeSession: () => runtimeSession,
   useRuntimeSessionForConversation: () => null,
   useRuntimeSessionByArtifact: () => null,
   useRuntimeReceiptsForArtifact: () => [],
   useRuntimeFlow: () => null,
+  refreshRuntime: () => {
+    runtimeRefreshes += 1;
+    runtimeSession = runtimeAnswer;
+    return Promise.resolve(runtimeAnswer !== null);
+  },
 }));
 /** What the feed already holds for a path. The real hook keeps exactly this —
     a browser-wide per-path snapshot of the tail (`useLogTail`'s own cache),
@@ -220,6 +235,41 @@ const orchestratorFile: FileEntry = {
   waitingInput: null,
 } as FileEntry;
 
+/** How many times the file catalog was asked to re-read itself — Re-bind is only
+    a re-bind if it reaches the seam that owns the half it is missing (#1182). */
+let catalogReloads = 0;
+let detachCatalog: (() => void) | null = null;
+
+/** The plane resolving a structured host for the seat's transcript: a session
+    the capability matrix classifies as `structured`, so the surface the panel
+    was waiting on finally has an answer. */
+const hostedSession = (): RuntimeSessionView => ({
+  session: {
+    conversationId: "conversation_orch",
+    sessionKey: { engine: "claude", sessionId: "session-orch" },
+    hostKind: "claude-broker",
+    host: "hosted",
+    turn: "idle",
+    provenance: "structured",
+    revision: 1,
+    attentionIds: [],
+    recentReceipts: [],
+    accountId: "spare",
+    parentConversationId: null,
+    flowId: null,
+    workflowId: null,
+    cwd: "/repos/atlas/worktrees/board",
+    artifactPath: "/transcripts/orch.jsonl",
+    capabilities: { steer: true, structuredAttention: true },
+    activeTurnId: null,
+  },
+  uiState: "idle",
+  attentions: [],
+  receipts: [],
+  legacy: false,
+  structuredControlsEnabled: true,
+});
+
 const roots = new Set<Root>();
 beforeEach(() => {
   /* Both answer caches are this TAB's memory (#1149), so each test starts as a
@@ -232,6 +282,10 @@ beforeEach(() => {
   incumbentReads = 0;
   incumbentReadDown = false;
   runtimePlaneOn = false;
+  runtimeSession = null;
+  runtimeAnswer = null;
+  runtimeRefreshes = 0;
+  catalogReloads = 0;
   seatPosts = [];
   rotatePosts = [];
   spawnPosts = 0;
@@ -240,6 +294,8 @@ beforeEach(() => {
   installFetch();
 });
 afterEach(() => {
+  detachCatalog?.();
+  detachCatalog = null;
   for (const root of roots) flushSync(() => root.unmount());
   roots.clear();
   dom.document.body.replaceChildren();
@@ -268,6 +324,36 @@ function mount(files: FileEntry[] = []): HTMLElement {
   return host as unknown as HTMLElement;
 }
 
+/**
+ * The panel over a catalog that RELOADS when it is asked to.
+ *
+ * The panel does not own `files`; the app's catalog (`useFiles`) does, and it
+ * re-reads on `FILES_CHANGED_EVENT` — the seam `requestFilesRefresh()`
+ * dispatches on. So a listener that re-renders the panel with the transcript a
+ * reload would have found IS the catalog answering, and a panel that never
+ * asks sees `initial` forever (#1182).
+ */
+function mountReloadableCatalog(initial: FileEntry[], reloaded: FileEntry[]): HTMLElement {
+  const host = dom.document.createElement("div");
+  dom.document.body.append(host);
+  const root = createRoot(host as unknown as HTMLElement);
+  roots.add(root);
+  let files = initial;
+  const render = () => flushSync(() => root.render(
+    <OrchestratorPanel project="atlas" projectName="Atlas" projectCwd="/repos/atlas" files={files} onClose={() => undefined} />,
+  ));
+  const onChanged = () => {
+    catalogReloads += 1;
+    files = reloaded;
+    /* A real reload is a fetch, so the answer lands a turn later rather than
+       inside the click that asked for it. */
+    setTimeout(render, 0);
+  };
+  dom.addEventListener(FILES_CHANGED_EVENT, onChanged);
+  detachCatalog = () => dom.removeEventListener(FILES_CHANGED_EVENT, onChanged);
+  render();
+  return host as unknown as HTMLElement;
+}
 
 /** The panel reopened on a later seat read — a reload, or coming back to the
     project. Draft state (including an unsettled submission's key) lives in
@@ -303,6 +389,13 @@ function mountDock(files: FileEntry[]) {
 
 function panelState(host: HTMLElement): string | null {
   return host.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-state") ?? null;
+}
+
+/** Which half of a bounded bind the panel is naming, or null while it is naming
+    none. Read as the reason rather than as the element, so a regression prints
+    «catalog» instead of a whole DOM subtree. */
+function bindReason(host: HTMLElement): string | null {
+  return host.querySelector("[data-orchestrator-bind]")?.getAttribute("data-orchestrator-bind") ?? null;
 }
 
 function confirmButton(host: HTMLElement): HTMLButtonElement {
@@ -638,12 +731,13 @@ test("a re-hosted seat binds to its successor transcript through the status read
   expect(rotatePosts).toHaveLength(0);
 });
 
-test("a bind that never lands stops spinning: the panel names the reason and offers Re-bind (#1182)", async () => {
+test("a bind that never lands stops spinning: the panel names the reason and Re-bind CLEARS it (#1182)", async () => {
   seatStatus = { seat: activeSeat(), pending: null, exists: true };
   incumbentStatus = incumbent({ liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
 
-  /* Nothing in the catalog answers for this seat, on any key. */
-  const host = mount([]);
+  /* Nothing in the catalog answers for this seat, on any key — until it is
+     re-read, which is the half this failure is actually missing. */
+  const host = mountReloadableCatalog([], [orchestratorFile]);
   await settle();
   flushSync(() => undefined);
   expect(panelState(host)).toBe("live");
@@ -655,32 +749,47 @@ test("a bind that never lands stops spinning: the panel names the reason and off
   await settle();
   flushSync(() => undefined);
 
-  expect(host.querySelector("[data-orchestrator-bind]")?.getAttribute("data-orchestrator-bind")).toBe("catalog");
+  expect(bindReason(host)).toBe("catalog");
   expect(host.textContent).toContain("file catalog");
   /* Both ways forward, and rotation is neither of them. */
   expect(host.textContent).toContain("Open it on the board");
   const before = incumbentReads;
   flushSync(() => (host.querySelector("[data-orchestrator-rebind]") as HTMLButtonElement).click());
   await settle();
+  flushSync(() => undefined);
+
+  /* The failure is OVER: the transcript arrived and the conversation is on
+     screen. Re-reading only the orchestrator endpoints would have left the panel
+     on the same banner it was already on. */
+  expect(bindReason(host)).toBeNull();
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+  expect(host.textContent).not.toContain("Opening the conversation");
+  /* Because Re-bind re-ran the reads the seat is resolved from AND the catalog
+     read the conversation itself has to come out of. */
   expect(incumbentReads).toBeGreaterThan(before);
+  expect(catalogReloads).toBe(1);
   expect(rotatePosts).toHaveLength(0);
+  expect(seatPosts).toHaveLength(0);
+  expect(spawnPosts).toBe(0);
 }, SEAT_BIND_TIMEOUT_MS + 20_000);
 
-test("the RUNTIME half of a bounded bind offers the same two ways forward (#1182)", async () => {
+test("the RUNTIME half of a bounded bind offers the same two ways forward, and Re-bind CLEARS it (#1182)", async () => {
   seatStatus = { seat: activeSeat(), pending: null, exists: true };
   incumbentStatus = incumbent({ liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
   /* The transcript IS in view, so resolution got that far. What has not answered
      is the runtime plane: authoritative, with no host evidence for a
      conversation whose pid is running, which holds the surface at
-     `unresolved` — the other half of «opening…». */
+     `unresolved` — the other half of «opening…». It has the answer and is
+     waiting to be asked: only `refreshRuntime()` moves it. */
   runtimePlaneOn = true;
+  runtimeAnswer = hostedSession();
   const running = { ...orchestratorFile, proc: "running", pid: 4242 } as FileEntry;
 
   const host = mount([running]);
   await settle();
   flushSync(() => undefined);
   expect(panelState(host)).toBe("live");
-  expect(host.querySelector("[data-orchestrator-bind]")).toBeNull();
+  expect(bindReason(host)).toBeNull();
 
   await new Promise((resolve) => setTimeout(resolve, SEAT_BIND_TIMEOUT_MS + 250));
   await settle();
@@ -699,7 +808,15 @@ test("the RUNTIME half of a bounded bind offers the same two ways forward (#1182
   const before = incumbentReads;
   flushSync(() => (banner!.querySelector("[data-orchestrator-rebind]") as HTMLButtonElement).click());
   await settle();
+  flushSync(() => undefined);
+
+  /* The wait is over: the surface resolved and the banner is gone, with the
+     conversation still where it was. */
+  expect(bindReason(host)).toBeNull();
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+  /* Because Re-bind asked the plane that was holding the surface unresolved. */
   expect(incumbentReads).toBeGreaterThan(before);
+  expect(runtimeRefreshes).toBe(1);
   /* And rotation is neither of them — nor is a second designation or a spawn. */
   expect(rotatePosts).toHaveLength(0);
   expect(seatPosts).toHaveLength(0);
@@ -735,7 +852,7 @@ test("a cached «alive» nobody is answering for any more never accuses the seat
   expect(host.querySelector("[data-orchestrator-context]")?.getAttribute("data-orchestrator-context")).toBe("24");
   /* And it is not evidence: the panel keeps waiting instead of reporting a
      fault the server was never asked to confirm. */
-  expect(host.querySelector("[data-orchestrator-bind]")).toBeNull();
+  expect(bindReason(host)).toBeNull();
   expect(host.textContent).toContain("Opening the conversation");
   expect(host.textContent).toContain("Open it on the board");
 }, SEAT_BIND_TIMEOUT_MS + 20_000);
