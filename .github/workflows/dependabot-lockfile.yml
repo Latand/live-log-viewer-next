@@ -6,6 +6,11 @@ name: Dependabot lockfile refresh
 # (#1183). This job regenerates bun.lock on the Dependabot branch and commits it
 # through the repository GITHUB_TOKEN.
 #
+# Two things keep the write narrow. The branch must be unprotected, checked
+# before any step can write. And the commit is a fast-forward from the exact
+# revision this run inspected, so a branch that moved mid-run is refused rather
+# than overwritten with a lockfile resolved from the package.json it replaced.
+#
 # GitHub raises no `synchronize` for a push made with that token, so the gates
 # would never see the commit this job just wrote. The last step therefore
 # dispatches them against the branch: a dispatched run reads the branch head,
@@ -38,6 +43,26 @@ jobs:
       actions: write
       contents: write
     steps:
+      # `contents: write` is job-scoped, so refusing a protected branch has to be
+      # a step, and it comes first: nothing this job does may touch a branch a
+      # protection rule covers, however the branch is named and whoever opened
+      # the pull request. GitHub refuses the ref update below for such a branch
+      # anyway; this reports the reason instead of a REST error, and stops
+      # before the branch's package.json is installed.
+      - name: Refuse a protected head branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          protected="$(gh api "repos/${GITHUB_REPOSITORY}/branches/${HEAD_REF}" --jq '.protected')"
+          if [[ "$protected" != "false" ]]; then
+            echo "::error::${HEAD_REF} is protected (protected=${protected}); refusing to write to it"
+            exit 1
+          fi
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 1
@@ -66,36 +91,48 @@ jobs:
             exit 0
           fi
           printf 'refreshed=true\n' >> "$GITHUB_OUTPUT"
-          printf 'blob=%s\n' "$(git rev-parse 'HEAD:bun.lock')" >> "$GITHUB_OUTPUT"
 
-      # The contents API commits as the bot the token already belongs to, which
-      # is why this workflow writes no author identity of its own. `sha` is the
-      # blob the branch currently carries, so a Dependabot force-push landing
-      # mid-run is refused instead of overwritten.
+      # The git data API commits as the bot the token already belongs to, which
+      # is why this workflow writes no author identity of its own.
+      #
+      # The commit's parent is the revision the install read, and the ref update
+      # asks for a fast-forward, so GitHub itself refuses to move a branch that
+      # is no longer that revision. The lockfile a run resolved therefore only
+      # ever lands on the package.json it was resolved from: a Dependabot
+      # force-push arriving mid-run leaves the branch untouched, and the run its
+      # push starts resolves the lockfile again.
       - name: Commit the refreshed lockfile
         if: steps.lockfile.outputs.refreshed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          LOCKFILE_BLOB: ${{ steps.lockfile.outputs.blob }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: |
           set -euo pipefail
 
-          bun -e '
-          const fs = require("node:fs");
+          branch_head="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${HEAD_REF}" --jq '.object.sha')"
+          if [[ "$branch_head" != "$HEAD_SHA" ]]; then
+            echo "::notice::${HEAD_REF} moved to ${branch_head}; the run for that revision refreshes the lockfile"
+            exit 0
+          fi
 
-          fs.writeFileSync("lockfile-commit.json", JSON.stringify({
-            branch: process.env.HEAD_REF,
-            content: fs.readFileSync("bun.lock").toString("base64"),
-            message: "chore(deps): refresh bun.lock",
-            sha: process.env.LOCKFILE_BLOB,
-          }));
-          '
+          base_tree="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${HEAD_SHA}" --jq '.tree.sha')"
 
-          gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/bun.lock" --input lockfile-commit.json \
-            --jq '.commit.sha'
-          rm lockfile-commit.json
+          blob="$(base64 -w 0 bun.lock \
+            | jq -Rc '{ content: ., encoding: "base64" }' \
+            | gh api --method POST "repos/${GITHUB_REPOSITORY}/git/blobs" --input - --jq '.sha')"
+
+          tree="$(jq -nc --arg base "$base_tree" --arg blob "$blob" \
+            '{ base_tree: $base, tree: [{ path: "bun.lock", mode: "100644", type: "blob", sha: $blob }] }' \
+            | gh api --method POST "repos/${GITHUB_REPOSITORY}/git/trees" --input - --jq '.sha')"
+
+          commit="$(jq -nc --arg tree "$tree" --arg parent "$HEAD_SHA" \
+            '{ message: "chore(deps): refresh bun.lock", tree: $tree, parents: [$parent] }' \
+            | gh api --method POST "repos/${GITHUB_REPOSITORY}/git/commits" --input - --jq '.sha')"
+
+          jq -nc --arg sha "$commit" '{ sha: $sha, force: false }' \
+            | gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${HEAD_REF}" --input - --jq '.object.sha'
 
       - name: Run the gates on the refreshed head
         if: steps.lockfile.outputs.refreshed == 'true'
