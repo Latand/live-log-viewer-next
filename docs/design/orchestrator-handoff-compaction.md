@@ -674,3 +674,39 @@ Cut on purpose, and why the simpler mechanism suffices:
 - **Truncating an over-budget digest as an alternative to the fallback.** The
   criteria name over-budget as a fallback trigger; measure how often it
   happens before softening it.
+
+## 10. Corrections from the first review round
+
+Two defects the design did not anticipate, both fixed at the root in the
+implementation and covered by tests:
+
+**The summarizer is an await point across a durable transition.** Rotation
+reads the incumbent, its mandate and its transcript path, then waits up to 75 s
+for the digest, then designates a successor with `replaceIncumbent: true`. A
+designation that settles inside that window owns the seat by the time rotation
+resumes, and replacing it would revoke a newer orchestrator on the strength of
+a stale read — handing the successor a superseded mandate and losing the newer
+one's own handoff. `executeOrchestratorRotation` now re-reads the seat after
+composition and proceeds only when `conversationId` and `seatEpoch` still match
+what it read; otherwise it answers 409 `incumbent_changed`, naming the epoch it
+composed against and the one that is current. Nothing is spawned and no intent
+is created, so rotating again simply recomposes from the seated orchestrator.
+The synchronous path — a first rotation, or a replay of a pending intent — has
+no await point and passes the check trivially, so the serialization the store
+already provides is unchanged.
+
+**"Identity-free" cannot be delegated to the model.** The prompt asks for a
+digest without names, handles, addresses or paths, but the material being
+compacted is transcript-derived, the model may quote it back, and whatever it
+writes is pasted into the successor's mandate and re-summarized at every later
+rotation — one leak becomes permanent. `hardenedRedact` covers credentials
+only. `identityRedact` in `handoffDigest.ts` now removes four classes
+deterministically — email addresses, account handles (`@name` and the owner
+segment of a code-hosting URL), filesystem paths (home-relative, rooted at a
+real filesystem root, or three or more segments deep) and opaque record ids —
+and runs on every piece of summarizer input and again on the model's output,
+before the budget check. Over-redaction is the intended failure mode: a digest
+of decisions, blockers and in-flight work needs none of those to be useful, and
+two-segment API routes and ordinary URLs survive it. The deterministic fallback
+is deliberately untouched: AC 3 specifies the prior handoffs verbatim, and they
+are the seat's own text, carrying the predecessor pointer the successor needs.

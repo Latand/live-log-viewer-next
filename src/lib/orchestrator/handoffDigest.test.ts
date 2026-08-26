@@ -14,6 +14,7 @@ import {
   HANDOFF_DIGEST_TIMEOUT_MS,
   HISTORY_BUDGET_BYTES,
   HISTORY_HEADING,
+  identityRedact,
   normalizeMarkers,
   productionDigestRuntime,
   splitMandate,
@@ -240,4 +241,83 @@ test("compose trims the history before the notes and refuses only when the core 
 
   const refused = composeSuccessorMandate({ core: "c".repeat(2_000), history: "a digest", handoff, budgetBytes: 1_000, deliver });
   expect(refused.kind).toBe("too_large");
+});
+
+/* Invented identity material, one literal per prohibited class, assembled so
+   no id-shaped or account-shaped value enters a public artifact. */
+const FIXTURE_ID = `conversation_${"7".repeat(8)}-${"7".repeat(4)}-4${"7".repeat(3)}-8${"7".repeat(3)}-${"7".repeat(12)}`;
+const IDENTITY_CLASSES = {
+  email: "someone@example.com",
+  handle: "@some-handle",
+  forgeOwner: "github.com/some-owner",
+  homePath: "/home/user/checkouts/some-repo/lane.md",
+  tildePath: "~/notes/rotation-plan.md",
+  recordId: FIXTURE_ID,
+};
+const IDENTITY_MATERIAL = [
+  `Decisions: escalated to ${IDENTITY_CLASSES.email}, pinged ${IDENTITY_CLASSES.handle}`,
+  `Blockers: the mirror at ${IDENTITY_CLASSES.forgeOwner}/some-repo is behind`,
+  `In flight: rerunning from ${IDENTITY_CLASSES.homePath} against ${IDENTITY_CLASSES.tildePath}, tracking ${IDENTITY_CLASSES.recordId}`,
+].join("\n");
+
+/** Which prohibited classes survived, by name, so a failure says which one. */
+function leakedClasses(value: string): string[] {
+  return Object.entries(IDENTITY_CLASSES).filter(([, literal]) => value.includes(literal)).map(([name]) => name);
+}
+
+test("AC2: every prohibited identity class is stripped from the digest the model returns", async () => {
+  const outcome = await summarizeHandoffsHeadless({
+    project: "proj-a",
+    clientRequestId: "req_identity_out",
+    priorHistory: null,
+    priorHandoffs: ["a prior handoff"],
+    predecessor: null,
+  }, runtime({ run: async () => runResult({ finalOutput: IDENTITY_MATERIAL }) }));
+
+  expect(outcome.kind).toBe("digest");
+  const digest = outcome.kind === "digest" ? outcome.text : "";
+  /* Model compliance is not the filter: this digest ignored every instruction
+     in the prompt and still reaches the successor's mandate identity-free. */
+  expect(leakedClasses(digest)).toEqual([]);
+  expect(digest).toContain("[redacted-email]");
+  expect(digest).toContain("[redacted-handle]");
+  expect(digest).toContain("[redacted-path]");
+  expect(digest).toContain("[redacted-id]");
+  /* The substance survives — only the identities go. */
+  expect(digest).toContain("escalated to");
+  expect(digest).toContain("the mirror at");
+});
+
+test("AC2: identity material never reaches the summarizer's prompt either", async () => {
+  const transcript = writeTranscript("claude", [
+    { role: "assistant", text: `closing report: ${IDENTITY_MATERIAL}` },
+  ]);
+  const prompts: string[] = [];
+
+  await summarizeHandoffsHeadless({
+    project: "proj-a",
+    clientRequestId: "req_identity_in",
+    priorHistory: `earlier digest naming ${IDENTITY_CLASSES.email}`,
+    priorHandoffs: [`a prior handoff written from ${IDENTITY_CLASSES.homePath}`, `handed off by ${IDENTITY_CLASSES.handle}`],
+    predecessor: { path: transcript, engine: "claude" },
+  }, runtime({
+    run: async (request) => {
+      prompts.push(request.prompt);
+      return runResult({ finalOutput: "Decisions:\n- nothing to report" });
+    },
+    readPredecessorReport: productionDigestRuntime.readPredecessorReport,
+  }));
+
+  expect(prompts).toHaveLength(1);
+  expect(leakedClasses(prompts[0]!)).toEqual([]);
+  /* Every input channel — previous digest, prior handoffs, predecessor tail —
+     is filtered, and each still contributes its substance. */
+  expect(prompts[0]).toContain("earlier digest naming [redacted-email]");
+  expect(prompts[0]).toContain("a prior handoff written from [redacted-path]");
+  expect(prompts[0]).toContain("closing report:");
+});
+
+test("identityRedact leaves ordinary working text alone", () => {
+  const kept = "the /api/board route still 500s; agent_registry and account_manager are fine; and/or the queue drains, see https://example.com/docs/page (issue #1067, 12/13 checks)";
+  expect(identityRedact(kept)).toBe(kept);
 });

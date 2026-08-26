@@ -624,6 +624,28 @@ export async function executeOrchestratorRotation(
     path: predecessor?.path ?? incumbent.path,
     seatEpoch: incumbent.seatEpoch,
   };
+  /* The summarizer is an await point of up to HANDOFF_DIGEST_TIMEOUT_MS, and
+     everything above — the incumbent, its mandate, the handoff header — was
+     read BEFORE it. A designation that settled during that wait owns the seat
+     now, and `replaceIncumbent: true` would revoke it on the strength of a
+     stale read: the newer orchestrator would lose its authority to a successor
+     carrying the superseded mandate, with the newer one's own handoff never
+     written. Rotation replaces only the incumbent it actually read; anything
+     else is a conflict the caller resolves by rotating again, which recomposes
+     from the current seat. */
+  const current = orchestratorSeatFor(project).active;
+  if (!current || current.conversationId !== incumbent.conversationId || current.seatEpoch !== incumbent.seatEpoch) {
+    return {
+      status: 409,
+      body: {
+        error: `the orchestrator seat for ${project} changed while this rotation composed its handoff (designation epoch ${incumbent.seatEpoch} is no longer current); rotate again to hand off from the seated orchestrator`,
+        code: "incumbent_changed",
+        rotatedFrom,
+        currentSeatEpoch: current?.seatEpoch ?? null,
+        currentConversationId: current?.conversationId ?? null,
+      },
+    };
+  }
   if (composed.kind === "too_large") return { status: 413, body: { ...composed.body, rotatedFrom } };
 
   const outcome = await executeOrchestratorSeatRequest({

@@ -405,6 +405,52 @@ function codexAssistantText(row: Record<string, unknown>): string | null {
   return record.type === "agent_message" && typeof record.message === "string" ? record.message : null;
 }
 
+/* AC 2 asks for an IDENTITY-FREE digest, and an instruction in the prompt is
+   not a filter: the material being compacted is transcript-derived, the model
+   is free to quote it back, and whatever it writes is pasted into the
+   successor's mandate and re-summarized at every later rotation — one leak
+   becomes permanent. `hardenedRedact` covers credentials only, so these four
+   identity classes are removed DETERMINISTICALLY, on the way in to the prompt
+   and again on the way out of the model. Over-redaction is the intended
+   failure mode: a digest of decisions, blockers and in-flight work needs none
+   of these to be useful, and the fresh handoff — which is not summarized —
+   still carries the predecessor's real transcript path. */
+const EMAIL_ADDRESS = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+/** The owner segment of a code-hosting URL is an account handle. */
+const FORGE_OWNER = /\b((?:github|gitlab)\.com\/|bitbucket\.org\/)[A-Za-z0-9][A-Za-z0-9-]{0,38}/gi;
+const AT_HANDLE = /(^|[^A-Za-z0-9_@/])@[A-Za-z0-9][A-Za-z0-9._-]{1,38}/g;
+const HOME_RELATIVE_PATH = /~\/[^\s"'`)\],;]*/g;
+/** Anything rooted in a real filesystem root, plus any absolute path three or
+    more segments deep — which catches an arbitrary checkout layout while
+    leaving two-segment API routes (`/api/board`) readable. */
+const ROOTED_PATH = /(?<![A-Za-z0-9_~:/])\/(?:home|Users|root|tmp|var|etc|opt|srv|mnt|media|app|workspace|private|data|usr|proc|dev)\/[^\s"'`)\],;]*/g;
+const DEEP_PATH = /(?<![A-Za-z0-9_~:/])\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/[^\s"'`)\],;]*/g;
+/** A prefixed record id, recognized by the digits every minted one carries —
+    so `agent_registry` and `account_manager` stay readable. Whatever this
+    misses, the UUID rule below still empties: the prefix alone names nobody. */
+const OPAQUE_ID = /\b(?:conversation|session|launch|thread|run|acct|account|agent)_(?=[A-Za-z0-9-]*\d)[A-Za-z0-9-]{6,}\b/gi;
+const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+
+/** Deterministic identity floor for the digest: emails, account handles,
+    filesystem paths and opaque record ids, whoever wrote the text. */
+export function identityRedact(value: string): string {
+  return value
+    .replace(EMAIL_ADDRESS, "[redacted-email]")
+    .replace(FORGE_OWNER, "$1[redacted-handle]")
+    .replace(AT_HANDLE, "$1[redacted-handle]")
+    .replace(HOME_RELATIVE_PATH, "[redacted-path]")
+    .replace(ROOTED_PATH, "[redacted-path]")
+    .replace(DEEP_PATH, "[redacted-path]")
+    .replace(OPAQUE_ID, "[redacted-id]")
+    .replace(UUID, "[redacted-id]");
+}
+
+/** Credentials and identities, in that order: the whole filter every piece of
+    summarizer input and the model's own output passes through. */
+function redactForDigest(value: string): string {
+  return identityRedact(hardenedRedact(value));
+}
+
 const DIGEST_INSTRUCTIONS = `You are compacting the rotation history of a project manager agent's mandate. Write a digest of the material below for the manager's successor. Use exactly these three headings and short bullet points under each:
 
 Decisions:
@@ -417,9 +463,9 @@ Rules: at most 3500 bytes in total. Keep only what the successor needs to act: d
     prompt, and the oldest handoffs drop out first when the input is too big —
     the previous digest already covers them. */
 function digestPrompt(request: HandoffDigestRequest, report: string | null): string {
-  const history = request.priorHistory ? hardenedRedact(request.priorHistory).trim() : null;
-  const tail = report ? hardenedRedact(report).trim() : null;
-  const handoffs = request.priorHandoffs.map((body) => hardenedRedact(body).trim()).filter(Boolean);
+  const history = request.priorHistory ? redactForDigest(request.priorHistory).trim() : null;
+  const tail = report ? redactForDigest(report).trim() : null;
+  const handoffs = request.priorHandoffs.map((body) => redactForDigest(body).trim()).filter(Boolean);
   let total = byteLength(history ?? "") + byteLength(tail ?? "") + handoffs.reduce((sum, body) => sum + byteLength(body), 0);
   let oldest = 0;
   while (oldest < handoffs.length && total > SUMMARY_INPUT_CAP_BYTES) {
@@ -476,7 +522,7 @@ export async function summarizeHandoffsHeadless(
     });
     if (result.status === "timeout") return { kind: "fallback", reason: "timeout" };
     if (result.status !== "done") return { kind: "fallback", reason: "failed" };
-    const redacted = hardenedRedact(result.finalOutput).trim();
+    const redacted = redactForDigest(result.finalOutput).trim();
     if (!redacted) return { kind: "fallback", reason: "empty" };
     if (byteLength(redacted) > HISTORY_BUDGET_BYTES) return { kind: "fallback", reason: "over_budget" };
     const digest = normalizeMarkers(redacted).trim();

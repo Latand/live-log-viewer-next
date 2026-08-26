@@ -1200,3 +1200,71 @@ test("AC6: twelve rotations keep every successor mandate inside the structured e
     expect(prompt.split(HISTORY_HEADING)).toHaveLength(2);
   }
 });
+
+test("a rotation whose summarizer is slow cannot revoke the designation that settled while it waited", async () => {
+  await seatIncumbent(stackedMandate("own the board", 2), "req_00001200");
+  const superseded = orchestratorSeatFor("proj-a").active!;
+
+  let enterSummarizer = (): void => {};
+  const entered = new Promise<void>((resolve) => { enterSummarizer = resolve; });
+  let releaseSummarizer = (): void => {};
+  const released = new Promise<void>((resolve) => { releaseSummarizer = resolve; });
+
+  const stale = dependencies({
+    spawn: async (body) => {
+      stale.recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(20), path: "/tmp/stale-successor.jsonl" } };
+    },
+    summarizeHandoffs: async (request) => {
+      stale.recorded.digests.push(request);
+      enterSummarizer();
+      await released;
+      return { kind: "digest", text: "Decisions:\n- composed against the superseded incumbent" };
+    },
+  });
+  const rotating = executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001201" }, stale.deps);
+  await entered;
+
+  /* A newer designation settles WHILE the rotation is parked in its summarizer,
+     so the rotation's incumbent, its mandate and its handoff are all stale. */
+  const newer = dependencies({
+    spawn: async () => ({ status: 200, body: { ok: true, conversationId: successorId(21), path: "/tmp/newer.jsonl" } }),
+  });
+  const seated = await executeOrchestratorSeatRequest({
+    ...spawnRequest("req_00001202"),
+    mandate: "own the board, freshly designated",
+    replaceIncumbent: true,
+  }, newer.deps);
+  expect(seated.status).toBe(200);
+
+  releaseSummarizer();
+  const rotated = await rotating;
+
+  /* Refused with the conflict, not silently applied on top of the newer seat. */
+  expect(rotated.status).toBe(409);
+  expect(rotated.body).toMatchObject({
+    code: "incumbent_changed",
+    currentConversationId: successorId(21),
+    rotatedFrom: { conversationId: superseded.conversationId, seatEpoch: superseded.seatEpoch },
+  });
+  /* No successor was spawned for it and no intent is left pending. */
+  expect(stale.recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+  /* The newer orchestrator still holds the seat, unrevoked. */
+  const active = orchestratorSeatFor("proj-a").active!;
+  expect(active.conversationId).toBe(successorId(21));
+  expect(active.seatEpoch).toBeGreaterThan(superseded.seatEpoch);
+  expect(activeOrchestratorSeats().map((seat) => seat.conversationId)).toEqual([successorId(21)]);
+  expect(orchestratorRevocations().some((revocation) => revocation.conversationId === successorId(21))).toBeFalse();
+  /* Rotating again recomposes from the seated orchestrator and succeeds. */
+  const retried = dependencies({
+    spawn: async (body) => {
+      retried.recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(22), path: "/tmp/retried.jsonl" } };
+    },
+  });
+  const second = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001203" }, retried.deps);
+  expect(second.status).toBe(200);
+  expect(String(retried.recorded.spawns[0]!.prompt)).toStartWith("own the board, freshly designated");
+  expect(orchestratorSeatFor("proj-a").active!.conversationId).toBe(successorId(22));
+});
