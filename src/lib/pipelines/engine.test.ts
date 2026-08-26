@@ -1709,7 +1709,7 @@ test("transient structured spawn handshakes retry twice before parking (#1056)",
   const delays: number[] = [];
   h.ports.spawnAgent = async () => {
     spawnCalls += 1;
-    throw new Error("structured delivery controller is unavailable");
+    throw new Error("runtime host request timed out");
   };
   Object.assign(h.ports, {
     sleep: async (milliseconds: number) => { delays.push(milliseconds); },
@@ -1721,8 +1721,93 @@ test("transient structured spawn handshakes retry twice before parking (#1056)",
   expect(spawnCalls).toBe(3);
   expect(delays).toEqual([1_000, 1_000]);
   expect(parked.state).toBe("needs_decision");
-  expect(parked.stateDetail).toContain("structured delivery controller is unavailable");
+  expect(parked.stateDetail).toContain("runtime host request timed out");
   expect(parked.stateDetail).toContain("2 retries");
+});
+
+test("stage activation rides out a controller that is unavailable for a few seconds (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const baseSpawn = h.ports.spawnAgent;
+  let spawnCalls = 0;
+  const delays: number[] = [];
+  h.ports.spawnAgent = async (input, onReserved) => {
+    spawnCalls += 1;
+    if (spawnCalls <= 3) throw new Error("structured delivery controller is unavailable");
+    return baseSpawn(input, onReserved);
+  };
+  Object.assign(h.ports, {
+    sleep: async (milliseconds: number) => { delays.push(milliseconds); },
+  });
+
+  await tickPipelines([], h.ports);
+
+  expect(spawnCalls).toBe(4);
+  expect(delays).toEqual([1_000, 2_000, 4_000]);
+  expect(loadPipelines()[0]!).toMatchObject({
+    state: "running",
+    stateDetail: null,
+    cursor: { stageId: "plan", state: "running" },
+  });
+});
+
+test("a controller that never returns parks the stage with the wait it spent (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  let spawnCalls = 0;
+  const delays: number[] = [];
+  h.ports.spawnAgent = async () => {
+    spawnCalls += 1;
+    throw new Error("structured delivery controller is unavailable");
+  };
+  Object.assign(h.ports, {
+    sleep: async (milliseconds: number) => { delays.push(milliseconds); },
+  });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(delays.reduce((total, delay) => total + delay, 0)).toBe(30_000);
+  expect(spawnCalls).toBe(delays.length + 1);
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("structured delivery controller is unavailable");
+  expect(parked.stateDetail).toContain("waited 30s");
+});
+
+test("a process without a delivery controller publication defers stage activation (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  let spawnCalls = 0;
+  const baseSpawn = h.ports.spawnAgent;
+  h.ports.spawnAgent = async (input, onReserved) => {
+    spawnCalls += 1;
+    return baseSpawn(input, onReserved);
+  };
+  Object.assign(h.ports, { structuredDeliveryPublication: () => "unbound" as const });
+
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  const deferred = loadPipelines()[0]!;
+  expect(spawnCalls).toBe(0);
+  expect(deferred.state).toBe("running");
+  expect(deferred.stateDetail).toBeNull();
+  expect(deferred.cursor).toMatchObject({ stageId: "plan", state: "pending" });
+  expect(deferred.runs[0]!.attempts).toHaveLength(1);
+  expect(deferred.runs[0]!.attempts.at(-1)!.state).toBe("pending");
+
+  /* The process that owns the publication activates the same attempt. */
+  Object.assign(h.ports, { structuredDeliveryPublication: () => "ready" as const });
+  await tickPipelines([], h.ports);
+
+  expect(spawnCalls).toBe(1);
+  expect(loadPipelines()[0]!).toMatchObject({
+    state: "running",
+    cursor: { stageId: "plan", state: "running" },
+  });
 });
 
 test("a transient structured spawn handshake can recover on retry (#1056)", async () => {

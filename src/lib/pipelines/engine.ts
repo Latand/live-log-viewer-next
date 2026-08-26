@@ -17,7 +17,8 @@ import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
-import { supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
+import { structuredHostsEnabled, supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
+import { structuredDeliveryPublicationState } from "@/lib/runtime/structuredDeliveryController";
 import { redactBounded } from "@/lib/monitor/redact";
 import { parseReview, type ReviewFinding } from "@/lib/review";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
@@ -149,6 +150,9 @@ export interface PipelinePorts {
   }, onReserved: (reservation: PipelineStageLaunchReservation) => void): Promise<PipelineStageSpawn>;
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
   claimSpawnRetry(launchId: string, claimId: string): "claimed" | "settled" | "conflict";
+  /** Whether the ticking process can publish a structured host: `ready` now,
+      `rebinding` between publications, `unbound` never at all (#1191). */
+  structuredDeliveryPublication?(): "ready" | "rebinding" | "unbound";
   paneAgentAlive(paneId: string): Promise<boolean>;
   /** Terminates the host that owns a stage attempt's agent. `not-running` means
       no host was resident, so a close can tell an idle lane from one it stopped. */
@@ -586,6 +590,15 @@ export function defaultPipelinePorts(): PipelinePorts {
       invalidateRegistryProjection();
       return result;
     },
+    /* Stage activation belongs to the process that hosts the structured
+       delivery controller. The account-migration inventory sidecar reconciles
+       files — and therefore ticks pipelines — from a child process that never
+       binds one, so a spawn issued there can only ever fail (#1191). With
+       structured hosting switched off there is no publication to wait for and
+       the spawn must fail in the open, as it always did. */
+    structuredDeliveryPublication: () => structuredHostsEnabled()
+      ? structuredDeliveryPublicationState()
+      : "ready",
     spawnReceipt: (launchId) => {
       const receipt = snapshot().receipts[launchId];
       if (!receipt) return null;
@@ -710,6 +723,11 @@ const VERDICT_RECOVERY_INTERVAL_MS = 30_000;
 const VERDICT_RECOVERY_ACCOUNTING_BUDGET_MS = 15_000;
 const SPAWN_HANDSHAKE_MAX_ATTEMPTS = 3;
 const SPAWN_HANDSHAKE_RETRY_DELAY_MS = 1_000;
+/** A controller that is between publications comes back in milliseconds, so a
+    stage transition rides it out instead of parking on two immediate retries
+    (#1191). The budget is the total backoff a single activation will spend. */
+const SPAWN_CONTROLLER_WAIT_BUDGET_MS = 30_000;
+const SPAWN_CONTROLLER_RETRY_MAX_MS = 8_000;
 const DEAD_RUNNING_ATTEMPT_GRACE_MS = 3 * 60_000;
 /** Attempt states that end a round; a pending cursor over one of these queues a
     fresh attempt on the next tick (tickRunStage/tickReviewStage). */
@@ -1577,6 +1595,11 @@ async function tickRunStage(
   }
 
   if (attempt.state === "pending") {
+    /* A process that never bound the delivery controller cannot launch this
+       stage, and no retry there can change that. Leave the attempt pending: the
+       pass ends on a pending cursor, which wakes the process that owns the
+       controller (requestPipelineTick), and it activates the same attempt. */
+    if (ports.structuredDeliveryPublication?.() === "unbound") return;
     attempt.state = "spawning";
     attempt.startedAt = ports.now();
     setCursorState(pipeline, stage.id, "spawning");
@@ -1617,7 +1640,11 @@ async function tickRunStage(
         },
       };
       let spawned: PipelineStageSpawn | null = null;
-      for (let spawnAttempt = 1; spawnAttempt <= SPAWN_HANDSHAKE_MAX_ATTEMPTS; spawnAttempt += 1) {
+      let spawnAttempt = 0;
+      let controllerRetries = 0;
+      let controllerWaitMs = 0;
+      while (true) {
+        spawnAttempt += 1;
         try {
           spawned = await ports.spawnAgent({
             ...spawnInput,
@@ -1632,15 +1659,30 @@ async function tickRunStage(
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          const transient = isTransientStructuredSpawnFailure(message);
-          if (!transient || spawnAttempt === SPAWN_HANDSHAKE_MAX_ATTEMPTS) {
-            if (transient) {
-              throw new Error(`stage spawn failed after ${spawnAttempt - 1} retries: ${message}`);
-            }
-            throw error;
+          if (!isTransientStructuredSpawnFailure(message)) throw error;
+          /* An unavailable controller is a publication this process is between,
+             not a rejected launch, so it gets the wait budget; every other
+             transient keeps the two immediate handshake retries (#1056). */
+          const controllerUnavailable = isStructuredDeliveryControllerFailure(message);
+          const retryInMs = controllerUnavailable
+            ? Math.min(
+                SPAWN_CONTROLLER_RETRY_MAX_MS,
+                SPAWN_HANDSHAKE_RETRY_DELAY_MS * (2 ** controllerRetries),
+                SPAWN_CONTROLLER_WAIT_BUDGET_MS - controllerWaitMs,
+              )
+            : spawnAttempt < SPAWN_HANDSHAKE_MAX_ATTEMPTS ? SPAWN_HANDSHAKE_RETRY_DELAY_MS : 0;
+          if (retryInMs <= 0) {
+            const waited = controllerUnavailable
+              ? ` (waited ${Math.round(controllerWaitMs / 1_000)}s for the structured delivery controller)`
+              : "";
+            throw new Error(`stage spawn failed after ${spawnAttempt - 1} retries: ${message}${waited}`);
+          }
+          if (controllerUnavailable) {
+            controllerRetries += 1;
+            controllerWaitMs += retryInMs;
           }
           const sleep = ports.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
-          await sleep(SPAWN_HANDSHAKE_RETRY_DELAY_MS);
+          await sleep(retryInMs);
         }
       }
       if (!spawned) throw new Error("stage spawn failed without a result");
@@ -2369,8 +2411,12 @@ function isStructuredSpawnPark(pipeline: Pipeline, attempt: PipelineStageAttempt
     || isTransientStructuredSpawnFailure(failure);
 }
 
+function isStructuredDeliveryControllerFailure(failure: string): boolean {
+  return failure.includes("structured delivery controller is unavailable");
+}
+
 function isTransientStructuredSpawnFailure(failure: string): boolean {
-  return failure.includes("structured delivery controller is unavailable")
+  return isStructuredDeliveryControllerFailure(failure)
     || failure.includes("structured initial message")
     || failure.includes("runtime host request timed out");
 }

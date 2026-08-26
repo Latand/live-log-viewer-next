@@ -41,6 +41,9 @@ interface ControllerState {
   terminateActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   completeActive: ((adopted: readonly StructuredDeliveryHost[]) => Promise<void>) | null;
   stopActive: () => void;
+  /* Distinguishes "this process hosts the controller and is between
+     publications" from "this process never hosted one at all" (#1191). */
+  everPublished?: boolean;
 }
 const controllerStore = process as typeof process & { __llvStructuredDeliveryController?: ControllerState };
 const state: ControllerState = controllerStore.__llvStructuredDeliveryController ??= {
@@ -53,6 +56,7 @@ const state: ControllerState = controllerStore.__llvStructuredDeliveryController
   terminateActiveHost: null,
   completeActive: null,
   stopActive: () => {},
+  everPublished: false,
 };
 
 const CONTROLLER_UNAVAILABLE_CODE = "structured-delivery-controller-unavailable";
@@ -76,6 +80,36 @@ export function requireStructuredDeliveryControllerPublication(): NonNullable<Co
   const publish = state.registerActiveHost;
   if (!publish) throw new StructuredDeliveryControllerUnavailableError();
   return publish;
+}
+
+/**
+ * Whether THIS process can publish a structured host right now.
+ *
+ * `unbound` is the load-bearing case (#1191): a process that never bound the
+ * queue — the account-migration inventory sidecar reconciles files, and
+ * therefore ticks pipelines, in a child process — can never publish one, so a
+ * caller there must hand the work to the process that owns the controller
+ * instead of retrying into a failure that cannot resolve.
+ */
+export function structuredDeliveryPublicationState(): "ready" | "rebinding" | "unbound" {
+  if (state.registerActiveHost) return "ready";
+  return state.everPublished ? "rebinding" : "unbound";
+}
+
+/** Drops the current publication and stops the queue behind it. Only a bind
+    with no replacement to install takes this path. */
+function retireStructuredDeliveryPublication(): void {
+  state.stopActive();
+  state.stopActive = () => {};
+  state.activeQueue = null;
+  state.activeRegistry = null;
+  state.activeHosts = null;
+  state.registerActiveHost = null;
+  state.republishActiveHost = null;
+  state.releaseActiveHost = null;
+  state.terminateActiveHost = null;
+  state.completeActive = null;
+  setStructuredDeliveryKick(null);
 }
 
 function entryForHost(registry: AgentRegistry, adopted: StructuredDeliveryHost): AgentRegistryEntry | null {
@@ -255,19 +289,16 @@ export async function bindStructuredDeliveryQueue(
     deferStartupWork?: boolean;
   } = {},
 ): Promise<void> {
-  state.stopActive();
-  state.stopActive = () => {};
-  state.activeQueue = null;
-  state.activeRegistry = null;
-  state.activeHosts = null;
-  state.registerActiveHost = null;
-  state.republishActiveHost = null;
-  state.releaseActiveHost = null;
-  state.terminateActiveHost = null;
-  state.completeActive = null;
-  setStructuredDeliveryKick(null);
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
-  if (!client) return;
+  /* Swap, never reset-then-rebuild (#1191): the publication a spawn reads stays
+     the predecessor's until the successor is fully built, and the two change
+     hands in one step below. Without a client there is no successor to build,
+     so this is the one path that retires the publication outright. */
+  if (!client) {
+    retireStructuredDeliveryPublication();
+    return;
+  }
+  const retirePredecessor = state.stopActive;
   const registry = dependencies.registry ?? agentRegistry();
   const hosts = new Map<string, EngineHost>();
   let scheduleAutomaticRetry = () => {};
@@ -682,6 +713,11 @@ export async function bindStructuredDeliveryQueue(
     return completion;
   };
   state.completeActive = complete;
+  state.everPublished = true;
+  /* The successor now owns every hook, so the predecessor's teardown finds
+     `state.activeQueue !== queue` and unwinds only its own timers, host
+     subscriptions and event pumps — it cannot null the live publication. */
+  retirePredecessor();
   if (!dependencies.deferStartupWork) await complete(adopted);
 }
 
