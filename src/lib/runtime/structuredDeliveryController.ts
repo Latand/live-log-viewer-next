@@ -921,3 +921,13 @@ export async function republishStructuredDeliveryHost(key: SessionKey): Promise<
 export async function releaseStructuredDeliveryHost(key: SessionKey): Promise<boolean> {
   return await state.releaseActiveHost?.(key) ?? false;
 }
+
+/**
+ * Ends a host this generation still holds, through its own lifecycle: the
+ * engine host is released and its registry row retired in one move. False when
+ * no registration owns the key — the caller then has only the process to go on
+ * (the resources rail's released/orphaned rows, #1199).
+ */
+export async function terminateStructuredDeliveryHost(key: SessionKey): Promise<boolean> {
+  return await state.terminateActiveHost?.(key) ?? false;
+}

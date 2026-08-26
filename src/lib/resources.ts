@@ -17,13 +17,14 @@ import {
   type ResourceObservation,
 } from "@/lib/resourceCollector";
 import { descendantPids } from "@/lib/proc/memory";
+import { accountMigrationHostArgv, agentProcesses, structuredHostEngine, type AgentProcess } from "@/lib/scanner/process";
 import { overlayResourceSessionTitles } from "@/lib/session/titleProjection";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { captureTmuxAttachReferences, type TmuxAttachReference } from "@/lib/tmux";
 import { statePath } from "@/lib/configDir";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
-import type { FileEntry, ResourceSession, ResourcesPayload } from "./types";
+import { RESOURCE_STRUCTURED_HOST_LIMIT, type FileEntry, type ResourceSession, type ResourcesPayload } from "./types";
 
 /**
  * System memory pressure + per-agent-session memory attribution, the data
@@ -144,11 +145,64 @@ function captureSystemMemory(proc: Pick<ProcBackend, "systemMemory"> = procBacke
     stable `%N` pane id to address, and the pane pid to verify it against. */
 export type KillTargetRef = TmuxAttachReference;
 
+/**
+ * One structured host as the registry knows it, assembled by the viewer and
+ * handed to the collector. The collector owns no registry access of its own —
+ * it runs in a contained worker process — so everything the list needs about
+ * a host's identity, role and ownership travels in this record.
+ */
+export interface StructuredHostRecord {
+  /** Session key id (`<engine>:<sessionId>`), the row's stable target suffix. */
+  id: string;
+  engine: "claude" | "codex";
+  sessionId: string | null;
+  pid: number;
+  /** Kernel start-time token captured with the pid; a recycled pid fails it. */
+  startIdentity: string | null;
+  cwd: string;
+  path: string | null;
+  conversationId: string | null;
+  title: string | null;
+  role: string | null;
+  model: string | null;
+  /** Pipeline stage this host serves, when it belongs to one. */
+  stage: string | null;
+  /** A live orchestrator seat, excluded from bulk kills unless ticked. */
+  seat: boolean;
+  turnBusy: boolean;
+  /** The runtime still holds this host and can end it through its own lifecycle. */
+  owned: boolean;
+}
+
+/**
+ * Server-held authority for one structured kill. It carries the process fence
+ * (pid plus start identity) and everything the kill route needs to refuse a
+ * target on its own terms — the seat opt-in above all — so a client can never
+ * widen what a listed row authorizes.
+ */
+export interface StructuredHostKillRef {
+  pid: number;
+  startIdentity: string | null;
+  engine: "claude" | "codex";
+  sessionId: string | null;
+  conversationId: string | null;
+  seat: boolean;
+  turnBusy: boolean;
+  owned: boolean;
+  lastActiveAt: string | null;
+}
+
+/** Structured rows carry this prefix so a pane target and a host target can
+    never be mistaken for one another on the wire. */
+const STRUCTURED_TARGET_PREFIX = "structured:";
+
 const globalStore = globalThis as unknown as {
   __llvResourcesReader?: ResourcesReader;
   __llvResourcesReaderVersion?: number;
   __llvResourceTargets?: Map<string, KillTargetRef>;
   __llvLastResourceTargets?: Array<{ target: string; ref: KillTargetRef }>;
+  __llvStructuredHostTargets?: Map<string, StructuredHostKillRef>;
+  __llvLastStructuredHostTargets?: Array<{ target: string; ref: StructuredHostKillRef }>;
   __llvResourceTargetsGeneration?: number;
   __llvResourceTargetEpoch?: number;
   __llvLastResourceBuild?: ResourceBuildDiagnostic;
@@ -178,16 +232,35 @@ function rememberResourceTargets(sessions: Iterable<{ target: string; ref: KillT
   globalStore.__llvLastResourceTargets = [...sessions].map(({ target, ref }) => ({ target, ref }));
 }
 
+/**
+ * The same server-held allowlist, for structured hosts. A kill request names a
+ * target the last snapshot listed; anything else — the operator's own shell,
+ * the viewer, the runtime host, a migration worker — has no entry here and is
+ * refused before a single signal is composed.
+ */
+export function noteStructuredHostTargets(hosts: Iterable<{ target: string; ref: StructuredHostKillRef }>): void {
+  const map = new Map<string, StructuredHostKillRef>();
+  for (const { target, ref } of hosts) map.set(target, ref);
+  globalStore.__llvStructuredHostTargets = map;
+  rememberStructuredHostTargets([...map].map(([target, ref]) => ({ target, ref })));
+}
+
+function rememberStructuredHostTargets(hosts: Iterable<{ target: string; ref: StructuredHostKillRef }>): void {
+  globalStore.__llvLastStructuredHostTargets = [...hosts].map(({ target, ref }) => ({ target, ref }));
+}
+
 /** Applies a served observation exactly once in generation order. A consumed
     target therefore cannot return through a late observation. */
 export function applyResourceTargets(
   generation: number,
   sessions: Iterable<{ target: string; ref: KillTargetRef }>,
   collectionEpoch = globalStore.__llvResourceTargetEpoch ?? 0,
+  hosts: Iterable<{ target: string; ref: StructuredHostKillRef }> = [],
 ): void {
   if (collectionEpoch !== (globalStore.__llvResourceTargetEpoch ?? 0)) return;
   if (generation <= (globalStore.__llvResourceTargetsGeneration ?? 0)) return;
   noteSessionTargets(sessions);
+  noteStructuredHostTargets(hosts);
   globalStore.__llvResourceTargetsGeneration = generation;
 }
 
@@ -208,6 +281,25 @@ export function allowedKillTarget(target: string): KillTargetRef | null {
     for tmux to reuse, so a repeated POST must not pass the gate again. */
 export function consumeKillTarget(target: string): void {
   if (globalStore.__llvResourceTargets?.delete(target)) {
+    globalStore.__llvResourceTargetEpoch = (globalStore.__llvResourceTargetEpoch ?? 0) + 1;
+  }
+}
+
+/** Structured host refs from the observation most recently derived here. */
+export function lastStructuredHostTargetRefs(): Array<{ target: string; ref: StructuredHostKillRef }> {
+  return globalStore.__llvLastStructuredHostTargets?.map(({ target, ref }) => ({ target, ref: { ...ref } })) ?? [];
+}
+
+/** Snapshot host ref recorded for `target`, or null when it was never listed. */
+export function allowedStructuredHostTarget(target: string): StructuredHostKillRef | null {
+  if (target === "") return null;
+  return globalStore.__llvStructuredHostTargets?.get(target) ?? null;
+}
+
+/** Drops `target` after a kill so a repeated POST cannot pass the gate against
+    a pid the kernel has since handed to something else. */
+export function consumeStructuredHostTarget(target: string): void {
+  if (globalStore.__llvStructuredHostTargets?.delete(target)) {
     globalStore.__llvResourceTargetEpoch = (globalStore.__llvResourceTargetEpoch ?? 0) + 1;
   }
 }
@@ -243,6 +335,23 @@ export interface ResourceSnapshotDependencies {
   readHosts(fresh: boolean, entries: ResourceFileObservation[], ppids: Map<number, number>): Promise<TranscriptHostSnapshot>;
   proc: Pick<ProcBackend, "systemMemory" | "ppidMap" | "processMemory">;
   captureAttachReferences(refs: ReadonlyArray<Pick<TmuxAttachReference, "tmuxServerPid" | "paneId" | "panePid">>): Map<string, TmuxAttachReference>;
+  /** Structured-host records the registry holds. The viewer reads them and
+      hands them to the collector; nothing here ever opens the registry. */
+  readStructuredHosts?(fresh: boolean): Promise<StructuredHostRecord[]>;
+  /** Live claude/codex processes, for the host shapes no record covers. */
+  listAgentProcesses?(fresh: boolean): AgentProcess[];
+  /** Whether a host's working directory still exists — a deleted worktree is
+      what makes an otherwise healthy record an orphan. */
+  directoryExists?(directory: string): boolean;
+  /** Liveness and recycled-pid fence for a recorded host process. */
+  processIdentity?(pid: number): string | null;
+}
+
+/** The registry read behind the inventory, loaded on demand: the contained
+    collector worker imports this module and must never pull the registry in
+    with it. */
+async function readStructuredHostRecordsForCollection(): Promise<StructuredHostRecord[]> {
+  return (await import("@/lib/runtime/structuredHostControl")).readStructuredHostRecords();
 }
 
 const resourceSnapshotDependencies: ResourceSnapshotDependencies = {
@@ -254,6 +363,10 @@ const resourceSnapshotDependencies: ResourceSnapshotDependencies = {
   readHosts: (fresh, entries, ppids) => readTranscriptHosts(fresh, entries as FileEntry[], ppids),
   proc: procBackend,
   captureAttachReferences: captureTmuxAttachReferences,
+  readStructuredHosts: readStructuredHostRecordsForCollection,
+  listAgentProcesses: agentProcesses,
+  directoryExists: (directory) => existsSync(directory),
+  processIdentity: (pid) => procBackend.processIdentity(pid),
 };
 
 export type ResourceFileObservation = Readonly<Pick<FileEntry,
@@ -284,6 +397,61 @@ export async function readResourceFileSnapshot(fresh: boolean): Promise<Resource
   return resourceWorkerFileSnapshot(scan.snapshot.files, () => null);
 }
 
+/**
+ * Every structured host worth listing, with its process tree.
+ *
+ * The registry names the set the runtime owns or spawned, and the process scan
+ * covers the one class it cannot: a host whose record was already cleared while
+ * the process kept running — the case that left 19 idle hosts on the machine
+ * with nothing in the UI to reach them (#1199). A record whose pid is gone, or
+ * whose pid the kernel handed to something else, is dropped rather than shown
+ * as a host that cannot be killed.
+ */
+async function structuredHostTrees(
+  fresh: boolean,
+  ppids: Map<number, number>,
+  dependencies: ResourceSnapshotDependencies,
+): Promise<Array<{ record: StructuredHostRecord; tree: number[] }>> {
+  const records = (await dependencies.readStructuredHosts?.(fresh)) ?? [];
+  const identity = dependencies.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
+  const live: StructuredHostRecord[] = [];
+  const claimed = new Set<number>();
+  for (const record of records) {
+    if (!Number.isSafeInteger(record.pid) || record.pid <= 1 || claimed.has(record.pid)) continue;
+    const observed = identity(record.pid);
+    if (observed === null) continue;
+    if (record.startIdentity !== null && record.startIdentity !== observed) continue;
+    claimed.add(record.pid);
+    live.push(record);
+    if (live.length >= RESOURCE_STRUCTURED_HOST_LIMIT) break;
+  }
+  for (const candidate of dependencies.listAgentProcesses?.(fresh) ?? []) {
+    if (live.length >= RESOURCE_STRUCTURED_HOST_LIMIT) break;
+    if (claimed.has(candidate.pid) || accountMigrationHostArgv(candidate.argv)) continue;
+    const engine = structuredHostEngine(candidate.argv);
+    if (engine === null) continue;
+    claimed.add(candidate.pid);
+    live.push({
+      id: `pid:${candidate.pid}`,
+      engine,
+      sessionId: null,
+      pid: candidate.pid,
+      startIdentity: identity(candidate.pid),
+      cwd: candidate.cwd,
+      path: null,
+      conversationId: null,
+      title: null,
+      role: null,
+      model: null,
+      stage: null,
+      seat: false,
+      turnBusy: false,
+      owned: false,
+    });
+  }
+  return live.map((record) => ({ record, tree: descendantPids(record.pid, ppids) }));
+}
+
 /** `fresh` advances the shared file scan and skips the pane/agent-process
     memos. A rebuild triggered right after a kill must use one newer corpus for
     host ownership, metadata, and the kill allowlist. */
@@ -298,72 +466,134 @@ export async function buildResourceSnapshot(
     const files = await measureResourcePhaseAsync(phases, "readFiles", () => dependencies.readFiles(fresh));
     const ppids = measureResourcePhase(phases, "ppidMap", () => dependencies.proc.ppidMap());
     const hosts = await measureResourcePhaseAsync(phases, "readHosts", () => dependencies.readHosts(fresh, files, ppids));
+    const structured = await measureResourcePhaseAsync(phases, "readHosts", () => structuredHostTrees(fresh, ppids, dependencies));
     const sessions: ResourceSession[] = [];
-    if (hosts.hosts.length > 0) {
-      const byPath = new Map(files.map((entry) => [entry.path, entry]));
-      const byPane = new Map<string, TranscriptHost[]>();
-      for (const host of hosts.hosts) {
-        const paneHosts = byPane.get(host.paneId);
-        if (paneHosts) paneHosts.push(host);
-        else byPane.set(host.paneId, [host]);
-      }
-
-      /* Trees first, memory second: one processMemory() batch over the union
-         keeps the portable backend at a single `ps` spawn for all panes. */
-      const paneTrees: Array<{ host: TranscriptHost; tree: number[]; paneHosts: TranscriptHost[] }> = [];
-      const treePids = new Set<number>();
-      for (const paneHosts of byPane.values()) {
-        const host = paneHosts[0]!;
-        const tree = descendantPids(host.panePid, ppids);
-        paneTrees.push({ host, tree, paneHosts });
-        for (const pid of tree) treePids.add(pid);
-      }
-      const memory = measureResourcePhase(phases, "processMemory", () => dependencies.proc.processMemory(treePids));
-
-      const killRefs: Array<{ target: string; ref: KillTargetRef }> = [];
-      measureResourcePhase(phases, "attach", () => {
-        const attachRefs = dependencies.captureAttachReferences(paneTrees.map(({ host }) => ({
-          tmuxServerPid: host.tmuxServerPid,
-          panePid: host.panePid,
-          paneId: host.paneId,
-        })));
-        for (const { host, tree, paneHosts } of paneTrees) {
-          let rssBytes = 0;
-          let swapBytes = 0;
-          for (const pid of tree) {
-            const mem = memory.get(pid);
-            if (!mem) continue;
-            rssBytes += mem.rssBytes;
-            swapBytes += mem.swapBytes;
-          }
-          /* The resolver elects one canonical host for every transcript. A
-             duplicate pane stays visible for cleanup, though it carries no path
-             and cannot disagree with path-addressed delivery. */
-          const entry = canonicalResourceEntry(hosts, paneHosts, byPath);
-          sessions.push({
-            target: host.display,
-            panePid: host.panePid,
-            path: entry?.path ?? null,
-            engine: host.engine,
-            hostConflict: conflictingResourceHost(hosts, host),
-            title: entry?.title ?? null,
-            project: entry?.project || null,
-            activity: entry?.activity ?? null,
-            lastActiveAt: entry ? isoFromUnix(entry.mtime) : null,
-            cwd: host.cwd,
-            rssBytes,
-            swapBytes,
-            procCount: tree.length,
-          });
-          const ref = attachRefs.get(host.paneId);
-          if (ref) killRefs.push({ target: host.display, ref });
-        }
-      });
-      sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
-      rememberResourceTargets(killRefs);
-    } else {
-      rememberResourceTargets([]);
+    const byPath = new Map(files.map((entry) => [entry.path, entry]));
+    const byPane = new Map<string, TranscriptHost[]>();
+    for (const host of hosts.hosts) {
+      const paneHosts = byPane.get(host.paneId);
+      if (paneHosts) paneHosts.push(host);
+      else byPane.set(host.paneId, [host]);
     }
+
+    /* Trees first, memory second: one processMemory() batch over the union
+       keeps the portable backend at a single `ps` spawn for every pane and
+       every structured host together. */
+    const paneTrees: Array<{ host: TranscriptHost; tree: number[]; paneHosts: TranscriptHost[] }> = [];
+    const treePids = new Set<number>();
+    for (const paneHosts of byPane.values()) {
+      const host = paneHosts[0]!;
+      const tree = descendantPids(host.panePid, ppids);
+      paneTrees.push({ host, tree, paneHosts });
+      for (const pid of tree) treePids.add(pid);
+    }
+    /* A host already counted inside another row's tree is that row's memory;
+       listing it twice would double the total the footer shows. Registry
+       records come first, so a recorded host always outranks a process the
+       scan found inside it. */
+    const structuredTrees: typeof structured = [];
+    for (const item of structured) {
+      if (treePids.has(item.record.pid)) continue;
+      structuredTrees.push(item);
+      for (const pid of item.tree) treePids.add(pid);
+    }
+    const memory = measureResourcePhase(phases, "processMemory", () => dependencies.proc.processMemory(treePids));
+    const treeMemory = (tree: number[]) => {
+      let rssBytes = 0;
+      let swapBytes = 0;
+      for (const pid of tree) {
+        const mem = memory.get(pid);
+        if (!mem) continue;
+        rssBytes += mem.rssBytes;
+        swapBytes += mem.swapBytes;
+      }
+      return { rssBytes, swapBytes };
+    };
+
+    const killRefs: Array<{ target: string; ref: KillTargetRef }> = [];
+    measureResourcePhase(phases, "attach", () => {
+      const attachRefs = dependencies.captureAttachReferences(paneTrees.map(({ host }) => ({
+        tmuxServerPid: host.tmuxServerPid,
+        panePid: host.panePid,
+        paneId: host.paneId,
+      })));
+      for (const { host, tree, paneHosts } of paneTrees) {
+        /* The resolver elects one canonical host for every transcript. A
+           duplicate pane stays visible for cleanup, though it carries no path
+           and cannot disagree with path-addressed delivery. */
+        const entry = canonicalResourceEntry(hosts, paneHosts, byPath);
+        sessions.push({
+          target: host.display,
+          panePid: host.panePid,
+          path: entry?.path ?? null,
+          engine: host.engine,
+          hostConflict: conflictingResourceHost(hosts, host),
+          title: entry?.title ?? null,
+          project: entry?.project || null,
+          activity: entry?.activity ?? null,
+          lastActiveAt: entry ? isoFromUnix(entry.mtime) : null,
+          cwd: host.cwd,
+          ...treeMemory(tree),
+          procCount: tree.length,
+        });
+        const ref = attachRefs.get(host.paneId);
+        if (ref) killRefs.push({ target: host.display, ref });
+      }
+    });
+
+    const hostRefs: Array<{ target: string; ref: StructuredHostKillRef }> = [];
+    for (const { record, tree } of structuredTrees) {
+      const entry = record.path ? byPath.get(record.path) ?? null : null;
+      const lastActiveAt = entry ? isoFromUnix(entry.mtime) : null;
+      const target = STRUCTURED_TARGET_PREFIX + record.id;
+      sessions.push({
+        target,
+        panePid: record.pid,
+        kind: "structured",
+        path: record.path,
+        engine: record.engine,
+        title: record.title ?? entry?.title ?? null,
+        project: entry?.project || null,
+        activity: entry?.activity ?? null,
+        lastActiveAt,
+        cwd: record.cwd || null,
+        ...treeMemory(tree),
+        procCount: tree.length,
+        model: record.model,
+        role: record.role,
+        conversationId: record.conversationId,
+        stage: record.stage,
+        /* No session id means no registry record covers this process at all;
+           a deleted worktree means the record outlived what it was hosting.
+           Either way the runtime cannot reach it through its own lifecycle. A
+           record with no cwd at all says nothing either way, so it is not read
+           as a vanished worktree. */
+        ownership: record.sessionId === null
+          || (record.cwd.length > 0 && dependencies.directoryExists?.(record.cwd) === false)
+          ? "orphaned"
+          : record.owned ? "owned" : "released",
+        seat: record.seat,
+        turnBusy: record.turnBusy,
+      });
+      hostRefs.push({
+        target,
+        ref: {
+          pid: record.pid,
+          startIdentity: record.startIdentity,
+          engine: record.engine,
+          sessionId: record.sessionId,
+          conversationId: record.conversationId,
+          seat: record.seat,
+          turnBusy: record.turnBusy,
+          owned: record.owned,
+          lastActiveAt,
+        },
+      });
+    }
+
+    sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
+    rememberResourceTargets(killRefs);
+    rememberStructuredHostTargets(hostRefs);
 
     globalStore.__llvLastResourceBuild = { fresh, status: "complete", durationMs: performance.now() - startedAt, phases };
     return { system, sessions };
@@ -383,6 +613,9 @@ export type CollectedResources = {
   hostCount: number;
   treeCount: number;
   targets: Array<{ target: string; ref: KillTargetRef }>;
+  /** Structured host kill authority. Absent on observations persisted before
+      structured hosts were listed, which had no host rows to authorize. */
+  hostTargets?: Array<{ target: string; ref: StructuredHostKillRef }>;
   targetEpoch?: number;
 };
 
@@ -743,6 +976,7 @@ function collectedResources(
   diagnostic: ResourceBuildDiagnostic,
   targets: Array<{ target: string; ref: KillTargetRef }> = [],
   targetEpoch = globalStore.__llvResourceTargetEpoch ?? 0,
+  hostTargets: Array<{ target: string; ref: StructuredHostKillRef }> = [],
 ): CollectedResources {
   return {
     payload,
@@ -750,12 +984,21 @@ function collectedResources(
     hostCount: payload.sessions.length,
     treeCount: payload.sessions.reduce((total, session) => total + session.procCount, 0),
     targets,
+    /* Omitted when empty so a deployment with no structured hosts serializes
+       exactly as it did before they were listed. */
+    ...(hostTargets.length > 0 ? { hostTargets } : {}),
     targetEpoch,
   };
 }
 
 type ResourceWorkerMessage =
-  | { type: "observation"; payload: ResourcesPayload; diagnostic: ResourceBuildDiagnostic; targets: Array<{ target: string; ref: KillTargetRef }> }
+  | {
+      type: "observation";
+      payload: ResourcesPayload;
+      diagnostic: ResourceBuildDiagnostic;
+      targets: Array<{ target: string; ref: KillTargetRef }>;
+      hostTargets: Array<{ target: string; ref: StructuredHostKillRef }>;
+    }
   | { type: "failure"; error: string };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -786,7 +1029,16 @@ function validResourceSystem(value: unknown): boolean {
 function validResourceSession(value: unknown): boolean {
   if (!record(value) || !exactKeys(value, [
     "target", "panePid", "path", "engine", "title", "project", "activity", "lastActiveAt", "cwd", "rssBytes", "swapBytes", "procCount",
-  ], ["hostConflict"])) return false;
+  ], ["hostConflict", "kind", "model", "role", "conversationId", "stage", "ownership", "seat", "turnBusy"])) return false;
+  if (value.kind !== undefined && value.kind !== "tmux" && value.kind !== "structured") return false;
+  if (value.ownership !== undefined
+    && value.ownership !== "owned" && value.ownership !== "released" && value.ownership !== "orphaned") return false;
+  if ((value.model !== undefined && !nullableString(value.model))
+    || (value.role !== undefined && !nullableString(value.role))
+    || (value.conversationId !== undefined && !nullableString(value.conversationId))
+    || (value.stage !== undefined && !nullableString(value.stage))
+    || (value.seat !== undefined && typeof value.seat !== "boolean")
+    || (value.turnBusy !== undefined && typeof value.turnBusy !== "boolean")) return false;
   return typeof value.target === "string" && value.target.length > 0
     && Number.isSafeInteger(value.panePid) && (value.panePid as number) > 0
     && nullableString(value.path)
@@ -836,6 +1088,50 @@ function validResourceTarget(value: unknown): value is { target: string; ref: Ki
     && validKillTargetRef(value.ref);
 }
 
+function validStructuredHostKillRef(value: unknown): value is StructuredHostKillRef {
+  if (!record(value) || !exactKeys(value, [
+    "pid", "startIdentity", "engine", "sessionId", "conversationId", "seat", "turnBusy", "owned", "lastActiveAt",
+  ])) return false;
+  return Number.isSafeInteger(value.pid) && (value.pid as number) > 1
+    && nullableString(value.startIdentity)
+    && (value.engine === "claude" || value.engine === "codex")
+    && nullableString(value.sessionId)
+    && nullableString(value.conversationId)
+    && typeof value.seat === "boolean"
+    && typeof value.turnBusy === "boolean"
+    && typeof value.owned === "boolean"
+    && nullableString(value.lastActiveAt)
+    && (value.lastActiveAt === null || Number.isFinite(Date.parse(value.lastActiveAt as string)));
+}
+
+function validStructuredHostTarget(value: unknown): value is { target: string; ref: StructuredHostKillRef } {
+  return record(value)
+    && exactKeys(value, ["target", "ref"])
+    && typeof value.target === "string"
+    && value.target.length > 0
+    && validStructuredHostKillRef(value.ref);
+}
+
+/** Host authority is only ever granted for a row the same payload listed, and
+    only for the pid that row showed. */
+function structuredHostTargetsMatchPayload(
+  payload: ResourcesPayload,
+  hostTargets: Array<{ target: string; ref: StructuredHostKillRef }>,
+): boolean {
+  const structuredByTarget = new Map<string, ResourceSession>();
+  for (const session of payload.sessions) {
+    if (session.kind !== "structured") continue;
+    if (structuredByTarget.has(session.target)) return false;
+    structuredByTarget.set(session.target, session);
+  }
+  const seen = new Set<string>();
+  return hostTargets.every(({ target, ref }) => {
+    if (seen.has(target)) return false;
+    seen.add(target);
+    return structuredByTarget.get(target)?.panePid === ref.pid;
+  });
+}
+
 function resourceTargetsMatchPayload(
   payload: ResourcesPayload,
   targets: Array<{ target: string; ref: KillTargetRef }>,
@@ -854,7 +1150,7 @@ function resourceTargetsMatchPayload(
 }
 
 function validCollectedResources(value: unknown): value is CollectedResources {
-  if (!record(value) || !exactKeys(value, ["payload", "diagnostic", "hostCount", "treeCount", "targets"], ["targetEpoch"])
+  if (!record(value) || !exactKeys(value, ["payload", "diagnostic", "hostCount", "treeCount", "targets"], ["targetEpoch", "hostTargets"])
     || !validResourcesPayload(value.payload)
     || !validResourceDiagnostic(value.diagnostic)
     || !Number.isSafeInteger(value.hostCount) || (value.hostCount as number) < 0
@@ -862,7 +1158,13 @@ function validCollectedResources(value: unknown): value is CollectedResources {
     || (value.targetEpoch !== undefined && (!Number.isSafeInteger(value.targetEpoch) || (value.targetEpoch as number) < 0))
     || !Array.isArray(value.targets)
     || value.targets.length > RESOURCE_OBSERVATION_MAX_TARGETS
-    || !value.targets.every(validResourceTarget)) return false;
+    || !value.targets.every(validResourceTarget)
+    || (value.hostTargets !== undefined
+      && (!Array.isArray(value.hostTargets)
+        || value.hostTargets.length > RESOURCE_STRUCTURED_HOST_LIMIT
+        || !value.hostTargets.every(validStructuredHostTarget)))) return false;
+  if (value.hostTargets !== undefined
+    && !structuredHostTargetsMatchPayload(value.payload, value.hostTargets as Array<{ target: string; ref: StructuredHostKillRef }>)) return false;
   return value.diagnostic.status === "complete"
     && resourceTargetsMatchPayload(value.payload, value.targets)
     && value.hostCount === value.payload.sessions.length
@@ -879,14 +1181,23 @@ function resourceWorkerMessage(value: unknown): ResourceWorkerMessage | null {
       ? candidate as ResourceWorkerMessage
       : null;
   }
-  if (candidate.type !== "observation" || !exactKeys(candidate, ["type", "payload", "diagnostic", "targets"])
+  /* `hostTargets` is optional on the wire: a worker binary left over from an
+     older build emits none, and the viewer then simply grants no host kill
+     authority for that observation instead of discarding it whole. */
+  const hostTargets = candidate.hostTargets ?? [];
+  if (candidate.type !== "observation" || !exactKeys(candidate, ["type", "payload", "diagnostic", "targets"], ["hostTargets"])
     || !validResourcesPayload(candidate.payload)
     || !validResourceDiagnostic(candidate.diagnostic)
     || !Array.isArray(candidate.targets)
     || candidate.targets.length > RESOURCE_OBSERVATION_MAX_TARGETS
-    || !candidate.targets.every(validResourceTarget)) return null;
-  if (candidate.diagnostic.status !== "complete" || !resourceTargetsMatchPayload(candidate.payload, candidate.targets)) return null;
-  return candidate as ResourceWorkerMessage;
+    || !candidate.targets.every(validResourceTarget)
+    || !Array.isArray(hostTargets)
+    || hostTargets.length > RESOURCE_STRUCTURED_HOST_LIMIT
+    || !hostTargets.every(validStructuredHostTarget)) return null;
+  if (candidate.diagnostic.status !== "complete"
+    || !resourceTargetsMatchPayload(candidate.payload, candidate.targets)
+    || !structuredHostTargetsMatchPayload(candidate.payload, hostTargets as Array<{ target: string; ref: StructuredHostKillRef }>)) return null;
+  return { ...candidate, hostTargets } as ResourceWorkerMessage;
 }
 
 export function parsePersistedResourceObservation(raw: string): ResourceObservation<CollectedResources> | null {
@@ -964,6 +1275,7 @@ async function collectResourcesInWorker(
   limits: ResourceWorkerLimits = {},
   targetEpoch = globalStore.__llvResourceTargetEpoch ?? 0,
   processRuntime: ResourceWorkerProcessRuntime = defaultResourceWorkerProcessRuntime,
+  readHostRecords: () => Promise<StructuredHostRecord[]> = readStructuredHostRecordsForCollection,
 ): Promise<CollectedResources> {
   const launch = resolveResourceWorkerLaunch();
   const observeTimeoutMs = limits.observeTimeoutMs ?? RESOURCE_OBSERVE_TIMEOUT_MS;
@@ -993,6 +1305,22 @@ async function collectResourcesInWorker(
   );
   const timeoutMs = Math.min(limits.timeoutMs ?? RESOURCE_WORKER_TIMEOUT_MS, workerBudgetMs);
   const filesTask = readFiles(fresh);
+  /* The registry is the viewer's to read: the worker runs contained and never
+     opens it. Started alongside the file scan and bounded by the same handoff
+     budget — a slow or failing inventory must not cost the whole observation,
+     it just leaves the payload with whatever hosts the process scan sees. */
+  let hostsTimer: ReturnType<typeof setTimeout> | undefined;
+  const hostsTask = Promise.race([
+    readHostRecords(),
+    new Promise<StructuredHostRecord[]>((resolve) => {
+      hostsTimer = setTimeout(() => resolve([]), inputTimeoutMs);
+    }),
+  ]).catch((error) => {
+    console.error(`[resources] structured host inventory failed: ${error instanceof Error ? error.message : String(error)}`);
+    return [] as StructuredHostRecord[];
+  }).finally(() => {
+    if (hostsTimer) clearTimeout(hostsTimer);
+  });
   let inputTimer: ReturnType<typeof setTimeout> | undefined;
   const files = await Promise.race([
     filesTask,
@@ -1006,7 +1334,8 @@ async function collectResourcesInWorker(
   ]).finally(() => {
     if (inputTimer) clearTimeout(inputTimer);
   });
-  const request = JSON.stringify({ type: "collect", fresh, files }) + "\n";
+  const hosts = await hostsTask;
+  const request = JSON.stringify({ type: "collect", fresh, files, hosts }) + "\n";
   const outputMaxBytes = limits.outputMaxBytes ?? RESOURCE_WORKER_OUTPUT_MAX_BYTES;
   if (Buffer.byteLength(request) > RESOURCE_WORKER_OUTPUT_MAX_BYTES) {
     throw new ResourceCollectorFailureError(
@@ -1832,7 +2161,7 @@ async function collectResourcesInWorker(
         }
         finish({
           type: "success",
-          value: collectedResources(message.payload, message.diagnostic, message.targets, targetEpoch),
+          value: collectedResources(message.payload, message.diagnostic, message.targets, targetEpoch, message.hostTargets),
         });
         output = "";
       }
@@ -1923,7 +2252,12 @@ function resourceReadFromResult(
   }
   const { payload, diagnostic } = observation.value;
   if (!failure && observation.collectorId === result.collectorId && observation.value.targetEpoch !== undefined) {
-    applyResourceTargets(observation.generation, observation.value.targets, observation.value.targetEpoch);
+    applyResourceTargets(
+      observation.generation,
+      observation.value.targets,
+      observation.value.targetEpoch,
+      observation.value.hostTargets ?? [],
+    );
   }
   if (failure) {
     return {
@@ -1986,7 +2320,7 @@ export function createResourcesReader(
       const payload = await build(fresh);
       const diagnostic = diagnosticForBuild();
       if (!diagnostic) throw new Error("resource build completed without diagnostics");
-      return collectedResources(payload, diagnostic, lastResourceTargetRefs(), targetEpoch);
+      return collectedResources(payload, diagnostic, lastResourceTargetRefs(), targetEpoch, lastStructuredHostTargetRefs());
     } : (fresh = false) => collectResourcesInWorker(
       fresh,
       options.readFiles,
@@ -2100,6 +2434,8 @@ export function resetResourcesForTests(): void {
   globalStore.__llvResourcesReaderVersion = undefined;
   globalStore.__llvResourceTargets = undefined;
   globalStore.__llvLastResourceTargets = undefined;
+  globalStore.__llvStructuredHostTargets = undefined;
+  globalStore.__llvLastStructuredHostTargets = undefined;
   globalStore.__llvResourceTargetsGeneration = undefined;
   globalStore.__llvResourceTargetEpoch = undefined;
   globalStore.__llvLastResourceBuild = undefined;

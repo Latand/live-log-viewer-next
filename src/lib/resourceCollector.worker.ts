@@ -1,14 +1,15 @@
 import "./resourceCollector.workerMode";
 
+import { existsSync } from "node:fs";
 import { parentPort } from "node:worker_threads";
 
 import { createTranscriptHostObserver } from "./agent/transcriptHost";
 import { procBackend } from "./proc";
 import { agentProcesses } from "./scanner/process";
-import { buildResourceSnapshot, lastResourceBuildDiagnostic, lastResourceTargetRefs, RESOURCE_WORKER_OUTPUT_MAX_BYTES, type ResourceWorkerFileObservation } from "./resources";
+import { buildResourceSnapshot, lastResourceBuildDiagnostic, lastResourceTargetRefs, lastStructuredHostTargetRefs, RESOURCE_WORKER_OUTPUT_MAX_BYTES, type ResourceWorkerFileObservation, type StructuredHostRecord } from "./resources";
 import { overlayResourceSessionTitles } from "./session/titleProjection";
 import { captureTmuxAttachReferences, panePidMap, tmuxServerPid } from "./tmux";
-import type { FileEntry } from "./types";
+import { RESOURCE_STRUCTURED_HOST_LIMIT, type FileEntry } from "./types";
 
 function send(message: unknown): void {
   if (parentPort) {
@@ -22,6 +23,9 @@ type ResourceWorkerRequest = {
   type: "collect";
   fresh: boolean;
   files: ResourceWorkerFileObservation[];
+  /** Structured-host records the viewer read out of the registry for us. The
+      worker runs contained and opens no registry of its own. */
+  hosts: StructuredHostRecord[];
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -48,14 +52,41 @@ function resourceFileObservation(value: unknown): value is ResourceWorkerFileObs
     && nullableString(value.conversationId);
 }
 
+function structuredHostRecord(value: unknown): value is StructuredHostRecord {
+  if (!record(value)) return false;
+  const keys = [
+    "id", "engine", "sessionId", "pid", "startIdentity", "cwd", "path", "conversationId",
+    "title", "role", "model", "stage", "seat", "turnBusy", "owned",
+  ];
+  if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) return false;
+  return typeof value.id === "string" && value.id.length > 0
+    && (value.engine === "claude" || value.engine === "codex")
+    && nullableString(value.sessionId)
+    && Number.isSafeInteger(value.pid) && (value.pid as number) > 1
+    && nullableString(value.startIdentity)
+    && typeof value.cwd === "string"
+    && nullableString(value.path)
+    && nullableString(value.conversationId)
+    && nullableString(value.title)
+    && nullableString(value.role)
+    && nullableString(value.model)
+    && nullableString(value.stage)
+    && typeof value.seat === "boolean"
+    && typeof value.turnBusy === "boolean"
+    && typeof value.owned === "boolean";
+}
+
 function resourceWorkerRequest(value: unknown): ResourceWorkerRequest | null {
   if (!record(value)
-    || Object.keys(value).length !== 3
+    || Object.keys(value).length !== 4
     || value.type !== "collect"
     || typeof value.fresh !== "boolean"
     || !Array.isArray(value.files)
     || value.files.length > 10_000
-    || !value.files.every(resourceFileObservation)) return null;
+    || !value.files.every(resourceFileObservation)
+    || !Array.isArray(value.hosts)
+    || value.hosts.length > RESOURCE_STRUCTURED_HOST_LIMIT
+    || !value.hosts.every(structuredHostRecord)) return null;
   return value as ResourceWorkerRequest;
 }
 
@@ -84,10 +115,20 @@ async function collect(message: unknown): Promise<void> {
       readHosts: (fresh, entries, ppids) => readHosts(fresh, entries as FileEntry[], ppids),
       proc: procBackend,
       captureAttachReferences: captureTmuxAttachReferences,
+      readStructuredHosts: async () => request.hosts,
+      listAgentProcesses: agentProcesses,
+      directoryExists: (directory) => existsSync(directory),
+      processIdentity: procBackend.processIdentity,
     });
     const diagnostic = lastResourceBuildDiagnostic();
     if (!diagnostic) throw new Error("resource worker completed without diagnostics");
-    send({ type: "observation", payload, diagnostic, targets: lastResourceTargetRefs() });
+    send({
+      type: "observation",
+      payload,
+      diagnostic,
+      targets: lastResourceTargetRefs(),
+      hostTargets: lastStructuredHostTargetRefs(),
+    });
   } catch (error) {
     send({ type: "failure", error: error instanceof Error ? error.message : String(error) });
   }

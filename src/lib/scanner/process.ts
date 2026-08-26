@@ -128,6 +128,35 @@ export function argvEngine(argv: string[]): AgentEngine | null {
   return null;
 }
 
+/**
+ * Engine of a structured host process — the pane-less shape the runtime spawns
+ * and speaks to over stdio — or null for anything else wearing the same
+ * binary. Both signatures are ones no human types: the Claude broker is the
+ * only `claude` run that reads `stream-json` off stdin, and `app-server` is the
+ * only Codex subcommand the viewer ever starts. That exactness is what keeps
+ * the operator's own `claude`/`codex` sessions out of the resources list, and
+ * therefore out of every kill it offers.
+ */
+export function structuredHostEngine(argv: string[]): AgentEngine | null {
+  const engine = argvEngine(argv);
+  if (engine === null || isHelperArgv(argv)) return null;
+  if (engine === "codex") return argv.includes("app-server") ? "codex" : null;
+  const printMode = argv.includes("-p") || argv.includes("--print");
+  const streamInput = argv.some((token, index) => token === "--input-format" && argv[index + 1] === "stream-json");
+  return printMode && streamInput ? "claude" : null;
+}
+
+/**
+ * An account-migration successor: the one structured-shaped Claude run the
+ * viewer starts that is NOT an addressable host but a migration worker forking
+ * a conversation onto another account. It carries `--fork-session`, and the
+ * resources list leaves it out entirely so no bulk kill can interrupt a
+ * migration mid-flight.
+ */
+export function accountMigrationHostArgv(argv: string[]): boolean {
+  return argv.includes("--fork-session");
+}
+
 // Claude Code internal workers: the session daemon plus its pty host/spare
 // wrappers. They share the engine binary and often the project cwd, so they
 // must not compete with the real interactive CLI for pid attribution.
