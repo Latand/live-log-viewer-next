@@ -2,6 +2,8 @@
 
 import { memo } from "react";
 
+import type { MandateDelivery } from "@/lib/runtime/messageOrigin";
+
 import { Brain, ChevronUp, Command, Check, Mail, Mic, Sparkle, X } from "../icons";
 import { hhmm } from "../utils";
 import { MESSAGE_ACTION } from "./actionStyles";
@@ -15,6 +17,7 @@ import { BlobCard } from "./cards/BlobCard";
 import { CmdGroupCard } from "./cards/CmdGroupCard";
 import { CompactBand } from "./cards/CompactBand";
 import { ImageCard } from "./cards/ImageCard";
+import { MandateCard } from "./cards/MandateCard";
 import { MemCitationCard } from "./cards/MemCitationCard";
 import { ProtocolMessageBody, parseProtocolPayload } from "./cards/ProtocolMessage";
 import { ReviewCard } from "./cards/ReviewCard";
@@ -35,16 +38,27 @@ import { McpCallCard } from "../runtime/McpCallCard";
  * same text, nearest its settlement time — so an operator's own message that
  * repeats a relay's words stays the operator's. No evidence — no provider,
  * unknown id, scaffold row, the operator's own words — keeps the row untouched.
+ *
+ * One more class of evidence rides here (#1166): the SAME occurrence record can
+ * say that its delivery was an orchestrator seat's mandate, and then the row is
+ * the seat's own card. Because the fact belongs to the delivery rather than to
+ * the text, an agent relay that repeats the mandate's bytes carries no such
+ * record and stays the relay it is, and an operator who pastes them by hand
+ * keeps their own bubble.
  */
 function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
   if (item.kind === "user") {
     /* A selected-context capture exists only on operator composer sends. */
     if (item.selectedContext) return item;
     const resolved = provenance.forItem(item);
-    return resolved?.origin === "agent" ? internalCard(item.ts, item.text, resolved.senderRole) : item;
+    if (resolved?.mandate) return mandateCard(item.ts, item.text, resolved.mandate);
+    if (resolved?.origin === "agent") return internalCard(item.ts, item.text, resolved.senderRole);
+    return item;
   }
   if (item.kind !== "sysmsg" || !item.deliveredMessage) return item;
   const resolved = provenance.forItem(item);
+  if (resolved?.mandate) return mandateCard(item.deliveredMessage.ts, item.text, resolved.mandate);
+  if (resolved?.origin === "agent") return internalCard(item.deliveredMessage.ts, item.text, resolved.senderRole);
   if (resolved?.origin === "operator") {
     return {
       kind: "user",
@@ -53,8 +67,11 @@ function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
       ...(resolved.selectedContext ? { selectedContext: resolved.selectedContext } : {}),
     };
   }
-  if (resolved?.origin === "agent") return internalCard(item.deliveredMessage.ts, item.text, resolved.senderRole);
   return item;
+}
+
+function mandateCard(ts: unknown, text: string, mandate: MandateDelivery): Item {
+  return { kind: "mandate", ts, text, mandate };
 }
 
 function internalCard(ts: unknown, text: string, senderRole: string | undefined): Item {
@@ -80,6 +97,7 @@ export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: 
   if (item.kind === "inbox-image") return <InboxImageCard name={item.name} path={item.path} />;
   if (item.kind === "blob") return <BlobCard bytes={item.bytes} text={item.text} />;
   if (item.kind === "sysmsg") return <SysMsgCard label={item.label} text={item.text} />;
+  if (item.kind === "mandate") return <MandateCard item={item} />;
   if (item.kind === "compact") return <CompactBand item={item} />;
   if (item.kind === "review") return <ReviewCard item={item} />;
   if (item.kind === "record") return <RecordCard item={item} />;

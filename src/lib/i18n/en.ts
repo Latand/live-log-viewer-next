@@ -1015,6 +1015,16 @@ export const en = {
      only, so nothing announces "nothing selected" anywhere (#1148). */
   "selectedContext.stale": "stale",
   "selectedContext.ariaSelected": "Selected card: {name} (project {project})",
+  /* #1166 the delivered orchestrator mandate. The seat sends it; the operator
+     never typed it, so the row names what it is instead of quoting 8 KB back
+     at them as their own words. */
+  "mandateCard.title": "Mandate",
+  "mandateCard.version": "v{version}",
+  "mandateCard.custom": "custom",
+  "mandateCard.lines": { one: "{count} line", other: "{count} lines" },
+  "mandateCard.sent": "sent at seat creation",
+  "mandateCard.readMandate": "Read the mandate",
+  "mandateCard.handoff": "Rotation handoff",
   "feed.voiceContext": "Call transcript",
   "feed.speak": "Read answer aloud (AI-generated voice)",
   "feed.stopSpeaking": "Stop reading aloud",

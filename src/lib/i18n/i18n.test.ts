@@ -157,3 +157,42 @@ describe("attach copy (issue #68) is present in both locales", () => {
     expect(uk["attach.restarted"]).toContain("Онови");
   });
 });
+
+describe("mandate card copy (#1166)", () => {
+  const keys = [
+    "mandateCard.title",
+    "mandateCard.version",
+    "mandateCard.custom",
+    "mandateCard.lines",
+    "mandateCard.sent",
+    "mandateCard.readMandate",
+    "mandateCard.handoff",
+  ] as const;
+
+  test("both locales define every label the card renders", () => {
+    for (const key of keys) {
+      expect(en[key], `en ${key}`).toBeTruthy();
+      expect(uk[key], `uk ${key}`).toBeTruthy();
+    }
+  });
+
+  test("the version qualifier interpolates in both locales, and stays a version in both", () => {
+    expect(translate("en", "mandateCard.version", { version: 9 })).toBe("v9");
+    expect(translate("uk", "mandateCard.version", { version: 9 })).toBe("v9");
+  });
+
+  test("the line count declines in Ukrainian instead of freezing one form", () => {
+    expect(translate("en", "mandateCard.lines", { count: 1 })).toBe("1 line");
+    expect(translate("en", "mandateCard.lines", { count: 58 })).toBe("58 lines");
+    expect(translate("uk", "mandateCard.lines", { count: 1 })).toBe("1 рядок");
+    expect(translate("uk", "mandateCard.lines", { count: 3 })).toBe("3 рядки");
+    expect(translate("uk", "mandateCard.lines", { count: 58 })).toBe("58 рядків");
+  });
+
+  test("both locales say the mandate arrived with the seat, not from the operator", () => {
+    expect(en["mandateCard.sent"]).toBe("sent at seat creation");
+    expect(uk["mandateCard.sent"]).toContain("надіслано");
+    expect(en["mandateCard.custom"]).toBe("custom");
+    expect(uk["mandateCard.custom"]).toBe("власний");
+  });
+});
