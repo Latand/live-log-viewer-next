@@ -46,11 +46,17 @@ Object.assign(globalThis, {
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const actualLogTail = await import("@/hooks/useLogTail");
+/** Whether the runtime plane is AUTHORITATIVE for this test. Off (the default
+    everywhere else here) makes `file.proc` the authority, so a transcript in the
+    catalog classifies on its own; on, with no session to resolve, is the plane
+    holding a running conversation at `unresolved` — the half of «opening…» that
+    is not the catalog's (#1182). */
+let runtimePlaneOn: boolean;
 mock.module("@/hooks/useRuntime", () => ({
   ...actualRuntimeHooks,
   useRuntimeBusState: () => ({ enabled: false, connection: "off", resyncedAt: null, lastEventAt: null, store: emptyStore() }),
   useRuntime: () => ({ enabled: false, connection: "off", resyncedAt: null, store: emptyStore() }),
-  useRuntimeEnabled: () => false,
+  useRuntimeEnabled: () => runtimePlaneOn,
   useRuntimeSession: () => null,
   useRuntimeSessionForConversation: () => null,
   useRuntimeSessionByArtifact: () => null,
@@ -100,6 +106,9 @@ let incumbentStatus: Record<string, unknown> | null;
 /** How many times that read has been answered — Re-bind is only a re-bind if it
     actually re-runs resolution (#1182). */
 let incumbentReads: number;
+/** The status read is DOWN: every attempt answers 503, which is what a panel
+    reopened against a viewer that has not finished coming back sees (#1182). */
+let incumbentReadDown: boolean;
 const realFetch = globalThis.fetch;
 
 function answer(queue: { status: number; body: Record<string, unknown> | null; throws?: boolean }[]): Response {
@@ -123,6 +132,7 @@ function installFetch(): void {
        a switch away genuinely lands on another project's own answer. */
     if (url.startsWith("/api/orchestrator/seat/status")) {
       incumbentReads += 1;
+      if (incumbentReadDown) return { ok: false, status: 503, json: async () => ({}) } as Response;
       const target = new URL(url, "http://localhost").searchParams.get("project");
       return { ok: true, status: 200, json: async () => (target === "atlas" ? incumbentStatus : { project: target, designated: false, rotation: null, context: null }) } as Response;
     }
@@ -220,6 +230,8 @@ beforeEach(() => {
   seatStatus = { seat: null, pending: null, exists: true, viewerMcpRegistered: false };
   incumbentStatus = { project: "atlas", designated: false, rotation: null, context: null };
   incumbentReads = 0;
+  incumbentReadDown = false;
+  runtimePlaneOn = false;
   seatPosts = [];
   rotatePosts = [];
   spawnPosts = 0;
@@ -652,6 +664,80 @@ test("a bind that never lands stops spinning: the panel names the reason and off
   await settle();
   expect(incumbentReads).toBeGreaterThan(before);
   expect(rotatePosts).toHaveLength(0);
+}, SEAT_BIND_TIMEOUT_MS + 20_000);
+
+test("the RUNTIME half of a bounded bind offers the same two ways forward (#1182)", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent({ liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
+  /* The transcript IS in view, so resolution got that far. What has not answered
+     is the runtime plane: authoritative, with no host evidence for a
+     conversation whose pid is running, which holds the surface at
+     `unresolved` — the other half of «opening…». */
+  runtimePlaneOn = true;
+  const running = { ...orchestratorFile, proc: "running", pid: 4242 } as FileEntry;
+
+  const host = mount([running]);
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(host)).toBe("live");
+  expect(host.querySelector("[data-orchestrator-bind]")).toBeNull();
+
+  await new Promise((resolve) => setTimeout(resolve, SEAT_BIND_TIMEOUT_MS + 250));
+  await settle();
+  flushSync(() => undefined);
+
+  const banner = host.querySelector('[data-orchestrator-bind="surface"]') as HTMLElement | null;
+  expect(banner).not.toBeNull();
+  /* The reason is the runtime plane's, and the conversation itself is still on
+     screen underneath it. */
+  expect(banner!.textContent).toContain("runtime plane");
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+
+  /* Re-bind AND the board, on this half too. */
+  expect((banner!.querySelector("[data-orchestrator-open-board]") as HTMLAnchorElement).getAttribute("href"))
+    .toBe("#c=conversation_orch");
+  const before = incumbentReads;
+  flushSync(() => (banner!.querySelector("[data-orchestrator-rebind]") as HTMLButtonElement).click());
+  await settle();
+  expect(incumbentReads).toBeGreaterThan(before);
+  /* And rotation is neither of them — nor is a second designation or a spawn. */
+  expect(rotatePosts).toHaveLength(0);
+  expect(seatPosts).toHaveLength(0);
+  expect(spawnPosts).toBe(0);
+}, SEAT_BIND_TIMEOUT_MS + 20_000);
+
+test("a cached «alive» nobody is answering for any more never accuses the seat (#1182)", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent({ liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
+
+  /* One good reading, taken while the viewer was up: this tab now REMEMBERS an
+     alive host for the seat. */
+  const before = mount([orchestratorFile]);
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(before)).toBe("live");
+
+  /* Then the viewer restarts underneath the tab. The catalog answers for
+     nothing, and every status read from here fails — so the only thing still
+     saying «alive» is the memory. */
+  incumbentReadDown = true;
+  const host = remount([]);
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, SEAT_BIND_TIMEOUT_MS + 250));
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("live");
+  /* The reading IS on hand — with no file in the catalog the board contributes
+     no context of its own, so the header's model and wear can only be coming
+     from the retained reading. */
+  expect(incumbentRow(host)?.textContent).toContain("opus");
+  expect(host.querySelector("[data-orchestrator-context]")?.getAttribute("data-orchestrator-context")).toBe("24");
+  /* And it is not evidence: the panel keeps waiting instead of reporting a
+     fault the server was never asked to confirm. */
+  expect(host.querySelector("[data-orchestrator-bind]")).toBeNull();
+  expect(host.textContent).toContain("Opening the conversation");
+  expect(host.textContent).toContain("Open it on the board");
 }, SEAT_BIND_TIMEOUT_MS + 20_000);
 
 test("a seat whose transcript is gone returns the panel to the draft", async () => {

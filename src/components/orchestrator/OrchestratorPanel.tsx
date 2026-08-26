@@ -154,7 +154,7 @@ export function OrchestratorPanel({
   const seated = Boolean(seatConversationId && status?.exists);
   /* The incumbent's wear is only a question while there IS an incumbent; a
      project sitting on its draft asks nothing. */
-  const { incumbent: read, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, seated);
+  const { incumbent: read, stale: readStale, refresh: refreshIncumbent } = useOrchestratorIncumbent(project, seated);
   /* A reading is only about the conversation it names. Right after a rotation
      the seat has already advanced to the successor while this slower poll still
      describes the predecessor — showing that as «the incumbent» would put the
@@ -188,6 +188,14 @@ export function OrchestratorPanel({
   useEffect(() => {
     if (unboundWithReading) void refreshIncumbent();
   }, [unboundWithReading, refreshIncumbent]);
+  /* Liveness is only evidence while someone is still answering for it. The
+     header may keep a cached reading — an engine and a context percent from a
+     minute ago beat a row of dashes — but a cached «alive» carried across the
+     very restart this panel is waiting out, with every refresh since failing, is
+     a MEMORY. Accusing the seat of failing to bind on it would report a fault
+     the server was never asked to confirm, so the bound stays silent and
+     «opening…» stands until a status read answers again (issue #1182). */
+  const hostLive = !readStale && incumbentHostLive(incumbent);
   /* Re-bind: re-run resolution from both reads it is composed of. It designates,
      rotates and spawns nothing — recovering a restart must never cost a seat. */
   const rebind = () => {
@@ -209,7 +217,7 @@ export function OrchestratorPanel({
     file,
     surface,
     incumbent,
-    hostLive: incumbentHostLive(incumbent),
+    hostLive,
     unboundForMs,
   });
   /**
@@ -410,7 +418,9 @@ export function OrchestratorPanel({
               {/* Bound to a transcript, but the runtime plane never resolved a
                   host for it: the conversation renders and the panel says why
                   its controls are still «opening», rather than leaving a badge
-                  the operator can only read as a stuck seat (#1182). */}
+                  the operator can only read as a stuck seat (#1182). Both ways
+                  forward ride here too — a bounded wait offers the same pair
+                  whichever half is missing, and rotation is neither of them. */}
               {state.bindFailure === "surface" ? (
                 <p
                   data-orchestrator-bind="surface"
@@ -419,6 +429,7 @@ export function OrchestratorPanel({
                 >
                   {t("orchPanel.bindStalledSurface")}
                   <RebindButton onRebind={rebind} />
+                  <OpenOnBoardLink conversationId={state.conversationId} />
                 </p>
               ) : null}
             </>
@@ -449,12 +460,7 @@ export function OrchestratorPanel({
                   <p className="max-w-[300px] text-ui text-muted">{t("orchPanel.resolvingHint")}</p>
                 </>
               )}
-              <a
-                href={"#c=" + encodeURIComponent(state.conversationId)}
-                className="text-ui font-semibold text-accent underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              >
-                {t("orchPanel.openOnBoard")}
-              </a>
+              <OpenOnBoardLink conversationId={state.conversationId} />
             </Centered>
           )}
         </div>
@@ -936,6 +942,22 @@ function SecondaryButton({ onClick, children }: { onClick: () => void; children:
     <button type="button" onClick={onClick} className={SECONDARY_BUTTON}>
       {children}
     </button>
+  );
+}
+
+/** The board still has the conversation while the dock cannot bind it, so this
+    rides with every bounded reason — not only with the one that leaves the panel
+    with nothing else to show (issue #1182). */
+function OpenOnBoardLink({ conversationId }: { conversationId: string }) {
+  const { t } = useLocale();
+  return (
+    <a
+      href={"#c=" + encodeURIComponent(conversationId)}
+      data-orchestrator-open-board
+      className="text-ui font-semibold text-accent underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+    >
+      {t("orchPanel.openOnBoard")}
+    </a>
   );
 }
 

@@ -39,6 +39,9 @@ const viewerMcpCwds = new Set<string>();
     not a hope. */
 let seatReads: string[];
 let statusReads: string[];
+/** The status route is refusing to answer — a viewer that has not finished
+    coming back, with the tab's own last reading still on hand (#1182). */
+let statusDown: boolean;
 const realFetch = globalThis.fetch;
 
 function seatBody(project: string, cwd: string): unknown {
@@ -82,11 +85,13 @@ beforeEach(() => {
   viewerMcpCwds.clear();
   seatReads = [];
   statusReads = [];
+  statusDown = false;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost");
     const project = url.searchParams.get("project") ?? "";
     if (url.pathname === "/api/orchestrator/seat/status") {
       statusReads.push(project);
+      if (statusDown) return { ok: false, status: 503, json: async () => ({}) } as Response;
       return { ok: true, status: 200, json: async () => statusBody(project) } as Response;
     }
     seatReads.push(project);
@@ -106,11 +111,12 @@ afterEach(() => {
     the incumbent model, and the cwd-scoped Viewer MCP preflight. */
 function Probe({ project, cwd }: { project: string; cwd?: string }) {
   const { status, failed } = useOrchestratorSeat(project, cwd);
-  const { incumbent } = useOrchestratorIncumbent(project, Boolean(status?.seat));
+  const { incumbent, stale } = useOrchestratorIncumbent(project, Boolean(status?.seat));
   return (
     <div
       data-seat={status ? status.seat?.conversationId ?? "vacant" : failed ? "unavailable" : "loading"}
       data-model={incumbent?.model ?? "unread"}
+      data-freshness={stale ? "stale" : "fresh"}
       data-viewer-mcp={status?.viewerMcpRegistered ? "registered" : "missing"}
     />
   );
@@ -132,6 +138,7 @@ function mountProbe() {
     open: (project: string, cwd?: string) => flushSync(() => root.render(<Probe key={`${project}:${cwd ?? ""}`} project={project} cwd={cwd} />)),
     seat: () => probe().getAttribute("data-seat"),
     model: () => probe().getAttribute("data-model"),
+    freshness: () => probe().getAttribute("data-freshness"),
     viewerMcp: () => probe().getAttribute("data-viewer-mcp"),
   };
 }
@@ -239,4 +246,41 @@ test("a failed re-read keeps the project's own last answer, never another projec
   expect(dock.seat()).toBe("loading");
   await settle();
   expect(dock.seat()).toBe("unavailable");
+});
+
+test("a retained incumbent reading is marked stale, so nothing reads it as CURRENT evidence (#1182)", async () => {
+  seats.set("atlas", "conversation_atlas");
+  models.set("atlas", "opus");
+  seats.set("borealis", "conversation_borealis");
+
+  const dock = mountProbe();
+  dock.open("atlas");
+  await settle();
+  expect(dock.model()).toBe("opus");
+  expect(dock.freshness()).toBe("fresh");
+
+  /* The status route stops answering. Coming back to atlas repaints the reading
+     from the tab's own cache — the header keeps naming the incumbent — but the
+     reading re-enters STALE: it was answered for in an earlier episode, and the
+     read that would confirm it is failing. */
+  statusDown = true;
+  dock.open("borealis");
+  await settle();
+  dock.open("atlas");
+  expect(dock.model()).toBe("opus");
+  expect(dock.freshness()).toBe("stale");
+  await settle();
+  expect(dock.model()).toBe("opus");
+  expect(dock.freshness()).toBe("stale");
+
+  /* The route comes back and the very next answer restores the reading as
+     current — staleness is about the answer, never a latch. */
+  statusDown = false;
+  await settle();
+  dock.open("borealis");
+  await settle();
+  dock.open("atlas");
+  await settle();
+  expect(dock.model()).toBe("opus");
+  expect(dock.freshness()).toBe("fresh");
 });
