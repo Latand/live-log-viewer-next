@@ -87,12 +87,24 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
   const firstRun = loaded && catalogFailures === 0 && !summaries.length;
   /* The phone's rail is not mounted beside the board — it exists only once
      something opens the drawer, so nothing an event fired at tap time could
-     reach. It decides at mount instead: a rail arriving into a first run lists
+     reach. It decides for itself instead: a rail sitting in a first run lists
      no projects, and the only reason to have summoned it is what this form
-     does, so it arrives open. That makes the overview's «Create a project»
+     does, so the form is open. That makes the overview's «Create a project»
      button one tap on a phone too (issue #1162), and the labelled button above
-     the form still collapses it. */
-  const [createOpen, setCreateOpen] = useState(() => isMobile && firstRun && !!onCreateProject);
+     the form still collapses it.
+     The tap can land before the catalog answers, so the rail arrives with
+     `loaded` false and the first run only becomes true a moment later. It
+     follows that transition — the repo's render-phase adjustment pattern — so
+     the form opens on the edge instead of being decided once at mount, which
+     had cost the operator a second tap. The edge fires once: a form the
+     operator has since collapsed stays collapsed. */
+  const mobileFirstRun = isMobile && firstRun && !!onCreateProject;
+  const [createOpen, setCreateOpen] = useState(mobileFirstRun);
+  const [seenMobileFirstRun, setSeenMobileFirstRun] = useState(mobileFirstRun);
+  if (mobileFirstRun !== seenMobileFirstRun) {
+    setSeenMobileFirstRun(mobileFirstRun);
+    if (mobileFirstRun) setCreateOpen(true);
+  }
   /* The first-run overview's «Create a project» button steers this form
      (issue #1162) instead of carrying a second creation path. The rail owns the
      form, so it owns the event that opens it — the same one-window-event idiom

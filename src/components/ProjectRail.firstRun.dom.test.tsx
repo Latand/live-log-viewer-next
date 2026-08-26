@@ -55,6 +55,16 @@ Object.assign(globalThis, {
   matchMedia: matchMediaStub,
 });
 
+/* A rail row arriving into the list is flipped in; happy-dom has no Web
+   Animations, and `useFlip` subscribes to the returned animation. */
+(dom.HTMLElement.prototype as unknown as { animate: () => unknown }).animate = () => ({
+  finished: Promise.resolve(),
+  cancel() {},
+  finish() {},
+  addEventListener() {},
+  removeEventListener() {},
+});
+
 /* The rail's footers and header controls poll APIs on mount; a failed response
    leaves each of them in its own empty state. */
 globalThis.fetch = (async () => ({ ok: false, status: 503, json: async () => ({}) })) as unknown as typeof fetch;
@@ -99,31 +109,39 @@ afterEach(async () => {
   viewportWidth = 1280;
 });
 
+function railTree(extra: Partial<React.ComponentProps<typeof ProjectRail>>, beside?: React.ReactNode) {
+  return (
+    <>
+      <ProjectRail
+        files={[]}
+        projectCatalog={[]}
+        pipelines={[]}
+        workflows={[]}
+        archivedProjects={new Set()}
+        selected="__overview__"
+        loaded
+        now={2_000}
+        onSelect={() => {}}
+        onCreateProject={createProject}
+        {...extra}
+      />
+      {beside}
+    </>
+  );
+}
+
 function renderRail(extra: Partial<React.ComponentProps<typeof ProjectRail>> = {}, beside?: React.ReactNode): HTMLElement {
   const container = dom.document.createElement("div");
   dom.document.body.appendChild(container);
   root = createRoot(container as unknown as Element);
-  act(() =>
-    root!.render(
-      <>
-        <ProjectRail
-          files={[]}
-          projectCatalog={[]}
-          pipelines={[]}
-          workflows={[]}
-          archivedProjects={new Set()}
-          selected="__overview__"
-          loaded
-          now={2_000}
-          onSelect={() => {}}
-          onCreateProject={createProject}
-          {...extra}
-        />
-        {beside}
-      </>,
-    ),
-  );
+  act(() => root!.render(railTree(extra, beside)));
   return container as unknown as HTMLElement;
+}
+
+/** New props onto the SAME mounted rail — the catalog answering under it, not a
+    remount, which is the whole difference the mount-time read could not see. */
+function rerenderRail(extra: Partial<React.ComponentProps<typeof ProjectRail>> = {}, beside?: React.ReactNode) {
+  act(() => root!.render(railTree(extra, beside)));
 }
 
 const create = (host: HTMLElement) => host.querySelector('[data-testid="rail-create-project"]') as unknown as HTMLElement | null;
@@ -256,8 +274,44 @@ test("on a phone one tap on the overview's button reaches the open form", () => 
 
 test("a desktop rail does not open the form until it is asked", () => {
   /* The phone's auto-open is scoped to the drawer it lives in: an always-on
-     desktop rail must not expand a form nobody asked for. */
-  const host = renderRail();
+     desktop rail must not expand a form nobody asked for — not at mount, and
+     not when the catalog answers under it either. */
+  const host = renderRail({ loaded: false });
+  expect(form(host)).toBeNull();
+
+  rerenderRail({ loaded: true });
+  expect(form(host)).toBeNull();
+});
+
+test("a phone rail summoned before the catalog answers still opens the form itself", () => {
+  /* The tap that opens the drawer can land while the catalog is still in
+     flight, so the rail mounts knowing nothing yet — «no projects» is not true
+     of it yet, and it was never going to be told again. It follows the
+     transition instead: the first run arriving under an already-mounted rail
+     opens the same form one tap bought on a loaded one (issue #1162). */
+  viewportWidth = 390;
+  const host = renderRail({ loaded: false });
+  expect(form(host)).toBeNull();
+
+  rerenderRail({ loaded: true });
+  expect(form(host)).not.toBeNull();
+
+  /* And the operator still owns it from there: collapsing the form must survive
+     every later render of a rail that is still in the same first run. */
+  click(create(host)!);
+  expect(form(host)).toBeNull();
+  rerenderRail({ loaded: true, now: 3_000 });
+  expect(form(host)).toBeNull();
+});
+
+test("a phone rail whose catalog answers with projects opens no form", () => {
+  /* The transition that opens the form is the first run specifically, not the
+     catalog merely answering. */
+  viewportWidth = 390;
+  const host = renderRail({ loaded: false });
+
+  rerenderRail({ loaded: true, files: [fileEntry()] });
+  expect(create(host)).not.toBeNull();
   expect(form(host)).toBeNull();
 });
 
