@@ -43,6 +43,19 @@ export type ManagerRecordRef = typeof MANAGER_RECORD_REF;
 export const BRIDGE_REPORT_CAPACITY = 500;
 /** Retired ids kept so a trimmed report cannot be re-appended by a late replay. */
 export const BRIDGE_RETIRED_ID_CAPACITY = 2_000;
+/** Answered report seqs kept alongside the log (#1168). Bounded for the same
+    reason `retired` is: the file is state, not history. */
+export const BRIDGE_ANSWERED_REF_CAPACITY = 500;
+/**
+ * How long an unanswered `blocked`/`question` report keeps asking (#1168).
+ *
+ * The same reasoning `STALLED_ATTENTION_TTL` carries, and the same two hours:
+ * the attention queue answers "who needs me right now", and a decision request
+ * the operator has already settled some other way — in the orchestrator's own
+ * conversation, in person — must not sit in the queue forever with nothing in
+ * the log able to retire it.
+ */
+export const BRIDGE_ASK_TTL_SECONDS = 2 * 3600;
 /** §3: report bodies are bounded. Measured in UTF-8 bytes, not code units. */
 export const BRIDGE_REPORT_BODY_MAX_BYTES = 2_048;
 
@@ -78,6 +91,16 @@ export type BridgeStoredReportClass = BridgeReportClass | typeof LEGACY_CONFIRMA
 
 export function isStoredBridgeReportClass(value: unknown): value is BridgeStoredReportClass {
   return isBridgeReportClass(value) || value === LEGACY_CONFIRMATION_CLASS;
+}
+
+/**
+ * The two classes in which the manager is ASKING rather than reporting: `blocked`
+ * ("I cannot proceed") and `question` ("I need an answer"). They are the only
+ * rows that open an attention item, the only rows whose caller key is kept
+ * verbatim, and the only rows a directive can answer (#1168).
+ */
+export function isBridgeDecisionRequestClass(value: BridgeStoredReportClass): boolean {
+  return value === "blocked" || value === "question";
 }
 
 /**
@@ -119,11 +142,25 @@ export function bridgeReportOriginLabel(origin: BridgeReportOrigin | undefined):
   return origin.conversationId ? `${who} ${origin.conversationId}` : who;
 }
 
+/**
+ * Resolves a recorded seat identity to the conversation id the registry calls
+ * it now (#1168). Both the ask projection and a directive's settlement run
+ * EVERY seat identity through the same one — see `seatIdentity.ts`.
+ */
+export type CanonicalSeatConversationId = (conversationId: string) => string;
+
 export interface BridgeReportV1 {
   /** Monotonic, never reused — THE cursor unit. */
   seq: number;
   /** Derived from the caller's stable `key`; a re-append is a no-op. */
   id: string;
+  /** The caller's own `key`, verbatim — the identity #1168 puts on the
+      attention item, which the hashed `id` cannot spell back out. Kept only on
+      the decision-request classes, which are the only rows that become an
+      attention item; absent on every other class and on rows written before
+      this field existed, which open no ask at all rather than being enqueued
+      under some other identity. */
+  key?: string;
   at: string;
   class: BridgeStoredReportClass;
   /** Server-derived origin. Absent on rows written before origin labeling
@@ -171,6 +208,11 @@ export interface BridgeReportLogV1 {
   trimmedThroughByChannel?: Record<string, number>;
   reports: BridgeReportV1[];
   retired: string[];
+  /** Report seqs a gateway directive answered with `[bridge ref=<seq>]`
+      (#1168). Kept here rather than on a channel because a seq is already
+      log-global, and because the attention queue must read ONE file to know
+      whether a report is still asking. */
+  answeredRefs?: number[];
 }
 
 export interface BridgeChannelV1 {

@@ -7,12 +7,14 @@ import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 import { hardenedRedact } from "@/lib/view/compactText";
 
 import {
+  BRIDGE_ANSWERED_REF_CAPACITY,
   BRIDGE_CHANNEL_SCHEMA_VERSION,
   BRIDGE_DRAIN_BATCH_MAX,
   BRIDGE_REPORT_BODY_MAX_BYTES,
   BRIDGE_REPORT_CAPACITY,
   BRIDGE_REPORT_LOG_SCHEMA_VERSION,
   BRIDGE_RETIRED_ID_CAPACITY,
+  isBridgeDecisionRequestClass,
   isStoredBridgeReportClass,
   LEGACY_CONFIRMATION_CLASS,
   MANAGER_RECORD_REF,
@@ -23,6 +25,7 @@ import {
   type BridgeReportLogV1,
   type BridgeReportOrigin,
   type BridgeReportV1,
+  type CanonicalSeatConversationId,
 } from "./types";
 
 /**
@@ -154,6 +157,7 @@ function normalizeReport(value: unknown): BridgeReportV1 | null {
     seq: candidate.seq as number,
     at: candidate.at,
     class: candidate.class,
+    ...(typeof candidate.key === "string" && candidate.key ? { key: candidate.key } : {}),
     body: typeof candidate.body === "string" ? candidate.body : "",
     ...(origin ? { origin } : {}),
     ...(project !== undefined ? { project } : {}),
@@ -170,7 +174,20 @@ function emptyLog(): BridgeReportLogV1 {
     trimmedThroughByChannel: {},
     reports: [],
     retired: [],
+    answeredRefs: [],
   };
+}
+
+/** Recorded answers, sorted and bounded. Unlike a report row a malformed entry
+    here is noise rather than damage — it can only fail to clear an ask, never
+    invent one — so it drops instead of stopping the read. */
+function normalizeAnsweredRefs(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const refs = new Set<number>();
+  for (const entry of value) {
+    if (Number.isInteger(entry) && (entry as number) > 0) refs.add(entry as number);
+  }
+  return [...refs].sort((left, right) => left - right).slice(-BRIDGE_ANSWERED_REF_CAPACITY);
 }
 
 /** Every recorded row must survive the round trip. A row that does not is
@@ -211,6 +228,7 @@ function normalizeLog(value: unknown, target: string): BridgeReportLogV1 {
       : {},
     reports,
     retired: Array.isArray(file.retired) ? file.retired.filter((id): id is string => typeof id === "string") : [],
+    answeredRefs: normalizeAnsweredRefs(file.answeredRefs),
   };
 }
 
@@ -392,6 +410,10 @@ export function appendBridgeReports(
         seq: file.lastSeq,
         at: input.at,
         class: input.class,
+        /* The verbatim key is kept for the classes that become an attention
+           item and for no others (#1168): a `status` row is identified by its
+           hashed `id` exactly as it was before this field existed. */
+        ...(isBridgeDecisionRequestClass(input.class) ? { key: input.key } : {}),
         body: bridgeReportBody(input.body),
         ...(input.origin ? { origin: normalizeOrigin(input.origin) } : {}),
         ...("project" in input ? { project: typeof input.project === "string" ? input.project : null } : {}),
@@ -445,6 +467,60 @@ export function appendBridgeReports(
     }
     writeJsonDurably(bridgeReportLogPath(), file);
     return { appended, skipped };
+  });
+}
+
+/**
+ * Record that `scope`'s directive answered report `ref` (#1168).
+ *
+ * The gateway's trailer is the only thing that can say a `question` was
+ * ANSWERED — the cursor says only that it was read aloud — so the answer has to
+ * outlive the turn that carried it. It lands in the report log rather than in a
+ * channel: the seq it names is already log-global, and the attention queue then
+ * needs exactly one file to know whether a report is still asking.
+ *
+ * Log-global is also why the seq alone may never be taken at face value. The
+ * ref is resolved against the log INSIDE the write transaction and recorded only
+ * when it names a decision request this directive's own seat filed:
+ *
+ * - a ref naming nothing yet would sit in the file waiting to pre-answer
+ *   whatever report later takes that seq, silencing a question nobody replied to;
+ * - a ref naming another project's row would let one project's directive clear
+ *   another project's ask, because the number carries no ownership of its own;
+ * - a ref naming a `status` row settles nothing that was ever asking.
+ *
+ * The seat fence compares CANONICAL identities on both sides, through the
+ * caller's resolver. The recorded seat is whatever the conversation was called
+ * when the report was routed and the scope's is whatever the seat authority
+ * calls it now, so raw equality fails after an account migration rekeys it —
+ * and it fails on the one side that matters, because the attention projection
+ * canonicalizes too and had already moved the ask onto the live card. The
+ * resolver travels in rather than being read here so this stays a pure durable
+ * store; passing it is not optional, because an identity resolver nobody
+ * supplied is exactly the raw comparison this fence exists to stop being.
+ *
+ * Idempotent, so a directive retry under the same derived id costs nothing.
+ */
+export function recordBridgeDirectiveAnswer(
+  ref: number,
+  scope: BridgeChannelScope,
+  canonicalSeatConversationId: CanonicalSeatConversationId,
+): void {
+  if (!Number.isInteger(ref) || ref < 1) return;
+  withFileTransactionSync(bridgeReportLogPath(), BRIDGE_LOG_BUSY, () => {
+    const file = readLog();
+    const answered = file.reports.find((report) => report.seq === ref);
+    if (!answered || !isBridgeDecisionRequestClass(answered.class)) return;
+    if (answered.project !== scope.project) return;
+    const recordedSeat = answered.targetSeatConversationId;
+    /* An unrouted row is the log's quarantine: it opened no ask, so there is
+       nothing here for a directive to settle. */
+    if (!recordedSeat) return;
+    if (canonicalSeatConversationId(recordedSeat) !== canonicalSeatConversationId(scope.seatConversationId)) return;
+    const refs = file.answeredRefs ?? [];
+    if (refs.includes(ref)) return;
+    file.answeredRefs = normalizeAnsweredRefs([...refs, ref]);
+    writeJsonDurably(bridgeReportLogPath(), file);
   });
 }
 

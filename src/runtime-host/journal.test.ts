@@ -12,11 +12,17 @@ import type { Flow } from "@/lib/flows/types";
 import { UnixRuntimeHostClient } from "@/lib/runtime/client";
 import { runtimePresentationReceipt, runtimeScope } from "@/lib/runtime/contracts";
 import { projectEngineHostEvent } from "@/lib/runtime/engineHostEvents";
+import { LIVE_TURN_TEXT_LIMIT } from "@/lib/runtime/liveTurn";
 import { structuredContentDigest, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 import { streamingVoiceDelivery } from "@/lib/runtime/voiceDelivery";
 
 import { RuntimeHost, RuntimeHostFence } from "./host";
-import { RuntimeJournal, RuntimeJournalFault } from "./journal";
+import {
+  RuntimeJournal,
+  RuntimeJournalFault,
+  RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS,
+  RUNTIME_SNAPSHOT_TERMINAL_DEPLOYMENT_LIMIT,
+} from "./journal";
 import { serveRuntimeHost } from "./socket";
 
 function sandbox(name: string): string {
@@ -455,6 +461,274 @@ test("snapshot bounds inactive session history while retaining every active sess
   expect(ids.has("conversation_dead_000")).toBeFalse();
   expect(journal.sessionState("conversation_dead_000")).toMatchObject({ host: "dead" });
   journal.close();
+});
+
+test("snapshot drops large live turns from every hosted idle session", () => {
+  const dir = sandbox("bounded-idle-live-turns");
+  const filename = path.join(dir, "events.sqlite");
+  const journal = new RuntimeJournal(filename, { maxEvents: 1_000, now: () => 100 });
+  const sessionCount = 300;
+  for (let index = 0; index < sessionCount; index += 1) {
+    const conversationId = `conversation_idle_${String(index).padStart(3, "0")}`;
+    journal.append({
+      scope: runtimeScope("session", conversationId),
+      kind: "session-status",
+      payload: {
+        conversationId,
+        sessionKey: { engine: "codex", sessionId: `session-${index}` },
+        hostKind: "codex-app-server",
+        host: "hosted",
+        turn: "idle",
+        provenance: "structured",
+        capabilities: { steer: true, structuredAttention: true },
+      },
+    });
+  }
+
+  // Recreate the oversized durable rows that predated live-turn bounding.
+  const legacyText = "x".repeat(LIVE_TURN_TEXT_LIMIT);
+  const raw = new Database(filename);
+  raw.query(`
+    UPDATE entities
+    SET state_json = json_set(
+      state_json,
+      '$.liveTurn',
+      json(?)
+    )
+    WHERE kind = 'session'
+  `).run(JSON.stringify({ turnId: "turn-finished", text: legacyText }));
+  raw.close();
+
+  expect(sessionCount * Buffer.byteLength(legacyText)).toBeGreaterThan(16 * 1024 * 1024);
+  expect(journal.sessionState("conversation_idle_000")?.liveTurn?.text).toHaveLength(LIVE_TURN_TEXT_LIMIT);
+  const json = journal.snapshotJson();
+  const snapshot = JSON.parse(json) as ReturnType<RuntimeJournal["snapshot"]>;
+  expect(snapshot.sessions).toHaveLength(sessionCount);
+  expect(snapshot.sessions.every((session) => session.liveTurn === null)).toBeTrue();
+  expect(Buffer.byteLength(json)).toBeLessThan(4 * 1024 * 1024);
+  journal.close();
+});
+
+test("snapshot nulls live turns for every non-running turn axis regardless of host", () => {
+  const dir = sandbox("non-running-live-turns");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { now: () => 100 });
+  for (const [turn, host] of [
+    ["idle", "hosted"],
+    ["unknown", "dead"],
+    ["interrupt_requested", "unhosted"],
+  ] as const) {
+    journal.append({
+      scope: runtimeScope("session", `conversation-${turn}`),
+      kind: "session-status",
+      payload: {
+        conversationId: `conversation-${turn}`,
+        host,
+        turn,
+        liveTurn: { turnId: `turn-${turn}`, text: "stale live text" },
+      },
+    });
+  }
+
+  expect(journal.snapshot().sessions.map((session) => session.liveTurn)).toEqual([null, null, null]);
+  journal.close();
+});
+
+test("snapshot caps a legacy running live turn to its marked UTF-8 tail", () => {
+  const dir = sandbox("bounded-running-live-turn");
+  const filename = path.join(dir, "events.sqlite");
+  const journal = new RuntimeJournal(filename, { now: () => 100 });
+  journal.append({
+    scope: runtimeScope("session", "conversation-running"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-running",
+      sessionKey: { engine: "codex", sessionId: "session-running" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: "turn-running",
+    },
+  });
+
+  const tail = "tail-界";
+  const legacyText = `${"🫶🏽".repeat(LIVE_TURN_TEXT_LIMIT)}${tail}`;
+  const raw = new Database(filename);
+  const row = raw.query<{ state_json: string }, [string, string]>(
+    "SELECT state_json FROM entities WHERE kind = ? AND id = ?",
+  ).get("session", "conversation-running")!;
+  const state = JSON.parse(row.state_json) as Record<string, unknown>;
+  state.liveTurn = { turnId: "turn-running", text: legacyText };
+  raw.query("UPDATE entities SET state_json = ? WHERE kind = ? AND id = ?")
+    .run(JSON.stringify(state), "session", "conversation-running");
+  raw.close();
+
+  expect(Buffer.byteLength(journal.sessionState("conversation-running")?.liveTurn?.text ?? ""))
+    .toBeGreaterThan(LIVE_TURN_TEXT_LIMIT);
+  const liveTurn = journal.snapshot().sessions[0]?.liveTurn;
+  expect(liveTurn).not.toBeNull();
+  expect(Buffer.byteLength(liveTurn?.text ?? "")).toBeLessThanOrEqual(LIVE_TURN_TEXT_LIMIT);
+  expect(liveTurn?.text.endsWith(tail)).toBeTrue();
+  expect(liveTurn?.items?.some((item) => (item.omittedChars ?? 0) > 0)).toBeTrue();
+  journal.close();
+});
+
+test("snapshot retains active and newest terminal deployments without deleting history", () => {
+  const dir = sandbox("bounded-deployments");
+  let now = 100;
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { now: () => now });
+  const terminalIds: string[] = [];
+  for (let index = 0; index < RUNTIME_SNAPSHOT_TERMINAL_DEPLOYMENT_LIMIT + 5; index += 1) {
+    const receipt = journal.admitViewerDeployment({
+      idempotencyKey: `deployment-${index}`,
+      requestedRevision: `requested-${index}`,
+      revision: `revision-${index}`,
+    }, { pid: index + 1, startIdentity: null });
+    if (receipt.state !== "accepted") throw new Error("deployment fixture was not admitted");
+    terminalIds.push(receipt.deploymentId);
+    now += 1;
+    journal.updateViewerDeployment(receipt.deploymentId, { phase: "succeeded", terminal: true });
+    now += 1;
+  }
+  const active = journal.admitViewerDeployment({
+    idempotencyKey: "deployment-active",
+    requestedRevision: "requested-active",
+    revision: "revision-active",
+  }, { pid: 99, startIdentity: null });
+  if (active.state !== "accepted") throw new Error("active deployment fixture was not admitted");
+
+  const snapshotIds = new Set(journal.snapshot().deployments.map((deployment) => deployment.deploymentId));
+  expect(snapshotIds.size).toBe(RUNTIME_SNAPSHOT_TERMINAL_DEPLOYMENT_LIMIT + 1);
+  expect(snapshotIds.has(active.deploymentId)).toBeTrue();
+  expect(snapshotIds.has(terminalIds[0]!)).toBeFalse();
+  expect(snapshotIds.has(terminalIds.at(-1)!)).toBeTrue();
+  expect(journal.viewerDeployment(terminalIds[0]!)).toMatchObject({ terminal: true, phase: "succeeded" });
+  journal.close();
+});
+
+test("snapshot omits stale terminal-session edges while durable rows remain", () => {
+  const dir = sandbox("bounded-edges");
+  const filename = path.join(dir, "events.sqlite");
+  let now = 100;
+  const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => now });
+  const spawn = (suffix: string) => journal.executeOperation({
+    kind: "spawn",
+    conversationId: `child-${suffix}`,
+    operationId: `operation-${suffix}`,
+    idempotencyKey: `spawn-${suffix}`,
+    engine: "codex",
+    cwd: "repo",
+    "prompt": "Run the fixture",
+    parentConversationId: "parent",
+    sessionId: `session-${suffix}`,
+  });
+  const setHost = (suffix: string, host: "hosted" | "dead" | "unhosted") => journal.append({
+    scope: runtimeScope("session", `child-${suffix}`),
+    kind: "session-status",
+    payload: { host, turn: "idle" },
+  });
+
+  spawn("stale-dead");
+  setHost("stale-dead", "dead");
+  spawn("recent-terminal");
+  setHost("recent-terminal", "hosted");
+  spawn("active-old");
+  setHost("active-old", "hosted");
+  now += RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS + 1;
+  setHost("recent-terminal", "unhosted");
+
+  const edgeIds = journal.snapshot().edges.map((edge) => edge.id);
+  expect(edgeIds).toEqual(["edge-operation-active-old", "edge-operation-recent-terminal"]);
+  const raw = new Database(filename, { readonly: true });
+  expect(raw.query<{ count: number }, []>(
+    "SELECT COUNT(*) AS count FROM entities WHERE kind = 'edge'",
+  ).get()?.count).toBe(3);
+  raw.close();
+  journal.close();
+});
+
+test("snapshot retains an old edge when a recent terminal checkpoint was compacted", () => {
+  const dir = sandbox("compacted-terminal-edge");
+  const filename = path.join(dir, "events.sqlite");
+  const day = 24 * 60 * 60 * 1_000;
+  let now = 0;
+  const journal = new RuntimeJournal(filename, { maxEvents: 100, now: () => now });
+  journal.executeOperation({
+    kind: "spawn",
+    conversationId: "child-compacted-terminal",
+    operationId: "operation-compacted-terminal",
+    idempotencyKey: "spawn-compacted-terminal",
+    engine: "codex",
+    cwd: "repo",
+    "prompt": "Run the fixture",
+    parentConversationId: "parent",
+    sessionId: "session-compacted-terminal",
+  });
+
+  now = 6 * day;
+  journal.append({
+    scope: runtimeScope("session", "child-compacted-terminal"),
+    kind: "session-status",
+    payload: { host: "dead", turn: "idle" },
+  });
+  journal.append({
+    scope: runtimeScope("session", "unrelated-session"),
+    kind: "session-status",
+    payload: { host: "hosted", turn: "idle" },
+  });
+  journal.compact(1);
+  now = 8 * day;
+
+  const raw = new Database(filename, { readonly: true });
+  expect(raw.query<{ count: number }, []>(`
+    SELECT COUNT(*) AS count
+    FROM entities AS session
+    JOIN events AS event ON event.seq = session.checkpoint_seq
+    WHERE session.kind = 'session' AND session.id = 'child-compacted-terminal'
+  `).get()?.count).toBe(0);
+  expect(raw.query<{ count: number }, []>(`
+    SELECT COUNT(*) AS count FROM entities WHERE kind = 'edge'
+  `).get()?.count).toBe(1);
+  raw.close();
+
+  expect(journal.snapshot().edges.map((edge) => edge.id))
+    .toEqual(["edge-operation-compacted-terminal"]);
+  journal.close();
+});
+
+test("journal backfills entity update times when reopening a legacy schema", () => {
+  const dir = sandbox("legacy-entity-update-time");
+  const filename = path.join(dir, "events.sqlite");
+  const initial = new RuntimeJournal(filename, { now: () => 123 });
+  initial.append({
+    scope: runtimeScope("session", "legacy-session"),
+    kind: "session-status",
+    payload: { host: "dead", turn: "idle" },
+  });
+  initial.close();
+
+  const legacy = new Database(filename);
+  legacy.exec(`
+    ALTER TABLE entities RENAME TO entities_with_update_time;
+    CREATE TABLE entities (
+      kind TEXT NOT NULL, id TEXT NOT NULL, revision INTEGER NOT NULL,
+      state_json TEXT NOT NULL, checkpoint_seq INTEGER NOT NULL,
+      PRIMARY KEY(kind, id)
+    );
+    INSERT INTO entities(kind, id, revision, state_json, checkpoint_seq)
+    SELECT kind, id, revision, state_json, checkpoint_seq FROM entities_with_update_time;
+    DROP TABLE entities_with_update_time;
+  `);
+  legacy.close();
+
+  const reopened = new RuntimeJournal(filename, { now: () => 999 });
+  const migrated = new Database(filename, { readonly: true });
+  expect(migrated.query<{ updated_at: number }, [string, string]>(`
+    SELECT updated_at FROM entities WHERE kind = ? AND id = ?
+  `).get("session", "legacy-session")?.updated_at).toBe(123);
+  migrated.close();
+  reopened.close();
 });
 
 test("issue 51 keeps tool work running until authoritative turn completion", () => {
@@ -2639,6 +2913,43 @@ test("snapshotJson rebuilds only when the database has changed", () => {
   const second = journal.snapshotJson();
   expect(second).not.toBe(first);
   expect(JSON.parse(second).snapshotSeq).toBe(2);
+  journal.close();
+});
+
+test("snapshotJson expires terminal-session edges without a database change", () => {
+  const dir = sandbox("snapshot-cache-edge-expiry");
+  let now = 100;
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => now });
+  journal.executeOperation({
+    kind: "spawn",
+    conversationId: "child-expiring-edge",
+    operationId: "operation-expiring-edge",
+    idempotencyKey: "spawn-expiring-edge",
+    engine: "codex",
+    cwd: "repo",
+    "prompt": "Run the fixture",
+    parentConversationId: "parent",
+    sessionId: "session-expiring-edge",
+  });
+  journal.append({
+    scope: runtimeScope("session", "child-expiring-edge"),
+    kind: "session-status",
+    payload: { host: "dead", turn: "idle" },
+  });
+
+  const before = journal.snapshotJson();
+  const beforeSnapshot = JSON.parse(before) as ReturnType<RuntimeJournal["snapshot"]>;
+  expect(beforeSnapshot.edges.map((edge) => edge.id)).toEqual(["edge-operation-expiring-edge"]);
+  expect(journal.snapshotJson()).toBe(before);
+
+  now += RUNTIME_SNAPSHOT_STALE_EDGE_RETENTION_MS;
+  expect(journal.snapshotJson()).toBe(before);
+  now += 1;
+  const after = journal.snapshotJson();
+  const afterSnapshot = JSON.parse(after) as ReturnType<RuntimeJournal["snapshot"]>;
+  expect(afterSnapshot.snapshotSeq).toBe(beforeSnapshot.snapshotSeq);
+  expect(afterSnapshot.edges).toEqual([]);
+  expect(journal.snapshot().edges).toEqual([]);
   journal.close();
 });
 

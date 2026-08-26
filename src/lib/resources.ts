@@ -707,6 +707,7 @@ type ResourceWorkerLaunchOptions = {
   env?: NodeJS.ProcessEnv;
   execPath?: string;
   exists?: (pathname: string) => boolean;
+  versions?: { bun?: string };
 };
 
 export function resolveResourceWorkerLaunch(options: ResourceWorkerLaunchOptions = {}): {
@@ -716,6 +717,8 @@ export function resolveResourceWorkerLaunch(options: ResourceWorkerLaunchOptions
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
   const exists = options.exists ?? existsSync;
+  const execPath = options.execPath ?? process.execPath;
+  const versions = options.versions ?? process.versions;
   const sourceWorker = path.join(cwd, "src/lib/resourceCollector.worker.ts");
   const bundledWorker = path.join(cwd, ".next/server/resource-collector-worker.js");
   const sourceWorkerExists = exists(sourceWorker);
@@ -730,7 +733,7 @@ export function resolveResourceWorkerLaunch(options: ResourceWorkerLaunchOptions
   const bunContainer = "/usr/local/bin/bun-container";
   if (sourceWorkerExists && exists(bunContainer)) return { executable: bunContainer, workerPath: sourceWorker };
   if (bundledWorkerExists) {
-    return { executable: options.execPath ?? process.execPath, workerPath: bundledWorker };
+    return { executable: versions.bun ? execPath : (env.LLV_BUN_EXECUTABLE || "bun"), workerPath: bundledWorker };
   }
   return { executable: "bun", workerPath: sourceWorker };
 }

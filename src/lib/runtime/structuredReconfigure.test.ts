@@ -11,6 +11,7 @@ import type { SuccessorProviderPort, ViewerConversationId } from "@/lib/accounts
 import { applyStructuredReconfigure } from "./structuredReconfigure";
 import type { StructuredReconfigureEffect } from "./structuredDeliveryQueue";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -24,7 +25,7 @@ function fixture(profile: Partial<{ model: string | null; effort: string | null;
   const sessionId = crypto.randomUUID();
   const transcript = path.join(root, `rollout-${sessionId}.jsonl`);
   fs.writeFileSync(transcript, "{}\n");
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd: root,
     accountId: "source",

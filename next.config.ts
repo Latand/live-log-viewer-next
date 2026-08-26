@@ -14,6 +14,9 @@ const nextConfig: NextConfig = {
       ".next/server/file-scanner-worker.js",
       ".next/server/files-response-worker.js",
       ".next/server/resource-collector-worker.js",
+      ".next/server/account-migration-controller-worker.js",
+      ".next/server/wakatime-sync-worker.js",
+      ".next/server/chunks/**",
     ],
   },
   webpack(config, { isServer, nextRuntime }) {
@@ -24,6 +27,8 @@ const nextConfig: NextConfig = {
         "file-scanner-worker": "./src/lib/fileScanner.worker.ts",
         "files-response-worker": "./src/lib/filesResponse.worker.ts",
         "resource-collector-worker": "./src/lib/resourceCollector.worker.ts",
+        "account-migration-controller-worker": "./src/lib/accountMigrationController.worker.ts",
+        "wakatime-sync-worker": "./src/lib/wakatimeSync.worker.ts",
       });
     }
     return config;

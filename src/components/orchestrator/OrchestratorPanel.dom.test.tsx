@@ -4,8 +4,11 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
+import type { RuntimeSessionView } from "@/hooks/useRuntime";
+import { FILES_CHANGED_EVENT } from "@/lib/filesEvents";
 import { setLocale } from "@/lib/i18n";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
+import { messageTextDigest } from "@/lib/runtime/messageTextDigest";
 import type { FileEntry } from "@/lib/types";
 
 /*
@@ -46,27 +49,55 @@ Object.assign(globalThis, {
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const actualLogTail = await import("@/hooks/useLogTail");
+/** Whether the runtime plane is AUTHORITATIVE for this test. Off (the default
+    everywhere else here) makes `file.proc` the authority, so a transcript in the
+    catalog classifies on its own; on, with no session to resolve, is the plane
+    holding a running conversation at `unresolved` — the half of «opening…» that
+    is not the catalog's (#1182). */
+let runtimePlaneOn: boolean;
+/** The host the plane resolves for the seat's transcript right now — null is the
+    plane holding it at `unresolved`. */
+let runtimeSession: RuntimeSessionView | null;
+/** What the plane would answer if someone ASKED it: `refreshRuntime()` is the
+    only thing that moves it, so a panel that never calls that seam sees
+    `runtimeSession` stay exactly where it was (#1182). */
+let runtimeAnswer: RuntimeSessionView | null;
+let runtimeRefreshes: number;
 mock.module("@/hooks/useRuntime", () => ({
   ...actualRuntimeHooks,
   useRuntimeBusState: () => ({ enabled: false, connection: "off", resyncedAt: null, lastEventAt: null, store: emptyStore() }),
   useRuntime: () => ({ enabled: false, connection: "off", resyncedAt: null, store: emptyStore() }),
-  useRuntimeEnabled: () => false,
-  useRuntimeSession: () => null,
+  useRuntimeEnabled: () => runtimePlaneOn,
+  useRuntimeSession: () => runtimeSession,
   useRuntimeSessionForConversation: () => null,
   useRuntimeSessionByArtifact: () => null,
   useRuntimeReceiptsForArtifact: () => [],
   useRuntimeFlow: () => null,
+  refreshRuntime: () => {
+    runtimeRefreshes += 1;
+    runtimeSession = runtimeAnswer;
+    return Promise.resolve(runtimeAnswer !== null);
+  },
 }));
+/** What the feed already holds for a path. The real hook keeps exactly this —
+    a browser-wide per-path snapshot of the tail (`useLogTail`'s own cache),
+    read synchronously on mount — which is why a re-seated conversation view
+    repaints a transcript this tab has already read (#1149). */
+const tailLines = new Map<string, string[]>();
 mock.module("@/hooks/useLogTail", () => ({
-  useLogTail: () => ({
-    lines: [], linesStart: 0, size: 0, loading: false, error: null, tickTime: null,
+  ...actualLogTail,
+  useLogTail: (file: FileEntry | null) => ({
+    lines: (file && tailLines.get(file.path)) ?? [], linesStart: 0, size: 0, loading: false, error: null, tickTime: null,
     paused: false, setPaused: () => undefined, clear: () => undefined,
     hasMore: false, loadingOlder: false, loadOlder: async () => 0, prependGen: 0,
   }),
 }));
 
 const { OrchestratorPanel } = await import("./OrchestratorPanel");
-const { SEAT_POLL_MS } = await import("./useOrchestratorSeat");
+const { SEAT_BIND_TIMEOUT_MS } = await import("./seatState");
+const { resetMessageProvenanceCacheForTests } = await import("../feed/messageProvenance");
+const { SEAT_POLL_MS, resetOrchestratorSeatCacheForTests } = await import("./useOrchestratorSeat");
+const { resetOrchestratorIncumbentCacheForTests } = await import("./useOrchestratorIncumbent");
 
 const accounts = {
   claude: { active: "primary", accounts: [{ id: "primary", label: "primary", authPresent: true }, { id: "spare", label: "spare", authPresent: true }] },
@@ -77,17 +108,26 @@ interface SeatFile {
   seat: Record<string, unknown> | null;
   pending: Record<string, unknown> | null;
   exists: boolean;
+  viewerMcpRegistered?: boolean;
 }
 
 let seatStatus: SeatFile;
 let seatPosts: Record<string, unknown>[];
 let rotatePosts: Record<string, unknown>[];
 let spawnPosts: number;
+/** `GET /api/log/provenance`, the feed's delivery evidence (#1117, #1166). */
+let provenanceOccurrences: Record<string, unknown>[];
 /** Queued answers for the confirm POST, oldest first; the last one repeats. */
 let seatResponses: { status: number; body: Record<string, unknown> | null; throws?: boolean }[];
 let rotateResponses: { status: number; body: Record<string, unknown> | null; throws?: boolean }[];
 /** `GET /api/orchestrator/seat/status`, the incumbent read (#978). */
 let incumbentStatus: Record<string, unknown> | null;
+/** How many times that read has been answered — Re-bind is only a re-bind if it
+    actually re-runs resolution (#1182). */
+let incumbentReads: number;
+/** The status read is DOWN: every attempt answers 503, which is what a panel
+    reopened against a viewer that has not finished coming back sees (#1182). */
+let incumbentReadDown: boolean;
 const realFetch = globalThis.fetch;
 
 function answer(queue: { status: number; body: Record<string, unknown> | null; throws?: boolean }[]): Response {
@@ -107,13 +147,27 @@ function installFetch(): void {
       rotatePosts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return answer(rotateResponses);
     }
+    /* Both reads are per-project, and only atlas has an orchestrator here, so
+       a switch away genuinely lands on another project's own answer. */
     if (url.startsWith("/api/orchestrator/seat/status")) {
-      return { ok: true, status: 200, json: async () => incumbentStatus } as Response;
+      incumbentReads += 1;
+      if (incumbentReadDown) return { ok: false, status: 503, json: async () => ({}) } as Response;
+      const target = new URL(url, "http://localhost").searchParams.get("project");
+      return { ok: true, status: 200, json: async () => (target === "atlas" ? incumbentStatus : { project: target, designated: false, rotation: null, context: null }) } as Response;
     }
     if (url.startsWith("/api/orchestrator/seat?")) {
-      return { ok: true, status: 200, json: async () => seatStatus } as Response;
+      const target = new URL(url, "http://localhost").searchParams.get("project");
+      return { ok: true, status: 200, json: async () => (target === "atlas" ? seatStatus : { seat: null, pending: null, exists: true }) } as Response;
     }
     if (url === "/api/accounts") return { ok: true, status: 200, json: async () => accounts } as Response;
+    /* Delivery evidence for the dock's own feed (#1166): what the server
+       projected for this transcript, mandate fact included. */
+    if (url.startsWith("/api/log/provenance")) {
+      return { ok: true, status: 200, json: async () => ({ messages: {}, occurrences: provenanceOccurrences }) } as Response;
+    }
+    /* No voice backend in a DOM test, so a transcript's speak control renders
+       nothing rather than reading a shape the catch-all below cannot supply. */
+    if (url.startsWith("/api/tts/")) return { ok: false, status: 404, json: async () => ({}) } as Response;
     if (url.startsWith("/api/spawn")) {
       spawnPosts += 1;
       return { ok: true, status: 200, json: async () => ({}) } as Response;
@@ -190,10 +244,59 @@ const orchestratorFile: FileEntry = {
   waitingInput: null,
 } as FileEntry;
 
+/** How many times the file catalog was asked to re-read itself — Re-bind is only
+    a re-bind if it reaches the seam that owns the half it is missing (#1182). */
+let catalogReloads = 0;
+let detachCatalog: (() => void) | null = null;
+
+/** The plane resolving a structured host for the seat's transcript: a session
+    the capability matrix classifies as `structured`, so the surface the panel
+    was waiting on finally has an answer. */
+const hostedSession = (): RuntimeSessionView => ({
+  session: {
+    conversationId: "conversation_orch",
+    sessionKey: { engine: "claude", sessionId: "session-orch" },
+    hostKind: "claude-broker",
+    host: "hosted",
+    turn: "idle",
+    provenance: "structured",
+    revision: 1,
+    attentionIds: [],
+    recentReceipts: [],
+    accountId: "spare",
+    parentConversationId: null,
+    flowId: null,
+    workflowId: null,
+    cwd: "/repos/atlas/worktrees/board",
+    artifactPath: "/transcripts/orch.jsonl",
+    capabilities: { steer: true, structuredAttention: true },
+    activeTurnId: null,
+  },
+  uiState: "idle",
+  attentions: [],
+  receipts: [],
+  legacy: false,
+  structuredControlsEnabled: true,
+});
+
 const roots = new Set<Root>();
 beforeEach(() => {
-  seatStatus = { seat: null, pending: null, exists: true };
+  /* Both answer caches are this TAB's memory (#1149), so each test starts as a
+     tab that has never read a seat. */
+  resetOrchestratorSeatCacheForTests();
+  resetOrchestratorIncumbentCacheForTests();
+  resetMessageProvenanceCacheForTests();
+  tailLines.clear();
+  provenanceOccurrences = [];
+  seatStatus = { seat: null, pending: null, exists: true, viewerMcpRegistered: false };
   incumbentStatus = { project: "atlas", designated: false, rotation: null, context: null };
+  incumbentReads = 0;
+  incumbentReadDown = false;
+  runtimePlaneOn = false;
+  runtimeSession = null;
+  runtimeAnswer = null;
+  runtimeRefreshes = 0;
+  catalogReloads = 0;
   seatPosts = [];
   rotatePosts = [];
   spawnPosts = 0;
@@ -202,6 +305,8 @@ beforeEach(() => {
   installFetch();
 });
 afterEach(() => {
+  detachCatalog?.();
+  detachCatalog = null;
   for (const root of roots) flushSync(() => root.unmount());
   roots.clear();
   dom.document.body.replaceChildren();
@@ -230,6 +335,37 @@ function mount(files: FileEntry[] = []): HTMLElement {
   return host as unknown as HTMLElement;
 }
 
+/**
+ * The panel over a catalog that RELOADS when it is asked to.
+ *
+ * The panel does not own `files`; the app's catalog (`useFiles`) does, and it
+ * re-reads on `FILES_CHANGED_EVENT` — the seam `requestFilesRefresh()`
+ * dispatches on. So a listener that re-renders the panel with the transcript a
+ * reload would have found IS the catalog answering, and a panel that never
+ * asks sees `initial` forever (#1182).
+ */
+function mountReloadableCatalog(initial: FileEntry[], reloaded: FileEntry[]): HTMLElement {
+  const host = dom.document.createElement("div");
+  dom.document.body.append(host);
+  const root = createRoot(host as unknown as HTMLElement);
+  roots.add(root);
+  let files = initial;
+  const render = () => flushSync(() => root.render(
+    <OrchestratorPanel project="atlas" projectName="Atlas" projectCwd="/repos/atlas" files={files} onClose={() => undefined} />,
+  ));
+  const onChanged = () => {
+    catalogReloads += 1;
+    files = reloaded;
+    /* A real reload is a fetch, so the answer lands a turn later rather than
+       inside the click that asked for it. */
+    setTimeout(render, 0);
+  };
+  dom.addEventListener(FILES_CHANGED_EVENT, onChanged);
+  detachCatalog = () => dom.removeEventListener(FILES_CHANGED_EVENT, onChanged);
+  render();
+  return host as unknown as HTMLElement;
+}
+
 /** The panel reopened on a later seat read — a reload, or coming back to the
     project. Draft state (including an unsettled submission's key) lives in
     sessionStorage, so it survives exactly as it does for the operator. */
@@ -240,12 +376,50 @@ function remount(files: FileEntry[] = []): HTMLElement {
   return mount(files);
 }
 
+/** One dock's panel across a project switch: the SAME root, the panel re-seated
+    under `key={project}` exactly as `OrchestratorDock` mounts it. */
+function mountDock(files: FileEntry[]) {
+  const host = dom.document.createElement("div");
+  dom.document.body.append(host);
+  const root = createRoot(host as unknown as HTMLElement);
+  roots.add(root);
+  return {
+    host: host as unknown as HTMLElement,
+    open: (project: string) => flushSync(() => root.render(
+      <OrchestratorPanel
+        key={project}
+        project={project}
+        projectName={project}
+        projectCwd={`/repos/${project}`}
+        files={files}
+        onClose={() => undefined}
+      />,
+    )),
+  };
+}
+
 function panelState(host: HTMLElement): string | null {
   return host.querySelector("[data-orchestrator-panel]")?.getAttribute("data-orchestrator-state") ?? null;
 }
 
+/** Which half of a bounded bind the panel is naming, or null while it is naming
+    none. Read as the reason rather than as the element, so a regression prints
+    «catalog» instead of a whole DOM subtree. */
+function bindReason(host: HTMLElement): string | null {
+  return host.querySelector("[data-orchestrator-bind]")?.getAttribute("data-orchestrator-bind") ?? null;
+}
+
 function confirmButton(host: HTMLElement): HTMLButtonElement {
   return host.querySelector("[data-orchestrator-confirm]") as HTMLButtonElement;
+}
+
+/** The disclosure the built-in mandate lives behind (#1163). */
+function mandateRules(host: HTMLElement): HTMLElement {
+  return host.querySelector("[data-orchestrator-mandate-details]") as HTMLElement;
+}
+
+function rulesSummary(host: HTMLElement): string {
+  return mandateRules(host).querySelector("summary")?.textContent ?? "";
 }
 
 /** Typing, the way this repo's DOM tests type: happy-dom does not carry React's
@@ -262,6 +436,8 @@ test("with no orchestrator the panel is a draft prefilled with the default manda
   flushSync(() => undefined);
 
   expect(panelState(host)).toBe("draft");
+  expect(host.querySelector("[data-viewer-mcp-status]")?.textContent).toContain("scripts/install-mcp.sh");
+  expect(host.querySelector("[data-viewer-mcp-status]")?.textContent).toContain("claude mcp add viewer");
   const mandate = host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
   expect(mandate.value).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
   /* Cwd is the project's own root, stated and never typed. */
@@ -288,6 +464,14 @@ test("with no orchestrator the panel is a draft prefilled with the default manda
   expect(seatPosts[0]!.promptVersion).toBeUndefined();
 });
 
+test("the orchestrator draft confirms a resolved Viewer MCP registration", async () => {
+  seatStatus = { seat: null, pending: null, exists: true, viewerMcpRegistered: true };
+  const host = mount();
+  await settle();
+
+  expect(host.querySelector("[data-viewer-mcp-status]")?.textContent).toContain("viewer MCP: registered ✓");
+});
+
 test("an unedited mandate records the approved prompt version", async () => {
   const host = mount();
   await settle();
@@ -297,6 +481,127 @@ test("an unedited mandate records the approved prompt version", async () => {
      constant, never a number of its own. */
   expect(seatPosts[0]!.promptVersion).toBe(ORCHESTRATOR_PROMPT_VERSION);
 });
+
+test("the draft opens on the plain intro with the built-in rules COLLAPSED — and confirm still posts them unchanged", async () => {
+  const host = mount();
+  await settle();
+  flushSync(() => undefined);
+
+  /* What an operator meets first: what they say to it, what it does with that,
+     and that it acts on its own — never 58 lines of rules (#1163). */
+  const intro = host.querySelector("[data-orchestrator-intro]")?.textContent ?? "";
+  expect(intro).toContain("You talk to it like a colleague");
+  expect(intro).toContain("merges on APPROVE");
+  expect(intro).toContain("it deploys on its own");
+  /* Copy, not a gate: it says when one agent is the better answer, above a
+     button that stays exactly as pressable as it was. */
+  expect(host.querySelector("[data-orchestrator-one-task]")?.textContent).toContain("One task?");
+  expect(confirmButton(host).disabled).toBe(false);
+
+  expect(mandateRules(host).hasAttribute("open")).toBe(false);
+  expect(rulesSummary(host)).toBe(`Mandate v${ORCHESTRATOR_PROMPT_VERSION} — built-in operating rules (edit)`);
+
+  /* Folded away and delivered verbatim: the disclosure hides the text, it never
+     edits it (PRD #976 decision 3). */
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts[0]!.mandate).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
+  expect(seatPosts[0]!.promptVersion).toBe(ORCHESTRATOR_PROMPT_VERSION);
+});
+
+test("confirm posts the textarea byte for byte — the operator's own blank lines survive it", async () => {
+  const host = mount();
+  await settle();
+  const mandate = host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
+
+  /* Trim asks ONE question — is there a mandate at all — and whitespace alone
+     still answers no. */
+  type(mandate, "  \n\t \n ");
+  await settle();
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts).toHaveLength(0);
+  expect(host.textContent).toContain("The mandate can't be empty.");
+
+  /* It never answers the other question. What the field holds is what the
+     orchestrator reads, indentation and surrounding blank lines included: the
+     mandate is prose the operator wrote, and its shape is part of it. */
+  const exact = "\n\n  You run Atlas.\n\n    - talk to me here\n  \n";
+  type(mandate, exact);
+  await settle();
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  expect(seatPosts).toHaveLength(1);
+  expect(seatPosts[0]!.mandate).toBe(exact);
+});
+
+test("an edited mandate expands the rules, drops the version claim, and comes back expanded", async () => {
+  const host = mount();
+  await settle();
+
+  type(host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement, "You run Atlas. Talk to me here.");
+  await settle();
+  flushSync(() => undefined);
+
+  expect(mandateRules(host).hasAttribute("open")).toBe(true);
+  /* Edited text is the operator's own and claims no version — the summary says
+     so rather than labelling their words as the built-in ones. */
+  expect(rulesSummary(host)).toBe("Mandate — your own operating rules (edit)");
+
+  /* The draft survives in sessionStorage, so the panel reopened on it lands on
+     the same edit — with it in view, not folded back out of sight. */
+  const next = remount();
+  await settle();
+  flushSync(() => undefined);
+  expect((next.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe("You run Atlas. Talk to me here.");
+  expect(mandateRules(next).hasAttribute("open")).toBe(true);
+});
+
+test("a designation that fails expands the rules over the error — the text to fix is never behind a click", async () => {
+  seatResponses = [{ status: 400, body: { error: "orchestrator cwd could not be resolved", code: "cwd_unresolved" } }];
+  const host = mount();
+  await settle();
+  expect(mandateRules(host).hasAttribute("open")).toBe(false);
+
+  flushSync(() => confirmButton(host).click());
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("intent-error");
+  expect(mandateRules(host).hasAttribute("open")).toBe(true);
+  expect((host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
+});
+
+test("a disclosure folded back by hand re-opens when a durable error reaches the mounted draft", async () => {
+  const host = mount();
+  await settle();
+
+  /* Two separate reasons to be open, in the order that used to lose the second
+     one. The edit opens it... */
+  type(host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement, "You run Atlas. Talk to me here.");
+  await settle();
+  flushSync(() => undefined);
+  expect(mandateRules(host).hasAttribute("open")).toBe(true);
+
+  /* ...the operator folds it back, which is theirs to do... */
+  (mandateRules(host) as HTMLDetailsElement).open = false;
+  expect(mandateRules(host).hasAttribute("open")).toBe(false);
+
+  /* ...and a designation recorded as terminally failed arrives on the POLL, so
+     this draft becomes the error surface without a reload or a remount to
+     reset the disclosure — the one path where the second reason has to speak
+     for itself. */
+  seatStatus = { seat: null, pending: pendingSeat("spawn was rejected with HTTP status 500"), exists: true };
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, SEAT_POLL_MS + 5));
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("intent-error");
+  /* The text the error is about is in view, not behind a click. */
+  expect(mandateRules(host).hasAttribute("open")).toBe(true);
+  expect((host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement).value).toBe("You run Atlas. Talk to me here.");
+}, SEAT_POLL_MS + 4_000);
 
 test("a double-click designates ONCE and a retry after a lost reply replays the same key", async () => {
   seatResponses = [{ status: 0, body: null, throws: true }];
@@ -411,10 +716,157 @@ test("an active seat mounts the REAL conversation column — feed and composer, 
   expect(panelState(host)).toBe("live");
   expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
   expect(host.querySelector("[data-agent-control-strip]")).not.toBeNull();
-  expect(host.querySelector("textarea")).not.toBeNull();
+  expect((host.querySelector("textarea") as HTMLTextAreaElement).placeholder).toBe("what should get done in Atlas?");
   /* No draft on a seated project: a second create is not offered at all. */
   expect(confirmButton(host)).toBeNull();
 });
+
+test("a re-hosted seat binds to its successor transcript through the status read, with no rotation (#1182)", async () => {
+  /* The viewer came back and the conversation is being written to a NEW
+     transcript the catalog carries under its own native id: neither the seat's
+     recorded path nor its recorded id names anything in view. The status read
+     resolves the durable id to the registry's current generation, which is the
+     only thing that can bind the two. */
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent({ transcriptPath: "/transcripts/orch.successor.jsonl", liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
+  const successor = { ...orchestratorFile, path: "/transcripts/orch.successor.jsonl", name: "orch.successor.jsonl", conversationId: "conversation_orch_successor" } as FileEntry;
+
+  const host = mount([successor]);
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("live");
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch_successor"]')).not.toBeNull();
+  expect(host.textContent).not.toContain("Opening the conversation");
+  /* Nothing was rotated to get here. */
+  expect(rotatePosts).toHaveLength(0);
+});
+
+test("a bind that never lands stops spinning: the panel names the reason and Re-bind CLEARS it (#1182)", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent({ liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
+
+  /* Nothing in the catalog answers for this seat, on any key — until it is
+     re-read, which is the half this failure is actually missing. */
+  const host = mountReloadableCatalog([], [orchestratorFile]);
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(host)).toBe("live");
+  expect(host.textContent).toContain("Opening the conversation");
+  expect(host.querySelector("[data-orchestrator-rebind]")).toBeNull();
+
+  /* Past the bound, «opening» is no longer an honest answer. */
+  await new Promise((resolve) => setTimeout(resolve, SEAT_BIND_TIMEOUT_MS + 250));
+  await settle();
+  flushSync(() => undefined);
+
+  expect(bindReason(host)).toBe("catalog");
+  expect(host.textContent).toContain("file catalog");
+  /* Both ways forward, and rotation is neither of them. */
+  expect(host.textContent).toContain("Open it on the board");
+  const before = incumbentReads;
+  flushSync(() => (host.querySelector("[data-orchestrator-rebind]") as HTMLButtonElement).click());
+  await settle();
+  flushSync(() => undefined);
+
+  /* The failure is OVER: the transcript arrived and the conversation is on
+     screen. Re-reading only the orchestrator endpoints would have left the panel
+     on the same banner it was already on. */
+  expect(bindReason(host)).toBeNull();
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+  expect(host.textContent).not.toContain("Opening the conversation");
+  /* Because Re-bind re-ran the reads the seat is resolved from AND the catalog
+     read the conversation itself has to come out of. */
+  expect(incumbentReads).toBeGreaterThan(before);
+  expect(catalogReloads).toBe(1);
+  expect(rotatePosts).toHaveLength(0);
+  expect(seatPosts).toHaveLength(0);
+  expect(spawnPosts).toBe(0);
+}, SEAT_BIND_TIMEOUT_MS + 20_000);
+
+test("the RUNTIME half of a bounded bind offers the same two ways forward, and Re-bind CLEARS it (#1182)", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent({ liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
+  /* The transcript IS in view, so resolution got that far. What has not answered
+     is the runtime plane: authoritative, with no host evidence for a
+     conversation whose pid is running, which holds the surface at
+     `unresolved` — the other half of «opening…». It has the answer and is
+     waiting to be asked: only `refreshRuntime()` moves it. */
+  runtimePlaneOn = true;
+  runtimeAnswer = hostedSession();
+  const running = { ...orchestratorFile, proc: "running", pid: 4242 } as FileEntry;
+
+  const host = mount([running]);
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(host)).toBe("live");
+  expect(bindReason(host)).toBeNull();
+
+  await new Promise((resolve) => setTimeout(resolve, SEAT_BIND_TIMEOUT_MS + 250));
+  await settle();
+  flushSync(() => undefined);
+
+  const banner = host.querySelector('[data-orchestrator-bind="surface"]') as HTMLElement | null;
+  expect(banner).not.toBeNull();
+  /* The reason is the runtime plane's, and the conversation itself is still on
+     screen underneath it. */
+  expect(banner!.textContent).toContain("runtime plane");
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+
+  /* Re-bind AND the board, on this half too. */
+  expect((banner!.querySelector("[data-orchestrator-open-board]") as HTMLAnchorElement).getAttribute("href"))
+    .toBe("#c=conversation_orch");
+  const before = incumbentReads;
+  flushSync(() => (banner!.querySelector("[data-orchestrator-rebind]") as HTMLButtonElement).click());
+  await settle();
+  flushSync(() => undefined);
+
+  /* The wait is over: the surface resolved and the banner is gone, with the
+     conversation still where it was. */
+  expect(bindReason(host)).toBeNull();
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+  /* Because Re-bind asked the plane that was holding the surface unresolved. */
+  expect(incumbentReads).toBeGreaterThan(before);
+  expect(runtimeRefreshes).toBe(1);
+  /* And rotation is neither of them — nor is a second designation or a spawn. */
+  expect(rotatePosts).toHaveLength(0);
+  expect(seatPosts).toHaveLength(0);
+  expect(spawnPosts).toBe(0);
+}, SEAT_BIND_TIMEOUT_MS + 20_000);
+
+test("a cached «alive» nobody is answering for any more never accuses the seat (#1182)", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent({ liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
+
+  /* One good reading, taken while the viewer was up: this tab now REMEMBERS an
+     alive host for the seat. */
+  const before = mount([orchestratorFile]);
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(before)).toBe("live");
+
+  /* Then the viewer restarts underneath the tab. The catalog answers for
+     nothing, and every status read from here fails — so the only thing still
+     saying «alive» is the memory. */
+  incumbentReadDown = true;
+  const host = remount([]);
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, SEAT_BIND_TIMEOUT_MS + 250));
+  await settle();
+  flushSync(() => undefined);
+
+  expect(panelState(host)).toBe("live");
+  /* The reading IS on hand — with no file in the catalog the board contributes
+     no context of its own, so the header's model and wear can only be coming
+     from the retained reading. */
+  expect(incumbentRow(host)?.textContent).toContain("opus");
+  expect(host.querySelector("[data-orchestrator-context]")?.getAttribute("data-orchestrator-context")).toBe("24");
+  /* And it is not evidence: the panel keeps waiting instead of reporting a
+     fault the server was never asked to confirm. */
+  expect(bindReason(host)).toBeNull();
+  expect(host.textContent).toContain("Opening the conversation");
+  expect(host.textContent).toContain("Open it on the board");
+}, SEAT_BIND_TIMEOUT_MS + 20_000);
 
 test("a seat whose transcript is gone returns the panel to the draft", async () => {
   seatStatus = { seat: activeSeat(), pending: null, exists: false };
@@ -604,6 +1056,11 @@ test("Rotate opens the SAME draft, prefilled from the incumbent, over the conver
   /* The incumbent's own mandate, editable — the handoff is the server's job. */
   const mandate = host.querySelector("[data-orchestrator-mandate]") as HTMLTextAreaElement;
   expect(mandate.value).toBe("run it");
+  /* A rotation is not an introduction: this operator already has one running,
+     and the rules behind the summary are ITS mandate's version, not the
+     built-in prompt's (#1163). */
+  expect(host.querySelector("[data-orchestrator-intro]")).toBeNull();
+  expect(rulesSummary(host)).toBe("Mandate v3 — built-in operating rules (edit)");
   expect(host.textContent).not.toContain("Handoff from your predecessor");
   /* The account picker opens on the account the incumbent is running under. */
   const account = host.querySelector('select[aria-label*="Claude"]') as HTMLSelectElement;
@@ -891,3 +1348,152 @@ test("the draft a closed conversation returns to can actually create — it says
   await settle();
   expect(seatPosts[0]!.replaceIncumbent).toBeUndefined();
 }, SEAT_POLL_MS + 4_000);
+
+/* #1166: the seat DELIVERS the mandate, so it lands in the transcript as an
+   ordinary message and the feed used to render those 8 KB as the operator's own
+   bubble — 180 characters and a character count, as if they had said it. The
+   seat named that delivery when it made it, and the evidence the dock's feed
+   already fetches carries the fact — and the version — to the card. */
+test("the dock renders the delivered mandate as the seat's own card, not as the operator's bubble", async () => {
+  const delivered = [
+    ORCHESTRATOR_SYSTEM_PROMPT,
+    "## Handoff from your predecessor (rotation)",
+    "You are replacing orchestrator conversation conversation_predecessor for project atlas.",
+  ].join("\n\n");
+  tailLines.set(orchestratorFile.path, [
+    JSON.stringify({ type: "user", uuid: "row-mandate-1", timestamp: "2026-08-13T10:00:02.000Z", message: { role: "user", content: delivered } }),
+  ]);
+  /* The seat's own delivery, as the provenance route projects it: this seat is
+     spawn-mode, so its launch id names the first prompt it was created with. */
+  provenanceOccurrences = [{
+    textDigest: messageTextDigest(delivered),
+    deliveredAt: "2026-08-13T10:00:01.000Z",
+    origin: "agent",
+    mandate: { kind: "version", version: ORCHESTRATOR_PROMPT_VERSION },
+  }];
+
+  const host = await mountLive();
+
+  const card = host.querySelector("[data-mandate-card]");
+  expect(card).not.toBeNull();
+  /* The seat's own recorded prompt version, carried by the delivery evidence —
+     which is why the board's pane names the same mandate the same way. */
+  expect(card!.textContent).toContain(`Mandate v${ORCHESTRATOR_PROMPT_VERSION}`);
+  expect(card!.textContent).toContain("sent at seat creation");
+  /* Folded away, and the rotation handoff is a section of the SAME card. */
+  expect(host.textContent).not.toContain("You are the viewer's built-in Manager");
+  expect(host.textContent).not.toContain("You are replacing orchestrator conversation");
+  expect(card!.textContent).toContain("Rotation handoff");
+  /* The operator's bubble is gone from the row entirely. */
+  expect(host.innerHTML).not.toContain("bg-user");
+});
+
+test("the same row without that evidence stays the message it was", async () => {
+  /* The negative control for the case above: nothing about the TEXT makes a
+     row a mandate, so with no delivery claiming it the dock renders the
+     bubble it renders today. */
+  tailLines.set(orchestratorFile.path, [
+    JSON.stringify({ type: "user", uuid: "row-mandate-2", timestamp: "2026-08-13T10:00:02.000Z", message: { role: "user", content: ORCHESTRATOR_SYSTEM_PROMPT } }),
+  ]);
+
+  const host = await mountLive();
+
+  expect(host.querySelector("[data-mandate-card]")).toBeNull();
+  expect(host.innerHTML).toContain("bg-user");
+});
+
+test("coming back to a project paints its conversation in the first commit, transcript and all", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent();
+  tailLines.set(orchestratorFile.path, [
+    JSON.stringify({ type: "assistant", uuid: "uuid-atlas-1", timestamp: "2026-08-13T10:05:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "Atlas mandate accepted." }] } }),
+  ]);
+
+  const dock = mountDock([orchestratorFile]);
+  dock.open("atlas");
+  await settle();
+  flushSync(() => undefined);
+  expect(panelState(dock.host)).toBe("live");
+  expect(dock.host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+  expect(dock.host.textContent).toContain("Atlas mandate accepted.");
+
+  /* A project with no orchestrator of its own: its own draft, its own read. */
+  dock.open("borealis");
+  await settle();
+  expect(panelState(dock.host)).toBe("draft");
+
+  /* Back to atlas. Nothing is awaited: this is the frame the switch itself
+     produced, so no round trip can have contributed to it. The conversation is
+     mounted on the same file with the transcript it was left showing — never
+     a loading state, never a blank column that fills in a moment later. */
+  dock.open("atlas");
+  expect(panelState(dock.host)).toBe("live");
+  expect(dock.host.querySelector('[data-orchestrator-conversation="conversation_orch"]')).not.toBeNull();
+  expect(dock.host.textContent).toContain("Atlas mandate accepted.");
+  /* The incumbent header is whole too — the model is read, not degraded to the
+     dash a fresh 60s-cadence status read would leave for a minute. */
+  expect(dock.host.textContent).toContain("opus");
+
+  /* The poll behind that paint still runs, and lands in place. */
+  seatStatus = { seat: activeSeat({ conversationId: "conversation_successor", path: "/transcripts/successor.jsonl" }), pending: null, exists: true };
+  await settle();
+  expect(panelState(dock.host)).toBe("live");
+});
+
+/* ------------------------------------------------------------------------- *
+ * The dock badge names the decision it is holding (issue #1167): «live» and
+ * «live, and holding a question up at you» used to be the same word.
+ * ------------------------------------------------------------------------- */
+
+const stateBadge = (host: HTMLElement) => host.querySelector("[data-orchestrator-badge]") as HTMLElement;
+
+const orchestratorQuestion = {
+  kind: "question" as const,
+  toolUseId: "tool-use-orch",
+  transcriptPath: "/transcripts/orch.jsonl",
+  pid: 4_242,
+  paneTarget: null,
+  askedAt: "2026-08-25T10:00:00.000Z",
+  questions: [{ header: "Rollout window", question: "Approve the proposed rollout window", multiSelect: false, options: [] }],
+};
+
+test("a seat holding a question badges «needs you» in the warning tone, and names the decision", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent();
+  const host = mount([{
+    ...orchestratorFile,
+    proc: "running",
+    pid: 4_242,
+    pendingQuestion: orchestratorQuestion,
+    durableLineage: { kind: "spawn", role: "orchestrator", parentConversationId: null, reviewsConversationId: null, memberships: [] },
+  } as FileEntry]);
+  await settle();
+  flushSync(() => undefined);
+
+  const badge = stateBadge(host);
+  expect(badge.getAttribute("data-orchestrator-badge")).toBe("needs-you");
+  expect(badge.textContent).toBe("needs you");
+  expect(badge.className).toContain("warning");
+  /* The SAME line the toast and the island popover carry — one derivation. */
+  expect(badge.getAttribute("title")).toBe("Rollout window · Orchestrator");
+});
+
+test("a quiet seat keeps the live badge, and claims no decision in its tooltip", async () => {
+  const host = await mountLive();
+
+  const badge = stateBadge(host);
+  expect(badge.getAttribute("data-orchestrator-badge")).toBe("live");
+  expect(badge.textContent).toBe("live");
+  expect(badge.hasAttribute("title")).toBeFalse();
+});
+
+test("the badge is localized with the rest of the dock", async () => {
+  setLocale("uk");
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  const host = mount([{ ...orchestratorFile, proc: "running", pid: 4_242, pendingQuestion: orchestratorQuestion } as FileEntry]);
+  await settle();
+  flushSync(() => undefined);
+
+  expect(stateBadge(host).getAttribute("data-orchestrator-badge")).toBe("needs-you");
+  expect(stateBadge(host).textContent).toBe("потребує тебе");
+});

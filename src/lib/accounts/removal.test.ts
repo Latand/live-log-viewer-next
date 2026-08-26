@@ -2,6 +2,7 @@ import { afterAll, beforeEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-removal-test-"));
 const previousState = process.env.LLV_STATE_DIR;
@@ -73,7 +74,7 @@ function deadConversation(store: Registry, artifactPath: string, accountId: stri
 
 test("a pending Viewer spawn blocks managed-home removal for its assigned account", () => {
   const store = registry();
-  store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+  beginLegacySpawnFixture(store, { engine: "claude", cwd: "/repo", accountId: "work" });
 
   expect(accountRemovalBlockers("claude", "work")).toEqual(["live_sessions"]);
   expect(accountRemovalBlockers("claude", "other")).toEqual([]);
@@ -81,7 +82,7 @@ test("a pending Viewer spawn blocks managed-home removal for its assigned accoun
 
 test("an unresolved live launch blocks removal of every managed account for its engine", () => {
   const store = registry();
-  store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: null });
+  beginLegacySpawnFixture(store, { engine: "codex", cwd: "/repo", accountId: null });
 
   expect(accountRemovalBlockers("codex", "work")).toEqual(["live_sessions"]);
   expect(accountRemovalBlockers("claude", "work")).toEqual([]);
@@ -108,7 +109,7 @@ test("dead history plus stale starting entries and receipts no longer block remo
     claimEpoch: 0, claimOwner: null, pendingAction: null,
   });
   // …and a launch receipt stuck in `starting` from a pipeline that ended days ago.
-  store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+  beginLegacySpawnFixture(store, { engine: "claude", cwd: "/repo", accountId: "work" });
 
   expect(accountRemovalBlockers("claude", "work", DAYS_LATER)).toEqual([]);
 });

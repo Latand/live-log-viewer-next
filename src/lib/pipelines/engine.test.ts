@@ -83,6 +83,7 @@ test("a pipeline stage keeps its reserved account through a routing change befor
         promptScaffold: "Builder guidance",
       },
       cwd,
+      title: "Build scoped change · build",
       ["prompt"]: "Build the scoped change",
       parentPath: null,
       clientAttemptId: "pipeline_account_pin_attempt",
@@ -126,7 +127,11 @@ test("a pipeline stage keeps its reserved account through a routing change befor
     });
     if (settled.kind !== "settled") throw new Error("pipeline settlement conflicted");
 
-    expect(settled.receipt).toMatchObject({ accountId: "limited", accountPin: true });
+    expect(settled.receipt).toMatchObject({
+      accountId: "limited",
+      accountPin: true,
+      launchProfile: expect.objectContaining({ title: "Build scoped change · build" }),
+    });
     expect(settled.conversation).toMatchObject({ pinnedAccountId: "limited", migration: null });
   } finally {
     resolveSpawn.mockRestore();
@@ -178,6 +183,7 @@ function entry(pathname: string): FileEntry {
 function harness() {
   const calls: string[] = [];
   const spawnRoles: Array<Parameters<PipelinePorts["spawnAgent"]>[0]["role"]> = [];
+  const spawnTitles: string[] = [];
   const messages = new Map<string, { text: string; ts: number }>();
   const durableTurns = new Map<string, StageTurnEvidence>();
   const flows = new Map<string, Flow>();
@@ -229,9 +235,10 @@ function harness() {
     },
     spawnReceipt: () => null,
     claimSpawnRetry: () => "claimed",
-    spawnAgent: async ({ role, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
+    spawnAgent: async ({ role, title, parentPath, clientAttemptId, membership, supersedes }, onReserved) => {
       spawn += 1;
       spawnRoles.push(structuredClone(role));
+      spawnTitles.push(title);
       calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}:supersedes=${supersedes ?? "none"}`);
       calls.push(`membership:${membership.kind}:${membership.containerId}:${membership.slot}:${membership.role}:${membership.stageOrder}:round=${membership.round}`);
       onReserved({ launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}` });
@@ -312,6 +319,7 @@ function harness() {
     durableTurns,
     flows,
     spawnRoles,
+    spawnTitles,
     finish,
     setBuilderEffort: (effort: string) => { builderEffort = effort; },
     setPaneAlive: (alive: boolean) => { paneAlive = alive; },
@@ -1077,7 +1085,7 @@ test("a cross-engine historical adoption settles with the child runtime", async 
     cwd: "/repo",
     accountId: "claude-test",
     parentConversationId: "conversation_source_codex",
-    launchProfile: { model: "claude-sonnet-4-6", effort: "high" },
+    launchProfile: { model: "claude-sonnet-4-6", effort: "high", title: "Adopt cross-engine pipeline stage" },
     memberships: [{
       kind: "pipeline",
       containerId: pipeline.id,
@@ -1467,6 +1475,29 @@ test("starting a draft enters the existing provision and stage-spawn path", asyn
   expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.state).toBe("running");
   expect(h.calls.some((call) => call.includes("worktree add"))).toBe(true);
   expect(h.calls.some((call) => call.startsWith("spawn:"))).toBe(true);
+  expect(h.spawnTitles).toEqual(["Start after review · plan"]);
+});
+
+test("long pipeline tasks keep distinct stage identifiers in every spawn title", async () => {
+  const h = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "x".repeat(4_000),
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+  }, h.ports);
+  expect(created.pipeline).toBeDefined();
+
+  await tickPipelines([], h.ports); // provision
+  await tickPipelines([], h.ports); // spawn plan
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "plan output")], h.ports);
+  await tickPipelines([], h.ports); // spawn build
+
+  expect(h.spawnTitles).toHaveLength(2);
+  expect(h.spawnTitles[0]).toEndWith(" · plan");
+  expect(h.spawnTitles[1]).toEndWith(" · build");
+  expect(h.spawnTitles[0]).not.toBe(h.spawnTitles[1]);
+  expect(h.spawnTitles.every((title) => title.length <= 120)).toBe(true);
 });
 
 test("role params are accepted, persisted on the stage, and type-checked", async () => {
@@ -1678,7 +1709,7 @@ test("transient structured spawn handshakes retry twice before parking (#1056)",
   const delays: number[] = [];
   h.ports.spawnAgent = async () => {
     spawnCalls += 1;
-    throw new Error("structured delivery controller is unavailable");
+    throw new Error("runtime host request timed out");
   };
   Object.assign(h.ports, {
     sleep: async (milliseconds: number) => { delays.push(milliseconds); },
@@ -1690,8 +1721,244 @@ test("transient structured spawn handshakes retry twice before parking (#1056)",
   expect(spawnCalls).toBe(3);
   expect(delays).toEqual([1_000, 1_000]);
   expect(parked.state).toBe("needs_decision");
-  expect(parked.stateDetail).toContain("structured delivery controller is unavailable");
+  expect(parked.stateDetail).toContain("runtime host request timed out");
   expect(parked.stateDetail).toContain("2 retries");
+});
+
+/* The controller wait must never be slept through: the pipelines phase holds
+   the pipeline mutation, and a tick that blocks in it for the whole budget is
+   what pushed the flow pipeline controller past its 15s deadline (#1191). */
+const forbiddenSleep = async (milliseconds: number) => {
+  throw new Error(`stage activation slept ${milliseconds}ms inside the pipelines phase`);
+};
+
+/* Freezes the harness wall clock so a bounded, wall-clock wait can be driven
+   step by step. The default clock advances on every `now()` read, which would
+   make the elapsed budget depend on how many times a tick happens to ask. */
+function frozenWallClock(h: ReturnType<typeof harness>) {
+  let wall = Date.parse(h.ports.now());
+  h.ports.now = () => new Date(wall).toISOString();
+  return (milliseconds: number) => { wall += milliseconds; };
+}
+
+test("stage activation rides out a controller that is unavailable for a few seconds (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  const baseSpawn = h.ports.spawnAgent;
+  let spawnCalls = 0;
+  const scheduled: number[] = [];
+  const slept: number[] = [];
+  const attemptIds: string[] = [];
+  h.ports.spawnAgent = async (input, onReserved) => {
+    spawnCalls += 1;
+    attemptIds.push(input.clientAttemptId);
+    if (spawnCalls <= 3) throw new Error("structured delivery controller is unavailable");
+    return baseSpawn(input, onReserved);
+  };
+  Object.assign(h.ports, {
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: async (milliseconds: number) => { slept.push(milliseconds); },
+  });
+
+  /* Each tick makes exactly one attempt and hands the wait to a scheduled
+     tick; nothing sleeps inside the pipelines phase. */
+  for (let round = 0; round < 4; round += 1) {
+    await tickPipelines([], h.ports);
+    if (round === 3) break;
+    const waiting = loadPipelines()[0]!;
+    expect(waiting.state).toBe("running");
+    expect(waiting.stateDetail).toBeNull();
+    expect(waiting.cursor).toMatchObject({ stageId: "plan", state: "pending" });
+    expect(waiting.runs[0]!.attempts.at(-1)!.state).toBe("pending");
+    advance(scheduled.at(-1)!);
+  }
+
+  expect(spawnCalls).toBe(4);
+  expect(scheduled).toEqual([1_000, 2_000, 4_000]);
+  expect(slept).toEqual([]);
+  /* Each retry keeps a launch identity of its own even though the wait now
+     spans ticks, so no attempt collides with the receipt of the one before. */
+  expect(new Set(attemptIds).size).toBe(4);
+  expect(attemptIds.slice(1).map((id) => id.split("_pipeline_")[0])).toEqual([
+    "handshake_retry_1",
+    "handshake_retry_2",
+    "handshake_retry_3",
+  ]);
+  const running = loadPipelines()[0]!;
+  expect(running).toMatchObject({
+    state: "running",
+    stateDetail: null,
+    cursor: { stageId: "plan", state: "running" },
+  });
+  /* The wait record is spent, so a later stall starts its own budget. */
+  expect(running.runs[0]!.attempts.at(-1)!.controllerWait).toBeUndefined();
+});
+
+test("a stage waiting on the controller does not spin the pipelines phase (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  frozenWallClock(h);
+  h.ports.spawnAgent = async () => { throw new Error("structured delivery controller is unavailable"); };
+  Object.assign(h.ports, { scheduleTick: () => {}, sleep: forbiddenSleep });
+  let ticks = 0;
+  const unregister = registerPipelineTick(async () => { ticks += 1; });
+  try {
+    await tickPipelines([], h.ports);
+    expect(loadPipelines()[0]!.cursor).toMatchObject({ stageId: "plan", state: "pending" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    /* The pending cursor belongs to a wait that is not due; re-ticking it at
+       once would loop the controller through passes that can only defer it. */
+    expect(ticks).toBe(0);
+  } finally {
+    unregister();
+  }
+});
+
+test("a controller that is between publications is never spawned into (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  const baseSpawn = h.ports.spawnAgent;
+  let spawnCalls = 0;
+  const scheduled: number[] = [];
+  h.ports.spawnAgent = async (input, onReserved) => {
+    spawnCalls += 1;
+    return baseSpawn(input, onReserved);
+  };
+  Object.assign(h.ports, {
+    structuredDeliveryPublication: () => "rebinding" as const,
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: forbiddenSleep,
+  });
+
+  await tickPipelines([], h.ports);
+
+  /* The spawn only fails at durable host publication, so an attempt issued
+     against a rebinding controller burns a real engine launch first. */
+  expect(spawnCalls).toBe(0);
+  expect(scheduled).toEqual([1_000]);
+  expect(loadPipelines()[0]!).toMatchObject({
+    state: "running",
+    stateDetail: null,
+    cursor: { stageId: "plan", state: "pending" },
+  });
+
+  /* Before the booked wait falls due nothing is retried. */
+  await tickPipelines([], h.ports);
+  expect(scheduled).toEqual([1_000]);
+
+  advance(1_000);
+  Object.assign(h.ports, { structuredDeliveryPublication: () => "ready" as const });
+  await tickPipelines([], h.ports);
+
+  expect(spawnCalls).toBe(1);
+  expect(loadPipelines()[0]!).toMatchObject({
+    state: "running",
+    cursor: { stageId: "plan", state: "running" },
+  });
+});
+
+test("a controller that never returns parks the stage with the wait it spent (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  let spawnCalls = 0;
+  const scheduled: number[] = [];
+  const slept: number[] = [];
+  h.ports.spawnAgent = async () => {
+    spawnCalls += 1;
+    throw new Error("structured delivery controller is unavailable");
+  };
+  Object.assign(h.ports, {
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: async (milliseconds: number) => { slept.push(milliseconds); },
+  });
+
+  for (let round = 0; round < 8 && loadPipelines()[0]!.state === "running"; round += 1) {
+    await tickPipelines([], h.ports);
+    if (scheduled.length > 0) advance(scheduled.at(-1)!);
+  }
+
+  const parked = loadPipelines()[0]!;
+  /* The budget is wall-clock, so the schedule stops exactly on it. */
+  expect(scheduled).toEqual([1_000, 2_000, 4_000, 8_000, 8_000, 7_000]);
+  expect(scheduled.reduce((total, delay) => total + delay, 0)).toBe(30_000);
+  expect(spawnCalls).toBe(scheduled.length + 1);
+  /* Nothing was slept through inside the pipelines phase. */
+  expect(slept).toEqual([]);
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("structured delivery controller is unavailable");
+  expect(parked.stateDetail).toContain("6 retries over 30s");
+});
+
+test("the controller wait counts the time a failing spawn attempt spent (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  const advance = frozenWallClock(h);
+  let spawnCalls = 0;
+  const scheduled: number[] = [];
+  h.ports.spawnAgent = async () => {
+    spawnCalls += 1;
+    /* Durable host setup runs for 20s before it reaches host publication. */
+    advance(20_000);
+    throw new Error("structured delivery controller is unavailable");
+  };
+  Object.assign(h.ports, {
+    scheduleTick: (delayMs: number) => { scheduled.push(delayMs); },
+    sleep: forbiddenSleep,
+  });
+
+  await tickPipelines([], h.ports);
+  advance(scheduled.at(-1)!);
+  await tickPipelines([], h.ports);
+
+  /* Two attempts have burned 40s of wall clock between them, so the budget is
+     spent even though the booked backoff only came to 1s. */
+  const parked = loadPipelines()[0]!;
+  expect(spawnCalls).toBe(2);
+  expect(scheduled).toEqual([1_000]);
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("1 retries over 41s");
+});
+
+test("a process without a delivery controller publication defers stage activation (#1191)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  let spawnCalls = 0;
+  const baseSpawn = h.ports.spawnAgent;
+  h.ports.spawnAgent = async (input, onReserved) => {
+    spawnCalls += 1;
+    return baseSpawn(input, onReserved);
+  };
+  Object.assign(h.ports, { structuredDeliveryPublication: () => "unbound" as const });
+
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  const deferred = loadPipelines()[0]!;
+  expect(spawnCalls).toBe(0);
+  expect(deferred.state).toBe("running");
+  expect(deferred.stateDetail).toBeNull();
+  expect(deferred.cursor).toMatchObject({ stageId: "plan", state: "pending" });
+  expect(deferred.runs[0]!.attempts).toHaveLength(1);
+  expect(deferred.runs[0]!.attempts.at(-1)!.state).toBe("pending");
+
+  /* The process that owns the publication activates the same attempt. */
+  Object.assign(h.ports, { structuredDeliveryPublication: () => "ready" as const });
+  await tickPipelines([], h.ports);
+
+  expect(spawnCalls).toBe(1);
+  expect(loadPipelines()[0]!).toMatchObject({
+    state: "running",
+    cursor: { stageId: "plan", state: "running" },
+  });
 });
 
 test("a transient structured spawn handshake can recover on retry (#1056)", async () => {
@@ -4383,7 +4650,13 @@ test("issue 533: a cross-process late recovery loses atomically to a claimed ret
   const registryPath = path.join(process.env.LLV_STATE_DIR!, `retry-race-${pipeline.id}.json`);
   const retryRegistry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
   const competingRegistry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
-  const begun = retryRegistry.beginSpawnRequest({ engine: "codex", cwd: pipeline.worktreeDir, transport: "structured", accountId: "work" });
+  const begun = retryRegistry.beginSpawnRequest({
+    engine: "codex",
+    cwd: pipeline.worktreeDir,
+    transport: "structured",
+    accountId: "work",
+    launchProfile: { title: "Recover claimed pipeline retry" },
+  });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const key = { engine: "codex" as const, sessionId: `retry-race-${pipeline.id}` };
   const artifactPath = path.join(pipeline.worktreeDir, "late-original.jsonl");

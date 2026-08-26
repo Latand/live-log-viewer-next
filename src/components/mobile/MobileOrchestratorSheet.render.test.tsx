@@ -32,6 +32,8 @@ const state: Extract<OrchestratorPanelState, { kind: "live" }> = {
   seat,
   conversationId: seat.conversationId!,
   liveness: "stalled",
+  attention: null,
+  bindFailure: null,
   rotation: null,
   transition: null,
 };
@@ -72,6 +74,7 @@ function quietBannerCount(file: FileEntry): number {
       state={state}
       file={file}
       pendingMandate=""
+      viewerMcpRegistered={false}
       submitting={false}
       onConfirm={() => undefined}
       onRecheck={() => undefined}

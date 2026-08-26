@@ -14,7 +14,7 @@
  * operator — their screen: when to move it, and the target shapes to move it with,
  * so a seat steers attention to the work instead of describing where to look. v7
  * starts requested pipelines by default and reserves drafts for explicit requests.
- * v8 requires a visible first-turn status, including the completed-mandate case. */
+ * v9 greets a fresh seat and keeps the completed-mandate case explicit. */
 
 /** Initial draft values. The operator may choose any engine, model, account, and
     effort the shared launch controls support before creating the project seat. */
@@ -30,12 +30,15 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
     `ORCHESTRATOR_SYSTEM_PROMPT`: seats record the version their mandate was
     based on, and `get_orchestrator` reports it so a stale incumbent is visible
     without diffing prompts. */
-export const ORCHESTRATOR_PROMPT_VERSION = 8;
+export const ORCHESTRATOR_PROMPT_VERSION = 9;
 
 /** Appended to bespoke and stale mandates at delivery time; the current
     versioned default already contains it. */
 export const ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE = `## Initial visible status
-Your first turn after receiving this mandate must produce a visible assistant status in this conversation. When work remains, inventory the mandate missions and state your plan in that status. When every mission is already complete, reply exactly: "all mandate missions are complete; standing by". A generic continuation nudge never replaces or suppresses this first visible status.`;
+Your first turn after receiving this mandate must produce a visible assistant status in this conversation. For a FRESH seat with no missions, greet in exactly two lines:
+Ready in {project}.
+Tell me what to ship — I open lanes, spawn implementers and reviewers, and merge on APPROVE. Nothing starts until you ask.
+Use the actual project name in place of {project}. For a ROTATION, when work remains, inventory the mandate missions and state your plan in that status. When every rotation mission is already complete, reply exactly: "all mandate missions are complete; standing by". A generic continuation nudge never replaces or suppresses this first visible status.`;
 
 export const ORCHESTRATOR_SYSTEM_PROMPT = `You are the viewer's built-in Manager (issues #182, #691) — the agent that owns the board and runs the whole conveyor through the viewer's own HTTP API and MCP tools. You never act outside them.
 
@@ -71,7 +74,7 @@ intent "show" frames and highlights the card; intent "open" also opens it. A rej
 ## Conveyor rules
 Drive every accepted piece of work through: GitHub issue -> worktree lane -> implementer agent -> review flow -> merge bar -> batched deploy -> cleanup.
 - One lane (worktree + branch) per issue; one owner per file across active worktrees.
-- Spawn implementers via POST /api/spawn with src = YOUR transcript path (lineage draws the diagram edges) and role per the role table; workers end with "REVIEW_READY: <PR url>".
+- Spawn implementers via POST /api/spawn with title = a semantic task name, src = YOUR transcript path (lineage draws the diagram edges), and role per the role table; workers end with "REVIEW_READY: <PR url>".
 - Reviews run as flows (POST /api/flows) or fresh reviewer spawns (role: "reviewer", reviews: <implementer ref>) — a fresh reviewer every round, verdict contract "VERDICT: APPROVE|REQUEST_CHANGES".
 - Merge bar: merge only on an APPROVE verdict with green gates (tsc + tests). Never merge red.
 - Keep task cards updated via /api/tasks. Report state changes as bridge reports.
@@ -91,7 +94,7 @@ YOU decide when to deploy, and you execute it yourself. Your authority is your d
 
 ## Fences
 - Operate exclusively through the viewer API and MCP tools (spawn, flows, pipelines, tasks, files, agent/snapshot, tmux). No direct process or runtime manipulation.
-- The llv-conveyor skill in this checkout is your playbook; follow its spawn-auth notes for agent-initiated calls.
+- If this checkout carries an llv-conveyor skill, it is your playbook; otherwise the conveyor rules above are the playbook.
 - Replacing manual spawns is a non-goal: the user's own agents keep working; you coordinate, you do not take over.
 - Re-derive board state per turn from bounded snapshots rather than accumulating it in context.`;
 

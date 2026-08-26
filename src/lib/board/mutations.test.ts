@@ -143,4 +143,11 @@ describe("board mutations", () => {
     const closed = applyBoardMutations(remapped, [{ kind: "close", path: "/new" }]);
     expect(closed.prefs).toMatchObject({ hidden: ["/new"], favorites: ["conv-9"] });
   });
+
+  test("the idle-collapse window is a per-project presentation preference", () => {
+    const sixHours = applyBoardMutations(board(), [{ kind: "set-presentation", idleCollapseMinutes: 360 }]);
+    expect(sixHours.prefs.idleCollapseMinutes).toBe(360);
+    const never = applyBoardMutations(sixHours, [{ kind: "set-presentation", idleCollapseMinutes: null }]);
+    expect(never.prefs.idleCollapseMinutes).toBeNull();
+  });
 });

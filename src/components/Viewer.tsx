@@ -18,12 +18,13 @@ import { useViewPresence } from "@/hooks/useViewPresence";
 import { OVERVIEW_CONTEXT, OVERVIEW_SLICE, viewBus } from "@/hooks/viewPresenceBus";
 import { projectDisplayName } from "@/lib/displayNames";
 import { canonicalClientProject } from "@/lib/projects/clientAliases";
-import { type TFunction, useLocale } from "@/lib/i18n";
+import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { advanceAttentionCycle, attentionId, buildAttentionQueue, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
+import { advanceAttentionCycle, attentionExpiries, attentionId, buildAttentionQueue, type AttentionItem } from "./attention";
 import { AttentionHost } from "./attention/AttentionHost";
-import { AttentionIsland } from "./attention/AttentionIsland";
+import { AttentionIsland, AttentionQueueRow } from "./attention/AttentionIsland";
+import { AttentionToast } from "./attention/AttentionToast";
 import { purgeLegacyOperatorCredential } from "./operatorCredential";
 import { ArtifactPreviewHost } from "./preview/ArtifactPreviewHost";
 import { VoiceBridgeRelayHost } from "./voice/VoiceBridgeRelayHost";
@@ -33,7 +34,7 @@ import { focusHandoffBus } from "./attention/focusHandoffBus";
 import { ConnectionPill } from "./ConnectionPill";
 import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows";
 import { KeepAwakeProvider } from "./KeepAwakeControl";
-import { OrchestratorDock, OPEN_KEY as ORCHESTRATOR_OPEN_KEY } from "./orchestrator/OrchestratorDock";
+import { OrchestratorDock, dockOpenFor, rememberDockOpen } from "./orchestrator/OrchestratorDock";
 import { OverviewBoard } from "./OverviewBoard";
 import { GlobalSearch, transcriptFocusHash } from "./search/GlobalSearch";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
@@ -41,7 +42,7 @@ import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
 import { DeploymentStatusPill } from "./runtime/DeploymentStatusPill";
 import { StagingBadge } from "./StagingBadge";
-import { activityDot, cleanTitle, fmtAge } from "./utils";
+import { activityDot, cleanTitle } from "./utils";
 
 const PROJECT_KEY = "llvProject";
 
@@ -106,20 +107,6 @@ const STALE_FOCUS_REPLAY_MS = 8_000;
     new target, or dismisses it — a notice that evaporates while the hash stays
     put lands the tab back on the silent default view this fix exists to kill. */
 const UNKNOWN_FRAGMENT_NOTICE_MS = 6_000;
-
-/** One-line reason a queue item waits: question header, screen tail, or the stalled wording. */
-function attentionSnippet(t: TFunction, item: AttentionItem): string {
-  const q = item.file.pendingQuestion;
-  if (q) {
-    if (q.kind === "plan") return t("status.awaitingPlan");
-    const first = q.questions?.[0];
-    return first?.header || first?.question.split("\n")[0] || t("status.awaitingAnswer");
-  }
-  if (item.file.rateLimit) return t("status.rateLimited");
-  const w = item.file.waitingInput;
-  if (w) return w.menu?.question.split("\n")[0] || w.screenTail || t("status.awaitingTerminal");
-  return t("status.stalled");
-}
 
 export function Viewer() {
   const { t } = useLocale();
@@ -206,10 +193,19 @@ export function Viewer() {
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
   /* The per-project orchestrator dock (PRD #976 slice A). Its open state is the
-     operator's, persisted like the panel's width; the server render and the
-     first client render agree on «closed», and the mount effect below applies
-     what was stored — the same shape the project restore uses. */
+     operator's and belongs to the PROJECT (#1149), exactly as the dock's width
+     does (#1011): the server render and the first client render agree on
+     «closed» (the Overview, which has no dock), and every project that comes
+     after answers for itself in the render below. */
   const [orchestratorOpen, setOrchestratorOpen] = useState(false);
+  /* The project the open state above was read for. A switch re-reads during
+     render, so the dock the operator closed in one project stays closed there
+     and nowhere else, with no frame of the previous project's answer. */
+  const [orchestratorOpenProject, setOrchestratorOpenProject] = useState(OVERVIEW);
+  if (orchestratorOpenProject !== project) {
+    setOrchestratorOpenProject(project);
+    setOrchestratorOpen(dockOpenFor(project));
+  }
   /* The ONE global message search (issue #1054). It is shell state, not board
      state: the same overlay answers from the overview, from any project and on
      the phone, and it unmounts on close so every open starts on «my messages»
@@ -260,8 +256,9 @@ export function Viewer() {
     const initial = readHash();
     if (initial.filePath || initial.conversationId) setPendingHash(initial);
     const savedProject = initial.project ?? localStorage.getItem(PROJECT_KEY);
+    /* The restored project answers for its own dock through the same
+       per-project read a later switch uses — see `orchestratorOpenProject`. */
     if (savedProject) setProject(savedProject);
-    if (localStorage.getItem(ORCHESTRATOR_OPEN_KEY) === "1") setOrchestratorOpen(true);
     if (!recognizedFragment(location.hash)) setUnknownFragmentNotice(true);
   }, []);
 
@@ -378,20 +375,16 @@ export function Viewer() {
     recordProjectNavigation(projectUrl(nextProject));
   }, [applyProject]);
 
-  /* The dock FOLLOWS the selected project rather than belonging to one: the
-     open state is a device preference, and the panel re-seats itself on
-     whichever project the rail is showing. */
+  /* Opening or closing the dock is a statement about THIS project (#1149): it
+     is remembered under the project's own key, so the projects the operator is
+     not looking at keep the dock exactly as they had it. */
   const toggleOrchestrator = useCallback(() => {
     setOrchestratorOpen((open) => {
       const next = !open;
-      try {
-        localStorage.setItem(ORCHESTRATOR_OPEN_KEY, next ? "1" : "0");
-      } catch {
-        /* private mode */
-      }
+      rememberDockOpen(project, next);
       return next;
     });
-  }, []);
+  }, [project]);
 
   /* The overview board has no project view state to report: presence publishes
      the overview context/slice here, and ProjectDashboard takes over the moment
@@ -546,17 +539,16 @@ export function Viewer() {
   }, [catalogPin, pendingHash, allFiles, files, loaded]);
 
   /* The one queue every counter shows: badge, popover and the tab title all
-     read the same list, stalled tail included (D10). The clock advances when
-     the oldest stalled entry crosses its 2h TTL: useFiles keeps the array
-     identity while the /api/files body is unchanged, so without this tick an
-     expired stalled item would sit in the badge until an unrelated change. */
+     read the same list, stalled tail included (D10). The clock advances at the
+     nearest expiry of any kind — a stalled entry crossing its 2h TTL, an
+     orchestrator's bridge ask crossing its own (#1168): useFiles keeps the
+     array identity while the /api/files body is unchanged, and a cached
+     projection does not move when a report merely gets old, so without this
+     tick an expired item would sit in the badge until an unrelated change. */
   const [clock, setClock] = useState(() => Date.now() / 1000);
   const queue = useMemo(() => buildAttentionQueue(files, clock), [files, clock]);
   useEffect(() => {
-    const expiries = files
-      .filter((file) => file.activity === "stalled")
-      .map((file) => file.mtime + STALLED_ATTENTION_TTL)
-      .filter((at) => at > clock);
+    const expiries = attentionExpiries(files).filter((at) => at > clock);
     if (!expiries.length) return;
     const delay = Math.max(0, (Math.min(...expiries) - Date.now() / 1000) * 1000) + 500;
     const timer = window.setTimeout(() => setClock(Date.now() / 1000), delay);
@@ -859,25 +851,7 @@ export function Viewer() {
             {t("attention.popoverTitle")}
           </div>
           {queue.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className="flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] px-2.5 py-2 text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              onClick={() => jumpToItem(item)}
-            >
-              <span className="flex w-full min-w-0 items-center gap-1.5">
-                <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-primary">
-                  {cleanTitle(item.file.title, 90)}
-                </span>
-                <span className="shrink-0 rounded-full border border-border bg-canvas px-1.5 text-[10px] font-semibold text-muted" title={item.project}>
-                  {projectDisplayName(item.project, item.file.projectName)}
-                </span>
-                <span className="shrink-0 text-[10.5px] text-muted">{fmtAge(item.since)}</span>
-              </span>
-              <span className={`w-full truncate text-[11px] ${item.tier === "stalled" ? "text-warning" : "text-muted"}`}>
-                {attentionSnippet(t, item)}
-              </span>
-            </button>
+            <AttentionQueueRow key={item.id} item={item} onOpen={() => jumpToItem(item)} />
           ))}
         </div>
       ) : null}
@@ -926,25 +900,15 @@ export function Viewer() {
           <div className="pointer-events-none fixed right-4 top-12 z-50 flex flex-col items-end gap-2">
             {attentionBadge}
             {toastFile ? (
-              <div className="pointer-events-auto flex max-w-[360px] gap-2 rounded-[8px] border border-warning/45 bg-warning-soft px-4 py-3 text-[13px] font-semibold text-primary shadow-1">
-                <button
-                  className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                  onClick={() => {
-                    openFile(toastFile);
-                    setToastPath(null);
-                  }}
-                >
-                  <span className="block text-[11px] font-bold text-warning">{t("viewer.agentWaiting")}</span>
-                  <span className="line-clamp-2">{toastFile.title}</span>
-                </button>
-                <button
-                  className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                  aria-label={t("viewer.closeNotification")}
-                  onClick={() => setToastPath(null)}
-                >
-                  <X className="h-3.5 w-3.5" aria-hidden />
-                </button>
-              </div>
+              <AttentionToast
+                file={toastFile}
+                mobile={false}
+                onOpen={() => {
+                  openFile(toastFile);
+                  setToastPath(null);
+                }}
+                onDismiss={() => setToastPath(null)}
+              />
             ) : null}
           </div>
         )}
@@ -953,25 +917,15 @@ export function Viewer() {
             own space and never covers the toolbar. Its open target and 44px close
             are both full tap-height. */}
         {isMobile && toastFile ? (
-          <div className="flex shrink-0 items-stretch gap-2 border-b border-warning/45 bg-warning-soft pl-3 pr-1.5 py-1.5">
-            <button
-              className="flex min-h-11 min-w-0 flex-1 flex-col justify-center text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              onClick={() => {
-                openFile(toastFile);
-                setToastPath(null);
-              }}
-            >
-              <span className="block text-[11px] font-bold text-warning">{t("viewer.agentWaiting")}</span>
-              <span className="truncate text-[13px] font-semibold text-primary">{toastFile.title}</span>
-            </button>
-            <button
-              className="flex h-11 w-11 shrink-0 items-center justify-center self-center rounded-full border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              aria-label={t("viewer.closeNotification")}
-              onClick={() => setToastPath(null)}
-            >
-              <X className="h-5 w-5" aria-hidden />
-            </button>
-          </div>
+          <AttentionToast
+            file={toastFile}
+            mobile
+            onOpen={() => {
+              openFile(toastFile);
+              setToastPath(null);
+            }}
+            onDismiss={() => setToastPath(null)}
+          />
         ) : null}
         {project === OVERVIEW ? (
           <OverviewBoard

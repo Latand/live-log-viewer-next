@@ -62,6 +62,9 @@ class FakePorts implements ReportRunnerPorts {
   listChatsError: Error | null = null;
   /** Holds the source pass open, to model a run still being planned. */
   listChatsGate: Promise<void> | null = null;
+  /** The service-owned read lease exposed to the runner through its ports. */
+  readPhaseActive = false;
+  readPhaseGate: Promise<void> | null = null;
   /** Every read the Viewer itself made, in order. */
   reads: string[] = [];
   spawns: Record<string, unknown>[] = [];
@@ -85,6 +88,16 @@ class FakePorts implements ReportRunnerPorts {
   logs: string[] = [];
   now() { return this.clock; }
   connection() { return this.connectionState; }
+  async beginReadPhase() {
+    if (this.readPhaseGate) await this.readPhaseGate;
+    this.readPhaseActive = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.readPhaseActive = false;
+    };
+  }
   readPort(credentialRef: string): TelegramReadPort {
     /* What the production port does on every call: re-read the stored
        credential and refuse one from a generation other than the pinned one,
@@ -419,6 +432,44 @@ test("a reconnect after the source pass settles the run instead of launching for
   expect(ports.logs).toEqual(["account_mismatch"]);
   expect(fs.existsSync(reportSourcesPath(file.history[0].id))).toBe(false);
   expect(file.cursor.lastSuccessfulWindowEndAt).toBeNull();
+});
+
+test("the report holds the connector guard from get_me through the source pass", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  let release!: () => void;
+  ports.listChatsGate = new Promise<void>((resolve) => { release = resolve; });
+  const runner = new TelegramReportRunner(ports);
+
+  expect((await runner.runNow()).ok).toBe(true);
+  for (let turn = 0; turn < 10 && !ports.reads.includes("listChats"); turn += 1) {
+    await Promise.resolve();
+  }
+  expect(ports.reads).toContain("getMe");
+  expect(ports.reads).toContain("listChats");
+  expect(ports.readPhaseActive).toBe(true);
+
+  release();
+  await runner.settled();
+  expect(ports.readPhaseActive).toBe(false);
+  expect(ports.spawns.length).toBe(1);
+});
+
+test("a report waits for a health check that already owns the connector", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  const runner = new TelegramReportRunner(ports);
+  let releaseHealthCheck!: () => void;
+  ports.readPhaseGate = new Promise<void>((resolve) => { releaseHealthCheck = resolve; });
+
+  expect((await runner.runNow()).ok).toBe(true);
+  await Promise.resolve();
+  expect(ports.reads).toEqual([]);
+
+  releaseHealthCheck();
+  await runner.settled();
+  expect(ports.reads[0]).toBe("getMe");
+  expect(ports.spawns.length).toBe(1);
 });
 
 test("the grant admission resolves belongs to the generation the run verified", async () => {

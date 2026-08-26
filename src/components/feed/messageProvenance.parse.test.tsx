@@ -336,3 +336,76 @@ test("a ledger-resolved relay consumes its occurrence, so an identical operator 
   expect(operator).toContain("bg-user");
   expect(operator).not.toContain("internal");
 });
+
+/*
+ * #1166 rides the same seam, as one more fact about the SAME delivery: an
+ * occurrence can say that its delivery was an orchestrator seat's mandate, and
+ * then the row is the seat's card rather than 8 KB of the operator's own words.
+ * Because the fact belongs to the delivery, identical bytes from anywhere else
+ * are unaffected.
+ */
+
+/** 8 KB of seat scaffold, standing in for the mandate here. */
+const SEAT_MANDATE = "You are the orchestrator for this project.\n\nOwn the board and report status first.";
+
+test("a delivered mandate replaces the operator bubble it used to be rendered as", () => {
+  setLocale("en");
+  const [html] = renderAll([{ kind: "user", ts: at(1_000), text: SEAT_MANDATE }], {
+    occurrences: [occurrence(SEAT_MANDATE, at(0), { origin: "agent", mandate: { kind: "version", version: 4 } })],
+  });
+  expect(html).toContain("data-mandate-card");
+  expect(html).toContain("Mandate v4");
+  expect(html).not.toContain("bg-user");
+});
+
+test("the same bytes with no mandate delivery behind them stay the operator's own message", () => {
+  setLocale("en");
+  /* The operator pasted the mandate into the composer themselves. Same text,
+     same row shape, no seat delivery — so it is still them talking. */
+  const [pasted] = renderAll([{ kind: "user", ts: at(1_000), text: SEAT_MANDATE }], {
+    occurrences: [occurrence(SEAT_MANDATE, at(0), { origin: "operator" })],
+  });
+  expect(pasted).toContain("bg-user");
+  expect(pasted).not.toContain("data-mandate-card");
+  /* And with no evidence at all the row is untouched. */
+  const [unattributed] = renderAll([{ kind: "user", ts: at(1_000), text: SEAT_MANDATE }], {});
+  expect(unattributed).toContain("bg-user");
+  expect(unattributed).not.toContain("data-mandate-card");
+});
+
+test("a claude row delivered as the mandate becomes the card instead of a system row", () => {
+  setLocale("en");
+  const html = renderWithProvenance({
+    kind: "sysmsg",
+    label: "system",
+    text: SEAT_MANDATE,
+    deliveredMessage: { engineMessageId: ENGINE_MESSAGE_ID, ts: at(2_000) },
+  }, {
+    occurrences: [occurrence(SEAT_MANDATE, at(2_000), { origin: "agent", mandate: { kind: "custom" } })],
+  });
+  expect(html).toContain("data-mandate-card");
+  /* A bespoke mandate reads the same on this surface as in the dock. */
+  expect(html).toContain("Mandate custom");
+});
+
+test("a mandate the server could not name is still the card, with no qualifier", () => {
+  setLocale("en");
+  const [html] = renderAll([{ kind: "user", ts: at(1_000), text: SEAT_MANDATE }], {
+    occurrences: [occurrence(SEAT_MANDATE, at(0), { origin: "agent", mandate: { kind: "unqualified" } })],
+  });
+  expect(html).toContain("data-mandate-card");
+  expect(html).toContain("Mandate");
+  expect(html).not.toContain("Mandate v");
+  expect(html).not.toContain("custom");
+  expect(html).not.toContain("bg-user");
+});
+
+test("an agent relay that carries the mandate text stays the internal card", () => {
+  setLocale("en");
+  const [html] = renderAll([{ kind: "user", ts: at(1_000), text: SEAT_MANDATE }], {
+    occurrences: [occurrence(SEAT_MANDATE, at(0), { origin: "agent", senderRole: "orchestrator" })],
+  });
+  expect(html).toContain("internal");
+  expect(html).toContain("orchestrator");
+  expect(html).not.toContain("data-mandate-card");
+});

@@ -5,6 +5,7 @@ import {
   MIGRATION_INTENT_PROGRESS_TIMEOUT_MS,
   migrationIntentCanEnroll,
   migrationIntentLastProgressAt,
+  rolledBackMigrationOwnsDelivery,
 } from "./intentLiveness";
 
 const startedAt = "2026-07-29T10:00:00.000Z";
@@ -98,4 +99,21 @@ test("a future-dated progress marker fails closed", () => {
   };
 
   expect(migrationIntentCanEnroll(context, value, Date.parse(startedAt))).toBe(false);
+});
+
+test("rollback ownership requires a latest admission strictly before rollback", () => {
+  const rolledBackAt = "2026-07-29T10:00:00.100Z";
+
+  expect(rolledBackMigrationOwnsDelivery({
+    createdAt: "2026-07-29T10:00:00.000Z",
+    assignedAt: "2026-07-29T10:00:00.050Z",
+  }, rolledBackAt)).toBe(true);
+  expect(rolledBackMigrationOwnsDelivery({
+    createdAt: "2026-07-29T10:00:00.000Z",
+    assignedAt: rolledBackAt,
+  }, rolledBackAt)).toBe(false);
+  expect(rolledBackMigrationOwnsDelivery({
+    createdAt: "2026-07-29T10:00:00.000Z",
+    assignedAt: "2026-07-29T10:00:00.150Z",
+  }, rolledBackAt)).toBe(false);
 });

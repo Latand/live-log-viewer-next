@@ -61,6 +61,7 @@ export function MobileOrchestratorSheet({
   state,
   file,
   pendingMandate,
+  viewerMcpRegistered,
   submitting,
   onConfirm,
   onRecheck,
@@ -76,6 +77,7 @@ export function MobileOrchestratorSheet({
   /** The pending intent's own mandate, replayed verbatim when a stuck
       designation is resumed. */
   pendingMandate: string;
+  viewerMcpRegistered: boolean;
   submitting: boolean;
   onConfirm: (payload: SeatConfirmPayload) => void;
   onRecheck: () => void;
@@ -264,11 +266,30 @@ export function MobileOrchestratorSheet({
               ) : (
                 <div className="shrink-0">
                   <h2 className="text-title font-semibold text-primary">{t("orchPanel.draftTitle")}</h2>
-                  <p className="mt-1 text-ui leading-4 text-muted">
-                    {t(state.vacated ? "orchPanel.draftHintVacated" : "orchPanel.draftHint", { project: projectName })}
-                  </p>
+                  {state.vacated ? (
+                    <p className="mt-1 text-ui leading-4 text-muted">
+                      {t("orchPanel.draftHintVacated", { project: projectName })}
+                    </p>
+                  ) : null}
                 </div>
               )}
+
+              {/* The dock's own intro, word for word (#1163): the phone meets
+                  this draft in the same three sentences, so what an orchestrator
+                  is never depends on which surface you created it from. */}
+              <p className="shrink-0 text-ui leading-5 text-secondary" data-orchestrator-intro>
+                {t("orchPanel.introTalk")}{" "}
+                {t("orchPanel.introRuns")}{" "}
+                {t("orchPanel.introReports")}
+              </p>
+
+              <p
+                className="shrink-0 rounded-control border border-border bg-card px-3 py-2 font-mono text-caption text-secondary"
+                data-viewer-mcp-status={viewerMcpRegistered ? "registered" : "missing"}
+                role="status"
+              >
+                {t(viewerMcpRegistered ? "orchPanel.viewerMcpRegistered" : "orchPanel.viewerMcpMissing")}
+              </p>
 
               {/* The shared launch module, in the phone's own layout: the same
                   fields and the same invariants the dock has, lifted to 44px

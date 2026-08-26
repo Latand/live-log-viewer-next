@@ -57,6 +57,7 @@ function installService() {
   setTelegramServiceForTests(new TelegramConnectionService({
     adapter,
     ensureConnector: async () => ({ ok: true, url: "http://127.0.0.1:8809/mcp" }),
+    readConnectorIdentity: async () => ({ name: "Account A", username: null, id: "770000001" }),
     stopConnector: () => {},
     registerHosts: () => ({
       ok: true,

@@ -1,5 +1,6 @@
 import type { BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
+import { DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES } from "@/lib/board/types";
 
 /**
  * The board's key vocabulary — one string per independently-writable unit of
@@ -18,6 +19,7 @@ import type { BoardProjectStateV1 } from "@/lib/view/types";
 
 export const VIEW_MODE_KEY = "viewMode";
 export const TASK_PANEL_KEY = "taskPanelOpen";
+export const IDLE_COLLAPSE_KEY = "idleCollapseMinutes";
 const PATH_PREFIX = "path:";
 
 /** Per-key causal revisions: key → the board revision at which it last changed.
@@ -106,6 +108,9 @@ export function boardKeysChanged(before: BoardProjectStateV1, after: BoardProjec
   for (const id of symmetricDifference(before.prefs.expandedEngineTrayParentIds, after.prefs.expandedEngineTrayParentIds)) keys.add(trayKey(id));
   if (before.prefs.viewMode !== after.prefs.viewMode) keys.add(VIEW_MODE_KEY);
   if (before.prefs.taskPanelOpen !== after.prefs.taskPanelOpen) keys.add(TASK_PANEL_KEY);
+  const beforeIdle = before.prefs.idleCollapseMinutes === undefined ? DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES : before.prefs.idleCollapseMinutes;
+  const afterIdle = after.prefs.idleCollapseMinutes === undefined ? DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES : after.prefs.idleCollapseMinutes;
+  if (beforeIdle !== afterIdle) keys.add(IDLE_COLLAPSE_KEY);
   return keys;
 }
 
@@ -133,6 +138,7 @@ export function mutationKeys(mutation: BoardMutationV1, aliases: Record<string, 
       return [
         ...(mutation.viewMode === undefined ? [] : [VIEW_MODE_KEY]),
         ...(mutation.taskPanelOpen === undefined ? [] : [TASK_PANEL_KEY]),
+        ...(mutation.idleCollapseMinutes === undefined ? [] : [IDLE_COLLAPSE_KEY]),
       ];
   }
 }
@@ -151,7 +157,7 @@ export const MAX_RETIRED_KEY_REVISIONS = 512;
     target's key rather than holding one of their own. */
 export function liveBoardKeys(board: BoardProjectStateV1): Set<string> {
   const aliases = board.pathAliases ?? {};
-  const keys = new Set<string>([VIEW_MODE_KEY, TASK_PANEL_KEY]);
+  const keys = new Set<string>([VIEW_MODE_KEY, TASK_PANEL_KEY, IDLE_COLLAPSE_KEY]);
   for (const canonical of canonicalPlacements(board, aliases).keys()) keys.add(pathKey(canonical));
   for (const id of board.prefs.favorites ?? []) keys.add(favoriteKey(id));
   for (const id of board.prefs.foldedEngineChildIds ?? []) keys.add(foldKey(id));

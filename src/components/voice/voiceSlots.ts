@@ -89,6 +89,7 @@ export interface VoiceComposerCardProps {
   pollPaused: boolean;
   deadHost: boolean;
   sendBlockedReason: string | null;
+  placeholder?: string;
 }
 
 /**
@@ -108,12 +109,16 @@ export interface VoiceComposerCardProps {
  * form out of the dock the operator is typing in.
  */
 interface ComposerPlace {
+  id: string | HTMLElement;
   node: HTMLElement;
   primary: boolean;
 }
 
+type ComposerPlaceId = string | HTMLElement;
+
 const composerCardNodes = new Map<string, ComposerPlace[]>();
 const composerCardProps = new Map<string, VoiceComposerCardProps>();
+const composerCardPropsByPlace = new Map<string, Map<ComposerPlaceId, VoiceComposerCardProps>>();
 
 /** How many `VoiceComposerHost`s are mounted (production: exactly one).
     Cards defer their composer to the host ONLY while a host exists, so an
@@ -122,17 +127,35 @@ const composerCardProps = new Map<string, VoiceComposerCardProps>();
 let composerHosts = 0;
 
 /** A surface's place for the hoisted composer. Returns the retraction. */
-export function publishVoiceComposerCardNode(cardId: string, node: HTMLElement, primary = false): () => void {
-  const place: ComposerPlace = { node, primary };
+function refreshVoiceComposerCardProps(cardId: string): boolean {
+  const places = composerCardNodes.get(cardId);
+  const selected = places?.findLast((place) => place.primary) ?? places?.[places.length - 1];
+  const next = selected ? composerCardPropsByPlace.get(cardId)?.get(selected.id) : undefined;
+  /* With no places the host may be parking a live-call composer. Retain the
+     last snapshot until the host explicitly releases that conversation. */
+  if (!next || composerCardProps.get(cardId) === next) return false;
+  composerCardProps.set(cardId, next);
+  return true;
+}
+
+/** A surface's place for the hoisted composer. Returns the retraction. */
+export function publishVoiceComposerCardNode(cardId: string, node: HTMLElement, primary = false, placeId: string | null = null): () => void {
+  const id: ComposerPlaceId = placeId ?? node;
+  const place: ComposerPlace = { id, node, primary };
   composerCardNodes.set(cardId, [...(composerCardNodes.get(cardId) ?? []), place]);
+  refreshVoiceComposerCardProps(cardId);
   notify();
   return () => {
     const places = composerCardNodes.get(cardId);
     if (!places) return;
     const remaining = places.filter((entry) => entry !== place);
     if (remaining.length === places.length) return;
+    const propsByPlace = composerCardPropsByPlace.get(cardId);
+    propsByPlace?.delete(id);
+    if (propsByPlace?.size === 0) composerCardPropsByPlace.delete(cardId);
     if (remaining.length) composerCardNodes.set(cardId, remaining);
     else composerCardNodes.delete(cardId);
+    refreshVoiceComposerCardProps(cardId);
     notify();
   };
 }
@@ -141,17 +164,11 @@ export function publishVoiceComposerCardNode(cardId: string, node: HTMLElement, 
     the composer of an active call outlives its card and needs SOMETHING to render
     with; stale runtime detail refreshes through the composer's own hooks. Released
     by `forgetVoiceComposerCardProps` once no composer renders from them. */
-export function publishVoiceComposerCardProps(cardId: string, props: VoiceComposerCardProps): void {
-  const current = composerCardProps.get(cardId);
-  if (current
-    && current.file === props.file
-    && current.pollPaused === props.pollPaused
-    && current.deadHost === props.deadHost
-    && current.sendBlockedReason === props.sendBlockedReason) {
-    return;
-  }
-  composerCardProps.set(cardId, props);
-  notify();
+export function publishVoiceComposerCardProps(cardId: string, placeId: ComposerPlaceId, props: VoiceComposerCardProps): void {
+  const byPlace = composerCardPropsByPlace.get(cardId) ?? new Map<ComposerPlaceId, VoiceComposerCardProps>();
+  byPlace.set(placeId, props);
+  composerCardPropsByPlace.set(cardId, byPlace);
+  if (refreshVoiceComposerCardProps(cardId)) notify();
 }
 
 /**
@@ -165,7 +182,8 @@ export function publishVoiceComposerCardProps(cardId: string, props: VoiceCompos
  * of the tab.
  */
 export function forgetVoiceComposerCardProps(cardId: string): void {
-  if (!composerCardProps.delete(cardId)) return;
+  const changed = composerCardProps.delete(cardId) || composerCardPropsByPlace.delete(cardId);
+  if (!changed) return;
   notify();
 }
 
@@ -224,6 +242,7 @@ export function resetVoiceSlotsForTest(): void {
   composerSlots.clear();
   composerCardNodes.clear();
   composerCardProps.clear();
+  composerCardPropsByPlace.clear();
   composerHosts = 0;
   listeners.clear();
 }

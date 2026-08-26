@@ -51,6 +51,7 @@ export const en = {
   "turn.running": "working {d}",
   "turn.lastRun": "last run: {d}",
   "turn.timer": "elapsed work time",
+  "turn.waiting": "waiting for your answer",
 
   // Board status vocabulary (issue #961) — wording reused from the existing
   // attention/receipt/turn surfaces, one word per card.
@@ -115,7 +116,11 @@ export const en = {
   "dash.pipelinesUnavailable": "Pipelines are temporarily unavailable: the pipelines state file could not be read. Other panels stay live.",
   "dash.loadingBoard": "Loading the board…",
   "dash.emptyTitle": "The scheme is empty for now",
-  "dash.emptyHint": "Open the switchboard in the bottom-right corner and click a conversation — it will appear here",
+  "dash.emptyStartHere": "Start here: Orchestrator — tell it what you want done in {project}.",
+  "dash.emptyOneAgent": "Or spawn one agent for one task (Create → Agent).",
+  /* The empty project's second offer names the menu path it stands in for, so
+     the same route is findable again from the header once the board fills. */
+  "dash.emptyAgentCta": "Create → Agent",
   "dash.viewScheme": "scheme",
   "dash.viewList": "conversations",
   "dash.viewSchemeMenu": "View: scheme",
@@ -372,6 +377,7 @@ export const en = {
   "composer.placeholderSpawn": "prompt — the agent will start…",
   "composer.placeholderResolving": "message the agent — reconnecting to its session…",
   "composer.placeholderSend": "message the agent…",
+  "composer.placeholderOrchestrator": "what should get done in {project}?",
   "composer.textAria": "Text for the agent",
   /* Chat-first mobile composer (issue #419 reopened): the model/reasoning +
      attachment second row folds behind this compact primary-row action so the
@@ -1004,11 +1010,21 @@ export const en = {
   "feed.copyCode": "Copy code",
   "feed.copyMd": "Copy message (Markdown)",
   "feed.voiceTurn": "Voice",
-  /* #844 selected-card badge — the composer and the transcript row share it. */
-  "selectedContext.none": "Nothing selected",
+  /* #844 selected-card badge — the composer and the transcript row share it.
+     There is no copy for an empty selection: the badge renders a named card
+     only, so nothing announces "nothing selected" anywhere (#1148). */
   "selectedContext.stale": "stale",
   "selectedContext.ariaSelected": "Selected card: {name} (project {project})",
-  "selectedContext.ariaNone": "Submitted with nothing selected",
+  /* #1166 the delivered orchestrator mandate. The seat sends it; the operator
+     never typed it, so the row names what it is instead of quoting 8 KB back
+     at them as their own words. */
+  "mandateCard.title": "Mandate",
+  "mandateCard.version": "v{version}",
+  "mandateCard.custom": "custom",
+  "mandateCard.lines": { one: "{count} line", other: "{count} lines" },
+  "mandateCard.sent": "sent at seat creation",
+  "mandateCard.readMandate": "Read the mandate",
+  "mandateCard.handoff": "Rotation handoff",
   "feed.voiceContext": "Call transcript",
   "feed.speak": "Read answer aloud (AI-generated voice)",
   "feed.stopSpeaking": "Stop reading aloud",
@@ -1756,6 +1772,7 @@ export const en = {
   "status.awaitingPlan": "awaiting plan approval",
   "status.awaitingAnswer": "awaiting an answer to a question",
   "status.awaitingTerminal": "awaiting a reply in the terminal",
+  "status.awaitingDecision": "the orchestrator is waiting on your decision",
   "status.working": "working…",
   "status.returnedResult": "returned with a result",
   "status.stalled": "interrupted or awaiting permission",
@@ -1791,7 +1808,10 @@ export const en = {
   "overview.archived": "· {count} archived",
   "overview.moreLive": "{count} more live",
   "overview.quiet": "quiet · last activity {age}",
-  "overview.empty": "No logs yet",
+  "overview.firstRunTitle": "No projects yet",
+  "overview.firstRunBody": "Sessions from ~/.claude/projects and ~/.codex/sessions appear here as they happen",
+  "overview.firstRunCreate": "Create a project",
+  "overview.firstRunElsewhere": "…or run any claude / codex session inside a repo.",
 
   // Catalog fetch failure (issue #696) — never the idle empty-state copy
   "catalog.unreachable": "catalog unavailable",
@@ -1813,13 +1833,20 @@ export const en = {
   "orchPanel.unavailableHint": "Nothing was changed. Until this answers, creating one here could designate a second orchestrator.",
   "orchPanel.recheck": "Check again",
   "orchPanel.draftTitle": "Create this project's orchestrator",
-  "orchPanel.draftHint": "It runs in {project}, owns this board, and answers you here. The text below is delivered to it as its first message — edit it however you like.",
-  "orchPanel.draftHintVacated": "The previous orchestrator's conversation is gone. Create a new one for {project}; the text below is delivered as its first message.",
+  "orchPanel.draftHintVacated": "The previous orchestrator's conversation is gone. Create a new one for {project}.",
+  "orchPanel.introTalk": "You talk to it like a colleague: «fix the flaky test in X», «take issues 12 and 14», «review PR 30».",
+  "orchPanel.introRuns": "It opens lanes, spawns implementers and fresh reviewers, and merges on APPROVE.",
+  "orchPanel.introReports": "It reports back here; it deploys on its own unless you edit that out below.",
+  "orchPanel.viewerMcpRegistered": "viewer MCP: registered ✓",
+  "orchPanel.viewerMcpMissing": "viewer MCP: run scripts/install-mcp.sh or claude mcp add viewer -- bun ./bin/mcp-server.mjs",
   "orchPanel.mandate": "Mandate",
   "orchPanel.mandateSent": "Sent as the first message",
+  "orchPanel.mandateSummary": "Mandate v{version} — built-in operating rules (edit)",
+  "orchPanel.mandateSummaryCustom": "Mandate — your own operating rules (edit)",
   "orchPanel.restoreDefault": "Restore default",
   "orchPanel.mandateRequired": "The mandate can't be empty.",
   "orchPanel.cwd": "Working directory: {cwd}",
+  "orchPanel.oneTask": "One task? Spawn one agent and talk to it directly (Create → Agent). The orchestrator pays off when several things run at once while you are elsewhere.",
   "orchPanel.confirm": "Create orchestrator",
   "orchPanel.confirmRetry": "Try again",
   "orchPanel.creating": "Creating the orchestrator…",
@@ -1839,10 +1866,16 @@ export const en = {
   "orchPanel.resolving": "Opening the conversation…",
   "orchPanel.resolvingHint": "The orchestrator is designated; its transcript hasn't reached this view yet.",
   "orchPanel.openOnBoard": "Open it on the board",
+  "orchPanel.bindStalled": "Still can't open this conversation",
+  "orchPanel.bindStalledCatalog": "The seat's recorded transcript isn't in this view's file catalog. Its host is alive, so the conversation is most likely running under a transcript that replaced the recorded one.",
+  "orchPanel.bindStalledSurface": "This transcript is in view, but the runtime plane hasn't resolved a host for it yet.",
+  "orchPanel.rebind": "Re-bind",
+  "orchPanel.rebindTitle": "Look this seat's conversation up again by its own id. Nothing is designated, rotated or spawned.",
   "orchPanel.rotation": "Rotation recommended",
   "orchPanel.rotationStrong": "Rotation strongly recommended",
   "orchPanel.rotationContext": "context is at {percent}% of the model's window",
   "orchPanel.rotationDead": "its host is gone",
+  "orchPanel.badgeNeedsYou": "needs you",
   "orchPanel.badgeLive": "live",
   "orchPanel.badgeStalled": "quiet",
   "orchPanel.badgeResumable": "finished",
@@ -1953,6 +1986,11 @@ export const en = {
   "launchHistory.retryLabel": "Retry",
   "launchHistory.retry": "Retry launch: {title}",
   "workerStack.title": "Collapsed workers",
+  "workerStack.idle": "{count} idle",
+  "workerStack.window": "Collapse idle conversations after",
+  "workerStack.minutes": "{count} min",
+  "workerStack.never": "Never",
+  "workerStack.noVerdict": "no verdict",
   "workerStack.aria": "Collapsed worker conversations",
   "workerStack.expandGroup": "Expand review group on the board",
   "workerStack.flow": "Flow",
@@ -1999,6 +2037,13 @@ export const en = {
   "attention.popoverTitle": "Waiting on you",
   "attention.filterOn": "Show only those waiting on you (F)",
   "attention.filterOff": "Show all nodes (F)",
+  /* The one decision line every attention surface shares (#1167): the toast
+     title, the island popover row and the orchestrator dock badge's tooltip.
+     Lower-case to sit beside `rateLimit.badgeUntil`, which names the same class
+     of wait and is reused verbatim. */
+  "attention.decisionQuestion": "a question",
+  "attention.decisionPlan": "plan approval",
+  "attention.decisionPermission": "permission prompt",
 
   // MobileFocusView
   "mobile.noConvos": "No conversations yet",

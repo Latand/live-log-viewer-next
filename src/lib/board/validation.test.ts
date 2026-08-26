@@ -85,3 +85,17 @@ test("accepts well-formed engine tray mutations and rejects malformed ones", asy
     validateBoardPatchRequest(patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 3, mutations: [{ kind: "set-engine-tray-expanded", parentId: "", expanded: true }] })),
   ).rejects.toThrow();
 });
+
+test("accepts a bounded idle-collapse window and the never sentinel", async () => {
+  const bounded = await validateBoardPatchRequest(
+    patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 0, mutations: [{ kind: "set-presentation", idleCollapseMinutes: 120 }] }),
+  );
+  expect(bounded.mutations).toEqual([{ kind: "set-presentation", idleCollapseMinutes: 120 }]);
+  const never = await validateBoardPatchRequest(
+    patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 0, mutations: [{ kind: "set-presentation", idleCollapseMinutes: null }] }),
+  );
+  expect(never.mutations).toEqual([{ kind: "set-presentation", idleCollapseMinutes: null }]);
+  await expect(
+    validateBoardPatchRequest(patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 0, mutations: [{ kind: "set-presentation", idleCollapseMinutes: 0 }] })),
+  ).rejects.toThrow();
+});

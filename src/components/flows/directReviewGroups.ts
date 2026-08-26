@@ -5,7 +5,7 @@ import type { FileEntry } from "@/lib/types";
 import { currentConversationFile, withoutArchivedPredecessors } from "@/lib/accounts/identity";
 
 import { projectKey } from "@/components/projectModel";
-import { workerCollapseIdleMs } from "@/components/scheme/workerCollapse";
+import { collapseContext, keepExpanded, workerCollapseIdleMs } from "@/components/scheme/workerCollapse";
 
 import { isActiveFlow } from "./flowModel";
 
@@ -68,27 +68,32 @@ export interface DirectReviewGroupsInput {
   conversationAliases?: Readonly<Record<string, string>>;
   /** Wall clock for the failed-round freshness horizon; defaults to Date.now(). */
   nowMs?: number;
-  /** Freshness horizon override (tests); defaults to the shared worker idle window. */
-  idleMs?: number;
+  /** Freshness horizon override (tests); null disables age-only settlement. */
+  idleMs?: number | null;
+  /** Inputs consumed by the board's shared expansion predicate. */
+  pipelines?: Parameters<typeof collapseContext>[0]["pipelines"];
+  pinnedPaths?: ReadonlySet<string>;
+  protectedPaths?: ReadonlySet<string>;
+  activeDeliveryConversationIds?: ReadonlySet<string>;
 }
 
-/** An activity read that must not mislabel a still-working reviewer as failed:
-    anything live, mid-turn, or waiting on input is not terminal. */
-function reviewerStillWorking(file: FileEntry): boolean {
-  return (
-    file.activity === "live"
-    || file.activity === "stalled"
-    || file.proc === "running"
-    || Boolean(file.pendingQuestion)
-    || Boolean(file.waitingInput)
-  );
-}
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
   const visible = withoutArchivedPredecessors([...input.files]);
   const groups = groupDirectReviewers(input);
   const nowMs = input.nowMs ?? Date.now();
-  const idleMs = input.idleMs ?? workerCollapseIdleMs();
+  const idleMs = input.idleMs === undefined ? workerCollapseIdleMs() : input.idleMs;
+  const expansionContext = collapseContext({
+    files: visible,
+    flows: input.flows,
+    pipelines: input.pipelines,
+    pinnedPaths: input.pinnedPaths ?? EMPTY_PATHS,
+    protectedPaths: input.protectedPaths,
+    activeDeliveryConversationIds: input.activeDeliveryConversationIds,
+    nowMs,
+    idleMs,
+  });
 
   const out: Flow[] = [];
   for (const { key, members } of groups) {
@@ -105,13 +110,9 @@ export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
     const rounds = members.map<Round>((member, index) => {
       const { file } = member;
       const outcome = file.review ?? null;
-      /* A verdict-less reviewer that stopped working failed before its verdict —
-         the LATEST round included (production regression on 66ef346). The round
-         reads as aborted either way; whether the GROUP stays actionable for a
-         fresh failure is the freshness-horizon clause on `state` below.
-         Anything live, mid-turn, or waiting on input stays the actionable
-         front card. */
-      const failed = !outcome && !reviewerStillWorking(file);
+      /* Direct reviewers share the board's expansion decision, including
+         delivery, pin, terminal, input, process, and idle-window evidence. */
+      const failed = !outcome && !keepExpanded(file, expansionContext);
       return {
         n: index + 1,
         reviewerPath: file.path,
@@ -152,18 +153,9 @@ export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
          reviewer; finished rounds drop it via the deck's own `finished` gate. */
       reviewerMode: "pane",
       roundLimit: 0,
-      /* An unfinished latest round is the actionable loop; an all-terminal
-         group parks as compact history and never forces its reviewed
-         conversation onto the board (see ProjectDashboard's expansion gate).
-         A latest round that FAILED before its verdict stays actionable only
-         inside the shared freshness horizon (#289/#325 spec: a fresh failure
-         must stay visible), then parks — the unbounded rule flooded the board
-         with days-old dead reviewers (production regression on 66ef346). */
-      state:
-        last.verdict === null
-          && (last.error === null || nowMs - latest.file.mtime * 1000 < idleMs)
-          ? "reviewing"
-          : "done_comment",
+      /* An unfinished latest round is actionable. Verdict, terminal evidence,
+         or W-idle settlement parks the group as compact history. */
+      state: last.verdict === null && last.error === null ? "reviewing" : "done_comment",
       stateDetail: null,
       rounds,
       createdAt: rounds[0]!.startedAt,

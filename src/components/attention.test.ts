@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import type { FileEntry, PendingQuestion, WaitingInput } from "@/lib/types";
 
-import { advanceAttentionCycle, attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL } from "./attention";
+import { BRIDGE_ASK_TTL_SECONDS } from "@/lib/bridge/types";
+
+import { advanceAttentionCycle, attentionExpiries, attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL } from "./attention";
 
 const NOW = 1_800_000_000;
 
@@ -168,6 +170,108 @@ describe("buildAttentionQueue", () => {
     expect(bySince.get("/q")).toBe(NOW - 111);
     expect(bySince.get("/w")).toBe(NOW - 222);
     expect(bySince.get("/s")).toBe(NOW - 333);
+  });
+});
+
+/* #1168 — the orchestrator's own `blocked`/`question` bridge reports. The
+   gateway used to be the only thing that ever read them, so with the voice
+   channel off "I need a decision" reached the operator as prose and nothing
+   else. The server stamps the open ask onto the seat's entry; the queue turns
+   it into a first-class hard block, and owns the clock that retires it. */
+describe("bridge asks", () => {
+  const ASK = { id: "lane-4-blocked", at: new Date((NOW - 900) * 1000).toISOString() };
+
+  test("an open ask is a blocked item keyed by the report key, dated by the report", () => {
+    const seat = entry({ path: "/seat", bridgeAsk: ASK });
+    expect(attentionId(seat, NOW)).toBe("lane-4-blocked");
+    expect(buildAttentionQueue([seat], NOW)).toMatchObject([
+      { id: "lane-4-blocked", tier: "blocked", since: NOW - 900, project: "demo" },
+    ]);
+  });
+
+  test("the ask outranks the seat's own local prompt", () => {
+    const seat = entry({
+      path: "/seat",
+      bridgeAsk: ASK,
+      pendingQuestion: question("toolu_local", NOW - 10),
+      activity: "stalled",
+      proc: "running",
+    });
+    expect(attentionId(seat, NOW)).toBe("lane-4-blocked");
+    expect(buildAttentionQueue([seat], NOW)[0]!.since).toBe(NOW - 900);
+  });
+
+  test("it sorts inside the hard-blocked segment, ahead of a stalled tail", () => {
+    const files = [
+      entry({ path: "/stall", activity: "stalled", proc: "running", mtime: NOW - 7000 }),
+      entry({ path: "/fresh-q", pendingQuestion: question("toolu_q", NOW - 5) }),
+      entry({ path: "/seat", bridgeAsk: ASK }),
+    ];
+    const queue = buildAttentionQueue(files, NOW);
+    expect(queue.map((item) => item.file.path)).toEqual(["/seat", "/fresh-q", "/stall"]);
+    expect(queue.map((item) => item.tier)).toEqual(["blocked", "blocked", "stalled"]);
+  });
+
+  test("the project filter keeps the seat inside its own project queue", () => {
+    const files = [
+      entry({ path: "/seat", project: "alpha", bridgeAsk: ASK }),
+      entry({ path: "/other", project: "beta", bridgeAsk: { ...ASK, id: "lane-9-blocked" } }),
+    ];
+    expect(buildAttentionQueue(files, NOW, "alpha").map((item) => item.id)).toEqual(["lane-4-blocked"]);
+  });
+
+  test("re-reading the same ask yields the same single item", () => {
+    const seat = entry({ path: "/seat", bridgeAsk: ASK });
+    const first = buildAttentionQueue([seat], NOW);
+    const second = buildAttentionQueue([entry({ path: "/seat", bridgeAsk: { ...ASK } })], NOW);
+    expect(second).toHaveLength(1);
+    expect(second[0]!.id).toBe(first[0]!.id);
+  });
+
+  test("no ask leaves an otherwise quiet seat out of the queue", () => {
+    expect(buildAttentionQueue([entry({ path: "/seat" })], NOW)).toEqual([]);
+    expect(buildAttentionQueue([entry({ path: "/seat", bridgeAsk: null })], NOW)).toEqual([]);
+  });
+
+  /* The expiry has to bind HERE, on the live clock, and not only on the server
+     that stamped the ask: /api/files serves a cached projection, and nothing in
+     the bridge log moves when a report merely gets old. */
+  test("the ask ages out of the queue on the TTL boundary, not before it", () => {
+    const filed = NOW - BRIDGE_ASK_TTL_SECONDS;
+    const seat = entry({ path: "/seat", bridgeAsk: { id: "lane-4-blocked", at: new Date(filed * 1000).toISOString() } });
+    expect(buildAttentionQueue([seat], NOW).map((item) => item.id)).toEqual(["lane-4-blocked"]);
+    expect(attentionId(seat, NOW + 1)).toBeNull();
+    expect(buildAttentionQueue([seat], NOW + 1)).toEqual([]);
+  });
+
+  test("an expired ask falls through to the seat's own signal rather than hiding it", () => {
+    const seat = entry({
+      path: "/seat",
+      bridgeAsk: { id: "lane-4-blocked", at: new Date((NOW - BRIDGE_ASK_TTL_SECONDS - 1) * 1000).toISOString() },
+      pendingQuestion: question("toolu_local", NOW - 10),
+    });
+    expect(buildAttentionQueue([seat], NOW)).toMatchObject([
+      { id: "toolu_local", tier: "blocked", since: NOW - 10 },
+    ]);
+  });
+
+  test("an unparseable ask time enqueues nothing on its own account", () => {
+    const seat = entry({ path: "/seat", bridgeAsk: { id: "lane-4-blocked", at: "whenever" } });
+    expect(buildAttentionQueue([seat], NOW)).toEqual([]);
+  });
+
+  test("the ask's own expiry is one of the ticks the queue schedules", () => {
+    const filed = NOW - 900;
+    const files = [
+      entry({ path: "/seat", bridgeAsk: { id: "lane-4-blocked", at: new Date(filed * 1000).toISOString() } }),
+      entry({ path: "/stall", activity: "stalled", proc: "running", mtime: NOW - 60 }),
+    ];
+    expect(attentionExpiries(files).sort((a, b) => a - b)).toEqual([
+      filed + BRIDGE_ASK_TTL_SECONDS,
+      NOW - 60 + STALLED_ATTENTION_TTL,
+    ].sort((a, b) => a - b));
+    /* An unparseable time schedules nothing: there is no moment to wake for. */
+    expect(attentionExpiries([entry({ path: "/seat", bridgeAsk: { id: "x", at: "whenever" } })])).toEqual([]);
   });
 });
 

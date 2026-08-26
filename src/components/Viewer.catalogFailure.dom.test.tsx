@@ -149,7 +149,7 @@ test("a project restored from localStorage names the catalog failure instead of 
   expect(host.textContent).toContain(en["catalog.retry"]);
   /* And never the affirmative idle copy for a catalog nobody could read. */
   expect(host.textContent).not.toContain(en["common.nothingRunning"]);
-  expect(host.textContent).not.toContain(en["overview.empty"]);
+  expect(host.textContent).not.toContain(en["overview.firstRunTitle"]);
 });
 
 test("a project restored from a #p= hash gets the same failure treatment", async () => {

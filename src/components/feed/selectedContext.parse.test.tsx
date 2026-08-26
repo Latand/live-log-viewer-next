@@ -57,7 +57,7 @@ test("the transcript row renders the same badge the composer showed", () => {
   expect(html).toContain("Look at that one.");
 });
 
-test("an explicit empty selection renders on the transcript row too", () => {
+test("a row sent with an explicit empty selection carries the reference and shows no chip", () => {
   setLocale("en");
   const empty = captureSelectedContext({
     context: { project: "atlas" },
@@ -69,7 +69,14 @@ test("an explicit empty selection renders on the transcript row too", () => {
   });
   const items = userItems(encodeCodexStructuredUserText("Anything running?", undefined, empty));
   const user = items.find((item) => item.kind === "user")!;
-  expect(renderToStaticMarkup(<FeedItem item={user} />)).toContain("Nothing selected");
+  /* The record still says the operator asked with nothing selected (#844) — the
+     reference survives the round trip — while the row itself stays clean: a chip
+     repeating that over every bare operator message is the noise of #1148. */
+  expect(user.kind === "user" && user.selectedContext).toEqual(empty);
+  const html = renderToStaticMarkup(<FeedItem item={user} />);
+  expect(html).toContain("Anything running?");
+  expect(html).not.toContain("data-selected-context");
+  expect(html.toLowerCase()).not.toContain("nothing selected");
 });
 
 test("a row with no reference renders no badge markup at all", () => {

@@ -166,6 +166,16 @@ test("the pane-less variant of the card carries the same dismiss control", () =>
   expect(host.textContent).toBe("");
 });
 
+test("the pane-less transport notice is a muted caption below the question", () => {
+  const host = renderCard(questionFile({ paneTarget: null }));
+  const caption = host.querySelector('[data-question-transport="unavailable"]');
+
+  expect(caption?.className).toContain("text-muted");
+  expect(caption?.className).not.toContain("text-danger");
+  expect(host.textContent!.indexOf("Which transport?")).toBeLessThan(host.textContent!.indexOf(en["question.noPane"]));
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+});
+
 test("on a phone the dismiss control meets the 44px touch target", () => {
   narrowViewport = true;
   const host = renderCard(questionFile());

@@ -4,12 +4,17 @@ import {
 } from "@/lib/runtime/bridgeDelivery";
 import { rootIdentity as readRootIdentity } from "@/lib/root/store";
 
+import type { BridgeAsk } from "@/lib/types";
+
+import { openBridgeAsks, type OpenBridgeAskOptions } from "./asks";
 import {
   acknowledgeBridgeReports,
   appendBridgeReports,
   drainBridgeReports,
   issueBridgeAckToken,
   openBridgeChannel,
+  readBridgeReportLog,
+  recordBridgeDirectiveAnswer,
   redeemBridgeAckToken,
 } from "./store";
 import {
@@ -58,6 +63,32 @@ export interface BridgeDeliveryRequest {
 export function recordManagerReport(input: BridgeReportInput): BridgeReportV1 | null {
   const { appended } = appendBridgeReports([input]);
   return appended[0] ?? null;
+}
+
+/**
+ * Record that a directive answered a report, by the seq its trailer named
+ * (#1168). Exported here so the relay path settles an ask through the same
+ * service every other bridge write goes through.
+ */
+export { recordBridgeDirectiveAnswer };
+
+/**
+ * The open ask of every orchestrator seat, for the surface that shows the
+ * operator what needs them (#1168).
+ *
+ * Deliberately outside the drain: it opens no channel, hands out no batch and
+ * moves no cursor, because the whole point is that a blocked manager reaches
+ * the operator with the voice gateway switched off. Read-only and fail-closed —
+ * an unreadable log costs the ask and never the files poll that asked for it.
+ */
+export function bridgeAsksForSeats(
+  options: Omit<OpenBridgeAskOptions, "now"> & { now?: Date } = {},
+): ReadonlyMap<string, BridgeAsk> {
+  try {
+    return openBridgeAsks(readBridgeReportLog(), { ...options, now: options.now ?? new Date() });
+  } catch {
+    return new Map();
+  }
 }
 
 /**

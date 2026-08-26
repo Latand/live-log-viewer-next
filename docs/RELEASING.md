@@ -78,6 +78,8 @@ The legacy direct Compose replacement workflow is unsupported after listener mig
 
 ## Package release
 
+High-severity dependency exceptions require a reason and expiry in [`security/audit-allowlist.json`](../security/audit-allowlist.json); expired entries fail the audit gate.
+
 1. Bump `version` in `package.json`.
 2. Run `npm publish --dry-run` and inspect the file list. It should contain
    `bin/`, `dist/`, `README.md`, `LICENSE`, and `package.json`.

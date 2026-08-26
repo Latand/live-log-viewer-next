@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2, Search, Undo2 } from "lucide-react";
+import { Bot, Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2, Search, Undo2 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
@@ -10,6 +10,8 @@ import { resolveFavoriteRows } from "./favorites/favoriteRows";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useNowSeconds } from "@/hooks/useNowSeconds";
 import { selectionInOrder, viewBus } from "@/hooks/viewPresenceBus";
+import { useRuntimeSelector } from "@/hooks/useRuntime";
+import { DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES } from "@/lib/board/types";
 import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
@@ -37,7 +39,7 @@ import { buildSubagentTrays } from "./scheme/subagentTray";
 import type { SubagentTrayApi } from "./scheme/SubagentTrayView";
 import { conversationIdentity, formatConversationHash } from "@/lib/accounts/identity";
 import { recordFocusNavigation } from "@/lib/navigation/focusHistory";
-import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
+import { collapsibleWorkerFiles, groupWorkerStacks, pipelineCursorStagePaths, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { launchHistoryClaimPaths, launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
 import { LaunchHistory } from "./LaunchHistory";
 import { isPlacedTask } from "./scheme/taskGeometry";
@@ -83,6 +85,7 @@ const HIGHLIGHT_MS = 1800;
 /** Cadence of the board's wall clocks — the idle windows they drive are
     minutes wide, so both the millisecond and the seconds clock tick here. */
 const BOARD_CLOCK_MS = 30_000;
+const ACTIVE_DELIVERY_RECEIPTS = new Set(["pending", "delivering", "applying", "queued", "uncertain"]);
 
 interface Props {
   files: FileEntry[];
@@ -306,6 +309,70 @@ function HeaderMenu({
   );
 }
 
+/**
+ * The empty project's next step (issue #1162).
+ *
+ * A project whose board carries nothing used to advise opening the switchboard
+ * and clicking a conversation — of which there are none. It names the two ways
+ * work actually starts here instead: the orchestrator, which is told what to
+ * get done, and one agent for one task. Both buttons steer handlers the
+ * dashboard already owns; no third creation path exists.
+ *
+ * The phone leaf passes neither handler: its orchestrator row sits directly
+ * above this leaf and its header owns «Create», so the same two lines land
+ * without duplicating either control.
+ */
+function EmptyProjectLeaf({
+  projectName,
+  onOrchestrator,
+  onAgent,
+  agentDisabled = false,
+}: {
+  projectName: string;
+  onOrchestrator?: () => void;
+  onAgent?: () => void;
+  agentDisabled?: boolean;
+}) {
+  const { t } = useLocale();
+  return (
+    <div className="flex flex-1 items-center justify-center px-4 py-5 text-center" data-testid="project-empty">
+      <div className="flex max-w-[440px] flex-col items-center gap-2">
+        <div className="text-[13.5px] font-semibold text-primary">{t("dash.emptyTitle")}</div>
+        <div className="text-[12px] text-secondary">{t("dash.emptyStartHere", { project: projectName })}</div>
+        <div className="text-[12px] text-secondary">{t("dash.emptyOneAgent")}</div>
+        {onOrchestrator || onAgent ? (
+          <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+            {onOrchestrator ? (
+              <button
+                type="button"
+                data-testid="project-empty-orchestrator"
+                onClick={onOrchestrator}
+                className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-[10px] border border-accent/45 bg-card px-4 text-[13px] font-bold text-accent shadow-1 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <Bot className="h-4 w-4" aria-hidden /> {t("orchPanel.title")}
+              </button>
+            ) : null}
+            {onAgent ? (
+              <button
+                type="button"
+                data-testid="project-empty-agent"
+                onClick={onAgent}
+                disabled={agentDisabled}
+                title={t("dash.newConvo")}
+                className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-[10px] border border-border bg-card px-4 text-[13px] font-bold text-primary shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {/* The visible copy is the header menu path this button stands
+                    in for, so the route survives the empty state (issue #1162). */}
+                <MessageSquarePlus className="h-4 w-4 shrink-0 text-accent" aria-hidden /> {t("dash.emptyAgentCta")}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 /** One 44px-tall row inside a HeaderMenu popover. Passing `checked` turns the
     row into a radio option (the folded scheme/list switch, issue #613) so the
     face currently shown is announced instead of merely tinted. */
@@ -423,6 +490,15 @@ function ProjectDashboardView({
      freshest generation so a resumed conversation lists once under its current
      file. Sorted freshest-first for the panel. */
   const favoriteRows = useMemo(() => resolveFavoriteRows(files, favoriteIds), [files, favoriteIds]);
+  const idleCollapseMinutes = board.prefs.idleCollapseMinutes === undefined
+    ? DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES
+    : board.prefs.idleCollapseMinutes;
+  /* Conversation auto-collapse (#112/#1158): genuine user placements, manual
+     expansions, and favorites pin a card against collapse. */
+  const pinnedPaths = useMemo(
+    () => new Set([...board.explicitManual, ...prefs.expanded, ...favoriteRows.map((row) => row.file.path)]),
+    [board.explicitManual, prefs.expanded, favoriteRows],
+  );
   const [drafts, setDrafts] = useState<string[]>([]);
   const [pendingRestoredHandoffs, setPendingRestoredHandoffs] = useState<Set<string>>(() => new Set());
   /* The phone focus view reports its currently-focused conversation here so the
@@ -470,6 +546,28 @@ function ProjectDashboardView({
      the first tick lands the real time, and reviewer verdicts collapse without
      waiting on the clock at all. */
   const [nowMs, setNowMs] = useState(0);
+  /* Runtime receipts bridge the scan interval: a queued send immediately keeps
+     its target on the board, then the next files poll carries the new turn. */
+  const activeDeliverySignature = useRuntimeSelector(
+    (state) => {
+      const active = new Set(Object.values(state.store.operations)
+        .filter((receipt) => (receipt.kind === "send" || receipt.kind === "steer")
+          && ACTIVE_DELIVERY_RECEIPTS.has(receipt.status))
+        .map((receipt) => receipt.conversationId));
+      for (const session of Object.values(state.store.sessions)) {
+        if (session.turn === "running" || session.turn === "interrupt_requested") active.add(session.conversationId);
+      }
+      return [...active].sort().join("\n");
+    },
+    "",
+  );
+  const activeDeliveryConversationIds = useMemo(
+    () => new Set(activeDeliverySignature ? activeDeliverySignature.split("\n") : []),
+    [activeDeliverySignature],
+  );
+  /* Only active execution cursors receive pipeline expansion protection.
+     Completed prior stages remain reachable through compact history. */
+  const protectedCollapsePaths = useMemo(() => pipelineCursorStagePaths(pipelines, files), [pipelines, files]);
   /* The subagent-tray projection measures transcript freshness and attention
      TTLs against `mtime`, which is SECONDS. It takes the seconds clock
      straight from the shared hook rather than a conversion of `nowMs` — the
@@ -584,8 +682,19 @@ function ProjectDashboardView({
      `deckFlows` is what the deck grammar consumes (folding, layout, worker
      collapse); every PATCH-backed control surface keeps the real `flows`. */
   const directReviewGroups = useMemo(
-    () => directReviewFlows({ files, flows, tasks, conversationAliases, nowMs }),
-    [files, flows, tasks, conversationAliases, nowMs],
+    () => directReviewFlows({
+      files,
+      flows,
+      tasks,
+      conversationAliases,
+      nowMs,
+      idleMs: idleCollapseMinutes === null ? null : idleCollapseMinutes * 60_000,
+      pipelines: pipelinesError ? undefined : pipelines,
+      pinnedPaths,
+      protectedPaths: protectedCollapsePaths,
+      activeDeliveryConversationIds,
+    }),
+    [files, flows, tasks, conversationAliases, nowMs, idleCollapseMinutes, pipelines, pipelinesError, pinnedPaths, protectedCollapsePaths, activeDeliveryConversationIds],
   );
   const deckFlows = useMemo(
     () => (directReviewGroups.length ? [...flows, ...directReviewGroups] : flows),
@@ -629,21 +738,7 @@ function ProjectDashboardView({
     for (const path of prefs.expanded) paths.add(path);
     return paths;
   }, [expandedFlowConversations, prefs.expanded]);
-  /* Worker-class auto-collapse (issue #112): a card is pinned against collapse
-     by a GENUINE user placement (`explicitManual`, not the roots reconcile-roots
-     auto-seeds into `prefs.manual`) or a manual expansion. */
-  const pinnedPaths = useMemo(
-    () => new Set([...board.explicitManual, ...prefs.expanded]),
-    [board.explicitManual, prefs.expanded],
-  );
-  /* The latest attempt transcript of every current stage on an ACTIVE
-     (cursor-bearing) pipeline stays a full-size real stage card (#507 F2). The
-     idle-worker auto-collapse (#112) classifies a stage transcript as a
-     pipeline-stage worker, so an aged-idle passed stage would otherwise fold
-     into the pipeline worker stack — dropping its real card or duplicating it
-     beside the stack. Protecting exactly this full-pane set keeps one surface
-     per stage; older retries and completed/closed pipelines are absent, so
-     their compaction is preserved (#507 final review F1).
+  /* The pipeline layout's full-pane set remains its claim authority (#507 F2).
      Derived BEFORE `groupFiles` (issue #560): the review stage's current
      reviewer transcript is one of these full-pane paths, and it must be
      protected from `foldClaimedReviewers` — that fold runs over every file's
@@ -671,16 +766,30 @@ function ProjectDashboardView({
     () => compactPipelineArtifactPaths(pipelines, deckFlows, files),
     [pipelines, deckFlows, files],
   );
-  /* Collapse-eligible worker conversations, derived BEFORE layout so their
+  /* Collapse-eligible conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
      full-size cards (a spawned worker stays a column under an active parent
      otherwise). Reviewers of active flows stay in their round deck and are
      kept out of the stacks after layout via deckReviewerPaths. */
   const collapsibleWorkers = useMemo(
-    () => collapsibleWorkerFiles({ files, project, flows: deckFlows, pipelines, pinnedPaths, protectedPaths: protectedStagePaths, nowMs }),
-    [files, project, deckFlows, pipelines, pinnedPaths, protectedStagePaths, nowMs],
+    () => collapsibleWorkerFiles({
+      files,
+      project,
+      flows: deckFlows,
+      pipelines: pipelinesError ? undefined : pipelines,
+      pinnedPaths,
+      protectedPaths: protectedCollapsePaths,
+      activeDeliveryConversationIds,
+      nowMs,
+      idleMs: idleCollapseMinutes === null ? null : idleCollapseMinutes * 60_000,
+    }),
+    [files, project, deckFlows, pipelines, pipelinesError, pinnedPaths, protectedCollapsePaths, activeDeliveryConversationIds, nowMs, idleCollapseMinutes],
   );
   const collapsedPaths = useMemo(() => new Set(collapsibleWorkers.map((file) => file.path)), [collapsibleWorkers]);
+  const keepExpandedPaths = useMemo(
+    () => new Set(files.filter((file) => !collapsedPaths.has(file.path)).map((file) => file.path)),
+    [files, collapsedPaths],
+  );
   /* Per-origin stack grouping inputs (issue #136): a worker folds under its
      pipeline, else its spawner — the topmost resolvable ancestor of its
      `parent` chain — so one origin is one chip regardless of how many workers or
@@ -705,7 +814,7 @@ function ProjectDashboardView({
         seen.add(parent.path);
         cursor = parent;
       }
-      return cursor.path === file.path ? null : cursor.path;
+      return cursor.path;
     },
     [filesByPath],
   );
@@ -736,8 +845,8 @@ function ProjectDashboardView({
      the projection partitions each engine child into a promoted node or a
      folded tray row. The final group build consumes that single authority. */
   const baseGroups = useMemo(
-    () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations, now: nowSeconds }),
-    [sceneFiles, project, expandedConversations, nowSeconds],
+    () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations, keepExpandedPaths, now: nowSeconds }),
+    [sceneFiles, project, expandedConversations, keepExpandedPaths, nowSeconds],
   );
   const engineProjection = useMemo(() => {
     const hiddenPaths = new Set(prefs.hidden);
@@ -772,10 +881,11 @@ function ProjectDashboardView({
       ? buildBranchGroups(sceneFiles, project, {
         expandedConversationPaths: expandedConversations,
         enginePlacement: { promotedEnginePaths: engineProjection.promotedPaths, foldedEnginePaths: engineProjection.foldedPaths },
+        keepExpandedPaths,
         now: nowSeconds,
       })
       : baseGroups),
-    [sceneFiles, project, expandedConversations, engineProjection, baseGroups, nowSeconds],
+    [sceneFiles, project, expandedConversations, engineProjection, keepExpandedPaths, baseGroups, nowSeconds],
   );
   const activeRoots = useMemo(() => new Set(groups.map((group) => group.key)), [groups]);
   const cards = useMemo(() => collapsedTrees(sceneFiles, project, activeRoots), [sceneFiles, project, activeRoots]);
@@ -866,11 +976,11 @@ function ProjectDashboardView({
       ...manualPaths,
       ...extra.map((file) => file.path),
     ]);
-    const protectedNodes = protectedReviewerNodes({ files, flows: deckFlows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths, now: nowSeconds })
+    const protectedNodes = protectedReviewerNodes({ files, flows: deckFlows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths, keepExpandedPaths, now: nowSeconds })
       .filter((file) => projectKey(file) === project && !compactPipelinePaths.has(file.path));
     const extras = [...extra, ...protectedNodes];
     return extras.length ? [...manualNodes, ...extras] : manualNodes;
-  }, [ephemeral, groupFiles, files, compactPipelinePaths, deckFlows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths, nowSeconds]);
+  }, [ephemeral, groupFiles, files, compactPipelinePaths, deckFlows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths, keepExpandedPaths, nowSeconds]);
   const liveCount = useMemo(
     () =>
       groups.reduce(
@@ -1919,12 +2029,7 @@ function ProjectDashboardView({
               {listAvailable ? (
                 <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
               ) : (
-                <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
-                  <div>
-                    <div className="text-[13.5px] font-semibold text-muted">{t("dash.emptyTitle")}</div>
-                    <div className="mt-0.5 text-[12px] text-muted">{t("dash.emptyHint")}</div>
-                  </div>
-                </div>
+                <EmptyProjectLeaf projectName={projectName} />
               )}
             </>
           )}
@@ -1975,12 +2080,12 @@ function ProjectDashboardView({
             ) : listAvailable ? (
               <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
             ) : (
-              <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
-                <div>
-                  <div className="text-[13.5px] font-semibold text-muted">{t("dash.emptyTitle")}</div>
-                  <div className="mt-0.5 text-[12px] text-muted">{t("dash.emptyHint")}</div>
-                </div>
-              </div>
+              <EmptyProjectLeaf
+                projectName={projectName}
+                onOrchestrator={onToggleOrchestratorPanel}
+                onAgent={addDraft}
+                agentDisabled={!loaded}
+              />
             )}
             {/* The create button floats in the bottom-left corner of the board —
                 away from the fixed attention pill in the top-right, above the
@@ -2037,9 +2142,8 @@ function ProjectDashboardView({
       {!isMobile && boardReady ? <Switchboard files={files} flows={deckFlows} project={project} loaded={loaded} catalogFailures={catalogFailures} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} /> : null}
 
       {/* Worker-class cards that have auto-collapsed fold into one stack per
-          origin — flow / pipeline / spawner (issue #112, #136) — instead of
-          vanishing to the switchboard; owner-touched and live cards are never
-          included. The quiet `residual` strip is derived from `sceneFiles`,
+      origin — flow / pipeline / spawner (issue #112, #136) — instead of
+      vanishing to the switchboard. The quiet `residual` strip is derived from `sceneFiles`,
           which already excludes every collapsed worker, so a card never appears
           in both a stack and here.
 
@@ -2077,7 +2181,16 @@ function ProjectDashboardView({
               onOpenFile={closeShelfThen(openSwitchboardFile)}
             />
             <LaunchHistory items={launchHistory} onRetry={closeShelfThen(retryLaunch)} />
-            <WorkerStacks stacks={workerStacks} files={files} flows={deckFlows} pipelines={pipelines} onSelect={closeShelfThen(openSwitchboardFile)} onExpandGroup={closeShelfThen(expandReviewGroup)} />
+            <WorkerStacks
+              stacks={workerStacks}
+              files={files}
+              flows={deckFlows}
+              pipelines={pipelines}
+              idleCollapseMinutes={idleCollapseMinutes}
+              onIdleCollapseMinutesChange={board.setIdleCollapseMinutes}
+              onSelect={closeShelfThen(openSwitchboardFile)}
+              onExpandGroup={closeShelfThen(expandReviewGroup)}
+            />
             {!hasArchiveNodes && residual.length ? (
               <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={closeShelfThen(openSwitchboardFile)} />
             ) : null}

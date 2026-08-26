@@ -73,6 +73,7 @@ function provenanceOf(occurrence: DeliveredMessageOccurrence): DeliveredMessageP
     origin: occurrence.origin,
     ...(occurrence.senderRole ? { senderRole: occurrence.senderRole } : {}),
     ...(occurrence.selectedContext ? { selectedContext: occurrence.selectedContext } : {}),
+    ...(occurrence.mandate ? { mandate: occurrence.mandate } : {}),
   };
 }
 

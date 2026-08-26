@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import { expect, test } from "bun:test";
 
 import { FOCUS_TARGET_KINDS } from "@/lib/attention/targets";
@@ -40,6 +43,12 @@ test("system prompt encodes the conveyor loop and its bars", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("merge only on an APPROVE verdict");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("REVIEW_READY:");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("src = YOUR transcript path");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("title = a semantic task name");
+});
+
+test("the canonical direct-spawn example includes the mandatory semantic title", () => {
+  const skill = fs.readFileSync(path.join(import.meta.dir, "../../../.claude/skills/live-log-viewer-orchestration/SKILL.md"), "utf8");
+  expect(skill).toContain('"title":"<semantic task title>"');
 });
 
 /* #982 / PRD #976 decision 7 — the operator talks to whoever they want, the manager
@@ -76,17 +85,25 @@ test("bridge reports survive as the second channel, for the operator away from t
 });
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
-   this constant as defaultPromptVersion, so a v3 seat reads as stale without a diff. */
-test("the default mandate is at version 8", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(8);
+   this constant as defaultPromptVersion, so an older seat reads as stale without a diff. */
+test("the default mandate is at version 9", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(9);
 });
 
-test("the mandate requires a visible first-turn status even when every mission is already complete", () => {
+test("the mandate greets a fresh seat and preserves the exact rotation standby status", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## Initial visible status");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Your first turn after receiving this mandate");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("FRESH seat with no missions");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Ready in {project}.\nTell me what to ship — I open lanes, spawn implementers and reviewers, and merge on APPROVE. Nothing starts until you ask.");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("ROTATION");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("inventory the mandate missions and state your plan");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("all mandate missions are complete; standing by");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("generic continuation nudge");
+});
+
+test("the conveyor skill reference is portable across checkouts", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("If this checkout carries an llv-conveyor skill, it is your playbook; otherwise the conveyor rules above are the playbook.");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).not.toContain("The llv-conveyor skill in this checkout is your playbook");
 });
 
 test("mandate delivery keys off directive content and appends it exactly once", () => {

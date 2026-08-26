@@ -26,11 +26,13 @@ import { recordTranscriptComposerRelease, transcriptTurnResult, type TranscriptT
 import { nativeCodexForkSourceThreadId } from "@/lib/scanner/codexNative";
 import { writingHolders } from "@/lib/scanner/process";
 import type { FileEntry } from "@/lib/types";
+import { durableSemanticTitle } from "@/lib/title";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 import { isStructuredDeliveryControllerUnavailable } from "@/lib/runtime/structuredDeliveryController";
 
 import {
   emptyLaunchProfile,
+  migrationSuccessorLaunchProfile,
   sameGenerationHostEvidence,
   sameProviderReceiptOutcome,
   type HistoryCopyPort,
@@ -264,7 +266,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
         fast: currentProfile?.fast ?? null,
         permissionMode: currentProfile?.permissionMode ?? null,
         readOnly: currentProfile?.readOnly ?? null,
-        title: entry.title || currentProfile?.title || null,
+        title: durableSemanticTitle(entry.title) ?? durableSemanticTitle(currentProfile?.title),
         project: entry.project || currentProfile?.project || null,
         parentConversationId: parentConversation?.id ?? currentProfile?.parentConversationId ?? null,
         role: configuredRoot && existing?.id === configuredRoot ? "root" : currentProfile?.role ?? "worker",
@@ -772,13 +774,26 @@ export async function advanceConversationMigration(
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
       if (!completeProviderTurnObservation(conversation, source, successorProvider.virtualSource === true, registry)) return restoreCreationFence(conversation);
+      if (!migration.successorLaunchProfile) {
+        conversation = registry.transitionConversationMigration(
+          conversation.id,
+          migration.revision,
+          ["successor-starting"],
+          { successorLaunchProfile: migrationSuccessorLaunchProfile(source.launchProfile) },
+        );
+        migration = conversation.migration!;
+      }
       const conversationId = conversation.id;
       const creationOwner = { operationId: migration.operationId, revision: migration.revision };
+      const successorSource = {
+        ...source,
+        launchProfile: migration.successorLaunchProfile!,
+      };
       receipt = await successorProvider.create({
         engine: conversation.engine,
         operationId: creationOwner.operationId,
         conversationId,
-        source,
+        source: successorSource,
         targetAccountId: migration.targetId,
         recordContinuityPath(pathname) {
           registry.recordMigrationContinuityPath(conversationId, pathname, creationOwner);
@@ -792,8 +807,10 @@ export async function advanceConversationMigration(
     const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
       ?? conversation.generations.at(-1);
     if (!source) throw new Error("conversation has no source generation");
+    const successorProfile = migration.successorLaunchProfile
+      ?? migrationSuccessorLaunchProfile(source.launchProfile);
     if (!receipt || receipt.operationId !== migration.operationId) throw new Error("persisted successor receipt operation does not match");
-    await successorProvider.verify(receipt, { engine: conversation.engine, targetAccountId: migration.targetId, launchProfile: source.launchProfile });
+    await successorProvider.verify(receipt, { engine: conversation.engine, targetAccountId: migration.targetId, launchProfile: successorProfile });
     const publicationConversationId = conversation.id;
     const publicationReceipt = receipt;
     const publicationRevision = migration.revision;
@@ -828,7 +845,7 @@ export async function advanceConversationMigration(
       engine: conversation.engine,
       conversationId: publicationConversationId,
       targetAccountId: migration.targetId,
-      launchProfile: source.launchProfile,
+      launchProfile: successorProfile,
       ownsOperation: ownsPublication,
     });
     publishOwner = registry.conversation(publicationConversationId);
@@ -850,7 +867,7 @@ export async function advanceConversationMigration(
       id: publicationReceipt.nativeId,
       path: publicationReceipt.path,
       accountId: migration.targetId,
-      launchProfile: source.launchProfile,
+      launchProfile: successorProfile,
       historyHash: publicationReceipt.historyHash,
       host: publicationReceipt.host,
     }, publicationRevision, publicationOperationId, publicationReceipt);
@@ -984,13 +1001,21 @@ export async function reconcileMigrations(
       return;
     }
     if (conversation.migration.phase === "rolled-back") {
+      /* Reconciliation can reach rolled-back residue before the hygiene sweep
+         clears it. Apply the same latest-admission ownership fence here so an
+         exact resend cannot be cancelled through its older reservation. */
       for (const item of registry.pendingDeliveries(conversation.id)) {
-        if (item.state === "held" || item.state === "assigned" || item.state === "delivery-uncertain") {
-          registry.terminalizeHeldDelivery(
-            item.id,
-            "delivery cancelled because its owning account migration was rolled back; send again to authorize a fresh delivery action",
-          );
-        }
+        if (item.state !== "held" && item.state !== "assigned" && item.state !== "delivery-uncertain") continue;
+        registry.terminalizeRolledBackMigrationDelivery(
+          item.id,
+          conversation.migration.intentId,
+          "delivery cancelled because its owning account migration was rolled back; send again to authorize a fresh delivery action",
+        );
+      }
+      if (registry.pendingDeliveries(conversation.id).some((item) =>
+        item.state === "assigned"
+        || (item.state === "delivery-uncertain" && delivery.reconcileUncertain))) {
+        await drainHeldDeliveries(conversation.id, delivery, registry);
       }
       return;
     }
