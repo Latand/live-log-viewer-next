@@ -54,7 +54,7 @@ draft is already filled in:
   effort; change any of it before you confirm.
 - **Confirm** designates the seat and delivers the mandate exactly once. The
   designation is recorded before anything is spawned, so a lost reply or a
-  reloaded page converges on the one orchestrator instead of creating a second.
+  reloaded page converges on the one orchestrator; no second seat is created.
 
 One seat per project. It is durable state on the machine, so every window you
 open that project in finds the same orchestrator.
@@ -86,7 +86,8 @@ What it does with work you accept:
 - **A pipeline** when the work wants declared stages: two to four stages in one
   dedicated worktree, each ending in a structured JSON verdict, each transition
   declared through `next` — see [docs/pipelines.md](pipelines.md).
-- **The merge bar**: merge on an APPROVE verdict with green gates, never on red.
+- **The merge bar**: merge only on an APPROVE verdict with green gates —
+  `tsc` and the tests. A red gate holds the merge.
 - **Task cards and reports** kept current as state changes.
 
 Everything it starts shows up on the project board as cards, descending from
@@ -166,7 +167,7 @@ spawn "per the role table":
 | Job | Engine and model | Effort | Where it comes from |
 | --- | --- | --- | --- |
 | The orchestrator seat | Claude Opus | high | `Orchestrator` role preset (the dock's own create draft opens at low) |
-| Deep implementation, the hard bugs | Codex GPT-5.6-Sol | xhigh | operator routing |
+| Data-bar work: the runtime, flows, agents, the scanner | Codex GPT-5.6-Sol | xhigh | operator routing |
 | UI work | Claude Opus | high | operator routing |
 | Design and critique | Claude Fable | high | operator routing |
 | Simple, fully specified tasks | Codex GPT-5.6-Luna | xhigh | operator routing |
@@ -174,6 +175,13 @@ spawn "per the role table":
 | Verification, prod audits | Codex GPT-5.6-Sol | high / xhigh | `Verifier`, `Prod-auditor` presets |
 | Default builder | Codex GPT-5.6-Sol | medium | `Builder` role preset |
 | Cleanups and deploys | Codex GPT-5.6-Terra | low / medium | `Cleaner`, `Deployer` presets |
+
+**Data-bar work** names the subsystems where a wrong answer corrupts state
+that outlives the run — the runtime, the flow and agent layers, the scanner.
+Those lanes hold their merge until a review round comes back with no findings
+at all, so they get the strongest model at the highest effort; the hard
+diagnostic bugs are routed the same way. This repository keeps its own merge
+bars in `.claude/skills/llv-conveyor/SKILL.md`.
 
 The presets live in `src/lib/roles/defaults.ts`; a pipeline stage or a flow
 role reference resolves through them, and an explicit `engine`/`model`/`effort`
