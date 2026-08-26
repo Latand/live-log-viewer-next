@@ -276,6 +276,24 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
 
 const CLIENT_REQUEST_ID = /^[A-Za-z0-9_-]{8,128}$/;
 
+/** The seat a caller composed against is no longer the seated one, so its
+    replacement would revoke an orchestrator it never read. */
+function incumbentChangedResult(
+  project: string,
+  expectedSeatEpoch: number,
+  current: OrchestratorSeat | null,
+): SeatCommandResult {
+  return {
+    status: 409,
+    body: {
+      error: `the orchestrator seat for ${project} changed while this rotation composed its handoff (designation epoch ${expectedSeatEpoch} is no longer current); rotate again to hand off from the seated orchestrator`,
+      code: "incumbent_changed",
+      currentSeatEpoch: current?.seatEpoch ?? null,
+      currentConversationId: current?.conversationId ?? null,
+    },
+  };
+}
+
 export interface SeatCommandResult {
   status: number;
   body: Record<string, unknown>;
@@ -459,6 +477,24 @@ export async function executeOrchestratorSeatRequest(
 
   const completedReplay = reconcileCompletedSeatReplay(project, clientRequestId, dependencies);
   if (completedReplay) return replayedSeatResponse(completedReplay);
+
+  /* Issue #1067: rotation reads its incumbent, then awaits the summarizer, and
+     the reconciliation directly above can seat a launch that settled during
+     that wait — an intent that was still `unknown` when the rotation read the
+     project. Checked HERE, after reconciliation and with no await point left
+     before the durable begin, so a rotation can never replace a seat it never
+     read. It sits below the completed-replay short-circuit on purpose: a
+     rotation replaying its OWN finished intent is idempotent, not stale.
+     Callers that composed against no particular seat omit the field. */
+  const expectedIncumbentSeatEpoch = typeof rawBody.expectedIncumbentSeatEpoch === "number"
+    ? rawBody.expectedIncumbentSeatEpoch
+    : null;
+  if (expectedIncumbentSeatEpoch !== null) {
+    const seated = orchestratorSeatFor(project).active;
+    if (!seated || seated.seatEpoch !== expectedIncumbentSeatEpoch) {
+      return incumbentChangedResult(project, expectedIncumbentSeatEpoch, seated);
+    }
+  }
 
   if (existingConversationId) {
     const target = dependencies.conversationTarget(existingConversationId);
@@ -772,16 +808,8 @@ export async function executeOrchestratorRotation(
      from the current seat. */
   const current = orchestratorSeatFor(project).active;
   if (!current || current.conversationId !== incumbent.conversationId || current.seatEpoch !== incumbent.seatEpoch) {
-    return {
-      status: 409,
-      body: {
-        error: `the orchestrator seat for ${project} changed while this rotation composed its handoff (designation epoch ${incumbent.seatEpoch} is no longer current); rotate again to hand off from the seated orchestrator`,
-        code: "incumbent_changed",
-        rotatedFrom,
-        currentSeatEpoch: current?.seatEpoch ?? null,
-        currentConversationId: current?.conversationId ?? null,
-      },
-    };
+    const conflict = incumbentChangedResult(project, incumbent.seatEpoch, current);
+    return { status: conflict.status, body: { ...conflict.body, rotatedFrom } };
   }
   if (composed.kind === "too_large") return { status: 413, body: { ...composed.body, rotatedFrom } };
 
@@ -792,6 +820,10 @@ export async function executeOrchestratorRotation(
     /* Rotation IS the explicit replacement, so it carries the opt-in the plain
        spawn-mode guard requires. */
     replaceIncumbent: true,
+    /* ...but only of the seat this rotation actually read. The check above ran
+       BEFORE the seat request's own reconciliation; this is what that request
+       re-checks after it, which is the last read before the durable begin. */
+    expectedIncumbentSeatEpoch: incumbent.seatEpoch,
     promptVersion: incumbent.promptVersion,
     ...(rawBody.engine !== undefined ? { engine: rawBody.engine } : {}),
     ...(rawBody.model !== undefined ? { model: rawBody.model } : {}),

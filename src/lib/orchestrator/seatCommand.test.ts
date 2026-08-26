@@ -1737,3 +1737,73 @@ test("a rotation whose summarizer is slow cannot revoke the designation that set
   expect(String(retried.recorded.spawns[0]!.prompt)).toStartWith("own the board, freshly designated");
   expect(orchestratorSeatFor("proj-a").active!.conversationId).toBe(successorId(22));
 });
+
+/** A second designation already in flight beside the seated incumbent: its
+    launch was accepted, but the request that accepted it never activated the
+    intent, so only reconciliation can seat it. */
+function seedPendingBesideIncumbent(input: { clientRequestId: string; launchId: string }): void {
+  const file = path.join(sandbox, "orchestrator-seats.json");
+  const state = JSON.parse(fs.readFileSync(file, "utf8")) as { nextSeatEpoch: number; pending: Record<string, unknown> };
+  state.pending["proj-a"] = {
+    project: "proj-a",
+    seatEpoch: state.nextSeatEpoch,
+    conversationId: null,
+    path: null,
+    engine: "claude",
+    model: "opus",
+    runtimeIdentityFrozen: true,
+    mandate: "own the board, freshly designated",
+    promptVersion: null,
+    predecessorConversationId: null,
+    state: "pending",
+    intent: { clientRequestId: input.clientRequestId, mode: "spawn", launchId: input.launchId, error: null },
+    designatedAt: AT,
+    activatedAt: null,
+  };
+  state.nextSeatEpoch += 1;
+  fs.writeFileSync(file, JSON.stringify(state), "utf8");
+}
+
+test("a pending launch that settles DURING summarization is seated, and the stale rotation cannot replace it", async () => {
+  await seatIncumbent(stackedMandate("own the board", 2), "req_00001210");
+  const superseded = orchestratorSeatFor("proj-a").active!;
+  const newer = successorId(30);
+  seedPendingBesideIncumbent({ clientRequestId: "req_00001211", launchId: "launch_newer" });
+
+  /* The settlement flips exactly once, inside the summarizer: UNKNOWN when the
+     rotation reconciles and reads its incumbent, SETTLED by the time it
+     composes. No timers, no interleaved requests — just the durable receipt
+     changing under a rotation that is parked on an await. */
+  let summarized = false;
+  const stale = dependencies({
+    spawn: async (body) => {
+      stale.recorded.spawns.push(body);
+      return { status: 200, body: { ok: true, conversationId: successorId(31), path: "/tmp/stale-successor.jsonl" } };
+    },
+    summarizeHandoffs: async (request) => {
+      stale.recorded.digests.push(request);
+      summarized = true;
+      return { kind: "digest", text: "Decisions:\n- composed against the superseded incumbent" };
+    },
+    launchSettlement: () => (summarized
+      ? { kind: "settled", conversationId: newer, path: "/tmp/newer.jsonl", launchId: "launch_newer" }
+      : { kind: "unknown" }),
+  });
+
+  const rotated = await executeOrchestratorRotation({ project: "proj-a", clientRequestId: "req_00001212" }, stale.deps);
+
+  expect(rotated.status).toBe(409);
+  expect(rotated.body).toMatchObject({
+    code: "incumbent_changed",
+    rotatedFrom: { conversationId: superseded.conversationId, seatEpoch: superseded.seatEpoch },
+  });
+  /* Nothing was spawned for the stale rotation and no intent is left pending. */
+  expect(stale.recorded.spawns).toEqual([]);
+  expect(orchestratorSeatFor("proj-a").pending).toBeNull();
+  /* The reconciled designation holds the seat, unrevoked. */
+  const active = orchestratorSeatFor("proj-a").active!;
+  expect(active.conversationId).toBe(newer);
+  expect(active.seatEpoch).toBeGreaterThan(superseded.seatEpoch);
+  expect(activeOrchestratorSeats().map((seat) => seat.conversationId)).toEqual([newer]);
+  expect(orchestratorRevocations().some((revocation) => revocation.conversationId === newer)).toBeFalse();
+});
