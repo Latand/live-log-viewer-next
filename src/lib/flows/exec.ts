@@ -266,6 +266,16 @@ export function scanEventStream(stdout: string): { sessionId: string | null; las
   return { sessionId, lastAgentMessage };
 }
 
+export interface BuiltHeadlessCommand {
+  command: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  stdin: string | null;
+  outputPath: string | null;
+  sessionId: string | null;
+  reviewerPath: string | null;
+}
+
 export function reviewerCommand(
   role: RoleConfig,
   reviewRequest: string,
@@ -274,7 +284,10 @@ export function reviewerCommand(
   codexAccount?: HeadlessCodexAccount | null,
   claudeAccount?: HeadlessClaudeAccount | null,
   spawnCapability?: string,
-): { command: string; args: string[]; env: NodeJS.ProcessEnv; stdin: string | null; outputPath: string | null; sessionId: string | null; reviewerPath: string | null } {
+  /* Reviewers need approval-free command access; one-shot summarizers read
+     nothing but their prompt and run outside any repository. */
+  options: { sandbox?: "bypass" | "read-only" } = {},
+): BuiltHeadlessCommand {
   if (role.engine === "claude") {
     const sessionId = crypto.randomUUID();
     /* Headless reviewers need approval-free command access for tests, builds,
@@ -301,7 +314,8 @@ export function reviewerCommand(
   /* --json turns stdout into a JSONL event stream whose first events carry
      the session/thread id — a structured contract instead of parsing the
      human banner. The verdict itself still arrives via --output-last-message. */
-  const args = ["--disable", "multi_agent", "exec", "--ignore-user-config", "-", "--json", "--output-last-message", outputPath, "--dangerously-bypass-approvals-and-sandbox"];
+  const args = ["--disable", "multi_agent", "exec", "--ignore-user-config", "-", "--json", "--output-last-message", outputPath,
+    ...(options.sandbox === "read-only" ? ["-s", "read-only", "--skip-git-repo-check"] : ["--dangerously-bypass-approvals-and-sandbox"])];
   if (codexAccount?.managed) args.unshift("-c", "cli_auth_credentials_store=file");
   if (role.model) args.push("-m", role.model);
   if (role.effort) args.push("-c", `model_reasoning_effort=${role.effort}`);
@@ -321,6 +335,78 @@ export function reviewerCommand(
   };
 }
 
+/**
+ * Detached + file-backed stdio: the child must not die with the viewer. A plain
+ * child shares the dev server's process group, so Ctrl+C on the server delivers
+ * SIGINT to it too; detached makes it a group leader and the log files replace
+ * the pipes we can no longer hold. The timeout kills the whole group, and the
+ * `runs` map keeps exactly what disk cannot know — the exit code and the timer.
+ *
+ * Returns null when `key` already has a live run, which is the caller's
+ * duplicate-launch guard.
+ */
+function launchDetached(input: {
+  key: string;
+  built: BuiltHeadlessCommand;
+  cwd: string;
+  stdoutPath: string;
+  stderrPath: string;
+  timeoutMs: number;
+  runtime?: HeadlessReviewRuntime;
+  onTimeout?: () => void;
+  onExit: (run: LiveRun) => void;
+}): { pid: number | null; identity: string | null } | null {
+  if (runs.has(input.key)) return null;
+  const stdoutFd = fs.openSync(input.stdoutPath, "w");
+  const stderrFd = fs.openSync(input.stderrPath, "w");
+  let child: ChildProcess;
+  try {
+    child = spawn(input.runtime?.command ?? input.built.command, input.built.args, {
+      cwd: input.cwd,
+      env: input.built.env,
+      detached: true,
+      stdio: [input.built.stdin === null ? "ignore" : "pipe", stdoutFd, stderrFd],
+    });
+    if (input.built.stdin !== null && child.stdin) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(input.built.stdin, "utf8");
+    }
+  } finally {
+    fs.closeSync(stdoutFd);
+    fs.closeSync(stderrFd);
+  }
+  child.unref();
+  const identityOf = input.runtime?.processIdentity ?? procBackend.processIdentity;
+  const identity = child.pid ? identityOf(child.pid) : null;
+  const run: LiveRun = {
+    child,
+    identity,
+    identityOf,
+    startedAt: Date.now(),
+    exit: null,
+    terminationStarted: false,
+    timer: setTimeout(() => {
+      input.onTimeout?.();
+      killOwnedRun(run);
+    }, input.timeoutMs),
+  };
+  run.timer.unref();
+  runs.set(input.key, run);
+  child.on("error", () => {
+    clearTimeout(run.timer);
+    run.exit = { code: null, signal: null };
+    killOwnedRun(run);
+    input.onExit(run);
+  });
+  child.on("close", (code, signal) => {
+    clearTimeout(run.timer);
+    run.exit = { code, signal };
+    killOwnedRun(run);
+    input.onExit(run);
+  });
+  return { pid: child.pid ?? null, identity };
+}
+
 export function startHeadlessReview(
   flowId: string,
   round: number,
@@ -334,68 +420,113 @@ export function startHeadlessReview(
   spawnCapability?: string,
 ): HeadlessReviewLaunch {
   const key = runKey(flowId, round);
-  if (runs.has(key)) return { pid: null, identity: null, sessionId: null, reviewerPath: null };
+  const idle: HeadlessReviewLaunch = { pid: null, identity: null, sessionId: null, reviewerPath: null };
+  if (runs.has(key)) return idle;
   const outputPath = outputPathFor(flowId, round);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   clearHeadlessReviewArtifacts(flowId, round);
   const built = reviewerCommand(role, reviewRequest, outputPath, cwd, codexAccount, claudeAccount, spawnCapability);
-  /* Detached + file-backed stdio: the reviewer must not die with the viewer.
-     A plain child shares the dev server's process group, so Ctrl+C on the
-     server delivers SIGINT to the reviewer too; detached makes it a group
-     leader and the log files replace the pipes we can no longer hold. */
-  const stdoutFd = fs.openSync(stdoutPathFor(flowId, round), "w");
-  const stderrFd = fs.openSync(stderrPathFor(flowId, round), "w");
-  let child: ChildProcess;
-  try {
-    child = spawn(runtime?.command ?? built.command, built.args, {
-      cwd,
-      env: built.env,
-      detached: true,
-      stdio: [built.stdin === null ? "ignore" : "pipe", stdoutFd, stderrFd],
-    });
-    if (built.stdin !== null && child.stdin) {
-      child.stdin.on("error", () => {});
-      child.stdin.end(built.stdin, "utf8");
-    }
-  } finally {
-    fs.closeSync(stdoutFd);
-    fs.closeSync(stderrFd);
-  }
-  child.unref();
-  const identityOf = runtime?.processIdentity ?? procBackend.processIdentity;
-  const identity = child.pid ? identityOf(child.pid) : null;
-  const run: LiveRun = {
-    child,
-    identity,
-    identityOf,
-    startedAt: Date.now(),
-    exit: null,
-    terminationStarted: false,
-    timer: setTimeout(() => {
-      killOwnedRun(run);
-    }, timeoutMs),
-  };
-  run.timer.unref();
-  runs.set(key, run);
   let completionSignaled = false;
   const signalCompletion = () => {
     if (completionSignaled) return;
     completionSignaled = true;
     requestPipelineTick();
   };
-  child.on("error", () => {
-    clearTimeout(run.timer);
-    run.exit = { code: null, signal: null };
-    killOwnedRun(run);
-    signalCompletion();
+  const launched = launchDetached({
+    key,
+    built,
+    cwd,
+    stdoutPath: stdoutPathFor(flowId, round),
+    stderrPath: stderrPathFor(flowId, round),
+    timeoutMs,
+    runtime,
+    onExit: signalCompletion,
   });
-  child.on("close", (code, signal) => {
-    clearTimeout(run.timer);
-    run.exit = { code, signal };
-    killOwnedRun(run);
-    signalCompletion();
+  if (!launched) return idle;
+  return { pid: launched.pid, identity: launched.identity, sessionId: built.sessionId, reviewerPath: built.reviewerPath };
+}
+
+export interface HeadlessCodexRunRequest {
+  /** `runs` map key; a duplicate while a run is live resolves `failed`. */
+  key: string;
+  /** The child's working directory, created if it does not exist. */
+  cwd: string;
+  ["prompt"]: string;
+  model: string | null;
+  effort: string | null;
+  account: HeadlessCodexAccount | null;
+  /** stdout.log, stderr.txt and last-message.md are written here. */
+  artifactDir: string;
+  timeoutMs: number;
+  sandbox: "bypass" | "read-only";
+  runtime?: HeadlessReviewRuntime;
+}
+
+/**
+ * One bounded Codex turn for a caller that wants the answer rather than a
+ * flow round: same command shape, same detached process group, same timeout
+ * kill, resolved when the child exits. There is no restart seam on purpose —
+ * a request that dies with the server has nobody to hand the output to, and
+ * the detached child finishes its own turn and exits.
+ */
+export async function runHeadlessCodexOnce(request: HeadlessCodexRunRequest): Promise<HeadlessRunResult> {
+  const outputPath = path.join(request.artifactDir, "last-message.md");
+  const stdoutPath = path.join(request.artifactDir, "stdout.log");
+  const stderrPath = path.join(request.artifactDir, "stderr.txt");
+  fs.mkdirSync(request.artifactDir, { recursive: true });
+  fs.mkdirSync(request.cwd, { recursive: true });
+  for (const artifact of [outputPath, stdoutPath, stderrPath]) fs.rmSync(artifact, { force: true });
+  const built = reviewerCommand(
+    { engine: "codex", model: request.model, effort: request.effort },
+    request["prompt"],
+    outputPath,
+    request.cwd,
+    request.account,
+    null,
+    undefined,
+    { sandbox: request.sandbox },
+  );
+  let timedOut = false;
+  return await new Promise<HeadlessRunResult>((resolve) => {
+    const settle = (run: LiveRun): void => {
+      runs.delete(request.key);
+      const stdout = readOptional(stdoutPath);
+      const stderr = readOptional(stderrPath);
+      const artifactOutput = readOptional(outputPath).trim();
+      const scanned = scanEventStream(stdout);
+      const finalOutput = artifactOutput || scanned.lastAgentMessage;
+      const exit = run.exit;
+      /* Same conclusiveness rule as headlessReviewStatus: Codex writes the
+         last-message artifact only when the turn completes. */
+      const status: HeadlessRunResult["status"] = artifactOutput || (exit?.code === 0 && scanned.lastAgentMessage)
+        ? "done"
+        : timedOut ? "timeout" : "failed";
+      resolve({
+        status,
+        stdout,
+        stderr,
+        finalOutput,
+        sessionId: scanned.sessionId,
+        processIdentity: run.identity,
+        code: exit?.code ?? null,
+        signal: exit?.signal ?? null,
+      });
+    };
+    const launched = launchDetached({
+      key: request.key,
+      built,
+      cwd: request.cwd,
+      stdoutPath,
+      stderrPath,
+      timeoutMs: request.timeoutMs,
+      runtime: request.runtime,
+      onTimeout: () => { timedOut = true; },
+      onExit: settle,
+    });
+    if (!launched) {
+      resolve({ status: "failed", stdout: "", stderr: "", finalOutput: "", sessionId: null, processIdentity: null, code: null, signal: null });
+    }
   });
-  return { pid: child.pid ?? null, identity, sessionId: built.sessionId, reviewerPath: built.reviewerPath };
 }
 
 /** Removes attempt-scoped process output before a logical round is relaunched. */

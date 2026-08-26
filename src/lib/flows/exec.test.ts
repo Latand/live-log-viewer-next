@@ -9,7 +9,7 @@ import { procBackend } from "@/lib/proc";
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so exec/store load dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-exec-test-"));
-const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventStream, startHeadlessReview, terminateHeadlessReviewerGroup, terminateHeadlessReviewerGroupAndWait } = await import("./exec");
+const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, runHeadlessCodexOnce, scanEventStream, startHeadlessReview, terminateHeadlessReviewerGroup, terminateHeadlessReviewerGroupAndWait } = await import("./exec");
 const { reviewerPrompt } = await import("./prompts");
 const { outputPathFor, stdoutPathFor } = await import("./store");
 const { WAKATIME_CREDENTIAL_ENV } = await import("../wakatime/credential");
@@ -539,4 +539,86 @@ test("restart reconstruction: dead run with no output at all times out past the 
   const started = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const status = headlessReviewStatus("flow-e", 1, { reviewerPid: 999_999_999, reviewerIdentity: "999999999:gone", spawnStartedAt: started }, "codex");
   expect(status?.status).toBe("timeout");
+});
+
+/* Issue #1067: the one-shot summarizer the orchestrator rotation runs shares
+   this runner's account, process-group and artifact discipline. */
+
+test("a read-only one-shot command drops the sandbox bypass and keeps the empty MCP server table", () => {
+  const built = reviewerCommand(
+    { engine: "codex", model: "gpt-5.6-luna", effort: "low" },
+    "digest request",
+    "/out/last-message.md",
+    "/tmp/empty",
+    null,
+    null,
+    undefined,
+    { sandbox: "read-only" },
+  );
+
+  expect(built.args).toContain("-s");
+  expect(built.args).toContain("read-only");
+  expect(built.args).toContain("--skip-git-repo-check");
+  expect(built.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  /* Unchanged from the reviewer shape: no user config (so no MCP servers), a
+     single agent, the prompt on stdin, and the model on the command line. */
+  expect(built.args).toContain("--ignore-user-config");
+  expect(built.args).toContain("--disable");
+  expect(built.args).toContain("multi_agent");
+  expect(built.args).toContain("-m");
+  expect(built.args).toContain("gpt-5.6-luna");
+  expect(built.stdin).toStartWith("digest request");
+});
+
+test("runHeadlessCodexOnce resolves done from the last-message artifact", async () => {
+  const artifactDir = path.join(process.env.LLV_STATE_DIR!, "digest-done");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-digest-codex");
+  fs.writeFileSync(
+    executablePath,
+    `#!${process.execPath}\nawait Bun.stdin.text();\nconst target = process.argv[process.argv.indexOf("--output-last-message") + 1];\nawait Bun.write(target, "Decisions:\\n- compacted the history");\n`,
+    { mode: 0o700 },
+  );
+
+  const result = await runHeadlessCodexOnce({
+    key: "orchestrator-handoff:done",
+    cwd: path.join(artifactDir, "cwd"),
+    ["prompt"]: "compact these handoffs",
+    model: null,
+    effort: null,
+    account: null,
+    artifactDir,
+    timeoutMs: 10_000,
+    sandbox: "read-only",
+    runtime: { command: executablePath },
+  });
+
+  expect(result.status).toBe("done");
+  expect(result.finalOutput).toContain("compacted the history");
+  expect(result.code).toBe(0);
+});
+
+test("runHeadlessCodexOnce kills and reports a hung child once its bounded timeout fires", async () => {
+  const artifactDir = path.join(process.env.LLV_STATE_DIR!, "digest-timeout");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-hanging-codex");
+  fs.writeFileSync(
+    executablePath,
+    `#!${process.execPath}\nawait Bun.stdin.text();\nsetInterval(() => {}, 1_000);\n`,
+    { mode: 0o700 },
+  );
+
+  const result = await runHeadlessCodexOnce({
+    key: "orchestrator-handoff:timeout",
+    cwd: path.join(artifactDir, "cwd"),
+    ["prompt"]: "compact these handoffs",
+    model: null,
+    effort: null,
+    account: null,
+    artifactDir,
+    timeoutMs: 200,
+    sandbox: "read-only",
+    runtime: { command: executablePath },
+  });
+
+  expect(result.status).toBe("timeout");
+  expect(result.finalOutput).toBe("");
 });

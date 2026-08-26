@@ -391,8 +391,12 @@ export function completeOrchestratorSeatIntent(input: {
   return { kind: "activated", seat, revoked };
 }
 
-/** Record why a pending intent could not complete; the seat stays pending and
-    recoverable, and the previous active seat (if any) stays authoritative. */
+/** Record why a pending intent could not complete; the previous active seat
+    (if any) stays authoritative. The recorded error is the intent's TERMINAL
+    state (issue #1067): the row keeps its `pending` position only until the
+    next `beginOrchestratorSeatIntent` for the project, which moves it into
+    `history` as `terminal_error` and proceeds. Nothing has to expire it, and
+    no designation stays pending forever. */
 export function failOrchestratorSeatIntent(project: string, clientRequestId: string, error: string): void {
   const file = readOrchestratorSeatFile();
   const canonical = canonicalOrchestratorProject(project);

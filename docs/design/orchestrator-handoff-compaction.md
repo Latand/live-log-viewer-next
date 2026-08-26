@@ -442,11 +442,18 @@ Reused unchanged: `reviewerEnvironment` (credential scrubbing),
 
 ### 3.5 Transcript tail reader
 
-`tailMessages` in `src/lib/view/compactText.ts` becomes
-`export function tailTranscriptMessages(path: string, engine: "claude" | "codex")`
-with the same body (the `FileEntry` parameter only ever supplied `path` and
-`engine`); `compactText` calls it with `entry.path, entry.engine`.
-`readPredecessorReport` takes the last row whose `role === "assistant"`.
+**As built, this reuse was not possible.** `src/lib/view/compactText.ts` cannot
+be edited in a publishable change: its own secret-redaction regex (the
+`sk-…`/`gh…_` token alternation on line 15) matches the publication gate's
+`credential` detector, so the gate fails on the whole file the moment the file
+enters a diff — verified with
+`bun scripts/privacy-publication-gate.ts --paths src/lib/view/compactText.ts`.
+
+`handoffDigest.ts` therefore carries its own `lastAssistantReport(path, engine)`:
+the same bounded tail read through an `O_NOFOLLOW` descriptor with a
+device/inode identity check, recognizing both engines' row shapes, returning the
+last assistant text truncated to `PREDECESSOR_REPORT_CAP_BYTES`. `hardenedRedact`
+is still imported from `compactText.ts` — importing it changes nothing there.
 
 ## 4. Deterministic fallback (AC 3)
 
@@ -616,7 +623,7 @@ home-path literals.
 | `src/lib/orchestrator/seatCommand.test.ts` | tests in section 7; fixture builder; `engine` on the fake target |
 | `src/lib/flows/exec.ts` | `reviewerCommand` sandbox option; extract `launchDetached`; export `runHeadlessCodexOnce` |
 | `src/lib/flows/exec.test.ts` | command-shape and one-shot run tests |
-| `src/lib/view/compactText.ts` | export `tailTranscriptMessages(path, engine)`; `compactText` calls it |
+| ~~`src/lib/view/compactText.ts`~~ | Not touched — see 3.5; the reader lives in `handoffDigest.ts` |
 | `src/lib/mcp/bindings.ts` | `rotateOrchestrator` passes `handoff` through (one line) |
 | `docs/design/orchestrator-handoff-compaction.md` | this document |
 
