@@ -29,10 +29,12 @@ const { AgentRegistry } = await import("@/lib/agent/registry");
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 const { RuntimeJournal } = await import("@/runtime-host/journal");
 const { createFakeDeliveryLedger, FakeEngineHost } = await import("./fixtures/fakeEngineHost");
+const { RuntimeHostUnavailableError } = await import("./client");
 const {
   bindStructuredDeliveryQueue,
   hasStructuredDeliveryHost,
   publishStructuredDeliveryHost,
+  releaseStructuredDeliveryHost,
   structuredDeliveryPublicationState,
 } = await import("./structuredDeliveryController");
 const { kickStructuredDeliveryQueue } = await import("./structuredDeliverySignal");
@@ -117,12 +119,48 @@ function seedConversation(
   return { conversationId: conversation.id, key };
 }
 
-async function settles(assertion: () => boolean): Promise<void> {
+/** Holds the first `producerCursor` call of a bind open. That parks the
+    registration of a carried-over host between its seat and its commit, which
+    is the window every lifecycle assertion below is about (#1191). */
+function producerCursorGate(client: RuntimeHostClient, journal: InstanceType<typeof RuntimeJournal>) {
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => { open = resolve; });
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  let gated = true;
+  return {
+    started,
+    open: () => open(),
+    client: {
+      ...client,
+      producerCursor: async (producerKind: string, eventKeyPrefix: string) => {
+        if (gated) {
+          gated = false;
+          entered();
+          await gate;
+        }
+        return journal.producerCursor(producerKind, eventKeyPrefix);
+      },
+    } as RuntimeHostClient,
+  };
+}
+
+/** A structured host that counts the releases it receives, so "exactly once"
+    is an assertion instead of an inference. */
+function releaseCountingHost() {
+  const releases = { count: 0 };
+  return {
+    releases,
+    host: Object.assign(structuredHost(), { release: async () => { releases.count += 1; } }),
+  };
+}
+
+async function settles(assertion: () => boolean, what = "rebind condition"): Promise<void> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     if (assertion()) return;
     await Bun.sleep(5);
   }
-  throw new Error("rebind condition did not settle");
+  throw new Error(`${what} did not settle`);
 }
 
 function fixture(name: string) {
@@ -358,6 +396,132 @@ test("a delivery admitted while the successor is still registering lands exactly
   /* Completing the registration neither loses the host nor re-delivers. */
   expect(hasStructuredDeliveryHost(key)).toBe(true);
   expect(host.ledger.writes.map((entry) => entry.id)).toEqual(["operation-handover-window"]);
+
+  await close();
+});
+
+test("a carried-over host released mid-registration is released once and stays gone (#1191)", async () => {
+  const { registry, journal, directory, client, close } = fixture("handover-release");
+  await bindStructuredDeliveryQueue([], { registry, client });
+  const { key } = seedConversation(registry, directory, "handover-release-session");
+  const { host, releases } = releaseCountingHost();
+  await publishStructuredDeliveryHost({ key, host });
+
+  const gate = producerCursorGate(client, journal);
+  const rebind = bindStructuredDeliveryQueue([], { registry, client: gate.client });
+  /* Racing the rebind keeps this deterministic either way: a build that never
+     re-registers the carried-over host finishes the bind instead of entering
+     the gate, and fails the assertions below rather than hanging. */
+  await Promise.race([gate.started, rebind]);
+
+  /* The successor owns the publication and this host's registration is parked
+     inside it. One lifecycle means the release lands on the host itself here,
+     not on a seat the registration behind it can undo. */
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+  expect(await releaseStructuredDeliveryHost(key)).toBe(true);
+  expect(hasStructuredDeliveryHost(key)).toBe(false);
+  expect(releases.count).toBe(1);
+
+  gate.open();
+  await rebind;
+
+  /* The registration that resumed cannot bring the host back, and nothing
+     releases it a second time. */
+  expect(hasStructuredDeliveryHost(key)).toBe(false);
+  expect(releases.count).toBe(1);
+  expect(await releaseStructuredDeliveryHost(key)).toBe(false);
+  expect(releases.count).toBe(1);
+
+  await close();
+});
+
+test("a carried-over host terminated mid-registration is released once and stays gone (#1191)", async () => {
+  const { registry, journal, directory, client, close } = fixture("handover-terminate");
+  await bindStructuredDeliveryQueue([], { registry, client });
+  const { conversationId, key } = seedConversation(registry, directory, "handover-terminate-session");
+  const { host, releases } = releaseCountingHost();
+  await publishStructuredDeliveryHost({ key, host });
+
+  const gate = producerCursorGate(client, journal);
+  const rebind = bindStructuredDeliveryQueue([], { registry, client: gate.client });
+  await Promise.race([gate.started, rebind]);
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+
+  /* A kill effect drains through the controller's termination path while the
+     registration is still parked. */
+  journal.executeOperation({
+    kind: "kill",
+    operationId: "operation-handover-terminate",
+    idempotencyKey: "handover-terminate",
+    conversationId,
+    sessionKey: key,
+  });
+  await kickStructuredDeliveryQueue();
+  await settles(() => {
+    const status = journal.operationResult("operation-handover-terminate")?.receipt.status;
+    return status === "delivered" || status === "failed" || status === "rejected";
+  }, "the kill receipt");
+  expect(journal.operationResult("operation-handover-terminate")?.receipt.status).toBe("delivered");
+  expect(releases.count).toBe(1);
+  expect(hasStructuredDeliveryHost(key)).toBe(false);
+
+  gate.open();
+  await rebind;
+
+  expect(hasStructuredDeliveryHost(key)).toBe(false);
+  expect(releases.count).toBe(1);
+
+  await close();
+});
+
+test("a carried-over host whose registration fails is retried and delivers exactly once (#1191)", async () => {
+  const { registry, journal, directory, client, close } = fixture("handover-retry");
+  await bindStructuredDeliveryQueue([], { registry, client });
+  const { conversationId, key } = seedConversation(registry, directory, "handover-retry-session");
+  let subscriptions = 0;
+  const host = Object.assign(new FakeEngineHost(createFakeDeliveryLedger()), {
+    onStateChange: () => { subscriptions += 1; return () => {}; },
+  });
+  await publishStructuredDeliveryHost({ key, host });
+  expect(subscriptions).toBe(1);
+
+  let cursorFailures = 0;
+  const failingClient = {
+    ...client,
+    producerCursor: async (producerKind: string, eventKeyPrefix: string) => {
+      if (cursorFailures === 0) {
+        cursorFailures += 1;
+        throw new RuntimeHostUnavailableError("runtime host request timed out");
+      }
+      return journal.producerCursor(producerKind, eventKeyPrefix);
+    },
+  } as RuntimeHostClient;
+
+  await bindStructuredDeliveryQueue([], { registry, client: failingClient });
+  expect(cursorFailures).toBe(1);
+
+  /* The failed registration left a host that resolves but that nothing is
+     watching: without its own state subscription, a delivery admitted here has
+     nothing to wake the queue when the host turns idle again. */
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+  journal.executeOperation({
+    kind: "send",
+    operationId: "operation-handover-retry",
+    idempotencyKey: "handover-retry",
+    conversationId,
+    text: "admitted while the registration was failing",
+    policy: "queue",
+  });
+  await kickStructuredDeliveryQueue();
+  await settles(
+    () => journal.operationResult("operation-handover-retry")?.receipt.status === "delivered",
+    "the delivery admitted while the registration was failing",
+  );
+
+  /* The retry behind the seat makes the registration good. */
+  await settles(() => subscriptions === 2, "the retried registration");
+  expect(hasStructuredDeliveryHost(key)).toBe(true);
+  expect(host.ledger.writes.map((entry) => entry.id)).toEqual(["operation-handover-retry"]);
 
   await close();
 });

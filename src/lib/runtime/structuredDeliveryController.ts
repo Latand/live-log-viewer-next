@@ -22,6 +22,25 @@ export interface StructuredDeliveryHost {
   host: ObservableEngineHost;
 }
 
+interface HostAttachment {
+  unsubscribe: () => void;
+  stopEvents: () => Promise<void>;
+}
+
+/* One lifecycle per host (#1191). The seat a delivery resolves the host from
+   and the registration that owns its state subscription, event pump and
+   projection are the same record. A host carried over from the predecessor
+   takes its seat with `attachment` still null: resolvable from the instant the
+   successor goes live, and filled in by the registration that follows. Giving
+   the seat up sets `cancelled`, which that registration can no longer commit
+   past — so a host released or terminated mid-registration stays gone. */
+interface HostRegistration {
+  key: SessionKey;
+  host: ObservableEngineHost;
+  attachment: HostAttachment | null;
+  cancelled: boolean;
+}
+
 const DELIVERY_DRAIN_COALESCE_MS = 25;
 const DELIVERY_DRAIN_MAX_BACKOFF_MS = 1_000;
 const TERMINAL_RECONCILIATION_PAGE_SIZE = 16;
@@ -417,7 +436,8 @@ export async function bindStructuredDeliveryQueue(
   scheduleAutomaticRetry = () => {
     if (state.activeQueue === queue) scheduleDrain(DELIVERY_DRAIN_MAX_BACKOFF_MS);
   };
-  const registrations = new Map<string, { key: SessionKey; host: ObservableEngineHost; unsubscribe: () => void; stopEvents: () => Promise<void> }>();
+  const registrations = new Map<string, HostRegistration>();
+  const inheritedRetries = new Map<string, ReturnType<typeof setTimeout>>();
   const publishChains = new Map<string, Promise<void>>();
   const projectionEpoch = crypto.randomUUID();
   let projectionRevision = 0;
@@ -523,21 +543,39 @@ export async function bindStructuredDeliveryQueue(
     const republished = await republishCurrentHosts();
     if (conversationId && !republished.has(conversationId)) await publishCurrentFallback(conversationId);
   };
-  const unregisterHost = async (key: string, host: EngineHost): Promise<void> => {
+  /* Claiming a seat is one indivisible step, taken before anything awaits: it
+     leaves both maps, cancels the registration still in flight behind it and
+     drops its retry. A second release, a termination and that registration all
+     decide what to do from this one record, so exactly one caller can end a
+     host's lifecycle and exactly one releases it (#1191). */
+  const takeRegistration = (key: string, host?: EngineHost): HostRegistration | null => {
     const registered = registrations.get(key);
-    if (registered?.host !== host) return;
-    const discardedEntry = entryForHost(registry, registered);
-    const conversationId = discardedEntry ? conversationIdForEntry(registry, discardedEntry) : null;
-    registered.unsubscribe();
-    await registered.stopEvents();
+    if (!registered || (host !== undefined && registered.host !== host)) return null;
+    registered.cancelled = true;
     registrations.delete(key);
     hosts.delete(key);
+    const retry = inheritedRetries.get(key);
+    if (retry !== undefined) {
+      clearTimeout(retry);
+      inheritedRetries.delete(key);
+    }
+    return registered;
+  };
+  const detachRegistration = async (key: string, registered: HostRegistration): Promise<void> => {
+    const discardedEntry = entryForHost(registry, registered);
+    const conversationId = discardedEntry ? conversationIdForEntry(registry, discardedEntry) : null;
+    registered.attachment?.unsubscribe();
+    await registered.attachment?.stopEvents();
     const pendingPublications = publishChains.get(key);
     if (pendingPublications) {
       await pendingPublications;
       if (publishChains.get(key) === pendingPublications) publishChains.delete(key);
     }
     await refreshCurrentProjection(conversationId);
+  };
+  const unregisterHost = async (key: string, host: EngineHost): Promise<void> => {
+    const registered = takeRegistration(key, host);
+    if (registered) await detachRegistration(key, registered);
   };
   /* This generation no longer owns the publication: a swap installed a
      successor and retired it, or it was retired outright. */
@@ -563,9 +601,20 @@ export async function bindStructuredDeliveryQueue(
     if (ownsOperation && !await ownsOperation()) return async () => {};
     const key = sessionKeyId(item.key);
     const current = registrations.get(key);
-    if (current?.host === item.host) return async () => {};
-    if (current) await unregisterHost(key, current.host);
+    /* The same host under the same key either already holds a registration of
+       this generation, with nothing left to do, or holds a carried-over seat
+       this call is filling in. Any other host under that key is replaced. */
+    const seat = current && current.host === item.host ? current : null;
+    if (seat?.attachment) return async () => {};
+    if (current && !seat) await unregisterHost(key, current.host);
+    /* The seat was given up while this registration was in flight — released,
+       terminated, replaced, or filled in by another call. Its lifecycle ended
+       there, so this call must not commit: the host would come back after its
+       caller was told it was gone (#1191). */
+    const abandoned = (): boolean => seat !== null
+      && (seat.cancelled || seat.attachment !== null || registrations.get(key) !== seat);
     const initialState = await item.host.health();
+    if (abandoned()) return async () => {};
     if (ownsOperation && !await ownsOperation()) return async () => {};
     const publicationEntry = entryForHost(registry, item);
     const publicationConversationId = publicationEntry
@@ -587,8 +636,9 @@ export async function bindStructuredDeliveryQueue(
         console.error("[structured delivery] producer cursor unavailable; replaying host events");
       }
     }
+    if (abandoned()) return async () => {};
     await publishHostState(client, registry, item, initialState);
-    if (ownsOperation && !await ownsOperation()) {
+    if (abandoned() || (ownsOperation && !await ownsOperation())) {
       const restoreCurrentProjection = async () => {
         await refreshCurrentProjection(publicationConversationId);
       };
@@ -597,7 +647,10 @@ export async function bindStructuredDeliveryQueue(
     }
     /* The last yield point before the commit. Nothing below awaits, so a
        registration either lands whole in a generation that is still live or is
-       handed on before it leaves a trace in a retired one. */
+       handed on before it leaves a trace in a retired one. A seat that ended
+       is never handed on: the successor carried it over only if it still
+       existed at the swap, and re-driving a released host would republish it. */
+    if (abandoned()) return async () => {};
     if (superseded()) return await registerThroughSuccessor(item, ownsOperation);
     hosts.set(key, item.host);
     requestDrain();
@@ -649,18 +702,55 @@ export async function bindStructuredDeliveryQueue(
       eventsStopped = true;
       void events.return?.().catch(() => {});
     };
-    registrations.set(key, { key: item.key, host: item.host, unsubscribe, stopEvents });
+    /* The carried-over seat gains its attachment in place, so a concurrent
+       registration of the same host sees a seat that is already filled in and
+       stands down instead of installing a second subscription and pump. */
+    const registration: HostRegistration = seat
+      ?? { key: item.key, host: item.host, attachment: null, cancelled: false };
+    registration.attachment = { unsubscribe, stopEvents };
+    registrations.set(key, registration);
     return () => unregisterHost(key, item.host);
+  };
+  /* A carried-over host whose registration cannot commit yet — a producer-cursor
+     transport fault, a control-plane blip — keeps its seat, so deliveries still
+     resolve it. Left at that it would be a seat with no state subscription and
+     no event pump: nothing wakes the queue when the host turns idle, and a busy
+     delivery stays stranded there. Retry until the registration commits, the
+     seat is given up, or this generation is retired (#1191). */
+  const registerInherited = async (
+    item: StructuredDeliveryHost,
+    retryDelayMs = DELIVERY_DRAIN_COALESCE_MS,
+  ): Promise<void> => {
+    const key = sessionKeyId(item.key);
+    const stillPending = (): boolean => {
+      if (stopped || superseded()) return false;
+      const seat = registrations.get(key);
+      return seat !== undefined && seat.host === item.host && !seat.cancelled && seat.attachment === null;
+    };
+    if (!stillPending()) return;
+    try {
+      await register(item);
+    } catch (error) {
+      console.error("[structured delivery] carried-over host registration failed; retrying", error);
+      if (!stillPending()) return;
+      const timer = setTimeout(() => {
+        inheritedRetries.delete(key);
+        void registerInherited(item, Math.min(retryDelayMs * 2, DELIVERY_DRAIN_MAX_BACKOFF_MS));
+      }, retryDelayMs);
+      timer.unref?.();
+      inheritedRetries.set(key, timer);
+    }
   };
   /* Host resolution must not gap across the hand-over (#1191). Publishing an
      empty successor and registering its hosts afterwards left every delivery
      admitted in between resolving nothing, which settles the receipt `failed`
-     with "structured host recovery did not start". Seeding is synchronous — no
-     await stands between it and the installation below — so the successor
-     answers for every host the predecessor was already serving from the
-     instant it goes live. Each one is registered in full afterwards, which
-     replaces the seed with a registration of this generation: state
-     subscription, event pump and projection.
+     with "structured host recovery did not start". Every host the predecessor
+     served takes its seat here synchronously — no await stands between that and
+     the installation below — so the successor answers for it from the instant
+     it goes live. The seat is that host's whole lifecycle in this generation:
+     the registration that follows fills in its state subscription, event pump
+     and projection, and a release or a termination ends it whether or not that
+     registration has committed yet.
 
      Only the predecessor's hosts are carried. An adopted host is a publication
      this bind has yet to make, and one whose registration fails — a
@@ -669,7 +759,9 @@ export async function bindStructuredDeliveryQueue(
   const inherited = state.activeRegistrations?.() ?? [];
   for (const item of inherited) {
     const id = sessionKeyId(item.key);
-    if (!hosts.has(id)) hosts.set(id, item.host);
+    if (registrations.has(id)) continue;
+    hosts.set(id, item.host);
+    registrations.set(id, { key: item.key, host: item.host, attachment: null, cancelled: false });
   }
   state.activeHosts = hosts;
   state.registerActiveHost = register;
@@ -679,20 +771,19 @@ export async function bindStructuredDeliveryQueue(
     if (!registration) return false;
     return await republishRegistration(registration) !== null;
   };
+  /* Both paths claim the seat first, so a host carried over at the swap is
+     released here exactly like one this generation registered itself — even
+     while its own registration is still in flight behind it (#1191). */
   state.releaseActiveHost = async (key) => {
     const id = sessionKeyId(key);
-    const registered = registrations.get(id);
+    const registered = takeRegistration(id);
     if (!registered) {
-      /* A host carried over at the swap answers from `hosts` before its own
-         registration lands. Drop it here too, or the seed would keep resolving
-         a host this release just gave up. */
-      hosts.delete(id);
       const discardedEntry = registry.readOnlySnapshot().entries[id] ?? null;
       await refreshCurrentProjection(discardedEntry ? conversationIdForEntry(registry, discardedEntry) : null);
       return false;
     }
     try {
-      await unregisterHost(id, registered.host);
+      await detachRegistration(id, registered);
     } finally {
       await registered.host.release();
     }
@@ -700,16 +791,11 @@ export async function bindStructuredDeliveryQueue(
   };
   state.terminateActiveHost = async (key) => {
     const id = sessionKeyId(key);
-    const registered = registrations.get(id);
-    if (!registered) {
-      /* Same reason as the release path: a seeded carry-over must not survive
-         a termination the caller falls back to handling in the registry. */
-      hosts.delete(id);
-      return false;
-    }
+    const registered = takeRegistration(id);
+    if (!registered) return false;
     await registered.host.release();
     registry.terminateStructuredHost(key);
-    await unregisterHost(id, registered.host);
+    await detachRegistration(id, registered);
     return true;
   };
   state.activeQueue = queue;
@@ -724,9 +810,11 @@ export async function bindStructuredDeliveryQueue(
     stopped = true;
     if (drainTimer) clearTimeout(drainTimer);
     drainTimer = null;
+    for (const timer of inheritedRetries.values()) clearTimeout(timer);
+    inheritedRetries.clear();
     for (const registration of registrations.values()) {
-      registration.unsubscribe();
-      void registration.stopEvents();
+      registration.attachment?.unsubscribe();
+      void registration.attachment?.stopEvents();
     }
     registrations.clear();
     hosts.clear();
@@ -775,23 +863,16 @@ export async function bindStructuredDeliveryQueue(
      `state.activeQueue !== queue` and unwinds only its own timers, host
      subscriptions and event pumps — it cannot null the live publication. */
   retirePredecessor();
-  /* The carried-over hosts resolve from the seed already; this gives each one a
-     registration in this generation. It runs whether or not startup work is
+  /* The carried-over hosts resolve from their seats already; this gives each one
+     a registration in this generation. It runs whether or not startup work is
      deferred, because startup's own completion only covers the set it adopts,
      and a host the predecessor picked up after its adoption pass belongs to
-     neither set. */
-  for (const item of inherited) {
-    /* One host that cannot be re-registered — an evicted replay window, a
-       control-plane fault — must not take the bind down with it. The seed
-       already resolves it, so delivery keeps working while only its projection
-       falls behind; failing the bind here would retire nothing and leave the
-       startup retry re-entering the same throw. */
-    try {
-      await register(item);
-    } catch (error) {
-      console.error("[structured delivery] carried-over host kept its seat without a fresh registration", error);
-    }
-  }
+     neither set. One host that cannot be registered — an evicted replay window,
+     a control-plane fault — must not take the bind down with it: failing here
+     would retire nothing and leave the startup retry re-entering the same
+     throw, so the seat keeps serving deliveries and the retry behind it makes
+     the registration good. */
+  for (const item of inherited) await registerInherited(item);
   if (!dependencies.deferStartupWork) await complete(adopted);
 }
 
