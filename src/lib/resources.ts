@@ -148,8 +148,10 @@ function captureSystemMemory(proc: Pick<ProcBackend, "systemMemory"> = procBacke
   return system ? { ...system, capturedAt: new Date().toISOString() } : null;
 }
 
-/** What the kill path needs to take a snapshot session down safely: the
-    stable `%N` pane id to address, and the pane pid to verify it against. */
+/** What the kill path needs to take a snapshot row down safely, on whichever
+    transport owns it: for a pane, the stable `%N` pane id to address and the
+    pane pid to verify it against; for a structured host, the pid and the start
+    identity observed with it. */
 export type KillTargetRef = TmuxAttachReference | StructuredHostKillRef;
 
 /**
@@ -228,12 +230,16 @@ export function lastResourceBuildDiagnostic(): ResourceBuildDiagnostic | null {
 }
 
 /**
- * Server-held allowlist for the kill-target action: only pane targets present
- * in the last resources snapshot may be killed. A client-supplied arbitrary
- * target could name the user's own work pane, so it is refused. Each target
+ * Server-held allowlist for both kill paths: only targets present in the last
+ * resources snapshot may be killed. A client-supplied arbitrary target could
+ * name the user's own work pane — or the runtime host — so it is refused.
+ *
+ * Each target keeps the evidence its transport verifies at kill time. A pane
  * keeps the stable pane id and pane pid it had in the snapshot: display
  * coordinates renumber as windows close (`renumber-windows on`), so the kill
- * must address the pane by id and verify the pid still matches.
+ * must address the pane by id and verify the pid still matches. A structured
+ * host keeps its pid and the start identity observed with it, so a recycled
+ * pid fails the fence instead of taking down whatever inherited the number.
  */
 export function noteSessionTargets(sessions: Iterable<{ target: string; ref: KillTargetRef }>): void {
   const map = new Map<string, KillTargetRef>();
