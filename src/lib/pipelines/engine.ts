@@ -17,7 +17,8 @@ import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
-import { supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
+import { structuredHostsEnabled, supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
+import { structuredDeliveryPublicationState } from "@/lib/runtime/structuredDeliveryController";
 import { redactBounded } from "@/lib/monitor/redact";
 import { parseReview, type ReviewFinding } from "@/lib/review";
 import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
@@ -149,6 +150,13 @@ export interface PipelinePorts {
   }, onReserved: (reservation: PipelineStageLaunchReservation) => void): Promise<PipelineStageSpawn>;
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
   claimSpawnRetry(launchId: string, claimId: string): "claimed" | "settled" | "conflict";
+  /** Whether the ticking process can publish a structured host: `ready` now,
+      `rebinding` between publications, `unbound` never at all (#1191). */
+  structuredDeliveryPublication?(): "ready" | "rebinding" | "unbound";
+  /** Asks for another pipelines tick in `delayMs`. Stage activation waiting out
+      a controller uses it instead of sleeping, so the wait falls due on its own
+      schedule without a tick holding the pipelines phase (#1191). */
+  scheduleTick?(delayMs: number): void;
   paneAgentAlive(paneId: string): Promise<boolean>;
   /** Terminates the host that owns a stage attempt's agent. `not-running` means
       no host was resident, so a close can tell an idle lane from one it stopped. */
@@ -586,6 +594,19 @@ export function defaultPipelinePorts(): PipelinePorts {
       invalidateRegistryProjection();
       return result;
     },
+    /* Stage activation belongs to the process that hosts the structured
+       delivery controller. The account-migration inventory sidecar reconciles
+       files — and therefore ticks pipelines — from a child process that never
+       binds one, so a spawn issued there can only ever fail (#1191). With
+       structured hosting switched off there is no publication to wait for and
+       the spawn must fail in the open, as it always did. */
+    structuredDeliveryPublication: () => structuredHostsEnabled()
+      ? structuredDeliveryPublicationState()
+      : "ready",
+    scheduleTick: (delayMs) => {
+      const timer = setTimeout(() => requestPipelineTick(), delayMs);
+      timer.unref?.();
+    },
     spawnReceipt: (launchId) => {
       const receipt = snapshot().receipts[launchId];
       if (!receipt) return null;
@@ -710,6 +731,13 @@ const VERDICT_RECOVERY_INTERVAL_MS = 30_000;
 const VERDICT_RECOVERY_ACCOUNTING_BUDGET_MS = 15_000;
 const SPAWN_HANDSHAKE_MAX_ATTEMPTS = 3;
 const SPAWN_HANDSHAKE_RETRY_DELAY_MS = 1_000;
+/** A controller that is between publications comes back in seconds, so a stage
+    transition rides it out instead of parking on two immediate retries (#1191).
+    The budget is wall-clock across the whole activation, measured from the
+    first sighting: a spawn that fails at host publication has already burned
+    real time inside `spawnAgent`, and that time is part of the wait. */
+const SPAWN_CONTROLLER_WAIT_BUDGET_MS = 30_000;
+const SPAWN_CONTROLLER_RETRY_MAX_MS = 8_000;
 const DEAD_RUNNING_ATTEMPT_GRACE_MS = 3 * 60_000;
 /** Attempt states that end a round; a pending cursor over one of these queues a
     fresh attempt on the next tick (tickRunStage/tickReviewStage). */
@@ -1577,8 +1605,33 @@ async function tickRunStage(
   }
 
   if (attempt.state === "pending") {
+    /* A process that never bound the delivery controller cannot launch this
+       stage, and no retry there can change that. Leave the attempt pending: the
+       pass ends on a pending cursor, which wakes the process that owns the
+       controller (requestPipelineTick), and it activates the same attempt. */
+    const publication = ports.structuredDeliveryPublication?.() ?? "ready";
+    if (publication === "unbound") return;
+    const activationNow = ports.now();
+    /* A wait booked by an earlier tick is not due yet. */
+    if (unixMs(attempt.controllerWait?.retryAfter ?? "") > unixMs(activationNow)) return;
+    /* A publication this process is merely between is transient. Waiting for it
+       beats spawning into it: the failure lands deep in durable host setup
+       (structuredSpawn's publishHost), so an attempt issued now burns a real
+       engine launch before it can fail. */
+    if (publication === "rebinding") {
+      if (bookControllerWaitRound(attempt, activationNow, activationNow, ports) === "waiting") {
+        persist();
+        return;
+      }
+      park(
+        pipeline,
+        controllerWaitParkDetail(attempt, activationNow, "structured delivery controller is unavailable"),
+        attempt,
+      );
+      return;
+    }
     attempt.state = "spawning";
-    attempt.startedAt = ports.now();
+    attempt.startedAt = activationNow;
     setCursorState(pipeline, stage.id, "spawning");
     spawnsThisProcess.add(attemptKey(pipeline, stage, attempt));
     persist();
@@ -1617,13 +1670,24 @@ async function tickRunStage(
         },
       };
       let spawned: PipelineStageSpawn | null = null;
-      for (let spawnAttempt = 1; spawnAttempt <= SPAWN_HANDSHAKE_MAX_ATTEMPTS; spawnAttempt += 1) {
+      let spawnAttempt = 0;
+      /* Set when the spawn reached host publication and found no controller.
+         The activation leaves the loop for the wall-clock wait below rather
+         than sleeping here, so it costs the pipelines phase nothing. */
+      let controllerFailure: string | null = null;
+      /* Rounds already booked by earlier ticks of this same activation. The
+         retry index continues across them, so every attempt keeps a distinct
+         launch identity even though the wait now spans ticks (#1056). */
+      const priorControllerRounds = attempt.controllerWait?.rounds ?? 0;
+      while (true) {
+        spawnAttempt += 1;
         try {
+          const retryIndex = priorControllerRounds + spawnAttempt - 1;
           spawned = await ports.spawnAgent({
             ...spawnInput,
-            clientAttemptId: spawnAttempt === 1
+            clientAttemptId: retryIndex === 0
               ? spawnInput.clientAttemptId
-              : `handshake_retry_${spawnAttempt - 1}_${spawnInput.clientAttemptId}`.slice(0, 128),
+              : `handshake_retry_${retryIndex}_${spawnInput.clientAttemptId}`.slice(0, 128),
           }, (reservation) => {
             attempt.launchId = reservation.launchId;
             attempt.conversationId = reservation.conversationId;
@@ -1632,18 +1696,37 @@ async function tickRunStage(
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          const transient = isTransientStructuredSpawnFailure(message);
-          if (!transient || spawnAttempt === SPAWN_HANDSHAKE_MAX_ATTEMPTS) {
-            if (transient) {
-              throw new Error(`stage spawn failed after ${spawnAttempt - 1} retries: ${message}`);
-            }
-            throw error;
+          if (!isTransientStructuredSpawnFailure(message)) throw error;
+          /* An unavailable controller is a publication this process is between,
+             not a rejected launch, so it gets the wall-clock wait budget; every
+             other transient keeps the two immediate handshake retries (#1056),
+             which stay well inside the controller's phase deadline. */
+          if (isStructuredDeliveryControllerFailure(message)) {
+            controllerFailure = message;
+            break;
+          }
+          if (spawnAttempt >= SPAWN_HANDSHAKE_MAX_ATTEMPTS) {
+            throw new Error(`stage spawn failed after ${spawnAttempt - 1} retries: ${message}`);
           }
           const sleep = ports.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
           await sleep(SPAWN_HANDSHAKE_RETRY_DELAY_MS);
         }
       }
+      if (controllerFailure !== null) {
+        /* Wall-clock from the first sighting, so the time this attempt already
+           spent inside spawnAgent counts against the budget rather than being
+           invisible to it. */
+        const failedAt = ports.now();
+        if (bookControllerWaitRound(attempt, activationNow, failedAt, ports) === "exhausted") {
+          throw new Error(controllerWaitParkDetail(attempt, failedAt, controllerFailure));
+        }
+        attempt.state = "pending";
+        setCursorState(pipeline, stage.id, "pending");
+        persist();
+        return;
+      }
       if (!spawned) throw new Error("stage spawn failed without a result");
+      delete attempt.controllerWait;
       attempt.launchId = spawned.launchId;
       attempt.conversationId = spawned.conversationId;
       attempt.sessionId = spawned.sessionId;
@@ -2369,10 +2452,76 @@ function isStructuredSpawnPark(pipeline: Pipeline, attempt: PipelineStageAttempt
     || isTransientStructuredSpawnFailure(failure);
 }
 
+function isStructuredDeliveryControllerFailure(failure: string): boolean {
+  return failure.includes("structured delivery controller is unavailable");
+}
+
 function isTransientStructuredSpawnFailure(failure: string): boolean {
-  return failure.includes("structured delivery controller is unavailable")
+  return isStructuredDeliveryControllerFailure(failure)
     || failure.includes("structured initial message")
     || failure.includes("runtime host request timed out");
+}
+
+/** Wall-clock milliseconds this activation has already spent waiting for the
+    controller, `nowMs` included. Zero before the first sighting. */
+function controllerWaitElapsedMs(attempt: PipelineStageAttempt, nowMs: number): number {
+  const startedAt = attempt.controllerWait?.startedAt;
+  return startedAt ? Math.max(0, nowMs - unixMs(startedAt)) : 0;
+}
+
+/**
+ * Books one round of the bounded wait for a controller between publications and
+ * says whether the activation may still wait (#1191).
+ *
+ * The wait is spent BETWEEN ticks: this returns immediately and asks for a tick
+ * when the backoff falls due. Sleeping here instead would hold the pipeline
+ * mutation for the whole budget, which is what pushed the flow pipeline
+ * controller's pipelines phase past its deadline during the reported incidents.
+ *
+ * `since` is where the budget starts on the first round: the moment this
+ * activation began, not the moment it failed. A spawn only discovers the
+ * missing controller at durable host publication, so the seconds it spent
+ * inside `spawnAgent` are part of the wait and are charged to it.
+ */
+function bookControllerWaitRound(
+  attempt: PipelineStageAttempt,
+  since: string,
+  now: string,
+  ports: PipelinePorts,
+): "waiting" | "exhausted" {
+  const nowMs = unixMs(now);
+  const wait = attempt.controllerWait ?? { startedAt: since, rounds: 0, retryAfter: since };
+  const remainingMs = SPAWN_CONTROLLER_WAIT_BUDGET_MS - Math.max(0, nowMs - unixMs(wait.startedAt));
+  if (remainingMs <= 0) return "exhausted";
+  const delayMs = Math.min(
+    SPAWN_CONTROLLER_RETRY_MAX_MS,
+    SPAWN_HANDSHAKE_RETRY_DELAY_MS * (2 ** wait.rounds),
+    remainingMs,
+  );
+  attempt.controllerWait = {
+    startedAt: wait.startedAt,
+    rounds: wait.rounds + 1,
+    retryAfter: new Date(nowMs + delayMs).toISOString(),
+  };
+  ports.scheduleTick?.(delayMs);
+  return "waiting";
+}
+
+function controllerWaitParkDetail(attempt: PipelineStageAttempt, now: string, failure: string): string {
+  const seconds = Math.round(controllerWaitElapsedMs(attempt, unixMs(now)) / 1_000);
+  const rounds = attempt.controllerWait?.rounds ?? 0;
+  return `stage spawn failed after ${rounds} retries over ${seconds}s: ${failure}`;
+}
+
+/** A stage waiting out a controller holds a pending cursor on purpose, and its
+    own scheduled tick wakes it when the backoff falls due. Treating that cursor
+    as work to re-tick immediately would spin the controller through passes that
+    can only defer it again (#1191). */
+function stageActivationIsWaiting(pipeline: Pipeline, nowMs: number): boolean {
+  const stageId = pipeline.cursor?.stageId;
+  if (!stageId) return false;
+  const retryAfter = currentAttempt(pipeline, stageId)?.controllerWait?.retryAfter;
+  return retryAfter !== undefined && unixMs(retryAfter) > nowMs;
 }
 
 /**
@@ -2537,7 +2686,10 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
     /* A pass that ends on a pending cursor (a stage just passed and advanced,
        or provisioning finished) must not wait for an unrelated wake-up to
        materialize the next attempt (#337). */
-    followUp = result.pipelines.some((pipeline) => pipeline.state === "running" && pipeline.cursor?.state === "pending");
+    const followUpAt = unixMs(ports.now());
+    followUp = result.pipelines.some((pipeline) => pipeline.state === "running"
+      && pipeline.cursor?.state === "pending"
+      && !stageActivationIsWaiting(pipeline, followUpAt));
     return result;
   } catch (error) {
     /* The store fails closed on malformed state, but this tick runs inside

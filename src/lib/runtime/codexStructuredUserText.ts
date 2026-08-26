@@ -12,9 +12,8 @@ import { messageOriginRole, type MessageOrigin } from "./messageOrigin";
  * It is one HTML comment on the record's first line, carrying named attributes:
  * `sha256` (the structured content digest, when images make the echo lossy),
  * `ctx` (the selected-card reference, #844), and since #1117 `origin`
- * (`operator` | `agent`) with an optional `sender` role token — authorship
- * stamped at delivery time so the feed can tell the operator's own words from
- * inter-agent traffic. All attributes are optional and independent, and every
+ * (`operator` | `agent`) with an optional
+ * `sender` role token. All attributes are optional and independent, and every
  * older form — bare marker, marker with only a digest — decodes byte-identically
  * to what it always did. Transcripts are not migrated.
  *
@@ -79,7 +78,13 @@ export function decodeCodexStructuredUserText(value: string): DecodedCodexStruct
     const origin: MessageOrigin | null = originKind
       ? { kind: originKind, ...(originKind === "agent" && senderRole ? { role: senderRole } : {}) }
       : null;
-    return { text: value.slice(marker[0].length), structured: true, contentDigest, selectedContext, origin };
+    return {
+      text: value.slice(marker[0].length),
+      structured: true,
+      contentDigest,
+      selectedContext,
+      origin,
+    };
   }
   if (!value.startsWith(STRUCTURED_USER_MARKER)) {
     return { text: value, structured: false, contentDigest: null, selectedContext: null, origin: null };

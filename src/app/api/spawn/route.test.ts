@@ -111,6 +111,77 @@ test("spawn admission rejects an explicit model outside the selected engine cata
   });
 });
 
+test("direct spawn records one durable operator gesture while MCP service spawn records none", async () => {
+  const { internalServiceHeaders } = await import("@/lib/agent/operatorAuthority");
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "operator-spawn-activity-"));
+  const store = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const recorded = new Map<string, unknown>();
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => store,
+    defer: () => {},
+    recordOperatorActivity: (input: { idempotencyKey?: string }) => {
+      recorded.set(input.idempotencyKey ?? "", input);
+      return { key: "b".repeat(64), engine: "claude" as const, project: "project-fixture", atMs: 1 };
+    },
+  };
+  const post = async (clientAttemptId: string | undefined, headers: Record<string, string> = {}) => POST.withDependencies(new NextRequest(
+    "http://127.0.0.1/api/spawn",
+    {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1",
+        origin: "http://127.0.0.1",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+        ...headers,
+      },
+      body: JSON.stringify({
+        /* #916 landed on main while this lane was open: every new spawn now
+           needs an explicit semantic title, and this fixture is about the
+           gesture ledger, not title derivation. */
+        title: "claude · audit the operator gesture ledger",
+        engine: "claude",
+        cwd,
+        ["prompt"]: "inspect",
+        ...(clientAttemptId ? { clientAttemptId } : {}),
+      }),
+    },
+  ), dependencies);
+
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const idlessDirect = await post(undefined);
+    const direct = await post("operator_spawn_gesture_20260815");
+    const replay = await post("operator_spawn_gesture_20260815");
+    const mcp = await post(undefined, internalServiceHeaders("mcp"));
+
+    expect([idlessDirect.status, direct.status, replay.status, mcp.status]).toEqual([400, 202, 202, 202]);
+    expect(await idlessDirect.json()).toEqual({ error: "clientAttemptId is required for direct operator spawn" });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      const envKey = ({ transport: "LLV_SPAWN_TRANSPORT", hosts: "LLV_STRUCTURED_HOSTS", events: "LLV_RUNTIME_EVENTS", socket: "LLV_RUNTIME_HOST_SOCKET", ui: "NEXT_PUBLIC_RUNTIME_UI" } as const)[key as keyof typeof previous];
+      if (value === undefined) delete process.env[envKey];
+      else process.env[envKey] = value;
+    }
+  }
+  expect([...recorded.values()]).toEqual([expect.objectContaining({
+    idempotencyKey: "spawn:operator_spawn_gesture_20260815",
+    resolvedAttribution: expect.objectContaining({ engine: "claude" }),
+  })]);
+});
+
 test("new semantic, empty, and image-only prompts require an explicit semantic title", async () => {
   const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
   const post = async (body: Record<string, unknown>) => POST.withDependencies(new NextRequest("http://127.0.0.1/api/spawn", {
@@ -1850,7 +1921,7 @@ test("a fresh process resolves and refreshes a persisted Claude account before o
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd: ${JSON.stringify(cwd)}, prompt: "resume work", accountId: "rebooted" }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd: ${JSON.stringify(cwd)}, ["prompt"]: "resume work", accountId: "rebooted", clientAttemptId: "fresh_process_spawn_20260825" }),
     }));
     await Promise.all(deferred.map((work) => work()));
     const body = await response.json();
@@ -2207,7 +2278,7 @@ test("structured spawn maps operational image storage failures to 503", async ()
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd, prompt: "inspect", images: [{ base64: png, mime: "image/png" }] }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd, ["prompt"]: "inspect", images: [{ base64: png, mime: "image/png" }], clientAttemptId: "image_storage_failure_20260825" }),
     }), dependencies);
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "runtime image storage quota exceeded" });
@@ -3684,7 +3755,7 @@ test("a structured launch that dies on an unreachable host terminalizes its rece
         "sec-fetch-site": "same-origin",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd, prompt: "spawn against a dead host" }),
+      body: JSON.stringify({ title: "Test semantic spawn", engine: "claude", cwd, ["prompt"]: "spawn against a dead host", clientAttemptId: "dead_host_spawn_20260825" }),
     }), dependencies);
 
     expect(response.status).toBe(202);

@@ -9,6 +9,8 @@ import { NextRequest } from "next/server";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry } from "@/lib/agent/registry";
+import { setCallerConversationResolverForTests } from "@/lib/agent/operatorAuthority";
+import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
@@ -18,6 +20,7 @@ import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./st
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 function request(body: unknown, headers: Record<string, string> = { host: "127.0.0.1" }): NextRequest {
   return new NextRequest("http://127.0.0.1/api/runtime/send", {
@@ -63,6 +66,137 @@ test("runtime command HTTP handling preserves validation, CSRF, status, and conf
   const conflictClient = { command: async () => { throw new RuntimeHostUnavailableError("conflict", "idempotency-conflict"); } } as unknown as RuntimeHostClient;
   const conflict = await handleRuntimeCommand(request({ conversationId: "conv-one", text: "continue", idempotencyKey: "send-one" }), "send", { enabled: () => true, structuredEnabled: () => true, client: () => conflictClient });
   expect(conflict.status).toBe(409);
+});
+
+test("runtime send records operator activity before delivery failure and excludes self-named agents", async () => {
+  const recorded: unknown[] = [];
+  const enqueued: unknown[] = [];
+  const agentCapability = "b".repeat(43);
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => null,
+    recordOperatorActivity: (input) => {
+      recorded.push(input);
+      return { key: "b".repeat(64), engine: "codex", project: "fixture", atMs: Date.now() };
+    },
+    enqueue: async (input) => {
+      enqueued.push(input);
+      throw new Error("delivery unavailable");
+    },
+  };
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  try {
+    const direct = await handleRuntimeCommand(request({
+      conversationId: "conversation_direct",
+      text: "retain direct activity",
+      idempotencyKey: "direct-runtime-one",
+    }), "send", dependencies);
+    const agent = await handleRuntimeCommand(request({
+      conversationId: "conversation_direct",
+      text: "bridge traffic",
+      idempotencyKey: "bridge-runtime-one",
+    }, {
+      host: "127.0.0.1",
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: agentCapability,
+    }), "send", dependencies);
+
+    expect(direct.status).toBe(503);
+    expect(agent.status).toBe(503);
+    expect(recorded).toEqual([{
+      conversationId: "conversation_direct",
+      idempotencyKey: "direct-runtime-one",
+    }]);
+  } finally {
+    setCallerConversationResolverForTests(null);
+  }
+});
+
+test("runtime answer records authorized operator activity once and excludes self-named agents", async () => {
+  const recorded: unknown[] = [];
+  const commands: unknown[] = [];
+  const agentCapability = "c".repeat(43);
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => ({
+      command: async (command: unknown) => {
+        commands.push(command);
+        throw new Error("answer delivery unavailable");
+      },
+    }) as unknown as RuntimeHostClient,
+    recordOperatorActivity: (input) => {
+      recorded.push(input);
+      return { key: "c".repeat(64), engine: "codex", project: "fixture", atMs: Date.now() };
+    },
+  };
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  try {
+    const body = {
+      conversationId: "conversation_direct",
+      attentionId: "attention-one",
+      resolution: { answers: [[0]] },
+      operationId: "answer-gesture-one",
+    };
+    const direct = await handleRuntimeCommand(request(body), "answer", dependencies);
+    const agent = await handleRuntimeCommand(request(body, {
+      host: "127.0.0.1",
+      [VIEWER_SPAWN_CAPABILITY_HEADER]: agentCapability,
+    }), "answer", dependencies);
+
+    expect(direct.status).toBe(503);
+    expect(agent.status).toBe(503);
+    expect(commands).toHaveLength(2);
+    expect(recorded).toEqual([{
+      conversationId: "conversation_direct",
+      idempotencyKey: "answer-gesture-one",
+    }]);
+  } finally {
+    setCallerConversationResolverForTests(null);
+  }
+});
+
+test("disabled WakaTime leaves runtime answer delivery unchanged and touches no activity state", async () => {
+  let registryReads = 0;
+  const commands: unknown[] = [];
+  const response = await handleRuntimeCommand(request({
+    conversationId: "conversation_direct",
+    attentionId: "attention-disabled",
+    resolution: { answers: [[0]] },
+    operationId: "answer-disabled-gesture",
+  }), "answer", {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => ({
+      command: async (command: unknown) => {
+        commands.push(command);
+        return {
+          operationId: "answer-disabled-gesture",
+          replayed: false,
+          receipt: {
+            operationId: "answer-disabled-gesture",
+            idempotencyKey: "answer-disabled-gesture",
+            conversationId: "conversation_direct",
+            kind: "answer" as const,
+            status: "delivered" as const,
+            at: "2026-08-15T10:00:00.000Z",
+            revision: 1,
+          },
+        };
+      },
+    }) as unknown as RuntimeHostClient,
+    recordOperatorActivity: (input) => recordDirectOperatorWakatimeActivity(input, {
+      enabled: () => false,
+      registrySnapshot: () => {
+        registryReads += 1;
+        throw new Error("disabled recording touched the registry");
+      },
+    }),
+  });
+
+  expect(response.status).toBe(200);
+  expect(commands).toHaveLength(1);
+  expect(registryReads).toBe(0);
 });
 
 test("runtime image admission returns typed statuses before commands or delivery reservations", async () => {

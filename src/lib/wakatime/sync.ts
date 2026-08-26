@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { agentRegistry, conversationLookupFromSnapshot, type RegistryFile } from "@/lib/agent/registry";
 import { configFilePath, statePath } from "@/lib/configDir";
+import { UNRESOLVED_PROJECT } from "@/lib/projects/identity";
 import {
   currentFileScan,
   persistedFileScanSnapshot,
@@ -11,16 +12,17 @@ import {
 } from "@/lib/scanner/scanCache";
 import { recentTurnWindowsFor, type RecentTurnWindows } from "@/lib/scanner/turnDuration";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
+import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 import type { FileEntry, TurnBoundary } from "@/lib/types";
 
 import { acquireWakatimeSchedulerLease, type WakatimeSchedulerLease } from "./lease";
+import { wakatimeIntegrationEnabled } from "./activation";
 
 const ENDPOINT = "https://api.wakatime.com/api/v1/users/current/heartbeats.bulk";
 const SAMPLE_INTERVAL_MS = 120_000;
 const TICK_INTERVAL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 const MAX_BATCH = 25;
-const OPERATOR_ENGAGEMENT_MS = 10 * 60_000;
 const DEFAULT_MAX_PENDING = 10_000;
 const DEFAULT_MAX_STREAMS = 5_000;
 const CLOSED_STREAM_RETENTION_MS = 30 * 24 * 60 * 60_000;
@@ -87,6 +89,13 @@ export interface WakatimeCredential {
   sourceStamp: string;
 }
 
+export interface DirectOperatorWakatimeHeartbeat {
+  key: string;
+  engine: "claude" | "codex";
+  project: string;
+  atMs: number;
+}
+
 interface TimerHandle {
   unref?(): unknown;
 }
@@ -103,7 +112,7 @@ export interface WakatimeSyncDependencies {
   recentTurnWindows(entry: FileEntry): RecentTurnWindows;
   readCredential(): Promise<WakatimeCredential | null> | WakatimeCredential | null;
   readState(): Promise<unknown | null> | unknown | null;
-  writeState(state: WakatimeStateV1): Promise<void> | void;
+  writeState(state: WakatimeStateV1): Promise<WakatimeStateV1 | void> | WakatimeStateV1 | void;
   fetch(url: string, init: RequestInit): Promise<WakatimeResponse>;
   now(): number;
   random(): number;
@@ -126,10 +135,6 @@ function digest(...parts: Array<string | number>): string {
 
 function turnDigest(conversationId: string, startedAtMs: number): string {
   return digest("llv-wakatime-v1", conversationId, startedAtMs);
-}
-
-function operatorDigest(conversationId: string, actionAtMs: number): string {
-  return digest("llv-wakatime-operator-v1", conversationId, actionAtMs);
 }
 
 function eventKey(stream: string, sampleTimeMs: number, kind: "activity" | "boundary" = "activity"): string {
@@ -295,7 +300,7 @@ function sampleTimes(start: number, end: number, closed: boolean, last: number |
 
 function addWindow(
   state: WakatimeStateV1,
-  entry: FileEntry,
+  source: { engine: "claude" | "codex"; lastActivityAtMs: number },
   streamKey: string,
   project: string,
   window: TurnBoundary,
@@ -310,10 +315,11 @@ function addWindow(
   const start = Math.max(window.startedAt, state.enabledAtMs);
   const existing = state.streams[streamKey];
   const retired = state.retiredStreams?.[streamKey];
-  if (window.endedAt === null && !openWindowActive && !existing && !retired && entry.mtime * 1_000 <= state.enabledAtMs) return;
+  if (window.endedAt === null && !openWindowActive && !existing && !retired
+    && source.lastActivityAtMs <= state.enabledAtMs) return;
   const lastProvenActivityAt = Math.min(now, Math.max(
     start,
-    entry.mtime * 1_000,
+    source.lastActivityAtMs,
     existing?.lastObservedAtMs ?? retired?.lastObservedAtMs ?? start,
   ));
   const end = window.endedAt ?? (openWindowActive ? now : lastProvenActivityAt);
@@ -322,8 +328,8 @@ function addWindow(
     && end <= retired.lastMaterializedAtMs
     && retired.boundaryFinalizedAtMs === end) return;
   const stream = existing ?? {
-    entity: `agent-log-viewer/${entry.engine}/${streamKey.slice(0, 16)}`,
-    engine: entry.engine as "claude" | "codex",
+    entity: `agent-log-viewer/${source.engine}/${streamKey.slice(0, 16)}`,
+    engine: source.engine,
     project,
     startedAtMs: window.startedAt,
     endedAtMs: window.endedAt,
@@ -360,6 +366,43 @@ function addWindow(
   }
   stream.lastMaterializedAtMs = Math.max(stream.lastMaterializedAtMs, end);
   if (closesObservedInterval) stream.boundaryFinalizedAtMs = end;
+}
+
+function addDirectOperatorHeartbeat(
+  state: WakatimeStateV1,
+  action: DirectOperatorWakatimeHeartbeat,
+  now: number,
+  existingKeys: Set<string>,
+): void {
+  if (state.streams[action.key] || state.retiredStreams?.[action.key]) return;
+  const entity = `agent-log-viewer/operator/${action.engine}/${action.key.slice(0, 16)}`;
+  state.streams[action.key] = {
+    entity,
+    engine: action.engine,
+    project: action.project,
+    startedAtMs: action.atMs,
+    endedAtMs: action.atMs + 1,
+    lastMaterializedAtMs: action.atMs + 1,
+    lastObservedAtMs: action.atMs,
+    boundaryFinalizedAtMs: action.atMs + 1,
+  };
+  const key = eventKey(action.key, action.atMs);
+  if (existingKeys.has(key)) return;
+  state.pending.push({
+    key,
+    stream: action.key,
+    kind: "activity",
+    createdAtMs: now,
+    heartbeat: {
+      entity,
+      type: "app",
+      project: action.project,
+      category: "ai coding",
+      time: action.atMs / 1_000,
+      ai_session: action.key,
+    },
+  });
+  existingKeys.add(key);
 }
 
 function openTurnIsActive(entry: FileEntry): boolean {
@@ -545,7 +588,8 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
 
   const persist = async (current: WakatimeStateV1): Promise<boolean> => {
     try {
-      await deps.writeState(structuredClone(current));
+      const written = await deps.writeState(structuredClone(current));
+      if (written) Object.assign(current, structuredClone(written));
       return true;
     } catch {
       report("state_write_failed");
@@ -554,66 +598,59 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
   };
 
   const observe = async (current: WakatimeStateV1): Promise<void> => {
-    const scan = await deps.scan();
-    if (!scan.complete) return;
-    const registry = deps.registrySnapshot();
-    const lookup = conversationLookupFromSnapshot(registry);
     const now = deps.now();
     const existingKeys = new Set(current.pending.map((event) => event.key));
     const observations: Array<{
-      entry: FileEntry;
+      source: { engine: "claude" | "codex"; lastActivityAtMs: number };
       streamKey: string;
       project: string;
       window: TurnBoundary;
       openWindowActive: boolean;
     }> = [];
-    for (const entry of scan.files) {
-      if ((entry.engine !== "claude" && entry.engine !== "codex")
-        || (entry.root !== "claude-projects" && entry.root !== "codex-sessions")
-        || !entry.path.endsWith(".jsonl") || entry.derivationComplete !== true) continue;
-      const conversation = lookup.conversationForPath(entry.path);
-      const generation = conversation?.generations.at(-1);
-      if (!conversation || !generation || generation.path !== entry.path || conversation.engine !== entry.engine) continue;
-      const recent = deps.recentTurnWindows(entry);
-      if (!recent.complete) continue;
-      if (recent.prefixTruncated && !historyGapPaths.has(entry.path)) {
-        historyGapPaths.add(entry.path);
-        current.counters.historyGaps += 1;
-        report("history_gap", { count: current.counters.historyGaps });
-      }
-      const project = resolveProjectAttribution({
-        projectOwnership: conversation.projectOwnership,
-        cwd: generation.launchProfile.cwd || entry.cwd,
-        launchProfileProject: generation.launchProfile.project,
-        fallbackProject: entry.project,
-      }).project;
-      if (!project) continue;
-      const openWindowActive = openTurnIsActive(entry);
-      for (const window of recent.windows) {
-        observations.push({
-          entry,
-          streamKey: turnDigest(conversation.id, window.startedAt),
-          project,
-          window,
-          openWindowActive,
-        });
-      }
-      const actionTimes = new Set<number>();
-      if (conversation.delegationDepth === 0) {
-        for (const actionAtMs of recent.operatorActionsAtMs ?? []) actionTimes.add(actionAtMs);
-        for (const actionAtMs of recent.unprovenancedUserActionsAtMs ?? []) actionTimes.add(actionAtMs);
-      }
-      for (const actionAtMs of actionTimes) {
-        if (!finite(actionAtMs) || actionAtMs <= 0) continue;
-        const engagementEndMs = actionAtMs + OPERATOR_ENGAGEMENT_MS;
-        const engagementActive = engagementEndMs > now;
-        observations.push({
-          entry,
-          streamKey: operatorDigest(conversation.id, actionAtMs),
-          project,
-          window: { startedAt: actionAtMs, endedAt: engagementActive ? null : engagementEndMs },
-          openWindowActive: engagementActive,
-        });
+    let scan: { files: FileEntry[]; complete: boolean } = { files: [], complete: false };
+    try {
+      scan = await deps.scan();
+    } catch {
+      report("observation_failed");
+    }
+    if (scan.complete) {
+      try {
+        const registry = deps.registrySnapshot();
+        const lookup = conversationLookupFromSnapshot(registry);
+        for (const entry of scan.files) {
+          if ((entry.engine !== "claude" && entry.engine !== "codex")
+            || (entry.root !== "claude-projects" && entry.root !== "codex-sessions")
+            || !entry.path.endsWith(".jsonl") || entry.derivationComplete !== true) continue;
+          const conversation = lookup.conversationForPath(entry.path);
+          const generation = conversation?.generations.at(-1);
+          if (!conversation || !generation || generation.path !== entry.path || conversation.engine !== entry.engine) continue;
+          const recent = deps.recentTurnWindows(entry);
+          if (!recent.complete) continue;
+          if (recent.prefixTruncated && !historyGapPaths.has(entry.path)) {
+            historyGapPaths.add(entry.path);
+            current.counters.historyGaps += 1;
+            report("history_gap", { count: current.counters.historyGaps });
+          }
+          const project = resolveProjectAttribution({
+            projectOwnership: conversation.projectOwnership,
+            cwd: generation.launchProfile.cwd || entry.cwd,
+            launchProfileProject: generation.launchProfile.project,
+            fallbackProject: entry.project,
+          }).project;
+          if (!project) continue;
+          const openWindowActive = openTurnIsActive(entry);
+          for (const window of recent.windows) {
+            observations.push({
+              source: { engine: entry.engine, lastActivityAtMs: entry.mtime * 1_000 },
+              streamKey: turnDigest(conversation.id, window.startedAt),
+              project,
+              window,
+              openWindowActive,
+            });
+          }
+        }
+      } catch {
+        report("observation_failed");
       }
     }
     const effectiveEnd = (observation: typeof observations[number]): number => {
@@ -621,7 +658,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       if (observation.openWindowActive) return now;
       return Math.min(now, Math.max(
         observation.window.startedAt,
-        observation.entry.mtime * 1_000,
+        observation.source.lastActivityAtMs,
         current.streams[observation.streamKey]?.lastObservedAtMs ?? observation.window.startedAt,
       ));
     };
@@ -668,7 +705,7 @@ export function createWakatimeSync(deps: WakatimeSyncDependencies): WakatimeSync
       const observation = observations[index]!;
       addWindow(
         current,
-        observation.entry,
+        observation.source,
         observation.streamKey,
         observation.project,
         observation.window,
@@ -931,17 +968,16 @@ export function readProductionWakatimeCredential(
   return readWakatimeCredentialFile(filename);
 }
 
-function readProductionState(): unknown | null {
+function readProductionState(filename: string = statePath("wakatime-state.json")): unknown | null {
   try {
-    return JSON.parse(fs.readFileSync(statePath("wakatime-state.json"), "utf8")) as unknown;
+    return JSON.parse(fs.readFileSync(filename, "utf8")) as unknown;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
 }
 
-function writeProductionState(state: WakatimeStateV1): void {
-  const filename = statePath("wakatime-state.json");
+function writeStateFile(filename: string, state: WakatimeStateV1): void {
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temporary = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
@@ -950,6 +986,55 @@ function writeProductionState(state: WakatimeStateV1): void {
   } finally {
     try { fs.unlinkSync(temporary); } catch { /* rename or cleanup already completed */ }
   }
+}
+
+function operatorStream(stream: WakatimeStateV1["streams"][string]): boolean {
+  return stream.entity.startsWith("agent-log-viewer/operator/");
+}
+
+export function writeProductionWakatimeState(
+  state: WakatimeStateV1,
+  filename: string = statePath("wakatime-state.json"),
+): WakatimeStateV1 {
+  return withFileTransactionSync(filename, "WakaTime state is busy", () => {
+    const concurrent = stateFrom(readProductionState(filename));
+    if (concurrent) {
+      const pendingKeys = new Set(state.pending.map((event) => event.key));
+      for (const [key, stream] of Object.entries(concurrent.streams)) {
+        if (!operatorStream(stream) || state.streams[key]) continue;
+        state.streams[key] = stream;
+        for (const event of concurrent.pending) {
+          if (event.stream === key && !pendingKeys.has(event.key)) {
+            state.pending.push(event);
+            pendingKeys.add(event.key);
+          }
+        }
+      }
+    }
+    writeStateFile(filename, state);
+    return state;
+  });
+}
+
+export function enqueueProductionOperatorHeartbeat(
+  action: DirectOperatorWakatimeHeartbeat,
+  filename: string = statePath("wakatime-state.json"),
+  enabled: () => boolean = wakatimeIntegrationEnabled,
+): void {
+  if (!enabled()) return;
+  if (!/^[a-f0-9]{64}$/.test(action.key)
+    || (action.engine !== "claude" && action.engine !== "codex")
+    || !action.project.trim()
+    || action.project.trim() === UNRESOLVED_PROJECT
+    || !Number.isSafeInteger(action.atMs)
+    || action.atMs <= 0) {
+    throw new Error("direct operator heartbeat is invalid");
+  }
+  withFileTransactionSync(filename, "WakaTime state is busy", () => {
+    const current = stateFrom(readProductionState(filename)) ?? freshState(action.atMs);
+    addDirectOperatorHeartbeat(current, { ...action, project: action.project.trim() }, action.atMs, new Set(current.pending.map((event) => event.key)));
+    writeStateFile(filename, current);
+  });
 }
 
 const singleton = globalThis as typeof globalThis & { __llvWakatimeSync?: WakatimeSync };
@@ -978,7 +1063,7 @@ function productionDependencies(): WakatimeSyncDependencies {
     recentTurnWindows: recentTurnWindowsFor,
     readCredential: readProductionWakatimeCredential,
     readState: readProductionState,
-    writeState: writeProductionState,
+    writeState: writeProductionWakatimeState,
     fetch: (url, init) => fetch(url, init),
     now: Date.now,
     random: Math.random,
@@ -990,8 +1075,9 @@ function productionDependencies(): WakatimeSyncDependencies {
   };
 }
 
-export function startWakatimeSync(dependencies: WakatimeSyncDependencies = productionDependencies()): void {
+export function startWakatimeSync(dependencies?: WakatimeSyncDependencies): void {
   if (singleton.__llvWakatimeSync) return;
-  const sync = createWakatimeSync(dependencies);
+  if (!dependencies && !wakatimeIntegrationEnabled()) return;
+  const sync = createWakatimeSync(dependencies ?? productionDependencies());
   singleton.__llvWakatimeSync = sync;
 }

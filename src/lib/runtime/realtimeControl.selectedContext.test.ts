@@ -4,6 +4,7 @@ import { captureSelectedContext, type SelectedContextRef } from "@/lib/selection
 
 import { executeRealtimeControl } from "./realtimeControl";
 import { resetVoiceViewBindings, voiceSelectedContext } from "./voiceViewBinding";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 /**
  * #844 §2/§4 at the realtime admission boundary: the utterance and the card it
@@ -133,6 +134,71 @@ test("an explicit empty selection is admitted and readable, distinct from never 
   );
   expect(result.status).toBe(200);
   expect(voiceSelectedContext("conversation_voice")?.reference.state).toBe("none");
+});
+
+test("a live peer records one stable operator event and a recording failure stays retryable", async () => {
+  const spoken: string[] = [];
+  const host = hostFor(spoken);
+  const recorded: unknown[] = [];
+  let fail = true;
+  await start(host, DESK);
+  const body = {
+    action: "operatorActivity",
+    conversationId: "conversation_voice",
+    realtimeSessionId: "live-1",
+    operatorEventId: "4".repeat(64),
+  };
+  const dependencies = {
+    recordOperatorActivity(input: unknown) {
+      recorded.push(input);
+      if (fail) throw new Error("disk unavailable");
+      return { key: "a".repeat(64), engine: "codex" as const, project: "atlas", atMs: NOW };
+    },
+  };
+
+  const failed = await executeRealtimeControl(body, () => host, PEER, dependencies);
+  fail = false;
+  const retried = await executeRealtimeControl(body, () => host, PEER, dependencies);
+  const anonymous = await executeRealtimeControl(body, () => host, { operator: false }, dependencies);
+  const agent = await executeRealtimeControl(
+    body,
+    () => host,
+    { caller: { kind: "conversation", conversationId: "conversation_worker" }, operator: false },
+    dependencies,
+  );
+
+  expect(failed.status).toBe(503);
+  expect(retried.status).toBe(200);
+  expect(anonymous.status).toBe(403);
+  expect(agent.status).toBe(403);
+  expect(recorded).toEqual([
+    { conversationId: "conversation_voice", idempotencyKey: `realtime:${"4".repeat(64)}` },
+    { conversationId: "conversation_voice", idempotencyKey: `realtime:${"4".repeat(64)}` },
+  ]);
+});
+
+test("disabled WakaTime acknowledges realtime operator activity without state access", async () => {
+  const host = hostFor([]);
+  let registryReads = 0;
+  await start(host, DESK);
+
+  const result = await executeRealtimeControl({
+    action: "operatorActivity",
+    conversationId: "conversation_voice",
+    realtimeSessionId: "live-1",
+    operatorEventId: "8".repeat(64),
+  }, () => host, PEER, {
+    recordOperatorActivity: (input) => recordDirectOperatorWakatimeActivity(input, {
+      enabled: () => false,
+      registrySnapshot: () => {
+        registryReads += 1;
+        throw new Error("disabled recording touched the registry");
+      },
+    }),
+  });
+
+  expect(result.status).toBe(200);
+  expect(registryReads).toBe(0);
 });
 
 test("a call opened with no window binding refuses every reference", async () => {

@@ -156,6 +156,18 @@ export type PipelineStageAttempt = {
   };
   startedAt: string | null;
   completedAt: string | null;
+  /** Bounded wait for a structured delivery controller that is between
+      publications (#1191). `startedAt` is wall-clock from the first sighting,
+      so the budget covers the time a failing spawn attempt spent inside
+      `spawnAgent` as well as the backoff; `retryAfter` is when the next
+      activation may run. Persisted because the wait is spent between ticks —
+      sleeping through it would hold the pipeline mutation past the flow
+      pipeline controller's phase deadline. */
+  controllerWait?: {
+    startedAt: string;
+    rounds: number;
+    retryAfter: string;
+  };
   /** Exactly-once relay (#353): the `{{prev.output}}` payload persisted when the
       cursor advanced here. Null on pre-v3 attempts, which fall back to the
       legacy positional scan. */

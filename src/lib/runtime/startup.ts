@@ -726,11 +726,11 @@ export async function adoptStructuredHostsAtStartup(
       && !orchestratorHostKeys.has(sessionKeyId(item.key)),
   );
   reportProgress("finalizing structured delivery");
-  if (controllerBoundEarly) {
-    await completeStructuredDeliveryQueueStartup(nextAdoptedHosts);
-  } else {
-    await bindStructuredDeliveryQueue(nextAdoptedHosts, { registry, client });
-  }
+  /* `controllerBoundEarly` is exactly "this pass has a runtime client", so the
+     only way past it is a viewer that cannot host at all. Rebinding there would
+     retire a publication this pass has no client to replace — and every spawn
+     in the process would fail until some later pass rebound it (#1191). */
+  if (controllerBoundEarly) await completeStructuredDeliveryQueueStartup(nextAdoptedHosts);
   await enqueueOrchestratorRestartRecoveries(
     registry,
     client,

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { deliverConversationMessage, type DeliveryOutcome } from "@/lib/delivery";
+import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { attachmentPath } from "@/lib/tasks/attachments";
@@ -10,6 +11,7 @@ import { assembleSendResults, type TaskSendTargetOutcome } from "@/lib/tasks/sen
 import { loadTasks, mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { ApiError } from "@/lib/types";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,7 +36,27 @@ function pathsFromBody(body: unknown): string[] | null {
   return normalized.length === paths.length && normalized.length > 0 ? [...new Set(normalized)] : null;
 }
 
-export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<NextResponse<SendResponse | ApiError>> {
+interface TaskSendDependencies {
+  loadTasks: typeof loadTasks;
+  listFiles: typeof listFiles;
+  deliverConversationMessage: typeof deliverConversationMessage;
+  mutateTasks: typeof mutateTasks;
+  recordOperatorActivity: typeof recordDirectOperatorWakatimeActivity;
+}
+
+const productionDependencies: TaskSendDependencies = {
+  loadTasks,
+  listFiles,
+  deliverConversationMessage,
+  mutateTasks,
+  recordOperatorActivity: recordDirectOperatorWakatimeActivity,
+};
+
+async function postTaskSend(
+  req: NextRequest,
+  ctx: TaskRouteContext,
+  dependencies: TaskSendDependencies = productionDependencies,
+): Promise<NextResponse<SendResponse | ApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
@@ -48,11 +70,35 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
   if (!paths) return NextResponse.json({ error: "paths with conversations are required" }, { status: 400 });
 
   const { id } = await ctx.params;
-  const task = loadTasks().find((item) => item.id === id);
+  const task = dependencies.loadTasks().find((item) => item.id === id);
   if (!task) return NextResponse.json({ error: "task not found" }, { status: 404 });
 
-  const files = await listFiles();
+  const files = await dependencies.listFiles();
   const byPath = new Map(files.map((file) => [file.path, file]));
+  const targetEntries = paths.flatMap((targetPath) => {
+    const target = byPath.get(targetPath);
+    return target && (target.engine === "claude" || target.engine === "codex") ? [target] : [];
+  }).sort((left, right) => left.path.localeCompare(right.path));
+  const clientRequestId = body && typeof body === "object" && !Array.isArray(body)
+    && typeof (body as { clientRequestId?: unknown }).clientRequestId === "string"
+    ? (body as { clientRequestId: string }).clientRequestId.trim().slice(0, 128)
+    : "";
+  if (clientRequestId && !/^[A-Za-z0-9_-]{8,128}$/.test(clientRequestId)) {
+    return NextResponse.json({ error: "clientRequestId must be 8-128 URL-safe characters" }, { status: 400 });
+  }
+  if (targetEntries[0] && directOperatorActivityAuthority(req).ok) {
+    try {
+      dependencies.recordOperatorActivity({
+        ...(clientRequestId ? { idempotencyKey: `task-send:${clientRequestId}` } : {}),
+        resolvedAttribution: {
+          engine: targetEntries[0].engine === "claude" ? "claude" : "codex",
+          project: task.project,
+        },
+      });
+    } catch {
+      return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
+    }
+  }
   /* Durable attachment paths ride in the delivery text (the buildImagePayload
      convention: one path per line after the text). The bytes are task-owned
      from creation, so a failed delivery can never orphan or erase them — the
@@ -65,7 +111,13 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
     /* #1117: a task send is the operator's own dispatch, and this route is
        reachable only from operator surfaces — stamped server-side, like
        /api/runtime/send, so the delivered card renders as the operator's. */
-    outcomes.push(await deliverConversationMessage({ pid: entry?.pid ?? null, path: targetPath, text, images: [], origin: { kind: "operator" } }));
+    outcomes.push(await dependencies.deliverConversationMessage({
+      pid: entry?.pid ?? null,
+      path: targetPath,
+      text,
+      images: [],
+      origin: { kind: "operator" },
+    }));
   }
 
   const at = isoNow();
@@ -73,7 +125,7 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
   /* The deliveries above already happened; the serialized read-modify-write
      folds their outcome into the freshest snapshot (DELETE mid-send wins:
      the task is gone from that snapshot and nothing is resurrected). */
-  const result = mutateTasks((tasks) => {
+  const result = dependencies.mutateTasks((tasks) => {
     const outcome = applyAssignmentPatches(tasks, id, assembled.patches, at);
     return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
   });
@@ -86,3 +138,8 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
     failed: assembled.failed,
   });
 }
+
+export const POST = Object.assign(
+  async (req: NextRequest, ctx: TaskRouteContext): Promise<NextResponse<SendResponse | ApiError>> => postTaskSend(req, ctx),
+  { withDependencies: postTaskSend },
+);

@@ -7,6 +7,7 @@ import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/age
 import { ENGINE_MODELS, validateLaunchModel } from "@/lib/agent/models";
 import { procBackend } from "@/lib/proc";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { internalServiceHeaders } from "@/lib/agent/operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { applyConversationMigration } from "@/lib/accounts/migration/conversationCommand";
 import { attentionCallerAuthority, processAncestry, type AttentionCallerAuthority, type AttentionCallerSources } from "@/lib/attention/callerAuthority";
@@ -46,9 +47,10 @@ import {
 } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
-import { recordManagerReport } from "@/lib/bridge/service";
+import { recordBridgeDirectiveAnswer, recordManagerReport } from "@/lib/bridge/service";
 import { bridgeDirectiveBody, bridgeDirectiveId, type BridgeTrailer } from "@/lib/bridge/directive";
-import { isBridgeReportClass } from "@/lib/bridge/types";
+import { seatIdentityResolver } from "@/lib/bridge/seatIdentity";
+import { isBridgeReportClass, type CanonicalSeatConversationId } from "@/lib/bridge/types";
 import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orchestrator/authority";
 import { activeOrchestratorSeats, canonicalOrchestratorProject, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "@/lib/orchestrator/seats";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
@@ -294,6 +296,12 @@ export interface ViewerMcpDomainDependencies {
       `@/lib/orchestrator/authority`), for project-scoped directive routing.
       Optional so partial harnesses fall back to the production resolver. */
   authorizedSeats?(): ReturnType<typeof authorizedManagerSeats>;
+  /** Resolves a seat identity through the registry's alias chain (#1168), so a
+      directive settles the ask of a seat the log recorded under a pre-migration
+      id. The attention projection resolves the recorded seat the same way, and
+      the two must agree or a rekeyed seat's ask outlives its answer. Optional
+      so partial harnesses fall back to the production registry. */
+  canonicalSeatConversationId?: CanonicalSeatConversationId;
   /** The calling voice session's CANONICAL PROJECT — production resolves it
       from the caller's conversation cwd through the worktree-grouping path
       (`projectInfoFromCwd`), the same attribution every other surface uses.
@@ -450,6 +458,12 @@ export function capabilityConversationResolver(
   return () => resolveDigest(digest);
 }
 
+/** The registry's own alias chain, resolved per call so a migration that lands
+    between two directives takes effect on the next one. */
+const productionCanonicalSeatConversationId = seatIdentityResolver(
+  (conversationId) => agentRegistry().canonicalConversationId(conversationId),
+);
+
 function attentionCallerSources(): AttentionCallerSources {
   return {
     ancestry: () => processAncestry(process.pid, (pid) => procBackend.readPpid(pid)),
@@ -470,6 +484,7 @@ export const productionDomainDependencies: ViewerMcpDomainDependencies = {
   selectedContext: productionSelectedContextDependencies,
   completedFileScan,
   registrySnapshot: () => agentRegistry().readOnlySnapshot(),
+  canonicalSeatConversationId: productionCanonicalSeatConversationId,
   boardFor,
   applyBoardCommand: (input, snapshot) => applyBoardCommand(input, { registrySnapshot: () => snapshot }),
   getFlowsWithPresets,
@@ -641,6 +656,7 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies)
     ...(roleParams ? { roleParams } : {}),
     clientAttemptId,
   }, {
+    ...internalServiceHeaders("mcp"),
     [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
   });
   return {
@@ -673,7 +689,7 @@ async function sendMessage(
     /* #1117: an MCP send is inter-agent traffic by definition; the sender role
        is the server's own caller attribution, so the feed can say WHO relayed. */
     origin: mcpSenderOrigin(dependencies),
-  });
+  }, callerCapabilityHeaders());
   /* The registry's OWN lookup over the projection this call already holds (#845),
      rather than a local reimplementation of it. The alias walk is multi-hop and
      cycle-guarded and the path index covers continuity paths, so a send addressed by
@@ -1444,7 +1460,27 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     /* #1117: a directive relay is inter-agent traffic — the manager's feed
        names the gateway (or attributed caller role), never the operator. */
     origin: mcpSenderOrigin(dependencies),
-  });
+  }, callerCapabilityHeaders());
+  /* The trailer is the ONLY thing that says a report was answered — the drain
+     cursor says only that it was read aloud — so it is recorded the moment the
+     answer actually reaches the manager (#1168). Scoped by the project and seat
+     this directive was just routed to, because a report seq is log-global: the
+     store settles the ref only if it names a decision request THIS seat filed,
+     so a ref that names nothing yet cannot pre-answer a later report and a
+     directive cannot clear another project's ask. The seat identity travels in
+     through the registry's alias chain, because the log recorded whatever the
+     conversation was called when it asked while the seat authority hands this
+     relay whatever it is called now — and the attention projection resolves the
+     recorded id the same way, so anything less here leaves a rekeyed seat's ask
+     visible and unanswerable. Idempotent, so a directive retry under the same
+     derived id settles the same seq once. */
+  if (trailer) {
+    recordBridgeDirectiveAnswer(
+      trailer.ref,
+      { project, seatConversationId: manager.conversationId },
+      dependencies.canonicalSeatConversationId ?? productionCanonicalSeatConversationId,
+    );
+  }
   return {
     directiveId: deliveryId,
     managerConversationId: manager.conversationId,
@@ -1474,7 +1510,10 @@ function derivedRequestId(base: string, suffix: string): string {
  */
 function callerCapabilityHeaders(): Record<string, string> {
   const capability = process.env[VIEWER_SPAWN_CAPABILITY_ENV]?.trim() ?? "";
-  return /^[A-Za-z0-9_-]{43}$/.test(capability) ? { [VIEWER_SPAWN_CAPABILITY_HEADER]: capability } : {};
+  return {
+    ...internalServiceHeaders("mcp"),
+    ...(/^[A-Za-z0-9_-]{43}$/.test(capability) ? { [VIEWER_SPAWN_CAPABILITY_HEADER]: capability } : {}),
+  };
 }
 
 /** Explicitly allowlisted fields for the designation routes. The seat route
@@ -1659,7 +1698,7 @@ async function sendMessageToOrchestrator(
     text: message,
     images: [],
     origin: mcpSenderOrigin(dependencies),
-  });
+  }, callerCapabilityHeaders());
   return redactPayload({
     project,
     conversationId: seat.conversationId,

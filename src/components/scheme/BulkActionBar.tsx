@@ -199,11 +199,18 @@ export const BulkActionBar = memo(function BulkActionBar({
             return;
           }
           const taskId = created.task.id;
+          /* #763: one submit is one operator input, however many targets it
+             fans out to. Every per-target request carries this one gesture id,
+             so the server records a single operator heartbeat for the whole
+             submit instead of one per target. The runner closes over it, so
+             retrying the failed slots replays the same gesture rather than
+             counting the operator twice. */
+          const operatorEventId = newClientRequestId();
           /* Per-target task delivery through the same report/retry machinery as
              the broadcast; the images ride in the delivery text as durable
              paths, so no separate post-send image hop is needed. */
           const items = await execute("message", [...byPath.keys()], async (path) => {
-            const sent = await sendTask(taskId, [path]);
+            const sent = await sendTask(taskId, [path], operatorEventId);
             if ("error" in sent) return { ok: false as const, error: sent.error };
             const result = sent.results[0];
             if (!result?.ok) return { ok: false as const, error: result?.error ?? t("common.failedSend") };

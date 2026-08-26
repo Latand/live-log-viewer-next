@@ -356,6 +356,61 @@ test("pre-pane spawn failure returns an ownerless task to inbox", async () => {
   }]);
 });
 
+test("task spawn records its operator gesture once even when launch fails before a pane", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-wakatime-failure-"));
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const task: BoardTask = {
+    id: "task-wakatime-failure",
+    project: "project-fixture",
+    status: "inbox",
+    text: "Launch the worker",
+    placement: "unplaced",
+    assignments: [],
+    createdAt: "2026-08-15T10:00:00.000Z",
+    updatedAt: "2026-08-15T10:00:00.000Z",
+  };
+  const recorded = new Map<string, unknown>();
+  let tasks = [task];
+  const dependencies = {
+    registry: () => registry,
+    loadTasks: () => tasks,
+    mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
+      const mutation = mutator(tasks);
+      if (mutation.tasks) tasks = mutation.tasks;
+      return mutation.result;
+    },
+    resolveSpawnAccount: () => ({
+      engine: "claude" as const,
+      accountId: "claude-work",
+      kind: "managed" as const,
+      home: cwd,
+      transcriptRoot: cwd,
+      env: { NODE_ENV: "test" },
+    }),
+    spawnAgentWithPrompt: async () => { throw new Error("process failed before pane"); },
+    resolveSpawnedTranscriptPath: async () => null,
+    recordOperatorActivity: (input: { idempotencyKey?: string }) => {
+      recorded.set(input.idempotencyKey ?? "", input);
+      return { key: "c".repeat(64), engine: "claude" as const, project: task.project, atMs: 1 };
+    },
+  } as Parameters<typeof POST.withDependencies>[2];
+  const request = () => new NextRequest("http://127.0.0.1/api/tasks/task-wakatime-failure/spawn", {
+    method: "POST",
+    headers: { host: "127.0.0.1", origin: "http://127.0.0.1", "sec-fetch-site": "same-origin", "content-type": "application/json" },
+    body: JSON.stringify({ engine: "claude", cwd, clientAttemptId: "task_spawn_gesture_20260815" }),
+  });
+  const context = { params: Promise.resolve({ id: task.id }) };
+
+  const failed = await POST.withDependencies(request(), context, dependencies);
+  const replay = await POST.withDependencies(request(), context, dependencies);
+
+  expect([failed.status, replay.status]).toEqual([500, 200]);
+  expect([...recorded.values()]).toEqual([{
+    idempotencyKey: "task-spawn:task_spawn_gesture_20260815",
+    resolvedAttribution: { engine: "claude", project: "project-fixture" },
+  }]);
+});
+
 test("a deliberate retry after pre-pane failure creates one fresh launch", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-deliberate-retry-"));
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });

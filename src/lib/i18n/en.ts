@@ -1772,6 +1772,7 @@ export const en = {
   "status.awaitingPlan": "awaiting plan approval",
   "status.awaitingAnswer": "awaiting an answer to a question",
   "status.awaitingTerminal": "awaiting a reply in the terminal",
+  "status.awaitingDecision": "the orchestrator is waiting on your decision",
   "status.working": "working…",
   "status.returnedResult": "returned with a result",
   "status.stalled": "interrupted or awaiting permission",

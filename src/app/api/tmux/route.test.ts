@@ -9,13 +9,17 @@ import { NextRequest } from "next/server";
 const realResources = { ...(await import("@/lib/resources")) };
 const previousCodexHome = process.env.LLV_CODEX_HOME;
 const routeCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tmux-route-codex-"));
+const previousStateDir = process.env.LLV_STATE_DIR;
 const PATHNAME = path.join(routeCodexHome, "sessions", "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl");
 fs.mkdirSync(path.dirname(PATHNAME), { recursive: true });
 fs.writeFileSync(PATHNAME, "{}\n");
 process.env.LLV_CODEX_HOME = routeCodexHome;
+process.env.LLV_STATE_DIR = path.join(routeCodexHome, "state");
 afterAll(() => {
   if (previousCodexHome === undefined) delete process.env.LLV_CODEX_HOME;
   else process.env.LLV_CODEX_HOME = previousCodexHome;
+  if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousStateDir;
   fs.rmSync(routeCodexHome, { recursive: true, force: true });
   mock.module("@/lib/resources", () => realResources);
 });
@@ -40,7 +44,10 @@ let attachResolution: unknown = {
   command: "TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -t 'agents:4.0'",
   readOnlyCommand: "TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -r -t 'agents:4.0'",
 };
-let delivery: (message: unknown) => Promise<{ ok: true; outcome: "delivered-to-live" | "resumed"; target: string; spawned?: boolean }> = async () => ({
+let delivery: (message: unknown) => Promise<
+  | { ok: true; outcome: "delivered-to-live" | "resumed"; target: string; spawned?: boolean }
+  | { ok: false; outcome: "failed"; error: string; status: number }
+> = async () => ({
   ok: true,
   outcome: "delivered-to-live",
   target: "agents:4.0",
@@ -52,6 +59,8 @@ let structuredControlRequest: Record<string, unknown> | null = null;
 let interruptCalls = 0;
 let structuredMessageCalls = 0;
 let structuredMessageRequest: Record<string, unknown> | null = null;
+let operatorActivityRequests: Record<string, unknown>[] = [];
+let operatorActivityEnabled = true;
 let collectedImages: Array<{ base64: string; mime: string }> = [];
 let deletedImagePaths: string[][] = [];
 let structuredMessageResult:
@@ -84,7 +93,7 @@ const snapshot = {
   canonicalFor: (pathname: string) => (pathname === PATHNAME ? host : null),
 };
 
-const completedFiles = [{ path: PATHNAME }];
+let completedFiles: Array<Record<string, unknown>> = [{ path: PATHNAME }];
 
 mock.module("@/lib/agent/transcriptHost", () => ({
   canonicalTranscriptTarget: (observed: typeof snapshot, pathname: string) => observed.canonicalFor(pathname)?.display ?? null,
@@ -114,6 +123,18 @@ mock.module("@/lib/runtime/structuredMessageDelivery", () => ({
     structuredMessageCalls += 1;
     structuredMessageRequest = request;
     return structuredMessageResult;
+  },
+}));
+mock.module("@/lib/wakatime/operatorActivity", () => ({
+  recordDirectOperatorWakatimeActivity: (request: Record<string, unknown>) => {
+    if (!operatorActivityEnabled) return null;
+    operatorActivityRequests.push(request);
+    return {
+      key: "a".repeat(64),
+      engine: "codex",
+      project: "fixture",
+      atMs: Date.now(),
+    };
   },
 }));
 mock.module("@/lib/delivery", () => ({
@@ -197,13 +218,149 @@ function get(url: string): NextRequest {
   return new NextRequest(url, { headers: { host: "127.0.0.1" } });
 }
 
-function post(body: unknown): NextRequest {
+function post(body: unknown, headers: Record<string, string> = {}): NextRequest {
   return new NextRequest("http://127.0.0.1/api/tmux", {
     method: "POST",
-    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    headers: { host: "127.0.0.1", "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
+
+test("/api/tmux records a validated direct browser message and refuses an agent claim", async () => {
+  const { setCallerConversationResolverForTests } = await import("@/lib/agent/operatorAuthority");
+  const { VIEWER_SPAWN_CAPABILITY_HEADER } = await import("@/lib/agent/spawnPolicy");
+  const agentCapability = "a".repeat(43);
+  delivery = async () => ({ ok: true, outcome: "delivered-to-live", target: "agents:4.0" });
+  operatorActivityRequests = [];
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  try {
+    const direct = await POST(post({
+      path: PATHNAME,
+      text: "direct operator input",
+      clientMessageId: "direct-message-one",
+    }));
+    const agent = await POST(post({
+      path: PATHNAME,
+      text: "agent bridge input",
+      clientMessageId: "bridge-message-one",
+    }, { [VIEWER_SPAWN_CAPABILITY_HEADER]: agentCapability }));
+
+    expect(direct.status).toBe(200);
+    expect(agent.status).toBe(200);
+    expect(operatorActivityRequests).toHaveLength(1);
+    expect(operatorActivityRequests[0]).toMatchObject({
+      path: PATHNAME,
+      idempotencyKey: "direct-message-one",
+    });
+  } finally {
+    setCallerConversationResolverForTests(null);
+  }
+});
+
+test("/api/tmux excludes authenticated monitor and MCP producers while one browser gesture records once", async () => {
+  const { internalServiceHeaders } = await import("@/lib/agent/operatorAuthority");
+  operatorActivityRequests = [];
+
+  const bodies = [
+    ["browser-message", {}],
+    ["monitor-message", internalServiceHeaders("monitor")],
+    ["mcp-message", internalServiceHeaders("mcp")],
+    ["forged-service-message", { "x-llv-internal-service": "mcp.invalid" }],
+  ] as const;
+  const responses = [];
+  for (const [clientMessageId, headers] of bodies) {
+    responses.push(await POST(post({ path: PATHNAME, text: "same delivery shape", clientMessageId }, headers)));
+  }
+
+  expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+  expect(operatorActivityRequests).toEqual([
+    expect.objectContaining({ idempotencyKey: "browser-message" }),
+    expect.objectContaining({ idempotencyKey: "forged-service-message" }),
+  ]);
+});
+
+test("/api/tmux delivery is unaffected when WakaTime recording is disabled", async () => {
+  operatorActivityEnabled = false;
+  operatorActivityRequests = [];
+  let deliveries = 0;
+  delivery = async () => {
+    deliveries += 1;
+    return { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
+  };
+  try {
+    const response = await POST(post({ path: PATHNAME, text: "continue", clientMessageId: "disabled-message" }));
+    expect(response.status).toBe(200);
+    expect(deliveries).toBe(1);
+    expect(operatorActivityRequests).toEqual([]);
+  } finally {
+    operatorActivityEnabled = true;
+  }
+});
+
+test("/api/tmux records an authorized dialog answer once and excludes an agent claim", async () => {
+  const { setCallerConversationResolverForTests } = await import("@/lib/agent/operatorAuthority");
+  const { VIEWER_SPAWN_CAPABILITY_HEADER } = await import("@/lib/agent/spawnPolicy");
+  const agentCapability = "d".repeat(43);
+  operatorActivityRequests = [];
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  try {
+    const body = {
+      path: PATHNAME,
+      action: "dialog-key",
+      key: "1",
+      label: "Proceed",
+      clientMessageId: "dialog-answer-one",
+    };
+    const direct = await POST(post(body));
+    const agent = await POST(post(body, { [VIEWER_SPAWN_CAPABILITY_HEADER]: agentCapability }));
+
+    expect(direct.status).toBe(200);
+    expect(agent.status).toBe(200);
+    expect(operatorActivityRequests).toEqual([expect.objectContaining({
+      path: PATHNAME,
+      idempotencyKey: "dialog-answer-one",
+    })]);
+  } finally {
+    setCallerConversationResolverForTests(null);
+  }
+});
+
+test("/api/tmux gives each id-less request a hash-only fallback with no message text", async () => {
+  operatorActivityRequests = [];
+  const body = { path: PATHNAME, text: "legacy retry payload" };
+
+  const first = await POST(post(body));
+  const retry = await POST(post(body));
+  const distinct = await POST(post({ ...body, text: "another intentional payload" }));
+
+  expect([first.status, retry.status, distinct.status]).toEqual([200, 200, 200]);
+  expect(operatorActivityRequests).toHaveLength(3);
+  expect(operatorActivityRequests[0]).not.toHaveProperty("idempotencyKey");
+  expect(JSON.stringify(operatorActivityRequests)).not.toContain("legacy retry payload");
+});
+
+test("/api/tmux attributes by path before a recycled pid and rejects conflicting strong evidence", async () => {
+  const unrelated = { path: "/sessions/unrelated.jsonl", conversationId: "conversation_unrelated", pid: 77 };
+  const exact = { path: PATHNAME, conversationId: "conversation_exact", pid: 42 };
+  completedFiles = [unrelated, exact];
+  operatorActivityRequests = [];
+  try {
+    const exactResponse = await POST(post({ path: PATHNAME, pid: 77, text: "attribute exactly", clientMessageId: "exact-target" }));
+    const conflictResponse = await POST(post({
+      path: PATHNAME,
+      conversationId: "conversation_unrelated",
+      text: "conflicting target",
+      clientMessageId: "conflicting-target",
+    }));
+
+    expect(exactResponse.status).toBe(200);
+    expect(operatorActivityRequests[0]?.fallbackEntry).toEqual(exact);
+    expect(conflictResponse.status).toBe(409);
+    expect(operatorActivityRequests).toHaveLength(1);
+  } finally {
+    completedFiles = [{ path: PATHNAME }];
+  }
+});
 
 test("/api/tmux GET uses the transcript host when a recycled pid disagrees", async () => {
   transcriptReads = 0;

@@ -88,6 +88,7 @@ interface ControlRequest {
   view?: { viewSessionId: string; deviceId: string };
   realtimeSessionId?: string;
   selectedContext?: SelectedContextRef;
+  operatorEventId?: string;
 }
 
 let requests: ControlRequest[] = [];
@@ -96,6 +97,7 @@ const PATH = "fixtures/projects/atlas/worker-a.jsonl";
 
 beforeEach(() => {
   requests = [];
+  dom.localStorage.clear();
   globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
     requests.push(JSON.parse(String(init?.body)) as ControlRequest);
     return { ok: true, status: 200, json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" }) } as unknown as Response;
@@ -141,16 +143,70 @@ test("a finished utterance reports the selected card against the call's own cred
   finished(peer, "user", "look at that one");
   await Promise.resolve();
 
-  const published = requests.filter((request) => request.action === "selectedContext");
-  expect(published).toHaveLength(1);
-  expect(published[0]!.realtimeSessionId).toBe("live-1");
-  expect(published[0]!.selectedContext).toMatchObject({
+  const operatorActivity = requests.filter((request) => request.action === "operatorActivity");
+  expect(operatorActivity).toHaveLength(1);
+  expect(operatorActivity[0]!.realtimeSessionId).toBe("live-1");
+  expect(operatorActivity[0]!.operatorEventId).toMatch(/^[a-f0-9]{64}$/);
+  const selectedContext = requests.filter((request) => request.action === "selectedContext");
+  expect(selectedContext).toHaveLength(1);
+  expect(selectedContext[0]!.selectedContext).toMatchObject({
     version: 1,
     state: "selected",
     conversationId: "conversation_atlas_a",
     viewSessionId: "vs-synthetic-1",
     deviceId: "dev-synthetic-1",
   });
+});
+
+test("operator activity retries network and server failures with one stable event identity", async () => {
+  let firstOperatorEventId: string | null = null;
+  const attemptsByEventId = new Map<string, number>();
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as ControlRequest;
+    requests.push(request);
+    if (request.action === "operatorActivity") {
+      const operatorEventId = request.operatorEventId!;
+      firstOperatorEventId ??= operatorEventId;
+      const attempt = (attemptsByEventId.get(operatorEventId) ?? 0) + 1;
+      attemptsByEventId.set(operatorEventId, attempt);
+      if (attempt === 1 && operatorEventId === firstOperatorEventId) throw new Error("offline");
+      if (attempt === 1) {
+        return { ok: false, status: 503, json: async () => ({ error: "temporarily unavailable" }) } as Response;
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, sdp: "v=0\r\nanswer", realtimeSessionId: "live-1" }) } as unknown as Response;
+  }) as typeof fetch;
+  const peer = await liveCall("conversation_voice_retry");
+
+  finished(peer, "user", "record after a network failure");
+  for (let microtask = 0; microtask < 8; microtask += 1) await Promise.resolve();
+  finished(peer, "user", "record after a server failure");
+  for (let microtask = 0; microtask < 8; microtask += 1) await Promise.resolve();
+
+  const published = requests.filter((request) => request.action === "operatorActivity");
+  expect(published).toHaveLength(4);
+  expect(published[0]!.operatorEventId).toBe(published[1]!.operatorEventId);
+  expect(published[2]!.operatorEventId).toBe(published[3]!.operatorEventId);
+  expect(published[0]!.operatorEventId).not.toBe(published[2]!.operatorEventId);
+  expect(dom.localStorage.length).toBe(0);
+});
+
+test("a live call reports operator activity without browser storage", async () => {
+  const peer = await liveCall("conversation_voice_storage_restricted");
+  const originalSetItem = dom.localStorage.setItem.bind(dom.localStorage);
+  dom.localStorage.setItem = () => {
+    throw new Error("storage is restricted");
+  };
+  try {
+    finished(peer, "user", "record this direct activity");
+    for (let index = 0; index < 4; index += 1) await Promise.resolve();
+  } finally {
+    dom.localStorage.setItem = originalSetItem;
+  }
+
+  const published = requests.filter((request) => request.action === "operatorActivity");
+  expect(published).toHaveLength(1);
+  expect(published[0]!.operatorEventId).toMatch(/^[a-f0-9]{64}$/);
 });
 
 test("streaming fragments and the agent's own speech publish nothing", async () => {
@@ -160,7 +216,7 @@ test("streaming fragments and the agent's own speech publish nothing", async () 
   finished(peer, "assistant", "The build is green.");
   await Promise.resolve();
 
-  expect(requests.filter((request) => request.action === "selectedContext")).toHaveLength(0);
+  expect(requests.filter((request) => request.action === "selectedContext" || request.action === "operatorActivity")).toHaveLength(0);
 });
 
 test("each finished utterance reports again, so a mid-call re-selection is honoured", async () => {
@@ -168,10 +224,11 @@ test("each finished utterance reports again, so a mid-call re-selection is honou
   finished(peer, "user", "look at that one");
   viewBus.reportSlice({ mode: "list", focusedPath: null, selectedPaths: [], visiblePaths: [], camera: null });
   finished(peer, "user", "never mind, general status");
-  await Promise.resolve();
+  for (let index = 0; index < 4; index += 1) await Promise.resolve();
 
   const published = requests.filter((request) => request.action === "selectedContext");
   expect(published).toHaveLength(2);
   expect(published[0]!.selectedContext).toMatchObject({ state: "selected" });
   expect(published[1]!.selectedContext).toMatchObject({ state: "none" });
+  expect(requests.filter((request) => request.action === "operatorActivity")).toHaveLength(2);
 });

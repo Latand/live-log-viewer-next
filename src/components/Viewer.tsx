@@ -21,7 +21,7 @@ import { canonicalClientProject } from "@/lib/projects/clientAliases";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { advanceAttentionCycle, attentionId, buildAttentionQueue, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
+import { advanceAttentionCycle, attentionExpiries, attentionId, buildAttentionQueue, type AttentionItem } from "./attention";
 import { AttentionHost } from "./attention/AttentionHost";
 import { AttentionIsland, AttentionQueueRow } from "./attention/AttentionIsland";
 import { AttentionToast } from "./attention/AttentionToast";
@@ -539,17 +539,16 @@ export function Viewer() {
   }, [catalogPin, pendingHash, allFiles, files, loaded]);
 
   /* The one queue every counter shows: badge, popover and the tab title all
-     read the same list, stalled tail included (D10). The clock advances when
-     the oldest stalled entry crosses its 2h TTL: useFiles keeps the array
-     identity while the /api/files body is unchanged, so without this tick an
-     expired stalled item would sit in the badge until an unrelated change. */
+     read the same list, stalled tail included (D10). The clock advances at the
+     nearest expiry of any kind — a stalled entry crossing its 2h TTL, an
+     orchestrator's bridge ask crossing its own (#1168): useFiles keeps the
+     array identity while the /api/files body is unchanged, and a cached
+     projection does not move when a report merely gets old, so without this
+     tick an expired item would sit in the badge until an unrelated change. */
   const [clock, setClock] = useState(() => Date.now() / 1000);
   const queue = useMemo(() => buildAttentionQueue(files, clock), [files, clock]);
   useEffect(() => {
-    const expiries = files
-      .filter((file) => file.activity === "stalled")
-      .map((file) => file.mtime + STALLED_ATTENTION_TTL)
-      .filter((at) => at > clock);
+    const expiries = attentionExpiries(files).filter((at) => at > clock);
     if (!expiries.length) return;
     const delay = Math.max(0, (Math.min(...expiries) - Date.now() / 1000) * 1000) + 500;
     const timer = window.setTimeout(() => setClock(Date.now() / 1000), delay);

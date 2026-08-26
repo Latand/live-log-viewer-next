@@ -4,7 +4,9 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
 import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { parseRuntimeCommand } from "./commands";
@@ -24,6 +26,7 @@ export interface RuntimeHttpDependencies {
   structuredEnabled?(): boolean;
   registry?(): AgentRegistry;
   enqueue?: typeof enqueueStructuredMessage;
+  recordOperatorActivity?: typeof recordDirectOperatorWakatimeActivity;
   kick?(): void | Promise<void>;
 }
 
@@ -33,6 +36,7 @@ const DEFAULT_DEPENDENCIES: RuntimeHttpDependencies = {
   structuredEnabled: () => structuredHostsEnabled(),
   registry: agentRegistry,
   enqueue: enqueueStructuredMessage,
+  recordOperatorActivity: recordDirectOperatorWakatimeActivity,
   kick: kickStructuredDeliveryQueue,
 };
 
@@ -105,6 +109,18 @@ export async function handleRuntimeCommand(
   }
   const client = dependencies.client();
   try {
+    if ((command.kind === "send" || command.kind === "steer" || command.kind === "answer")
+      && directOperatorActivityAuthority(request).ok
+      && dependencies.recordOperatorActivity) {
+      try {
+        dependencies.recordOperatorActivity({
+          conversationId: command.conversationId,
+          idempotencyKey: command.idempotencyKey,
+        });
+      } catch {
+        return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
+      }
+    }
     if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
       const admitted = await dependencies.enqueue({
         path: "",
