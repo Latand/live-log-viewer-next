@@ -128,7 +128,9 @@ class FakeAppServer extends EventEmitter {
   realtimeAppendErrorAt: number | null = null;
   responseChunkBytes: number | null = null;
   oversizedTurnStartResult = false;
+  oversizedTurnStartErrorResult = false;
   oversizedTurnSteerResult = false;
+  oversizedTurnInterruptResult = false;
   resumeReplayTurns: unknown[] | null = null;
   resumeItemsBackwardsCursor = "resume-items-anchor";
   rejectFullTurnPages = false;
@@ -321,10 +323,15 @@ class FakeAppServer extends EventEmitter {
     }
     if (method === "turn/start") {
       const turnId = `turn-${++this.turn}`;
+      if (this.oversizedTurnStartErrorResult) {
+        return this.respondError(message.id, `turn refused ${"p".repeat(26 * 1024 * 1024)}`);
+      }
       if (this.oversizedTurnStartResult) {
         this.persistUserMessage(message, turnId);
         this.notify("turn/started", { threadId: this.threadId, turn: { id: turnId } });
-        return this.respond(message.id, { turn: { id: turnId }, padding: "p".repeat(26 * 1024 * 1024) });
+        this.respond(message.id, { turn: { id: turnId }, padding: "p".repeat(26 * 1024 * 1024) });
+        this.completeUserMessage(message, turnId);
+        return;
       }
       this.respond(message.id, { turn: { id: turnId } });
       this.notify("turn/started", { threadId: this.threadId, turn: { id: turnId } });
@@ -335,13 +342,20 @@ class FakeAppServer extends EventEmitter {
       const turnId = (message.params as { expectedTurnId: string }).expectedTurnId;
       if (this.oversizedTurnSteerResult) {
         this.persistUserMessage(message, turnId);
-        return this.respond(message.id, { turnId, padding: "p".repeat(26 * 1024 * 1024) });
+        this.respond(message.id, { turnId, padding: "p".repeat(26 * 1024 * 1024) });
+        this.completeUserMessage(message, turnId);
+        return;
       }
       this.respond(message.id, { turnId });
       this.completeUserMessage(message, turnId);
       return;
     }
-    if (method === "turn/interrupt") return this.respond(message.id, {});
+    if (method === "turn/interrupt") {
+      if (this.oversizedTurnInterruptResult) {
+        return this.respond(message.id, { padding: "p".repeat(26 * 1024 * 1024) });
+      }
+      return this.respond(message.id, {});
+    }
     if (method === "thread/inject_items") {
       if (this.injectItemsError) return this.respondError(message.id, this.injectItemsError);
       if (this.holdInjectItems) {
@@ -1606,8 +1620,9 @@ describe("CodexAppServerHost", () => {
         spawnProcess: fakeSpawn(server),
       });
 
-      expect(server.requests.find((request) => request.method === "thread/read")?.params)
-        .toEqual({ threadId, includeTurns: false });
+      const metadataReads = server.requests.filter((request) => request.method === "thread/read");
+      expect(metadataReads).toHaveLength(1);
+      expect(metadataReads[0]?.params).toEqual({ threadId, includeTurns: false });
       expect(server.requests.some((request) => request.method === "thread/turns/list")).toBeTrue();
       expect(server.requests.some((request) => request.method === "thread/items/list")).toBeTrue();
       expect(server.requests.some((request) => request.method === "thread/read"
@@ -1655,6 +1670,135 @@ describe("CodexAppServerHost", () => {
     expect(await host.send({ id: "post-shrink", text: "ping" })).toMatchObject({ outcome: "turn-started" });
     await host.release();
   }, 30_000);
+
+  /* A page is only as large as the records inside it. One whose bounded
+     reduction exceeds the reducer output budget is re-requested a record at a
+     time, so a size-coupled page cannot make the session unreachable on every
+     adoption attempt (#301 Expected 1). */
+  test("an item page over the reducer output budget is retried one item at a time and adoption completes", async () => {
+    const threadId = "overflowing-item-page-thread";
+    /* Three inline images: each survives the reducer's image cap whole, and
+       together they pass the reduced-output budget that a ten-record page
+       would have to fit. */
+    const inlineImage = `data:image/png;base64,${"A".repeat(22_400_000)}`;
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: "overflow-turn",
+      status: "completed",
+      items: Array.from({ length: 3 }, (_, index) => ({
+        id: `page-overflow-item-${index}`,
+        type: "agentMessage",
+        text: inlineImage,
+      })),
+    }]);
+    const eventStore = new MemoryEventStore();
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const host = await CodexAppServerHost.adopt(threadId, {
+        cwd: "/repo",
+        eventStore,
+        spawnProcess: fakeSpawn(server),
+      });
+
+      const narrowed = server.requests.filter((request) => request.method === "thread/items/list"
+        && (request.params as { limit?: number }).limit === 1);
+      expect(narrowed).toHaveLength(1);
+      const ids = eventStore.load(threadId)
+        .filter((event) => event.kind === "item")
+        .map((event) => (event.item as { id?: unknown }).id)
+        .filter((id): id is string => typeof id === "string" && id.startsWith("page-overflow-item-"));
+      expect(ids).toEqual(["page-overflow-item-0", "page-overflow-item-1", "page-overflow-item-2"]);
+      expect((await host.health()).status).not.toBe("dead");
+      expect(await host.send({ id: "after-page-overflow", text: "still reachable" }))
+        .toMatchObject({ outcome: "turn-started" });
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
+  }, 120_000);
+
+  /* One persisted record whose bounded reduction is still over the budget sits
+     outside the supported envelope. Hydration stops there and says so rather
+     than failing adoption, so everything newer stays readable (#301 Expected
+     1 and 2). */
+  test("a single item still over the reducer budget ends hydration with a diagnostic and adoption completes", async () => {
+    const threadId = "unadmittable-item-thread";
+    const inlineImage = `data:image/png;base64,${"A".repeat(22_400_000)}`;
+    const server = new FakeAppServer(threadId, threadId, false, [
+      {
+        id: "unadmittable-turn",
+        status: "completed",
+        items: [{
+          id: "unadmittable-item",
+          type: "mcpToolCall",
+          status: "completed",
+          result: { Ok: { content: Array.from({ length: 3 }, () => ({ type: "text", text: inlineImage })) } },
+        }],
+      },
+      {
+        id: "newer-turn",
+        status: "completed",
+        items: [{ id: "newer-item", type: "agentMessage", text: "readable history" }],
+      },
+    ]);
+    const eventStore = new MemoryEventStore();
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const host = await CodexAppServerHost.adopt(threadId, {
+        cwd: "/repo",
+        eventStore,
+        spawnProcess: fakeSpawn(server),
+      });
+
+      const stored = eventStore.load(threadId);
+      expect(stored.some((event) => event.kind === "item"
+        && (event.item as { id?: unknown }).id === "newer-item")).toBeTrue();
+      expect(stored.some((event) => event.kind === "item"
+        && (event.item as { id?: unknown }).id === "unadmittable-item")).toBeFalse();
+      const diagnostics = stored.filter((event) => event.kind === "item"
+        && /oversized JSONL frame: observed \d+ bytes, bound \d+ bytes, message type response to thread\/items\/list/
+          .test(String((event.item as { text?: unknown }).text ?? "")));
+      expect(diagnostics.length).toBeGreaterThan(0);
+      expect((await host.health()).status).not.toBe("dead");
+      expect(await host.send({ id: "after-unadmittable-item", text: "still reachable" }))
+        .toMatchObject({ outcome: "turn-started" });
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
+  }, 120_000);
+
+  /* The single-frame history path this issue removes must not regrow: neither
+     adoption nor delivery may ask for a full turn page or a full thread read
+     (#301 P2). */
+  test("adoption and delivery never request full turn pages or full thread reads", async () => {
+    const threadId = "no-full-history-thread";
+    const server = new FakeAppServer(threadId, threadId, false, smallHistoryTurns(12));
+    server.rejectFullTurnPages = true;
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    server.turnsListSource = [
+      ...smallHistoryTurns(12),
+      {
+        id: "persisted-turn",
+        status: "completed",
+        items: [{ type: "userMessage", clientId: "already-persisted", content: [{ type: "text", text: "hello" }] }],
+      },
+    ];
+    expect(await host.send({ id: "already-persisted", text: "hello" }))
+      .toEqual({ outcome: "turn-started", turnId: "persisted-turn" });
+    expect(await host.send({ id: "fresh-delivery", text: "next" }))
+      .toMatchObject({ outcome: "turn-started" });
+
+    expect(server.requests.some((request) => request.method === "thread/turns/list"
+      && (request.params as { itemsView?: unknown }).itemsView === "full")).toBeFalse();
+    expect(server.requests.some((request) => request.method === "thread/read"
+      && (request.params as { includeTurns?: unknown }).includeTurns === true)).toBeFalse();
+    await host.release();
+  });
 
   test("inline image history in an item page reaches the ledger only as a bounded reference", async () => {
     const threadId = "image-replay-thread";
@@ -2170,7 +2314,10 @@ describe("CodexAppServerHost", () => {
     }
   });
 
-  test("an oversized turn/start response fences and reconciles without killing the host", async () => {
+  /* A mutating acknowledgement too large to admit is a delivery whose turn id
+     is late, not a delivery that failed: the persisted user item carries the
+     outcome, so the first send resolves with it (#301 Expected 1 and 3). */
+  test("an oversized turn/start acknowledgement resolves the delivery from the persisted user item", async () => {
     const server = new FakeAppServer("oversized-turn-start-thread");
     server.oversizedTurnStartResult = true;
     const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -2183,12 +2330,10 @@ describe("CodexAppServerHost", () => {
       });
 
       const entry = { id: "oversized-turn-start", text: "hi" };
-      await expect(host.send(entry))
-        .rejects.toThrow(/oversized JSONL frame.*turn\/start.*outcome is uncertain/);
-      expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: "turn-1" });
-
       expect(await host.send(entry)).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+      expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: "turn-1" });
       expect(server.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+
       expect(await host.send({
         id: "after-oversized-response",
         text: "again",
@@ -2200,7 +2345,7 @@ describe("CodexAppServerHost", () => {
     }
   });
 
-  test("an oversized turn/steer response reconciles without duplicating the steer", async () => {
+  test("an oversized turn/steer acknowledgement resolves as steered without a duplicate steer", async () => {
     const server = new FakeAppServer("oversized-turn-steer-thread");
     const warn = spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -2215,11 +2360,64 @@ describe("CodexAppServerHost", () => {
       server.oversizedTurnSteerResult = true;
       const steer = { id: "oversized-steer", text: "continue", expectedTurnId: "turn-1" };
 
-      await expect(host.send(steer))
-        .rejects.toThrow(/oversized JSONL frame.*turn\/steer.*outcome is uncertain/);
+      expect(await host.send(steer)).toEqual({ outcome: "steered", turnId: "turn-1" });
       expect((await host.health()).status).not.toBe("dead");
-      expect(await host.send(steer)).toMatchObject({ turnId: "turn-1" });
       expect(server.requests.filter((request) => request.method === "turn/steer")).toHaveLength(1);
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /* An oversized `error` envelope means the server refused: nothing started,
+     so this delivery fails with the diagnostic while the writer stays open. */
+  test("an oversized error acknowledgement rejects the delivery and leaves later deliveries writable", async () => {
+    const server = new FakeAppServer("oversized-error-ack-thread");
+    server.oversizedTurnStartErrorResult = true;
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const host = await CodexAppServerHost.start({
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(server),
+        ...stubbedTermination(server),
+      });
+
+      await expect(host.send({ id: "refused-delivery", text: "hi" }))
+        .rejects.toThrow(/oversized JSONL frame.*message type response to turn\/start/);
+      expect((await host.health()).status).not.toBe("dead");
+
+      server.oversizedTurnStartErrorResult = false;
+      expect(await host.send({ id: "later-delivery", text: "still writable" }))
+        .toMatchObject({ outcome: "turn-started" });
+      await host.release();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  /* An acknowledgement without a client id used to close the writer forever:
+     the card said alive and nothing could ever be delivered again (#301). */
+  test("an oversized turn/interrupt acknowledgement leaves deliveries writable", async () => {
+    const server = new FakeAppServer("oversized-interrupt-ack-thread");
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const host = await CodexAppServerHost.start({
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(server),
+        ...stubbedTermination(server),
+      });
+      expect(await host.send({ id: "interrupt-turn", text: "begin" }))
+        .toEqual({ outcome: "turn-started", turnId: "turn-1" });
+      server.oversizedTurnInterruptResult = true;
+
+      await expect(host.interrupt("turn-1"))
+        .rejects.toThrow(/oversized JSONL frame.*message type response to turn\/interrupt/);
+      expect((await host.health()).status).not.toBe("dead");
+
+      expect(await host.send({ id: "after-interrupt", text: "still writable", expectedTurnId: "turn-1" }))
+        .toEqual({ outcome: "steered", turnId: "turn-1" });
       await host.release();
     } finally {
       warn.mockRestore();
