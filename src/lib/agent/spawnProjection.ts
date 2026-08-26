@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { readOnlyConversationLookupFromSnapshot, type RegistryFile, type SpawnReceipt } from "./registry";
+import { readOnlyConversationLookupFromSnapshot, type ConversationLookup, type RegistryFile, type SpawnReceipt } from "./registry";
 import { projectRootForCwd } from "@/lib/scanner/describe";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
@@ -17,6 +17,37 @@ const TERMINAL_SPAWN_RECENT_MS = 15 * 60 * 1_000;
    15 min, launch-history strip until 24 h, retired after). Mirrored by
    LAUNCH_HISTORY_RETIREMENT_MS in components/launchHistoryModel.ts. */
 export const PLACEHOLDER_RETIREMENT_MS = 24 * 60 * 60 * 1_000;
+
+export type DurableHandoffProvenance = "operator-handoff" | "container-spawn";
+
+/**
+ * Classifies a Viewer spawn from evidence committed at launch admission.
+ * Membership added after birth cannot rewrite an operator handoff's provenance.
+ */
+export function durableHandoffProvenanceForConversation(
+  snapshot: RegistryFile,
+  conversationId: SpawnReceipt["conversationId"],
+  lookup: ConversationLookup = readOnlyConversationLookupFromSnapshot(snapshot),
+): DurableHandoffProvenance | null {
+  const canonicalConversationId = lookup.canonicalConversationId(conversationId);
+  const edge = snapshot.lineageEdges[canonicalConversationId];
+  if (!edge || edge.source !== "viewer-spawn") return null;
+  const receipt = edge.evidence.launchId ? snapshot.receipts[edge.evidence.launchId] : null;
+  const parentConversationId = lookup.canonicalConversationId(edge.parentConversationId);
+  const bornAt = receipt?.createdAt ?? edge.createdAt;
+  const bornIntoContainer = (snapshot.memberships[canonicalConversationId] ?? []).some((membership) =>
+    membership.createdAt === bornAt
+      && membership.parentConversationId !== null
+      && lookup.canonicalConversationId(membership.parentConversationId) === parentConversationId);
+  /* Parent attribution, admitted delegation depth, and same-birth membership
+     are durable origin facts. Launch display belongs solely to presentation. */
+  const parentSource = edge.evidence.parentSource ?? receipt?.parentSource ?? null;
+  const delegatedAtBirth = receipt?.delegationDepth !== null
+    && receipt?.delegationDepth !== undefined
+    && receipt.delegationDepth > 0;
+  if (bornIntoContainer || parentSource === "inferred-caller" || delegatedAtBirth) return "container-spawn";
+  return "operator-handoff";
+}
 
 function retiredTerminalReceipt(receipt: SpawnReceipt, nowMs: number): boolean {
   const terminal = receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted";
@@ -474,7 +505,8 @@ function spawnCard(
   scannedPaths: ReadonlySet<string>,
   nowMs: number,
 ): FileEntry {
-  const conversationId = spawn.conversationId ?? receipt.conversationId;
+  const conversationId = readOnlyConversationLookupFromSnapshot(snapshot)
+    .canonicalConversationId(receipt.conversationId);
   /* Pre-admission cards honor the explicit operator project the moment the
      receipt exists; once admitted, the conversation record is authoritative. */
   const projectOwnership = snapshot.conversations[conversationId]?.projectOwnership
@@ -493,6 +525,14 @@ function spawnCard(
     ? snapshot.conversations[parentConversationId]?.generations.at(-1)?.path ?? null
     : null;
   const memberships = snapshot.memberships[conversationId] ?? [];
+  /* The handoff marker describes launch provenance. Current membership can be
+     newer than the launch, so the admission-time lineage classifier owns it. */
+  const handoffProvenance = durableHandoffProvenanceForConversation(snapshot, conversationId);
+  const operatorHandoff = Boolean(
+    parentPath
+      && scannedPaths.has(parentPath)
+      && handoffProvenance !== "container-spawn",
+  );
   return {
     path: `spawn:${receipt.launchId}`,
     root: receipt.engine === "codex" ? "codex-sessions" : "claude-projects",
@@ -509,7 +549,7 @@ function spawnCard(
     // A preallocated card is by definition a Viewer launch (issue #339).
     spawnOrigin: "viewer",
     parent: parentPath && scannedPaths.has(parentPath) ? parentPath : null,
-    ...(parentPath && scannedPaths.has(parentPath) ? { handoff: true } : {}),
+    ...(operatorHandoff ? { handoff: true } : {}),
     mtime: Date.parse(receipt.createdAt) / 1000,
     size: 0,
     activity: projectedActivity(spawn, receipt.createdAt, nowMs),

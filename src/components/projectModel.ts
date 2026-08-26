@@ -89,6 +89,12 @@ export function isSubagent(file: FileEntry): boolean {
  */
 export function isChildConversation(file: FileEntry): boolean {
   if (isSubagent(file)) return true;
+  /* Durable Viewer lineage is the primary child proof for managed stages and
+     flows. It survives transcript-path changes and carries the relationship
+     without borrowing the operator handoff flag. */
+  if (file.durableLineage?.parentConversationId) return true;
+  if (file.durableLineage?.memberships.some((membership) => membership.parentConversationId)) return true;
+  if (file.spawnOrigin === "viewer" && file.parent) return true;
   /* A conversation spawned by a handoff is a branch of its source — unlike a
      claude main with a parent from compaction chaining, which is quiet history. */
   if (file.handoff && file.parent) return true;
@@ -351,10 +357,16 @@ export interface EnginePlacement {
 }
 
 /** Descendants that deserve a full transcript column next to the root. */
-function columnWorthy(file: FileEntry, expandedConversationPaths?: ReadonlySet<string>, placement?: EnginePlacement): boolean {
+function columnWorthy(
+  file: FileEntry,
+  expandedConversationPaths?: ReadonlySet<string>,
+  placement?: EnginePlacement,
+  keepExpandedPaths?: ReadonlySet<string>,
+): boolean {
   /* A folded engine child owns exactly one surface — its parent tray — so it is
      never a column, and a promoted one is a full node regardless of activity. */
   if (placement?.foldedEnginePaths?.has(file.path)) return false;
+  if (keepExpandedPaths && !keepExpandedPaths.has(file.path)) return false;
   if (placement?.promotedEnginePaths?.has(file.path)) return true;
   return (
     !isAuxTask(file) &&
@@ -375,6 +387,7 @@ function assembleGroup(
   expandedConversationPaths?: ReadonlySet<string>,
   placement?: EnginePlacement,
   placeableByAge: (file: FileEntry) => boolean = () => true,
+  keepExpandedPaths?: ReadonlySet<string>,
 ): BranchGroup {
   /* Stop traversal at the first foreign owner so a later same-project node
      cannot leak through that foreign branch and appear twice. */
@@ -395,8 +408,12 @@ function assembleGroup(
      column. The aged one rests in the under-deck like any other finished item. */
   const rootActive = root.activity === "live" || root.proc === "running";
   const branches = descendants
-    .filter((file) => (rootActive && isChildConversation(file) && placeableByAge(file) && !placement?.foldedEnginePaths?.has(file.path))
-      || columnWorthy(file, expandedConversationPaths, placement))
+    .filter((file) => (rootActive
+      && isChildConversation(file)
+      && placeableByAge(file)
+      && (!keepExpandedPaths || keepExpandedPaths.has(file.path))
+      && !placement?.foldedEnginePaths?.has(file.path))
+      || columnWorthy(file, expandedConversationPaths, placement, keepExpandedPaths))
     .sort((a, b) => liveRank(a) - liveRank(b) || tick5(b.mtime) - tick5(a.mtime) || a.path.localeCompare(b.path));
   const liveTasks = descendants
     .filter((file) => isAuxTask(file) && file.activity === "live")
@@ -506,6 +523,9 @@ export interface BranchGroupOptions {
   now?: number;
   /** Placement age horizon in seconds; defaults to the env-tunable value. */
   ageHorizonSeconds?: number;
+  /** Result of the board's shared keepExpanded predicate. When supplied, every
+      automatic root and child placement must belong to this set. */
+  keepExpandedPaths?: ReadonlySet<string>;
 }
 
 export function buildBranchGroups(files: FileEntry[], project: string, options: BranchGroupOptions = {}): BranchGroup[] {
@@ -513,7 +533,7 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
   const kids = kidsIndex(files);
   const roots = new Map<string, FileEntry>();
   const orphanTasks = new Map<string, FileEntry>();
-  const { expandedConversationPaths, enginePlacement } = options;
+  const { expandedConversationPaths, enginePlacement, keepExpandedPaths } = options;
   const now = options.now ?? 0;
   const ageHorizon = options.ageHorizonSeconds ?? schemeAgeHorizonSeconds();
   /* The automatic-placement age horizon. Without a clock (`now === 0`, the
@@ -543,12 +563,13 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
       if (!parent || projectKey(parent) !== projectKey(file)) break;
       seen.add(parent.path);
       cursor = parent;
-      if (placeableByAge(parent)) best = parent;
+      if (placeableByAge(parent) && (!keepExpandedPaths || keepExpandedPaths.has(parent.path))) best = parent;
     }
     return best;
   };
   for (const file of files) {
     if (projectKey(file) !== project) continue;
+    const keepExpanded = !keepExpandedPaths || keepExpandedPaths.has(file.path);
     /* A cross-project child starts an independently owned visual segment. Keep
        its root card after the child becomes quiet while the durable parent
        pointer continues to support explicit cross-project navigation. The
@@ -556,13 +577,13 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
        activity ages out it leaves the canvas (a live or running one never
        does), and only an explicit expansion below can still place it. */
     if (beginsProjectSegment(file, byPath)) {
-      if (now === 0 || file.activity === "live" || file.proc === "running" || recentlyActive(file)) {
+      if (keepExpanded && (now === 0 || file.activity === "live" || file.proc === "running" || recentlyActive(file))) {
         roots.set(file.path, file);
         continue;
       }
     }
     const expanded = expandedConversationPaths?.has(file.path) === true;
-    if (
+    if (keepExpanded && (
       file.activity === "live" ||
       file.proc === "running" ||
       (recentlyActive(file) && isChildConversation(file)) ||
@@ -570,16 +591,16 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
          must still open its parent's group so it can render as a full node. */
       enginePlacement?.promotedEnginePaths?.has(file.path) === true ||
       (expanded && (isConversation(file) || isChildConversation(file)))
-    ) {
+    )) {
       const root = groupRootFor(file);
       if (isAuxTask(root)) orphanTasks.set(root.path, root);
       else roots.set(root.path, root);
       continue;
     }
-    if (recentlyActive(file) && isConversation(file)) roots.set(file.path, file);
+    if (keepExpanded && recentlyActive(file) && isConversation(file)) roots.set(file.path, file);
   }
   const groups = singleOwnership(
-    [...roots.values()].map((root) => assembleGroup(root, kids, expandedConversationPaths, enginePlacement, placeableByAge)),
+    [...roots.values()].map((root) => assembleGroup(root, kids, expandedConversationPaths, enginePlacement, placeableByAge, keepExpandedPaths)),
     byPath,
   );
   for (const task of orphanTasks.values()) {

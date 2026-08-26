@@ -1222,6 +1222,219 @@ test("a rejected launch projects a terminal failed card with zero conversation a
   }
 });
 
+test("a pipeline stage placeholder carries durable spawn lineage without an operator handoff flag", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-lineage-projection-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      role: "builder",
+      origin: { kind: "container", container: "pipeline", containerId: "pipeline-fixture", creatorConversationId: parent.id },
+      memberships: [{
+        kind: "pipeline",
+        containerId: "pipeline-fixture",
+        role: "builder",
+        slot: "build:1",
+        stageId: "build",
+        stageOrder: 0,
+        round: 1,
+        parentConversationId: parent.id,
+      }],
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+
+    const card = preallocatedStructuredSpawnCards([scannedFile(parentPath)], registry.snapshot())[0]!;
+    expect(card.parent).toBe(parentPath);
+    expect(card.handoff).toBeUndefined();
+    expect(card.spawnOrigin).toBe("viewer");
+    expect(card.durableLineage).toMatchObject({
+      parentConversationId: parent.id,
+      memberships: [{ kind: "pipeline", containerId: "pipeline-fixture", stageId: "build" }],
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an agent-authenticated child with launch display stays caller-owned", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-caller-owned-display-projection-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      parentSource: "inferred-caller",
+      role: "builder",
+      origin: { kind: "agent", conversationId: parent.id },
+      launchDisplay: { prompt: "Review the projection", images: 0, echo: "Review the projection" },
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+
+    const card = preallocatedStructuredSpawnCards([scannedFile(parentPath)], registry.snapshot())[0]!;
+    expect(begun.receipt.delegationDepth).toBe(1);
+    expect(card.parent).toBe(parentPath);
+    expect(card.handoff).toBeUndefined();
+    expect(card.durableLineage).toMatchObject({
+      role: "builder",
+      parentConversationId: parent.id,
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an operator handoff placeholder keeps its provenance after later flow enrollment", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-enrolled-handoff-placeholder-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      parentSource: "explicit",
+      role: "builder",
+      origin: { kind: "operator" },
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    registry.rememberMembership(begun.receipt.conversationId, {
+      kind: "flow",
+      containerId: "flow-fixture",
+      role: "implementer",
+      slot: "implementer",
+      stageId: null,
+      stageOrder: 0,
+      round: null,
+      parentConversationId: null,
+    });
+
+    const card = preallocatedStructuredSpawnCards([scannedFile(parentPath)], registry.snapshot())[0]!;
+
+    expect(card.parent).toBe(parentPath);
+    expect(card.handoff).toBe(true);
+    expect(card.durableLineage?.memberships).toEqual([
+      expect.objectContaining({ kind: "flow", containerId: "flow-fixture", role: "implementer" }),
+    ]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("materialized handoffs and historical stages stay input-immutable", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-enrolled-operator-handoff-"));
+  const artifactPath = path.join(directory, `${SETTLED_SESSION_ID}.jsonl`);
+  const pipelineSessionId = "historical-pipeline-stage";
+  const pipelineArtifactPath = path.join(directory, `${pipelineSessionId}.jsonl`);
+  try {
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const parentPath = path.join(directory, "parent.jsonl");
+    const parent = registry.ensureConversation("codex", parentPath, "work");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      parentSource: "explicit",
+      role: "builder",
+      origin: { kind: "operator" },
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    registry.settleSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId: SETTLED_SESSION_ID },
+      artifactPath,
+      cwd: directory,
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      status: "unhosted",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    registry.rememberMembership(begun.receipt.conversationId, {
+      kind: "flow",
+      containerId: "flow-fixture",
+      role: "implementer",
+      slot: "implementer",
+      stageId: null,
+      stageOrder: 0,
+      round: null,
+      parentConversationId: null,
+    });
+    const pipelineBegun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: parent.id,
+      role: "builder",
+      memberships: [{
+        kind: "pipeline",
+        containerId: "pipeline-fixture",
+        role: "builder",
+        slot: "build:1",
+        stageId: "build",
+        stageOrder: 0,
+        round: 1,
+        parentConversationId: parent.id,
+      }],
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (pipelineBegun.kind !== "created") throw new Error("expected historical stage launch creation");
+    registry.settleSpawn(pipelineBegun.receipt.launchId, {
+      key: { engine: "codex", sessionId: pipelineSessionId },
+      artifactPath: pipelineArtifactPath,
+      cwd: directory,
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      status: "unhosted",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    const stage = scannedFile(artifactPath);
+    stage.parent = parentPath;
+    stage.handoff = true;
+    const pipelineStage = scannedFile(pipelineArtifactPath);
+    pipelineStage.parent = parentPath;
+    pipelineStage.handoff = true;
+    const files = [scannedFile(parentPath), stage, pipelineStage];
+    const before = structuredClone(files);
+    const snapshot = registry.snapshot();
+    const snapshotBefore = structuredClone(snapshot);
+
+    projectLaunchConversations(files, snapshot);
+
+    expect(files).toEqual(before);
+    expect(snapshot).toEqual(snapshotBefore);
+    expect(stage.handoff).toBe(true);
+    expect(pipelineStage.handoff).toBe(true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("terminal receipts age through history and retire at the 24h bound; non-terminal receipts always project (#342)", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-retire-"));
   const filename = path.join(directory, "agent-registry.json");

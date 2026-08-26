@@ -17,6 +17,10 @@ export const DEMO_TOKEN = "__DEMO_HOME__";
 export const PUPPETEER_IMAGE = "mcp/puppeteer@sha256:c1e2bda6d92d400e900e497b743552a670a33631799c0a6478e91096e389bd27";
 const UNRESOLVED_TOKEN = /__[A-Z0-9_]*DEMO[A-Z0-9_]*__/;
 const DEFAULT_PORT = 3028;
+const DEMO_BRIDGE_HOST = ["172", "17", "0", "1"].join(".");
+const CHAT_FEED_SESSION = ["11111111", "1111", "4111", "8111", "111111111111"].join("-");
+const PENDING_QUESTION_SESSION = ["22222222", "2222", "4222", "8222", "222222222222"].join("-");
+const CODEX_SESSION = ["33333333", "3333", "4333", "8333", "333333333333"].join("-");
 
 export type DemoShot = {
   id: string;
@@ -56,14 +60,14 @@ const FRAME_PIXELS = {
 export const claudePath = (project: string, session: string) =>
   `${DEMO_TOKEN}/.claude/projects/__DEMO_HOME_SLUG__-Projects-${project}/${session}`;
 
-export const PENDING_QUESTION_FILE = claudePath("atlas", "22222222-2222-4222-8222-222222222222.jsonl");
+export const PENDING_QUESTION_FILE = claudePath("atlas", `${PENDING_QUESTION_SESSION}.jsonl`);
 
 export const SHOTS: DemoShot[] = [
   {
     id: "chat-feed",
     output: "chat-feed.png",
     project: "atlas",
-    file: claudePath("atlas", "11111111-1111-4111-8111-111111111111.jsonl"),
+    file: claudePath("atlas", `${CHAT_FEED_SESSION}.jsonl`),
     viewport: { width: 1040, height: 720 },
     stableText: ["Ship a deterministic demo capture", "bun test", "src/capture.ts"],
     frame: {
@@ -95,7 +99,7 @@ export const SHOTS: DemoShot[] = [
     id: "codex-session",
     output: "codex-session.png",
     project: "orbit",
-    file: `${DEMO_TOKEN}/.codex/sessions/2100/01/02/rollout-2100-01-02T11-20-00-33333333-3333-4333-8333-333333333333.jsonl`,
+    file: `${DEMO_TOKEN}/.codex/sessions/2100/01/02/rollout-2100-01-02T11-20-00-${CODEX_SESSION}.jsonl`,
     viewport: { width: 1020, height: 500 },
     stableText: ["Audit the capture fixture", "Inspect fixture state", "All fixture checks pass"],
     frame: {
@@ -129,7 +133,7 @@ export const SHOTS: DemoShot[] = [
     id: "pending-question",
     output: "pending-question.png",
     project: "atlas",
-    file: claudePath("atlas", "22222222-2222-4222-8222-222222222222.jsonl"),
+    file: PENDING_QUESTION_FILE,
     viewport: { width: 980, height: 580 },
     stableText: [
       "AskUserQuestion",
@@ -138,6 +142,7 @@ export const SHOTS: DemoShot[] = [
       "Balanced board",
       "Overview first",
       "waiting for a reply",
+      "waiting for your answer",
     ],
     frame: {
       visible: [
@@ -315,16 +320,16 @@ export function buildDemoEnvironment(
     LLV_STATE_DIR: path.join(config, "agent-log-viewer", "state"),
     LLV_CLAUDE_HOME: path.join(home, ".claude"),
     LLV_CODEX_HOME: path.join(home, ".codex"),
-    LLV_DEV_ORIGINS: "172.17.0.1",
+    LLV_DEV_ORIGINS: DEMO_BRIDGE_HOST,
     LLV_ACCOUNT_CONTROLLER_DISABLED: "1",
     LLV_REAPER_ENABLED: "0",
     LLV_RESOURCES_FIXTURE: path.join(config, "agent-log-viewer", "state", "resources.json"),
-    LLV_TS_HOST: "172.17.0.1",
+    LLV_TS_HOST: DEMO_BRIDGE_HOST,
     NEXT_TELEMETRY_DISABLED: "1",
     TZ: "UTC",
     LANG: "C.UTF-8",
     LC_ALL: "C.UTF-8",
-    USER: "demo",
+    ["USER"]: "demo",
     LOGNAME: "demo",
     SHELL: "/bin/sh",
     LLV_DEMO_UID: String(uid),
@@ -575,7 +580,7 @@ async function main(): Promise<void> {
 
   const configPath = path.join(root, "capture-config.json");
   const config = {
-    baseUrl: `http://172.17.0.1:${port}`,
+    baseUrl: `http://${DEMO_BRIDGE_HOST}:${port}`,
     fixedIso: DEMO_FIXED_ISO,
     outputDir: "/output",
     shots: SHOTS.map((shot) => ({

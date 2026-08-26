@@ -12,6 +12,8 @@ const REVIEW_FENCES = [
 const REVIEW_FRAME_RULES =
   "Two standing rules. (1) Anchor the frame: when the assignment carries the requester's originating requirement, validate the work against that verbatim requirement, never against the artifact's previous revision — WRONG-PREMISE (\"this does not serve the original requirement\") is an expected verdict and outranks any finding about internal rigour. (2) Over-engineering pass: on every review, flag machinery heavier than the problem it solves (a library plus wrapper where a native primitive does), name the simpler mechanism, and report what to cut — OVER-BUILT is a first-class verdict, and a round that only removes scope is a successful round.";
 
+const VIEWER_BASE_URL = `http://127.0.0.1:${process.env.PORT?.trim() || "8898"}`;
+
 export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
   {
     id: "orchestrator",
@@ -27,9 +29,9 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
       { key: "mergePolicy", label: "Merge policy", description: "Delivery policy for backlog-campaign mode.", kind: "select", options: ["pr", "merge"] },
       { key: "completionPolicy", label: "Completion policy", description: "Terminal policy for backlog-campaign mode.", kind: "select", options: ["pr-opened", "merged", "released"] },
     ],
-    promptScaffold: `You are the Orchestrator. Drive work through the production Viewer API at http://127.0.0.1:8898. Use fresh empty sessions with src lineage; forks are disabled. Keep every worker visible and controllable in the Viewer.\n\nMode: {{mode}}\nRepository: {{repo}}\nIssue query: {{issueQuery}}\nUrgent list: {{urgent}}\nMaximum workers: {{maxWorkers}}\nMerge policy: {{mergePolicy}}\nCompletion policy: {{completionPolicy}}\n\nFor backlog-campaign mode, inventory dependencies before assignment, use Opus/Sol gates, route backend work to Terra and frontend work to Opus, complete one review round, and require root release checks. Before a Viewer replacement, preserve the external-worker deployment barrier.`,
+    promptScaffold: `You are the Orchestrator. Drive work through the production Viewer API at ${VIEWER_BASE_URL}. Use fresh empty sessions with src lineage; forks are disabled. Keep every worker visible and controllable in the Viewer.\n\nMode: {{mode}}\nRepository: {{repo}}\nIssue query: {{issueQuery}}\nUrgent list: {{urgent}}\nMaximum workers: {{maxWorkers}}\nMerge policy: {{mergePolicy}}\nCompletion policy: {{completionPolicy}}\n\nFor backlog-campaign mode, inventory dependencies before assignment, use Opus/Sol gates, route backend work to Terra and frontend work to Opus, complete one review round, and require root release checks. Before a Viewer replacement, preserve the external-worker deployment barrier.`,
     safetyFences: [
-      "Viewer control uses http://127.0.0.1:8898 with src lineage.",
+      `Viewer control uses ${VIEWER_BASE_URL} with src lineage.`,
       "Fresh empty sessions only; forks are disabled.",
       "One owner holds a file at a time across active worktrees.",
     ],

@@ -90,6 +90,7 @@ export function VoiceComposerHost() {
             pollPaused={props.pollPaused}
             deadHost={props.deadHost}
             sendBlockedReason={props.sendBlockedReason}
+            placeholder={props.placeholder}
             dockNode={getVoiceComposerCardNode(cardId)}
           />
         );
