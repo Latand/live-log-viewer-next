@@ -352,7 +352,6 @@ export function QuestionCard({ file }: { file: FileEntry }) {
           </span>
           {dismissButton}
         </div>
-        <div className="text-[13px] font-semibold text-danger">{t("question.noPane")}</div>
         {pending.kind === "plan" ? (
           <pre className="mt-2 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-[8px] border border-border bg-canvas px-3 py-2 text-[13px]">{pending.plan}</pre>
         ) : (
@@ -363,6 +362,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
             </div>
           ))
         )}
+        <p role="note" data-question-transport="unavailable" className="mt-3 text-[12px] font-semibold text-muted">{t("question.noPane")}</p>
         <button className="mt-3 rounded-[8px] bg-accent px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60" disabled={resuming} onClick={resume}>
           {t("question.openSession")}
         </button>
@@ -377,7 +377,6 @@ export function QuestionCard({ file }: { file: FileEntry }) {
         <span className="inline-flex items-center gap-1.5 rounded-full bg-warning-soft px-2 py-0.5 text-[11px] font-bold text-warning">
           <Pause className="h-3.5 w-3.5" aria-hidden /> {t("question.waiting")}
         </span>
-        {!hasPane ? <span className="text-[12px] font-semibold text-danger">{t("question.noPane")}</span> : null}
         {dismissButton}
       </div>
       {pending.kind === "plan" ? (

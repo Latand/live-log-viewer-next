@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { keyRevisionAt, MAX_RETIRED_KEY_REVISIONS, mutationKeys, pathKey, VIEW_MODE_KEY } from "./keys";
+import { IDLE_COLLAPSE_KEY, keyRevisionAt, MAX_RETIRED_KEY_REVISIONS, mutationKeys, pathKey, VIEW_MODE_KEY } from "./keys";
 import { boardFor, migrateBoardProjects, mutateBoard, remapBoardPaths } from "./store";
 
 /*
@@ -195,4 +195,5 @@ test("mutationKeys names every key a mutation contends on", () => {
      setting the task panel never fences a queued view-mode switch. */
   expect(mutationKeys({ kind: "set-presentation", taskPanelOpen: true })).toEqual(["taskPanelOpen"]);
   expect(mutationKeys({ kind: "set-presentation", viewMode: null })).toEqual(["viewMode"]);
+  expect(mutationKeys({ kind: "set-presentation", idleCollapseMinutes: null })).toEqual([IDLE_COLLAPSE_KEY]);
 });

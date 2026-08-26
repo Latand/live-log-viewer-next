@@ -6,6 +6,7 @@ import { commitMarqueeSelection, pruneSelection, toggleSelected } from "@/compon
 import { boardKeysChanged, type BoardKeyRevisions, canonicalKey, keyRevisionAt, mutationKeys } from "@/lib/board/keys";
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
+import { DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES } from "@/lib/board/types";
 
 export type BoardPrefs = BoardProjectStateV1["prefs"];
 export type BoardViewMode = BoardPrefs["viewMode"];
@@ -59,7 +60,7 @@ export function patchPrefix(outbox: readonly BoardMutationV1[], maxCount = MAX_M
   return prefix;
 }
 
-export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode: null, taskPanelOpen: false };
+export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], idleCollapseMinutes: DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES, viewMode: null, taskPanelOpen: false };
 
 /* Legacy per-browser keys #38 migrates off of. `llvTaskPanel` is global today;
    it seeds every project's per-project panel state and is left intact so a
@@ -98,6 +99,7 @@ export interface BoardSnapshot {
 export function isEmptyPrefs(prefs: BoardPrefs): boolean {
   return prefs.manual.length === 0 && prefs.hidden.length === 0 && prefs.expanded.length === 0 && prefs.favorites.length === 0
     && (prefs.foldedEngineChildIds?.length ?? 0) === 0 && (prefs.expandedEngineTrayParentIds?.length ?? 0) === 0
+    && (prefs.idleCollapseMinutes === undefined ? DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES : prefs.idleCollapseMinutes) === DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES
     && prefs.viewMode === null && !prefs.taskPanelOpen;
 }
 
@@ -133,7 +135,7 @@ export function readLegacyPrefs(project: string, storage: Pick<Storage, "getItem
   if (!hadColumns && viewMode === null && !taskPanelOpen) return null;
   /* Favorites and tray pins are server-only (issues #185/#142) — no legacy
      per-browser tier feeds them, so the migration seed carries empty lists. */
-  return { ...columns, favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode, taskPanelOpen };
+  return { ...columns, favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], idleCollapseMinutes: DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES, viewMode, taskPanelOpen };
 }
 
 /** Coalesce two partial patches: later keys win, so a burst of edits collapses
@@ -1022,6 +1024,7 @@ export interface BoardState extends BoardSnapshot {
   restore(path: string, placement: "auto" | "manual" | "expanded"): void;
   setViewMode(viewMode: BoardViewMode): void;
   setTaskPanelOpen(open: boolean): void;
+  setIdleCollapseMinutes(minutes: number | null): void;
   /* The canonical selection's writers (#771) — the same three every view uses.
      Live even while the durable board is unavailable: the selection is session
      state and owes nothing to the server. */
@@ -1094,6 +1097,9 @@ export function useBoardState(project: string | null): BoardState {
     },
     setTaskPanelOpen(open) {
       storeRef.current?.mutate([{ kind: "set-presentation", taskPanelOpen: open }]);
+    },
+    setIdleCollapseMinutes(minutes) {
+      storeRef.current?.mutate([{ kind: "set-presentation", idleCollapseMinutes: minutes }]);
     },
     setFavorite(id, favorite) {
       storeRef.current?.mutate([{ kind: "set-favorite", id, favorite }]);

@@ -1,0 +1,16 @@
+{
+  "project": "audit-fixture",
+  "nowMs": 2000000000000,
+  "idleMinutes": 120,
+  "closedPipelineIds": ["pipeline-closed-a", "pipeline-closed-b", "pipeline-closed-c"],
+  "settledPipelineChildren": 53,
+  "runningChildren": 3,
+  "freshIdleChildren": 1,
+  "pinnedSettledChildren": 1,
+  "reviewersWithoutVerdict": 1,
+  "expected": {
+    "columnsBefore": 60,
+    "columnsAfter": 6,
+    "collapsed": 54
+  }
+}

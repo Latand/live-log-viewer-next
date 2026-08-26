@@ -15,7 +15,6 @@ import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, isRecoverableLe
 import { lastAssistantMessage, readFindingsFile } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
-import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
 import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
@@ -326,10 +325,6 @@ async function spawnPipelineAgent(
   }
   const transcript = response.path ?? null;
   const key = transcript ? sessionKeyFromTranscript(input.role.engine, transcript) : null;
-  if (transcript && input.parentPath && parent.conversationId) {
-    rememberHandoffChild(transcript, input.parentPath);
-    persistHandoffLineage();
-  }
   return {
     launchId: begun.receipt.launchId,
     conversationId: begun.receipt.conversationId,

@@ -1,6 +1,7 @@
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 import { readBoundedJson, ViewValidationError } from "@/lib/view/validation";
 import type { BoardMutationV1 } from "@/lib/board/mutations";
+import { MAX_BOARD_IDLE_COLLAPSE_MINUTES } from "@/lib/board/types";
 
 /* Must admit every request shape the client transport emits, or a legal
    write becomes untransportable and the client can only drop it. The board
@@ -91,11 +92,15 @@ function mutation(value: unknown, index: number): BoardMutationV1 {
     return { kind: "set-engine-tray-expanded", parentId: validPath(raw.parentId, `mutations[${index}].parentId`), expanded: raw.expanded };
   }
   if (raw.kind === "set-presentation") {
-    exact(raw, ["kind", "viewMode", "taskPanelOpen"], `mutations[${index}]`);
-    if (raw.viewMode === undefined && raw.taskPanelOpen === undefined) throw new ViewValidationError("INVALID_REQUEST", `empty mutations[${index}]`);
+    exact(raw, ["kind", "viewMode", "taskPanelOpen", "idleCollapseMinutes"], `mutations[${index}]`);
+    if (raw.viewMode === undefined && raw.taskPanelOpen === undefined && raw.idleCollapseMinutes === undefined) throw new ViewValidationError("INVALID_REQUEST", `empty mutations[${index}]`);
     if (raw.viewMode !== undefined && raw.viewMode !== null && raw.viewMode !== "scheme" && raw.viewMode !== "list") throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].viewMode`);
     if (raw.taskPanelOpen !== undefined && typeof raw.taskPanelOpen !== "boolean") throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].taskPanelOpen`);
-    return { kind: "set-presentation", ...(raw.viewMode === undefined ? {} : { viewMode: raw.viewMode }), ...(raw.taskPanelOpen === undefined ? {} : { taskPanelOpen: raw.taskPanelOpen }) };
+    if (raw.idleCollapseMinutes !== undefined && raw.idleCollapseMinutes !== null
+      && (!Number.isInteger(raw.idleCollapseMinutes) || (raw.idleCollapseMinutes as number) <= 0 || (raw.idleCollapseMinutes as number) > MAX_BOARD_IDLE_COLLAPSE_MINUTES)) {
+      throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].idleCollapseMinutes`);
+    }
+    return { kind: "set-presentation", ...(raw.viewMode === undefined ? {} : { viewMode: raw.viewMode }), ...(raw.taskPanelOpen === undefined ? {} : { taskPanelOpen: raw.taskPanelOpen }), ...(raw.idleCollapseMinutes === undefined ? {} : { idleCollapseMinutes: raw.idleCollapseMinutes as number | null }) };
   }
   throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].kind`);
 }
@@ -130,7 +135,7 @@ export function validateBoardPatchPayload(value: unknown): ValidatedBoardPatchPa
     rejectMutationAliasCycles(mutations);
     return { project: body.project, baseRevision: body.baseRevision as number, mutations };
   }
-  const rawPatch = record(body.patch, "patch"); exact(rawPatch, ["manual", "hidden", "expanded", "favorites", "foldedEngineChildIds", "expandedEngineTrayParentIds", "viewMode", "taskPanelOpen"], "patch");
+  const rawPatch = record(body.patch, "patch"); exact(rawPatch, ["manual", "hidden", "expanded", "favorites", "foldedEngineChildIds", "expandedEngineTrayParentIds", "idleCollapseMinutes", "viewMode", "taskPanelOpen"], "patch");
   if (Object.keys(rawPatch).length === 0) throw new ViewValidationError("INVALID_REQUEST", "empty patch");
   const patch: BoardPatch = {};
   if (rawPatch.manual !== undefined) patch.manual = pathList(rawPatch.manual, "patch.manual");
@@ -142,6 +147,13 @@ export function validateBoardPatchPayload(value: unknown): ValidatedBoardPatchPa
      semantic `set-engine-*` mutations. */
   if (rawPatch.foldedEngineChildIds !== undefined) patch.foldedEngineChildIds = pathList(rawPatch.foldedEngineChildIds, "patch.foldedEngineChildIds");
   if (rawPatch.expandedEngineTrayParentIds !== undefined) patch.expandedEngineTrayParentIds = pathList(rawPatch.expandedEngineTrayParentIds, "patch.expandedEngineTrayParentIds");
+  if (rawPatch.idleCollapseMinutes !== undefined) {
+    if (rawPatch.idleCollapseMinutes !== null
+      && (!Number.isInteger(rawPatch.idleCollapseMinutes) || (rawPatch.idleCollapseMinutes as number) <= 0 || (rawPatch.idleCollapseMinutes as number) > MAX_BOARD_IDLE_COLLAPSE_MINUTES)) {
+      throw new ViewValidationError("INVALID_REQUEST", "invalid patch.idleCollapseMinutes");
+    }
+    patch.idleCollapseMinutes = rawPatch.idleCollapseMinutes as number | null;
+  }
   if (rawPatch.viewMode !== undefined) {
     if (rawPatch.viewMode !== null && rawPatch.viewMode !== "scheme" && rawPatch.viewMode !== "list") throw new ViewValidationError("INVALID_REQUEST", "invalid patch.viewMode");
     patch.viewMode = rawPatch.viewMode;

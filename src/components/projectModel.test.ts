@@ -462,11 +462,7 @@ describe("automatic placement age horizon", () => {
     expect(rendered).toContain("/old-root/agent");
   });
 
-  test("a card below two group roots hangs under the nearer one, once", () => {
-    /* A `recent` conversation mid-chain becomes a root with no lift at all, so
-       it and the tree root above it both assembled over the same subtree and
-       emitted the leaf twice under one key (React: "two children with the same
-       key"). Nearest drawn ancestor wins, matching how the arrows already read. */
+  test("durable spawn lineage keeps a recent middle conversation inside one root group", () => {
     const spawned = { kind: "spawn", role: null, depth: 0, parentConversationId: "c", reviewsConversationId: null, memberships: [] } as FileEntry["durableLineage"];
     const top = entry({ path: "/top", root: "codex-sessions", engine: "codex", activity: "live", mtime: NOW - HOUR });
     const mid = entry({ path: "/mid", parent: "/top", durableLineage: spawned, activity: "recent", mtime: NOW - HOUR });
@@ -476,7 +472,7 @@ describe("automatic placement age horizon", () => {
     expect(rendered).toEqual([...new Set(rendered)]);
     expect(rendered).toContain("/leaf");
     const owner = groups.find((group) => group.columns.some((column) => column.file.path === "/leaf"))!;
-    expect(owner.key).toBe("/mid");
+    expect(owner.key).toBe("/top");
   });
 
   test("a stale child under a live root rests as a chip instead of taking a column", () => {

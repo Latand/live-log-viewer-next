@@ -144,6 +144,7 @@ test("a rejected answer clears the selection, hides the raw error and offers a r
   /* Translated copy at the boundary; the driver's own sentence never renders. */
   expect(host.textContent).toContain(en["question.deliveryFailed"]);
   expect(host.textContent).toContain(en["question.errorMoved"]);
+  expect(host.querySelector('[role="alert"] .text-danger')).not.toBeNull();
   expect(host.textContent).not.toContain(RAW_SERVER_ERROR);
   expect(host.textContent).not.toContain("screen does not match");
 

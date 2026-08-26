@@ -18,14 +18,18 @@ import { deckDisclosureTerminal } from "./flows/reviewDeckDisclosure";
 import type { WorkerStack } from "./scheme/workerCollapse";
 import { activityDot, engineBadge, fmtAge } from "./utils";
 
-/** Verdict glyph for a folded reviewer round, resolved through the flows list by
-    path (never `file.flow`, which /api/files does not populate). */
-function reviewerVerdict(file: FileEntry, flows: readonly Flow[]): string | null {
+const IDLE_WINDOW_OPTIONS = [30, 60, 120, 360, 1_440] as const;
+
+/** Verdict state for a folded reviewer, including terminal runs that produced no
+    verdict. Durable lineage covers closed flows omitted from the client list. */
+function reviewerOutcome(file: FileEntry, flows: readonly Flow[]): { verdict: string | null; reviewer: boolean } {
   for (const flow of flows) {
     const round = flow.rounds.find((item) => item.reviewerPath === file.path);
-    if (round) return round.verdict ? VERDICT_GLYPHS[round.verdict] : null;
+    if (round) return { verdict: round.verdict ? VERDICT_GLYPHS[round.verdict] : null, reviewer: true };
   }
-  return null;
+  const reviewer = file.durableLineage?.role === "reviewer"
+    || file.durableLineage?.memberships.some((membership) => membership.role === "reviewer") === true;
+  return { verdict: file.review?.verdict ? VERDICT_GLYPHS[file.review.verdict] : null, reviewer };
 }
 
 function StackRow({
@@ -71,6 +75,10 @@ function StackRow({
             >
               {lastRound.verdict ? `${VERDICT_GLYPHS[lastRound.verdict]} ${lastRound.verdict}` : t("roundDeck.aborted")}
             </span>
+          ) : lastRound ? (
+            <span className="inline-flex h-4 shrink-0 items-center rounded-full bg-sunken px-1.5 text-[9.5px] font-bold text-muted">
+              {t("workerStack.noVerdict")}
+            </span>
           ) : null}
           <span className="shrink-0 text-[10px] font-normal tabular-nums text-muted">{stack.items.length}</span>
         </button>
@@ -93,7 +101,7 @@ function StackRow({
         <FlipRow className="mt-1 flex flex-wrap items-start gap-1.5 pb-1 pl-5">
           {stack.items.map((file) => {
             const badge = engineBadge(file);
-            const verdict = reviewerVerdict(file, flows);
+            const outcome = reviewerOutcome(file, flows);
             return (
               <button
                 key={file.path}
@@ -106,7 +114,12 @@ function StackRow({
               >
                 <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
                 <span className="shrink-0 rounded-full px-1.5 text-[9px]" style={badge.style}>{badge.label}</span>
-                {verdict ? <span className="shrink-0 text-[10px] text-muted" aria-hidden>{verdict}</span> : null}
+                {outcome.verdict ? <span className="shrink-0 text-[10px] text-muted" aria-hidden>{outcome.verdict}</span> : null}
+                {!outcome.verdict && outcome.reviewer ? (
+                  <span data-reviewer-no-verdict className="shrink-0 rounded-full bg-card px-1.5 text-[9px] font-bold text-muted">
+                    {t("workerStack.noVerdict")}
+                  </span>
+                ) : null}
                 <span className="truncate">{cleanTitle(file.title, 60)}</span>
                 <span className="shrink-0 font-normal text-muted">{fmtAge(file.mtime)}</span>
               </button>
@@ -120,8 +133,8 @@ function StackRow({
 
 /**
  * Board strip of worker-class conversations that have auto-collapsed (issue
- * #112): finished reviewer rounds, quiet flow implementers, pipeline stages and
- * agent-spawned subtasks, grouped into a compact per-flow / per-worktree stack.
+ * #112/#1158): settled and expired conversations grouped into compact origin
+ * stacks.
  * Each stack expands on click; opening a member routes through the board's
  * normal open (which pins it as a manual placement, so a hand-expanded card
  * survives reloads and never re-collapses under the owner). A stack that is a
@@ -133,6 +146,8 @@ export function WorkerStacks({
   files,
   flows,
   pipelines = [],
+  idleCollapseMinutes = 120,
+  onIdleCollapseMinutesChange = () => {},
   onSelect,
   onExpandGroup,
 }: {
@@ -141,6 +156,8 @@ export function WorkerStacks({
   flows: Flow[];
   /** Pipelines, for naming a per-pipeline origin stack by its task (issue #136). */
   pipelines?: Pipeline[];
+  idleCollapseMinutes?: number | null;
+  onIdleCollapseMinutesChange?: (minutes: number | null) => void;
   onSelect: (file: FileEntry) => void;
   /** Expands a terminal direct review group back onto the board. */
   onExpandGroup?: (flow: Flow) => void;
@@ -190,14 +207,37 @@ export function WorkerStacks({
 
   return (
     <div className="shrink-0 border-t border-border bg-canvas" data-testid="worker-stacks" data-worker-stack-pipeline-ids={foldedPipelineIds}>
-      <SectionHeader
-        open={open}
-        onToggle={() => setOpen((value) => !value)}
-        label={t("workerStack.title")}
-        count={total}
-        ariaLabel={t("workerStack.aria")}
-        mobile={isMobile}
-      />
+      <div className="flex min-w-0 items-center">
+        <div className="min-w-0 flex-1">
+          <SectionHeader
+            open={open}
+            onToggle={() => setOpen((value) => !value)}
+            label={t("workerStack.idle", { count: total })}
+            ariaLabel={t("workerStack.aria")}
+            mobile={isMobile}
+          />
+        </div>
+        <label className="mr-2 shrink-0">
+          <span className="sr-only">{t("workerStack.window")}</span>
+          <select
+            data-testid="idle-collapse-window"
+            aria-label={t("workerStack.window")}
+            value={idleCollapseMinutes === null ? "never" : String(idleCollapseMinutes)}
+            onChange={(event) => onIdleCollapseMinutesChange(event.target.value === "never" ? null : Number(event.target.value))}
+            className={`rounded-[8px] border border-border bg-card px-2 text-[11px] font-semibold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isMobile ? "h-11" : "h-7"}`}
+          >
+            {idleCollapseMinutes !== null && !IDLE_WINDOW_OPTIONS.includes(idleCollapseMinutes as typeof IDLE_WINDOW_OPTIONS[number]) ? (
+              <option value={idleCollapseMinutes}>{t("workerStack.minutes", { count: idleCollapseMinutes })}</option>
+            ) : null}
+            {IDLE_WINDOW_OPTIONS.map((minutes) => (
+              <option key={minutes} value={minutes}>
+                {minutes < 60 ? t("workerStack.minutes", { count: minutes }) : t("resources.hoursN", { n: minutes / 60 })}
+              </option>
+            ))}
+            <option value="never">{t("workerStack.never")}</option>
+          </select>
+        </label>
+      </div>
       {open ? (
         <div className="flex max-h-52 flex-col gap-0.5 overflow-y-auto px-3 pb-2.5">
           {stacks.map((stack) => (

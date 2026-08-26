@@ -178,14 +178,12 @@ export interface FileEntry {
   handoff?: boolean;
   /** At least one human-authored message exists in the transcript (issue #112).
       Sourced from the reaper's sticky authorship evidence (PR #125), which
-      filters Claude task-notification records and viewer-injected relays. A
-      hard pin against worker-class auto-collapse — an owner-touched card never
-      collapses. Absent when unknown (no reaper observation yet). */
+      filters Claude task-notification records and viewer-injected relays. This
+      protects process reaping; the board's pure view projection uses its own
+      activity, settlement and operator-pin evidence. */
   userAuthored?: boolean;
   /** The reaper has NOT scanned this transcript since its latest activity, so
-      its authorship is unconfirmed (issue #112). The board's worker
-      auto-collapse fails closed on this — an unverified worker is pinned like an
-      owner-authored one until a reaper cycle clears it. Set for claude/codex
+      its authorship is unconfirmed (issue #112). Set for claude/codex
       transcripts whose mtime is newer than the reaper's last run (or when the
       reaper has never run). */
   authorshipUnverified?: boolean;

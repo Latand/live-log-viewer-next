@@ -26,10 +26,21 @@ function ElapsedTimer({ startedAt, label }: { startedAt: number; label: string }
 }
 
 interface Props {
-  file: Pick<FileEntry, "lastTurn" | "activity">;
+  file: Pick<FileEntry, "lastTurn" | "activity">
+    & Partial<Pick<FileEntry, "mtime" | "pendingQuestion" | "waitingInput" | "rateLimit">>;
   workingLabel: string;
   workingIcon: LucideIcon;
   compact?: boolean;
+}
+
+function waitingStartedAt(file: Props["file"]): number | null {
+  if (file.pendingQuestion) {
+    const askedAt = Date.parse(file.pendingQuestion.askedAt);
+    return Number.isFinite(askedAt) ? askedAt : null;
+  }
+  if (file.rateLimit) return file.lastTurn?.startedAt ?? (file.mtime === undefined ? null : file.mtime * 1000);
+  if (file.waitingInput) return file.waitingInput.since * 1000;
+  return null;
 }
 
 /**
@@ -50,8 +61,32 @@ interface Props {
 export function TurnStatusBar({ file, workingLabel, workingIcon: Icon, compact = false }: Props) {
   const { t } = useLocale();
   const turn = file.lastTurn ?? null;
+  const waiting = Boolean(file.pendingQuestion || file.rateLimit || file.waitingInput);
   const running = turnIsRunning(file);
   const pad = compact ? "px-3 py-1" : "px-6 py-1.5";
+
+  if (waiting) {
+    const startedAt = waitingStartedAt(file);
+    return (
+      <div
+        data-turn-status="waiting"
+        className={`flex shrink-0 items-center justify-center gap-2 border-t border-border ${pad} text-[12px] font-semibold text-warning`}
+      >
+        <span className="flex items-center gap-0.5" aria-hidden>
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-warning" />
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-warning [animation-delay:150ms]" />
+          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-warning [animation-delay:300ms]" />
+        </span>
+        <span className="min-w-0 truncate">{t("turn.waiting")}</span>
+        {startedAt !== null ? (
+          <>
+            <span aria-hidden>·</span>
+            <ElapsedTimer startedAt={startedAt} label={t("turn.timer")} />
+          </>
+        ) : null}
+      </div>
+    );
+  }
 
   if (running) {
     return (
