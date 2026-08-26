@@ -6,6 +6,7 @@ import type { AgentLaunchDraft, LaunchDraftStorage } from "@/components/draft/Ag
 import { applySpawnedConversationSnapshot } from "@/hooks/useFiles";
 import { requestFilesRefresh } from "@/lib/filesEvents";
 import { useLocale } from "@/lib/i18n";
+import { derivedSpawnTitle } from "@/lib/title";
 
 import {
   classifySpawnResponse,
@@ -136,6 +137,7 @@ export function useSeatConfirm(options: {
           const { draft, cwd, firstMessage } = input.launch;
           const provisional = provisionalSpawnFile(
             createSpawnAttempt(clientRequestId, at, {
+              title: derivedSpawnTitle("orchestrator", firstMessage, project),
               engine: draft.engine,
               model: draft.model,
               cwd,

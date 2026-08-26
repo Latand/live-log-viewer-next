@@ -1814,6 +1814,7 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     clientRequestId: clientRequestIdSchema,
     cwd: z.string().min(1).describe("Existing working directory for the new agent."),
     "prompt": z.string().describe("First instruction sent to the agent."),
+    title: z.string().min(1).describe("Semantic conversation title required for every new spawn."),
     engine: z.enum(["claude", "codex"]).optional(),
     model: z.string().optional(),
     effort: z.string().optional(),

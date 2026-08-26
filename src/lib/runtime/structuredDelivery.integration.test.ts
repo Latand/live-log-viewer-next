@@ -18,6 +18,7 @@ import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./str
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { structuredContentDigest } from "./structuredContent";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-delivery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
@@ -2631,7 +2632,7 @@ test("provisional adoption preserves runtime idempotency across Codex and Claude
       })).toMatchObject({ ok: true, structured: true, outcome: "queued" });
       expect(journal.effectBatch()).toHaveLength(1);
 
-      const migration = registry.beginSpawnRequest({
+      const migration = beginLegacySpawnFixture(registry, {
         engine: scenario.engine,
         cwd: directory,
         accountId: "target",

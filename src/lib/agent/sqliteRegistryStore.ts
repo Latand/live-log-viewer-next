@@ -33,6 +33,7 @@ const ROW_COLLECTIONS = [
 const META_FIELDS = [
   "importedResumePanes",
   "legacyResumePanes",
+  "identityMigrations",
   "conversationRevision",
   "engineRouting",
   "autoBalance",

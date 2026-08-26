@@ -26,6 +26,7 @@ import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { INITIAL_MESSAGE_TIMEOUT_MS, STALE_STRUCTURED_SPAWN_TIMEOUT_MS, STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudeLaunchForm, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
 import { structuredContentDigest } from "./structuredContent";
+import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 
 type UnsequencedEvent = RuntimeEvent extends infer Event
   ? Event extends RuntimeEvent ? Omit<Event, "seq"> : never
@@ -70,13 +71,13 @@ test("structured Claude permission mapping distinguishes trusted autonomous spaw
 
 test("structured Claude receipts expose the effective permission mode", () => {
   const store = new AgentRegistry(path.join(sandbox, `permission-receipt-${crypto.randomUUID()}.json`), undefined, undefined, { sqliteMode: "off" });
-  const trusted = store.beginSpawnRequest({
+  const trusted = beginLegacySpawnFixture(store, {
     engine: "claude",
     cwd: "/repo",
     transport: "structured",
     launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "bypassPermissions" }),
   });
-  const downgraded = store.beginSpawnRequest({
+  const downgraded = beginLegacySpawnFixture(store, {
     engine: "claude",
     cwd: "/repo",
     transport: "structured",
@@ -171,7 +172,7 @@ test("attempt 93c42855 recovers a failed registry receipt from transcript eviden
   const artifactPath = path.join(cwd, `${id}.jsonl`);
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -213,7 +214,7 @@ test("issue 533: restart recovery adopts late child delivery after released-main
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, transport: "structured", accountId: "work" });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const key = { engine: "codex" as const, sessionId: id };
   registry.stageStructuredSpawn(begun.receipt.launchId, {
@@ -286,7 +287,7 @@ test("clientAttemptId replay materializes its reserved conversation from runtime
   fs.mkdirSync(cwd, { recursive: true });
   const artifactPath = path.join(cwd, `${id}.jsonl`);
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -361,7 +362,7 @@ test("issue 533: matching runtime evidence preserves a claimed path-pending stru
   const artifactPath = path.join(cwd, `${id}.jsonl`);
   fs.mkdirSync(cwd, { recursive: true });
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, transport: "structured", accountId: "work" });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const key = { engine: "codex" as const, sessionId: id };
   registry.stageStructuredSpawn(begun.receipt.launchId, {
@@ -417,7 +418,7 @@ test("completed replay preserves its live structured host ownership", async () =
   const artifactPath = path.join(cwd, `${id}.jsonl`);
   fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "review current diff" } })}\n`);
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -500,7 +501,7 @@ test.each(["codex", "claude"] as const)("%s replay terminalizes a live registeri
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   const key = { engine, sessionId: id };
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine,
     cwd,
     transport: "structured",
@@ -585,7 +586,7 @@ test("replay measures the delivery timeout from initial-message admission", asyn
   const artifactPath = path.join(cwd, `${id}.jsonl`);
   fs.writeFileSync(artifactPath, "");
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "codex-subscription" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, transport: "structured", accountId: "codex-subscription" });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const key = { engine: "codex" as const, sessionId: id };
   registry.stageStructuredSpawn(begun.receipt.launchId, {
@@ -643,7 +644,7 @@ test.each(["hosted", "recovering"] as const)("a matching %s session fails its qu
   const artifactPath = path.join(cwd, `${id}.jsonl`);
   fs.writeFileSync(artifactPath, "");
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, transport: "structured", accountId: "work" });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const key = { engine: "codex" as const, sessionId: id };
   registry.stageStructuredSpawn(begun.receipt.launchId, {
@@ -704,7 +705,7 @@ test.each(["registering", "hosted", "recovering"] as const)("a healthy slow %s l
   const artifactPath = path.join(cwd, `${id}.jsonl`);
   fs.writeFileSync(artifactPath, "");
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, transport: "structured", accountId: "work" });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const key = { engine: "codex" as const, sessionId: id };
   registry.stageStructuredSpawn(begun.receipt.launchId, {
@@ -762,7 +763,7 @@ test("replay terminalizes an explicit initial-message failure before the stage t
   const artifactPath = path.join(cwd, `${id}.jsonl`);
   fs.writeFileSync(artifactPath, "");
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "codex-subscription" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, transport: "structured", accountId: "codex-subscription" });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const key = { engine: "codex" as const, sessionId: id };
   registry.stageStructuredSpawn(begun.receipt.launchId, {
@@ -814,7 +815,7 @@ test("p0_282 empty-host replay terminalizes the receipt and releases its stale g
   fs.mkdirSync(cwd, { recursive: true });
   const artifactPath = path.join(cwd, `${id}.jsonl`);
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -1190,7 +1191,7 @@ test("a resume successor claims a released row whose recorded host process is st
     claimOwner: null,
     pendingAction: null,
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -1319,7 +1320,7 @@ test("a fresh structured spawn permits an intentionally empty first message", as
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     accountId: "codex-subscription",
@@ -1389,7 +1390,7 @@ test("a concurrent structured spawn replay stays pending until durable host setu
     clientAttemptId: `attempt_${id}`,
     requestDigest: id.replaceAll("-", "").padEnd(64, "0").slice(0, 64),
   };
-  const begun = registry.beginSpawnRequest(request);
+  const begun = beginLegacySpawnFixture(registry, request);
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const host = new RoundTripHost("codex", artifactPath, id);
   const bindReached = deferred();
@@ -1425,7 +1426,7 @@ test("a concurrent structured spawn replay stays pending until durable host setu
   });
 
   await bindReached.promise;
-  const replay = registry.beginSpawnRequest(request);
+  const replay = beginLegacySpawnFixture(registry, request);
   if (replay.kind !== "replay") throw new Error("concurrent request did not replay");
   const response = spawnResponseForReceipt(replay.receipt, replay.receipt.artifactPath, { structured: true });
   expect(response).toMatchObject({ launched: false, state: "path-pending", path: artifactPath });
@@ -1448,7 +1449,7 @@ test("a runtime synchronization hold preserves the staged spawn until recovery d
   const client = runtimeClient(journal);
   const host = new RoundTripHost("codex", artifactPath, id);
   await bindStructuredDeliveryQueue([{ key: { engine: "codex", sessionId: id }, host }], { registry, client });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -1560,7 +1561,7 @@ test("issue 533: a 30 second initial-message timeout releases admission ownershi
   const client = runtimeClient(journal);
   const host = new RoundTripHost("codex", artifactPath, id);
   await bindStructuredDeliveryQueue([{ key: { engine: "codex", sessionId: id }, host }], { registry, client });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, transport: "structured", accountId: "work" });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
 
   const response = await spawnStructuredConversation({
@@ -1666,7 +1667,7 @@ test("issue 533: transport-uncertain initial-message admission preserves the sta
   } as RuntimeHostClient;
   const host = new RoundTripHost("codex", artifactPath, id);
   await bindStructuredDeliveryQueue([{ key: { engine: "codex", sessionId: id }, host }], { registry, client });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, transport: "structured", accountId: "work" });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
 
   const response = await spawnStructuredConversation({
@@ -1744,7 +1745,7 @@ test("issue 533: replay re-admits a first message lost before runtime journal ad
   } as RuntimeHostClient;
   const host = new RoundTripHost("codex", artifactPath, id);
   await bindStructuredDeliveryQueue([{ key: { engine: "codex", sessionId: id }, host }], { registry, client: uncertainClient });
-  const reservation = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "work" });
+  const reservation = beginLegacySpawnFixture(registry, { engine: "codex", cwd, transport: "structured", accountId: "work" });
   if (reservation.kind !== "created") throw new Error("spawn receipt was unavailable");
   begun = reservation;
 
@@ -1828,7 +1829,7 @@ test("a failed resume before identity staging projects dead ownership so the fol
     claimOwner: null,
     pendingAction: null,
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -1947,7 +1948,7 @@ test("structured successor resume forwards the 942-record registry cursor into h
     claimOwner: null,
     pendingAction: null,
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2019,7 +2020,7 @@ test("an uncertain adoption cleanup retains the child process and writer claim",
     claimOwner: null,
     pendingAction: null,
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2113,7 +2114,7 @@ test("late adoption cleanup preserves the open failure and terminalizes the rele
     claimOwner: null,
     pendingAction: null,
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2219,7 +2220,7 @@ test("failed adoption keeps dead projection retryable across an append failure a
       activeTurnId: "stale-turn",
     },
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2318,7 +2319,7 @@ test("a staged resume releases its transferred claim when failure projection is 
     claimOwner: null,
     pendingAction: null,
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2399,7 +2400,7 @@ test("a projected same-session resume failure retains its terminal event cursor"
     claimOwner: null,
     pendingAction: null,
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2461,7 +2462,7 @@ test("spawn failure preserves the staged writer when its child cannot be reaped"
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
   const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2583,7 +2584,7 @@ test("startup recovery preserves a live adopted writer while settling its stale 
       activeTurnId: null,
     },
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2657,7 +2658,7 @@ test("startup recovery preserves a live adopted writer while settling its stale 
   const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
   const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
   const key = { engine: "codex" as const, sessionId };
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2756,7 +2757,7 @@ function stagedOwnershipRace(label: string) {
   const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
   const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
   const key = { engine: "codex" as const, sessionId };
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -2884,7 +2885,7 @@ test("a stale finalize cannot project the newer structured owner dead", async ()
     claimOwner: null,
     pendingAction: null,
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -3030,7 +3031,7 @@ test("a resume claim loser leaves the winning writer projection and ownership in
       activeTurnId: null,
     },
   });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -3093,7 +3094,7 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
       clientAttemptId: `attempt_${id}`,
       requestDigest: id.replaceAll("-", "").padEnd(64, "0").slice(0, 64),
     };
-    const begun = registry.beginSpawnRequest(request);
+    const begun = beginLegacySpawnFixture(registry, request);
     if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
     const host = new RoundTripHost("codex", artifactPath, id);
     const reached = deferred();
@@ -3139,7 +3140,7 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
     });
 
     await reached.promise;
-    const replay = registry.beginSpawnRequest(request);
+    const replay = beginLegacySpawnFixture(registry, request);
     if (replay.kind !== "replay") throw new Error("concurrent request did not replay");
     expect(spawnResponseForReceipt(replay.receipt, replay.receipt.artifactPath, { structured: true })).toMatchObject({
       launched: false,
@@ -3208,7 +3209,7 @@ function prepareReviewerIncidentState(
   });
   if (!reviewerRole.ok || !reviewerRole.value) throw new Error("reviewer role scaffold was unavailable");
   const prompt = `${reviewerRole.value.scaffold}\n\nreview the implementer diff`;
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine,
     cwd,
     transport: "structured",
@@ -3296,7 +3297,7 @@ test.each(["codex", "claude"] as const)("issue 1074: a %s host start that outliv
   const accountId = `${engine}-subscription`;
   const model = engine === "codex" ? "gpt-5.6-sol" : "opus";
   const launchProfile = emptyLaunchProfile({ cwd, model });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine,
     cwd,
     transport: "structured",
@@ -3391,7 +3392,7 @@ test.each(["codex", "claude"] as const)("issue 1074: a %s launch fails when shar
   const accountId = `${engine}-subscription`;
   const model = engine === "codex" ? "gpt-5.6-sol" : "opus";
   const launchProfile = emptyLaunchProfile({ cwd, model });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine,
     cwd,
     transport: "structured",
@@ -3487,7 +3488,7 @@ test("issue 1074: startup reconciliation recovers an overdue materialized placeh
     payload: { type: "user_message", message: "late startup message" },
   }) + "\n");
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -3547,7 +3548,7 @@ test("startup recovery finalizes a staged spawn without duplicating its admitted
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   await client.command({
     kind: "spawn",
@@ -3624,7 +3625,7 @@ test("startup recovery terminalizes an admitted spawn interrupted before identit
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "codex-subscription" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, transport: "structured", accountId: "codex-subscription" });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   await client.command({
     kind: "spawn", operationId: begun.receipt.launchId, idempotencyKey: begun.receipt.launchId,
@@ -3637,7 +3638,7 @@ test("startup recovery terminalizes an admitted spawn interrupted before identit
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "failed", key: null });
   expect((await client.operationStatus(begun.receipt.launchId))?.receipt).toMatchObject({ status: "failed" });
   expect((await client.effectBatch(["runtime.spawn"], 0)).filter((effect) => effect.payload.operationId === begun.receipt.launchId)).toEqual([]);
-  expect(registry.beginSpawnRequest({
+  expect(beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -3653,13 +3654,13 @@ test("startup recovery settles a structured receipt after a crash before runtime
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
-  const structured = registry.beginSpawnRequest({
+  const structured = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
     accountId: "codex-subscription",
   });
-  const tmux = registry.beginSpawnRequest({
+  const tmux = beginLegacySpawnFixture(registry, {
     engine: "claude",
     cwd,
     transport: "tmux",
@@ -3677,7 +3678,7 @@ test("startup recovery settles a structured receipt after a crash before runtime
   });
   expect(registry.snapshot().receipts[tmux.receipt.launchId]).toMatchObject({ state: "starting", key: null });
   expect(await client.effectBatch(["runtime.spawn"], 0)).toEqual([]);
-  expect(registry.beginSpawnRequest({
+  expect(beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -3693,7 +3694,7 @@ test.each(["failed", "delivered"] as const)("startup recovery settles a keyless 
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -3724,7 +3725,7 @@ test.each(["failed", "delivered"] as const)("startup recovery settles a keyless 
   });
   expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe(terminalStatus);
   expect((await client.effectBatch(["runtime.spawn"], 0)).filter((effect) => effect.payload.operationId === begun.receipt.launchId)).toEqual([]);
-  expect(registry.beginSpawnRequest({
+  expect(beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     transport: "structured",
@@ -3742,7 +3743,7 @@ test("startup recovery cleans a staged host whose spawn operation already failed
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   await client.command({
     kind: "spawn",
@@ -3817,7 +3818,7 @@ test("startup recovery retains a failed staged writer when its child cannot be r
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   await client.command({
     kind: "spawn",
@@ -3888,7 +3889,7 @@ test("startup recovery completes an intentionally empty spawn prompt without a h
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   await client.command({
     kind: "spawn",
@@ -4156,7 +4157,7 @@ test("a dead predecessor kill terminalizes without touching its live successor",
     claimOwner: null,
     pendingAction: null,
   });
-  const resumed = registry.beginSpawnRequest({
+  const resumed = beginLegacySpawnFixture(registry, {
     engine: "codex",
     cwd,
     accountId: "codex-subscription",
@@ -4323,7 +4324,7 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
     await bindStructuredDeliveryQueue([], { registry, client });
     const model = engine === "codex" ? "gpt-5.6-luna" : "claude-sonnet-4-6";
     const launchProfile = emptyLaunchProfile({ cwd, model });
-    const begun = registry.beginSpawnRequest({
+    const begun = beginLegacySpawnFixture(registry, {
       engine,
       cwd,
       accountId: `${engine}-subscription`,
@@ -4536,7 +4537,7 @@ test("structured spawn fails loudly when Codex omits the transcript-path capabil
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const host = new RoundTripHost("codex", path.join(cwd, `${id}.jsonl`), id);
   Object.defineProperty(host, "identity", { value: { threadId: id, path: null } });
@@ -4580,7 +4581,7 @@ test("issue 367: four simultaneous structured Claude launches admit past transie
 
   const launchProfile = emptyLaunchProfile({ cwd, permissionMode: "bypassPermissions" });
   const launches = Array.from({ length: 4 }, (_, index) => {
-    const begun = registry.beginSpawnRequest({
+    const begun = beginLegacySpawnFixture(registry, {
       engine: "claude",
       cwd,
       transport: "structured",
@@ -4665,7 +4666,7 @@ test("issue 367: a launch failing before identity staging retires its registerin
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd });
-  const begun = registry.beginSpawnRequest({ engine: "claude", cwd, transport: "structured", launchProfile });
+  const begun = beginLegacySpawnFixture(registry, { engine: "claude", cwd, transport: "structured", launchProfile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
 
   await expect(spawnStructuredConversation({
@@ -4696,7 +4697,7 @@ test("issue 367: startup recovery closes a queued runtime spawn whose durable re
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd });
-  const begun = registry.beginSpawnRequest({ engine: "claude", cwd, transport: "structured", launchProfile });
+  const begun = beginLegacySpawnFixture(registry, { engine: "claude", cwd, transport: "structured", launchProfile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
 
   /* Production shape: the admission command landed in the journal, the Viewer
@@ -4771,7 +4772,7 @@ test("issue 367: a post-kill relaunch that exhausts admission never leaves a liv
      terminal retry-safe failure — /api/files kept reporting it as live
      structured_spawn_queued with no PID, no session, and no transcript. */
   const launchProfile = emptyLaunchProfile({ cwd, permissionMode: "bypassPermissions" });
-  const begun = registry.beginSpawnRequest({ engine: "claude", cwd, transport: "structured", launchProfile });
+  const begun = beginLegacySpawnFixture(registry, { engine: "claude", cwd, transport: "structured", launchProfile });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   let admissionAttempts = 0;
   const deadClient = {
@@ -4835,7 +4836,7 @@ test("issue 1071: a retried fresh launch keeps its pre-allocated id until the se
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   const launchProfile = emptyLaunchProfile({ cwd });
   const conversation = registry.ensureConversation("claude", artifactPath, "claude-subscription");
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "claude",
     cwd,
     transport: "structured",
@@ -4898,7 +4899,7 @@ test("issue 1071: a terminal CLI exit fails the launch receipt instead of leavin
   const client = runtimeClient(journal);
   const launchProfile = emptyLaunchProfile({ cwd });
   const host = new TerminallyExitedClaudeHost("claude", artifactPath, sessionId);
-  const begun = registry.beginSpawnRequest({
+  const begun = beginLegacySpawnFixture(registry, {
     engine: "claude",
     cwd,
     transport: "structured",
@@ -4965,7 +4966,7 @@ test("issue 1071: startup fails a queued launch its replacement already supersed
 
   /* The launch the previous generation accepted: an identity was staged, the
      engine session was never created, and its runtime operation is queued. */
-  const stale = registry.beginSpawnRequest({
+  const stale = beginLegacySpawnFixture(registry, {
     engine: "claude",
     cwd,
     transport: "structured",
@@ -5003,7 +5004,7 @@ test("issue 1071: startup fails a queued launch its replacement already supersed
 
   /* An independent launch into the same worktree under the same role: its
      request identity differs, so it replaces nothing and must survive. */
-  const independent = registry.beginSpawnRequest({
+  const independent = beginLegacySpawnFixture(registry, {
     engine: "claude",
     cwd,
     transport: "structured",
@@ -5029,7 +5030,7 @@ test("issue 1071: startup fails a queued launch its replacement already supersed
 
   /* The operator's resubmission of the SAME launch under a fresh idempotency
      key — same request digest — now running. */
-  const fresh = registry.beginSpawnRequest({
+  const fresh = beginLegacySpawnFixture(registry, {
     engine: "claude",
     cwd,
     transport: "structured",
@@ -5102,7 +5103,7 @@ test("issue 1071: a stage retry supersedes its queued predecessor even though it
 
   /* Attempt 1: the stage launch the previous generation accepted, staged but
      never hosted, its runtime operation still queued. */
-  const attempt1 = registry.beginSpawnRequest({
+  const attempt1 = beginLegacySpawnFixture(registry, {
     engine: "claude",
     cwd,
     transport: "structured",
@@ -5140,7 +5141,7 @@ test("issue 1071: a stage retry supersedes its queued predecessor even though it
 
   /* An unrelated launch into the same worktree under the same role: it names
      no predecessor and shares no digest, so it must survive untouched. */
-  const independent = registry.beginSpawnRequest({
+  const independent = beginLegacySpawnFixture(registry, {
     engine: "claude",
     cwd,
     transport: "structured",
@@ -5168,7 +5169,7 @@ test("issue 1071: a stage retry supersedes its queued predecessor even though it
      terminally retires, and because that name is folded into the launch shape
      its request digest is NOT attempt 1's — the explicit edge is the only
      evidence that links the two. */
-  const attempt2 = registry.beginSpawnRequest({
+  const attempt2 = beginLegacySpawnFixture(registry, {
     engine: "claude",
     cwd,
     transport: "structured",

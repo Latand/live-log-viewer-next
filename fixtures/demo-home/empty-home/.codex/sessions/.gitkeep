@@ -1,0 +1,3 @@
+The zero-session seed for the first-run-empty still (issue #1162): both scanner
+roots exist and are empty, so the viewer renders a genuine first run instead of
+a missing-directory failure. Sessions are never added here.

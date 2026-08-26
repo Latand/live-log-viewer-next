@@ -42,7 +42,7 @@ Assignment defaults: all LLV UX/UI and Viewer bug investigation, implementation,
 
 ## Spawning
 
-`POST http://127.0.0.1:8898/api/spawn` with `{"engine":"codex|claude","model":"<model>","cwd":"<abs dir>","prompt":"<first message>","src":"<your own transcript path>"}` (same-origin: call from localhost without an Origin header).
+`POST http://127.0.0.1:8898/api/spawn` with `{"title":"<semantic task title>","engine":"codex|claude","model":"<model>","cwd":"<abs dir>","prompt":"<first message>","src":"<your own transcript path>"}` (same-origin: call from localhost without an Origin header).
 
 For generic callers, `src` stays optional. An explicit `src` wins; omission triggers silent caller inference; an unmatched external caller may create a root card. Orchestrators always supply `src` so the intended parent is deterministic and auditable. `src` records lineage in `~/.config/agent-log-viewer/state/handoff-lineage.json`.
 

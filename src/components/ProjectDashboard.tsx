@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2, Search, Undo2 } from "lucide-react";
+import { Bot, Layers, List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2, Search, Undo2 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
@@ -305,6 +305,70 @@ function HeaderMenu({
           {children(() => setOpen(false))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * The empty project's next step (issue #1162).
+ *
+ * A project whose board carries nothing used to advise opening the switchboard
+ * and clicking a conversation — of which there are none. It names the two ways
+ * work actually starts here instead: the orchestrator, which is told what to
+ * get done, and one agent for one task. Both buttons steer handlers the
+ * dashboard already owns; no third creation path exists.
+ *
+ * The phone leaf passes neither handler: its orchestrator row sits directly
+ * above this leaf and its header owns «Create», so the same two lines land
+ * without duplicating either control.
+ */
+function EmptyProjectLeaf({
+  projectName,
+  onOrchestrator,
+  onAgent,
+  agentDisabled = false,
+}: {
+  projectName: string;
+  onOrchestrator?: () => void;
+  onAgent?: () => void;
+  agentDisabled?: boolean;
+}) {
+  const { t } = useLocale();
+  return (
+    <div className="flex flex-1 items-center justify-center px-4 py-5 text-center" data-testid="project-empty">
+      <div className="flex max-w-[440px] flex-col items-center gap-2">
+        <div className="text-[13.5px] font-semibold text-primary">{t("dash.emptyTitle")}</div>
+        <div className="text-[12px] text-secondary">{t("dash.emptyStartHere", { project: projectName })}</div>
+        <div className="text-[12px] text-secondary">{t("dash.emptyOneAgent")}</div>
+        {onOrchestrator || onAgent ? (
+          <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+            {onOrchestrator ? (
+              <button
+                type="button"
+                data-testid="project-empty-orchestrator"
+                onClick={onOrchestrator}
+                className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-[10px] border border-accent/45 bg-card px-4 text-[13px] font-bold text-accent shadow-1 hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <Bot className="h-4 w-4" aria-hidden /> {t("orchPanel.title")}
+              </button>
+            ) : null}
+            {onAgent ? (
+              <button
+                type="button"
+                data-testid="project-empty-agent"
+                onClick={onAgent}
+                disabled={agentDisabled}
+                title={t("dash.newConvo")}
+                className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-[10px] border border-border bg-card px-4 text-[13px] font-bold text-primary shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {/* The visible copy is the header menu path this button stands
+                    in for, so the route survives the empty state (issue #1162). */}
+                <MessageSquarePlus className="h-4 w-4 shrink-0 text-accent" aria-hidden /> {t("dash.emptyAgentCta")}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -1965,12 +2029,7 @@ function ProjectDashboardView({
               {listAvailable ? (
                 <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
               ) : (
-                <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
-                  <div>
-                    <div className="text-[13.5px] font-semibold text-muted">{t("dash.emptyTitle")}</div>
-                    <div className="mt-0.5 text-[12px] text-muted">{t("dash.emptyHint")}</div>
-                  </div>
-                </div>
+                <EmptyProjectLeaf projectName={projectName} />
               )}
             </>
           )}
@@ -2021,12 +2080,12 @@ function ProjectDashboardView({
             ) : listAvailable ? (
               <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
             ) : (
-              <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
-                <div>
-                  <div className="text-[13.5px] font-semibold text-muted">{t("dash.emptyTitle")}</div>
-                  <div className="mt-0.5 text-[12px] text-muted">{t("dash.emptyHint")}</div>
-                </div>
-              </div>
+              <EmptyProjectLeaf
+                projectName={projectName}
+                onOrchestrator={onToggleOrchestratorPanel}
+                onAgent={addDraft}
+                agentDisabled={!loaded}
+              />
             )}
             {/* The create button floats in the bottom-left corner of the board —
                 away from the fixed attention pill in the top-right, above the

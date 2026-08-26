@@ -5,11 +5,13 @@ import {
   DEMO_FIXED_ISO,
   DEMO_TOKEN,
   PUPPETEER_IMAGE,
+  SEED_SOURCES,
   SHOTS,
   assertStableText,
   buildDockerClientEnvironment,
   buildDemoEnvironment,
   renderFixtureTemplate,
+  shotsBySeed,
 } from "./demo-capture";
 
 /* The browser script stays CommonJS on purpose — it runs under plain `node`
@@ -90,6 +92,7 @@ describe("demo capture contract", () => {
       "session-tree.png",
       "codex-session.png",
       "overview-board.png",
+      "first-run-empty.png",
       "pending-question.png",
       "review-group-expanded.png",
       "review-group-collapsed.png",
@@ -105,6 +108,60 @@ describe("demo capture contract", () => {
     expect(SHOTS.every((shot) => shot.frame.pixels.tileSize > 0)).toBeTrue();
     expect(SHOTS.every((shot) => shot.frame.pixels.minColorCount > 0)).toBeTrue();
     expect(new Set(SHOTS.map((shot) => shot.output)).size).toBe(SHOTS.length);
+  });
+
+  test("the first-run still renders from a home with no sessions at all", async () => {
+    const fs = await import("node:fs");
+    const shot = SHOTS.find((candidate) => candidate.id === "first-run-empty")!;
+    expect(shot.seed).toBe("empty");
+    expect(shot.project).toBeNull();
+    expect(shot.file).toBeNull();
+
+    /* The seed is the claim: a first run cannot be staged inside a home full of
+       sessions, so this directory must contain no transcript at all. */
+    const seedRoot = path.join(import.meta.dir, "..", SEED_SOURCES.empty);
+    const transcripts: string[] = [];
+    const visit = (directory: string) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const pathname = path.join(directory, entry.name);
+        if (entry.isDirectory()) visit(pathname);
+        else if (/\.(jsonl|json)$/.test(entry.name)) transcripts.push(pathname);
+      }
+    };
+    visit(seedRoot);
+    expect(transcripts).toEqual([]);
+    /* Both scanner roots still exist, so the viewer reads a genuine first run
+       rather than a missing-directory failure. */
+    for (const root of [".claude/projects", ".codex/sessions"]) {
+      expect(fs.statSync(path.join(seedRoot, root)).isDirectory()).toBeTrue();
+    }
+
+    /* The gated frame is the next step, not just the absence of cards. */
+    expect(shot.frame.visible.map((expected) => expected.selector)).toEqual([
+      '[data-testid="overview-first-run"]',
+      '[data-testid="overview-create-project"]',
+      '[data-testid="rail-create-project"]',
+    ]);
+    /* …and the retired dead ends may not reappear on the first screen. */
+    expect(shot.frame.absentText).toContain("No logs yet");
+    expect(shot.frame.absentText).toContain("Nothing found");
+    /* Sparse by design: the blank-frame floor still applies, the color floor is
+       the one relaxed, and only for this shot. */
+    expect(shot.frame.pixels.minNonWhiteRatio).toBe(0.15);
+    expect(shot.frame.pixels.minColorCount).toBeLessThan(100);
+    expect(shot.frame.pixels.minColorCount).toBeGreaterThan(0);
+    expect(SHOTS.filter((candidate) => (candidate.frame.pixels.minColorCount < 100)).map((candidate) => candidate.id)).toEqual(["first-run-empty"]);
+  });
+
+  test("shots are captured one boot per fixture home, in manifest order", () => {
+    const groups = shotsBySeed();
+    expect(groups.map(([seed]) => seed)).toEqual(["demo", "empty"]);
+    expect(groups.flatMap(([, shots]) => shots.map((shot) => shot.id)).sort()).toEqual(SHOTS.map((shot) => shot.id).sort());
+    /* Every shot renders against a home that exists in the repository. */
+    for (const [seed, shots] of groups) {
+      expect(SEED_SOURCES[seed]).toBeTruthy();
+      expect(shots.length).toBeGreaterThan(0);
+    }
   });
 
   test("readiness Kanban shots pin the Ukrainian locale, both viewports, and the five section headings", () => {

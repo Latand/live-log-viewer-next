@@ -36,13 +36,13 @@ test("a failed catalog fetch renders an error with a retry, never the idle empty
   expect(html).toContain('role="alert"');
   /* The two affirmative idle statements the board used to make while nothing
      had actually loaded. */
-  expect(html).not.toContain(en["overview.empty"]);
+  expect(html).not.toContain(en["overview.firstRunTitle"]);
   expect(html).not.toContain(en["common.nothingRunning"]);
 });
 
 test("a genuinely empty installation still reads as empty, with no error", () => {
   const html = board(0);
-  expect(html).toContain(en["overview.empty"]);
+  expect(html).toContain(en["overview.firstRunTitle"]);
   expect(html).toContain(en["common.nothingRunning"]);
   expect(html).not.toContain(en["catalog.errorTitle"]);
   expect(html).not.toContain(en["catalog.retry"]);
