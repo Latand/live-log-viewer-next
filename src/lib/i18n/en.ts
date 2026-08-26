@@ -1865,10 +1865,16 @@ export const en = {
   "orchPanel.resolving": "Opening the conversation…",
   "orchPanel.resolvingHint": "The orchestrator is designated; its transcript hasn't reached this view yet.",
   "orchPanel.openOnBoard": "Open it on the board",
+  "orchPanel.bindStalled": "Still can't open this conversation",
+  "orchPanel.bindStalledCatalog": "The seat's recorded transcript isn't in this view's file catalog. Its host is alive, so the conversation is most likely running under a transcript that replaced the recorded one.",
+  "orchPanel.bindStalledSurface": "This transcript is in view, but the runtime plane hasn't resolved a host for it yet.",
+  "orchPanel.rebind": "Re-bind",
+  "orchPanel.rebindTitle": "Look this seat's conversation up again by its own id. Nothing is designated, rotated or spawned.",
   "orchPanel.rotation": "Rotation recommended",
   "orchPanel.rotationStrong": "Rotation strongly recommended",
   "orchPanel.rotationContext": "context is at {percent}% of the model's window",
   "orchPanel.rotationDead": "its host is gone",
+  "orchPanel.badgeNeedsYou": "needs you",
   "orchPanel.badgeLive": "live",
   "orchPanel.badgeStalled": "quiet",
   "orchPanel.badgeResumable": "finished",
@@ -2030,6 +2036,13 @@ export const en = {
   "attention.popoverTitle": "Waiting on you",
   "attention.filterOn": "Show only those waiting on you (F)",
   "attention.filterOff": "Show all nodes (F)",
+  /* The one decision line every attention surface shares (#1167): the toast
+     title, the island popover row and the orchestrator dock badge's tooltip.
+     Lower-case to sit beside `rateLimit.badgeUntil`, which names the same class
+     of wait and is reused verbatim. */
+  "attention.decisionQuestion": "a question",
+  "attention.decisionPlan": "plan approval",
+  "attention.decisionPermission": "permission prompt",
 
   // MobileFocusView
   "mobile.noConvos": "No conversations yet",

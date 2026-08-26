@@ -45,3 +45,28 @@ test("the shell registers the navigator half of the handoff", () => {
      handoff needs both. */
   expect(code).toMatch(/focusHandoffBus\.setShell\(/);
 });
+
+/*
+ * The same defect class for the attention TOAST and the popover rows (issue
+ * #1167): both moved out of the shell into `./attention/*` so the decision line
+ * they now carry could be tested directly. A component with its own green suite
+ * and no mount is the exact failure this file exists to catch, and the old
+ * inline markup would go on rendering «Agent is waiting for a reply» beside it.
+ */
+
+test("the shell renders the attention toast on both surfaces, and no longer inlines its own", () => {
+  expect(code).toMatch(/import\s*\{[^}]*\bAttentionToast\b[^}]*\}\s*from\s*"\.\/attention\/AttentionToast"/);
+  const mounted = code.match(/<AttentionToast\b/g) ?? [];
+  /* Desktop floats it under the island; the phone docks it in flow. */
+  expect(mounted).toHaveLength(2);
+  /* The generic wording is the toast component's own fallback now. The shell
+     keeping a copy is how a second, decision-less toast comes back. */
+  expect(code).not.toContain("viewer.agentWaiting");
+});
+
+test("the shell renders the popover rows from the island's own component", () => {
+  expect(code).toMatch(/import\s*\{[^}]*\bAttentionQueueRow\b[^}]*\}\s*from\s*"\.\/attention\/AttentionIsland"/);
+  expect(code).toMatch(/<AttentionQueueRow\b/);
+  /* The row's own line derivation replaced the shell's parallel snippet. */
+  expect(code).not.toContain("attentionSnippet");
+});

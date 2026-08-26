@@ -11,8 +11,12 @@ import {
   newSeatRequestId,
   orchestratorQuietBannerEligible,
   parseSeatStatus,
+  resolveSeatFile,
   ROTATION_CONTEXT_PERCENT,
+  SEAT_BIND_TIMEOUT_MS,
+  seatBadgeOf,
   seatRequestSettled,
+  type OrchestratorPanelState,
   type OrchestratorSeatStatus,
 } from "./seatState";
 
@@ -62,6 +66,10 @@ function file(overrides: Partial<FileEntry> = {}): FileEntry {
 }
 
 const base = { statusFailed: false, submitting: false, submitFailure: null, file: null, surface: null };
+
+/** A fixed «now» for the one derivation that reads a clock: the attention
+    queue's stalled tier, which ages out (`STALLED_ATTENTION_TTL`). */
+const NOW = 1_760_000_100;
 
 describe("the panel names every state in the map (#977)", () => {
   test("no answer yet is loading, and a failed read says so instead of inviting a second orchestrator", () => {
@@ -233,6 +241,8 @@ describe("the server's own rotation recommendation is what the panel says (#978)
     effort: null,
     accountId: "work",
     cwd: "/repos/atlas",
+    transcriptPath: "/transcripts/orchestrator.jsonl",
+    liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 },
     context: { tokens: 620_000, limit: 1_000_000, percent: 62, estimated: false, basis: "provider-reported usage" },
     transcriptFacts: { bytes: 1024, messageCount: 10, toolCount: 4, compactionCount: 0 },
     rotation: { recommended: false, level: "none", reasons: [], thresholdUnknown: false },
@@ -400,4 +410,138 @@ test("a minted request id satisfies the seat route's own gate", () => {
   for (let index = 0; index < 20; index += 1) {
     expect(newSeatRequestId()).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
   }
+});
+
+describe("the dock binds the seat by its durable conversation id (#1182)", () => {
+  const successorPath = "/transcripts/orchestrator.successor.jsonl";
+
+  test("a recorded path the catalog no longer carries still binds, because the id does", () => {
+    /* The seat froze the path it was activated at; the conversation has since
+       been re-hosted onto a new transcript under the SAME durable id. */
+    const successor = file({ path: successorPath, name: "orchestrator.successor.jsonl" });
+    expect(resolveSeatFile({
+      files: [successor],
+      conversationId: "conversation_orchestrator",
+      seatPath: "/transcripts/orchestrator.jsonl",
+      currentPath: null,
+    })).toBe(successor);
+  });
+
+  test("a successor generation the catalog knows under another id binds through the status read's current path", () => {
+    /* The re-hosted generation entered the catalog keyed by the native session
+       it is now written under, so nothing about the seat's recorded id or path
+       matches it. `GET /api/orchestrator/seat/status` resolves the durable id
+       to exactly this path through the registry, which is the bridge. */
+    const successor = file({ path: successorPath, name: "orchestrator.successor.jsonl", conversationId: "conversation_successor" });
+    expect(resolveSeatFile({
+      files: [successor],
+      conversationId: "conversation_orchestrator",
+      seatPath: "/transcripts/orchestrator.jsonl",
+      currentPath: successorPath,
+    })).toBe(successor);
+  });
+
+  test("the recorded path is a hint: it binds when nothing better answers, and never outranks the id", () => {
+    const recorded = file();
+    const successor = file({ path: successorPath, name: "orchestrator.successor.jsonl" });
+    /* Only the hint is left. */
+    expect(resolveSeatFile({ files: [recorded], conversationId: "conversation_orchestrator", seatPath: recorded.path, currentPath: null })).toBe(recorded);
+    /* The recorded path is an archived predecessor of the live generation, so
+       the id's current entry wins over the entry the path names. */
+    const archived = file({ migratedTo: successorPath } as Partial<FileEntry>);
+    expect(resolveSeatFile({ files: [archived, successor], conversationId: "conversation_orchestrator", seatPath: archived.path, currentPath: null })).toBe(successor);
+    /* No seat at all binds nothing, whatever the catalog holds. */
+    expect(resolveSeatFile({ files: [successor], conversationId: null, seatPath: successorPath, currentPath: successorPath })).toBeNull();
+  });
+});
+
+describe("«opening» is bounded once the status read says the host is alive (#1182)", () => {
+  const stuck = { ...base, status: status({ seat: seat() }), hostLive: true };
+
+  test("under the bound it is still opening; over it, the panel names what is missing", () => {
+    expect(deriveOrchestratorPanelState({ ...stuck, unboundForMs: SEAT_BIND_TIMEOUT_MS - 1 }))
+      .toMatchObject({ kind: "live", liveness: "resolving", bindFailure: null });
+    expect(deriveOrchestratorPanelState({ ...stuck, unboundForMs: SEAT_BIND_TIMEOUT_MS }))
+      .toMatchObject({ kind: "live", liveness: "resolving", bindFailure: "catalog" });
+  });
+
+  test("a bound transcript whose host the runtime plane has not resolved names THAT instead", () => {
+    expect(deriveOrchestratorPanelState({ ...stuck, file: file(), surface: "unresolved", unboundForMs: SEAT_BIND_TIMEOUT_MS }))
+      .toMatchObject({ kind: "live", liveness: "resolving", bindFailure: "surface" });
+  });
+
+  test("nothing is claimed while the wait is legitimate: no live host, or the seat already bound", () => {
+    /* The status read has not reported a live host, so «opening» is honest. */
+    expect(deriveOrchestratorPanelState({ ...stuck, hostLive: false, unboundForMs: 10 * SEAT_BIND_TIMEOUT_MS }))
+      .toMatchObject({ bindFailure: null });
+    /* Bound and classified — there is no wait to bound. */
+    expect(deriveOrchestratorPanelState({ ...stuck, file: file(), surface: "live-root", unboundForMs: 10 * SEAT_BIND_TIMEOUT_MS }))
+      .toMatchObject({ liveness: "live", bindFailure: null });
+  });
+});
+
+describe("a decision the operator owes outranks every word for «it is running» (#1167)", () => {
+  const asked = {
+    kind: "question" as const,
+    toolUseId: "tool-use-orch",
+    transcriptPath: "/transcripts/orchestrator.jsonl",
+    pid: 4242,
+    paneTarget: null,
+    askedAt: "2026-08-25T10:00:00.000Z",
+    questions: [{ header: "Rollout window", question: "Approve the proposed rollout window", multiSelect: false, options: [] }],
+  };
+  const seated = { ...base, status: status({ seat: seat() }), now: NOW };
+  const badgeOf = (state: OrchestratorPanelState) => seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>);
+
+  /* EVERY liveness `livenessOf` can produce, with the surface and the file that
+     produce it — the badge is asserted over all five, both ways, so no state can
+     quietly opt out of naming a decision the island is already counting. */
+  const LIVENESSES = [
+    ["live-root", {}, "live"],
+    ["live-root", { activity: "stalled" }, "stalled"],
+    ["resume", {}, "resumable"],
+    ["dead", {}, "dead"],
+    ["unresolved", {}, "resolving"],
+  ] as const;
+
+  test("a hosted seat with a question on screen carries the attention id and badges «needs you»", () => {
+    const state = deriveOrchestratorPanelState({ ...seated, file: file({ pendingQuestion: asked }), surface: "live-root" });
+    expect(state).toMatchObject({ kind: "live", liveness: "live", attention: "tool-use-orch" });
+    expect(badgeOf(state)).toBe("needs-you");
+  });
+
+  test("a pending decision is the badge at every liveness, «finished» and «host gone» included", () => {
+    for (const [surface, overrides, liveness] of LIVENESSES) {
+      const state = deriveOrchestratorPanelState({ ...seated, file: file({ ...overrides, pendingQuestion: asked }), surface });
+      expect(state).toMatchObject({ liveness, attention: "tool-use-orch" });
+      expect(badgeOf(state)).toBe("needs-you");
+    }
+  });
+
+  test("with nothing owed, every liveness keeps its own word", () => {
+    for (const [surface, overrides, liveness] of LIVENESSES) {
+      const state = deriveOrchestratorPanelState({ ...seated, file: file(overrides), surface });
+      expect(state).toMatchObject({ liveness, attention: null });
+      expect(badgeOf(state)).toBe(liveness);
+    }
+  });
+
+  test("a terminal prompt is a decision too — the badge follows the queue, not the signal's shape", () => {
+    const waiting = file({
+      activity: "stalled",
+      waitingInput: { since: NOW - 120, screenTail: "> 1. Yes", target: "llv:0.0", menu: null },
+    });
+    const state = deriveOrchestratorPanelState({ ...seated, file: waiting, surface: "live-root" });
+    expect(state).toMatchObject({ liveness: "stalled" });
+    expect(badgeOf(state)).toBe("needs-you");
+  });
+
+  test("the attention read is the QUEUE's: an abandoned open turn with no live process owes nothing", () => {
+    const abandoned = file({ activity: "stalled", proc: "done", mtime: NOW - 60 });
+    expect(deriveOrchestratorPanelState({ ...seated, file: abandoned, surface: "live-root" })).toMatchObject({ attention: null });
+    const held = file({ activity: "stalled", proc: "running", mtime: NOW - 60 });
+    expect(deriveOrchestratorPanelState({ ...seated, file: held, surface: "live-root" })).toMatchObject({
+      attention: `/transcripts/orchestrator.jsonl:stalled:${NOW - 60}`,
+    });
+  });
 });
