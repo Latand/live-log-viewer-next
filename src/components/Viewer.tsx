@@ -18,10 +18,11 @@ import { useViewPresence } from "@/hooks/useViewPresence";
 import { OVERVIEW_CONTEXT, OVERVIEW_SLICE, viewBus } from "@/hooks/viewPresenceBus";
 import { projectDisplayName } from "@/lib/displayNames";
 import { canonicalClientProject } from "@/lib/projects/clientAliases";
-import { type TFunction, useLocale } from "@/lib/i18n";
+import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { advanceAttentionCycle, attentionId, buildAttentionQueue, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
+import { advanceAttentionCycle, attentionExpiries, attentionId, buildAttentionQueue, type AttentionItem } from "./attention";
+import { attentionSnippet } from "./attention/snippet";
 import { AttentionHost } from "./attention/AttentionHost";
 import { AttentionIsland } from "./attention/AttentionIsland";
 import { purgeLegacyOperatorCredential } from "./operatorCredential";
@@ -106,25 +107,6 @@ const STALE_FOCUS_REPLAY_MS = 8_000;
     new target, or dismisses it — a notice that evaporates while the hash stays
     put lands the tab back on the silent default view this fix exists to kill. */
 const UNKNOWN_FRAGMENT_NOTICE_MS = 6_000;
-
-/** One-line reason a queue item waits: the manager's own ask, a question
-    header, a screen tail, or the stalled wording. */
-function attentionSnippet(t: TFunction, item: AttentionItem): string {
-  /* Same precedence `attentionId` applies, so the row's words belong to the
-     signal the row was enqueued under (issue #1168). */
-  const ask = item.file.bridgeAsk;
-  if (ask) return ask.summary || t("status.awaitingDecision");
-  const q = item.file.pendingQuestion;
-  if (q) {
-    if (q.kind === "plan") return t("status.awaitingPlan");
-    const first = q.questions?.[0];
-    return first?.header || first?.question.split("\n")[0] || t("status.awaitingAnswer");
-  }
-  if (item.file.rateLimit) return t("status.rateLimited");
-  const w = item.file.waitingInput;
-  if (w) return w.menu?.question.split("\n")[0] || w.screenTail || t("status.awaitingTerminal");
-  return t("status.stalled");
-}
 
 export function Viewer() {
   const { t } = useLocale();
@@ -557,17 +539,16 @@ export function Viewer() {
   }, [catalogPin, pendingHash, allFiles, files, loaded]);
 
   /* The one queue every counter shows: badge, popover and the tab title all
-     read the same list, stalled tail included (D10). The clock advances when
-     the oldest stalled entry crosses its 2h TTL: useFiles keeps the array
-     identity while the /api/files body is unchanged, so without this tick an
-     expired stalled item would sit in the badge until an unrelated change. */
+     read the same list, stalled tail included (D10). The clock advances at the
+     nearest expiry of any kind — a stalled entry crossing its 2h TTL, an
+     orchestrator's bridge ask crossing its own (#1168): useFiles keeps the
+     array identity while the /api/files body is unchanged, and a cached
+     projection does not move when a report merely gets old, so without this
+     tick an expired item would sit in the badge until an unrelated change. */
   const [clock, setClock] = useState(() => Date.now() / 1000);
   const queue = useMemo(() => buildAttentionQueue(files, clock), [files, clock]);
   useEffect(() => {
-    const expiries = files
-      .filter((file) => file.activity === "stalled")
-      .map((file) => file.mtime + STALLED_ATTENTION_TTL)
-      .filter((at) => at > clock);
+    const expiries = attentionExpiries(files).filter((at) => at > clock);
     if (!expiries.length) return;
     const delay = Math.max(0, (Math.min(...expiries) - Date.now() / 1000) * 1000) + 500;
     const timer = window.setTimeout(() => setClock(Date.now() / 1000), delay);
@@ -886,7 +867,7 @@ export function Viewer() {
                 <span className="shrink-0 text-[10.5px] text-muted">{fmtAge(item.since)}</span>
               </span>
               <span className={`w-full truncate text-[11px] ${item.tier === "stalled" ? "text-warning" : "text-muted"}`}>
-                {attentionSnippet(t, item)}
+                {attentionSnippet(t, item, clock)}
               </span>
             </button>
           ))}

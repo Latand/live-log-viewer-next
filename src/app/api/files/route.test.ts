@@ -3216,11 +3216,9 @@ test("issue 1168: the seat's open bridge ask rides the files payload and clears 
   });
 
   const asking = await (await GET(new Request("http://127.0.0.1/api/files"))).json() as { files: FileEntry[] };
-  expect(asking.files.find((entry) => entry.path === seatPath)?.bridgeAsk).toMatchObject({
-    id: filed!.id,
-    seq: filed!.seq,
-    class: "blocked",
-    summary: "cannot proceed: the lane needs a base branch",
+  expect(asking.files.find((entry) => entry.path === seatPath)?.bridgeAsk).toEqual({
+    id: "lane-4-blocked",
+    at: filed!.at,
   });
   /* The ask belongs to the seat alone — no other scanned row carries it. */
   expect(asking.files.find((entry) => entry.path === "/sessions/worker.jsonl")?.bridgeAsk).toBeUndefined();

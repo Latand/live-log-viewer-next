@@ -262,7 +262,7 @@ test("a batch of only non-manager rows carries no manager-voice header at all", 
 
 test("a blocked report becomes an open ask for its seat, with the gateway never involved", () => {
   sandbox();
-  const appended = recordManagerReport({
+  recordManagerReport({
     key: "lane-9-blocked",
     class: "blocked",
     at: NOW.toISOString(),
@@ -270,16 +270,21 @@ test("a blocked report becomes an open ask for its seat, with the gateway never 
   });
 
   const asks = bridgeAsksForSeats({ now: NOW });
-  expect(asks.get(SCOPE.seatConversationId)).toMatchObject({
-    id: appended!.id,
-    seq: appended!.seq,
-    class: "blocked",
-    at: NOW.toISOString(),
-    summary: "cannot proceed: the lane needs a base branch",
-  });
+  /* #1168: the item is identified by the REPORT KEY the caller filed under,
+     which survives the round trip through the durable log. */
+  expect(asks.get(SCOPE.seatConversationId)).toEqual({ id: "lane-9-blocked", at: NOW.toISOString() });
   /* No channel file was created and no cursor moved: the queue reads the log,
      never the gateway's position in it. */
   expect(readBridgeChannel(SCOPE)).toBeNull();
+});
+
+test("the seat's own later report clears the ask without any directive", () => {
+  sandbox();
+  recordManagerReport({ key: "lane-9-blocked", class: "blocked", at: NOW.toISOString(), body: "cannot proceed" });
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(1);
+
+  recordManagerReport({ key: "lane-9-progress", class: "status", at: NOW.toISOString(), body: "moving again" });
+  expect(bridgeAsksForSeats({ now: NOW }).size).toBe(0);
 });
 
 test("a directive that answers the report's seq clears the ask", () => {
@@ -325,7 +330,8 @@ test("re-appending the same report key produces no second ask", () => {
 
   const asks = bridgeAsksForSeats({ now: NOW });
   expect(asks.size).toBe(1);
-  expect(asks.get(SCOPE.seatConversationId)?.id).toBe(first!.id);
+  expect(asks.get(SCOPE.seatConversationId)?.id).toBe(input.key);
+  expect(first).not.toBeNull();
 });
 
 test("an unreadable report log costs the ask, never the caller", () => {

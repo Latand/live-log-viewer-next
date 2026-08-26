@@ -18,6 +18,7 @@ import {
   BRIDGE_DRAIN_BATCH_MAX,
   BRIDGE_REPORT_BODY_MAX_BYTES,
   BRIDGE_REPORT_CAPACITY,
+  BRIDGE_REPORT_KEY_MAX_CHARS,
   MANAGER_RECORD_REF,
   type BridgeReportInput,
 } from "./types";
@@ -116,6 +117,23 @@ test("a manager retry under one key yields one seq and one log entry (§7.5)", (
   expect(log.reports).toHaveLength(1);
   expect(log.reports[0]!.id).toBe(bridgeReportId("deploy-settled"));
   expect(log.lastSeq).toBe(1);
+});
+
+test("the row keeps the caller's key verbatim, and drops it rather than truncate it (#1168)", () => {
+  sandbox();
+  openBridgeChannel(ROOT_ID);
+  const oversized = "k".repeat(BRIDGE_REPORT_KEY_MAX_CHARS + 1);
+  const appended = appendBridgeReports([report("lane-4-blocked"), report(oversized)]);
+
+  /* The key leaves the log as an attention item id, so it round-trips exactly. */
+  expect(appended.appended[0]!.key).toBe("lane-4-blocked");
+  expect(readBridgeReportLog().reports[0]!.key).toBe("lane-4-blocked");
+  /* Past the cap it is dropped, never shortened: two long keys sharing a prefix
+     would otherwise share one attention identity. The hashed id still comes
+     from the FULL key, so idempotent re-append is untouched. */
+  expect(appended.appended[1]!.key).toBeUndefined();
+  expect(appended.appended[1]!.id).toBe(bridgeReportId(oversized));
+  expect(appendBridgeReports([report(oversized)]).skipped).toBe(1);
 });
 
 test("the drain returns one bounded batch oldest first and reports what is left", () => {

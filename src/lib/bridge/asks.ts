@@ -20,36 +20,53 @@ import {
  * This module is the missing read. It is pure over the log and derives at
  * read time — no store of its own, no subscription, no second copy of the
  * manager's state that could disagree with the log. Everything it decides comes
- * out of three fields the log already carries: the row's class, its seq, and
+ * out of fields the log already carries: the row's class, its key, its seq, and
  * the seqs a directive has answered.
  *
- * ONE open ask per seat, deliberately. The manager talks in sequence, so its
- * newest decision request is the one it is actually sitting on, and the older
- * ones are superseded by it. The alternative — every unanswered row, forever —
- * turns a queue that answers "who needs me right now" into an inbox.
+ * ONE open ask per PROJECT, deliberately, and it is that project's NEWEST
+ * manager report that decides — whichever seat filed it. Two consequences, both
+ * wanted:
+ *
+ * - The manager talks in sequence, so an earlier `blocked` is superseded by a
+ *   newer decision request AND by the manager simply moving on: a `status` or
+ *   `completed` since means it is no longer stuck on the old one. The
+ *   alternative — every unanswered row, forever — turns a queue that answers
+ *   "who needs me right now" into an inbox.
+ * - A project has exactly one designated orchestrator at a time, and a report
+ *   is routed to that seat at write time. So the project's last word also
+ *   settles a ROTATION: the successor's first report retires whatever its
+ *   predecessor was still asking, with no second authority to consult and
+ *   nothing to go stale.
  */
 
-/** How much of a report body the queue shows as its one-line reason. */
-const ASK_SUMMARY_MAX = 160;
+/**
+ * Whether one row speaks in the MANAGER's own voice.
+ *
+ * `bridge_report` is callable from every session, and this ask points at the
+ * orchestrator's own card, which would misattribute a worker's blocker to the
+ * seat that never filed it. The origin label is the existing authority on that
+ * question (a null label means the manager's own voice, legacy origin-less rows
+ * included), so this reuses it rather than minting a second rule.
+ */
+function isManagerVoice(report: BridgeReportV1): boolean {
+  return bridgeReportOriginLabel(report.origin) === null;
+}
 
-function askSummary(body: string): string {
-  const first = body.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
-  return first.length > ASK_SUMMARY_MAX ? `${first.slice(0, ASK_SUMMARY_MAX - 1)}…` : first;
+/** Whether the row is the manager asking the operator to decide something. */
+function isDecisionRequest(report: BridgeReportV1): boolean {
+  return report.class === "blocked" || report.class === "question";
 }
 
 /**
- * Whether one row is the MANAGER asking the operator for a decision.
+ * The identity #1168 puts on the attention item: the caller's own report key.
  *
- * `bridge_report` is callable from every session, so the class alone does not
- * make a row the manager's voice — and this ask points at the orchestrator's
- * own card, which would misattribute a worker's blocker to the seat that never
- * filed it. The origin label is the existing authority on that question (a null
- * label means the manager's own voice, legacy origin-less rows included), so
- * this reuses it rather than minting a second rule.
+ * Rows written before the log kept the key — and a key too long to keep
+ * verbatim — fall back to the derived id, which is what identified them before
+ * this existed. Both are stable across re-reads, which is the property the
+ * queue needs.
  */
-function isManagerAsk(report: BridgeReportV1): boolean {
-  if (report.class !== "blocked" && report.class !== "question") return false;
-  return bridgeReportOriginLabel(report.origin) === null;
+function askIdentity(report: BridgeReportV1): string {
+  return report.key ?? report.id;
 }
 
 export interface OpenBridgeAskOptions {
@@ -61,13 +78,13 @@ export interface OpenBridgeAskOptions {
 }
 
 /**
- * The open ask of every orchestrator seat the log names, keyed by that seat's
- * conversation id.
+ * The open ask of every project the log names, keyed by the conversation id of
+ * the seat that filed it — which is the card the operator answers it on.
  *
- * Only rows in the manager's own voice qualify (see {@link isManagerAsk}), and
- * one qualifies while all three clearing signals stay silent:
+ * Only rows in the manager's own voice qualify (see {@link isManagerVoice}),
+ * and one qualifies while all three clearing signals stay silent:
  * - **answered** — a directive carried `[bridge ref=<seq>]` for it;
- * - **superseded** — the seat filed a newer `blocked`/`question` since;
+ * - **superseded** — the project's manager has filed ANY newer report since;
  * - **expired** — it aged past {@link BRIDGE_ASK_TTL_SECONDS}.
  *
  * Unrouted rows (no project, or no recipient seat) never qualify: they are the
@@ -81,43 +98,51 @@ export function openBridgeAsks(
   const ttlMs = (options.ttlSeconds ?? BRIDGE_ASK_TTL_SECONDS) * 1000;
   const answered = new Set(log.answeredRefs ?? []);
 
-  const newestBySeat = new Map<string, BridgeReportV1>();
+  /* The project's LAST WORD from its manager, whatever class it was and
+     whichever seat filed it — supersedence is "the manager has spoken since",
+     not "the manager has asked again". */
+  const newestByProject = new Map<string, BridgeReportV1>();
   for (const report of log.reports) {
-    if (!isManagerAsk(report)) continue;
+    if (!isManagerVoice(report)) continue;
     if (!report.project || !report.targetSeatConversationId) continue;
-    const seat = canonical(report.targetSeatConversationId);
-    const incumbent = newestBySeat.get(seat);
-    if (!incumbent || report.seq > incumbent.seq) newestBySeat.set(seat, report);
+    const incumbent = newestByProject.get(report.project);
+    if (!incumbent || report.seq > incumbent.seq) newestByProject.set(report.project, report);
   }
 
   const asks = new Map<string, BridgeAsk>();
-  for (const [seat, report] of newestBySeat) {
+  for (const report of newestByProject.values()) {
+    const seat = report.targetSeatConversationId;
+    if (!seat) continue;
+    if (!isDecisionRequest(report)) continue;
     if (answered.has(report.seq)) continue;
     const at = Date.parse(report.at);
     /* An unparseable time cannot be aged, and an ask nothing can retire is
        worse than one that never opened. */
     if (!Number.isFinite(at)) continue;
     if (options.now.getTime() - at > ttlMs) continue;
-    asks.set(seat, {
-      id: report.id,
-      seq: report.seq,
-      class: report.class === "blocked" ? "blocked" : "question",
-      at: report.at,
-      summary: askSummary(report.body),
-    });
+    asks.set(canonical(seat), { id: askIdentity(report), at: report.at });
   }
   return asks;
 }
 
-/** Stamp each seat's open ask onto its own scanned entry. Every other entry is
-    left exactly as it was, including one whose conversation the registry has
-    not identified yet. */
+/**
+ * Stamp each seat's open ask onto its own scanned entry.
+ *
+ * A retired round is skipped on purpose. Terminal supersedence (issue #383) and
+ * migration both demote a conversation's live attention fields earlier in the
+ * projection — `pendingQuestion`, `waitingInput`, the rate-limit wall — because
+ * the successor carries the live card. An ask stamped afterwards would be the
+ * one signal that survived that demotion and would re-raise a dead round's
+ * card. Every other entry is left exactly as it was, including one whose
+ * conversation the registry has not identified yet.
+ */
 export function overlayBridgeAsks(
   files: FileEntry[],
   asks: ReadonlyMap<string, BridgeAsk>,
 ): void {
   if (asks.size === 0) return;
   for (const file of files) {
+    if (file.supersededBy || file.migratedTo) continue;
     const ask = file.conversationId ? asks.get(file.conversationId) : undefined;
     if (ask) file.bridgeAsk = ask;
   }

@@ -58,6 +58,17 @@ export const BRIDGE_ANSWERED_REF_CAPACITY = 500;
 export const BRIDGE_ASK_TTL_SECONDS = 2 * 3600;
 /** §3: report bodies are bounded. Measured in UTF-8 bytes, not code units. */
 export const BRIDGE_REPORT_BODY_MAX_BYTES = 2_048;
+/**
+ * How long a caller `key` may be and still be kept verbatim on its row (#1168).
+ *
+ * The key is caller-supplied text that now leaves the log as an attention item
+ * id, so it is bounded like everything else a caller writes here. Truncating it
+ * is the one thing that must NOT happen: two long keys sharing a prefix would
+ * then share an attention identity. A key past the cap is simply not kept, and
+ * its row keeps asking under the hashed `id` — which stays derived from the
+ * FULL key, so idempotent re-append is unaffected either way.
+ */
+export const BRIDGE_REPORT_KEY_MAX_CHARS = 256;
 
 /**
  * The fixed, small set of things the manager may tell the gateway. Deliberately
@@ -137,6 +148,11 @@ export interface BridgeReportV1 {
   seq: number;
   /** Derived from the caller's stable `key`; a re-append is a no-op. */
   id: string;
+  /** The caller's own `key`, verbatim — the identity #1168 puts on the
+      attention item, which the hashed `id` cannot spell back out. Absent on
+      rows written before this field existed and on a key past
+      {@link BRIDGE_REPORT_KEY_MAX_CHARS}; readers fall back to `id`. */
+  key?: string;
   at: string;
   class: BridgeStoredReportClass;
   /** Server-derived origin. Absent on rows written before origin labeling

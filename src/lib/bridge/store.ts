@@ -12,6 +12,7 @@ import {
   BRIDGE_DRAIN_BATCH_MAX,
   BRIDGE_REPORT_BODY_MAX_BYTES,
   BRIDGE_REPORT_CAPACITY,
+  BRIDGE_REPORT_KEY_MAX_CHARS,
   BRIDGE_REPORT_LOG_SCHEMA_VERSION,
   BRIDGE_RETIRED_ID_CAPACITY,
   isStoredBridgeReportClass,
@@ -87,6 +88,19 @@ export function bridgeReportId(key: string): string {
 }
 
 /**
+ * The caller `key` as the row keeps it (#1168): verbatim, or not at all.
+ *
+ * A key is now read back out as an attention item id, so it has to be bounded
+ * like every other caller-written field here. It is never truncated to fit —
+ * two long keys sharing a prefix would then share one attention identity — so
+ * an oversized key is dropped and its row is identified by the hashed `id`,
+ * which is derived from the full key regardless.
+ */
+export function bridgeReportKeyForRecord(key: string): string | undefined {
+  return key.length <= BRIDGE_REPORT_KEY_MAX_CHARS ? key : undefined;
+}
+
+/**
  * Bodies are prose the gateway may read aloud, so unlike a lifecycle summary
  * this keeps the manager's own line structure. What it does not keep: secrets,
  * and anything past the byte cap.
@@ -155,6 +169,7 @@ function normalizeReport(value: unknown): BridgeReportV1 | null {
     seq: candidate.seq as number,
     at: candidate.at,
     class: candidate.class,
+    ...(typeof candidate.key === "string" && candidate.key ? { key: candidate.key } : {}),
     body: typeof candidate.body === "string" ? candidate.body : "",
     ...(origin ? { origin } : {}),
     ...(project !== undefined ? { project } : {}),
@@ -402,11 +417,13 @@ export function appendBridgeReports(
       }
       known.add(id);
       file.lastSeq += 1;
+      const storedKey = bridgeReportKeyForRecord(input.key);
       const report: BridgeReportV1 = {
         id,
         seq: file.lastSeq,
         at: input.at,
         class: input.class,
+        ...(storedKey ? { key: storedKey } : {}),
         body: bridgeReportBody(input.body),
         ...(input.origin ? { origin: normalizeOrigin(input.origin) } : {}),
         ...("project" in input ? { project: typeof input.project === "string" ? input.project : null } : {}),

@@ -17,11 +17,13 @@ import { BRIDGE_ASK_TTL_SECONDS, type BridgeReportLogV1, type BridgeReportV1 } f
 const SEAT = "conversation_manager_a";
 const OTHER_SEAT = "conversation_manager_b";
 const PROJECT = "repo-project-a";
+const OTHER_PROJECT = "repo-project-b";
 const NOW = new Date("2026-08-26T12:00:00.000Z");
 
 function report(overrides: Partial<BridgeReportV1> & { seq: number }): BridgeReportV1 {
   return {
     id: `rpt_${overrides.seq}`,
+    key: `lane-${overrides.seq}-decide`,
     at: NOW.toISOString(),
     class: "question",
     project: PROJECT,
@@ -44,16 +46,21 @@ function log(reports: BridgeReportV1[], answeredRefs?: number[]): BridgeReportLo
 }
 
 describe("openBridgeAsks", () => {
-  test("a blocked or question report opens one ask against its seat", () => {
-    const asks = openBridgeAsks(log([report({ seq: 4, class: "blocked", body: "cannot proceed: pick a base" })]), { now: NOW });
+  test("a blocked or question report opens one ask against its seat, keyed by the caller's key", () => {
+    const asks = openBridgeAsks(
+      log([report({ seq: 4, key: "lane-4-blocked", class: "blocked", body: "cannot proceed: pick a base" })]),
+      { now: NOW },
+    );
     expect([...asks.keys()]).toEqual([SEAT]);
-    expect(asks.get(SEAT)).toEqual({
-      id: "rpt_4",
-      seq: 4,
-      class: "blocked",
-      at: NOW.toISOString(),
-      summary: "cannot proceed: pick a base",
-    });
+    /* #1168 asks for the REPORT KEY, verbatim — not the hash the log derives
+       from it, which cannot be spelled back out. */
+    expect(asks.get(SEAT)).toEqual({ id: "lane-4-blocked", at: NOW.toISOString() });
+  });
+
+  test("a row written before the log kept keys still asks, under its derived id", () => {
+    const legacy = report({ seq: 4, class: "blocked" });
+    delete legacy.key;
+    expect(openBridgeAsks(log([legacy]), { now: NOW }).get(SEAT)?.id).toBe("rpt_4");
   });
 
   test("classes that are not a decision request open nothing", () => {
@@ -81,12 +88,12 @@ describe("openBridgeAsks", () => {
   test("a non-manager row does not supersede the manager's standing ask either", () => {
     const asks = openBridgeAsks(
       log([
-        report({ seq: 1, id: "rpt_manager" }),
-        report({ seq: 9, id: "rpt_builder", origin: { kind: "agent", conversationId: "conversation_builder", role: "builder" } }),
+        report({ seq: 1, key: "manager-ask" }),
+        report({ seq: 9, key: "builder-ask", origin: { kind: "agent", conversationId: "conversation_builder", role: "builder" } }),
       ]),
       { now: NOW },
     );
-    expect(asks.get(SEAT)?.id).toBe("rpt_manager");
+    expect(asks.get(SEAT)?.id).toBe("manager-ask");
   });
 
   test("an unrouted or quarantined row never opens an ask", () => {
@@ -105,33 +112,79 @@ describe("openBridgeAsks", () => {
   test("a newer ask supersedes the earlier one on the same seat", () => {
     const asks = openBridgeAsks(
       log([
-        report({ seq: 2, id: "rpt_old", body: "first question" }),
-        report({ seq: 5, id: "rpt_new", body: "second question" }),
+        report({ seq: 2, key: "old-ask", body: "first question" }),
+        report({ seq: 5, key: "new-ask", body: "second question" }),
       ]),
       { now: NOW },
     );
     expect(asks.size).toBe(1);
-    expect(asks.get(SEAT)?.id).toBe("rpt_new");
+    expect(asks.get(SEAT)?.id).toBe("new-ask");
+  });
+
+  test("the manager moving on clears the ask: any newer report of its own is its last word", () => {
+    /* The seat said `blocked`, then said something else. It is no longer
+       sitting on the old decision, and the queue must not keep claiming it is
+       just because no directive ever quoted the seq. */
+    for (const reportClass of ["status", "completed", "failed", "review_verdict"] as const) {
+      const asks = openBridgeAsks(
+        log([
+          report({ seq: 2, key: "old-ask", class: "blocked" }),
+          report({ seq: 5, key: "moved-on", class: reportClass }),
+        ]),
+        { now: NOW },
+      );
+      expect(asks.size).toBe(0);
+    }
+    /* …and a WORKER's later status does not speak for the seat. */
+    expect(openBridgeAsks(
+      log([
+        report({ seq: 2, key: "old-ask", class: "blocked" }),
+        report({ seq: 5, key: "worker-status", class: "status", origin: { kind: "agent", conversationId: "conversation_builder", role: "builder" } }),
+      ]),
+      { now: NOW },
+    ).get(SEAT)?.id).toBe("old-ask");
   });
 
   test("a superseded ask stays cleared even when the newer one was answered", () => {
     const asks = openBridgeAsks(
-      log([report({ seq: 2, id: "rpt_old" }), report({ seq: 5, id: "rpt_new" })], [5]),
+      log([report({ seq: 2, key: "old-ask" }), report({ seq: 5, key: "new-ask" })], [5]),
       { now: NOW },
     );
     expect(asks.size).toBe(0);
   });
 
-  test("seats keep their own ask", () => {
+  test("projects keep their own ask", () => {
     const asks = openBridgeAsks(
       log([
-        report({ seq: 1, id: "rpt_a" }),
-        report({ seq: 2, id: "rpt_b", targetSeatConversationId: OTHER_SEAT }),
+        report({ seq: 1, key: "ask-a" }),
+        report({ seq: 2, key: "ask-b", project: OTHER_PROJECT, targetSeatConversationId: OTHER_SEAT }),
       ]),
       { now: NOW },
     );
-    expect(asks.get(SEAT)?.id).toBe("rpt_a");
-    expect(asks.get(OTHER_SEAT)?.id).toBe("rpt_b");
+    expect(asks.get(SEAT)?.id).toBe("ask-a");
+    expect(asks.get(OTHER_SEAT)?.id).toBe("ask-b");
+  });
+
+  test("a rotation retires the predecessor's ask the moment its successor speaks", () => {
+    /* A project has exactly one designated orchestrator at a time, so the
+       project's last word settles which seat is still asking. Without this the
+       retired seat keeps a decision request on a card nobody is behind. */
+    const rotated = log([
+      report({ seq: 3, key: "predecessor-ask", class: "blocked" }),
+      report({ seq: 8, key: "successor-status", class: "status", targetSeatConversationId: OTHER_SEAT }),
+    ]);
+    expect(openBridgeAsks(rotated, { now: NOW }).size).toBe(0);
+
+    /* …and the successor's own decision request lands on the successor's card. */
+    const asking = openBridgeAsks(
+      log([
+        report({ seq: 3, key: "predecessor-ask", class: "blocked" }),
+        report({ seq: 8, key: "successor-ask", class: "question", targetSeatConversationId: OTHER_SEAT }),
+      ]),
+      { now: NOW },
+    );
+    expect([...asking.keys()]).toEqual([OTHER_SEAT]);
+    expect(asking.get(OTHER_SEAT)?.id).toBe("successor-ask");
   });
 
   test("the ask expires on the TTL boundary, not before it", () => {
@@ -146,22 +199,16 @@ describe("openBridgeAsks", () => {
   });
 
   test("a seat renamed by a conversation alias still resolves", () => {
-    const asks = openBridgeAsks(log([report({ seq: 1, targetSeatConversationId: "conversation_manager_old" })]), {
+    const asks = openBridgeAsks(log([report({ seq: 1, key: "aliased-ask", targetSeatConversationId: "conversation_manager_old" })]), {
       now: NOW,
       canonicalConversationId: (id) => (id === "conversation_manager_old" ? SEAT : id),
     });
-    expect(asks.get(SEAT)?.id).toBe("rpt_1");
+    expect(asks.get(SEAT)?.id).toBe("aliased-ask");
   });
 
-  test("the summary is the report's first line, bounded", () => {
-    const asks = openBridgeAsks(
-      log([report({ seq: 1, body: `  ${"decide ".repeat(40)}\nsecond line` })]),
-      { now: NOW },
-    );
-    const summary = asks.get(SEAT)!.summary;
-    expect(summary.length).toBeLessThanOrEqual(160);
-    expect(summary).toStartWith("decide decide");
-    expect(summary).not.toContain("second line");
+  test("the ask carries the queue's two facts and no report prose", () => {
+    const ask = openBridgeAsks(log([report({ seq: 1, key: "bounded", body: "a long decision request\nsecond line" })]), { now: NOW }).get(SEAT)!;
+    expect(Object.keys(ask).sort()).toEqual(["at", "id"]);
   });
 });
 
@@ -194,18 +241,36 @@ describe("overlayBridgeAsks", () => {
       entry({ path: "/worker.jsonl", conversationId: "conversation_worker" }),
       entry({ path: "/unregistered.jsonl" }),
     ];
-    overlayBridgeAsks(files, openBridgeAsks(log([report({ seq: 3 })]), { now: NOW }));
-    expect(files[0]!.bridgeAsk?.id).toBe("rpt_3");
+    overlayBridgeAsks(files, openBridgeAsks(log([report({ seq: 3, key: "seat-ask" })]), { now: NOW }));
+    expect(files[0]!.bridgeAsk?.id).toBe("seat-ask");
     expect(files[1]!.bridgeAsk).toBeUndefined();
     expect(files[2]!.bridgeAsk).toBeUndefined();
   });
 
+  test("a retired round never gets the ask back after the projection demoted it", () => {
+    /* Terminal supersedence and migration both blank a conversation's live
+       attention fields earlier in the files projection because the successor
+       carries the live card. An ask stamped afterwards would be the one signal
+       that outlived that demotion and would re-raise a dead round. */
+    const files = [
+      entry({
+        path: "/retired.jsonl",
+        conversationId: SEAT,
+        supersededBy: { conversationId: "conversation_manager_next", path: "/next.jsonl", at: NOW.toISOString(), reason: "rotation" },
+      }),
+      entry({ path: "/archived.jsonl", conversationId: SEAT, migratedTo: "/successor.jsonl" }),
+    ];
+    overlayBridgeAsks(files, openBridgeAsks(log([report({ seq: 3, key: "seat-ask" })]), { now: NOW }));
+    expect(files[0]!.bridgeAsk).toBeUndefined();
+    expect(files[1]!.bridgeAsk).toBeUndefined();
+  });
+
   test("re-reading the same log stamps the same ask, never a second one", () => {
     const files = [entry({ path: "/seat.jsonl", conversationId: SEAT })];
-    const asks = openBridgeAsks(log([report({ seq: 3 })]), { now: NOW });
+    const asks = openBridgeAsks(log([report({ seq: 3, key: "seat-ask" })]), { now: NOW });
     overlayBridgeAsks(files, asks);
     const first = files[0]!.bridgeAsk;
-    overlayBridgeAsks(files, openBridgeAsks(log([report({ seq: 3 })]), { now: NOW }));
+    overlayBridgeAsks(files, openBridgeAsks(log([report({ seq: 3, key: "seat-ask" })]), { now: NOW }));
     expect(files[0]!.bridgeAsk).toEqual(first!);
   });
 });
