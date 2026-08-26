@@ -8,7 +8,8 @@ const previousStateDir = process.env.LLV_STATE_DIR;
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-suggestions-route-"));
 process.env.LLV_STATE_DIR = sandbox;
 
-const { GET, DELETE } = await import("./route");
+const routeModule = await import("./route");
+const { GET } = routeModule;
 const { recordReplySuggestions } = await import("@/lib/suggestions/store");
 
 afterAll(() => {
@@ -23,8 +24,8 @@ const OPERATOR_HEADERS = {
   "sec-fetch-site": "same-origin",
 };
 
-function request(query: string, method: "GET" | "DELETE" = "GET"): NextRequest {
-  return new NextRequest(`http://127.0.0.1:8898/api/log/suggestions${query}`, { method, headers: OPERATOR_HEADERS });
+function request(query: string): NextRequest {
+  return new NextRequest(`http://127.0.0.1:8898/api/log/suggestions${query}`, { headers: OPERATOR_HEADERS });
 }
 
 test("the route answers a conversation's current set, and nothing for one without", async () => {
@@ -41,19 +42,14 @@ test("the route answers a conversation's current set, and nothing for one withou
   expect(empty.set).toBeNull();
 });
 
-test("the operator's message clears the set through DELETE, and clearing twice is honest about it", async () => {
-  recordReplySuggestions({
-    conversationId: "conversation_c",
-    replies: [{ label: "hold", text: "Hold." }],
-    origin: { kind: "manager", conversationId: "conversation_c", role: "orchestrator" },
-  });
-
-  expect(await DELETE(request("?conversationId=conversation_c", "DELETE")).json()).toEqual({ cleared: true });
-  expect(await DELETE(request("?conversationId=conversation_c", "DELETE")).json()).toEqual({ cleared: false });
-  expect((await GET(request("?conversationId=conversation_c")).json() as { set: unknown }).set).toBeNull();
+test("the read seam offers no way to retire a set — that is the send path's job", () => {
+  /* A pane must not be able to take drafts down: the record is retired by the
+     message that answers it, in the path that accepts that message. A mutating
+     verb here would be a second, view-shaped way to lose the operator's
+     current offer. */
+  expect(Object.keys(routeModule).filter((name) => /^[A-Z]+$/.test(name))).toEqual(["GET"]);
 });
 
 test("a call without a conversation is refused rather than answered with somebody else's drafts", () => {
   expect(GET(request("")).status).toBe(400);
-  expect(DELETE(request("", "DELETE")).status).toBe(400);
 });

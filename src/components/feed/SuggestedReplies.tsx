@@ -49,9 +49,6 @@ export interface SuggestedRepliesProps {
   floating?: boolean;
 }
 
-/* Answered per page life, so two surfaces showing the same conversation (the
-   dock and its board pane) clear the record once between them. */
-const clearedSets = new Set<string>();
 /* Last answer per conversation, so a set that the operator already retired
    never flashes back while a fresh read is in flight. */
 const cache = new Map<string, ReplySuggestionSetV1 | null>();
@@ -142,6 +139,21 @@ function suggestionsUrl(conversationId: string): string {
   return `/api/log/suggestions?conversationId=${encodeURIComponent(conversationId)}`;
 }
 
+/**
+ * The conversation moved and the record could not be read at its new state.
+ *
+ * The previous answer is NOT the answer to this question: the last thing that
+ * read cleanly belonged to an earlier turn, and showing it under a newer
+ * message offers the operator drafts for something nobody asked. So the row
+ * goes quiet and the conversation is marked unread, which lets the next change
+ * — or the next surface to mount — try again.
+ */
+function unreadable(conversationId: string): null {
+  cache.set(conversationId, null);
+  readRevisions.delete(conversationId);
+  return null;
+}
+
 async function readSet(conversationId: string, revision: string): Promise<ReplySuggestionSetV1 | null> {
   const key = `${conversationId}\n${revision}`;
   const pending = inFlight.get(key);
@@ -152,7 +164,7 @@ async function readSet(conversationId: string, revision: string): Promise<ReplyS
   const request = (async () => {
     try {
       const response = await fetch(suggestionsUrl(conversationId));
-      if (!response.ok) return cache.get(conversationId) ?? null;
+      if (!response.ok) return unreadable(conversationId);
       const body = await response.json() as { set?: unknown };
       const parsed = parseReplySuggestionSet(body.set);
       cache.set(conversationId, parsed);
@@ -160,7 +172,7 @@ async function readSet(conversationId: string, revision: string): Promise<ReplyS
     } catch {
       /* Quiet: a failed read renders exactly like a conversation with no
          drafts, which is the ordinary case. */
-      return cache.get(conversationId) ?? null;
+      return unreadable(conversationId);
     } finally {
       inFlight.delete(key);
     }
@@ -205,20 +217,15 @@ export function SuggestedReplies({ file, revision, items, outbox, floating = fal
   const offeredAt = set ? Date.parse(set.at) : Number.NaN;
   const answered = Boolean(set) && Number.isFinite(offeredAt) && answeredAt !== null && answeredAt > offeredAt;
 
-  /* The operator answered: the drafts are stale the moment they did, so the
-     record goes with the row rather than waiting under a question that is
-     over. Guarded per SET id, not per mount — the two surfaces of one pane
-     clear a set once between them, and the next set the manager offers is
-     still cleared by the answer that retires it. */
+  /* The operator answered: the drafts are stale the moment they did, so the row
+     goes with the message rather than waiting under a question that is over.
+     Nothing is written from here — the send path itself retires the durable
+     record, for the set that was standing when the message was accepted, so a
+     pane that is closed, unmounted or slow changes nothing about it. This only
+     forgets the local copy, so a remount does not flash it back. */
   useEffect(() => {
     if (!answered || !set || !conversationId) return;
-    if (clearedSets.has(set.setId)) return;
-    clearedSets.add(set.setId);
-    cache.set(conversationId, null);
-    void fetch(suggestionsUrl(conversationId), { method: "DELETE" }).catch(() => {
-      /* Best effort: the row is already gone, and the next set replaces this
-         one anyway. */
-    });
+    if (cache.get(conversationId)?.setId === set.setId) cache.set(conversationId, null);
   }, [answered, set, conversationId]);
 
   if (!set || answered) return null;

@@ -279,6 +279,46 @@ test("/api/tmux excludes authenticated monitor and MCP producers while one brows
   ]);
 });
 
+test("#1202 the operator's own message retires that conversation's reply drafts, with no pane mounted anywhere", async () => {
+  const { readReplySuggestions, recordReplySuggestions } = await import("@/lib/suggestions/store");
+  const { setCallerConversationResolverForTests } = await import("@/lib/agent/operatorAuthority");
+  const { VIEWER_SPAWN_CAPABILITY_HEADER } = await import("@/lib/agent/spawnPolicy");
+  const conversationId = "conversation_asked_something";
+  const previousFiles = completedFiles;
+  /* The send names only its transcript, so the conversation is the one the
+     route already resolves for operator activity — no second lookup scheme. */
+  completedFiles = [{ path: PATHNAME, conversationId }];
+  delivery = async () => ({ ok: true, outcome: "delivered-to-live", target: "agents:4.0" });
+  const offer = () => recordReplySuggestions({
+    conversationId,
+    replies: [{ label: "hold", text: "Hold. Explain the rollback first." }],
+    origin: { kind: "manager", conversationId, role: "orchestrator" },
+  });
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  try {
+    offer();
+    /* An agent's send through this same route is traffic, not an answer. */
+    const agent = await POST(post({
+      path: PATHNAME,
+      text: "worker status",
+      clientMessageId: "agent-send-one",
+    }, { [VIEWER_SPAWN_CAPABILITY_HEADER]: "d".repeat(43) }));
+    expect(agent.status).toBe(200);
+    expect(readReplySuggestions(conversationId)).not.toBeNull();
+
+    const operator = await POST(post({
+      path: PATHNAME,
+      text: "hold then",
+      clientMessageId: "operator-send-one",
+    }));
+    expect(operator.status).toBe(200);
+    expect(readReplySuggestions(conversationId)).toBeNull();
+  } finally {
+    setCallerConversationResolverForTests(null);
+    completedFiles = previousFiles;
+  }
+});
+
 test("/api/tmux delivery is unaffected when WakaTime recording is disabled", async () => {
   operatorActivityEnabled = false;
   operatorActivityRequests = [];

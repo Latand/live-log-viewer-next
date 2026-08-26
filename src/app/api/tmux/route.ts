@@ -15,6 +15,7 @@ import { completedFileScan } from "@/lib/scanner/scanCache";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { retireReplySuggestionsOnOperatorMessage } from "@/lib/suggestions/store";
 import { parseMessageOrigin } from "@/lib/runtime/messageOrigin";
 import { materializeStructuredTerminal } from "@/lib/runtime/structuredTerminal";
 import { dispatchStructuredControl } from "@/lib/runtime/structuredControls";
@@ -104,19 +105,28 @@ function operatorFallbackEntry(
   return files.find((entry) => entry.pid === target.pid);
 }
 
+/** Whether this request is the operator acting directly, and the conversation
+    the target resolved to — the same resolution the activity record already
+    performs, returned so a caller does not scan for it a second time. */
+interface AuthorizedOperatorAction {
+  byOperator: boolean;
+  conversationId: string;
+}
+
 async function recordAuthorizedOperatorActivity(
   req: NextRequest,
   target: { pid: number; hasPid: boolean; filePath: string; conversationId: string },
   identity: { idempotencyKey?: string },
-): Promise<ReturnType<typeof recordDirectOperatorWakatimeActivity> | null> {
-  if (!directOperatorActivityAuthority(req).ok) return null;
+): Promise<AuthorizedOperatorAction> {
+  if (!directOperatorActivityAuthority(req).ok) return { byOperator: false, conversationId: target.conversationId };
   const fallbackEntry = operatorFallbackEntry((await completedFileScan()).snapshot.files, target);
-  return recordDirectOperatorWakatimeActivity({
+  recordDirectOperatorWakatimeActivity({
     ...(target.conversationId ? { conversationId: target.conversationId } : {}),
     ...(target.filePath ? { path: target.filePath } : {}),
     ...identity,
     ...(fallbackEntry ? { fallbackEntry } : {}),
   });
+  return { byOperator: true, conversationId: target.conversationId || fallbackEntry?.conversationId || "" };
 }
 
 function attachJson(body: AttachResponse | AttachError, status = 200): NextResponse<AttachResponse | AttachError> {
@@ -325,8 +335,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
 
   const clientMessageId = typeof body.clientMessageId === "string" ? body.clientMessageId.trim().slice(0, 128) : "";
   const operatorTarget = { pid, hasPid, filePath, conversationId };
+  /* Stamped before the message is accepted, so the compare-and-clear below
+     retires the set that was standing when the operator pressed send and
+     leaves a fresher one — offered while this request was in flight — alone. */
+  const acceptedAt = new Date();
+  let operatorAction: AuthorizedOperatorAction;
   try {
-    await recordAuthorizedOperatorActivity(
+    operatorAction = await recordAuthorizedOperatorActivity(
       req,
       operatorTarget,
       clientMessageId ? { idempotencyKey: clientMessageId } : {},
@@ -336,6 +351,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       return NextResponse.json({ error: error.message }, { status: 409 });
     }
     return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
+  }
+  /* #1202: the operator answered, so the drafts offered under the question are
+     over — retired HERE, in the path that accepts their message, rather than by
+     a pane that may be closed, unmounted or on another device. An agent's send
+     through this same route is not an answer and leaves the set standing. */
+  if (operatorAction.byOperator) {
+    retireReplySuggestionsOnOperatorMessage(operatorAction.conversationId, acceptedAt);
   }
 
   if (structuredHostsEnabled()) {

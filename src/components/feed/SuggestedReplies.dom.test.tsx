@@ -62,11 +62,15 @@ const drafts = [
 ];
 
 let served: { set: unknown } = { set: { conversationId: CONVERSATION, setId: "rsg_1", at: SET_AT, origin: { kind: "manager", conversationId: CONVERSATION, role: "orchestrator" }, replies: drafts } };
+/* When the record cannot be read at all — the viewer restarting mid-turn, a
+   dropped request. */
+let readFails = false;
 const requests: { url: string; method: string }[] = [];
 globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
   const url = String(input);
   requests.push({ url, method: init?.method ?? "GET" });
   if (url.startsWith("/api/log/suggestions")) {
+    if (readFails) return { ok: false, status: 503, json: async () => ({ error: "unavailable" }) } as Response;
     return { ok: true, json: async () => served } as Response;
   }
   if (url === "/api/tmux/targets") return { ok: true, json: async () => ({ targets: { "0": null } }) } as Response;
@@ -79,6 +83,7 @@ afterEach(() => {
   document.body.replaceChildren();
   sessionStorage.clear();
   requests.length = 0;
+  readFails = false;
   setLocale("en");
 });
 
@@ -191,13 +196,17 @@ test("a draft joins whatever the operator already typed instead of replacing it"
   expect(textarea.value).toBe(`one more thing:\n\n${drafts[0]!.text}`);
 });
 
-test("the operator's own message retires the set and clears the durable record", async () => {
+test("the operator's own message retires the set, and the row writes nothing to do it", async () => {
   const answered = { at: Date.parse(SET_AT) + 1_000, text: "no, wait" };
   const host = mount(<SuggestedReplies file={file()} revision="4" outbox={[{ id: "out-1", text: answered.text, images: 0, at: answered.at, state: "queued" }] as never} />);
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   expect(host.querySelectorAll("[data-reply-suggestion]")).toHaveLength(0);
-  expect(requests.some((entry) => entry.method === "DELETE" && entry.url.includes(CONVERSATION))).toBe(true);
+  /* The durable record is retired by the send path that accepted the message,
+     not from here: a rendered pane must never be what a set's survival depends
+     on, and a clear issued from a view can land after the manager has already
+     offered a newer one. */
+  expect(requests.every((entry) => entry.method === "GET")).toBe(true);
 });
 
 test("a second set offered into the same pane is retired by its own answer", async () => {
@@ -216,7 +225,6 @@ test("a second set offered into the same pane is retired by its own answer", asy
   rerender(<SuggestedReplies file={file(conversation)} revision="ask-1" outbox={outboxAt(answeredFirstAt)} />);
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(host.querySelectorAll("[data-reply-suggestion]")).toHaveLength(0);
-  expect(requests.filter((entry) => entry.method === "DELETE")).toHaveLength(1);
 
   /* The manager asks again in the same pane, and the operator answers again. */
   served = { set: { conversationId: conversation, setId: "rsg_second", at: secondAt, origin: { kind: "manager", conversationId: conversation, role: "orchestrator" }, replies: drafts.slice(0, 2) } };
@@ -229,7 +237,28 @@ test("a second set offered into the same pane is retired by its own answer", asy
   rerender(<SuggestedReplies file={file(conversation)} revision="ask-2" outbox={outboxAt(Date.parse(secondAt) + 1_000)} />);
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(host.querySelectorAll("[data-reply-suggestion]")).toHaveLength(0);
-  expect(requests.filter((entry) => entry.method === "DELETE")).toHaveLength(2);
+});
+
+test("a set that cannot be re-read under a newer turn goes quiet instead of standing under it", async () => {
+  /* The drafts that read cleanly a turn ago answered THAT question. If the
+     record cannot be read at the conversation's new state, the honest row is
+     no row: pills under a message they were not written for would put words in
+     the operator's mouth for something nobody asked. */
+  const conversation = "conversation_unreadable";
+  served = { set: { conversationId: conversation, setId: "rsg_ok", at: SET_AT, origin: { kind: "manager", conversationId: conversation, role: "orchestrator" }, replies: drafts } };
+  const { host, rerender } = mountRoot(<SuggestedReplies file={file(conversation)} revision="rev-a" />);
+  await settle(host, "[data-reply-suggestion]", drafts.length);
+
+  readFails = true;
+  rerender(<SuggestedReplies file={file(conversation)} revision="rev-b" />);
+  await settle(host, "[data-reply-suggestion]", 0, 4_000);
+  expect(host.querySelector("[data-reply-suggestions]")).toBeNull();
+
+  /* And it is a failure to read, not a verdict: the next change tries again. */
+  readFails = false;
+  rerender(<SuggestedReplies file={file(conversation)} revision="rev-c" />);
+  await settle(host, "[data-reply-suggestion]", drafts.length, 4_000);
+  expect(host.querySelectorAll("[data-reply-suggestion]")).toHaveLength(drafts.length);
 });
 
 test("a conversation with no set renders nothing at all", async () => {

@@ -2809,7 +2809,12 @@ function suggestReplies(args: McpToolArgs, dependencies: ViewerMcpDomainDependen
      caller writes nothing and learns nothing. */
   const authority = dependencies.attentionAuthority();
   const seats = dependencies.authorizedSeats?.() ?? authorizedManagerSeats(productionManagerAuthoritySources());
-  const admission = permitReplySuggestions(authority, seats);
+  const canonical = dependencies.canonicalSeatConversationId ?? productionCanonicalSeatConversationId;
+  /* Identity AND target in one verdict: a seat offers drafts under its own
+     message, so naming another conversation is refused here — the operator's
+     own root/gateway session is the only caller that may address the board. */
+  const named = text(args.conversationId);
+  const admission = permitReplySuggestions(authority, seats, named || null, canonical);
   if (!admission.allowed) {
     throw new McpToolRefusal(admission.error, { code: "SUGGEST_REPLIES_NOT_PERMITTED", refusedAs: admission.refusedAs });
   }
@@ -2819,10 +2824,14 @@ function suggestReplies(args: McpToolArgs, dependencies: ViewerMcpDomainDependen
      resolving designation a second time. */
   const origin = dependencies.callerAttribution?.()
     ?? callerAttributionFrom(authority, (conversationId) => seats.some((seat) => seat.conversationId === conversationId));
-  const conversationId = text(args.conversationId) || origin.conversationId || "";
-  if (!conversationId) {
+  const target = named || origin.conversationId || "";
+  if (!target) {
     throw new Error("conversationId is required: this caller has no conversation of its own to offer drafts in");
   }
+  /* Keyed by what the registry calls this conversation NOW: the pane reads its
+     drafts under the canonical id, so a set filed under a pre-migration alias
+     would be written where nothing looks for it. */
+  const conversationId = canonical(target);
 
   try {
     const recorded = recordReplySuggestions({

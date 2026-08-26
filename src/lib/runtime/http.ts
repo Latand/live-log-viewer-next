@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
+import { retireReplySuggestionsOnOperatorMessage } from "@/lib/suggestions/store";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
@@ -27,6 +28,8 @@ export interface RuntimeHttpDependencies {
   registry?(): AgentRegistry;
   enqueue?: typeof enqueueStructuredMessage;
   recordOperatorActivity?: typeof recordDirectOperatorWakatimeActivity;
+  /** #1202: retires the conversation's reply drafts when the operator answers. */
+  retireReplySuggestions?: typeof retireReplySuggestionsOnOperatorMessage;
   kick?(): void | Promise<void>;
 }
 
@@ -37,6 +40,7 @@ const DEFAULT_DEPENDENCIES: RuntimeHttpDependencies = {
   registry: agentRegistry,
   enqueue: enqueueStructuredMessage,
   recordOperatorActivity: recordDirectOperatorWakatimeActivity,
+  retireReplySuggestions: retireReplySuggestionsOnOperatorMessage,
   kick: kickStructuredDeliveryQueue,
 };
 
@@ -109,8 +113,9 @@ export async function handleRuntimeCommand(
   }
   const client = dependencies.client();
   try {
+    const byOperator = directOperatorActivityAuthority(request).ok;
     if ((command.kind === "send" || command.kind === "steer" || command.kind === "answer")
-      && directOperatorActivityAuthority(request).ok
+      && byOperator
       && dependencies.recordOperatorActivity) {
       try {
         dependencies.recordOperatorActivity({
@@ -120,6 +125,14 @@ export async function handleRuntimeCommand(
       } catch {
         return NextResponse.json({ error: "direct operator activity could not be recorded" }, { status: 503 });
       }
+    }
+    /* #1202: the operator's own message retires the reply drafts offered under
+       the question it answers. Done in the path that accepts the message, so a
+       closed dock or a second device changes nothing, and compared against the
+       moment of acceptance, so a set offered while this request was in flight
+       survives it. */
+    if ((command.kind === "send" || command.kind === "steer") && byOperator) {
+      (dependencies.retireReplySuggestions ?? retireReplySuggestionsOnOperatorMessage)(command.conversationId, new Date());
     }
     if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
       const admitted = await dependencies.enqueue({

@@ -136,11 +136,13 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
  */
 const INTERRUPTED_RECOVERABLE_TOOLS: ReadonlySet<McpToolName> = new Set<McpToolName>([
   "request_attention",
-  /* `suggest_replies` qualifies for the simplest possible version of the same
-     reason: the set it writes REPLACES the conversation's previous one and its
-     id derives from the operation, so re-running an interrupted call converges
-     on the identical record. */
-  "suggest_replies",
+  /* Deliberately NOT here: `suggest_replies`. Its write is idempotent over the
+     record, but the record is retired by something outside the call — the
+     operator's own answer — so re-running an interrupted write would put the
+     drafts back under a question they have already answered. A disposable
+     draft is exactly the thing not worth resurrecting: the interrupted call
+     answers `call_interrupted`, and the seat offers a fresh set if it still
+     wants one. */
 ]);
 
 function interruptedCallIsRecoverable(toolName: McpToolName, args: McpToolArgs): boolean {
@@ -1678,7 +1680,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "Offer the operator ready-made replies to your own message: 1\u20136 short drafts that render as pills under your latest turn in the dock and the board's conversation pane. Tapping one drops its text into their composer for editing \u2014 the Viewer never sends it, and nothing here decides anything.",
     "Call it after every message that asks the operator something or proposes a course of action, with 2\u20134 short, distinct drafts written in the operator's own language. The set REPLACES whatever you offered last for that conversation, and the operator's next message clears it.",
     "Authority is the same as request_attention's, and for the same reason \u2014 this writes into the surface they are answering in: the operator's own session or a designated orchestrator seat. A worker or unidentified caller is refused (SUGGEST_REPLIES_NOT_PERMITTED) with nothing recorded.",
-    "conversationId defaults to your own conversation, which is where the drafts belong when you are the one asking.",
+    "conversationId defaults to your own conversation, which is where the drafts belong when you are the one asking; a designated seat may name only its own, and another conversation is refused.",
   ].join(" "),
   bridge_report: "Append one bounded report to the durable bridge log for the voice gateway to relay. Callable from any session; the origin is labeled server-side and a non-orchestrator report is visibly attributed to its own session.",
   bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",

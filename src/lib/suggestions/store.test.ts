@@ -9,6 +9,7 @@ import {
   readReplySuggestionsFile,
   recordReplySuggestions,
   replySuggestionsFile,
+  retireReplySuggestionsOnOperatorMessage,
 } from "./store";
 import {
   MAX_REPLY_SUGGESTIONS,
@@ -70,6 +71,28 @@ test("clearing removes the conversation's set and says whether there was one", (
   expect(clearReplySuggestions("conversation_a")).toBe(true);
   expect(readReplySuggestions("conversation_a")).toBeNull();
   expect(clearReplySuggestions("conversation_a")).toBe(false);
+});
+
+test("the operator's message retires the set that was standing when they sent it, and no later one", () => {
+  const sentAt = new Date("2026-08-26T10:02:00.000Z");
+  record("conversation_a", [{ label: "yes", text: "Yes." }], "2026-08-26T10:00:00.000Z");
+
+  expect(retireReplySuggestionsOnOperatorMessage("conversation_a", sentAt)).toBe(true);
+  expect(readReplySuggestions("conversation_a")).toBeNull();
+
+  /* Offered while the send was in flight: it answers a question the operator
+     has not read yet, so their message must not take it down — the delayed
+     clear that used to arrive later and wipe the manager's newest offer. */
+  const fresh = record("conversation_a", [{ label: "hold", text: "Hold." }], "2026-08-26T10:03:00.000Z");
+  expect(retireReplySuggestionsOnOperatorMessage("conversation_a", sentAt)).toBe(false);
+  expect(readReplySuggestions("conversation_a")?.setId).toBe(fresh.set.setId);
+  expect(clearReplySuggestions("conversation_a", { offeredAtOrBefore: new Date("2026-08-26T10:04:00.000Z") })).toBe(true);
+  expect(readReplySuggestions("conversation_a")).toBeNull();
+});
+
+test("retiring is quiet about a conversation with nothing to retire", () => {
+  expect(retireReplySuggestionsOnOperatorMessage("conversation_quiet", new Date())).toBe(false);
+  expect(retireReplySuggestionsOnOperatorMessage("", new Date())).toBe(false);
 });
 
 test("the record survives on disk under the state dir", () => {

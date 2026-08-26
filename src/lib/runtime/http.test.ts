@@ -112,6 +112,50 @@ test("runtime send records operator activity before delivery failure and exclude
   }
 });
 
+test("#1202 an operator's structured message retires that conversation's reply drafts; an agent's does not", async () => {
+  /* Retired by the path that accepts the message, so a closed dock, an
+     unmounted pane or a second device changes nothing about it. */
+  const retired: { conversationId: string; at: number }[] = [];
+  const agentCapability = "c".repeat(43);
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => null,
+    enqueue: async () => null,
+    retireReplySuggestions: (conversationId, at) => {
+      retired.push({ conversationId, at: at.getTime() });
+      return true;
+    },
+  };
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  const before = Date.now();
+  try {
+    await handleRuntimeCommand(request({
+      conversationId: "conversation_asked",
+      text: "hold the deploy then",
+      idempotencyKey: "operator-answer-one",
+    }), "send", dependencies);
+    await handleRuntimeCommand(request({
+      conversationId: "conversation_asked",
+      text: "worker status",
+      idempotencyKey: "agent-traffic-one",
+    }, { host: "127.0.0.1", [VIEWER_SPAWN_CAPABILITY_HEADER]: agentCapability }), "send", dependencies);
+    /* A permission answer is a keypress, not the sentence the drafts offered. */
+    await handleRuntimeCommand(request({
+      conversationId: "conversation_asked",
+      option: "yes",
+      idempotencyKey: "operator-dialog-one",
+    }), "answer", dependencies);
+
+    expect(retired.map((entry) => entry.conversationId)).toEqual(["conversation_asked"]);
+    /* Stamped when the message was accepted, so the compare-and-clear in the
+       store can spare a set offered while it was in flight. */
+    expect(retired[0]!.at).toBeGreaterThanOrEqual(before);
+  } finally {
+    setCallerConversationResolverForTests(null);
+  }
+});
+
 test("runtime answer records authorized operator activity once and excludes self-named agents", async () => {
   const recorded: unknown[] = [];
   const commands: unknown[] = [];

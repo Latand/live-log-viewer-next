@@ -227,12 +227,54 @@ export function readReplySuggestions(conversationId: string, filePath = replySug
   return readReplySuggestionsFile(filePath).sets.find((set) => set.conversationId === conversationId) ?? null;
 }
 
-/** Drop the conversation's set — what the operator's own message does to it.
-    Answers whether there was one, so a caller can stay quiet about a no-op. */
-export function clearReplySuggestions(conversationId: string, now = new Date()): boolean {
+/**
+ * Drop the conversation's set. Answers whether there was one to drop, so a
+ * caller can stay quiet about a no-op.
+ *
+ * `offeredAtOrBefore` is the COMPARE half of compare-and-clear, and every
+ * clear that answers a message carries it: a set offered after that moment
+ * belongs to a question the message cannot have answered, so it survives.
+ * Without it, an answer that arrives a beat late takes down the manager's
+ * NEXT offer along with the one it was actually replying to.
+ */
+export interface ClearReplySuggestionsOptions {
+  /** Clear only a set offered at or before this moment — the timestamp the
+      answering message was accepted at, on the same clock the record's `at`
+      is written on. */
+  offeredAtOrBefore?: Date;
+  now?: Date;
+}
+
+export function clearReplySuggestions(conversationId: string, options: ClearReplySuggestionsOptions = {}): boolean {
+  const now = options.now ?? new Date();
   return mutate((file) => {
-    const remaining = file.sets.filter((set) => set.conversationId !== conversationId);
-    if (remaining.length === file.sets.length) return { result: false };
-    return { sets: remaining, result: true };
+    const current = file.sets.find((set) => set.conversationId === conversationId) ?? null;
+    if (!current) return { result: false };
+    if (options.offeredAtOrBefore !== undefined) {
+      const offeredAt = Date.parse(current.at);
+      if (!Number.isFinite(offeredAt) || offeredAt > options.offeredAtOrBefore.getTime()) return { result: false };
+    }
+    return { sets: file.sets.filter((set) => set.conversationId !== conversationId), result: true };
   }, now);
+}
+
+/**
+ * The operator answered in this conversation, so its drafts are over (#1202).
+ *
+ * Called from the send paths themselves rather than from a rendered pane: the
+ * record is retired by the message that answers it, whether or not a feed
+ * happened to be mounted to notice — and it is retired only for the set that
+ * was standing when that message was accepted, so a fresh offer racing the
+ * send survives it.
+ *
+ * Never throws: a message the operator sent must land even when the drafts
+ * record cannot be written.
+ */
+export function retireReplySuggestionsOnOperatorMessage(conversationId: string, at: Date): boolean {
+  if (!conversationId) return false;
+  try {
+    return clearReplySuggestions(conversationId, { offeredAtOrBefore: at });
+  } catch {
+    return false;
+  }
 }
