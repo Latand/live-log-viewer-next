@@ -121,7 +121,7 @@ test("crossing the rotation threshold changes WORDS ONLY: prominent advisory, ze
     engine: "claude",
     cwd: sandbox,
     clientAttemptId: "seed_0000001",
-    launchProfile: { model: "opus" },
+    launchProfile: { model: "opus", title: "Assess orchestrator rotation health" },
   });
   seatActive("proj-a", begun.receipt.conversationId, transcript);
   const before = JSON.stringify(orchestratorSeatFor("proj-a"));

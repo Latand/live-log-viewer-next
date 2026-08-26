@@ -1,15 +1,17 @@
 import type { NextRequest } from "next/server";
 import fs from "node:fs";
 
+import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { agentRegistry } from "@/lib/agent/registry";
-import { validateLaunchModel } from "@/lib/agent/models";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { defaultModelFor } from "@/lib/agent/models";
 import { VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { resolveSpawnRole } from "@/lib/roles/registry";
+import { derivedSpawnTitle } from "@/lib/title";
 
 import { loadTasks } from "@/lib/tasks/store";
 import { orchestratorMandateForDelivery } from "./prompt";
@@ -19,6 +21,7 @@ import {
   failOrchestratorSeatIntent,
   canonicalOrchestratorProject,
   orchestratorSeatFor,
+  repairOrchestratorSeatRuntimeIdentity,
   type OrchestratorSeat,
 } from "./seats";
 
@@ -63,19 +66,30 @@ export interface SeatCommandDependencies {
       from the launch receipt, for reconciling an accepted launch whose
       accepting request died before activation. */
   launchSettlement(input: { launchId: string | null; clientRequestId: string }): LaunchSettlement;
+  /** Persist the active seat's role, membership, and rotation lineage. */
+  stampRegistryIdentity(seat: OrchestratorSeat): void;
+  /** Durable runtime identity for legacy seats that predate engine/model. */
+  runtimeIdentity(conversationId: string): { engine: string | null; model: string | null };
   now(): string;
 }
 
 export type LaunchSettlement =
   /** The launch durably produced a conversation; the intent can activate on it. */
-  | { kind: "settled"; conversationId: string; path: string | null; launchId: string | null }
+  | {
+      kind: "settled";
+      conversationId: string;
+      path: string | null;
+      launchId: string | null;
+      engine?: string | null;
+      model?: string | null;
+    }
   /** The launch terminally failed; the intent can record the error. */
   | { kind: "failed"; error: string }
   /** No settled receipt to reconcile against — leave the intent alone. */
   | { kind: "unknown" };
 
 export type ExistingConversationTarget =
-  | { kind: "eligible"; conversationId: string; path: string; cwd: string; project: string }
+  | { kind: "eligible"; conversationId: string; path: string; cwd: string; project: string; engine?: string | null; model?: string | null }
   | { kind: "ineligible"; code: "conversation_ineligible" | "invalid_cwd" | "missing_transcript" | "missing_project"; error: string };
 
 /** Issue #903: the spawn fallback must never be this server process's own
@@ -180,6 +194,8 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       path: transcriptPath,
       cwd,
       project: canonicalOrchestratorProject(ownedProject),
+      engine: conversation.engine,
+      model: generation?.launchProfile.model?.trim() || defaultModelFor(conversation.engine),
     };
   },
   projectTasks: (project) => loadTasks()
@@ -201,7 +217,22 @@ export const productionSeatCommandDependencies: SeatCommandDependencies = {
       conversationId: receipt.conversationId,
       path: receipt.artifactLifecycle === "materialized" ? receipt.artifactPath : null,
       launchId: receipt.launchId,
+      engine: receipt.engine,
+      model: receipt.launchProfile.model,
     };
+  },
+  runtimeIdentity: (conversationId) => {
+    const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
+    const conversationModel = conversation
+      ? conversation.generations.at(-1)?.launchProfile.model?.trim() || defaultModelFor(conversation.engine)
+      : null;
+    return {
+      engine: conversation?.engine ?? null,
+      model: conversationModel,
+    };
+  },
+  stampRegistryIdentity: (seat) => {
+    agentRegistry().stampOrchestratorSeatIdentity(seat);
   },
   now: () => new Date().toISOString(),
 };
@@ -216,18 +247,6 @@ export interface SeatCommandResult {
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function explicitSeatModelError(rawBody: Record<string, unknown>): string | null {
-  const model = text(rawBody.model);
-  if (!model) return null;
-  const role = resolveSpawnRole({ role: "orchestrator", roleParams: rawBody.roleParams ?? { mode: "standard" } });
-  let engine: "claude" | "codex" | null = null;
-  if (rawBody.engine === "claude" || rawBody.engine === "codex") engine = rawBody.engine;
-  else if (role.ok && role.value) engine = role.value.config.engine;
-  if (!engine) return null;
-  const validation = validateLaunchModel(engine, model);
-  return "error" in validation ? validation.error : null;
 }
 
 function replayedSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
@@ -260,7 +279,7 @@ function inProgressSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
 
 /**
  * Activation epilogue shared by both modes: seat the conversation, revoke a
- * differing predecessor, sync the legacy record.
+ * differing predecessor, and stamp the registry identity.
  *
  * AXIS SEPARATION (two-axis contract): revocation removes MANAGER-LEVEL
  * authority — manager voice and confirmation minting — and nothing else. The
@@ -270,19 +289,64 @@ function inProgressSeatResponse(seat: OrchestratorSeat): SeatCommandResult {
  * may reach them.
  */
 async function activate(
-  input: { project: string; clientRequestId: string; conversationId: string; path: string | null; launchId?: string | null },
+  input: {
+    project: string;
+    clientRequestId: string;
+    conversationId: string;
+    path: string | null;
+    launchId?: string | null;
+    engine?: string | null;
+    model?: string | null;
+  },
   dependencies: SeatCommandDependencies,
 ): Promise<{ seat: OrchestratorSeat } | null> {
-  const completed = completeOrchestratorSeatIntent({
-    project: input.project,
-    clientRequestId: input.clientRequestId,
-    conversationId: input.conversationId,
-    path: input.path,
-    launchId: input.launchId,
-    now: dependencies.now(),
+  let projectedSeat: OrchestratorSeat | null = null;
+  const completed = withAccountMutationLock(() => {
+    const result = completeOrchestratorSeatIntent({
+      project: input.project,
+      clientRequestId: input.clientRequestId,
+      conversationId: input.conversationId,
+      path: input.path,
+      launchId: input.launchId,
+      engine: input.engine,
+      model: input.model,
+      now: dependencies.now(),
+    });
+    if (result.kind !== "missing") projectedSeat = reconcileAuthorityProjections(result.seat, dependencies);
+    return result;
   });
   if (completed.kind === "missing") return null;
-  return { seat: completed.seat };
+  return { seat: projectedSeat ?? completed.seat };
+}
+
+function reconcileAuthorityProjections(
+  seat: OrchestratorSeat,
+  dependencies: SeatCommandDependencies,
+): OrchestratorSeat {
+  if (!seat.conversationId) throw new Error("active orchestrator seat is missing its conversation identity");
+  const durableRuntime = seat.engine && seat.model
+    ? { engine: null, model: null }
+    : dependencies.runtimeIdentity(seat.conversationId);
+  const repaired = repairOrchestratorSeatRuntimeIdentity({
+    project: seat.project,
+    conversationId: seat.conversationId,
+    engine: durableRuntime.engine,
+    model: durableRuntime.model,
+  }) ?? seat;
+  dependencies.stampRegistryIdentity(repaired);
+  return repaired;
+}
+
+function reconcileCompletedSeatReplay(
+  project: string,
+  clientRequestId: string,
+  dependencies: SeatCommandDependencies,
+): OrchestratorSeat | null {
+  return withAccountMutationLock(() => {
+    const seat = orchestratorSeatFor(project).active;
+    if (!seat || seat.intent.clientRequestId !== clientRequestId) return null;
+    return reconcileAuthorityProjections(seat, dependencies);
+  });
 }
 
 /**
@@ -314,6 +378,8 @@ function reconcilePendingSeatIntent(project: string, dependencies: SeatCommandDe
       conversationId: settlement.conversationId,
       path: settlement.path,
       launchId: settlement.launchId ?? pending.intent.launchId,
+      ...(settlement.engine ? { engine: settlement.engine } : {}),
+      ...(settlement.model ? { model: settlement.model } : {}),
     }, dependencies);
   }
   if (settlement.kind === "failed") {
@@ -349,6 +415,9 @@ export async function executeOrchestratorSeatRequest(
   const reconciliation = reconcilePendingSeatIntent(project, dependencies);
   if (reconciliation) await reconciliation;
 
+  const completedReplay = reconcileCompletedSeatReplay(project, clientRequestId, dependencies);
+  if (completedReplay) return replayedSeatResponse(completedReplay);
+
   if (existingConversationId) {
     const target = dependencies.conversationTarget(existingConversationId);
     if (!target) return { status: 404, body: { error: "conversation is unknown to the registry" } };
@@ -368,10 +437,16 @@ export async function executeOrchestratorSeatRequest(
       clientRequestId,
       mode: "existing",
       conversationId: target.conversationId,
+      engine: target.engine ?? null,
+      model: target.model ?? null,
       promptVersion,
       now: dependencies.now(),
     });
-    if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
+    if (begun.kind === "completed") {
+      const repaired = reconcileCompletedSeatReplay(project, clientRequestId, dependencies);
+      if (!repaired) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
+      return replayedSeatResponse(repaired);
+    }
     if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);
 
     /* The durable intent owns the target on replay. A retried request may carry
@@ -445,17 +520,59 @@ export async function executeOrchestratorSeatRequest(
       },
     };
   }
-  const modelError = explicitSeatModelError(rawBody);
-  if (modelError) return { status: 400, body: { error: modelError } };
-  const begun = beginOrchestratorSeatIntent({ project, mandate, clientRequestId, mode: "spawn", promptVersion, now: dependencies.now() });
-  if (begun.kind === "completed") return replayedSeatResponse(begun.seat);
+  const resolvedRuntime = resolveSpawnRole({
+    role: "orchestrator",
+    roleParams: rawBody.roleParams,
+    engine: rawBody.engine,
+    model: rawBody.model,
+    effort: rawBody.effort,
+  });
+  if (!resolvedRuntime.ok || !resolvedRuntime.value) {
+    return { status: 400, body: { error: resolvedRuntime.ok ? "orchestrator runtime is unavailable" : resolvedRuntime.error } };
+  }
+  const begun = beginOrchestratorSeatIntent({
+    project,
+    mandate,
+    clientRequestId,
+    mode: "spawn",
+    engine: resolvedRuntime.value.config.engine,
+    model: resolvedRuntime.value.config.model,
+    promptVersion,
+    now: dependencies.now(),
+  });
+  if (begun.kind === "completed") {
+    const repaired = reconcileCompletedSeatReplay(project, clientRequestId, dependencies);
+    if (!repaired) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
+    return replayedSeatResponse(repaired);
+  }
   if (begun.kind === "in_progress") return inProgressSeatResponse(begun.seat);
+  if (begun.kind === "replay" && begun.seat.runtimeIdentityFrozen !== true) {
+    const error = "legacy pending orchestrator runtime identity is unavailable; retry the designation with a new clientRequestId";
+    failOrchestratorSeatIntent(project, clientRequestId, error);
+    return {
+      status: 409,
+      body: {
+        error,
+        code: "legacy_runtime_identity_unavailable",
+        seat: orchestratorSeatFor(project).pending,
+      },
+    };
+  }
   /* A pending replay spawns the ORIGINAL intent's mandate: the spawn receipt is
      matched by clientAttemptId AND request digest, so a recomposed retry would
      otherwise conflict with its own first attempt. */
   const spawnMandate = orchestratorMandateForDelivery(begun.kind === "replay" ? begun.seat.mandate : mandate);
 
-  const spawnFields = ["engine", "model", "cwd", "effort", "fast", "accountId", "images", "roleParams", "allowSubagents"] as const;
+  const spawnFields = ["cwd", "effort", "fast", "accountId", "images", "roleParams", "allowSubagents"] as const;
+  const spawnRuntime = begun.kind === "replay"
+    ? {
+        ...(begun.seat.engine ? { engine: begun.seat.engine } : {}),
+        ...(begun.seat.model ? { model: begun.seat.model } : {}),
+      }
+    : {
+        engine: resolvedRuntime.value.config.engine,
+        model: resolvedRuntime.value.config.model,
+      };
   const cwd = resolveOrchestratorCwd(project, rawBody.cwd);
   if (!cwd) {
     failOrchestratorSeatIntent(project, clientRequestId, "orchestrator cwd could not be resolved");
@@ -470,11 +587,13 @@ export async function executeOrchestratorSeatRequest(
   }
   const spawnBody: Record<string, unknown> = {
     ...Object.fromEntries(spawnFields.flatMap((field) => (rawBody[field] === undefined ? [] : [[field, rawBody[field]]]))),
+    ...spawnRuntime,
     role: "orchestrator",
     roleParams: rawBody.roleParams ?? { mode: "standard" },
     project,
     cwd,
     ["prompt"]: spawnMandate,
+    title: derivedSpawnTitle("orchestrator", spawnMandate, project),
     clientAttemptId: clientRequestId,
   };
   const spawned = await dependencies.spawn(spawnBody);
@@ -502,6 +621,8 @@ export async function executeOrchestratorSeatRequest(
     conversationId: spawnedConversationId,
     path: typeof spawned.body.path === "string" ? spawned.body.path : null,
     launchId: launchId || null,
+    engine: resolvedRuntime.value.config.engine,
+    model: resolvedRuntime.value.config.model,
   }, dependencies);
   if (!activated) return { status: 409, body: { error: "seat intent was superseded by a newer designation" } };
   return {

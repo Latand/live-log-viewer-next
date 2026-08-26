@@ -6,7 +6,6 @@ import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import type { AccountContext } from "@/lib/accounts/contracts";
 import { accountManager, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
@@ -17,7 +16,7 @@ import { normalizeSpawnPlugins, pluginAllowlistForSession, SCHEDULED_REPORT_PLUG
 import { codexModelSupportsImages, modelFromBody, validateLaunchModel } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
-import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
+import { spawnContentDigest, spawnParentSelector, spawnRequestDigests } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { resolveSpawnLineage, SpawnParentError } from "@/lib/agent/spawnParent";
 import { SpawnAdmissionError, isSpawnDeniedRole } from "@/lib/agent/spawnAdmission";
@@ -39,6 +38,7 @@ import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
+import { derivedSpawnTitle, durableSemanticTitle, firstPromptLine, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import { en } from "@/lib/i18n/en";
 import { uk } from "@/lib/i18n/uk";
@@ -181,7 +181,7 @@ export async function executeSpawnRequest(
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; mcpServers?: unknown; plugins?: unknown; project?: unknown; supersedes?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; title?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown; mcpServers?: unknown; plugins?: unknown; project?: unknown; supersedes?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -247,6 +247,16 @@ export async function executeSpawnRequest(
   if (imageError) {
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
   }
+  const explicitTitle = body.title === undefined ? null : durableSemanticTitle(
+    typeof body.title === "string" ? body.title : null,
+    120,
+  );
+  if (body.title !== undefined && !explicitTitle) {
+    return NextResponse.json({ error: "title must be a semantic, non-placeholder string" }, { status: 400 });
+  }
+  const derivedTitle = firstPromptLine(userPrompt, 60)
+    ? derivedSpawnTitle(role.value?.role ?? engine, userPrompt)
+    : null;
   let transport;
   try {
     transport = spawnTransport();
@@ -277,6 +287,18 @@ export async function executeSpawnRequest(
   }
 
   const registry = dependencies.registry();
+  const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
+  const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
+  if (!explicitTitle && !existingAttempt) {
+    return NextResponse.json({ error: SPAWN_TITLE_REQUIRED_ERROR }, { status: 400 });
+  }
+  const launchTitle = explicitTitle
+    ?? derivedTitle
+    ?? durableSemanticTitle(existingAttempt?.launchProfile.title, 120);
+  if (!launchTitle) {
+    return NextResponse.json({ error: SPAWN_TITLE_REQUIRED_ERROR }, { status: 400 });
+  }
+
   let authenticatedCaller: AuthenticatedSpawnCaller | null = null;
   if (agentInitiated) {
     const caller = authenticatedAgentSpawnCaller(req, body.src, registry);
@@ -343,8 +365,12 @@ export async function executeSpawnRequest(
   let imagePaths: string[] = [];
   let launchId: string | null = null;
   try {
-    const clientAttemptId = typeof body.clientAttemptId === "string" ? body.clientAttemptId : null;
-    const existingAttempt = clientAttemptId ? registry.spawnReceiptForClientAttempt(clientAttemptId) : null;
+    const deterministicTitleReplay = body.title === undefined || explicitTitle === derivedTitle;
+    const identityWaveTitleReplay = existingAttempt?.identityWaveTitleBackfill === true
+      && deterministicTitleReplay;
+    const requestProfileTitle = identityWaveTitleReplay
+      ? durableSemanticTitle(existingAttempt.launchProfile.title, 120) ?? launchTitle
+      : launchTitle;
     const lineage = resolveSpawnLineage(spawnLineageSelectorForCaller(authenticatedCaller, {
       ...body,
       role: role.value?.role,
@@ -413,24 +439,38 @@ export async function executeSpawnRequest(
     const grantedServers = reportClassGrant
       ? grantedMcpServers(reportClassGrant.mcpServers)
       : mcpServersForSession({ origin: sessionOrigin, requested: requestedMcpServers });
-    const requestDigestForAccount = (accountId: string) => spawnRequestDigest({
-      engine,
-      cwd,
-      model: selectedModel.model,
-      effort: reasoning.effort,
-      fast: reasoning.fast,
-      accountId,
-      role: role.value?.role ?? null,
-      mcpServers: grantedServers,
-      ...(plugins.length ? { plugins } : {}),
-      ...(body.allowSubagents === true ? { allowSubagents: true } : {}),
-      ...(explicitProject ? { project: explicitProject } : {}),
-      parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
-      ...(reviewedConversationId ? { reviews: spawnParentSelector({ parentConversationId: reviewedConversationId }) } : {}),
-      ...(supersedesConversationId ? { supersedes: spawnParentSelector({ parentConversationId: supersedesConversationId }) } : {}),
-      prompt,
-      images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
-    });
+    const requestDigestForAccount = (accountId: string, preserveOperationalTitleReplay = false) => {
+      const digests = spawnRequestDigests({
+        engine,
+        cwd,
+        model: selectedModel.model,
+        effort: reasoning.effort,
+        fast: reasoning.fast,
+        accountId,
+        role: role.value?.role ?? null,
+        title: launchTitle,
+        mcpServers: grantedServers,
+        ...(plugins.length ? { plugins } : {}),
+        ...(body.allowSubagents === true ? { allowSubagents: true } : {}),
+        ...(explicitProject ? { project: explicitProject } : {}),
+        parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
+        ...(reviewedConversationId ? { reviews: spawnParentSelector({ parentConversationId: reviewedConversationId }) } : {}),
+        ...(supersedesConversationId ? { supersedes: spawnParentSelector({ parentConversationId: supersedesConversationId }) } : {}),
+        prompt,
+        images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
+      });
+      if (identityWaveTitleReplay) {
+        return existingAttempt.requestDigest === digests.current ? digests.current : digests.withoutTitle;
+      }
+      if (preserveOperationalTitleReplay && existingAttempt) {
+        return existingAttempt.requestDigest === digests.current ? digests.current : digests.withoutTitle;
+      }
+      const existingSemanticTitle = durableSemanticTitle(existingAttempt?.launchProfile.title, 120);
+      if (!existingAttempt || !existingSemanticTitle || existingSemanticTitle === launchTitle) {
+        return existingAttempt?.requestDigest === digests.current ? digests.current : digests.withoutTitle;
+      }
+      return digests.current;
+    };
     const pipelineAttemptTarget = pipelineSourceConversationId && dependencies.pipelineAttemptTargetForSource
       ? dependencies.pipelineAttemptTargetForSource(pipelineSourceConversationId)
       : null;
@@ -504,6 +544,7 @@ export async function executeSpawnRequest(
       allowSubagents: body.allowSubagents === true,
       mcpServers: grantedServers,
       plugins,
+      title: requestProfileTitle,
       ...(explicitProject ? { project: explicitProject } : {}),
     });
     const terminalizePinnedAccountFailure = (failure: unknown): NextResponse<SpawnResponse | ApiError> => {
@@ -577,6 +618,7 @@ export async function executeSpawnRequest(
        the admitted fallback while a changed pin still conflicts. */
     const digest = requestDigestForAccount(
       typeof body.accountId === "string" ? body.accountId : account.accountId,
+      pinFallback || queuedUntil !== null,
     );
     const specForAccount = (
       launchAccount: HealthySpawnAccountResolution,
@@ -610,7 +652,7 @@ export async function executeSpawnRequest(
           mcpServers: grantedServers,
           plugins,
           permissionMode,
-          ...(title ? { title } : {}),
+          title: title ?? requestProfileTitle,
           ...(explicitProject ? { project: explicitProject } : {}),
         }),
       };
