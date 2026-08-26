@@ -40,6 +40,14 @@ export interface DeliveredMessageProvenance {
   /** Carried through for operator rows so the bubble renders the same
       selected-card badge the composer showed at submission (#844). */
   selectedContext?: SelectedContextRef;
+  /** Present when THIS delivery is an orchestrator seat's mandate (#1166).
+      A seat is created by delivering its mandate, so the 8 KB lands in the
+      transcript as an ordinary message; the seat record names that delivery by
+      its own client-message identity, which is what sets this. `version` is the
+      seat's recorded `promptVersion` — a number for an approved default, null
+      for a bespoke mandate. Render-time only: nothing about the transcript or
+      the delivery changes. */
+  mandate?: { version: number | null };
 }
 
 /**

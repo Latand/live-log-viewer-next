@@ -1,13 +1,10 @@
 "use client";
 
-import { useMemo } from "react";
-
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { AgentControlStrip } from "../AgentControlStrip";
 import { LogFeed } from "../LogFeed";
-import { MandateSeatProvider } from "../feed/mandateSeat";
 import { DeadHostBanner } from "../runtime/DeadHostBanner";
 import { TmuxComposer } from "../TmuxComposer";
 import { useAgentCapabilities } from "../useAgentCapabilities";
@@ -25,42 +22,26 @@ const noop = () => undefined;
  * `primaryPlace` is what makes the dock the composer's home: the same
  * conversation also has a card on the board behind the panel, and the one
  * hoisted composer must render HERE while both are on screen.
- *
- * `promptVersion` is the seat's own record of what its mandate was based on —
- * a number for an approved default, null for a bespoke one. It travels to the
- * mandate card (#1166) so the dock's first row can name WHICH mandate created
- * this seat; the board's pane renders the same card without it.
  */
-export function OrchestratorConversation({
-  file,
-  projectName,
-  promptVersion,
-}: {
-  file: FileEntry;
-  projectName: string;
-  promptVersion?: number | null;
-}) {
+export function OrchestratorConversation({ file, projectName }: { file: FileEntry; projectName: string }) {
   const { t } = useLocale();
   const { caps } = useAgentCapabilities(file);
   const deadHost = caps.surface === "dead";
   const sendCap = caps.controls.send;
   const sendBlockedReason = !deadHost && sendCap.state === "disabled" ? t(sendCap.reason) : null;
-  const seat = useMemo(() => ({ promptVersion }), [promptVersion]);
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-orchestrator-conversation={file.conversationId ?? file.path}>
       {deadHost ? <DeadHostBanner file={file} /> : null}
-      <MandateSeatProvider value={seat}>
-        <LogFeed
-          file={file}
-          showSvc={false}
-          lineFilter=""
-          onStatus={noop}
-          paused={false}
-          follow
-          setFollow={noop}
-          compact
-        />
-      </MandateSeatProvider>
+      <LogFeed
+        file={file}
+        showSvc={false}
+        lineFilter=""
+        onStatus={noop}
+        paused={false}
+        follow
+        setFollow={noop}
+        compact
+      />
       <AgentControlStrip file={file} />
       <TmuxComposer
         file={file}

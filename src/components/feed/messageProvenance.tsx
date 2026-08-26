@@ -75,16 +75,28 @@ export function setMessageProvenanceRetryScheduleForTests(delays: readonly numbe
   retryDelaysMs = delays ?? DEFAULT_RETRY_DELAYS_MS;
 }
 
+/** The seat-mandate projection of one delivery (#1166). A `version` the server
+    could not state is not a mandate claim at all: the card would have to invent
+    a qualifier, and the row is better off as the message it already was. */
+function parseMandate(value: unknown): { version: number | null } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { version } = value as Record<string, unknown>;
+  if (version === null) return { version: null };
+  return typeof version === "number" && Number.isInteger(version) ? { version } : null;
+}
+
 function parseProvenance(entry: unknown): DeliveredMessageProvenance | null {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
   const body = entry as Record<string, unknown>;
   if (body.origin !== "operator" && body.origin !== "agent") return null;
   const senderRole = messageOriginRole(body.senderRole);
   const selectedContext = parseSelectedContextRef(body.selectedContext);
+  const mandate = parseMandate(body.mandate);
   return {
     origin: body.origin,
     ...(senderRole ? { senderRole } : {}),
     ...(selectedContext ? { selectedContext } : {}),
+    ...(mandate ? { mandate } : {}),
   };
 }
 
@@ -290,7 +302,8 @@ export function useDeliveredMessageProvenance(path: string | null, items: readon
   const assignmentKey = useMemo(() => {
     const parts: string[] = [];
     for (const [item, provenance] of assignment) {
-      parts.push(`${itemSerial(item)}:${provenance.origin}:${provenance.senderRole ?? ""}:${provenance.selectedContext ? "ctx" : ""}`);
+      const mandate = provenance.mandate ? `mandate:${provenance.mandate.version ?? "custom"}` : "";
+      parts.push(`${itemSerial(item)}:${provenance.origin}:${provenance.senderRole ?? ""}:${provenance.selectedContext ? "ctx" : ""}:${mandate}`);
     }
     return parts.join("\n");
   }, [assignment]);

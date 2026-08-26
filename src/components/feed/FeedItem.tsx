@@ -8,7 +8,6 @@ import { MESSAGE_ACTION } from "./actionStyles";
 import { SelectedContextBadge } from "../SelectedContextBadge";
 import { CopyButton } from "./CopyButton";
 import { InboxImageCard } from "./InboxImage";
-import { isOrchestratorMandateText } from "./mandateMessage";
 import { md, mdBlocks } from "./markdown";
 import { useMessageProvenance, type ProvenanceLookup } from "./messageProvenance";
 import { tr, type Item } from "./parse";
@@ -38,24 +37,26 @@ import { McpCallCard } from "../runtime/McpCallCard";
  * repeats a relay's words stays the operator's. No evidence — no provider,
  * unknown id, scaffold row, the operator's own words — keeps the row untouched.
  *
- * One more classification rides here (#1166): a row whose text IS an
- * orchestrator seat's delivered mandate becomes the mandate card. It is asked
- * AFTER the delivery evidence, so it can only ever claim a row that would
- * otherwise render as the operator's own bubble or as a scaffold system row —
- * an agent relay carrying the same text stays the relay it is.
+ * One more class of evidence rides here (#1166): the SAME occurrence record can
+ * say that its delivery was an orchestrator seat's mandate, and then the row is
+ * the seat's own card. Because the fact belongs to the delivery rather than to
+ * the text, an agent relay that repeats the mandate's bytes carries no such
+ * record and stays the relay it is, and an operator who pastes them by hand
+ * keeps their own bubble.
  */
 function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
   if (item.kind === "user") {
     /* A selected-context capture exists only on operator composer sends. */
     if (item.selectedContext) return item;
     const resolved = provenance.forItem(item);
+    if (resolved?.mandate) return mandateCard(item.ts, item.text, resolved.mandate.version);
     if (resolved?.origin === "agent") return internalCard(item.ts, item.text, resolved.senderRole);
-    return isOrchestratorMandateText(item.text) ? mandateCard(item.ts, item.text) : item;
+    return item;
   }
   if (item.kind !== "sysmsg" || !item.deliveredMessage) return item;
   const resolved = provenance.forItem(item);
+  if (resolved?.mandate) return mandateCard(item.deliveredMessage.ts, item.text, resolved.mandate.version);
   if (resolved?.origin === "agent") return internalCard(item.deliveredMessage.ts, item.text, resolved.senderRole);
-  if (isOrchestratorMandateText(item.text)) return mandateCard(item.deliveredMessage.ts, item.text);
   if (resolved?.origin === "operator") {
     return {
       kind: "user",
@@ -67,8 +68,8 @@ function resolveDeliveredItem(item: Item, provenance: ProvenanceLookup): Item {
   return item;
 }
 
-function mandateCard(ts: unknown, text: string): Item {
-  return { kind: "mandate", ts, text };
+function mandateCard(ts: unknown, text: string, version: number | null): Item {
+  return { kind: "mandate", ts, text, version };
 }
 
 function internalCard(ts: unknown, text: string, senderRole: string | undefined): Item {

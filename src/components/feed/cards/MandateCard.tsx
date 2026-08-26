@@ -7,7 +7,6 @@ import { hhmm } from "../../utils";
 import { MESSAGE_ACTION } from "../actionStyles";
 import { CopyButton } from "../CopyButton";
 import { mandateMessage } from "../mandateMessage";
-import { useMandateSeat } from "../mandateSeat";
 import { mdBlocks } from "../markdown";
 import { tr, type MandateItem } from "../parse";
 
@@ -21,24 +20,23 @@ import { tr, type MandateItem } from "../parse";
  *
  * Both sections mount their body only once opened: the point of the card is
  * that a conversation no longer pays 8 KB of markdown to show its first row.
+ *
+ * `version` is what the seat itself recorded, carried here by the delivery
+ * evidence, so the dock and the board's conversation pane name the same mandate
+ * the same way — including the bespoke one, which reads `custom` on both.
  */
 export function MandateCard({ item }: { item: MandateItem }) {
-  const seat = useMandateSeat();
-  const message = mandateMessage(item.text, seat.promptVersion);
-  const qualifier = message.label.kind === "version"
-    ? tr("mandateCard.version", { version: message.label.version })
-    : message.label.kind === "custom"
-      ? tr("mandateCard.custom")
-      : "";
+  const message = mandateMessage(item.text);
+  const qualifier = item.version === null
+    ? tr("mandateCard.custom")
+    : tr("mandateCard.version", { version: item.version });
   return (
     <div className="my-3 ml-9 overflow-hidden rounded-surface border border-border bg-card shadow-1" data-mandate-card>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 px-3.5 pt-2">
         <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-sunken text-muted">
           <GlyphIcon name="plan" className="h-3.5 w-3.5" />
         </span>
-        <span className="text-[13px] font-semibold">
-          {qualifier ? `${tr("mandateCard.title")} ${qualifier}` : tr("mandateCard.title")}
-        </span>
+        <span className="text-[13px] font-semibold">{`${tr("mandateCard.title")} ${qualifier}`}</span>
         <span className="text-[11px] text-muted">
           · {tr("mandateCard.lines", { count: message.lines })} · {tr("mandateCard.sent")}
         </span>

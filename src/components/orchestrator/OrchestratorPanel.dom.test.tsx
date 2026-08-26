@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { emptyStore } from "@/components/runtime/runtimeModel";
 import { setLocale } from "@/lib/i18n";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
+import { messageTextDigest } from "@/lib/runtime/messageTextDigest";
 import type { FileEntry } from "@/lib/types";
 
 /*
@@ -72,6 +73,7 @@ mock.module("@/hooks/useLogTail", () => ({
 }));
 
 const { OrchestratorPanel } = await import("./OrchestratorPanel");
+const { resetMessageProvenanceCacheForTests } = await import("../feed/messageProvenance");
 const { SEAT_POLL_MS, resetOrchestratorSeatCacheForTests } = await import("./useOrchestratorSeat");
 const { resetOrchestratorIncumbentCacheForTests } = await import("./useOrchestratorIncumbent");
 
@@ -91,6 +93,8 @@ let seatStatus: SeatFile;
 let seatPosts: Record<string, unknown>[];
 let rotatePosts: Record<string, unknown>[];
 let spawnPosts: number;
+/** `GET /api/log/provenance`, the feed's delivery evidence (#1117, #1166). */
+let provenanceOccurrences: Record<string, unknown>[];
 /** Queued answers for the confirm POST, oldest first; the last one repeats. */
 let seatResponses: { status: number; body: Record<string, unknown> | null; throws?: boolean }[];
 let rotateResponses: { status: number; body: Record<string, unknown> | null; throws?: boolean }[];
@@ -126,6 +130,11 @@ function installFetch(): void {
       return { ok: true, status: 200, json: async () => (target === "atlas" ? seatStatus : { seat: null, pending: null, exists: true }) } as Response;
     }
     if (url === "/api/accounts") return { ok: true, status: 200, json: async () => accounts } as Response;
+    /* Delivery evidence for the dock's own feed (#1166): what the server
+       projected for this transcript, mandate fact included. */
+    if (url.startsWith("/api/log/provenance")) {
+      return { ok: true, status: 200, json: async () => ({ messages: {}, occurrences: provenanceOccurrences }) } as Response;
+    }
     /* No voice backend in a DOM test, so a transcript's speak control renders
        nothing rather than reading a shape the catch-all below cannot supply. */
     if (url.startsWith("/api/tts/")) return { ok: false, status: 404, json: async () => ({}) } as Response;
@@ -211,7 +220,9 @@ beforeEach(() => {
      tab that has never read a seat. */
   resetOrchestratorSeatCacheForTests();
   resetOrchestratorIncumbentCacheForTests();
+  resetMessageProvenanceCacheForTests();
   tailLines.clear();
+  provenanceOccurrences = [];
   seatStatus = { seat: null, pending: null, exists: true, viewerMcpRegistered: false };
   incumbentStatus = { project: "atlas", designated: false, rotation: null, context: null };
   seatPosts = [];
@@ -1082,7 +1093,8 @@ test("the draft a closed conversation returns to can actually create — it says
 /* #1166: the seat DELIVERS the mandate, so it lands in the transcript as an
    ordinary message and the feed used to render those 8 KB as the operator's own
    bubble — 180 characters and a character count, as if they had said it. The
-   dock knows which mandate created this seat, so the card can name it. */
+   seat named that delivery when it made it, and the evidence the dock's feed
+   already fetches carries the fact — and the version — to the card. */
 test("the dock renders the delivered mandate as the seat's own card, not as the operator's bubble", async () => {
   const delivered = [
     ORCHESTRATOR_SYSTEM_PROMPT,
@@ -1092,13 +1104,21 @@ test("the dock renders the delivered mandate as the seat's own card, not as the 
   tailLines.set(orchestratorFile.path, [
     JSON.stringify({ type: "user", uuid: "row-mandate-1", timestamp: "2026-08-13T10:00:02.000Z", message: { role: "user", content: delivered } }),
   ]);
+  /* The seat's own delivery, as the provenance route projects it: this seat is
+     spawn-mode, so its launch id names the first prompt it was created with. */
+  provenanceOccurrences = [{
+    textDigest: messageTextDigest(delivered),
+    deliveredAt: "2026-08-13T10:00:01.000Z",
+    origin: "agent",
+    mandate: { version: 3 },
+  }];
 
   const host = await mountLive();
 
   const card = host.querySelector("[data-mandate-card]");
   expect(card).not.toBeNull();
-  /* The seat's own recorded prompt version, carried into the feed by the dock;
-     the board's pane renders the same card without one. */
+  /* The seat's own recorded prompt version, carried by the delivery evidence —
+     which is why the board's pane names the same mandate the same way. */
   expect(card!.textContent).toContain("Mandate v3");
   expect(card!.textContent).toContain("sent at seat creation");
   /* Folded away, and the rotation handoff is a section of the SAME card. */
@@ -1107,6 +1127,20 @@ test("the dock renders the delivered mandate as the seat's own card, not as the 
   expect(card!.textContent).toContain("Rotation handoff");
   /* The operator's bubble is gone from the row entirely. */
   expect(host.innerHTML).not.toContain("bg-user");
+});
+
+test("the same row without that evidence stays the message it was", async () => {
+  /* The negative control for the case above: nothing about the TEXT makes a
+     row a mandate, so with no delivery claiming it the dock renders the
+     bubble it renders today. */
+  tailLines.set(orchestratorFile.path, [
+    JSON.stringify({ type: "user", uuid: "row-mandate-2", timestamp: "2026-08-13T10:00:02.000Z", message: { role: "user", content: ORCHESTRATOR_SYSTEM_PROMPT } }),
+  ]);
+
+  const host = await mountLive();
+
+  expect(host.querySelector("[data-mandate-card]")).toBeNull();
+  expect(host.innerHTML).toContain("bg-user");
 });
 
 test("coming back to a project paints its conversation in the first commit, transcript and all", async () => {
