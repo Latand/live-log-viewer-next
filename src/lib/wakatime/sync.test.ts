@@ -4,14 +4,15 @@ import os from "node:os";
 import path from "node:path";
 
 import type { RegistryFile } from "@/lib/agent/registry";
-import { recentTurnActivityFromRecords } from "@/lib/scanner/turnDuration";
 import type { FileEntry } from "@/lib/types";
 import {
   createWakatimeSync,
+  enqueueProductionOperatorHeartbeat,
   readProductionWakatimeCredential,
   readWakatimeCredentialFile,
   startWakatimeSync,
   wakatimeProductionScan,
+  writeProductionWakatimeState,
   type WakatimeStateV1,
   type WakatimeSyncDependencies,
 } from "./sync";
@@ -22,6 +23,82 @@ const TURN_START = NOW + 1_000;
 const TURN_END = NOW + 31_000;
 const PATH = "/sessions/current.jsonl";
 const TEST_CREDENTIAL = ["fixture", "wakatime", "value"].join("-");
+
+test("direct operator ingress adds one point heartbeat to the existing WakaTime queue", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-direct-"));
+  const filename = path.join(directory, "wakatime-state.json");
+  const action = {
+    key: "a".repeat(64),
+    engine: "codex" as const,
+    project: "project-fixture",
+    atMs: NOW,
+  };
+  try {
+    enqueueProductionOperatorHeartbeat(action, filename, () => true);
+    enqueueProductionOperatorHeartbeat({ ...action, atMs: NOW + 30_000 }, filename, () => true);
+
+    const state = JSON.parse(fs.readFileSync(filename, "utf8")) as WakatimeStateV1;
+    expect(state.pending).toHaveLength(1);
+    expect(state.pending[0]).toMatchObject({
+      kind: "activity",
+      heartbeat: {
+        project: "project-fixture",
+        time: NOW / 1_000,
+        ai_session: action.key,
+      },
+    });
+    expect(state.pending[0]!.heartbeat.entity.startsWith("agent-log-viewer/operator/codex/")).toBe(true);
+    expect(fs.existsSync(path.join(directory, "wakatime-operator-actions.json"))).toBe(false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a concurrent operator heartbeat survives a stale worker state write", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-concurrent-"));
+  const filename = path.join(directory, "wakatime-state.json");
+  try {
+    enqueueProductionOperatorHeartbeat({
+      key: "b".repeat(64),
+      engine: "claude",
+      project: "project-fixture",
+      atMs: NOW,
+    }, filename, () => true);
+    const stale: WakatimeStateV1 = {
+      version: 1,
+      enabledAtMs: NOW,
+      credentialGeneration: null,
+      streams: {},
+      retiredStreams: {},
+      pending: [],
+      retry: { failures: 0, retryAtMs: 0, reason: null },
+      counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
+    };
+
+    const merged = writeProductionWakatimeState(stale, filename);
+
+    expect(merged.pending).toHaveLength(1);
+    expect(merged.pending[0]!.heartbeat.project).toBe("project-fixture");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the shared WakaTime queue rejects unresolved operator attribution", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wakatime-unresolved-"));
+  const filename = path.join(directory, "wakatime-state.json");
+  try {
+    expect(() => enqueueProductionOperatorHeartbeat({
+      key: "c".repeat(64),
+      engine: "codex",
+      project: "project_unresolved",
+      atMs: NOW,
+    }, filename, () => true)).toThrow("direct operator heartbeat is invalid");
+    expect(fs.existsSync(filename)).toBe(false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("WakaTime sidecar reuses the Viewer snapshot without launching a corpus scan", async () => {
   const persisted = { files: [], projectCatalog: [], complete: true };
@@ -187,7 +264,14 @@ function harness(overrides: Partial<WakatimeSyncDependencies> = {}) {
     logger: (event, fields) => { logs.push({ event, fields }); },
     ...overrides,
   };
-  return { sync: createWakatimeSync(deps), deps, writes, requests, logs, state: () => stored };
+  return {
+    sync: createWakatimeSync(deps),
+    deps,
+    writes,
+    requests,
+    logs,
+    state: () => stored,
+  };
 }
 
 describe("WakaTime activity sync", () => {
@@ -561,7 +645,7 @@ describe("WakaTime activity sync", () => {
   });
 
   test("first enable is forward-only and preserves separate idle gaps between visible turns", async () => {
-    const { sync, state } = harness({
+    const fixture = harness({
       recentTurnWindows: () => ({
         windows: [
           { startedAt: NOW - 120_000, endedAt: NOW - 60_000 },
@@ -573,22 +657,22 @@ describe("WakaTime activity sync", () => {
       }),
     });
 
-    await sync.tick();
+    await fixture.sync.tick();
 
-    expect(state()?.pending.map((event) => event.heartbeat.time)).toEqual([
+    expect(fixture.state()?.pending.map((event) => event.heartbeat.time)).toEqual([
       NOW / 1_000,
       (NOW + 30_000) / 1_000,
       (NOW + 90_000) / 1_000,
       (NOW + 120_000) / 1_000,
     ]);
-    expect(new Set(state()?.pending
+    expect(new Set(fixture.state()?.pending
       .filter((event) => event.heartbeat.project === "-repo")
       .map((event) => event.heartbeat.entity)).size).toBe(2);
-    sync.stop();
+    fixture.sync.stop();
   });
 
   test("same-project turns exclude a sub-timeout idle gap from project duration", async () => {
-    const { sync, state } = harness({
+    const fixture = harness({
       recentTurnWindows: () => ({
         windows: [
           { startedAt: NOW, endedAt: NOW + 30_000 },
@@ -599,92 +683,15 @@ describe("WakaTime activity sync", () => {
       }),
     });
 
-    await sync.tick();
+    await fixture.sync.tick();
 
-    const heartbeats = state()!.pending.map((event) => event.heartbeat);
+    const heartbeats = fixture.state()!.pending.map((event) => event.heartbeat);
     expect(projectDurationSeconds(heartbeats, "-repo")).toBe(60);
     expect(heartbeats.filter((heartbeat) => heartbeat.project === "-repo").map((heartbeat) => heartbeat.time)).toEqual([
       NOW / 1_000,
       (NOW + 60_000) / 1_000,
     ]);
-    sync.stop();
-  });
-
-  test("legacy root input gets engagement while delegated launch input remains agent-only", async () => {
-    const durationAtDepth = async (delegationDepth: number) => {
-      const snapshot = registrySnapshot();
-      snapshot.conversations.conversation_test!.delegationDepth = delegationDepth;
-      const initialState: WakatimeStateV1 = {
-        version: 1,
-        enabledAtMs: NOW - 1,
-        credentialGeneration: null,
-        streams: {},
-        pending: [],
-        retry: { failures: 0, retryAtMs: 0, reason: null },
-        counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
-      };
-      const fixture = harness({
-        now: () => NOW + 15 * 60_000,
-        readState: async () => initialState,
-        registrySnapshot: () => snapshot,
-        recentTurnWindows: () => ({
-          windows: [{ startedAt: NOW, endedAt: NOW + 30_000 }],
-          operatorActionsAtMs: [],
-          unprovenancedUserActionsAtMs: [NOW],
-          prefixTruncated: false,
-          complete: true,
-        }),
-      });
-      await fixture.sync.tick();
-      const duration = projectDurationSeconds(
-        fixture.state()!.pending.map((event) => event.heartbeat),
-        "-repo",
-      );
-      fixture.sync.stop();
-      return duration;
-    };
-
-    expect(await durationAtDepth(0)).toBe(10 * 60);
-    expect(await durationAtDepth(1)).toBe(30);
-  });
-
-  test("structured engagement requires root provenance while delegated agent seconds stay unchanged", async () => {
-    const durationAtDepth = async (delegationDepth: number, operatorActionsAtMs: number[]) => {
-      const snapshot = registrySnapshot();
-      snapshot.conversations.conversation_test!.delegationDepth = delegationDepth;
-      const fixture = harness({
-        now: () => NOW + 15 * 60_000,
-        readState: async () => ({
-          version: 1,
-          enabledAtMs: NOW - 1,
-          credentialGeneration: null,
-          streams: {},
-          pending: [],
-          retry: { failures: 0, retryAtMs: 0, reason: null },
-          counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
-        }),
-        registrySnapshot: () => snapshot,
-        recentTurnWindows: () => ({
-          windows: [{ startedAt: NOW, endedAt: NOW + 30_000 }],
-          operatorActionsAtMs,
-          unprovenancedUserActionsAtMs: [],
-          prefixTruncated: false,
-          complete: true,
-        }),
-      });
-      await fixture.sync.tick();
-      const duration = projectDurationSeconds(
-        fixture.state()!.pending.map((event) => event.heartbeat),
-        "-repo",
-      );
-      fixture.sync.stop();
-      return duration;
-    };
-
-    const agentOnlySeconds = await durationAtDepth(1, []);
-    expect(agentOnlySeconds).toBe(30);
-    expect(await durationAtDepth(1, [NOW])).toBe(agentOnlySeconds);
-    expect(await durationAtDepth(0, [NOW])).toBe(10 * 60);
+    fixture.sync.stop();
   });
 
   test("overlapping same-project turns contribute their wall-clock union", async () => {
@@ -744,130 +751,6 @@ describe("WakaTime activity sync", () => {
       event.kind === "boundary" && event.heartbeat.time === (NOW + 60_000) / 1_000
     )).toHaveLength(0);
     sync.stop();
-  });
-
-  test("operator engagement ending on a live tick never cuts off a continuing silent agent", async () => {
-    let clock = NOW;
-    const snapshot = registrySnapshot();
-    snapshot.conversations.conversation_test!.delegationDepth = 0;
-    const { sync, state } = harness({
-      now: () => clock,
-      registrySnapshot: () => snapshot,
-      scan: async () => ({
-        complete: true,
-        files: [entry({
-          proc: "running",
-          pid: 42,
-          activity: "recent",
-          activityReason: "jsonl_turn_active",
-          mtime: clock / 1_000,
-        })],
-      }),
-      recentTurnWindows: () => ({
-        windows: [{ startedAt: NOW, endedAt: null }],
-        operatorActionsAtMs: [NOW],
-        prefixTruncated: false,
-        complete: true,
-      }),
-    });
-
-    await sync.tick();
-    clock += 10 * 60_000;
-    await sync.tick();
-
-    expect(state()?.pending.filter((event) =>
-      event.kind === "boundary" && event.heartbeat.time === clock / 1_000
-    )).toHaveLength(0);
-    expect(state()?.pending.some((event) =>
-      event.kind === "activity" && event.heartbeat.time === clock / 1_000
-    )).toBe(true);
-    sync.stop();
-  });
-
-  test("production-shaped replay preserves operator engagement, agent overlap, idle gaps, resume, and retry", async () => {
-    const secondPath = "/sessions/overlap.jsonl";
-    const snapshot = registrySnapshot();
-    snapshot.conversations.conversation_test!.delegationDepth = 0;
-    snapshot.conversations.conversation_overlap = structuredClone(snapshot.conversations.conversation_test!);
-    snapshot.conversations.conversation_overlap!.id = "conversation_overlap";
-    snapshot.conversations.conversation_overlap!.generations[0]!.path = secondPath;
-    const structuredUser = (timestamp: number, text: string) => ({
-      timestamp: new Date(timestamp).toISOString(),
-      payload: { type: "user_message", message: `<!-- llv:structured-user -->\n${text}` },
-    });
-    const primaryActivity = recentTurnActivityFromRecords(
-      [
-        structuredUser(NOW, "start"),
-        { timestamp: new Date(NOW + 1_000).toISOString(), payload: { type: "task_started" } },
-        { timestamp: new Date(NOW + 60_000).toISOString(), payload: { type: "turn_aborted" } },
-        structuredUser(NOW + 25 * 60_000, "resume"),
-        { timestamp: new Date(NOW + 25 * 60_000 + 1_000).toISOString(), payload: { type: "task_started" } },
-        { timestamp: new Date(NOW + 26 * 60_000).toISOString(), payload: { type: "task_complete" } },
-      ],
-      true,
-    );
-    let clock = NOW + 40 * 60_000;
-    const initialState: WakatimeStateV1 = {
-      version: 1,
-      enabledAtMs: NOW - 1,
-      credentialGeneration: null,
-      streams: {},
-      pending: [],
-      retry: { failures: 0, retryAtMs: 0, reason: null },
-      counters: { accepted: 0, permanentlyRejected: 0, compacted: 0, dropped: 0, historyGaps: 0 },
-    };
-    const attempted: WakatimeStateV1["pending"][number]["heartbeat"][][] = [];
-    const accepted: WakatimeStateV1["pending"][number]["heartbeat"][] = [];
-    const fixture = harness({
-      now: () => clock,
-      readState: async () => initialState,
-      readCredential: async () => ({ value: TEST_CREDENTIAL, sourceStamp: "fixture" }),
-      scan: async () => ({
-        complete: true,
-        files: [
-          entry({ mtime: (NOW + 26 * 60_000) / 1_000 }),
-          entry({ path: secondPath, name: "overlap.jsonl", mtime: (NOW + 15 * 60_000) / 1_000 }),
-        ],
-      }),
-      registrySnapshot: () => snapshot,
-      recentTurnWindows: (candidate) => candidate.path === PATH
-        ? { ...primaryActivity, prefixTruncated: false, complete: true }
-        : {
-            windows: [{ startedAt: NOW + 2 * 60_000, endedAt: NOW + 15 * 60_000 }],
-            operatorActionsAtMs: [],
-            prefixTruncated: false,
-            complete: true,
-          },
-      fetch: async (_url, init) => {
-        const body = JSON.parse(String(init.body)) as WakatimeStateV1["pending"][number]["heartbeat"][];
-        attempted.push(body);
-        if (attempted.length === 1) {
-          return { status: 500, headers: new Headers(), text: async () => "" };
-        }
-        accepted.push(...body);
-        return {
-          status: 201,
-          headers: new Headers(),
-          text: async () => JSON.stringify({
-            responses: body.map((_, index) => [{ data: { id: `accepted-${index}` } }, 201]),
-          }),
-        };
-      },
-    });
-
-    await fixture.sync.tick();
-    clock += 30_000;
-    await fixture.sync.tick();
-    await fixture.sync.tick();
-
-    expect(attempted).toHaveLength(2);
-    expect(attempted[1]).toEqual(attempted[0]);
-    expect(projectDurationSeconds(accepted, "-repo")).toBe(25 * 60);
-    expect(accepted.some((heartbeat) =>
-      heartbeat.project === "-repo" && heartbeat.time === (NOW + 12 * 60_000) / 1_000
-    )).toBe(true);
-    expect(fixture.state()?.pending).toHaveLength(0);
-    fixture.sync.stop();
   });
 
   test("an archived generation cannot create a second heartbeat stream", async () => {

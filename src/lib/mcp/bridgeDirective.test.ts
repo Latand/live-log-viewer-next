@@ -13,6 +13,7 @@ import {
   completeOrchestratorSeatIntent,
   orchestratorRevocations,
 } from "@/lib/orchestrator/seats";
+import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 
 import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
 
@@ -28,14 +29,17 @@ import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
 
 const sandboxes: string[] = [];
 const originalStateDir = process.env.LLV_STATE_DIR;
+const originalSpawnCapability = process.env[VIEWER_SPAWN_CAPABILITY_ENV];
 
 afterEach(() => {
   if (originalStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = originalStateDir;
+  if (originalSpawnCapability === undefined) delete process.env[VIEWER_SPAWN_CAPABILITY_ENV];
+  else process.env[VIEWER_SPAWN_CAPABILITY_ENV] = originalSpawnCapability;
   for (const sandbox of sandboxes.splice(0)) fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
-let posted: { pathname: string; body: Record<string, unknown> }[] = [];
+let posted: { pathname: string; body: Record<string, unknown>; headers: Record<string, string> }[] = [];
 
 /** REAL seat activation through the durable store — the designation evidence
     routing actually reads. */
@@ -72,8 +76,8 @@ function bindings(
 ) {
   posted = [];
   const control: ViewerControlDependencies = {
-    async post(pathname, body) {
-      posted.push({ pathname, body });
+    async post(pathname, body, headers) {
+      posted.push({ pathname, body, headers: headers ?? {} });
       return { outcome: "delivered", operationId: "op-1" };
     },
   };
@@ -88,6 +92,7 @@ function bindings(
 
 test("a directive is addressed to the project's active seat regardless of a caller-supplied target", async () => {
   sandbox();
+  process.env[VIEWER_SPAWN_CAPABILITY_ENV] = "d".repeat(43);
   const tools = bindings();
   const receipt = await tools.bridge_directive({
     clientRequestId: "ignored-by-the-derivation",
@@ -100,6 +105,7 @@ test("a directive is addressed to the project's active seat regardless of a call
 
   expect(posted).toHaveLength(1);
   expect(posted[0]!.body.conversationId).toBe("conversation_manager");
+  expect(posted[0]!.headers[VIEWER_SPAWN_CAPABILITY_HEADER]).toBe("d".repeat(43));
   expect(receipt).toMatchObject({ managerConversationId: "conversation_manager" });
 });
 
@@ -257,8 +263,8 @@ test("a directive refuses input that would break its own id derivation", async (
 function seatedBindings() {
   posted = [];
   const control: ViewerControlDependencies = {
-    async post(pathname, body) {
-      posted.push({ pathname, body });
+    async post(pathname, body, headers) {
+      posted.push({ pathname, body, headers: headers ?? {} });
       return { outcome: "delivered", operationId: "op-1" };
     },
   };

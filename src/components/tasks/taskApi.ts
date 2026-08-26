@@ -200,11 +200,19 @@ export async function unassignTask(id: string, handle: string | AssignmentRef): 
 
 /** Delivers the task to each target; returns the per-target breakdown.
     Waits out any in-flight text save first — a failed save aborts the
-    delivery so stale content is never reported as sent. */
-export async function sendTask(id: string, paths: string[]): Promise<TaskSendResult | { error: string }> {
+    delivery so stale content is never reported as sent.
+
+    `clientRequestId` names the operator gesture behind the delivery. A caller
+    that fans one submit out over several requests (the bulk bar) passes the
+    same id on every one of them, and the server folds them into a single
+    operator heartbeat instead of one per target (#763). */
+export async function sendTask(id: string, paths: string[], clientRequestId?: string): Promise<TaskSendResult | { error: string }> {
   const textError = await pendingTextError(id);
   if (textError) return { error: textError };
-  const res = await request<TaskSendResult>(`/api/tasks/${encodeURIComponent(id)}/send`, "POST", { paths });
+  const res = await request<TaskSendResult>(`/api/tasks/${encodeURIComponent(id)}/send`, "POST", {
+    paths,
+    ...(clientRequestId ? { clientRequestId } : {}),
+  });
   return res.ok ? res.data : { error: res.error };
 }
 

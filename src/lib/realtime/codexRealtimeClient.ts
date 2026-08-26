@@ -47,6 +47,12 @@ export type ParsedRealtimeEvent =
 const MAX_LINE_CHARS = 12_000;
 const MAX_LINES = 80;
 
+function newOperatorActivityId(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function object(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -425,6 +431,28 @@ class CodexRealtimeClient {
     }
   }
 
+  private publishOperatorActivity(): void {
+    if (!this.realtimeSessionId) return;
+    const payload = JSON.stringify({
+      action: "operatorActivity",
+      conversationId: this.conversationId,
+      realtimeSessionId: this.realtimeSessionId,
+      operatorEventId: newOperatorActivityId(),
+    });
+    const publish = async (retriesRemaining: number): Promise<void> => {
+      try {
+        await responseJson(await fetch("/api/runtime/realtime", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: payload,
+        }));
+      } catch {
+        if (retriesRemaining > 0) await publish(retriesRemaining - 1);
+      }
+    };
+    void publish(1);
+  }
+
   /**
    * Report what this call points at, for the delegated turn about to be minted.
    *
@@ -437,17 +465,26 @@ class CodexRealtimeClient {
    */
   private publishSelectedContext(): void {
     if (!this.realtimeSessionId) return;
+    const payload = JSON.stringify({
+      action: "selectedContext",
+      conversationId: this.conversationId,
+      realtimeSessionId: this.realtimeSessionId,
+      selectedContext: viewerSelectedContext(),
+    });
+    const publish = async (retry: boolean): Promise<void> => {
+      try {
+        const response = await fetch("/api/runtime/realtime", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: payload,
+        });
+        if (!response.ok && retry) await publish(false);
+      } catch {
+        if (retry) await publish(false);
+      }
+    };
     try {
-      void fetch("/api/runtime/realtime", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          action: "selectedContext",
-          conversationId: this.conversationId,
-          realtimeSessionId: this.realtimeSessionId,
-          selectedContext: viewerSelectedContext(),
-        }),
-      }).catch(() => undefined);
+      void publish(true);
     } catch {
       /* the call keeps going without a selected-card reference */
     }
@@ -472,7 +509,10 @@ class CodexRealtimeClient {
          reads it inside its submit handler: everything the reference will say
          is decided by the state that existed when the operator finished
          speaking. */
-      if (event.role === "user" && event.final) this.publishSelectedContext();
+      if (event.role === "user" && event.final) {
+        this.publishOperatorActivity();
+        this.publishSelectedContext();
+      }
     } else if (event.kind === "delegation") {
       return;
     } else if (event.kind === "error") {

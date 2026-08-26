@@ -7,6 +7,7 @@ import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/age
 import { ENGINE_MODELS, validateLaunchModel } from "@/lib/agent/models";
 import { procBackend } from "@/lib/proc";
 import { ensureOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
+import { internalServiceHeaders } from "@/lib/agent/operatorAuthority";
 import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { applyConversationMigration } from "@/lib/accounts/migration/conversationCommand";
 import { attentionCallerAuthority, processAncestry, type AttentionCallerAuthority, type AttentionCallerSources } from "@/lib/attention/callerAuthority";
@@ -655,6 +656,7 @@ async function spawnAgent(args: McpToolArgs, control: ViewerControlDependencies)
     ...(roleParams ? { roleParams } : {}),
     clientAttemptId,
   }, {
+    ...internalServiceHeaders("mcp"),
     [VIEWER_SPAWN_CAPABILITY_HEADER]: ensureOperatorSpawnCapability(),
   });
   return {
@@ -687,7 +689,7 @@ async function sendMessage(
     /* #1117: an MCP send is inter-agent traffic by definition; the sender role
        is the server's own caller attribution, so the feed can say WHO relayed. */
     origin: mcpSenderOrigin(dependencies),
-  });
+  }, callerCapabilityHeaders());
   /* The registry's OWN lookup over the projection this call already holds (#845),
      rather than a local reimplementation of it. The alias walk is multi-hop and
      cycle-guarded and the path index covers continuity paths, so a send addressed by
@@ -1458,7 +1460,7 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     /* #1117: a directive relay is inter-agent traffic — the manager's feed
        names the gateway (or attributed caller role), never the operator. */
     origin: mcpSenderOrigin(dependencies),
-  });
+  }, callerCapabilityHeaders());
   /* The trailer is the ONLY thing that says a report was answered — the drain
      cursor says only that it was read aloud — so it is recorded the moment the
      answer actually reaches the manager (#1168). Scoped by the project and seat
@@ -1508,7 +1510,10 @@ function derivedRequestId(base: string, suffix: string): string {
  */
 function callerCapabilityHeaders(): Record<string, string> {
   const capability = process.env[VIEWER_SPAWN_CAPABILITY_ENV]?.trim() ?? "";
-  return /^[A-Za-z0-9_-]{43}$/.test(capability) ? { [VIEWER_SPAWN_CAPABILITY_HEADER]: capability } : {};
+  return {
+    ...internalServiceHeaders("mcp"),
+    ...(/^[A-Za-z0-9_-]{43}$/.test(capability) ? { [VIEWER_SPAWN_CAPABILITY_HEADER]: capability } : {}),
+  };
 }
 
 /** Explicitly allowlisted fields for the designation routes. The seat route
@@ -1693,7 +1698,7 @@ async function sendMessageToOrchestrator(
     text: message,
     images: [],
     origin: mcpSenderOrigin(dependencies),
-  });
+  }, callerCapabilityHeaders());
   return redactPayload({
     project,
     conversationId: seat.conversationId,

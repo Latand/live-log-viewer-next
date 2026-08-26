@@ -36,31 +36,38 @@ restart.
 
 ## Activity mapping
 
-Each observed agent turn and direct operator engagement interval becomes a
-WakaTime `app` heartbeat stream:
+Agent turns and direct operator actions enter the same durable WakaTime `app`
+heartbeat queue. Each observed agent turn is an interval stream. Each accepted
+direct operator action is one point heartbeat at its admission time.
 
 | WakaTime field | Value |
 | --- | --- |
 | Project | The Viewer's canonical project attribution, including parent-repository grouping for worktrees. |
-| Entity | An opaque, stable per-interval identifier such as `agent-log-viewer/codex/0123abcd…`. |
+| Entity | An opaque, stable identifier such as `agent-log-viewer/codex/0123abcd…` for agent turns or `agent-log-viewer/operator/codex/0123abcd…` for operator points. |
 | Category | `ai coding`. |
-| Language | Omitted because transcript activity does not identify a source-file language. |
-| Time | Interval start, 120-second active samples, and an exact interval-boundary marker at the end. |
-| AI session | An opaque SHA-256 interval identifier. |
+| Language | Omitted because heartbeat attribution has no source-file language. |
+| Time | Agent interval start, 120-second active samples, and an exact boundary marker; direct operator admission time once. |
+| AI session | An opaque SHA-256 turn or operator-action identifier. |
 
 Project names, engine names, opaque turn identifiers, the category, and
 timestamps leave the machine. Titles, prompts, responses, transcript paths,
 working directories, model names, account ids, source contents, and branch
 names stay local.
 
-A direct operator action contributes a ten-minute engagement interval sampled
-at the same 120-second cadence. Viewer-structured Codex input and Claude input
-classified as human are eligible. Legacy bare Claude input is eligible in root
-conversations; delegated launch input remains agent-only. Harness, spawn,
-command, notification, SDK, peer, and coordinator envelopes do not create
-operator intervals. These intervals union with agent turns on the same
-timeline. Short turns retain the engagement tail, while long and silent agent
-turns continue through their full observed execution.
+Direct operator points are recorded at the validated ingress for legacy
+composer submissions, structured runtime send, steer, and answer commands,
+pending-question answers, task sends, task spawns, direct spawns, and final
+realtime user utterances. Stable request identities give retries one queued
+heartbeat identity. Project and engine attribution come from the ingress's
+conversation target or its pre-resolved task or spawn metadata. Conflicting or
+unavailable attribution rejects the input.
+
+Signed internal-service provenance marks Viewer monitor, MCP and bridge, and
+orchestrator requests as background traffic. Agent capability provenance
+excludes other agent-originated requests from direct operator points. Agent and
+orchestrator work caused by that traffic remains counted through the existing
+turn streams, including unattended execution and silent tool work. Direct
+operator recording never reads transcript text.
 
 The first enabled start creates a forward-only boundary. Completed work from
 before that timestamp remains local. A turn that crosses the boundary begins
