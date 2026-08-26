@@ -14,7 +14,9 @@ import {
   resolveSeatFile,
   ROTATION_CONTEXT_PERCENT,
   SEAT_BIND_TIMEOUT_MS,
+  seatBadgeOf,
   seatRequestSettled,
+  type OrchestratorPanelState,
   type OrchestratorSeatStatus,
 } from "./seatState";
 
@@ -64,6 +66,10 @@ function file(overrides: Partial<FileEntry> = {}): FileEntry {
 }
 
 const base = { statusFailed: false, submitting: false, submitFailure: null, file: null, surface: null };
+
+/** A fixed «now» for the one derivation that reads a clock: the attention
+    queue's stalled tier, which ages out (`STALLED_ATTENTION_TTL`). */
+const NOW = 1_760_000_100;
 
 describe("the panel names every state in the map (#977)", () => {
   test("no answer yet is loading, and a failed read says so instead of inviting a second orchestrator", () => {
@@ -471,5 +477,71 @@ describe("«opening» is bounded once the status read says the host is alive (#1
     /* Bound and classified — there is no wait to bound. */
     expect(deriveOrchestratorPanelState({ ...stuck, file: file(), surface: "live-root", unboundForMs: 10 * SEAT_BIND_TIMEOUT_MS }))
       .toMatchObject({ liveness: "live", bindFailure: null });
+  });
+});
+
+describe("a decision the operator owes outranks every word for «it is running» (#1167)", () => {
+  const asked = {
+    kind: "question" as const,
+    toolUseId: "tool-use-orch",
+    transcriptPath: "/transcripts/orchestrator.jsonl",
+    pid: 4242,
+    paneTarget: null,
+    askedAt: "2026-08-25T10:00:00.000Z",
+    questions: [{ header: "Rollout window", question: "Approve the proposed rollout window", multiSelect: false, options: [] }],
+  };
+  const seated = { ...base, status: status({ seat: seat() }), now: NOW };
+  const badgeOf = (state: OrchestratorPanelState) => seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>);
+
+  /* EVERY liveness `livenessOf` can produce, with the surface and the file that
+     produce it — the badge is asserted over all five, both ways, so no state can
+     quietly opt out of naming a decision the island is already counting. */
+  const LIVENESSES = [
+    ["live-root", {}, "live"],
+    ["live-root", { activity: "stalled" }, "stalled"],
+    ["resume", {}, "resumable"],
+    ["dead", {}, "dead"],
+    ["unresolved", {}, "resolving"],
+  ] as const;
+
+  test("a hosted seat with a question on screen carries the attention id and badges «needs you»", () => {
+    const state = deriveOrchestratorPanelState({ ...seated, file: file({ pendingQuestion: asked }), surface: "live-root" });
+    expect(state).toMatchObject({ kind: "live", liveness: "live", attention: "tool-use-orch" });
+    expect(badgeOf(state)).toBe("needs-you");
+  });
+
+  test("a pending decision is the badge at every liveness, «finished» and «host gone» included", () => {
+    for (const [surface, overrides, liveness] of LIVENESSES) {
+      const state = deriveOrchestratorPanelState({ ...seated, file: file({ ...overrides, pendingQuestion: asked }), surface });
+      expect(state).toMatchObject({ liveness, attention: "tool-use-orch" });
+      expect(badgeOf(state)).toBe("needs-you");
+    }
+  });
+
+  test("with nothing owed, every liveness keeps its own word", () => {
+    for (const [surface, overrides, liveness] of LIVENESSES) {
+      const state = deriveOrchestratorPanelState({ ...seated, file: file(overrides), surface });
+      expect(state).toMatchObject({ liveness, attention: null });
+      expect(badgeOf(state)).toBe(liveness);
+    }
+  });
+
+  test("a terminal prompt is a decision too — the badge follows the queue, not the signal's shape", () => {
+    const waiting = file({
+      activity: "stalled",
+      waitingInput: { since: NOW - 120, screenTail: "> 1. Yes", target: "llv:0.0", menu: null },
+    });
+    const state = deriveOrchestratorPanelState({ ...seated, file: waiting, surface: "live-root" });
+    expect(state).toMatchObject({ liveness: "stalled" });
+    expect(badgeOf(state)).toBe("needs-you");
+  });
+
+  test("the attention read is the QUEUE's: an abandoned open turn with no live process owes nothing", () => {
+    const abandoned = file({ activity: "stalled", proc: "done", mtime: NOW - 60 });
+    expect(deriveOrchestratorPanelState({ ...seated, file: abandoned, surface: "live-root" })).toMatchObject({ attention: null });
+    const held = file({ activity: "stalled", proc: "running", mtime: NOW - 60 });
+    expect(deriveOrchestratorPanelState({ ...seated, file: held, surface: "live-root" })).toMatchObject({
+      attention: `/transcripts/orchestrator.jsonl:stalled:${NOW - 60}`,
+    });
   });
 });

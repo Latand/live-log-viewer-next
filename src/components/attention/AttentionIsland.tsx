@@ -2,7 +2,12 @@
 
 import { ChevronRight, Filter, TriangleAlert } from "lucide-react";
 
+import { projectDisplayName } from "@/lib/displayNames";
 import { useLocale } from "@/lib/i18n";
+
+import type { AttentionItem } from "../attention";
+import { cleanTitle, fmtAge } from "../utils";
+import { decisionLine } from "./decision";
 
 interface Props {
   /** buildAttentionQueue's length, passed in so every surface shows one number. */
@@ -113,5 +118,42 @@ export function AttentionIsland({ count, mobile, queueOpen, filterActive, onTogg
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * One row of the island's popover — the queue as a list, in the order
+ * `buildAttentionQueue` fixed.
+ *
+ * The second line is the DECISION (issue #1167), from the one `decisionLine`
+ * the toast and the orchestrator dock badge also read. A row that repeats only
+ * the conversation title leaves the operator opening each waiting agent to
+ * learn what it wants, which is the work the queue exists to remove.
+ */
+export function AttentionQueueRow({ item, onOpen }: { item: AttentionItem; onOpen: () => void }) {
+  const { t, locale } = useLocale();
+  return (
+    <button
+      type="button"
+      data-attention-row={item.id}
+      className="flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] px-2.5 py-2 text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      onClick={onOpen}
+    >
+      <span className="flex w-full min-w-0 items-center gap-1.5">
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-primary">
+          {cleanTitle(item.file.title, 90)}
+        </span>
+        <span className="shrink-0 rounded-full border border-border bg-canvas px-1.5 text-[10px] font-semibold text-muted" title={item.project}>
+          {projectDisplayName(item.project, item.file.projectName)}
+        </span>
+        <span className="shrink-0 text-[10.5px] text-muted">{fmtAge(item.since)}</span>
+      </span>
+      <span
+        data-attention-decision
+        className={`w-full truncate text-[11px] ${item.tier === "stalled" ? "text-warning" : "text-muted"}`}
+      >
+        {decisionLine(t, locale, item.file) ?? t("status.stalled")}
+      </span>
+    </button>
   );
 }

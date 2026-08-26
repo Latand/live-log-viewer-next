@@ -1439,3 +1439,61 @@ test("coming back to a project paints its conversation in the first commit, tran
   await settle();
   expect(panelState(dock.host)).toBe("live");
 });
+
+/* ------------------------------------------------------------------------- *
+ * The dock badge names the decision it is holding (issue #1167): «live» and
+ * «live, and holding a question up at you» used to be the same word.
+ * ------------------------------------------------------------------------- */
+
+const stateBadge = (host: HTMLElement) => host.querySelector("[data-orchestrator-badge]") as HTMLElement;
+
+const orchestratorQuestion = {
+  kind: "question" as const,
+  toolUseId: "tool-use-orch",
+  transcriptPath: "/transcripts/orch.jsonl",
+  pid: 4_242,
+  paneTarget: null,
+  askedAt: "2026-08-25T10:00:00.000Z",
+  questions: [{ header: "Rollout window", question: "Approve the proposed rollout window", multiSelect: false, options: [] }],
+};
+
+test("a seat holding a question badges «needs you» in the warning tone, and names the decision", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  incumbentStatus = incumbent();
+  const host = mount([{
+    ...orchestratorFile,
+    proc: "running",
+    pid: 4_242,
+    pendingQuestion: orchestratorQuestion,
+    durableLineage: { kind: "spawn", role: "orchestrator", parentConversationId: null, reviewsConversationId: null, memberships: [] },
+  } as FileEntry]);
+  await settle();
+  flushSync(() => undefined);
+
+  const badge = stateBadge(host);
+  expect(badge.getAttribute("data-orchestrator-badge")).toBe("needs-you");
+  expect(badge.textContent).toBe("needs you");
+  expect(badge.className).toContain("warning");
+  /* The SAME line the toast and the island popover carry — one derivation. */
+  expect(badge.getAttribute("title")).toBe("Rollout window · Orchestrator");
+});
+
+test("a quiet seat keeps the live badge, and claims no decision in its tooltip", async () => {
+  const host = await mountLive();
+
+  const badge = stateBadge(host);
+  expect(badge.getAttribute("data-orchestrator-badge")).toBe("live");
+  expect(badge.textContent).toBe("live");
+  expect(badge.hasAttribute("title")).toBeFalse();
+});
+
+test("the badge is localized with the rest of the dock", async () => {
+  setLocale("uk");
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  const host = mount([{ ...orchestratorFile, proc: "running", pid: 4_242, pendingQuestion: orchestratorQuestion } as FileEntry]);
+  await settle();
+  flushSync(() => undefined);
+
+  expect(stateBadge(host).getAttribute("data-orchestrator-badge")).toBe("needs-you");
+  expect(stateBadge(host).textContent).toBe("потребує тебе");
+});

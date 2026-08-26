@@ -3,6 +3,7 @@ import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
 import type { StripSurface } from "../agentCapabilities";
+import { attentionId } from "../attention";
 import type { OrchestratorIncumbent } from "./incumbent";
 
 /*
@@ -131,6 +132,37 @@ export const ROTATION_CONTEXT_PERCENT = 50;
 export type SeatLiveness = "resolving" | "live" | "stalled" | "resumable" | "dead";
 
 /**
+ * What the dock's badge NAMES, which is not always the liveness (issue #1167).
+ *
+ * A seat that is running and a seat that is holding a question up at the
+ * operator both read «live», and the second one is the only one that needs
+ * anything. So a pending decision is ranked ahead of the liveness, and the
+ * badge says «needs you» in the warning tone the rest of the app already uses
+ * for a wait.
+ */
+export type SeatBadge = "needs-you" | SeatLiveness;
+
+/**
+ * The badge a live seat wears: the decision it owes the operator, or — with
+ * nothing owed — its liveness.
+ *
+ * A non-null attention id outranks EVERY liveness word, `dead` and `resumable`
+ * included, because the queue counting a conversation and the dock badging it
+ * have to be the same reading: a seat the island lists as waiting and the dock
+ * calls «finished» is one signal described two ways, which is the whole defect
+ * this issue names.
+ *
+ * Nothing is hidden by that. The badge was never the carrier of recovery — the
+ * rotation advisory, the «finished, resume it here» notice and the re-bind each
+ * ride as their own banner directly under the header, one line below the badge,
+ * and they keep saying what the seat needs while the badge says what the
+ * OPERATOR owes it.
+ */
+export function seatBadgeOf(state: OrchestratorLiveState): SeatBadge {
+  return state.attention ? "needs-you" : state.liveness;
+}
+
+/**
  * Why a seat the server calls LIVE has still not reached this panel, once the
  * wait has run past {@link SEAT_BIND_TIMEOUT_MS} (issue #1182).
  *
@@ -209,6 +241,10 @@ export interface OrchestratorLiveState {
   seat: OrchestratorSeat;
   conversationId: string;
   liveness: SeatLiveness;
+  /** The attention id of the seat's conversation (`attentionId`), or null when
+      it is waiting on nobody. The QUEUE's own reading, verbatim — the dock must
+      count as waiting exactly what the island counts (issue #1167). */
+  attention: string | null;
   /** Why a `resolving` seat the server calls live has not bound, once the wait
       is past its bound; null whenever «opening» is still an honest answer. */
   bindFailure: SeatBindFailure | null;
@@ -255,6 +291,9 @@ export function deriveOrchestratorPanelState(input: {
   /** How long the dock has been unable to bind this seat's conversation, or
       null while it is bound (issue #1182). */
   unboundForMs?: number | null;
+  /** Epoch SECONDS, for the one reading that ages: the attention queue's
+      stalled tier. Defaults to the wall clock, exactly as `attentionId` does. */
+  now?: number;
 }): OrchestratorPanelState {
   const { status } = input;
   const active = status?.seat && status.exists ? status.seat : null;
@@ -269,6 +308,7 @@ export function deriveOrchestratorPanelState(input: {
       seat: active,
       conversationId: active.conversationId,
       liveness,
+      attention: input.file ? attentionId(input.file, input.now) : null,
       bindFailure: bindFailureOf({
         liveness,
         hostLive: input.hostLive === true,

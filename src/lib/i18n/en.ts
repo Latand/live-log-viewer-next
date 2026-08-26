@@ -1874,6 +1874,7 @@ export const en = {
   "orchPanel.rotationStrong": "Rotation strongly recommended",
   "orchPanel.rotationContext": "context is at {percent}% of the model's window",
   "orchPanel.rotationDead": "its host is gone",
+  "orchPanel.badgeNeedsYou": "needs you",
   "orchPanel.badgeLive": "live",
   "orchPanel.badgeStalled": "quiet",
   "orchPanel.badgeResumable": "finished",
@@ -2035,6 +2036,13 @@ export const en = {
   "attention.popoverTitle": "Waiting on you",
   "attention.filterOn": "Show only those waiting on you (F)",
   "attention.filterOff": "Show all nodes (F)",
+  /* The one decision line every attention surface shares (#1167): the toast
+     title, the island popover row and the orchestrator dock badge's tooltip.
+     Lower-case to sit beside `rateLimit.badgeUntil`, which names the same class
+     of wait and is reused verbatim. */
+  "attention.decisionQuestion": "a question",
+  "attention.decisionPlan": "plan approval",
+  "attention.decisionPermission": "permission prompt",
 
   // MobileFocusView
   "mobile.noConvos": "No conversations yet",

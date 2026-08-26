@@ -21,6 +21,7 @@ import {
 import type { OrchestratorSeat } from "@/lib/orchestrator/seats";
 import type { FileEntry } from "@/lib/types";
 
+import { decisionLine } from "../attention/decision";
 import { IncumbentHeader } from "./IncumbentHeader";
 import { incumbentHostLive, type OrchestratorIncumbent } from "./incumbent";
 import { OrchestratorConversation } from "./OrchestratorConversation";
@@ -30,13 +31,14 @@ import {
   orchestratorQuietBannerEligible,
   resolveSeatFile,
   SEAT_BIND_TIMEOUT_MS,
+  seatBadgeOf,
   seatBindPending,
   seatRequestSettled,
   type OrchestratorPanelState,
   type OrchestratorSeatStatus,
   type RotationHint,
+  type SeatBadge,
   type SeatBindFailure,
-  type SeatLiveness,
   type SeatTransition,
 } from "./seatState";
 import { useOrchestratorIncumbent } from "./useOrchestratorIncumbent";
@@ -331,7 +333,7 @@ export function OrchestratorPanel({
           <span className="truncate text-body font-semibold text-primary">{t("orchPanel.title")}</span>
           <span className="truncate text-caption text-muted" title={projectName}>{projectName}</span>
         </span>
-        <StateBadge state={state} />
+        <StateBadge state={state} file={file} />
         <button
           type="button"
           onClick={onClose}
@@ -855,29 +857,42 @@ function OrchestratorDraft({
 
 const QUIET_BADGE = "border-border bg-canvas text-muted";
 const DANGER_BADGE = "border-danger/40 bg-danger-soft text-danger";
+const WARNING_BADGE = "border-warning/45 bg-warning-soft text-warning";
 
-/** One row per liveness, so a tone can never drift from the word beside it —
-    and green is claimed ONLY by a conversation that is actually hosted. */
-const LIVENESS_BADGE: Record<SeatLiveness, { tone: string; key: MessageKey }> = {
+/** One row per badge, so a tone can never drift from the word beside it — green
+    is claimed ONLY by a conversation that is actually hosted, and the warning
+    tone the rest of the app spends on a wait is what «needs you» wears. */
+const SEAT_BADGE: Record<SeatBadge, { tone: string; key: MessageKey }> = {
+  "needs-you": { tone: WARNING_BADGE, key: "orchPanel.badgeNeedsYou" },
   live: { tone: "border-success/45 bg-success-soft text-success", key: "orchPanel.badgeLive" },
-  stalled: { tone: "border-warning/45 bg-warning-soft text-warning", key: "orchPanel.badgeStalled" },
+  stalled: { tone: WARNING_BADGE, key: "orchPanel.badgeStalled" },
   resumable: { tone: QUIET_BADGE, key: "orchPanel.badgeResumable" },
   dead: { tone: DANGER_BADGE, key: "orchPanel.badgeDead" },
   resolving: { tone: QUIET_BADGE, key: "orchPanel.badgeResolving" },
 };
 
-function StateBadge({ state }: { state: OrchestratorPanelState }) {
-  const { t } = useLocale();
-  const live = state.kind === "live" ? LIVENESS_BADGE[state.liveness] : null;
-  const tone = live
-    ? live.tone
+/**
+ * The badge, and — when the seat is holding a decision up at the operator — the
+ * decision itself in its tooltip (issue #1167).
+ *
+ * The word comes from `seatBadgeOf`, which ranks a pending decision ahead of
+ * the liveness; the line comes from the SAME `decisionLine` the toast and the
+ * island popover read, so the dock can never name a wait differently from the
+ * surfaces the operator reached it through.
+ */
+function StateBadge({ state, file }: { state: OrchestratorPanelState; file: FileEntry | null }) {
+  const { t, locale } = useLocale();
+  const seatBadge = state.kind === "live" ? seatBadgeOf(state) : null;
+  const badge = seatBadge ? SEAT_BADGE[seatBadge] : null;
+  const tone = badge
+    ? badge.tone
     : state.kind === "intent-error"
       ? DANGER_BADGE
       : state.kind === "creating"
         ? "border-accent/45 bg-accent-soft text-accent"
         : QUIET_BADGE;
-  const label = live
-    ? t(live.key)
+  const label = badge
+    ? t(badge.key)
     : t(state.kind === "creating"
       ? "orchPanel.badgeCreating"
       : state.kind === "intent-error"
@@ -885,8 +900,18 @@ function StateBadge({ state }: { state: OrchestratorPanelState }) {
         : state.kind === "draft"
           ? "orchPanel.badgeNone"
           : "orchPanel.badgeReading");
+  /* The tooltip follows the badge: a seat the badge calls «needs you» carries
+     the decision behind it, and every other badge is already its own whole
+     answer. */
+  const decision = seatBadge === "needs-you" && file ? decisionLine(t, locale, file) : null;
   return (
-    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-caption font-semibold ${tone}`}>{label}</span>
+    <span
+      data-orchestrator-badge={seatBadge ?? state.kind}
+      title={decision ?? undefined}
+      className={`shrink-0 rounded-full border px-2 py-0.5 text-caption font-semibold ${tone}`}
+    >
+      {label}
+    </span>
   );
 }
 
