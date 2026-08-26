@@ -118,6 +118,59 @@ test("a manager retry under one key yields one seq and one log entry (§7.5)", (
   expect(log.lastSeq).toBe(1);
 });
 
+test("a decision request keeps the caller's key verbatim; other classes keep none (#1168)", () => {
+  sandbox();
+  openBridgeChannel(ROOT_ID);
+  const appended = appendBridgeReports([
+    report("lane-4-blocked", { class: "blocked" }),
+    report("stage-7-progress", { class: "status" }),
+  ]);
+
+  /* The key leaves the log again as the attention item's id, so it round-trips
+     exactly for the classes that become one. */
+  expect(appended.appended[0]!.key).toBe("lane-4-blocked");
+  expect(readBridgeReportLog().reports[0]!.key).toBe("lane-4-blocked");
+  /* A class that never enters the queue is identified by its hashed id alone,
+     exactly as it was before the field existed. */
+  expect(appended.appended[1]!.key).toBeUndefined();
+  expect(appended.appended[1]!.id).toBe(bridgeReportId("stage-7-progress"));
+});
+
+test("a long report key is accepted for every class, exactly as it was before #1168", () => {
+  sandbox();
+  openBridgeChannel(ROOT_ID);
+
+  /* #1168 needed the key kept VERBATIM, and nothing on this path reshapes one:
+     it is either stored whole or (for the classes that never become an
+     attention item) not stored at all. So the length policy the issue's first
+     pass added bounded nothing that would otherwise have been broken, while it
+     narrowed the acceptance contract of four report classes that have nothing
+     to do with the attention queue. It is gone; a caller's key is a caller's
+     key again. */
+  const long = `lane-${"k".repeat(400)}`;
+  const appended = appendBridgeReports([
+    report(long, { class: "status" }),
+    report(`${long}-done`, { class: "completed" }),
+    report(`${long}-failed`, { class: "failed" }),
+    report(`${long}-verdict`, { class: "review_verdict" }),
+    report(`${long}-blocked`, { class: "blocked" }),
+    report(`${long}-question`, { class: "question" }),
+  ]);
+  expect(appended.appended).toHaveLength(6);
+  expect(readBridgeReportLog().lastSeq).toBe(6);
+
+  /* And the decision requests still carry theirs back out whole — the property
+     the queue's identity actually depends on. */
+  expect(readBridgeReportLog().reports.map((entry) => entry.key)).toEqual([
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    `${long}-blocked`,
+    `${long}-question`,
+  ]);
+});
+
 test("the drain returns one bounded batch oldest first and reports what is left", () => {
   sandbox();
   openBridgeChannel(ROOT_ID);

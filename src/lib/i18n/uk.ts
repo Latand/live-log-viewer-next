@@ -1724,6 +1724,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "status.awaitingPlan": "чекає затвердження плану",
   "status.awaitingAnswer": "чекає відповіді на питання",
   "status.awaitingTerminal": "чекає на відповідь у терміналі",
+  "status.awaitingDecision": "оркестратор чекає на ваше рішення",
   "status.working": "працює…",
   "status.returnedResult": "повернувся з результатом",
   "status.stalled": "перервано або чекає дозволу",

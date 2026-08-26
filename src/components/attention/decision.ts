@@ -3,7 +3,7 @@ import { rateLimitText } from "@/components/rateLimit";
 import type { Locale, TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { attentionId } from "../attention";
+import { attentionId, openBridgeAsk } from "../attention";
 
 /**
  * The ONE line every attention surface shows for a waiting agent (issue #1167).
@@ -65,7 +65,13 @@ function roleLabel(t: TFunction, file: FileEntry): string | null {
  * already qualified — which is what makes the stalled tail honest rather than a
  * catch-all.
  */
-function decisionText(t: TFunction, locale: Locale, file: FileEntry): string {
+function decisionText(t: TFunction, locale: Locale, file: FileEntry, now: number): string {
+  /* First, exactly as `attentionId` orders it (issue #1168): an orchestrator's
+     open bridge ask is the one wait on this board that was ESCALATED rather
+     than inferred, so it outranks whatever the seat's own transcript is doing.
+     An ask the clock has already retired falls THROUGH to the signals below,
+     so the words age out with the row they belong to. */
+  if (openBridgeAsk(file, now)) return t("status.awaitingDecision");
   const pending = file.pendingQuestion;
   if (pending) {
     if (pending.kind === "plan") return t("attention.decisionPlan");
@@ -87,9 +93,9 @@ function decisionText(t: TFunction, locale: Locale, file: FileEntry): string {
  * generic wording rather than inventing a decision. `now` is epoch SECONDS and
  * defaults to the wall clock, exactly as `attentionId` does.
  */
-export function decisionLine(t: TFunction, locale: Locale, file: FileEntry, now?: number): string | null {
+export function decisionLine(t: TFunction, locale: Locale, file: FileEntry, now: number = Date.now() / 1000): string | null {
   if (attentionId(file, now) === null) return null;
-  const decision = decisionText(t, locale, file);
+  const decision = decisionText(t, locale, file, now);
   const role = roleLabel(t, file);
   return role ? `${decision} · ${role}` : decision;
 }

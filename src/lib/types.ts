@@ -97,6 +97,25 @@ export interface RateLimitState {
   resetAt: number | null;
 }
 
+/**
+ * A decision the project's orchestrator is waiting on the operator for
+ * (issue #1168): its newest unanswered `blocked`/`question` bridge report.
+ *
+ * The bridge report log is drained only by the voice gateway, so with that
+ * channel off a manager saying "I cannot proceed" reached the operator as
+ * prose in a feed and nothing more. This is the same fact, shaped for the
+ * attention queue and carrying only what that queue needs: the report's own
+ * key, so re-reading the log can never enqueue it twice, and the time it was
+ * filed, which is both the item's `since` and what ages it out. The report's
+ * prose stays in the feed that already renders it.
+ */
+export interface BridgeAsk {
+  /** The caller's report key — stable across re-reads, and the item's id. */
+  id: string;
+  /** ISO time the manager filed the report; the attention item's `since`. */
+  at: string;
+}
+
 /** One sidebar entry returned by GET /api/files. */
 export interface FileEntry {
   path: string;
@@ -200,6 +219,10 @@ export interface FileEntry {
   fast?: boolean | null;
   /** Structured Claude prompt that is currently blocking the live agent. */
   pendingQuestion: PendingQuestion | null;
+  /** The open bridge ask this conversation's orchestrator seat is sitting on
+      (issue #1168), stamped server-side from the durable report log. Present
+      only on a designated seat's entry; null or absent everywhere else. */
+  bridgeAsk?: BridgeAsk | null;
   /** Newest still-pending self-scheduled wakeup, for the board timer chip. */
   pendingWakeup?: PendingWakeup | null;
   /** Newest TodoWrite/update_plan state — the agent's plan and current goal. */
