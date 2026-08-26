@@ -25,6 +25,9 @@ import { procBackend } from "@/lib/proc";
 import { ROLE_IDS, type RoleId } from "@/lib/roles/types";
 import { SELECTED_TAIL_MAX_LINES } from "@/lib/selection/resolve";
 import {
+  MAX_REPLY_LABEL_CHARS, MAX_REPLY_SUGGESTIONS, MAX_REPLY_TEXT_BYTES, MIN_REPLY_SUGGESTIONS,
+} from "@/lib/suggestions/types";
+import {
   MAX_SCOPE_PATHS, MAX_SNAPSHOT_CHARS_PER_CONVERSATION, MAX_SNAPSHOT_LAST_MESSAGES, MAX_SNAPSHOT_STRING_LENGTH,
   MIN_SNAPSHOT_STRING_LENGTH, VIEW_RESOLUTIONS, VIEW_SCOPE_KINDS,
 } from "@/lib/view/types";
@@ -61,6 +64,7 @@ export const MCP_TOOL_NAMES = [
   "agent_activity",
   "lifecycle_events",
   "request_attention",
+  "suggest_replies",
   "bridge_report",
   "bridge_directive",
   "get_orchestrator",
@@ -93,6 +97,11 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
      is classified the same way rather than looking read-only by name. */
   "agent_activity",
   "request_attention",
+  /* Writes the conversation's current reply-draft set, which the operator's
+     composer reads. The record outlives this process, so a replayed
+     clientRequestId must answer from the receipt rather than re-offer drafts
+     under a question the operator has since answered. */
+  "suggest_replies",
   /* Appends to the durable bridge log, so a replayed clientRequestId must return
      the original receipt rather than append the report a second time. */
   "bridge_report",
@@ -127,6 +136,11 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
  */
 const INTERRUPTED_RECOVERABLE_TOOLS: ReadonlySet<McpToolName> = new Set<McpToolName>([
   "request_attention",
+  /* `suggest_replies` qualifies for the simplest possible version of the same
+     reason: the set it writes REPLACES the conversation's previous one and its
+     id derives from the operation, so re-running an interrupted call converges
+     on the identical record. */
+  "suggest_replies",
 ]);
 
 function interruptedCallIsRecoverable(toolName: McpToolName, args: McpToolArgs): boolean {
@@ -1660,6 +1674,12 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "A conversation target takes either its durable conversationId (resolved server-side to that conversation's current transcript, and the form to prefer because it survives resume and migration) or that transcript's path.",
     "A draft target also needs the top-level project argument; region and point accept intent \"show\" only. A rejected target names the kind it read and the fields that kind expects.",
   ].join(" "),
+  suggest_replies: [
+    "Offer the operator ready-made replies to your own message: 1\u20136 short drafts that render as pills under your latest turn in the dock and the board's conversation pane. Tapping one drops its text into their composer for editing \u2014 the Viewer never sends it, and nothing here decides anything.",
+    "Call it after every message that asks the operator something or proposes a course of action, with 2\u20134 short, distinct drafts written in the operator's own language. The set REPLACES whatever you offered last for that conversation, and the operator's next message clears it.",
+    "Authority is the same as request_attention's, and for the same reason \u2014 this writes into the surface they are answering in: the operator's own session or a designated orchestrator seat. A worker or unidentified caller is refused (SUGGEST_REPLIES_NOT_PERMITTED) with nothing recorded.",
+    "conversationId defaults to your own conversation, which is where the drafts belong when you are the one asking.",
+  ].join(" "),
   bridge_report: "Append one bounded report to the durable bridge log for the voice gateway to relay. Callable from any session; the origin is labeled server-side and a non-orchestrator report is visibly attributed to its own session.",
   bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
   get_orchestrator: "Read a project's designated orchestrator: designation, health and activity, model and prompt version, transcript size, message/tool/compaction counts, context usage against its model's configured window (clearly labelled when estimated), predecessor lineage, and a bounded rotation recommendation — STRONGLY_RECOMMEND_ROTATION once usage reaches the configured threshold. Words only: it never rotates, creates, or interrupts anything itself.",
@@ -1684,6 +1704,15 @@ const conversationArchiveTargetSchema = z.object({
 }).strict().refine((target) => Boolean(target.conversationId || target.transcriptPath), {
   message: "conversationId or transcriptPath is required",
 });
+/* #1202: one reply draft. `label` is what the pill says, `text` is what lands
+   in the composer, and the object is closed because a third field would be a
+   caller inventing semantics the renderer does not have. */
+const replyDraftSchema = z.object({
+  label: z.string().min(1).max(MAX_REPLY_LABEL_CHARS)
+    .describe("What the pill says \u2014 a few words the operator reads at a glance."),
+  text: z.string().min(1)
+    .describe(`The draft itself, in the operator's language. Lands in their composer, editable, never sent by the Viewer. At most ${MAX_REPLY_TEXT_BYTES} bytes.`),
+}).strict();
 const entityIdSchema = z.string().min(1);
 const snapshotStringSchema = z.string()
   .min(MIN_SNAPSHOT_STRING_LENGTH)
@@ -2043,6 +2072,15 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     zoom: z.enum(["inspect", "situate"]).optional(),
     contextLabel: z.string().optional().describe("Named in the spoken sentence but never navigated to."),
     project: z.string().optional().describe("Required only for a target the server cannot attribute on its own (a board draft)."),
+  }).passthrough(),
+  suggest_replies: z.object({
+    clientRequestId: clientRequestIdSchema,
+    conversationId: z.string().min(1).optional()
+      .describe("Durable conversation whose composer these drafts belong under. Defaults to the calling conversation."),
+    replies: z.array(replyDraftSchema).min(MIN_REPLY_SUGGESTIONS).max(MAX_REPLY_SUGGESTIONS)
+      .describe(`${MIN_REPLY_SUGGESTIONS}\u2013${MAX_REPLY_SUGGESTIONS} drafts, ordered as the operator should read them. Two to four distinct ones is the usual shape.`),
+    replaces: z.literal(true).optional()
+      .describe("Declares that this set supersedes the conversation's previous one. Replacement is unconditional either way \u2014 a conversation only ever holds the newest set."),
   }).passthrough(),
   bridge_report: z.object({
     clientRequestId: clientRequestIdSchema,

@@ -189,6 +189,46 @@ export function permitAttentionHandoff(
   };
 }
 
+/**
+ * Who may put words in the operator's own composer (#1202).
+ *
+ * `suggest_replies` writes the drafts that render under the manager's message
+ * and land in the composer on a tap. Like `request_attention` above, that is an
+ * OPERATION contract rather than an availability gate, and it is entitled to
+ * exactly the same identities: the operator's own root/gateway session, and a
+ * validated designated orchestrator seat. Workers and unidentified callers are
+ * refused with nothing written.
+ *
+ * No project half, unlike attention: a set is addressed to ONE conversation,
+ * not to a share of the operator's screen, and it moves nothing and decides
+ * nothing on its own — the operator still writes and sends every message.
+ */
+export type ReplySuggestionsVerdict =
+  | { allowed: true; via: "root" | "orchestrator" }
+  | { allowed: false; refusedAs: "unidentified" | "worker"; error: string };
+
+export function permitReplySuggestions(
+  authority: AttentionCallerAuthority,
+  seats: readonly { conversationId: string }[],
+): ReplySuggestionsVerdict {
+  if (authority.kind === "root") return { allowed: true, via: "root" };
+  if (authority.kind === "unidentified") {
+    return {
+      allowed: false,
+      refusedAs: "unidentified",
+      error: "suggest_replies writes drafts into the operator's composer, and no durable evidence names this caller; only the root session or the designated orchestrator may offer them",
+    };
+  }
+  if (seats.some((seat) => seat.conversationId === authority.conversationId)) {
+    return { allowed: true, via: "orchestrator" };
+  }
+  return {
+    allowed: false,
+    refusedAs: "worker",
+    error: "suggest_replies writes drafts into the operator's composer; a worker session may not offer them — signal the orchestrator or the root session instead",
+  };
+}
+
 /** The shape {@link import("./server").createMcpToolService} consults. Kept
     narrow so the service does not depend on how an identity was resolved. */
 export interface McpToolPolicy {

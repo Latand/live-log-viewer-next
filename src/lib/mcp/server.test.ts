@@ -1594,6 +1594,7 @@ describe("MCP tool service", () => {
         "agent_activity",
         "lifecycle_events",
         "request_attention",
+        "suggest_replies",
         "bridge_report",
         "bridge_directive",
         "get_orchestrator",

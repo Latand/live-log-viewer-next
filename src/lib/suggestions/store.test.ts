@@ -1,0 +1,131 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import {
+  clearReplySuggestions,
+  readReplySuggestions,
+  readReplySuggestionsFile,
+  recordReplySuggestions,
+  replySuggestionsFile,
+} from "./store";
+import {
+  MAX_REPLY_SUGGESTIONS,
+  REPLY_SUGGESTION_CONVERSATION_CAPACITY,
+  ReplySuggestionValidationError,
+} from "./types";
+
+/*
+ * The durable half of #1202: one reply-draft set per conversation, replaced by
+ * the next call and cleared the moment the operator sends. Modelled on the
+ * attention record — schema version, revision, atomic write under the shared
+ * file transaction — because the pills have to survive a page reload and a
+ * viewer restart exactly like every other viewer-side record.
+ */
+
+let sandbox = "";
+let previousStateDir: string | undefined;
+
+beforeEach(() => {
+  previousStateDir = process.env.LLV_STATE_DIR;
+  sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-suggestions-"));
+  process.env.LLV_STATE_DIR = sandbox;
+});
+afterEach(() => {
+  if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousStateDir;
+  fs.rmSync(sandbox, { recursive: true, force: true });
+});
+
+const MANAGER = { kind: "manager", conversationId: "conversation_seat", role: "orchestrator" } as const;
+
+function record(conversationId: string, replies: { label: string; text: string }[], at = "2026-08-26T10:00:00.000Z") {
+  return recordReplySuggestions({ conversationId, replies, origin: MANAGER, at: new Date(at) });
+}
+
+test("a recorded set is readable back for its conversation and nobody else's", () => {
+  record("conversation_a", [{ label: "yes, do it", text: "Yes — go ahead with the merge." }]);
+
+  const stored = readReplySuggestions("conversation_a");
+  expect(stored?.replies).toEqual([{ label: "yes, do it", text: "Yes — go ahead with the merge." }]);
+  expect(stored?.origin).toEqual(MANAGER);
+  expect(stored?.at).toBe("2026-08-26T10:00:00.000Z");
+  expect(readReplySuggestions("conversation_b")).toBeNull();
+});
+
+test("the newest set replaces the previous one for that conversation, and names what it replaced", () => {
+  const first = record("conversation_a", [{ label: "yes", text: "Yes." }]);
+  const second = record("conversation_a", [{ label: "hold", text: "Hold — explain the rollback first." }], "2026-08-26T10:05:00.000Z");
+
+  expect(second.replaced).toBe(first.set.setId);
+  expect(readReplySuggestions("conversation_a")?.replies).toEqual([{ label: "hold", text: "Hold — explain the rollback first." }]);
+  /* Replacement, not accumulation: one set per conversation, ever. */
+  expect(readReplySuggestionsFile().sets.filter((set) => set.conversationId === "conversation_a")).toHaveLength(1);
+});
+
+test("clearing removes the conversation's set and says whether there was one", () => {
+  record("conversation_a", [{ label: "yes", text: "Yes." }]);
+
+  expect(clearReplySuggestions("conversation_a")).toBe(true);
+  expect(readReplySuggestions("conversation_a")).toBeNull();
+  expect(clearReplySuggestions("conversation_a")).toBe(false);
+});
+
+test("the record survives on disk under the state dir", () => {
+  record("conversation_a", [{ label: "yes", text: "Yes." }]);
+
+  const onDisk = JSON.parse(fs.readFileSync(replySuggestionsFile(), "utf8")) as { schemaVersion: number; revision: number; sets: unknown[] };
+  expect(replySuggestionsFile().startsWith(sandbox)).toBe(true);
+  expect(onDisk.schemaVersion).toBe(1);
+  expect(onDisk.revision).toBe(1);
+  expect(onDisk.sets).toHaveLength(1);
+});
+
+test("labels and texts are trimmed, bounded and secret-redacted before anything durable exists", () => {
+  const stored = record("conversation_a", [{
+    label: "  yes, do it  ",
+    text: `  ship it with sk-ant-api03-${"a".repeat(40)}  `,
+  }]).set;
+
+  expect(stored.replies[0]!.label).toBe("yes, do it");
+  expect(stored.replies[0]!.text.startsWith("ship it with")).toBe(true);
+  expect(stored.replies[0]!.text).not.toContain("sk-ant-api03");
+});
+
+test("an empty, oversized or malformed set is refused with a named code and writes nothing", () => {
+  for (const replies of [
+    [],
+    Array.from({ length: MAX_REPLY_SUGGESTIONS + 1 }, (_, index) => ({ label: `l${index}`, text: `t${index}` })),
+    [{ label: "", text: "body" }],
+    [{ label: "label", text: "   " }],
+  ]) {
+    expect(() => record("conversation_a", replies)).toThrow(ReplySuggestionValidationError);
+  }
+  expect(fs.existsSync(replySuggestionsFile())).toBe(false);
+});
+
+test("a label longer than the pill can carry is refused rather than silently truncated", () => {
+  expect(() => record("conversation_a", [{ label: "x".repeat(200), text: "body" }])).toThrow(ReplySuggestionValidationError);
+});
+
+test("the oldest conversation falls away once the capacity is full", () => {
+  for (let index = 0; index < REPLY_SUGGESTION_CONVERSATION_CAPACITY + 3; index += 1) {
+    record(`conversation_${index}`, [{ label: "yes", text: "Yes." }], new Date(Date.UTC(2026, 7, 26, 10, index)).toISOString());
+  }
+
+  const file = readReplySuggestionsFile();
+  expect(file.sets).toHaveLength(REPLY_SUGGESTION_CONVERSATION_CAPACITY);
+  expect(readReplySuggestions("conversation_0")).toBeNull();
+  expect(readReplySuggestions(`conversation_${REPLY_SUGGESTION_CONVERSATION_CAPACITY + 2}`)).not.toBeNull();
+});
+
+test("an unreadable record reads as no suggestions: disposable drafts never take a composer down", () => {
+  fs.mkdirSync(path.dirname(replySuggestionsFile()), { recursive: true });
+  fs.writeFileSync(replySuggestionsFile(), "{not json", "utf8");
+
+  expect(readReplySuggestions("conversation_a")).toBeNull();
+  /* And the next write recovers the file rather than inheriting the wreckage. */
+  record("conversation_a", [{ label: "yes", text: "Yes." }]);
+  expect(readReplySuggestions("conversation_a")?.replies).toHaveLength(1);
+});

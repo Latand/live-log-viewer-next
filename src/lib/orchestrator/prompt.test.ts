@@ -86,8 +86,19 @@ test("bridge reports survive as the second channel, for the operator away from t
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
    this constant as defaultPromptVersion, so an older seat reads as stale without a diff. */
-test("the default mandate is at version 9", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(9);
+test("the default mandate is at version 10", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(10);
+});
+
+/* #1202 — every ask the manager makes should be answerable with a tap, so the
+   rule that produces the drafts is part of the mandate, not a convention. */
+test("the mandate tells the seat to offer reply drafts whenever it asks or proposes something", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## Reply drafts (suggest_replies)");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Call suggest_replies after EVERY message of yours that asks the operator something or proposes a course of action");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("2\u20134 short, distinct drafts");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("in the operator's own language");
+  /* A draft is an offer: the mandate must never read as the viewer answering. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("never a decision");
 });
 
 test("the mandate greets a fresh seat and preserves the exact rotation standby status", () => {

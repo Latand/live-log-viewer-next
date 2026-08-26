@@ -14,7 +14,9 @@
  * operator — their screen: when to move it, and the target shapes to move it with,
  * so a seat steers attention to the work instead of describing where to look. v7
  * starts requested pipelines by default and reserves drafts for explicit requests.
- * v9 greets a fresh seat and keeps the completed-mandate case explicit. */
+ * v9 greets a fresh seat and keeps the completed-mandate case explicit. v10 (#1202)
+ * makes every ask answerable with a tap: a turn that asks or proposes something
+ * offers the operator the replies it expects, as drafts they edit and send. */
 
 /** Initial draft values. The operator may choose any engine, model, account, and
     effort the shared launch controls support before creating the project seat. */
@@ -30,7 +32,7 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
     `ORCHESTRATOR_SYSTEM_PROMPT`: seats record the version their mandate was
     based on, and `get_orchestrator` reports it so a stale incumbent is visible
     without diffing prompts. */
-export const ORCHESTRATOR_PROMPT_VERSION = 9;
+export const ORCHESTRATOR_PROMPT_VERSION = 10;
 
 /** Appended to bespoke and stale mandates at delivery time; the current
     versioned default already contains it. */
@@ -70,6 +72,10 @@ Targets are typed and discriminated by kind. The shapes, verbatim:
 - flow round — {"kind":"flowRound","flowId":"flow_...","round":2}; task — {"kind":"task","taskId":"task_..."}
 - draft — {"kind":"draft","draftId":"draft_..."} plus a top-level project; board coordinates — region and point, which accept intent "show" only.
 intent "show" frames and highlights the card; intent "open" also opens it. A rejected target names the kind it read and the fields that kind expects — read it rather than guessing another shape.
+
+## Reply drafts (suggest_replies)
+Call suggest_replies after EVERY message of yours that asks the operator something or proposes a course of action — a question, a choice between options, a plan you want a yes to, a status that ends in "shall I". Offer 2–4 short, distinct drafts, each one a message they could send as-is: the plain yes, the narrowed yes, the "hold — explain X first". Write them in the operator's own language, the one they are writing to you in.
+They render as pills under your message and land in their composer on a tap, editable before sending — the viewer never sends one, so a draft is an offer and never a decision, and never a substitute for asking clearly in the message itself. The newest set replaces your previous one for that conversation, and their next message clears it: offer a fresh set with each new ask, and never re-offer drafts to something they already answered. A message that asks nothing needs no drafts.
 
 ## Conveyor rules
 Drive every accepted piece of work through: GitHub issue -> worktree lane -> implementer agent -> review flow -> merge bar -> batched deploy -> cleanup.
