@@ -496,17 +496,19 @@ export async function runHeadlessCodexOnce(request: HeadlessCodexRunRequest): Pr
       const scanned = scanEventStream(stdout);
       const finalOutput = artifactOutput || scanned.lastAgentMessage;
       const exit = run.exit;
-      /* TIMEOUT OUTRANKS THE ARTIFACT. A child that wrote `last-message.md`
-         and then hung until the timer killed its group did NOT finish its
-         turn: the artifact is whatever it had flushed at the moment of the
-         kill. Reading that as `done` hands the caller a half-written answer
-         and — for the orchestrator handoff digest (issue #1067) — silently
-         denies it the deterministic timeout fallback it is entitled to.
-         Otherwise the conclusiveness rule is headlessReviewStatus's: Codex
-         writes the last-message artifact only when the turn completes. */
+      /* THE EXIT OUTRANKS THE ARTIFACT. Codex writes `last-message.md` when
+         its turn completes, but a child that wrote it and then died — hung
+         until the timer killed its group, exited non-zero, or was signalled —
+         did NOT finish: the artifact is whatever it had flushed at the moment
+         it went away. Reading that as `done` hands the caller a half-written
+         answer and — for the orchestrator handoff digest (issue #1067) —
+         silently denies it the deterministic fallback it is entitled to. So a
+         clean exit is REQUIRED for `done`, and a timeout keeps its own reason
+         because the caller distinguishes the two. */
+      const exitedCleanly = exit !== null && exit.code === 0 && exit.signal === null;
       const status: HeadlessRunResult["status"] = timedOut
         ? "timeout"
-        : artifactOutput || (exit?.code === 0 && scanned.lastAgentMessage)
+        : exitedCleanly && (artifactOutput || scanned.lastAgentMessage)
           ? "done"
           : "failed";
       resolve({

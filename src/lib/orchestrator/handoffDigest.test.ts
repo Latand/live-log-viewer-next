@@ -150,6 +150,11 @@ test("AC3: timeout, failure, empty and over-budget results all fall back with th
   const cases: { result: HeadlessRunResult; reason: string }[] = [
     { result: runResult({ status: "timeout", finalOutput: "" }), reason: "timeout" },
     { result: runResult({ status: "failed", code: 1 }), reason: "failed" },
+    /* A child that wrote an artifact and then exited non-zero or by signal
+       reports `failed` (exec.ts), so its partial answer is refused here and
+       the deterministic history is composed instead (issue #1067). */
+    { result: runResult({ status: "failed", code: 1, finalOutput: "Decisions:\n- half of a digest" }), reason: "failed" },
+    { result: runResult({ status: "failed", code: null, signal: "SIGKILL", finalOutput: "Decisions:\n- half of a digest" }), reason: "failed" },
     { result: runResult({ finalOutput: "   \n  " }), reason: "empty" },
     { result: runResult({ finalOutput: "d".repeat(HISTORY_BUDGET_BYTES + 1) }), reason: "over_budget" },
   ];

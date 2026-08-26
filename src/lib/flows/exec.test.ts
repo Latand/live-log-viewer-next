@@ -667,3 +667,78 @@ test("runHeadlessCodexOnce reports timeout even when the hung child already wrot
   await waitForDeath(childPid);
   expect(() => process.kill(-childPid, 0)).toThrow();
 });
+
+/* Issue #1067: `last-message.md` is Codex's completed-turn artifact, but a
+   child that writes it and then dies did NOT complete its turn. Reading that
+   as `done` handed the orchestrator digest a partial answer AND denied it the
+   deterministic fallback, exactly as the timeout case above. */
+
+test("runHeadlessCodexOnce reports failed when the child wrote its artifact and exited non-zero", async () => {
+  const artifactDir = path.join(process.env.LLV_STATE_DIR!, "digest-artifact-then-exit-1");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-failing-codex");
+  fs.writeFileSync(
+    executablePath,
+    [
+      `#!${process.execPath}`,
+      "await Bun.stdin.text();",
+      `const target = process.argv[process.argv.indexOf("--output-last-message") + 1];`,
+      `await Bun.write(target, "Decisions:\\n- written before the error");`,
+      "process.exit(1);",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+
+  const result = await runHeadlessCodexOnce({
+    key: "orchestrator-handoff:exit-1",
+    cwd: path.join(artifactDir, "cwd"),
+    ["prompt"]: "compact these handoffs",
+    model: null,
+    effort: null,
+    account: null,
+    artifactDir,
+    timeoutMs: 10_000,
+    sandbox: "read-only",
+    runtime: { command: executablePath },
+  });
+
+  /* The artifact is on disk and non-empty, and the run is STILL a failure. */
+  expect(fs.readFileSync(path.join(artifactDir, "last-message.md"), "utf8")).toContain("written before the error");
+  expect(result.status).toBe("failed");
+  expect(result.code).toBe(1);
+});
+
+test("runHeadlessCodexOnce reports failed when the child wrote its artifact and died by signal", async () => {
+  const artifactDir = path.join(process.env.LLV_STATE_DIR!, "digest-artifact-then-signal");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-signalled-codex");
+  fs.writeFileSync(
+    executablePath,
+    [
+      `#!${process.execPath}`,
+      "await Bun.stdin.text();",
+      `const target = process.argv[process.argv.indexOf("--output-last-message") + 1];`,
+      `await Bun.write(target, "Decisions:\\n- written before the signal");`,
+      `process.kill(process.pid, "SIGKILL");`,
+      "setInterval(() => {}, 1_000);",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+
+  const result = await runHeadlessCodexOnce({
+    key: "orchestrator-handoff:signal",
+    cwd: path.join(artifactDir, "cwd"),
+    ["prompt"]: "compact these handoffs",
+    model: null,
+    effort: null,
+    account: null,
+    artifactDir,
+    timeoutMs: 10_000,
+    sandbox: "read-only",
+    runtime: { command: executablePath },
+  });
+
+  expect(fs.readFileSync(path.join(artifactDir, "last-message.md"), "utf8")).toContain("written before the signal");
+  expect(result.status).toBe("failed");
+  expect(result.signal).toBe("SIGKILL");
+});
