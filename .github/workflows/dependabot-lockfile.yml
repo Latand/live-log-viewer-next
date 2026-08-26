@@ -21,11 +21,13 @@ name: Dependabot lockfile refresh
 # ranges without unpacking a package, so nothing the pull request bumped ever
 # executes in the job that can write to the branch.
 #
-# GitHub raises no `synchronize` for a push made with that token, so the gates
-# would never see the commit this job just wrote. The last step therefore
-# dispatches them against the branch: a dispatched run reads the branch head,
-# which is the exact commit its check run lands on, so it can never report on a
-# revision it did not inspect.
+# GitHub raises no `synchronize` for a push made with that token — it starts no
+# workflow run of any kind for it — so the gates would never see the commit this
+# job just wrote. The last step therefore dispatches them against the branch: a
+# dispatched run reads the branch head, which is the exact commit its check run
+# lands on, so it can never report on a revision it did not inspect. A gate that
+# refuses the dispatch fails this job, because the alternative is a refreshed
+# head sitting green over required checks that never started.
 
 on:
   pull_request_target:
@@ -149,6 +151,17 @@ jobs:
             exit 1
           fi
 
+      # A dispatch reads the workflow file from the branch it names, so a
+      # Dependabot pull request opened before these three carried
+      # `workflow_dispatch` refuses one. That refusal is what this step exists
+      # to report, not something to log past: the head is now a commit no gate
+      # has read, and nothing else raises an event for it — GitHub starts no
+      # workflow run at all for a push made with the repository GITHUB_TOKEN,
+      # which is the whole reason the dispatch is here. A refused dispatch
+      # therefore fails the refresh, so the branch carries a red check rather
+      # than a head sitting green over required contexts that never started.
+      # `@dependabot rebase` puts the trigger on the branch and the next run
+      # dispatches cleanly.
       - name: Run the gates on the refreshed head
         if: steps.lockfile.outputs.refreshed == 'true'
         env:
@@ -159,17 +172,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          # A dispatch reads the workflow file from the branch it names, and a
-          # Dependabot pull request opened before this change merged carries an
-          # older copy of these three without the trigger. The refreshed lockfile
-          # still stands in that case; the gates run when the branch next moves,
-          # so the refusal is reported rather than fatal.
+          refused=()
+
           dispatch() {
-            if ! gh workflow run "$1" --ref "$HEAD_REF" "${@:2}"; then
-              echo "::warning::${1} on ${HEAD_REF} refused a dispatch; re-run the checks on the refreshed head"
+            local workflow="$1"
+            shift
+            if ! gh workflow run "$workflow" --ref "$HEAD_REF" "$@"; then
+              refused+=("$workflow")
             fi
           }
 
+          # Each gate is attempted before the step decides, so one workflow's
+          # refusal does not cost the branch the runs the other two would have
+          # started, and the error names every gate that is missing one. `gh`
+          # has already written its own reason for each refusal to the log.
           dispatch supply-chain.yml
           dispatch privacy-publication.yml
           dispatch privacy-tracker-audit.yml -f "publication_number=${PR_NUMBER}"
+
+          if (( ${#refused[@]} > 0 )); then
+            echo "::error::${HEAD_REF} refused a dispatch of ${refused[*]}; its refreshed head carries no run of those gates"
+            exit 1
+          fi
