@@ -491,35 +491,49 @@ describe("a decision the operator owes outranks every word for «it is running»
     questions: [{ header: "Rollout window", question: "Approve the proposed rollout window", multiSelect: false, options: [] }],
   };
   const seated = { ...base, status: status({ seat: seat() }), now: NOW };
+  const badgeOf = (state: OrchestratorPanelState) => seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>);
+
+  /* EVERY liveness `livenessOf` can produce, with the surface and the file that
+     produce it — the badge is asserted over all five, both ways, so no state can
+     quietly opt out of naming a decision the island is already counting. */
+  const LIVENESSES = [
+    ["live-root", {}, "live"],
+    ["live-root", { activity: "stalled" }, "stalled"],
+    ["resume", {}, "resumable"],
+    ["dead", {}, "dead"],
+    ["unresolved", {}, "resolving"],
+  ] as const;
 
   test("a hosted seat with a question on screen carries the attention id and badges «needs you»", () => {
     const state = deriveOrchestratorPanelState({ ...seated, file: file({ pendingQuestion: asked }), surface: "live-root" });
     expect(state).toMatchObject({ kind: "live", liveness: "live", attention: "tool-use-orch" });
-    expect(seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>)).toBe("needs-you");
+    expect(badgeOf(state)).toBe("needs-you");
   });
 
-  test("a quiet seat is still the liveness word — nothing is owed", () => {
-    const state = deriveOrchestratorPanelState({ ...seated, file: file(), surface: "live-root" });
-    expect(state).toMatchObject({ kind: "live", liveness: "live", attention: null });
-    expect(seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>)).toBe("live");
+  test("a pending decision is the badge at every liveness, «finished» and «host gone» included", () => {
+    for (const [surface, overrides, liveness] of LIVENESSES) {
+      const state = deriveOrchestratorPanelState({ ...seated, file: file({ ...overrides, pendingQuestion: asked }), surface });
+      expect(state).toMatchObject({ liveness, attention: "tool-use-orch" });
+      expect(badgeOf(state)).toBe("needs-you");
+    }
   });
 
-  test("a stalled seat with a terminal prompt is «needs you» too: both livenesses it outranks are hosted", () => {
+  test("with nothing owed, every liveness keeps its own word", () => {
+    for (const [surface, overrides, liveness] of LIVENESSES) {
+      const state = deriveOrchestratorPanelState({ ...seated, file: file(overrides), surface });
+      expect(state).toMatchObject({ liveness, attention: null });
+      expect(badgeOf(state)).toBe(liveness);
+    }
+  });
+
+  test("a terminal prompt is a decision too — the badge follows the queue, not the signal's shape", () => {
     const waiting = file({
       activity: "stalled",
       waitingInput: { since: NOW - 120, screenTail: "> 1. Yes", target: "llv:0.0", menu: null },
     });
     const state = deriveOrchestratorPanelState({ ...seated, file: waiting, surface: "live-root" });
     expect(state).toMatchObject({ liveness: "stalled" });
-    expect(seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>)).toBe("needs-you");
-  });
-
-  test("a gone or resumable host keeps its own badge: a decision nobody can answer must not hide the recovery", () => {
-    for (const [surface, liveness] of [["dead", "dead"], ["resume", "resumable"], ["unresolved", "resolving"]] as const) {
-      const state = deriveOrchestratorPanelState({ ...seated, file: file({ pendingQuestion: asked }), surface });
-      expect(state).toMatchObject({ liveness, attention: "tool-use-orch" });
-      expect(seatBadgeOf(state as Extract<OrchestratorPanelState, { kind: "live" }>)).toBe(liveness);
-    }
+    expect(badgeOf(state)).toBe("needs-you");
   });
 
   test("the attention read is the QUEUE's: an abandoned open turn with no live process owes nothing", () => {

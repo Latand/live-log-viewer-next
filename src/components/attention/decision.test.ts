@@ -63,11 +63,20 @@ describe("the decision behind a wait is named, never merely announced", () => {
     expect(decisionLine(t, "en", file({ pendingQuestion: question() }))).toBe("Hero frame");
   });
 
-  test("a header-less question falls back to the question's own first line, then to the generic wording", () => {
-    const firstLine = file({
+  test("a header-less question is the generic wording, NEVER the question body", () => {
+    /* The body is a paragraph written to be read inside the conversation. On a
+       badge it truncates into nonsense, so an absent header buys the generic
+       word rather than a sentence fragment. */
+    const bodyOnly = file({
       pendingQuestion: question({ questions: [{ header: "", question: "Which capture runs first?\nBoth are cheap.", multiSelect: false, options: [] }] }),
     });
-    expect(decisionLine(t, "en", firstLine)).toBe("Which capture runs first?");
+    expect(attentionDecision(bodyOnly)).toEqual({ kind: "question", header: null });
+    expect(decisionLine(t, "en", bodyOnly)).toBe("a question");
+
+    const blank = file({
+      pendingQuestion: question({ questions: [{ header: "   ", question: "Which capture runs first?", multiSelect: false, options: [] }] }),
+    });
+    expect(decisionLine(t, "en", blank)).toBe("a question");
 
     const nothing = file({ pendingQuestion: question({ questions: [] }) });
     expect(decisionLine(t, "en", nothing)).toBe("a question");
@@ -86,22 +95,17 @@ describe("the decision behind a wait is named, never merely announced", () => {
     expect(decisionLine(t, "en", unknown)).toBe("rate-limited");
   });
 
-  test("a terminal prompt is named by its own menu question, then its screen tail, then «permission prompt»", () => {
-    const menu = file({
-      waitingInput: {
-        since: NOW - 60,
-        screenTail: "> 1. Yes",
-        target: "llv:0.0",
-        menu: { question: "Allow the write to src/?\nIt touches two files.", tabs: [], options: [] },
-      },
-    });
-    expect(decisionLine(t, "en", menu)).toBe("Allow the write to src/?");
-
-    const tail = file({ waitingInput: { since: NOW - 60, screenTail: "\n  Do you want to proceed?  \n> 1. Yes\n", target: "llv:0.0", menu: null } });
-    expect(decisionLine(t, "en", tail)).toBe("Do you want to proceed?");
-
-    const bare = file({ waitingInput: { since: NOW - 60, screenTail: "   ", target: "llv:0.0", menu: null } });
-    expect(decisionLine(t, "en", bare)).toBe("permission prompt");
+  test("every terminal prompt is «permission prompt» — the screen names the options, not the decision", () => {
+    const scraped = [
+      { since: NOW - 60, screenTail: "> 1. Yes", target: "llv:0.0", menu: { question: "Allow the write to src/?", tabs: [], options: [] } },
+      { since: NOW - 60, screenTail: "\n  Do you want to proceed?  \n❯ 1. Yes\n", target: "llv:0.0", menu: null },
+      { since: NOW - 60, screenTail: "   ", target: "llv:0.0", menu: null },
+    ];
+    for (const waitingInput of scraped) {
+      const waiting = file({ waitingInput } as Partial<FileEntry>);
+      expect(attentionDecision(waiting)).toEqual({ kind: "permission" });
+      expect(decisionLine(t, "en", waiting)).toBe("permission prompt");
+    }
   });
 
   test("an interrupted agent keeps the interrupted wording", () => {

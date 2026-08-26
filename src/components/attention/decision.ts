@@ -23,43 +23,43 @@ import type { FileEntry } from "@/lib/types";
  * caller asks the queue first and asks for words second.
  */
 export type AttentionDecision =
-  /** A structured question: `header` is the agent's own label for it. */
+  /** A structured question, named by the agent's OWN label for it — never by
+      the question body, which is a paragraph written to be read inside the
+      conversation and truncates into nonsense on a badge. Null header means the
+      agent shipped none, and the generic wording stands in. */
   | { kind: "question"; header: string | null }
   /** A plan awaiting approval. */
   | { kind: "plan" }
   /** An engine or account wall, with the reset moment when one was reported. */
   | { kind: "rate-limit"; resetAt: number | null }
-  /** A terminal prompt, named by whatever the screen gave up. */
-  | { kind: "permission"; prompt: string | null }
+  /** A terminal prompt. Deliberately payload-free: the only text a scraped
+      prompt offers is the menu it is drawing («❯ 1. Yes»), which names the
+      OPTIONS rather than the decision. */
+  | { kind: "permission" }
   /** An interrupted turn — no question on screen, but nobody is working. */
   | { kind: "stalled" };
-
-/** First non-empty line of a scraped block, tidied for a one-line surface. */
-function firstLine(text: string | null | undefined): string | null {
-  if (!text) return null;
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (line) return line;
-  }
-  return null;
-}
 
 /**
  * The decision a conversation is blocked on, or null when it carries no signal.
  *
  * Precedence, identical to `attentionId`'s: a structured question, then a
  * rate-limit wall, then the screen-scrape fallback, then the stalled state.
+ *
+ * Each kind is named from a FIXED vocabulary — the agent's own question header,
+ * or one of three localized phrases. Nothing is lifted out of a question body
+ * or off a scraped screen: a line assembled from whatever the terminal happened
+ * to be drawing is not a decision the operator can recognize, and it is what
+ * put «❯ 1. Yes» in front of them as the name of a wait.
  */
 export function attentionDecision(file: FileEntry): AttentionDecision | null {
   const pending = file.pendingQuestion;
   if (pending) {
     if (pending.kind === "plan") return { kind: "plan" };
-    const first = pending.questions?.[0];
-    return { kind: "question", header: firstLine(first?.header) ?? firstLine(first?.question) };
+    const header = pending.questions?.[0]?.header?.trim();
+    return { kind: "question", header: header || null };
   }
   if (file.rateLimit) return { kind: "rate-limit", resetAt: file.rateLimit.resetAt };
-  const waiting = file.waitingInput;
-  if (waiting) return { kind: "permission", prompt: firstLine(waiting.menu?.question) ?? firstLine(waiting.screenTail) };
+  if (file.waitingInput) return { kind: "permission" };
   if (file.activity === "stalled") return { kind: "stalled" };
   return null;
 }
@@ -78,7 +78,7 @@ function decisionText(t: TFunction, locale: Locale, decision: AttentionDecision)
         ? t("rateLimit.badgeUntil", { time: formatRateLimitTime(decision.resetAt, locale) })
         : t("rateLimit.badge");
     case "permission":
-      return decision.prompt ?? t("attention.decisionPermission");
+      return t("attention.decisionPermission");
     case "stalled":
       return t("status.stalled");
   }

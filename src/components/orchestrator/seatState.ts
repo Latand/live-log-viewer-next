@@ -136,26 +136,30 @@ export type SeatLiveness = "resolving" | "live" | "stalled" | "resumable" | "dea
  *
  * A seat that is running and a seat that is holding a question up at the
  * operator both read «live», and the second one is the only one that needs
- * anything. So a pending decision is ranked ahead of the livenesses it can
- * outrank, and the badge says «needs you» in the warning tone the rest of the
- * app already uses for a wait.
+ * anything. So a pending decision is ranked ahead of the liveness, and the
+ * badge says «needs you» in the warning tone the rest of the app already uses
+ * for a wait.
  */
 export type SeatBadge = "needs-you" | SeatLiveness;
 
 /**
- * The livenesses a pending decision outranks. Both are HOSTED, so the question
- * on screen is one the operator can actually answer.
+ * The badge a live seat wears: the decision it owes the operator, or — with
+ * nothing owed — its liveness.
  *
- * `dead`, `resumable` and `resolving` keep their own word deliberately: a
- * transcript whose host is gone can still carry the last question it asked, and
- * badging that «needs you» would hide the recovery the badge exists to offer
- * behind an answer nobody can deliver.
+ * A non-null attention id outranks EVERY liveness word, `dead` and `resumable`
+ * included, because the queue counting a conversation and the dock badging it
+ * have to be the same reading: a seat the island lists as waiting and the dock
+ * calls «finished» is one signal described two ways, which is the whole defect
+ * this issue names.
+ *
+ * Nothing is hidden by that. The badge was never the carrier of recovery — the
+ * rotation advisory, the «finished, resume it here» notice and the re-bind each
+ * ride as their own banner directly under the header, one line below the badge,
+ * and they keep saying what the seat needs while the badge says what the
+ * OPERATOR owes it.
  */
-const ATTENTION_OUTRANKS: readonly SeatLiveness[] = ["live", "stalled"];
-
-/** The badge a live seat wears: its decision, or its liveness. */
 export function seatBadgeOf(state: OrchestratorLiveState): SeatBadge {
-  return state.attention && ATTENTION_OUTRANKS.includes(state.liveness) ? "needs-you" : state.liveness;
+  return state.attention ? "needs-you" : state.liveness;
 }
 
 /**

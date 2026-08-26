@@ -281,9 +281,12 @@ test("a queue row carries the decision line, the title, the project and the age"
 });
 
 test("a terminal prompt and a stalled agent each keep their own wording", async () => {
+  /* The prompt is named by its KIND, never by the menu the terminal happens to
+     be drawing: «❯ 1. Yes» names the options, and a row that says it has told
+     the operator nothing about what they are being asked to allow. */
   const terminal = buildAttentionQueue([entry("/alpha-terminal", "alpha", NOW - 60)], NOW)[0]!;
   let host = await render(<AttentionQueueRow item={terminal} onOpen={() => {}} />);
-  expect(host.querySelector("[data-attention-decision]")!.textContent).toBe("❯ 1. Yes");
+  expect(host.querySelector("[data-attention-decision]")!.textContent).toBe("permission prompt");
   await act(async () => { root?.unmount(); });
   document.body.replaceChildren();
 

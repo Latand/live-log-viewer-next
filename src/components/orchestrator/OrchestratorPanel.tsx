@@ -876,9 +876,9 @@ const SEAT_BADGE: Record<SeatBadge, { tone: string; key: MessageKey }> = {
  * decision itself in its tooltip (issue #1167).
  *
  * The word comes from `seatBadgeOf`, which ranks a pending decision ahead of
- * the livenesses it can outrank; the line comes from the SAME `decisionLine`
- * the toast and the island popover read, so the dock can never name a wait
- * differently from the surfaces the operator reached it through.
+ * the liveness; the line comes from the SAME `decisionLine` the toast and the
+ * island popover read, so the dock can never name a wait differently from the
+ * surfaces the operator reached it through.
  */
 function StateBadge({ state, file }: { state: OrchestratorPanelState; file: FileEntry | null }) {
   const { t, locale } = useLocale();
@@ -900,9 +900,9 @@ function StateBadge({ state, file }: { state: OrchestratorPanelState; file: File
         : state.kind === "draft"
           ? "orchPanel.badgeNone"
           : "orchPanel.badgeReading");
-  /* Only a seat the badge calls «needs you» names a decision: a stale question
-     on a gone host is not one the operator can answer, and the badge already
-     says what that seat needs instead. */
+  /* The tooltip follows the badge: a seat the badge calls «needs you» carries
+     the decision behind it, and every other badge is already its own whole
+     answer. */
   const decision = seatBadge === "needs-you" && file ? decisionLine(t, locale, file) : null;
   return (
     <span

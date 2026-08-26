@@ -29,6 +29,8 @@ Object.assign(globalThis, {
 });
 
 const { AttentionToast } = await import("./AttentionToast");
+const { AttentionQueueRow } = await import("./AttentionIsland");
+const { buildAttentionQueue } = await import("../attention");
 type FileEntry = import("@/lib/types").FileEntry;
 
 let root: Root | null = null;
@@ -46,6 +48,12 @@ async function render(node: React.ReactNode): Promise<HTMLElement> {
     root.render(node);
   });
   return host;
+}
+
+async function unmount() {
+  await act(async () => { root?.unmount(); });
+  root = null;
+  document.body.replaceChildren();
 }
 
 const click = (element: Element) =>
@@ -107,19 +115,57 @@ test("the title is the decision plus the role, and the body stays the conversati
   expect(host.textContent).toContain("Ship the rollout");
 });
 
-test("a plan, a wall and a terminal prompt each name themselves", async () => {
-  const cases: Array<[Partial<FileEntry>, string]> = [
-    [{ pendingQuestion: { ...question, kind: "plan", plan: "1. read 2. write" } }, "plan approval"],
-    [{ rateLimit: { source: "account", accountId: "primary", window: "session", resetAt: null } }, "rate-limited"],
-    [{ waitingInput: { since: NOW - 60, screenTail: "  ", target: "llv:0.0", menu: null } }, "permission prompt"],
-  ];
-  for (const [overrides, expected] of cases) {
+/**
+ * Every kind of wait the queue counts, with the ONE line it must read as.
+ *
+ * A terminal prompt is «permission prompt» whatever the screen is drawing, and
+ * a header-less question is the generic word rather than a slice of its own
+ * body: a title assembled from scraped text names the OPTIONS on screen, not
+ * the decision, and «❯ 1. Yes» is what that produced.
+ */
+const WAITS: Array<[string, Partial<FileEntry>, string]> = [
+  ["a question, by its header", { pendingQuestion: question }, "Rollout window"],
+  [
+    "a header-less question, by the generic word",
+    { pendingQuestion: { ...question, questions: [{ header: "", question: "Which capture runs first?", multiSelect: false, options: [] }] } },
+    "a question",
+  ],
+  ["a plan", { pendingQuestion: { ...question, kind: "plan", plan: "1. read 2. write" } }, "plan approval"],
+  ["a wall", { rateLimit: { source: "account", accountId: "primary", window: "session", resetAt: null } }, "rate-limited"],
+  [
+    "a terminal prompt, whatever the menu says",
+    { waitingInput: { since: NOW - 60, screenTail: "❯ 1. Yes", target: "llv:0.0", menu: { question: "Allow the write to src/?", tabs: [], options: [] } } },
+    "permission prompt",
+  ],
+  ["an interrupted turn", { activity: "stalled", mtime: NOW - 60 }, "interrupted or awaiting permission"],
+];
+
+test("a plan, a wall, a terminal prompt and an interrupted turn each name themselves", async () => {
+  for (const [, overrides, expected] of WAITS) {
     const host = await render(
       <AttentionToast file={file(overrides as Partial<FileEntry>)} mobile={false} onOpen={() => {}} onDismiss={() => {}} />,
     );
     expect(title(host)).toBe(expected);
-    await act(async () => { root?.unmount(); });
-    document.body.replaceChildren();
+    await unmount();
+  }
+});
+
+test("the toast title and the island popover row are the SAME line, for every kind of wait", async () => {
+  for (const [, overrides] of WAITS) {
+    const entry = file(overrides as Partial<FileEntry>);
+    const item = buildAttentionQueue([entry], NOW)[0]!;
+
+    let host = await render(<AttentionToast file={entry} mobile={false} onOpen={() => {}} onDismiss={() => {}} />);
+    const toastLine = title(host);
+    await unmount();
+
+    host = await render(<AttentionQueueRow item={item} onOpen={() => {}} />);
+    const rowLine = host.querySelector("[data-attention-decision]")?.textContent ?? null;
+    await unmount();
+
+    /* Not the generic fallback either: a counted wait always has a name. */
+    expect(toastLine).not.toBe("Agent is waiting for a reply");
+    expect(rowLine).toBe(toastLine);
   }
 });
 
