@@ -9,7 +9,7 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
 const { TelegramReportRunner, RUN_TIMEOUT_MS } = await import("./reportRunner");
 const { readTelegramReports, readReportText, reportInboxPath, reportSourcesPath, updateTelegramReports } = await import("./reportStore");
-const { DEFAULT_DAILY_REPORT_PROMPT } = await import("./reportPrompt");
+const { DEFAULT_DAILY_REPORT_PROMPT, reportConversationTitle } = await import("./reportPrompt");
 /* The tag lives in the operator's editable brief; fixtures use a synthetic
    one, exactly as a real operator's own tag never appears in this repo. */
 const DAILY_REPORT_TAG = "#report_tag";
@@ -207,6 +207,10 @@ test("Run now launches a board-visible Codex conversation holding exactly viewer
   expect(String(body.cwd)).toContain("report-workspace");
 
   const prompt = String(body.prompt);
+  const title = String(body.title);
+  const active = readTelegramReports().active!;
+  expect(title).toBe(reportConversationTitle({ windowStart: active.windowStart, windowEnd: active.windowEnd }));
+  expect(prompt.split("\n")[0]).toBe(title);
   /* The account was verified by the Viewer before this launch, so the recorded
      identity is in no prompt, no transcript and no registry row. */
   expect(ports.reads[0]).toBe("getMe");
