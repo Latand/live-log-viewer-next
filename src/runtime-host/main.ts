@@ -14,6 +14,7 @@ const { serveRuntimeHost } = await import("./socket");
 const { ViewerDeploymentCoordinator } = await import("./deployment");
 const { HostCommandViewerDeploymentAdapter } = await import("./deploymentAdapter");
 const { serveViewerDeploymentProxy } = await import("./deploymentProxy");
+const { ReceiptSweepReporter, receiptSweepDebugEnabled } = await import("./receiptSweep");
 const {
   currentRuntimeHostGeneration,
   RUNTIME_HOST_CONTAINER_ENV,
@@ -107,17 +108,14 @@ const legacyTimer = legacyScheduler ? setInterval(() => {
 /* Producer-receipt retention runs on wall clock, not on append traffic, so a
    quiet journal still drains its backlog. Each tick is bounded inside
    maintainProducerReceipts; the multi-week legacy accumulation drains across
-   ticks while the sweep itself never blocks the socket loop noticeably. */
-let receiptSweepDeleted = 0;
+   ticks while the sweep itself never blocks the socket loop noticeably. The
+   reporter keeps the ten-second cadence out of the log stream (#1216). */
+const receiptSweepReporter = new ReceiptSweepReporter({ debug: receiptSweepDebugEnabled() });
 const receiptSweepTimer = journal.isWritable() ? setInterval(() => {
   if (!journal.isWritable()) return;
   try {
-    const pass = journal.maintainProducerReceipts();
-    receiptSweepDeleted += pass.deleted;
-    if (pass.cycled && receiptSweepDeleted > 0) {
-      console.error(`[runtime journal] receipt sweep cycle removed ${receiptSweepDeleted} stale producer receipts`);
-      receiptSweepDeleted = 0;
-    }
+    const line = receiptSweepReporter.record(journal.maintainProducerReceipts(), Date.now());
+    if (line) console.error(line);
   } catch (error) {
     console.error(`[runtime journal] receipt sweep failed; next tick will retry: ${error instanceof Error ? error.message : String(error)}`);
   }

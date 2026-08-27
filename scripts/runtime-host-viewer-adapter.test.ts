@@ -477,6 +477,106 @@ test("SQLite promotion waits for completed runtime activation", async () => {
   });
 });
 
+/* #1216 regression pair. The promote deadline and the adapter-side activation
+   budget used to be the same 30s, so the host killed the adapter before its own
+   wait could name anything, and the operator only ever saw the phase string. */
+const sqliteIncumbent = { ...release, hotStateBackend: HOT_STATE_BACKEND };
+
+const liveIncumbentDocker = `#!/bin/sh
+if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then exit 0; fi
+if [ "$1" = "inspect" ] && [ "$2" = "--format" ]; then printf 'running\\n'; exit 0; fi
+exit 1
+`;
+
+function sqliteCandidate(revision: string, releaseId: string) {
+  return {
+    ...release,
+    revision,
+    container: "viewer-candidate-1216",
+    image: "viewer:candidate-1216",
+    hotStateBackend: HOT_STATE_BACKEND,
+    mcpRuntime: {
+      source: "managed" as const,
+      revision,
+      releaseId,
+      artifactDigest: revision.slice(0, 1).repeat(64),
+      stagedAt: "2026-08-27T00:00:00.000Z",
+    },
+  };
+}
+
+test("promote that never sees hot-state activation fails with a named reason", async () => {
+  const candidate = sqliteCandidate("5".repeat(40), "deploy-1216-never");
+  const result = await runAction({
+    action: "promote",
+    input: { candidate },
+    setupState: (state) => { initializeHotStateFixture(state, sqliteIncumbent); },
+    environment: {
+      LLV_HOT_STATE_ACTIVATION_TIMEOUT_MS: "400",
+      LLV_HOT_STATE_ACTIVATION_POLL_MS: "10",
+      LLV_INCUMBENT_HOT_STATE_RELEASE_TIMEOUT_MS: "150",
+      LLV_INCUMBENT_HOT_STATE_RELEASE_POLL_MS: "10",
+    },
+    dockerScript: liveIncumbentDocker,
+  });
+
+  expect(result.code).not.toBe(0);
+  expect(result.stderr).toContain(candidate.revision);
+  expect(result.stderr).toContain("waited");
+  expect(result.stderr).toContain("authority mode sqlite");
+  expect(result.stderr).toContain("activation pending");
+  expect(result.stderr).toContain("candidate container is running");
+  expect(result.stderr).toContain("incumbent still running");
+});
+
+test("promote succeeds when hot-state activation arrives late but inside the budget", async () => {
+  const candidate = sqliteCandidate("4".repeat(40), "deploy-1216-late");
+  const phaseFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "llv-1216-phase-")), "phase.json");
+  const phases: string[] = [];
+  const result = await runAction({
+    action: "promote",
+    input: { candidate },
+    setupState: (state) => { initializeHotStateFixture(state, sqliteIncumbent); },
+    environment: {
+      LLV_DEPLOYMENT_ADAPTER_PHASE_FILE: phaseFile,
+      LLV_HOT_STATE_ACTIVATION_TIMEOUT_MS: "5000",
+      LLV_HOT_STATE_ACTIVATION_POLL_MS: "10",
+      LLV_INCUMBENT_HOT_STATE_RELEASE_TIMEOUT_MS: "150",
+      LLV_INCUMBENT_HOT_STATE_RELEASE_POLL_MS: "10",
+    },
+    observe: async (state, child) => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        try {
+          const phase = (JSON.parse(fs.readFileSync(phaseFile, "utf8")) as { phase?: string }).phase;
+          if (phase && phases[phases.length - 1] !== phase) phases.push(phase);
+        } catch { /* the adapter rewrites the phase file atomically */ }
+        const authority = readHotStateAuthority(state);
+        if (authority?.mode === "sqlite"
+          && authority.releaseRevision === candidate.revision
+          && !authority.activationReadyAt
+          && phases.some((phase) => phase.startsWith("waiting for hot-state activation"))) {
+          markHotStateActivationReady(state, authority);
+          break;
+        }
+        await Bun.sleep(10);
+      }
+      await child.exited;
+    },
+    dockerScript: liveIncumbentDocker,
+  });
+
+  expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+  expect(result.authority).toMatchObject({
+    mode: "sqlite",
+    releaseRevision: candidate.revision,
+    activationReadyAt: expect.any(String),
+  });
+  expect(phases.some((phase) => phase.startsWith("releasing incumbent hot state"))).toBe(true);
+  expect(phases.some((phase) => /^waiting for hot-state activation - \d+s of \d+s - /.test(phase))).toBe(true);
+  fs.rmSync(path.dirname(phaseFile), { recursive: true, force: true });
+});
+
 test("promotion from SQLite to a legacy release checkpoints rollback mirrors first", async () => {
   const current = { ...release, hotStateBackend: HOT_STATE_BACKEND };
   const candidate = {

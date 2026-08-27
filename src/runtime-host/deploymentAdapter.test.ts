@@ -202,6 +202,28 @@ test("adapter action deadline terminates the process tree and clears durable own
   expect(fs.existsSync(fixture.stateFile)).toBe(false);
 });
 
+/* #1216: the runtime-host log carried nothing about a running deployment, so a
+   promote that stalled was invisible next to the journal maintenance chatter. */
+test("a running adapter action reports its phase transitions to the host log", async () => {
+  const phase = "waiting for hot-state activation - 3s of 180s - authority mode preparing revision matches epoch 9 activation pending";
+  const fixture = sleepingAdapter(phase);
+  const lines: string[] = [];
+  const adapter = HostCommandViewerDeploymentAdapter.fromExecutable(fixture.executable, {
+    stateFile: fixture.stateFile,
+    timeouts: { promote: 200 },
+    phaseLogIntervalMs: 5,
+    log: (...args) => { lines.push(args.map(String).join(" ")); },
+  });
+
+  await expect(adapter.promote({
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:18001",
+    revision: "a".repeat(40),
+  })).rejects.toThrow(`deployment adapter promote timed out while ${phase}`);
+  expect(new Set(lines)).toEqual(new Set([`[viewer deployment] promote ${phase}`]));
+});
+
 test("promotion deadline reports the active handoff phase", async () => {
   const candidate = {
     image: "viewer:test",

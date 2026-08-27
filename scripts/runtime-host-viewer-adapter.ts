@@ -51,6 +51,20 @@ import {
 } from "../src/runtime-host/hostRelease";
 import { completeRuntimeHostHandoff, stageRuntimeHostSuccessorContainer } from "../src/runtime-host/hostSuccessor";
 import {
+  awaitHotStateActivation,
+  awaitIncumbentHotStateRelease,
+  hotStateActivationApplies,
+  hotStateActivationObservation,
+  hotStateActivationPhase,
+  hotStateActivationSatisfied,
+  HOT_STATE_ACTIVATION_POLL_MS,
+  HOT_STATE_ACTIVATION_TIMEOUT_MS,
+  incumbentHotStateReleasePhase,
+  INCUMBENT_RELEASE_NOT_REQUIRED,
+  INCUMBENT_RELEASE_POLL_MS,
+  INCUMBENT_RELEASE_TIMEOUT_MS,
+} from "../src/runtime-host/deploymentHotState";
+import {
   hasViewerDeploymentCapability,
   promotedViewerReadinessPhase,
   viewerDeploymentRegistryBackendMode,
@@ -100,8 +114,13 @@ function removeDurableFile(filename: string): void {
   try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
 }
 
+let reportedAdapterPhase: string | null = null;
+
 function reportAdapterPhase(action: string, phase: string): void {
   if (!adapterPhaseFile) return;
+  const reported = `${action} :: ${phase}`;
+  if (reported === reportedAdapterPhase) return;
+  reportedAdapterPhase = reported;
   writeDurableJson(adapterPhaseFile, { action, phase, updatedAt: new Date().toISOString() });
 }
 
@@ -804,21 +823,54 @@ async function fenceCurrentSqliteRelease(
   }
 }
 
-async function waitForHotStateActivation(candidate: ViewerReleaseIdentity): Promise<void> {
-  if (candidate.hotStateBackend !== HOT_STATE_BACKEND) return;
-  const requestedTimeoutMs = Number(process.env.LLV_HOT_STATE_ACTIVATION_TIMEOUT_MS || 30_000);
-  const requestedPollMs = Number(process.env.LLV_HOT_STATE_ACTIVATION_POLL_MS || 50);
-  const timeoutMs = Number.isFinite(requestedTimeoutMs) ? Math.max(100, requestedTimeoutMs) : 30_000;
-  const pollMs = Number.isFinite(requestedPollMs) ? Math.max(5, requestedPollMs) : 50;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const authority = readHotStateAuthority(stateDir);
-    if (authority?.mode === "sqlite"
-      && authority.releaseRevision === candidate.revision
-      && authority.activationReadyAt) return;
-    await Bun.sleep(pollMs);
-  }
-  throw new Error("timed out waiting for the promoted Viewer to activate hot state");
+function budgetMs(name: string, fallback: number, floor: number): number {
+  const requested = Number(process.env[name] || fallback);
+  return Number.isFinite(requested) ? Math.max(floor, requested) : fallback;
+}
+
+/* #1216. An SQLite promote hands hot state from a live incumbent to the
+   candidate in two ordered steps, each with its own budget and its own visible
+   outcome. Step one waits for the incumbent to let go; the durable target flip
+   already fenced it out of SQLite writes, so a lingering incumbent is reported
+   rather than fatal. Step two waits for the candidate to publish activation and
+   names what it saw when it gives up. Both budgets sit inside the host-side
+   promote deadline (PROMOTE_ACTION_TIMEOUT_MS), so the adapter always outlives
+   its own waits and the operator reads a reason instead of a bare timeout. */
+async function handOverHotState(
+  candidate: ViewerReleaseIdentity,
+  current: ViewerReleaseIdentity | null,
+  phase: (value: string) => void,
+): Promise<void> {
+  if (!hotStateActivationApplies(candidate.hotStateBackend)) return;
+  const releaseTimeoutMs = budgetMs("LLV_INCUMBENT_HOT_STATE_RELEASE_TIMEOUT_MS", INCUMBENT_RELEASE_TIMEOUT_MS, 0);
+  const releasePollMs = budgetMs("LLV_INCUMBENT_HOT_STATE_RELEASE_POLL_MS", INCUMBENT_RELEASE_POLL_MS, 5);
+  const activationTimeoutMs = budgetMs("LLV_HOT_STATE_ACTIVATION_TIMEOUT_MS", HOT_STATE_ACTIVATION_TIMEOUT_MS, 100);
+  const activationPollMs = budgetMs("LLV_HOT_STATE_ACTIVATION_POLL_MS", HOT_STATE_ACTIVATION_POLL_MS, 5);
+  const authority = () => readHotStateAuthority(stateDir);
+  const activated = () => hotStateActivationSatisfied(authority(), candidate.revision);
+  const incumbent = current && current.container !== candidate.container ? current.container : null;
+  phase(incumbentHotStateReleasePhase("unknown", 0, releaseTimeoutMs));
+  const release = incumbent === null
+    ? INCUMBENT_RELEASE_NOT_REQUIRED
+    : await awaitIncumbentHotStateRelease({
+      inspect: () => containerState(incumbent),
+      activated,
+      sleep: (delayMs) => Bun.sleep(delayMs),
+      reportPhase: phase,
+      timeoutMs: releaseTimeoutMs,
+      pollMs: releasePollMs,
+    });
+  phase(hotStateActivationPhase(hotStateActivationObservation(authority(), candidate.revision), 0, activationTimeoutMs));
+  await awaitHotStateActivation({
+    revision: candidate.revision,
+    readAuthority: authority,
+    release,
+    inspectCandidate: () => containerState(candidate.container),
+    sleep: (delayMs) => Bun.sleep(delayMs),
+    reportPhase: phase,
+    timeoutMs: activationTimeoutMs,
+    pollMs: activationPollMs,
+  });
 }
 
 async function promoteTarget(
@@ -832,8 +884,7 @@ async function promoteTarget(
     ? await fenceCurrentSqliteRelease(current.revision, candidate)
     : null;
   const publication = switchTarget(candidate, "activate", undefined, fence, phase);
-  phase("waiting for hot-state activation");
-  await waitForHotStateActivation(candidate);
+  await handOverHotState(candidate, current, phase);
   return publication;
 }
 
