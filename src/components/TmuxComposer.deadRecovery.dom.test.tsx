@@ -198,14 +198,16 @@ test.each(["en", "uk"] as const)(
     expect(send.getAttribute("aria-disabled")).toBe("false");
     expect(send.disabled).toBe(false);
 
-    /* Finding 4: the dead host has no image pipeline, so the picker is DISABLED
-       and names the localized recovery reason, keeping a submission on hold until
-       the host recovers. */
+    /* Finding 4: the dead host has no image pipeline, and it says so in the
+       operator's language, keeping an image submission on hold until the host
+       recovers. Since #1224 the control itself stays open — a document is
+       delivered by inbox path and needs no image pipeline at all — so what the
+       recovery reason governs is the image, not the attach button. */
     const recoveryReason = translate(locale, "composer.imagesBlockedDuringRecovery");
-    const imageButton = host.querySelector(`button[aria-label="${translate(locale, "composer.addImages")}"]`) as HTMLButtonElement;
-    expect(imageButton).toBeTruthy();
-    expect(imageButton.disabled).toBe(true);
-    expect(imageButton.title).toBe(recoveryReason);
+    const attachButton = host.querySelector(`button[aria-label="${translate(locale, "composer.addAttachments")}"]`) as HTMLButtonElement;
+    expect(attachButton).toBeTruthy();
+    expect(attachButton.disabled).toBe(false);
+    expect(attachButton.title).toBe(recoveryReason);
     expect(host.textContent).toContain(recoveryReason);
 
     /* Production capability visibility: the matrix hides the runtime control

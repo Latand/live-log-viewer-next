@@ -243,3 +243,40 @@ test("images are unaffected: they still stage as images beside a document", asyn
   /* The staged-count copy stops saying "images" once one of them is not. */
   expect(host.textContent).toContain("2 attachments");
 });
+
+test("an empty file is refused by name instead of staging a tile that never delivers", async () => {
+  const host = mount();
+  flushSync(() => textareaProps(host).onDrop({
+    dataTransfer: { files: [fileOf("empty.log", "text/plain", 0)] },
+    preventDefault() {},
+    stopPropagation() {},
+  }));
+  await tick();
+
+  /* A zero-byte file has no bytes to hand an agent. Staging it would put a
+     tile on screen that claims "attached to the message" and then leaves with
+     the send — the silent discard #1224 exists to remove, in a new form. */
+  expect(tiles(host)).toHaveLength(0);
+  expect(staged.files).toEqual([]);
+  expect(host.textContent).toContain("empty.log");
+  expect(host.textContent).toContain("empty");
+});
+
+test("a read that comes back with no bytes errors its slot rather than sitting ready", async () => {
+  const host = mount();
+  flushSync(() => textareaProps(host).onDrop({
+    dataTransfer: { files: [fileOf("truncated.log", "text/plain")] },
+    preventDefault() {},
+    stopPropagation() {},
+  }));
+  /* The invariant, not the one input: no slot may sit in `ready` while the
+     deliverable projection excludes it, or Send goes out without it. */
+  flushSync(() => DeferredReader.settleAll("data:text/plain;base64,"));
+  await tick();
+
+  const ready = tiles(host).filter((tile) => tile.getAttribute("data-status") === "ready");
+  expect(ready).toHaveLength(0);
+  expect(tiles(host).map((tile) => tile.getAttribute("data-status"))).toEqual(["error"]);
+  expect(staged.files).toEqual([]);
+  expect(host.textContent).toContain("truncated.log");
+});

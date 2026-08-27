@@ -176,3 +176,34 @@ test("a send without attachments is byte-for-byte the send it always was", async
   expect(admitted[0]!.text).toBe("plain message");
   expect(inboxEntries()).toEqual([]);
 });
+
+test("an attachment larger than the command body ceiling still reaches the agent", async () => {
+  const admitted: Record<string, unknown>[] = [];
+  /* The bytes are on disk before the command is built, so the command's own
+     256 KiB ceiling is about the COMMAND — a document twice that size is an
+     ordinary attachment and must not be refused as an oversized request. */
+  const body = "invented log line\n".repeat(24_000);
+  expect(Buffer.from(body, "utf8").toString("base64").length).toBeGreaterThan(256 * 1024);
+  const response = await handleRuntimeCommand(request({
+    conversationId: "conversation_attach",
+    text: "read the trace",
+    idempotencyKey: "send-big-file",
+    files: [attachment("big-trace.log", body)],
+  }), "send", dependencies(async (input) => {
+    admitted.push(input as unknown as Record<string, unknown>);
+    return {
+      ok: true,
+      structured: true,
+      target: "conversation_attach",
+      outcome: "queued",
+      operationId: "op_big",
+      receipt: { operationId: "op_big", status: "queued" },
+    } as Awaited<ReturnType<NonNullable<NonNullable<Dependencies>["enqueue"]>>>;
+  }));
+
+  expect(response.status).toBe(202);
+  const written = String(admitted[0]!.text).split("\n").at(-1)!;
+  expect(path.basename(written)).toBe("big-trace.log");
+  expect(fs.readFileSync(written, "utf8")).toBe(body);
+  fs.rmSync(path.dirname(written), { recursive: true, force: true });
+});

@@ -442,7 +442,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "outbox.failed": "Не доставлено",
   "outbox.cancel": "Скасувати це повідомлення",
   "outbox.retry": "Повторити надсилання цього повідомлення",
-  "outbox.reattach": "Не надіслано — додайте зображення знову та надішліть",
+  "outbox.reattach": "Не надіслано — додайте файли знову та надішліть",
 
   // Agent control strip (issue #241)
   "strip.live": "наживо",
@@ -894,6 +894,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "attach.file": "файл",
   "attach.error": "помилка вкладення",
   "attach.imagesOnlyHere": "{name} не додано — цей композер приймає лише картинки PNG, JPEG, GIF або WebP",
+  "attach.empty": "{name} порожній — немає чого додавати",
   "attach.tooLarge": "{name}: завеликий (ліміт {max} МБ)",
   "attach.tooMany": "За один раз можна додати до {max} файлів",
   "attach.aggregateTooLarge": "Вкладення перевищують ліміт запиту — {max} МБ",

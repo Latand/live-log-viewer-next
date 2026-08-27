@@ -165,9 +165,14 @@ export function OutboxBubblesView({
                     uses, so nothing changes appearance when it replaces this
                     one — and a link the operator pasted is a link right away. */}
                 {mdBlocks(entry.text)}
-                {entry.images ? (
+                {/* What the submission actually carried. A file-only bubble
+                    used to render blank here, because the count came from the
+                    images alone (#1224). */}
+                {entry.images + (entry.files ?? 0) ? (
                   <span className="mt-1 block text-caption font-semibold text-muted">
-                    {t("composer.imagesCount", { count: entry.images })}
+                    {t(entry.files ? "composer.attachmentsCount" : "composer.imagesCount", {
+                      count: entry.images + (entry.files ?? 0),
+                    })}
                   </span>
                 ) : null}
               </div>

@@ -226,3 +226,15 @@ test("#1213 with no host behind the feed the bubble says it is waiting without n
     waited: translate("en", "runtime.receipt.waitedMin", { n: 3 }),
   }));
 });
+
+test("#1224 a bubble for a document-only submission names its attachment instead of rendering blank", async () => {
+  /* An attachment-only message has no text of its own, and the count came from
+     the images alone — so the operator's document appeared as an empty bubble
+     with a status chip under it. */
+  const host = await bubble({ text: "", images: 0, files: 1 }, SUBMITTED_AT + 1_000);
+  expect(host.textContent).toContain(translate("en", "composer.attachmentsCount", { count: 1 }));
+
+  /* An images-only submission keeps the wording it always had. */
+  const images = await bubble({ text: "", images: 2 }, SUBMITTED_AT + 1_000);
+  expect(images.textContent).toContain(translate("en", "composer.imagesCount", { count: 2 }));
+});

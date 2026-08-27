@@ -513,7 +513,7 @@ export const en = {
   "outbox.failed": "Not delivered",
   "outbox.cancel": "Cancel this message",
   "outbox.retry": "Retry sending this message",
-  "outbox.reattach": "Not sent — re-attach the images and send again",
+  "outbox.reattach": "Not sent — attach the files again and send",
 
   "draft.readPrompt": "Read the agent conversation in file {src} and continue from there: ",
   "draft.needDir": "specify a working directory",
@@ -916,6 +916,7 @@ export const en = {
   "attach.file": "file",
   "attach.error": "attachment error",
   "attach.imagesOnlyHere": "{name} wasn't attached — this composer takes PNG, JPEG, GIF or WebP images only",
+  "attach.empty": "{name} is empty — there is nothing to attach",
   "attach.tooLarge": "{name}: too large ({max} MB limit)",
   "attach.tooMany": "Up to {max} files can be attached at once",
   "attach.aggregateTooLarge": "Attachments exceed the {max} MB request limit",

@@ -1776,6 +1776,11 @@ export function TmuxComposerCore({
       id: clientMessageId,
       text: requestedText,
       images: requestedImages.length,
+      /* #1224: recorded on the durable entry so the refresh fence holds a
+         document-bearing submission back exactly as it holds an image-bearing
+         one — `outboxFiles` is memory-only, so a replay after a reload would
+         deliver the text without the file and say nothing. */
+      ...(requestedFiles.length ? { files: requestedFiles.length } : {}),
       at: nowMs(),
       /* Submission watermark (finding 2): the echoes of this exact text that
          already exist, so a pre-existing identical message never retires this

@@ -247,6 +247,18 @@ export function useImageAttachments(handlers: {
       (decoded) => {
         const current = attachmentsRef.current.find((attachment) => attachment.id === id);
         if (!current) return; /* removed while reading — never resurrect */
+        /* THE INVARIANT: no slot sits in `ready` while the deliverable
+           projection excludes it. `readyImages`/`readyFiles` both require
+           bytes, so a read that came back with none has to error here — a
+           `ready` tile that cannot be delivered claims delivery and then
+           leaves with the send, which is the silent discard #1224 removes. */
+        if (!decoded.base64) {
+          const name = current.name || translate(getLocale(), current.kind === "image" ? "img.image" : "attach.file");
+          const message = translate(getLocale(), "attach.empty", { name });
+          handlers.onError(message);
+          patch(id, (attachment) => ({ ...attachment, status: "error", base64: undefined, error: message }));
+          return;
+        }
         if (current.kind === "file") {
           /* A file carries no preview and consults no image capability: its
              bytes go to the inbox and the message names the path (#1224). */
@@ -292,14 +304,30 @@ export function useImageAttachments(handlers: {
 
   const addFiles = (input: File[]) => {
     if (!input.length) return;
-    const pickedImages = input.filter(isImage);
-    const pickedFiles = input.filter((file) => !isImage(file));
     const accepted: { file: File; kind: AttachmentKind }[] = [];
     let refused = false;
     const refuse = (message: string) => {
       refused = true;
       handlers.onError(message);
     };
+
+    /* A file with no bytes is refused BY NAME before anything is staged: there
+       is nothing to hand an agent, and a slot that stages anyway settles as
+       `ready` with an empty payload the send then leaves behind (#1224). Only
+       an explicit zero counts, so a picker that reports no size at all still
+       goes through the read, where the same emptiness is caught again. */
+    const usable: File[] = [];
+    for (const file of input) {
+      if (file.size !== 0) {
+        usable.push(file);
+        continue;
+      }
+      refuse(translate(getLocale(), "attach.empty", {
+        name: file.name || translate(getLocale(), isImage(file) ? "img.image" : "attach.file"),
+      }));
+    }
+    const pickedImages = usable.filter(isImage);
+    const pickedFiles = usable.filter((file) => !isImage(file));
 
     /* Images: unchanged behaviour and unchanged capability gate. An engine that
        cannot take an image says so here rather than at delivery time. */

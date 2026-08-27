@@ -127,16 +127,24 @@ async function dispatchRuntimeCommand(
         if (admittedFiles.error) {
           return NextResponse.json({ error: admittedFiles.error.error }, { status: admittedFiles.error.status });
         }
+        /* The uploaded bytes never reach `parseRuntimeCommand`. Its 256 KiB
+           ceiling bounds the COMMAND — and by this point the attachment is on
+           disk and represented by a path, so leaving the base64 on the object
+           would refuse every document past ~190 KB with an error naming neither
+           the file nor the real limit. The images branch above reduces its own
+           payload to refs for exactly this reason. */
+        const parsed: Record<string, unknown> = { ...(parseValue as Record<string, unknown>) };
+        delete parsed.files;
         if (admittedFiles.files.length) {
-          const parsed = parseValue as Record<string, unknown>;
           const bundle = buildFilePayload(
             typeof parsed.text === "string" ? parsed.text : "",
             admittedFiles.files,
             inboxFileBatchToken(typeof body.idempotencyKey === "string" ? body.idempotencyKey : null),
           );
           attachments.filePaths = bundle.filePaths;
-          parseValue = { ...parsed, text: bundle.payload };
+          parsed.text = bundle.payload;
         }
+        parseValue = parsed;
       }
     }
     command = parseRuntimeCommand(kind, parseValue);
