@@ -12,11 +12,17 @@ import { descendantPids } from "@/lib/proc/memory";
 import type { StructuredHostKillRef } from "@/lib/resources";
 
 import type { HandoffRow } from "./handoffQueue";
+import { NATIVE_MULTI_AGENT_DENY_FLAG } from "./hostActivityFlags";
+import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 import { terminateStructuredHostTree } from "./structuredHostControl";
 import {
   reconcileStructuredHostRetirement,
   STRUCTURED_HOST_RETIREMENT_CLAUSES,
   runStructuredHostRetirementSweep,
+  structuredHostRetirementGraceMs,
+  startStructuredHostRetirement,
+  stopStructuredHostRetirement,
+  STRUCTURED_HOST_RETIREMENT_INTERVAL_MS,
   structuredHostRetirementIdleMs,
   structuredHostRetirementJournalRecord,
   type StructuredHostRetirementClause,
@@ -50,7 +56,11 @@ function entry(over: Record<string, unknown> = {}): Record<string, unknown> {
       writerClaimEpoch: 1,
       activeTurnRef: null,
       pendingAttention: [],
-      activeFlags: [],
+      /* What every live Claude host actually carries: a permanent capability
+         advertisement, plus the denied-tool set when it launched without
+         native multi-agent tools. A predicate that reads these as activity
+         refuses every Claude host forever — the population #747 is about. */
+      activeFlags: [STRUCTURED_IMAGE_CAPABILITY, NATIVE_MULTI_AGENT_DENY_FLAG],
     },
     claimEpoch: 1,
     claimOwner: null,
@@ -109,6 +119,10 @@ interface SweepProbe {
 async function sweep(over: StructuredHostRetirementDependencies = {}): Promise<SweepProbe> {
   const terminated: StructuredHostKillRef[] = [];
   const report = await runStructuredHostRetirementSweep({
+    /* This process holds no structured hosts, so the real reader stands the
+       sweep down. Every clause case injects the answer the process that DOES
+       hold them would give; the stand-down itself has its own case below. */
+    publicationState: () => "ready",
     snapshot: () => snapshot(),
     handoffRows: () => [],
     durableEventTail: () => 12,
@@ -149,7 +163,11 @@ async function refusedBy(
   pinnedClauses.add(clause);
 }
 
-const fixtures: ChildProcess[] = [];
+/* Every pid a fixture tree put on this machine, torn down one by one. NOT by
+   process group: the grandchild calls setsid, which is the whole point of the
+   fixture, so `kill(-pid)` leaves it running past the end of the suite — the
+   orphan leak this feature exists to avoid, reproduced by its own tests. */
+const fixturePids: number[] = [];
 const scratchDirs: string[] = [];
 
 function fixtureTreeScript(): string {
@@ -169,16 +187,18 @@ function fixtureTreeScript(): string {
 }
 
 async function spawnFixtureHostTree(): Promise<{ pid: number; startIdentity: string; tree: number[] }> {
-  const child = spawn(process.execPath, [fixtureTreeScript()], { detached: true, stdio: "ignore" });
-  fixtures.push(child);
+  const child: ChildProcess = spawn(process.execPath, [fixtureTreeScript()], { detached: true, stdio: "ignore" });
+  child.unref();
   const pid = child.pid;
   if (pid === undefined) throw new Error("fixture host tree did not start");
+  fixturePids.push(pid);
   let tree: number[] = [];
   for (let attempt = 0; attempt < 200 && tree.length < 2; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 25));
     tree = descendantPids(pid, procBackend.ppidMap());
   }
   if (tree.length < 2) throw new Error("fixture host tree grew no child");
+  fixturePids.push(...tree);
   const startIdentity = procBackend.processIdentity(pid);
   if (startIdentity === null) throw new Error("fixture host tree has no process identity");
   return { pid, startIdentity, tree };
@@ -196,8 +216,8 @@ function processGroupId(pid: number): number | null {
 }
 
 afterEach(() => {
-  for (const child of fixtures.splice(0)) {
-    try { if (child.pid) process.kill(-child.pid, "SIGKILL"); } catch { /* the test already took it down */ }
+  for (const pid of fixturePids.splice(0)) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* the test already took it down */ }
   }
   for (const directory of scratchDirs.splice(0)) {
     try { fs.rmSync(directory, { recursive: true, force: true }); } catch { /* scratch only */ }
@@ -206,6 +226,8 @@ afterEach(() => {
 
 test("a settled, quiet, unclaimed host is retired and the audit says why", async () => {
   const probe = await sweep();
+  /* The fixture carries the flags a real Claude host carries, so this also
+     proves a capability advertisement is not read as activity. */
   expect(probe.terminated).toHaveLength(1);
   expect(probe.terminated[0]).toMatchObject({ kind: "structured", pid: HOST_PID, startIdentity: HOST_IDENTITY, sessionId: SESSION });
   const retired = probe.report.retired[0]!;
@@ -247,12 +269,36 @@ test("a host that is neither idle nor dead blocks retirement", async () => {
   await refusedBy("host-idle-or-dead", { snapshot: () => snapshot({ entries: { [`claude:${SESSION}`]: entry({ status: "live" }) } }) });
 });
 
-test("an active flag blocks retirement", async () => {
+test("an active flag blocks retirement, and a capability advertisement never does", async () => {
+  /* The activity flag arrives alongside the advertisements every Claude host
+     already carries, so the refusal has to come from the one that means the
+     host is doing something. */
   await refusedBy("no-active-flags", {
     snapshot: () => snapshot({
-      entries: { [`claude:${SESSION}`]: entry({ structuredHost: { ...(entry().structuredHost as object), activeFlags: ["compacting"] } }) },
+      entries: {
+        [`claude:${SESSION}`]: entry({
+          structuredHost: {
+            ...(entry().structuredHost as object),
+            activeFlags: [STRUCTURED_IMAGE_CAPABILITY, NATIVE_MULTI_AGENT_DENY_FLAG, "compacting"],
+          },
+        }),
+      },
     }),
   });
+
+  /* An advertisement a later release adds is unknown to the classifier, so it
+     counts as activity until it is named — unknown is never idle. */
+  const probe = await sweep({
+    snapshot: () => snapshot({
+      entries: {
+        [`claude:${SESSION}`]: entry({
+          structuredHost: { ...(entry().structuredHost as object), activeFlags: ["some-future-capability-v9"] },
+        }),
+      },
+    }),
+  });
+  expect(probe.terminated).toEqual([]);
+  expect(probe.report.refused[0]).toMatchObject({ clause: "no-active-flags" });
 });
 
 test("an undelivered handoff entry blocks retirement", async () => {
@@ -277,6 +323,19 @@ test("an undelivered handoff entry blocks retirement", async () => {
     updatedAt: "2026-08-26T09:00:00.000Z",
   } as unknown as HandoffRow;
   await refusedBy("handoff-queue-drained", { handoffRows: () => [row] });
+
+  /* A terminal row whose delivery was replayed owes nothing, and neither does
+     a claimed row that never carried one — a claim leaves an idle-turn row
+     `claimed` until the next hand-over, so a status test would refuse the
+     whole hosted population the moment the queue had a writer. */
+  const settled = await sweep({
+    handoffRows: () => [
+      { ...row, status: "claimed", pendingDeliveries: [] } as unknown as HandoffRow,
+      { ...row, status: "terminal", replayedDeliveryIds: ["delivery-1"] } as unknown as HandoffRow,
+    ],
+  });
+  expect(settled.report.refused).toEqual([]);
+  expect(settled.terminated).toHaveLength(1);
 });
 
 test("an undelivered held message blocks retirement", async () => {
@@ -317,6 +376,12 @@ test("a realtime-bound session blocks retirement", async () => {
   await refusedBy("no-realtime-binding", { realtimeBound: () => true });
 });
 
+test("a realtime binding that cannot be established blocks retirement", async () => {
+  /* The ledgers are process-scoped: a process that does not hold the host
+     answers nothing, not "no call". Null is that answer, and it refuses. */
+  await refusedBy("no-realtime-binding", { realtimeBound: () => null });
+});
+
 test("a live orchestrator seat blocks retirement", async () => {
   await refusedBy("seat-free", { orchestratorSeatConversations: () => new Set([CONVERSATION]) });
 });
@@ -341,6 +406,26 @@ test("a transcript written inside the interval blocks retirement", async () => {
 
 test("a host whose process identity cannot be observed blocks retirement", async () => {
   await refusedBy("process-identity", { processIdentity: () => null });
+});
+
+test("a host whose record stored no kernel identity blocks retirement", async () => {
+  /* The hosts write a null here precisely when they concluded their own pid
+     was recycled or unverifiable. Standing today's observation in for it would
+     compare an observation against itself and disable the fence entirely, on
+     a record that already said the pid cannot be trusted. */
+  await refusedBy("process-identity", {
+    snapshot: () => snapshot({
+      entries: {
+        [`claude:${SESSION}`]: entry({
+          structuredHost: { ...(entry().structuredHost as object), process: { pid: HOST_PID, startIdentity: null } },
+        }),
+      },
+    }),
+  });
+});
+
+test("a pid that no longer carries the recorded identity blocks retirement", async () => {
+  await refusedBy("process-identity", { processIdentity: () => `${HOST_PID}:999999` });
 });
 
 test("a sweep defers past its batch bound rather than overrunning the next tick", async () => {
@@ -505,11 +590,110 @@ test("a replacement host on the same session key is never reached", async () => 
     }),
   });
 
+  /* The predicate itself refuses, so the termination is never even reached. */
+  expect(probe.report.retired).toEqual([]);
+  expect(probe.report.failed).toEqual([]);
+  expect(probe.terminated).toEqual([]);
+  expect(probe.report.refused).toHaveLength(1);
+  expect(probe.report.refused[0]!.clause).toBe("process-identity");
+  expect(cleared).toEqual([]);
+  for (const pid of tree.tree) expect(procBackend.pidAlive(pid)).toBe(true);
+});
+
+test("an identity that changes after the predicate passed is refused at the signal", async () => {
+  /* The other half of the same fence: the predicate can only speak for the
+     instant it read, so the kill re-checks the kernel identity itself. Here the
+     record is honest and the sweep qualifies the host — and the tree still
+     survives, because the pid stopped being that host in between. */
+  const tree = await spawnFixtureHostTree();
+  const cleared: string[] = [];
+
+  const probe = await sweep({
+    snapshot: () => snapshot({
+      entries: {
+        [`claude:${SESSION}`]: entry({
+          structuredHost: { ...(entry().structuredHost as object), process: { pid: tree.pid, startIdentity: tree.startIdentity } },
+        }),
+      },
+    }),
+    processIdentity: (pid) => procBackend.processIdentity(pid),
+    processMemory: (pids) => procBackend.processMemory(pids),
+    ppidMap: () => procBackend.ppidMap(),
+    owned: () => false,
+    terminate: (ref) => terminateStructuredHostTree(ref, {
+      /* The kernel handed this pid to something else between the predicate
+         and the signal. */
+      processIdentity: () => `${tree.pid}:0`,
+      terminateOwnedHost: async () => false,
+      retireRegistryEntry: (key) => { cleared.push(`${key.engine}:${key.sessionId}`); },
+      graceMs: 200,
+      deadlineMs: 5_000,
+    }),
+  });
+
   expect(probe.report.retired).toEqual([]);
   expect(probe.report.failed).toHaveLength(1);
   expect(probe.report.failed[0]!.error).toContain("host has changed");
   expect(cleared).toEqual([]);
   for (const pid of tree.tree) expect(procBackend.pidAlive(pid)).toBe(true);
+});
+
+test("a host that stops qualifying between evaluation and its turn is not killed", async () => {
+  /* A batch ahead of a candidate may spend a grace ladder each, so its clauses
+     can be a minute old by the time the signal would go out. The re-check is
+     what keeps a turn that started in that window from being killed mid-flight.
+     The first read is the planning pass; every read after it is the re-check. */
+  let reads = 0;
+  const probe = await sweep({
+    snapshot: () => {
+      reads += 1;
+      return reads === 1
+        ? snapshot()
+        : snapshot({
+            conversations: {
+              [CONVERSATION]: conversation({ turn: { state: "busy", source: "user", terminalAt: null, observedAt: null } }),
+            },
+          });
+    },
+  });
+
+  expect(reads).toBeGreaterThan(1);
+  expect(probe.terminated).toEqual([]);
+  expect(probe.report.retired).toEqual([]);
+  expect(probe.report.refused).toEqual([
+    expect.objectContaining({ clause: "turn-settled", changed: true }),
+  ]);
+});
+
+test("a registry row that vanishes before its turn is reported, not signalled", async () => {
+  let reads = 0;
+  const probe = await sweep({
+    snapshot: () => {
+      reads += 1;
+      return reads === 1 ? snapshot() : snapshot({ entries: {} });
+    },
+  });
+  expect(probe.terminated).toEqual([]);
+  expect(probe.report.refused).toEqual([
+    expect.objectContaining({ clause: "process-identity", changed: true }),
+  ]);
+});
+
+test("a process that does not hold the structured hosts sweeps nothing at all", async () => {
+  /* Ownership, a live voice binding and a hosted realtime thread are all
+     process-scoped state of the process that bound the delivery queue. Asked
+     anywhere else they answer nothing, so two clauses would go vacuous and the
+     graceful shutdown would be unreachable. The sweep refuses to evaluate a
+     single host from there — and still leaves a record that it stood down. */
+  for (const state of ["unbound", "rebinding"] as const) {
+    const probe = await sweep({ publicationState: () => state, terminate: async () => { throw new Error("must not signal"); } });
+    expect(probe.report.standDown).toBe(state);
+    expect(probe.report.evaluated).toBe(0);
+    expect(probe.report.retired).toEqual([]);
+    expect(probe.report.refused).toEqual([]);
+    expect(probe.terminated).toEqual([]);
+    expect(probe.report.finishedAt).not.toBe("");
+  }
 });
 
 test("the controller seam sweeps on its own, honours the configured interval and swallows a failure", async () => {
@@ -539,6 +723,44 @@ test("the controller seam sweeps on its own, honours the configured interval and
     sweep: async () => { throw new Error("registry unavailable"); },
   });
   expect(failed).toBeNull();
+});
+
+test("an unset and a blank grace are the same statement, and neither is zero", async () => {
+  /* `Number("")` is 0, which would mean "escalate to SIGKILL on the first pass"
+     and lose the graceful window entirely — the idle parser already treats
+     blank as unset, and these two must not disagree. */
+  expect(structuredHostRetirementGraceMs({})).toBe(5_000);
+  expect(structuredHostRetirementGraceMs({ LLV_HOST_RETIREMENT_GRACE_MS: "" })).toBe(5_000);
+  expect(structuredHostRetirementGraceMs({ LLV_HOST_RETIREMENT_GRACE_MS: "   " })).toBe(5_000);
+  expect(structuredHostRetirementGraceMs({ LLV_HOST_RETIREMENT_GRACE_MS: "not a number" })).toBe(5_000);
+  expect(structuredHostRetirementGraceMs({ LLV_HOST_RETIREMENT_GRACE_MS: "1200" })).toBe(1_200);
+  /* An explicit zero is still the operator's word. */
+  expect(structuredHostRetirementGraceMs({ LLV_HOST_RETIREMENT_GRACE_MS: "0" })).toBe(0);
+  expect(structuredHostRetirementGraceMs({ LLV_HOST_RETIREMENT_GRACE_MS: "999999" })).toBe(60_000);
+  expect(structuredHostRetirementIdleMs({ LLV_HOST_RETIREMENT_IDLE_HOURS: "" })).toBe(6 * 3_600_000);
+});
+
+test("the sweep runs on its own timer, once per process", async () => {
+  const scheduled: { delayMs: number; callback: () => void }[] = [];
+  const sweeps: number[] = [];
+  const start = () => startStructuredHostRetirement({
+    scheduleInterval: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs });
+      return { unref: () => {} } as unknown as ReturnType<typeof setInterval>;
+    },
+    sweep: async () => { sweeps.push(1); },
+  });
+  try {
+    start();
+    start();
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]!.delayMs).toBe(STRUCTURED_HOST_RETIREMENT_INTERVAL_MS);
+    scheduled[0]!.callback();
+    await Promise.resolve();
+    expect(sweeps).toHaveLength(1);
+  } finally {
+    stopStructuredHostRetirement();
+  }
 });
 
 test("every clause of the predicate has a case that proves it blocks retirement", () => {

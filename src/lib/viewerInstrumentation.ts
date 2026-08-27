@@ -86,6 +86,8 @@ interface CurrentReleaseControllerLoaders {
   loadTelegramReportScheduler?: () => Promise<{ ensureTelegramReportScheduler: () => void }>;
   /** Optional for the same reason. */
   loadTelegramConnectorBoot?: () => Promise<{ provisionTelegramConnectorAtStartup: () => Promise<unknown> }>;
+  /** Optional for the same reason. */
+  loadStructuredHostRetirement?: () => Promise<{ startStructuredHostRetirement: () => void }>;
 }
 
 interface ViewerRuntimeActivationSteps {
@@ -330,6 +332,7 @@ export async function startCurrentReleaseControllers(
     loadAccountMigrationController: () => import("@/lib/accounts/migration/controller"),
     loadTelegramReportScheduler: () => import("@/lib/telegram/reportRunner"),
     loadTelegramConnectorBoot: () => import("@/lib/telegram/connectorBoot"),
+    loadStructuredHostRetirement: () => import("@/lib/runtime/structuredHostRetirement"),
   },
 ): Promise<void> {
   const { startFlowPipelineController } = await loaders.loadFlowPipelineController();
@@ -359,6 +362,20 @@ export async function startCurrentReleaseControllers(
     telegram?.ensureTelegramReportScheduler();
   } catch (error) {
     console.error("[telegram report] scheduler start failed", error instanceof Error ? error.name : "unknown");
+  }
+  /* Automatic structured host retirement (#747). It belongs to the release
+     that owns traffic for a stronger reason than the others: ownership of a
+     host and its live transports are process-scoped state of the process that
+     bound the delivery queue, so this is the only process that can answer the
+     predicate's questions or ask a host to shut down through its own
+     lifecycle. Started before the account-controller switch below, because
+     turning account migration off must not silently stop reclaiming hosts —
+     retirement has its own off switch (`LLV_HOST_RETIREMENT_IDLE_HOURS=0`). */
+  try {
+    const retirement = await loaders.loadStructuredHostRetirement?.();
+    retirement?.startStructuredHostRetirement();
+  } catch (error) {
+    console.error("[host retirement] sweep start failed", error instanceof Error ? error.name : "unknown");
   }
   if (env.LLV_ACCOUNT_CONTROLLER_DISABLED === "1") return;
   const { startAccountMigrationController } = await loaders.loadAccountMigrationController();

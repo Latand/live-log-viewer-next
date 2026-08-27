@@ -14,7 +14,12 @@ import { RESOURCE_STRUCTURED_HOST_LIMIT } from "@/lib/types";
 import { durableRuntimeEventTailSeq } from "./eventStore";
 import type { HandoffRow } from "./handoffQueue";
 import { handoffQueue } from "./handoffQueueStore";
-import { hasStructuredDeliveryHost, structuredDeliveryHostForConversation } from "./structuredDeliveryController";
+import { blockingHostActivityFlags } from "./hostActivityFlags";
+import {
+  hasStructuredDeliveryHost,
+  structuredDeliveryHostForConversation,
+  structuredDeliveryPublicationState,
+} from "./structuredDeliveryController";
 import {
   terminateStructuredHostTree,
   type StructuredHostTerminationOutcome,
@@ -51,6 +56,12 @@ import { realtimeBoundConversationIds } from "./voiceViewBinding";
  *   ladder in {@link terminateStructuredHostTree} signals the descendant set by
  *   pid and reuses the identity fence #1203 built, so a retirement can never
  *   reach a replacement host that took the session key since the snapshot.
+ * - **This runs in the process that holds the hosts, and nowhere else.**
+ *   Ownership of a host and the live transports bound to its conversation are
+ *   process-scoped state of the process that bound the structured delivery
+ *   queue. Asked anywhere else they answer nothing, not "none", so a sweep
+ *   there reads a bound call as unbound and an owned host as orphaned. See
+ *   {@link startStructuredHostRetirement}.
  */
 
 /** Conservative default: well past the 2 h the resources dialog offers by
@@ -63,10 +74,10 @@ const DEFAULT_RETIREMENT_GRACE_MS = 5_000;
 const MAX_RETIREMENT_GRACE_MS = 60_000;
 const TERMINATION_DEADLINE_MARGIN_MS = 10_000;
 /**
- * Retirements attempted per sweep. The controller ticks every 60 s and each
- * termination may wait out the grace ladder, so an unbounded batch would let
- * one sweep overrun the next. Everything skipped is reported as deferred and
- * picked up by the following tick.
+ * Retirements attempted per sweep. Each termination may wait out the grace
+ * ladder, so an unbounded batch would let one sweep overrun the next tick.
+ * Everything skipped is reported as deferred and picked up by the following
+ * one; nothing is lost, it only takes another interval.
  */
 const RETIREMENT_BATCH = 8;
 
@@ -127,7 +138,9 @@ export interface StructuredHostRetirementSubject {
   /** The ledger's durable tail: the session's own cursor. Null when the ledger
       exists but could not be read. */
   durableEventTail: number | null;
-  realtimeBound: boolean;
+  /** Null when this process cannot establish whether a live transport is bound
+      — a state the sweep refuses on rather than reads as "no call". */
+  realtimeBound: boolean | null;
   /** Null when the registry cannot establish whether this host holds a seat. */
   seat: boolean | null;
   transcriptMtimeMs: number | null;
@@ -178,8 +191,14 @@ export function structuredHostRetirementVerdict(
   }
   pass("host-idle-or-dead");
 
-  if (subject.activeFlags.length > 0) {
-    return refuse("no-active-flags", `the host carries ${subject.activeFlags.length} active flag(s)`);
+  /* Capability advertisements are not activity: every Claude host carries
+     `structured-image-v1` (and the multi-agent denial's tool set) for its whole
+     life, so reading the raw array refuses every Claude host forever and
+     retires nothing at all. Anything the classifier does not recognise still
+     counts as activity and still refuses. */
+  const activityFlags = blockingHostActivityFlags(subject.activeFlags);
+  if (activityFlags.length > 0) {
+    return refuse("no-active-flags", `the host is flagged ${activityFlags.join(", ")}`);
   }
   pass("no-active-flags");
 
@@ -205,6 +224,9 @@ export function structuredHostRetirementVerdict(
   }
   pass("events-flushed");
 
+  if (subject.realtimeBound === null) {
+    return refuse("no-realtime-binding", "whether a realtime session is bound cannot be established here");
+  }
   if (subject.realtimeBound) return refuse("no-realtime-binding", "a realtime session is bound to this conversation");
   pass("no-realtime-binding");
 
@@ -221,13 +243,21 @@ export function structuredHostRetirementVerdict(
   }
   pass("transcript-idle");
 
-  /* The fence #1203 built needs a kernel identity to bind the kill to. The
-     record's own is authoritative; a record that stored none must not inherit
-     a null that would disable the recycled-pid check, so the identity observed
-     with the pid now stands in for it. */
-  const startIdentity = subject.process.startIdentity ?? subject.observedStartIdentity;
-  if (subject.observedStartIdentity === null || startIdentity === null) {
+  /* The fence #1203 built binds the kill to the identity the record stored,
+     and only to that. A stored null is not a gap to fill: the hosts write it
+     precisely when they concluded their own pid was recycled or unverifiable,
+     so substituting today's observation would compare an observation against
+     itself and hand an unattended sweep a tree it never identified. Refusing
+     costs one leaked host; substituting can cost an unrelated process tree. */
+  const startIdentity = subject.process.startIdentity;
+  if (startIdentity === null) {
+    return refuse("process-identity", `the registry stored no kernel identity for pid ${subject.process.pid}`);
+  }
+  if (subject.observedStartIdentity === null) {
     return refuse("process-identity", `no kernel identity can be observed for pid ${subject.process.pid}`);
+  }
+  if (subject.observedStartIdentity !== startIdentity) {
+    return refuse("process-identity", `pid ${subject.process.pid} is no longer the recorded host`);
   }
   pass("process-identity");
 
@@ -265,6 +295,11 @@ export interface StructuredHostRetirementRefusal {
   conversationId: string | null;
   clause: StructuredHostRetirementClause;
   reason: string;
+  /** Set when the host qualified on evaluation and stopped qualifying in the
+      re-check taken one step before the signal — a turn that started, a seat
+      that was taken, a message that arrived while earlier candidates in the
+      same sweep were being terminated. */
+  changed?: true;
 }
 
 export interface StructuredHostRetirementFailure {
@@ -284,6 +319,10 @@ export interface StructuredHostRetirementReport {
   evaluated: number;
   /** Qualifying hosts left for the next tick by the per-sweep batch bound. */
   deferred: number;
+  /** Why the sweep evaluated nothing at all: this process does not hold the
+      structured hosts, so it can establish neither their live transports nor
+      their ownership. Null when the sweep ran. */
+  standDown: "rebinding" | "unbound" | null;
   retired: StructuredHostRetirementRecord[];
   refused: StructuredHostRetirementRefusal[];
   failed: StructuredHostRetirementFailure[];
@@ -291,10 +330,11 @@ export interface StructuredHostRetirementReport {
 }
 
 export interface StructuredHostRetirementDependencies {
+  publicationState?: () => "ready" | "rebinding" | "unbound";
   snapshot?: () => RegistryFile;
   handoffRows?: () => readonly HandoffRow[];
   durableEventTail?: (sessionId: string) => number | null;
-  realtimeBound?: (conversationId: string) => boolean;
+  realtimeBound?: (conversationId: string) => boolean | null;
   orchestratorSeatConversations?: () => ReadonlySet<string>;
   transcriptStat?: (pathname: string) => { mtimeMs: number } | null;
   processIdentity?: (pid: number) => string | null;
@@ -327,7 +367,12 @@ export function structuredHostRetirementIdleMs(
 export function structuredHostRetirementGraceMs(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): number {
-  const value = Number(env.LLV_HOST_RETIREMENT_GRACE_MS);
+  /* Unset and blank are the same statement — "the operator said nothing" —
+     and `Number("")` is 0, which would silently mean "escalate to SIGKILL
+     immediately" and lose the graceful window the default exists for. */
+  const raw = env.LLV_HOST_RETIREMENT_GRACE_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_RETIREMENT_GRACE_MS;
+  const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) return DEFAULT_RETIREMENT_GRACE_MS;
   return Math.min(value, MAX_RETIREMENT_GRACE_MS);
 }
@@ -341,21 +386,24 @@ function transcriptStat(pathname: string): { mtimeMs: number } | null {
   }
 }
 
-/** Conversations a live voice call or a hosted realtime thread is bound to.
-    Both are process-scoped, because both describe a transport that does not
-    survive the Viewer. */
-function defaultRealtimeBound(conversationId: string): boolean {
-  if (realtimeBoundConversationIds().has(conversationId)) return true;
+/**
+ * Conversations a live voice call or a hosted realtime thread is bound to.
+ *
+ * Both ledgers are process-scoped, because both describe a transport that does
+ * not survive the Viewer — which is exactly why this can only be read from the
+ * process that holds the hosts. Asked anywhere else it does not answer "no
+ * call", it answers nothing, and null is what the predicate refuses on.
+ */
+function defaultRealtimeBound(conversationId: string): boolean | null {
   try {
+    if (realtimeBoundConversationIds().has(conversationId)) return true;
     const host = structuredDeliveryHostForConversation(conversationId) as
       { currentRealtimeSessionId?: () => string | null } | null;
     return typeof host?.currentRealtimeSessionId === "function"
       ? host.currentRealtimeSessionId() !== null
       : false;
   } catch {
-    /* A host that cannot answer holds no realtime session we can prove; the
-       predicate's other clauses still have to pass for it to be retired. */
-    return false;
+    return null;
   }
 }
 
@@ -461,14 +509,20 @@ class RetirementWorkIndex {
  * both are the same clause: the handoff queue's own rows, and the registry's
  * held deliveries — a message accepted for a conversation whose host had not
  * taken it yet. Retiring under either strands the message.
+ *
+ * What blocks is an UNDELIVERED entry, in every status. A row's status
+ * describes where its ownership transfer stands, not whether a message is
+ * outstanding: `collectHandoffCandidates` enqueues one row per hosted
+ * conversation and a claim leaves an idle-turn row `claimed` until the next
+ * hand-over, so a status test would refuse the entire hosted population the
+ * moment the queue had a writer. The unreplayed pending delivery is the thing
+ * a retirement would strand, so that is the whole test.
  */
 function undeliveredHandoffIndex(rows: readonly HandoffRow[], file: RegistryFile): RetirementWorkIndex {
   const index = new RetirementWorkIndex();
   for (const row of rows) {
-    if (row.status === "terminal" || row.status === "failed") {
-      const replayed = new Set(row.replayedDeliveryIds ?? []);
-      if (!(row.pendingDeliveries ?? []).some((delivery) => !replayed.has(delivery.deliveryId))) continue;
-    }
+    const replayed = new Set(row.replayedDeliveryIds ?? []);
+    if (!(row.pendingDeliveries ?? []).some((delivery) => !replayed.has(delivery.deliveryId))) continue;
     if (row.engine === "claude" || row.engine === "codex") index.addKey(`${row.engine}:${row.engineSessionId}`);
     else index.addConversation(row.conversationId);
   }
@@ -491,6 +545,111 @@ function openOperationIndex(file: RegistryFile): RetirementWorkIndex {
 }
 
 /**
+ * Everything one evaluation of the predicate needs that comes out of durable
+ * state, indexed once. Rebuilt whenever the sweep re-reads, because a re-check
+ * whose queue and receipts come from the planning pass would re-check nothing.
+ */
+interface RetirementInputs {
+  file: RegistryFile;
+  conversationsBySession: Map<string, RegistryFile["conversations"][string]>;
+  undelivered: RetirementWorkIndex;
+  openOperations: RetirementWorkIndex;
+  /** The seat file is one read per pass, not one per host: a candidate list is
+      bounded but not small, and this is a file. */
+  seatConversations: ReadonlySet<string>;
+}
+
+/** Per-host facts that come from a durable read the whole pass shares. */
+interface RetirementSources {
+  snapshot: () => RegistryFile;
+  handoffRows: () => readonly HandoffRow[];
+  seatConversations: () => ReadonlySet<string>;
+}
+
+function retirementInputs(sources: RetirementSources): RetirementInputs {
+  const file = sources.snapshot();
+  const conversationsBySession = new Map<string, RegistryFile["conversations"][string]>();
+  for (const conversation of Object.values(file.conversations)) {
+    for (const generation of conversation.generations) conversationsBySession.set(generation.id, conversation);
+  }
+  return {
+    file,
+    conversationsBySession,
+    undelivered: undeliveredHandoffIndex(sources.handoffRows(), file),
+    openOperations: openOperationIndex(file),
+    seatConversations: sources.seatConversations(),
+  };
+}
+
+/** The live facts the predicate reads off the machine rather than out of a
+    durable store. Every one is re-read on the re-check, because every one of
+    them can change under it. */
+interface RetirementReaders {
+  durableEventTail: (sessionId: string) => number | null;
+  realtimeBound: (conversationId: string) => boolean | null;
+  transcriptStat: (pathname: string) => { mtimeMs: number } | null;
+  processIdentity: (pid: number) => string | null;
+}
+
+/** Candidate rows: registry-recorded structured hosts only. */
+function retirementCandidates(file: RegistryFile) {
+  return Object.values(file.entries)
+    .filter((entry) => Boolean(entry.structuredHost?.process)
+      && (entry.key.engine === "claude" || entry.key.engine === "codex")
+      /* A pane-hosted entry belongs to the tmux lifecycle, not to this one. */
+      && entry.host === null)
+    .slice(0, RESOURCE_STRUCTURED_HOST_LIMIT);
+}
+
+function retirementSubject(
+  entry: RegistryFile["entries"][string],
+  inputs: RetirementInputs,
+  readers: RetirementReaders,
+): StructuredHostRetirementSubject {
+  const columns = entry.structuredHost!;
+  const hostProcess = columns.process!;
+  const key = entry.key as SessionKey & { engine: "claude" | "codex" };
+  const keyId = sessionKeyId(key);
+  const conversation = inputs.conversationsBySession.get(key.sessionId) ?? null;
+  const conversationId = conversation?.id ?? null;
+  const memberships = conversation ? inputs.file.memberships[conversation.id] ?? [] : [];
+  const pipeline = memberships.find((membership) => membership.kind === "pipeline") ?? null;
+  const generation = conversation?.generations.find((candidate) => candidate.id === key.sessionId) ?? null;
+
+  return {
+    key,
+    keyId,
+    conversationId,
+    title: generation?.launchProfile.title ?? null,
+    role: conversation?.agentRole ?? pipeline?.role ?? generation?.launchProfile.role ?? null,
+    stage: pipeline?.stageId ?? pipeline?.slot ?? null,
+    cwd: entry.cwd || generation?.launchProfile.cwd || "",
+    transcriptPath: entry.artifactPath || "",
+    process: hostProcess,
+    status: entry.status,
+    activeTurnRef: columns.activeTurnRef,
+    turnBusy: conversation === null || conversation.turn.state === "unknown"
+      ? null
+      : conversation.turn.state === "busy",
+    pendingAttention: columns.pendingAttention,
+    activeFlags: columns.activeFlags,
+    pendingAction: entry.pendingAction,
+    structuredHostOperationId: entry.structuredHostOperationId ?? null,
+    undeliveredHandoffEntries: inputs.undelivered.count(keyId, conversationId),
+    openOperations: inputs.openOperations.count(keyId, conversationId),
+    eventCursor: columns.eventCursor,
+    durableEventTail: readers.durableEventTail(key.sessionId),
+    realtimeBound: conversationId === null ? false : readers.realtimeBound(conversationId),
+    seat: conversation === null
+      ? null
+      : memberships.some((membership) => membership.kind === "orchestrator")
+        || inputs.seatConversations.has(conversation.id),
+    transcriptMtimeMs: entry.artifactPath ? readers.transcriptStat(entry.artifactPath)?.mtimeMs ?? null : null,
+    observedStartIdentity: readers.processIdentity(hostProcess.pid),
+  };
+}
+
+/**
  * One pass over every structured host the registry records.
  *
  * Only recorded hosts are candidates. A process the scan finds with no registry
@@ -500,6 +659,21 @@ function openOperationIndex(file: RegistryFile): RetirementWorkIndex {
  * runtime container, its supervisors and the Viewer's own chain are never
  * recorded as structured hosts, and {@link terminateStructuredHostTree} refuses
  * the Viewer's own ancestry a second time.
+ *
+ * Two things about WHERE and WHEN this runs are load-bearing:
+ *
+ * - **It runs only in the process that holds the hosts.** A voice binding, a
+ *   hosted realtime thread and host ownership all live in that process and
+ *   nowhere else. Asked from any other process they do not answer "none", they
+ *   answer nothing — so a sweep there would read a bound call as unbound and
+ *   an owned host as orphaned, skip the graceful lifecycle shutdown entirely
+ *   and go straight to signals. `publicationState` is that fence, and it is
+ *   checked before a single candidate is read.
+ * - **A qualification is re-proved one step before the signal.** The batch
+ *   ahead of a candidate may spend a grace ladder each, so its clauses can be
+ *   a minute or more old by the time its turn comes. Every volatile fact is
+ *   re-read from durable state and from the machine, and a host that stopped
+ *   qualifying is reported with the clause that changed instead of killed.
  */
 export async function runStructuredHostRetirementSweep(
   dependencies: StructuredHostRetirementDependencies = {},
@@ -513,17 +687,21 @@ export async function runStructuredHostRetirementSweep(
     ?? DEFAULT_RETIREMENT_IDLE_HOURS * 3_600_000;
   const graceMs = dependencies.graceMs ?? structuredHostRetirementGraceMs();
   const batch = dependencies.batch ?? RETIREMENT_BATCH;
-  const file = (dependencies.snapshot ?? (() => agentRegistry().readOnlySnapshot()))();
-  const rows = (dependencies.handoffRows ?? (() => {
+  const snapshot = dependencies.snapshot ?? (() => agentRegistry().readOnlySnapshot());
+  const handoffRows = dependencies.handoffRows ?? (() => {
     try { return handoffQueue().rows(); } catch { return []; }
-  }))();
-  const undelivered = undeliveredHandoffIndex(rows, file);
-  const openOperations = openOperationIndex(file);
-  const eventTail = dependencies.durableEventTail ?? ((sessionId: string) => durableRuntimeEventTailSeq(sessionId));
-  const realtimeBound = dependencies.realtimeBound ?? defaultRealtimeBound;
-  const seatConversations = (dependencies.orchestratorSeatConversations ?? defaultOrchestratorSeatConversations)();
-  const stat = dependencies.transcriptStat ?? transcriptStat;
-  const identityOf = dependencies.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
+  });
+  const sources: RetirementSources = {
+    snapshot,
+    handoffRows,
+    seatConversations: dependencies.orchestratorSeatConversations ?? defaultOrchestratorSeatConversations,
+  };
+  const readers: RetirementReaders = {
+    durableEventTail: dependencies.durableEventTail ?? ((sessionId: string) => durableRuntimeEventTailSeq(sessionId)),
+    realtimeBound: dependencies.realtimeBound ?? defaultRealtimeBound,
+    transcriptStat: dependencies.transcriptStat ?? transcriptStat,
+    processIdentity: dependencies.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid)),
+  };
   const memoryOf = dependencies.processMemory ?? ((pids: Iterable<number>) => procBackend.processMemory(pids));
   const ppids = dependencies.ppidMap ?? (() => procBackend.ppidMap());
   const owned = dependencies.owned ?? hasStructuredDeliveryHost;
@@ -532,85 +710,91 @@ export async function runStructuredHostRetirementSweep(
     deadlineMs: graceMs + TERMINATION_DEADLINE_MARGIN_MS,
   }));
   const record = dependencies.record ?? recordRetirementReport;
-
-  const conversationsBySession = new Map<string, RegistryFile["conversations"][string]>();
-  for (const conversation of Object.values(file.conversations)) {
-    for (const generation of conversation.generations) conversationsBySession.set(generation.id, conversation);
-  }
-
-  const candidates = Object.values(file.entries)
-    .filter((entry) => Boolean(entry.structuredHost?.process)
-      && (entry.key.engine === "claude" || entry.key.engine === "codex")
-      /* A pane-hosted entry belongs to the tmux lifecycle, not to this one. */
-      && entry.host === null)
-    .slice(0, RESOURCE_STRUCTURED_HOST_LIMIT);
+  const publicationState = dependencies.publicationState ?? structuredDeliveryPublicationState;
 
   const report: StructuredHostRetirementReport = {
     version: 1,
     startedAt: new Date(startedAtMs).toISOString(),
     finishedAt: "",
     idleHours: idleMs / 3_600_000,
-    evaluated: candidates.length,
+    evaluated: 0,
     deferred: 0,
+    standDown: null,
     retired: [],
     refused: [],
     failed: [],
     reclaimed: { rssBytes: 0, swapBytes: 0, processes: 0 },
   };
 
-  let parents: Map<number, number> | null = null;
+  const publication = publicationState();
+  if (publication !== "ready") {
+    /* Not an error and not "nothing to do": this process cannot speak for the
+       hosts, so it evaluates none of them. The journal still gets the record,
+       because a sweep that stood down must be distinguishable from one that
+       never ran. */
+    report.standDown = publication;
+    report.finishedAt = new Date(now()).toISOString();
+    record(report);
+    return report;
+  }
+
+  const planned = retirementInputs(sources);
+  const candidates = retirementCandidates(planned.file);
+  report.evaluated = candidates.length;
+
+  const qualified: StructuredHostRetirementSubject[] = [];
   for (const entry of candidates) {
-    const columns = entry.structuredHost!;
-    const hostProcess = columns.process!;
-    const key = entry.key as SessionKey & { engine: "claude" | "codex" };
-    const keyId = sessionKeyId(key);
-    const conversation = conversationsBySession.get(key.sessionId) ?? null;
-    const conversationId = conversation?.id ?? null;
-    const memberships = conversation ? file.memberships[conversation.id] ?? [] : [];
-    const pipeline = memberships.find((membership) => membership.kind === "pipeline") ?? null;
-    const generation = conversation?.generations.find((candidate) => candidate.id === key.sessionId) ?? null;
-
-    const subject: StructuredHostRetirementSubject = {
-      key,
-      keyId,
-      conversationId,
-      title: generation?.launchProfile.title ?? null,
-      role: conversation?.agentRole ?? pipeline?.role ?? generation?.launchProfile.role ?? null,
-      stage: pipeline?.stageId ?? pipeline?.slot ?? null,
-      cwd: entry.cwd || generation?.launchProfile.cwd || "",
-      transcriptPath: entry.artifactPath || "",
-      process: hostProcess,
-      status: entry.status,
-      activeTurnRef: columns.activeTurnRef,
-      turnBusy: conversation === null || conversation.turn.state === "unknown"
-        ? null
-        : conversation.turn.state === "busy",
-      pendingAttention: columns.pendingAttention,
-      activeFlags: columns.activeFlags,
-      pendingAction: entry.pendingAction,
-      structuredHostOperationId: entry.structuredHostOperationId ?? null,
-      undeliveredHandoffEntries: undelivered.count(keyId, conversationId),
-      openOperations: openOperations.count(keyId, conversationId),
-      eventCursor: columns.eventCursor,
-      durableEventTail: eventTail(key.sessionId),
-      realtimeBound: conversationId === null ? false : realtimeBound(conversationId),
-      seat: conversation === null
-        ? null
-        : memberships.some((membership) => membership.kind === "orchestrator")
-          || seatConversations.has(conversation.id),
-      transcriptMtimeMs: entry.artifactPath ? stat(entry.artifactPath)?.mtimeMs ?? null : null,
-      observedStartIdentity: identityOf(hostProcess.pid),
-    };
-
+    const subject = retirementSubject(entry, planned, readers);
     const verdict = structuredHostRetirementVerdict(subject, { now: startedAtMs, idleMs });
     if (!verdict.retire) {
-      report.refused.push({ key: keyId, conversationId, clause: verdict.clause, reason: verdict.reason });
+      report.refused.push({
+        key: subject.keyId,
+        conversationId: subject.conversationId,
+        clause: verdict.clause,
+        reason: verdict.reason,
+      });
       continue;
     }
-    if (report.retired.length + report.failed.length >= batch) {
+    if (qualified.length >= batch) {
       report.deferred += 1;
       continue;
     }
+    qualified.push(subject);
+  }
+
+  let parents: Map<number, number> | null = null;
+  for (const planning of qualified) {
+    /* The re-check. Everything durable is re-read, and so is every fact that
+       lives on the machine rather than in the registry: an earlier termination
+       in this same sweep may have taken a grace ladder, and the checks that
+       admitted this host are that much older than the signal about to be sent
+       (the race `structuredHostKillRefusal` exists for on the interactive
+       path). A row that vanished in the meantime is nothing to retire. */
+    const current = retirementInputs(sources);
+    const fresh = current.file.entries[planning.keyId] ?? null;
+    if (fresh === null || !fresh.structuredHost?.process) {
+      report.refused.push({
+        key: planning.keyId,
+        conversationId: planning.conversationId,
+        clause: "process-identity",
+        reason: "the registry no longer records this host",
+        changed: true,
+      });
+      continue;
+    }
+    const subject = retirementSubject(fresh, current, readers);
+    const verdict = structuredHostRetirementVerdict(subject, { now: now(), idleMs });
+    if (!verdict.retire) {
+      report.refused.push({
+        key: subject.keyId,
+        conversationId: subject.conversationId,
+        clause: verdict.clause,
+        reason: verdict.reason,
+        changed: true,
+      });
+      continue;
+    }
+    const hostProcess = subject.process;
 
     /* Measured before anything is signalled: a tree that is already gone
        reports nothing, and a reclaim claimed after the kill would be zero. */
@@ -627,12 +811,12 @@ export async function runStructuredHostRetirementSweep(
       kind: "structured",
       pid: hostProcess.pid,
       startIdentity: verdict.startIdentity,
-      engine: key.engine,
-      sessionId: key.sessionId,
-      conversationId,
+      engine: subject.key.engine,
+      sessionId: subject.key.sessionId,
+      conversationId: subject.conversationId,
       seat: subject.seat,
       turnBusy: subject.turnBusy,
-      owned: owned(key),
+      owned: owned(subject.key),
       lastActiveAt: subject.transcriptMtimeMs === null ? null : new Date(subject.transcriptMtimeMs).toISOString(),
     };
 
@@ -640,7 +824,7 @@ export async function runStructuredHostRetirementSweep(
     try {
       outcome = await terminate(ref);
     } catch (error) {
-      report.failed.push({ key: keyId, conversationId, error: String(error), remaining: [] });
+      report.failed.push({ key: subject.keyId, conversationId: subject.conversationId, error: String(error), remaining: [] });
       continue;
     }
     if (!outcome.ok) {
@@ -648,14 +832,14 @@ export async function runStructuredHostRetirementSweep(
          attempt is abandoned and the host left intact. The ladder keeps the
          registry row for anything it could not finish, so nothing here is
          half-retired. */
-      report.failed.push({ key: keyId, conversationId, error: outcome.error, remaining: outcome.remaining });
+      report.failed.push({ key: subject.keyId, conversationId: subject.conversationId, error: outcome.error, remaining: outcome.remaining });
       continue;
     }
     report.retired.push({
-      key: keyId,
-      engine: key.engine,
-      sessionId: key.sessionId,
-      conversationId,
+      key: subject.keyId,
+      engine: subject.key.engine,
+      sessionId: subject.key.sessionId,
+      conversationId: subject.conversationId,
       title: subject.title,
       role: subject.role,
       stage: subject.stage,
@@ -679,12 +863,12 @@ export async function runStructuredHostRetirementSweep(
 }
 
 /**
- * The seam the account-migration controller ticks once a minute — the only
- * thing in the Viewer that runs on its own without an operator gesture.
+ * The seam behind the timer — the only thing in the Viewer that ends a host
+ * without an operator gesture.
  *
  * It is deliberately the whole policy: whether the sweep is enabled at all, and
- * that a failing sweep never blocks the rest of the reconciliation cycle. The
- * controller's call site is one line so the two cannot drift.
+ * that a failing sweep never blocks the tick around it. The call site is one
+ * line so the two cannot drift.
  */
 export async function reconcileStructuredHostRetirement(dependencies: {
   env?: Readonly<Record<string, string | undefined>>;
@@ -700,4 +884,53 @@ export async function reconcileStructuredHostRetirement(dependencies: {
     console.error("[host retirement] sweep failed", error);
     return null;
   }
+}
+
+/**
+ * How often the release that owns traffic sweeps.
+ *
+ * Far slower than the reconciliation controllers, and deliberately so: the
+ * default quiet interval is six hours, so a few minutes of latency costs
+ * nothing, while every tick reads `/proc` for each recorded host inside the
+ * process that is also serving the operator's board.
+ */
+export const STRUCTURED_HOST_RETIREMENT_INTERVAL_MS = 5 * 60_000;
+
+const retirementHost = globalThis as typeof globalThis & {
+  __llvStructuredHostRetirementTimer?: ReturnType<typeof setInterval>;
+};
+
+/**
+ * Starts the sweep in the process that holds the structured hosts.
+ *
+ * This is not a free choice of call site. Host ownership, a live voice binding
+ * and a hosted realtime thread are all process-scoped state of the process that
+ * bound the delivery queue. Swept from the account-migration inventory sidecar
+ * — a separate OS process — every one of those reads answers "none" for
+ * everything, which turns two clauses of the predicate vacuous and makes the
+ * graceful lifecycle shutdown unreachable, so every retirement would go
+ * straight to signals. So the sweep starts with the release that owns traffic,
+ * like every other controller that speaks for live hosts, and stands down at
+ * the top of {@link runStructuredHostRetirementSweep} if it ever finds itself
+ * somewhere that cannot answer.
+ */
+export function startStructuredHostRetirement(ports: {
+  scheduleInterval?: (callback: () => void, delayMs: number) => ReturnType<typeof setInterval>;
+  sweep?: () => Promise<unknown>;
+  intervalMs?: number;
+} = {}): void {
+  if (retirementHost.__llvStructuredHostRetirementTimer) return;
+  const schedule = ports.scheduleInterval ?? ((callback, delayMs) => setInterval(callback, delayMs));
+  const sweep = ports.sweep ?? (() => reconcileStructuredHostRetirement());
+  const timer = schedule(() => { void sweep(); }, ports.intervalMs ?? STRUCTURED_HOST_RETIREMENT_INTERVAL_MS);
+  timer.unref?.();
+  retirementHost.__llvStructuredHostRetirementTimer = timer;
+}
+
+/** Test seam: the timer is process-global, so a suite must be able to start
+    from an unstarted one without reaching into module internals. */
+export function stopStructuredHostRetirement(): void {
+  const timer = retirementHost.__llvStructuredHostRetirementTimer;
+  if (timer) clearInterval(timer);
+  retirementHost.__llvStructuredHostRetirementTimer = undefined;
 }
