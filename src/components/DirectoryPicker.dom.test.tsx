@@ -219,6 +219,20 @@ test("a filter word that matched nothing is never committed as a directory", () 
   expect(picks).toEqual([]);
   expect(trigger().getAttribute("data-directory-value")).toBe(REPO);
   expect(trigger().getAttribute("aria-expanded")).toBe("false");
+
+  /* A fragment with a slash in it is a filter too (issue #1223). Counting a
+     slash as a path shape offered it as a row and led the highlight with it, so
+     Enter committed a name only the server's own working directory could
+     resolve — and create-project sent it on to be refused. */
+  click(trigger());
+  type(".worktrees/fix");
+  expect(optionValues()).not.toContain(".worktrees/fix");
+  expect(optionValues()).toContain(`${REPO}/.worktrees/fix-887`);
+  type("scanner/nothing-here");
+  expect(optionValues()).toEqual([]);
+  press(search(), "Enter");
+  expect(picks).toEqual([]);
+  expect(trigger().getAttribute("data-directory-value")).toBe(REPO);
 });
 
 /* Issue #1223: the filter field is where a path gets spelled out, and for

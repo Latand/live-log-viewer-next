@@ -62,11 +62,21 @@ export function matchesDirectoryQuery(dir: string, query: string): boolean {
 
 export type PickerRow = { key: string; value: string; kind: "known" | "typed" };
 
-/** Whether a query is the operator naming a place rather than filtering. Only
-    a path shape is offered as a directory: the spawn route resolves anything
-    else against ITS own working directory, which is never what was meant. */
-export function looksLikeDirectoryPath(query: string): boolean {
-  return query.startsWith("/") || query.startsWith("~") || query.includes("/");
+/**
+ * Whether a query names a place rather than filters — the one definition of a
+ * path this control and its callers share (issue #1223).
+ *
+ * A place is named from somewhere fixed: the filesystem root, or the home
+ * directory the spawn route expands `~` and `~/…` to. Anything else, a bare
+ * word or a fragment with a slash in it alike, is a filter: nothing downstream
+ * can turn `notes/idea` into a directory except by resolving it against ITS own
+ * working directory, which is never where the operator meant. Counting a slash
+ * as a path made every such fragment a row to commit, and create-project would
+ * then send it on to be refused.
+ */
+export function isDirectoryPath(query: string): boolean {
+  const trimmed = query.trim();
+  return trimmed.startsWith("/") || trimmed === "~" || trimmed.startsWith("~/");
 }
 
 /** The known directories, current one first — relaunching from the same place
@@ -90,7 +100,7 @@ export function directoryRows(known: readonly string[], query: string, pristine:
   const matched = pristine ? [...known] : known.filter((dir) => matchesDirectoryQuery(dir, query));
   const rows: PickerRow[] = matched.map((dir) => ({ key: "known:" + dir, value: dir, kind: "known" }));
   const typed = query.trim();
-  if (!pristine && typed && looksLikeDirectoryPath(typed) && !known.includes(typed)) {
+  if (!pristine && typed && isDirectoryPath(typed) && !known.includes(typed)) {
     /* The typed path leads (issue #1223). Enter commits the highlighted row and
        the highlight starts at the top, so listing it last handed the operator a
        known lookalike instead of what they spelled: every path is a substring
@@ -239,7 +249,7 @@ export function DirectoryPicker({
    */
   const dismiss = (restoreFocus: boolean) => {
     const typed = query.trim();
-    if (!pristine && typed && looksLikeDirectoryPath(typed)) commit(typed, restoreFocus);
+    if (!pristine && typed && isDirectoryPath(typed)) commit(typed, restoreFocus);
     else close(restoreFocus);
   };
   /* The outside-press listener attaches once per opening; this ref keeps it

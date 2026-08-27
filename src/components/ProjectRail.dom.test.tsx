@@ -247,6 +247,15 @@ function createForm(container: HTMLElement) {
     filter,
     chosenRoot: () => trigger().getAttribute("data-directory-value"),
     pickerOpen: () => query<HTMLElement>('[data-directory-picker="open"]') !== null,
+    /* The popup is absolutely positioned out of the trigger and covers what
+       follows it, so a refusal is only readable while it precedes the picker
+       among the form's own rows (issue #1223). */
+    messagePrecedesPicker: () => {
+      const rows = [...query<HTMLFormElement>("form")!.children] as unknown as HTMLElement[];
+      const message = rows.findIndex((row) => /text-(danger|warning)/.test(row.className));
+      const picker = rows.findIndex((row) => row.hasAttribute("data-directory-picker"));
+      return message > -1 && picker > -1 && message < picker;
+    },
     optionValues: () => ([...container.querySelectorAll("[data-directory-option]")] as unknown as HTMLElement[])
       .map((option) => option.getAttribute("data-directory-option")),
     openPicker: () => flushSync(() => trigger().dispatchEvent(click())),
@@ -402,21 +411,23 @@ test("create-project: a typed path that a suggestion begins with is not swapped 
 });
 
 /* The three outcomes, told apart. First: a path that was never made absolute
-   says exactly that and answers with the completion. */
+   says exactly that and answers with the completion. `~/…` is the shape that
+   reaches this refusal from the UI — it names a place, so the picker commits
+   it, and only the server knows it is not a full path (issue #1223). */
 async function refuseRelativeRoot(expectedMessage: string) {
   suggestedDirs = ["/data/projects/fresh-idea"];
   const creations: string[] = [];
   const ui = await openCreateForm(async (_name, root) => {
     creations.push(root);
-    return { ok: false, code: "MISSING_DIRECTORY" };
+    return { ok: false, code: "RELATIVE_ROOT" };
   });
   ui.openPicker();
-  ui.typePath("notes/relative-idea");
-  expect(ui.chosenRoot()).toBe("notes/relative-idea");
+  ui.typePath("~/relative-idea");
+  expect(ui.chosenRoot()).toBe("~/relative-idea");
   ui.submit();
   await settle();
 
-  expect(creations).toEqual([]);
+  expect(creations).toEqual(["~/relative-idea"]);
   expect(ui.form().textContent).toContain(expectedMessage);
   /* The completion is offered rather than the rejection: the list is open on
      the suggestions and leads with one, one click from a real path. The
@@ -427,7 +438,30 @@ async function refuseRelativeRoot(expectedMessage: string) {
   expect(ui.chosenRoot()).toBe("");
   expect(ui.optionValues()).toEqual(["/data/projects/fresh-idea"]);
   expect(ui.offerButton()).toBeUndefined();
+  /* And it is readable while that list is open: the popup drops out of the
+     trigger over everything below it, so the words explaining the refusal have
+     to sit above the control the same commit opened. */
+  expect(ui.messagePrecedesPicker()).toBe(true);
 }
+
+/* The other half of one path definition: a fragment is not a path, so it never
+   becomes a root to submit in the first place (issue #1223). */
+test("create-project: a relative fragment is never committed as a root", async () => {
+  suggestedDirs = ["/data/projects/fresh-idea"];
+  const creations: string[] = [];
+  const ui = await openCreateForm(async (_name, root) => {
+    creations.push(root);
+    return { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
+  });
+  flushSync(() => type(ui.nameInput(), "Relative Idea"));
+  ui.openPicker();
+  ui.typePath("notes/relative-idea");
+  expect(ui.chosenRoot()).toBe("");
+  ui.submit();
+  await settle();
+  expect(creations).toEqual([]);
+  expect(ui.form().textContent).toContain("Choose a directory");
+});
 
 test("create-project: a root that is not a full path says so and opens the completion", async () => {
   await refuseRelativeRoot("A full path is required");

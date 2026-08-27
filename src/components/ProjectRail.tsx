@@ -13,7 +13,7 @@ import type { Workflow } from "@/lib/workflows/types";
 
 import { AccessQrButton } from "./AccessQrButton";
 import { CatalogFailureNotice } from "./CatalogFailureNotice";
-import { DirectoryPicker, splitDirectoryPath } from "./DirectoryPicker";
+import { DirectoryPicker, isDirectoryPath, splitDirectoryPath } from "./DirectoryPicker";
 import { FlipRow } from "./FlipRow";
 import { Archive, ChevronRight, Crown, FolderPlus, Loader2 } from "./icons";
 import { LanguageToggle } from "./LanguageToggle";
@@ -363,11 +363,12 @@ const CREATE_ERROR_KEYS: Record<string, "rail.invalidName" | "rail.invalidRoot" 
  * prefix to match, and answering it with the chosen path itself would list the
  * one directory already in hand. Everything the operator actually types goes to
  * the server verbatim, because the server is the only side that can look past
- * the rows already fetched.
+ * the rows already fetched. `isDirectoryPath` is the picker's own definition:
+ * the two sides of this form agree on what a path is (issue #1223).
  */
 function suggestionScope(query: string): string {
   const trimmed = query.trim();
-  if (!trimmed.startsWith("/")) return "";
+  if (!isDirectoryPath(trimmed)) return "";
   return trimmed.slice(0, trimmed.lastIndexOf("/") + 1);
 }
 
@@ -432,30 +433,24 @@ function CreateProjectForm({
     if (tail && tail !== "/") setName(tail);
   };
 
-  /* Both refusals that answer with the completion do so with no root in hand,
-     so the suggestions go back to the browse as the picker reopens on it.
-     Leaving them narrowed by the query that was just refused would open the
-     completion on the empty list that query matched. */
-  const reopenPickerOnBrowse = () => {
-    setSuggestQuery("");
-    setOpenSignal((value) => value + 1);
-  };
-
-  /* A root that is not a full path is a path the operator never finished, so
-     the answer is the completion rather than a refusal: the message says what
-     is missing and the picker opens on the suggestions (issue #1223).
-
-     The rejected text does not stay in the field. The picker puts the value it
-     holds at the head of its list and opens with the head highlighted and
-     badged "current", so keeping it would open the completion on the very input
-     the completion exists to replace — Enter would commit nothing, leave the
-     same refusal standing, and the operator would have to arrow past their own
-     rejected words to reach a real directory. */
-  const askForFullPath = () => {
+  /**
+   * The two refusals about the root itself — none given, and one the server
+   * answers RELATIVE_ROOT because it was never made absolute. Both say what is
+   * missing and then answer with the completion rather than with a rejection
+   * (issue #1223), so they are one action.
+   *
+   * Neither keeps what was refused. The picker puts the value it holds at the
+   * head of its list, highlighted and badged "current", so leaving it there
+   * would open the completion on the very input the completion exists to
+   * replace; and the suggestions go back to the browse, since a query narrowed
+   * to what was just refused opens the list on nothing.
+   */
+  const askForADirectory = (message: "rail.invalidRoot" | "rail.relativeRoot") => {
     setRoot("");
     setOfferCreateRoot(false);
-    setError(t("rail.relativeRoot"));
-    reopenPickerOnBrowse();
+    setError(t(message));
+    setSuggestQuery("");
+    setOpenSignal((value) => value + 1);
   };
   const inputClass = `w-full rounded-[9px] border border-border bg-canvas px-2.5 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
     isMobile ? "min-h-11" : "py-1.5"
@@ -468,12 +463,7 @@ function CreateProjectForm({
     }
     const target = root.trim();
     if (!target) {
-      setError(t("rail.invalidRoot"));
-      reopenPickerOnBrowse();
-      return;
-    }
-    if (!target.startsWith("/")) {
-      askForFullPath();
+      askForADirectory("rail.invalidRoot");
       return;
     }
     setBusy(true);
@@ -494,7 +484,7 @@ function CreateProjectForm({
       return;
     }
     if (outcome.code === "RELATIVE_ROOT") {
-      askForFullPath();
+      askForADirectory("rail.relativeRoot");
       return;
     }
     if (outcome.code === "MKDIR_FAILED") {
@@ -523,6 +513,13 @@ function CreateProjectForm({
           setNameEdited(Boolean(event.target.value.trim()));
         }}
       />
+      {/* Above the picker, because the popup drops out of the trigger and
+          covers everything under it — and two of these refusals open that popup
+          in the same commit that sets the message, so underneath it the
+          explanation was drawn and immediately hidden (issue #1223). */}
+      {error ? (
+        <div className={`px-0.5 text-[11px] font-semibold ${offerCreateRoot ? "text-warning" : "text-danger"}`}>{error}</div>
+      ) : null}
       <DirectoryPicker
         id="rail-create-root"
         value={root}
@@ -533,9 +530,6 @@ function CreateProjectForm({
         onQueryChange={(query, typed) => setSuggestQuery(typed ? query.trim() : suggestionScope(query))}
         onChange={chooseRoot}
       />
-      {error ? (
-        <div className={`px-0.5 text-[11px] font-semibold ${offerCreateRoot ? "text-warning" : "text-danger"}`}>{error}</div>
-      ) : null}
       {offerCreateRoot ? (
         <button
           type="button"
