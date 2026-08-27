@@ -6,17 +6,12 @@
  * only transitions the receipt to `delivering` once the host reports idle. The
  * composer used to render `pending`, `queued`, `delivering` and `uncertain` as
  * one indistinguishable spinner, so "arriving in a second", "arriving in twenty
- * minutes" and "never arriving" all looked the same — and the last of those had
- * no exit at all.
+ * minutes" and "never arriving" all looked the same.
  *
  * The phases, derived, never stored:
  * - `transmitting`          — the request path is still working on an attempt;
  * - `handing-over`          — the queue reached a turn boundary and is putting
- *                             the message in front of the agent RIGHT NOW. The
- *                             one phase that is NOT abandonable: the receipt
- *                             moves to `delivering` before `host.send`, so
- *                             retiring the effect here cannot un-send it and
- *                             would let a replacement duplicate the message;
+ *                             the message in front of the agent RIGHT NOW;
  * - `awaiting-turn`         — admitted and journaled, waiting for the agent's
  *                             turn to end; nothing is being transmitted. Said
  *                             ONLY on the host's own evidence that a turn is
@@ -31,13 +26,12 @@
  *                             no host axis reached this surface: naming a turn
  *                             here would assert something nobody established;
  * - `unconfirmed-admission` — the composer's own local row for a send whose
- *                             admission was never confirmed. There is no server
- *                             operation behind it, so no server control applies
- *                             and the message may or may not have been accepted;
- * - `uncertain`             — an ABANDONABLE attempt still unconfirmed past
+ *                             admission was never confirmed, so the message may
+ *                             or may not have been accepted;
+ * - `uncertain`             — a PARKED attempt still unconfirmed past
  *                             {@link DELIVERY_UNCERTAIN_MS}. Terminal for
  *                             presentation: the composer stops claiming the
- *                             message is moving and hands the operator a control.
+ *                             message is moving and says it did not arrive.
  *
  * A later terminal receipt always wins — a delivery that lands after the bound
  * settles through the ordinary resolved path and this model stops speaking.
@@ -46,7 +40,7 @@
 import type { TFunction } from "@/lib/i18n";
 
 import { deliveryResolved } from "./deliveryState";
-import { humanReceiptReasonKey, receiptIsTerminal, type HostAxis, type ReceiptStatus, type TurnAxis } from "./runtimeModel";
+import { receiptIsTerminal, type HostAxis, type ReceiptStatus, type TurnAxis } from "./runtimeModel";
 
 export type DeliveryWaitPhase =
   | "transmitting"
@@ -65,17 +59,6 @@ export type DeliveryWaitPhase =
  * back, and a wait nobody can explain are three different facts to act on.
  */
 export type DeliveryWaitCause = "turn" | "host" | "unknown";
-
-/**
- * How long a delivery may wait before the operator is treated as blocked on it
- * and it enters the attention queue.
- *
- * Calibrated against the operator's own evidence in #1213: four deliveries into
- * one busy host landed after 2 min, 12 s, 21 min and 4 min. A shorter threshold
- * would enqueue healthy deliveries; a longer one leaves the operator waiting on
- * a message nobody told them about.
- */
-export const DELIVERY_WAIT_ATTENTION_MS = 5 * 60_000;
 
 /**
  * How long a delivery may stay unconfirmed before the composer stops calling it
@@ -97,12 +80,6 @@ export interface DeliveryWait {
 
 export interface DeliveryWaitInput {
   status: ReceiptStatus;
-  /** The receipt's own sanitized reason, when it carries one. Weak evidence,
-      used ONLY when no host axis reached this surface: the journal drops a
-      reason on a same-status transition, and the queue's dead-host branch
-      passes a raw engine error rather than the `dead-host` token, so a null or
-      unrecognized reason proves nothing about the host. */
-  reason?: string | null;
   /** The conversation's own host axis, when the composer knows it. This is the
       authority for "the window is gone"; absent for a surface with no
       structured session behind it. */
@@ -120,17 +97,15 @@ export interface DeliveryWaitInput {
 }
 
 /**
- * Statuses the operator may abandon: the message is journaled and parked, and
- * failing the operation retires its durable effect in the same transaction, so
- * nothing can hand it over afterwards.
+ * Statuses in which the message is parked: journaled, waiting, and with nothing
+ * on the wire. These are the ones that reach the uncertain terminal.
  *
  * `delivering`/`applying` are deliberately absent. The delivery queue writes
- * `delivering` BEFORE it calls `host.send`, so an abandon there races a
- * hand-over that is already under way: the agent would receive the message and
- * a replacement both. That race is refused on the server too — this list and
- * the server's are the same rule stated on both sides of the wire.
+ * `delivering` BEFORE it calls `host.send`, so a message in that window is
+ * genuinely being put in front of the agent, and the queue always writes an
+ * outcome for it. That row names its own age past the bound instead.
  */
-function abandonable(status: ReceiptStatus): boolean {
+function parked(status: ReceiptStatus): boolean {
   return status === "pending" || status === "queued";
 }
 
@@ -141,7 +116,7 @@ function abandonable(status: ReceiptStatus): boolean {
 export function deliveryWaitFor(input: DeliveryWaitInput): DeliveryWait | null {
   /* Terminal OR resolved: `turn-started`/`steered` are not terminal receipts,
      but they prove the message is inside the agent's turn — there is no wait
-     left to describe and nothing to offer an exit from. */
+     left to describe. */
   if (receiptIsTerminal(input.status) || deliveryResolved(input.status)) return null;
   const startedAt = Date.parse(input.admittedAt);
   /* An unreadable or future stamp reports no wait rather than a negative or
@@ -150,12 +125,11 @@ export function deliveryWaitFor(input: DeliveryWaitInput): DeliveryWait | null {
   const attempts = Number.isFinite(input.attempts) ? Math.max(1, Math.trunc(input.attempts)) : 1;
   const cause = waitCause(input);
   const wait = (phase: DeliveryWaitPhase): DeliveryWait => ({ phase, waitedMs, attempts, cause });
-  /* The composer's local row for a send it could not confirm was admitted. It
-     carries no server operation, so it can neither be retried nor discarded
-     through one, and calling it "waiting for a turn" would assert an admission
-     that is exactly what could not be confirmed. */
+  /* The composer's local row for a send it could not confirm was admitted.
+     Calling it "waiting for a turn" would assert an admission that is exactly
+     what could not be confirmed. */
   if (input.status === "uncertain") return wait("unconfirmed-admission");
-  if (!abandonable(input.status)) return wait("handing-over");
+  if (!parked(input.status)) return wait("handing-over");
   if (waitedMs >= DELIVERY_UNCERTAIN_MS) return wait("uncertain");
   /* `queued` is the durable admission the delivery queue parks at the turn
      boundary: the message is sitting still, not moving down a wire. */
@@ -165,23 +139,18 @@ export function deliveryWaitFor(input: DeliveryWaitInput): DeliveryWait | null {
 }
 
 /**
- * What the message is waiting on, from the strongest evidence available.
+ * What the message is waiting on, from the conversation's own axes.
  *
- * The host's own axes come first because they are live and the receipt's reason
- * is not: the journal keeps a same-status transition as a no-op, so a message
- * already `queued` when its host died keeps whatever reason it had, and the
- * queue's own dead-host branch writes a raw engine error. The reason is
- * consulted only when no host axis reached this surface at all, and when
- * neither can answer, the wait says so instead of inventing a turn.
+ * The receipt's `reason` is deliberately not consulted: the journal keeps a
+ * same-status transition as a no-op, so a message already `queued` when its
+ * host died keeps whatever reason it had, and the queue's own dead-host branch
+ * writes a raw engine error. When the axes cannot answer, the wait says so
+ * instead of inventing a turn.
  */
 function waitCause(input: DeliveryWaitInput): DeliveryWaitCause {
-  if (input.host) {
-    if (input.host === "dead" || input.host === "unhosted") return "host";
-    return input.turn === "running" || input.turn === "interrupt_requested" ? "turn" : "unknown";
-  }
-  /* Reuses the receipt model's own reason mapping, so "the host is gone" has
-     one authority instead of a second list that can drift from it. */
-  return humanReceiptReasonKey(input.reason) === "receipt.human.deadHost" ? "host" : "unknown";
+  if (!input.host) return "unknown";
+  if (input.host === "dead" || input.host === "unhosted") return "host";
+  return input.turn === "running" || input.turn === "interrupt_requested" ? "turn" : "unknown";
 }
 
 /**
@@ -204,8 +173,8 @@ export function formatWaited(t: TFunction, waitedMs: number): string {
  * `transmitting` returns null on purpose: an attempt on the wire is momentary,
  * its existing wording ("sending…") is exact, and a ticking duration beside it
  * would be noise. `handing-over` is momentary for the same reason — until it is
- * not, and a hand-over still running past the bound names itself, because that
- * is the one row that offers no exit and the operator is owed the reason.
+ * not, and a hand-over still running past the bound names itself rather than
+ * spinning silently.
  */
 export function deliveryWaitText(
   t: TFunction,
@@ -227,10 +196,11 @@ export function deliveryWaitText(
 }
 
 /**
- * Why a message that never arrived never arrived — the sentence beside the
- * exit. The cause survives from the wait it came out of: a turn that never
- * ended and a host that never came back are different facts, and the operator
- * decides differently on each.
+ * Why a message that never arrived never arrived — the sentence under the
+ * terminal row. The cause survives from the wait it came out of: a turn that
+ * never ended and a host that never came back are different facts, and the
+ * operator decides differently on each. Each one ends by telling them the only
+ * thing that will move the message now: sending it again themselves.
  */
 export function deliveryUncertainWhy(t: TFunction, wait: DeliveryWait): string {
   if (wait.cause === "host") return t("runtime.receipt.unconfirmedWhyHost");

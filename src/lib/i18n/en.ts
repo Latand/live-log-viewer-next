@@ -2069,8 +2069,6 @@ export const en = {
   "attention.decisionQuestion": "a question",
   "attention.decisionPlan": "plan approval",
   "attention.decisionPermission": "permission prompt",
-  /* #1213: the agent is not the one waiting — the operator's message is. */
-  "attention.decisionDelivery": "your message has not reached the agent",
 
   // MobileFocusView
   "mobile.noConvos": "No conversations yet",
@@ -2229,13 +2227,11 @@ export const en = {
   "runtime.receipt.awaitingHostFor": "waiting for the agent’s window to come back · {waited}",
   "runtime.receipt.awaitingHandoverFor": "waiting to be handed to the agent · {waited}",
   "runtime.receipt.handingOverFor": "still handing this over to the agent · {waited}",
-  "runtime.receipt.handoverBusy": "This message is being handed to the agent right now — it cannot be retried or discarded until that finishes.",
   "runtime.receipt.admissionUnconfirmed": "never confirmed as sent · {waited}",
   "runtime.receipt.unconfirmed": "not delivered — no confirmation after {waited}",
-  "runtime.receipt.unconfirmedWhy": "The agent stayed inside a turn, so this message was never handed over. Nothing else will retry it — send it again or discard it.",
-  "runtime.receipt.unconfirmedWhyHost": "The agent’s window went away before this message was handed over, and nothing has taken the conversation back. Nothing else will retry it — send it again or discard it.",
-  "runtime.receipt.unconfirmedWhyUnknown": "This message was accepted but never handed over, and nothing here can say why. Nothing else will retry it — send it again or discard it.",
-  "runtime.receipt.discard": "Discard this message",
+  "runtime.receipt.unconfirmedWhy": "The agent stayed inside a turn, so this message was never handed over. Nothing else will retry it: send it again if you still need it.",
+  "runtime.receipt.unconfirmedWhyHost": "The agent’s window went away before this message was handed over, and nothing has taken the conversation back. Nothing else will retry it: send it again if you still need it.",
+  "runtime.receipt.unconfirmedWhyUnknown": "This message was accepted but never handed over, and nothing here can say why. Nothing else will retry it: send it again if you still need it.",
   "runtime.receipt.waitedSec": "{n}s",
   "runtime.receipt.waitedMin": "{n} min",
   "runtime.receipt.waitedHour": "{n} h",

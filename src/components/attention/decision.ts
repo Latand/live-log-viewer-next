@@ -3,7 +3,7 @@ import { rateLimitText } from "@/components/rateLimit";
 import type { Locale, TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { attentionId, blockingStuckDelivery, openBridgeAsk, stalledAttention } from "../attention";
+import { attentionId, openBridgeAsk } from "../attention";
 
 /**
  * The ONE line every attention surface shows for a waiting agent (issue #1167).
@@ -81,13 +81,6 @@ function decisionText(t: TFunction, locale: Locale, file: FileEntry, now: number
   }
   if (file.rateLimit) return rateLimitText(t, locale, file.rateLimit);
   if (file.waitingInput) return t("attention.decisionPermission");
-  if (stalledAttention(file, now)) return t("status.stalled");
-  /* Last, exactly where `attentionId` puts it (issue #1213): a conversation
-     whose only signal is a message it never handed over. Saying «interrupted or
-     awaiting permission» over a live agent mid-turn would be the
-     one-signal-two-descriptions defect this module exists to remove — the agent
-     is fine, the operator's message is the thing that is stuck. */
-  if (blockingStuckDelivery(file, now) !== null) return t("attention.decisionDelivery");
   return t("status.stalled");
 }
 

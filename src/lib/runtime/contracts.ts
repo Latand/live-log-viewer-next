@@ -61,12 +61,6 @@ export type RuntimeReceiptStatus =
 export type OperationKind = RuntimeOperationKind;
 export type ReceiptStatus = RuntimeReceiptStatus;
 
-/** Every receipt status, for validating one that arrived over the wire. */
-export const RUNTIME_RECEIPT_STATUSES: ReadonlySet<string> = new Set<RuntimeReceiptStatus>([
-  "pending", "delivering", "applying", "turn-started", "steered", "queued",
-  "delivered", "applied", "interrupted", "answered", "rejected", "failed", "uncertain",
-]);
-
 export type RuntimeEventKind =
   | "session-status"
   | "turn-started"
@@ -390,33 +384,8 @@ export interface RuntimeRetryOptions {
   requireHostedConversationId?: string;
 }
 
-export interface RuntimeTransitionOptions {
-  /** Statuses the caller observed and decided against. Re-checked inside the
-      journal's write transaction; a receipt that has since moved to any other
-      status refuses with {@link RuntimeTransitionFenceError}. */
-  fromStatuses?: readonly RuntimeReceiptStatus[];
-}
-
 export class RuntimeIdempotencyConflictError extends Error {
   readonly code = "idempotency-conflict";
-}
-
-/**
- * A transition refused because the receipt had already moved (issue #1213).
- *
- * Every caller that decides what to write by first READING a receipt is one
- * RPC behind the journal. The abandon path is the one where that gap can
- * duplicate an operator's message: the delivery queue writes `delivering`
- * before it calls `host.send`, so a receipt read as `queued` can be handed over
- * by the time the transition lands. `RuntimeJournal.transitionOperation` takes
- * the caller's observed statuses as a fence and evaluates it inside the same
- * `BEGIN IMMEDIATE` that writes, so the decision and the write see one state.
- *
- * Distinguished by code because the answer is not "this failed" — it is "the
- * row moved, re-read it", and the caller must not mint a replacement.
- */
-export class RuntimeTransitionFenceError extends Error {
-  readonly code = "transition-fence";
 }
 
 export interface RuntimeEdge {

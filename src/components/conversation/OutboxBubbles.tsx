@@ -181,9 +181,7 @@ export function OutboxBubblesView({
                     An ADMITTED message is not retryable here and never was:
                     `retryOutbox` refuses anything but `failed`, and re-queueing
                     it locally would not touch the journaled send the server is
-                    still holding. Its exit is the composer's receipt row, which
-                    owns the operation and abandons it before it resends
-                    (issue #1213). */}
+                    still holding (issue #1213). */}
                 {entry.state === "failed" && !entry.needsReattach ? (
                   <button
                     type="button"
@@ -199,7 +197,7 @@ export function OutboxBubblesView({
                 {/* Only a message that has not left for the wire can be taken
                     back — cancelling a delivering send would be a lie, and
                     dropping the bubble would leave the server still holding a
-                    message the operator believes is gone (issue #1213). */}
+                    message the operator believes is gone. */}
                 {entry.state === "queued" || entry.state === "failed" ? (
                   <button
                     type="button"

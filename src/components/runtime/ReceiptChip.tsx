@@ -2,7 +2,6 @@
 
 import { Clock3 } from "lucide-react";
 
-import { X } from "@/components/icons";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useLocale, type TFunction } from "@/lib/i18n";
 
@@ -50,9 +49,6 @@ export interface ReceiptChipProps {
   onRetry?: () => void;
   /** Edit-and-resend mints a fresh key. */
   onEdit?: () => void;
-  /** Give up on a delivery that never arrived (#1213): terminalizes it server
-      side so the parked message can no longer be handed over. */
-  onDiscard?: () => void;
 }
 
 /**
@@ -61,12 +57,12 @@ export interface ReceiptChipProps {
  * verbatim and are announced politely; both offer Retry (same key) and Edit
  * (new key).
  */
-export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onRetry, onEdit, onDiscard }: ReceiptChipProps) {
+export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onRetry, onEdit }: ReceiptChipProps) {
   const { t } = useLocale();
   const failed = receipt.status === "rejected" || receipt.status === "failed";
   /* Issue #1213: a delivery unconfirmed past the bound is terminal here even
-     though the receipt is not — the composer stops claiming it is moving, and
-     an operator control takes over from a spinner that had no exit. */
+     though the receipt is not — the composer stops claiming it is moving and
+     says it did not arrive, instead of spinning with no end. */
   const uncertain = wait?.phase === "uncertain";
   /* Nothing is moving in any of these: the message is parked behind a turn,
      parked with nothing to hand it to, parked for a reason this surface cannot
@@ -92,33 +88,6 @@ export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onR
         {parked ? <Clock3 className="mr-1 h-3 w-3" aria-hidden /> : null}
         {waitText ?? runtimeReceiptStatusText(t, receipt)}
       </Badge>
-      {/* The exit the operator never had. Retry abandons the parked attempt
-          server side before it mints a replacement, so pressing it cannot put
-          the same message into the agent's turn twice. */}
-      {uncertain && onRetry ? (
-        <button
-          type="button"
-          disabled={actionsDisabled}
-          data-receipt-uncertain-retry
-          className="min-h-11 rounded-full border border-border bg-canvas px-3 py-0.5 text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-0 sm:px-2"
-          onClick={onRetry}
-        >
-          {t("runtime.receipt.retry")}
-        </button>
-      ) : null}
-      {uncertain && onDiscard ? (
-        <button
-          type="button"
-          disabled={actionsDisabled}
-          data-receipt-discard
-          aria-label={t("runtime.receipt.discard")}
-          title={t("runtime.receipt.discard")}
-          className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-0 sm:min-w-0 sm:px-0.5"
-          onClick={onDiscard}
-        >
-          <X className="h-3 w-3" aria-hidden />
-        </button>
-      ) : null}
       {failed && onRetry ? (
         <button
           type="button"

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeEventsRolledBack, RUNTIME_PLANE_ABSENT } from "@/lib/runtime/flags";
-import { handleRuntimeAbandon, handleRuntimeRetry } from "@/lib/runtime/http";
+import { handleRuntimeRetry } from "@/lib/runtime/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,14 +38,4 @@ export async function GET(_request: Request, context: OperationRouteContext): Pr
 export async function POST(request: NextRequest, context: OperationRouteContext): Promise<NextResponse> {
   const { operationId } = await context.params;
   return handleRuntimeRetry(request, operationId);
-}
-
-/**
- * Discard an unconfirmed delivery (issue #1213): the operator's exit from a
- * message that never reached the agent. Terminalizes the operation and retires
- * its durable send effect, so nothing can hand the message over afterwards.
- */
-export async function DELETE(request: NextRequest, context: OperationRouteContext): Promise<NextResponse> {
-  const { operationId } = await context.params;
-  return handleRuntimeAbandon(request, operationId);
 }
