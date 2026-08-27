@@ -580,7 +580,7 @@ const emailAddressSource =
 function domainNamesNobody(domain: string): boolean {
   const lowered = domain.toLowerCase();
   return lowered === "example.com" || lowered === "example.net" || lowered === "example.org"
-    || lowered.endsWith(".invalid") || lowered === "test" || lowered.endsWith(".test");
+    || lowered.endsWith(".invalid") || lowered.endsWith(".test");
 }
 
 /** Every mailbox in the text that reaches a person, in the order they appear. */
@@ -1269,20 +1269,76 @@ function isMachineAttributionAddress(occurrence: EmailOccurrence): boolean {
   return localPart === FORGE_ROLE_LOCAL_PART && occurrence.domain.toLowerCase() === FORGE_DOMAIN;
 }
 
-/* Git reads a trailer block as the message's last paragraph: a run of
+/* Git reads a trailer block as a message's last paragraph: a run of
    `Token: value` lines that a blank line separates from everything before it,
    each token starting the line. A line anywhere else with the same shape is
    body prose, and prose is where people quote other people's addresses. */
 const COMMIT_TRAILER_LINE = /^[A-Za-z0-9][A-Za-z0-9-]*[ \t]*:[ \t]*\S/;
 
-function trailerBlockRange(lines: string[]): { end: number; start: number } | undefined {
-  let end = lines.length;
-  while (end > 0 && lines[end - 1].trim() === "") end -= 1;
-  let start = end;
-  while (start > 0 && lines[start - 1].trim() !== "") start -= 1;
-  if (start === 0 || start === end) return undefined;
-  if (!lines.slice(start, end).every((line) => COMMIT_TRAILER_LINE.test(line))) return undefined;
-  return { end, start };
+/* `git cherry-pick -x` writes this line into the trailer block it copies, and
+   git still reads that block as one — it is a prefix git generates itself. A
+   block does not stop being a block because git annotated it. */
+const CHERRY_PICK_TRAILER_LINE = /^\(cherry picked from commit [0-9a-f]{7,64}\)[ \t]*$/;
+
+function isTrailerLine(line: string): boolean {
+  return COMMIT_TRAILER_LINE.test(line) || CHERRY_PICK_TRAILER_LINE.test(line);
+}
+
+/* One commit message can carry several. A squash merge writes every commit of
+   a pull request into one message — each behind a `* <subject>` bullet, the
+   forge's own co-author paragraph behind a horizontal rule — and each of those
+   messages keeps the trailer block it was written with. So git's rule reads
+   every message the text concatenates, not only the last one. The bullets
+   count only when the text IS that concatenation, which the forge marks by
+   bulleting the paragraph right after the title; a body that merely holds a
+   list is one message and keeps one trailer block. */
+const EMBEDDED_MESSAGE_BULLET = /^\*[ \t]\S/;
+const EMBEDDED_MESSAGE_RULE = /^-{3,}[ \t]*$/;
+
+type MessageParagraph = { end: number; start: number };
+
+function messageParagraphs(lines: string[]): MessageParagraph[] {
+  const found: MessageParagraph[] = [];
+  let start: number | undefined;
+  for (let index = 0; index <= lines.length; index += 1) {
+    if (index < lines.length && lines[index].trim() !== "") {
+      if (start === undefined) start = index;
+      continue;
+    }
+    if (start !== undefined) found.push({ end: index, start });
+    start = undefined;
+  }
+  return found;
+}
+
+/** The line numbers that sit inside a trailer block, of any embedded message. */
+function trailerBlockLines(lines: string[]): Set<number> {
+  const paragraphs = messageParagraphs(lines);
+  const concatenated = paragraphs.length > 1
+    && EMBEDDED_MESSAGE_BULLET.test(lines[paragraphs[1].start]);
+  const block = new Set<number>();
+  let segment: MessageParagraph[] = [];
+  const closeSegment = (): void => {
+    const last = segment.at(-1);
+    /* A message's first paragraph is its subject, never its trailers. */
+    if (last === undefined || segment.length < 2) return;
+    for (let index = last.start; index < last.end; index += 1) {
+      if (!isTrailerLine(lines[index])) return;
+    }
+    for (let index = last.start; index < last.end; index += 1) block.add(index);
+  };
+  for (const paragraph of paragraphs) {
+    const rule = paragraph.end - paragraph.start === 1
+      && EMBEDDED_MESSAGE_RULE.test(lines[paragraph.start]);
+    const bullet = concatenated && EMBEDDED_MESSAGE_BULLET.test(lines[paragraph.start]);
+    if (segment.length > 0 && (rule || bullet)) {
+      closeSegment();
+      segment = [];
+    }
+    segment.push(paragraph);
+  }
+  closeSegment();
+  return block;
 }
 
 /* Occurrences arrive in ascending order, so one cursor walks the line starts
@@ -1319,11 +1375,9 @@ export function commitMessageAddressReview(message: string): CommitAddressReview
   const exempt = new Set<string>();
   for (const view of sensitiveTextViews(message).views) {
     const lines = view.split("\n");
-    const trailer = trailerBlockRange(lines);
+    const block = trailerBlockLines(lines);
     for (const { line, occurrence } of addressLines(view, lines)) {
-      const attributed = trailer === undefined
-        || line < trailer.start
-        || line >= trailer.end
+      const attributed = !block.has(line)
         || !MACHINE_ATTRIBUTION_TRAILER.test(lines[line])
         || !isMachineAttributionAddress(occurrence);
       (attributed ? attributable : exempt).add(occurrence.address);

@@ -2822,6 +2822,19 @@ describe("commitMessageFindings", () => {
     Bun.spawnSync({ cmd: ["git", "-C", repo, "commit", "-m", message], stderr: "pipe", stdout: "pipe" });
   }
 
+  function git(repo: string, ...arguments_: string[]): string {
+    const result = Bun.spawnSync({
+      cmd: ["git", "-C", repo, ...arguments_],
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    return result.stdout.toString();
+  }
+
+  /* The footer `git cherry-pick -x` appends, spelled out where a test needs the
+     shape without performing the pick. */
+  const cherryPickLine = `(cherry picked from commit ${"0123456789abcdef".repeat(2) + "01234567"})`;
+
   test("flags a personal email in a Co-Authored-By trailer", () => {
     const repo = gitRepo();
     const localPart = "someone";
@@ -3025,6 +3038,92 @@ describe("commitMessageFindings", () => {
     commit(
       repo,
       `chore: refresh dependencies\n\nSigned-Off-By: Dependency Tool\n <${forgeRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("a cherry-picked attribution trailer is still inside the trailer block", () => {
+    /* `git cherry-pick -x` writes its own line into the trailer block it
+       copies, and git keeps reading that block as one. Requiring every line of
+       the final paragraph to be `Token: value` discarded the whole block
+       instead, so the standing agent trailer became a finding and a branch
+       carrying a cherry-pick could only clear a required check by removing a
+       trailer AGENTS.md forbids removing. */
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    git(repo, "checkout", "-b", "source");
+    commit(repo, `feat: something\n\nCo-Authored-By: Some Model <${vendor}>`);
+    const picked = git(repo, "rev-parse", "HEAD").trim();
+    git(repo, "checkout", "feature");
+    git(repo, "cherry-pick", "-x", picked);
+
+    const message = git(repo, "log", "--format=%B", "-1", "HEAD");
+    expect(message).toContain("(cherry picked from commit ");
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("a cherry-pick line does not turn body prose into a trailer block", () => {
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(
+      repo,
+      `fix: quote the report\n\nThe report reads:\nCo-Authored-By: Some Model <${vendor}>\n${cherryPickLine}`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("the forge's own co-author paragraph does not demote the trailer above it", () => {
+    /* A squash merge writes the pull request's commits into one message and
+       appends its own co-author paragraph behind a horizontal rule. Reading
+       only the message's last paragraph left every trailer the forge wrote
+       above that rule outside the block. */
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(
+      repo,
+      `feat: something (#1)\n\nA body paragraph.\n\nCo-Authored-By: Some Model <${vendor}>\n\n---------\n\nCo-authored-by: Some Model <${vendor}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("a squashed pull request keeps the trailer block of every commit in it", () => {
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(
+      repo,
+      `feat: two things (#2)\n\n* feat: the first thing\n\nFirst body.\n\nCo-Authored-By: Some Model <${vendor}>\n\n* feat: the second thing\n\nSecond body.\n\nCo-Authored-By: Some Model <${vendor}>\n\n---------\n\nCo-authored-by: Some Model <${vendor}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("neither concatenation shape launders a person", () => {
+    const repo = gitRepo();
+    const person = ["someone", "personal.dev"].join("@");
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(repo, `feat: something\n\nCo-Authored-By: Someone <${person}>\n${cherryPickLine}`);
+    commit(
+      repo,
+      `feat: something (#3)\n\n* feat: the first thing\n\nCo-Authored-By: Someone <${person}>\n\n---------\n\nCo-authored-by: Some Model <${vendor}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.get("email_address")).toBe(2);
+  });
+
+  test("a bullet after a trailer paragraph is not a squashed message", () => {
+    /* The bullets only mark embedded messages when the text is the forge's
+       concatenation, which it marks by bulleting the paragraph right after the
+       title. A body that merely holds a list is one message with one trailer
+       block, and this address is not in it. */
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    commit(
+      repo,
+      `fix: document the dependency report\n\nSigned-Off-By: Dependency Tool <${forgeRole}>\n\n* the line above came from the report body`,
     );
     const findings = commitMessageFindings(repo, "main");
     expect(findings.has("email_address")).toBe(true);
