@@ -223,3 +223,60 @@ test("an empty directory reads as empty rather than as a blank control", () => {
   ));
   expect(trigger().textContent).toContain("директорію не вибрано");
 });
+
+/* Issue #1223: create-project's suggestions come from the filesystem, so the
+   caller has to hear where the operator is pointing and be able to open the
+   list itself when it refuses what was typed. */
+test("the filter text is reported as it changes, so a caller can widen the list", () => {
+  const queries: string[] = [];
+  host = dom.document.createElement("div");
+  dom.document.body.appendChild(host);
+  root = createRoot(host as unknown as Element);
+  flushSync(() => root!.render(
+    <DirectoryPicker
+      id="pick"
+      value={REPO}
+      dirs={DIRS}
+      ariaLabel="Root directory"
+      onQueryChange={(query) => queries.push(query)}
+      onChange={() => {}}
+    />,
+  ));
+  click(trigger());
+  /* Opening reports the current value: that alone is a place to complete. */
+  expect(queries).toEqual([REPO]);
+  type("/home/user/Projects/n");
+  expect(queries).toEqual([REPO, "/home/user/Projects/n"]);
+});
+
+test("an open signal from the caller opens the list on the value already held", () => {
+  const renderWith = (openSignal: number, disabled = false) => flushSync(() => root!.render(
+    <DirectoryPicker
+      id="pick"
+      value={REPO}
+      dirs={DIRS}
+      disabled={disabled}
+      ariaLabel="Root directory"
+      openSignal={openSignal}
+      onChange={() => {}}
+    />,
+  ));
+  host = dom.document.createElement("div");
+  dom.document.body.appendChild(host);
+  root = createRoot(host as unknown as Element);
+  renderWith(0);
+  expect(search()).toBeNull();
+
+  renderWith(1);
+  expect(search()).not.toBeNull();
+  expect(optionValues()).toEqual(DIRS);
+
+  /* A signal that has not moved leaves an operator-closed popup closed. */
+  press(search(), "Escape");
+  renderWith(1);
+  expect(search()).toBeNull();
+
+  /* A frozen control still refuses to open. */
+  renderWith(2, true);
+  expect(search()).toBeNull();
+});

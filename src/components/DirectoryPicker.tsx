@@ -127,6 +127,8 @@ export function DirectoryPicker({
   dirs,
   disabled,
   ariaLabel,
+  onQueryChange,
+  openSignal,
   onChange,
 }: {
   /** Stable id prefix for the listbox and option ids this control owns. */
@@ -136,6 +138,18 @@ export function DirectoryPicker({
   disabled?: boolean;
   /** Accessible name for the trigger; the chosen path is appended to it. */
   ariaLabel: string;
+  /**
+   * The filter text, reported as it changes (issue #1223). The picker still
+   * only filters `dirs`; this lets a caller whose suggestions come from the
+   * filesystem widen that list as the operator points somewhere new — which is
+   * what create-project needs, since the directory it is after is precisely the
+   * one no known-directories list carries.
+   */
+  onQueryChange?: (query: string) => void;
+  /** Bumped by a caller that wants the list opened — a create form that
+      refused the typed root answers with the completion, on the spot, rather
+      than with a rejection the operator has to reopen the picker to act on. */
+  openSignal?: number;
   onChange: (value: string) => void;
 }) {
   const { t } = useLocale();
@@ -147,6 +161,19 @@ export function DirectoryPicker({
   const [query, setQuery] = useState(value);
   const [pristine, setPristine] = useState(true);
   const [active, setActive] = useState(0);
+  /* Render-phase edge, the repo's pattern for following a prop transition: the
+     caller's signal opens the list on the value it already holds, without an
+     effect that would race the frame the refusal is drawn in. */
+  const [seenOpenSignal, setSeenOpenSignal] = useState(openSignal);
+  if (openSignal !== seenOpenSignal) {
+    setSeenOpenSignal(openSignal);
+    if (!disabled && !expanded) {
+      setQuery(value);
+      setPristine(true);
+      setActive(0);
+      setExpanded(true);
+    }
+  }
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -171,7 +198,9 @@ export function DirectoryPicker({
     setPristine(true);
     setActive(Math.max(known.indexOf(chosen), 0));
     setExpanded(true);
+    onQueryChange?.(value);
   };
+
   const close = () => {
     setExpanded(false);
     triggerRef.current?.focus();
@@ -264,6 +293,7 @@ export function DirectoryPicker({
               setQuery(event.target.value);
               setPristine(false);
               setActive(0);
+              onQueryChange?.(event.target.value);
             }}
             onKeyDown={(event) => {
               if (event.key === "ArrowDown") {

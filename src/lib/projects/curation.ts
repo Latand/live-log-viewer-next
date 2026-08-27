@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { withinSuggestionRoots } from "@/lib/projects/directorySuggestions";
 import {
   projectIdentityFromDirectory,
   projectIdentityFromRepositoryRoot,
@@ -32,6 +33,13 @@ interface ProjectCurationFile extends ProjectCurationSnapshot {
 export type CreateProjectFailure =
   | "INVALID_NAME"
   | "INVALID_ROOT"
+  /** The root is not an absolute path — a directory name that was never
+      finished into one. Told apart from a path that is absolute and absent,
+      which is a different objection with a different answer (issue #1223). */
+  | "RELATIVE_ROOT"
+  /** The root lies outside the directories the viewer knows about, which are
+      the same ones it may suggest from (issue #1223). */
+  | "OUTSIDE_ROOTS"
   /** The root is a plausible absolute path whose directory does not exist yet —
       the one refusal the client can turn into a "create directory" offer. */
   | "MISSING_DIRECTORY"
@@ -43,6 +51,10 @@ export interface CreateProjectOptions {
   /** Create the missing root directory (recursive mkdir) instead of refusing
       with MISSING_DIRECTORY. Relative paths and file paths still refuse. */
   createMissingRoot?: boolean;
+  /** Bound the creation to these directories — the roots create-project
+      suggests from. Omitted, the root is unbounded; the route always passes
+      them, so what can be created matches what can be offered (issue #1223). */
+  allowedRoots?: readonly string[];
 }
 
 export type CreateProjectResult =
@@ -158,6 +170,14 @@ export function setProjectCrown(project: string, crowned: boolean): boolean {
   return writeSnapshot({ crowned: next, manualProjects: current.manualProjects });
 }
 
+function resolvedPath(directory: string): string {
+  try {
+    return fs.realpathSync.native(directory);
+  } catch {
+    return directory;
+  }
+}
+
 /**
  * Register an operator-named project rooted at a directory. The identity is
  * minted exactly the way the scanner mints it for sessions running in that
@@ -177,8 +197,15 @@ export function createManualProject(
     return { ok: false, code: "INVALID_NAME", message: "project name must be 1-80 characters" };
   }
   const requested = root.trim();
-  if (!requested || !path.isAbsolute(requested)) {
-    return { ok: false, code: "INVALID_ROOT", message: "root must be an absolute directory path" };
+  if (!requested) {
+    return { ok: false, code: "INVALID_ROOT", message: "root must be a directory path" };
+  }
+  if (!path.isAbsolute(requested)) {
+    return { ok: false, code: "RELATIVE_ROOT", message: "root must be an absolute directory path" };
+  }
+  const bound = options.allowedRoots;
+  if (bound && !withinSuggestionRoots(requested, bound)) {
+    return { ok: false, code: "OUTSIDE_ROOTS", message: "root is outside the known project directories" };
   }
   let resolved: string;
   try {
@@ -194,6 +221,14 @@ export function createManualProject(
       const detail = error instanceof Error ? error.message : String(error);
       return { ok: false, code: "MKDIR_FAILED", message: detail };
     }
+  }
+  /* The bound is checked twice on purpose: once on the path as typed, so a
+     traversal never reaches the filesystem, and once on what it resolves to,
+     so a symlink sitting inside the bound cannot lead out of it. The roots are
+     resolved for that second comparison — a root reached through a link (a
+     `/tmp` that is really `/private/tmp`) still bounds its own contents. */
+  if (bound && !withinSuggestionRoots(resolved, bound.map(resolvedPath))) {
+    return { ok: false, code: "OUTSIDE_ROOTS", message: "root is outside the known project directories" };
   }
   try {
     if (!fs.statSync(resolved).isDirectory()) throw new Error("not a directory");
