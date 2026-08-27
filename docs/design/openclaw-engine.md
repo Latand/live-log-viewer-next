@@ -10,14 +10,17 @@ Verbatim, from the operator's request line in GitHub issue #1207 (opened
 > Viewer can host an OpenClaw agent as a structured host (spawn, deliver a
 > message, stream the turn, resume, kill).
 
-Everything below is validated against that sentence. Scope beyond the sentence
-is preserved in **Deferred — not currently justified**.
+This document designs the first half of that sentence — scanning and rendering.
+Hosting is deferred with its open requirements in **(d) Deferred — hosting**;
+other out-of-scope work is preserved in **Deferred — not currently justified**.
 
 ## Evidence discipline
 
 Two sources: this repository, and read-only inspection of the OpenClaw
 2026.6.10 install on the development machine. Source evidence was re-verified
-against `origin/main` at `dbfa3753` on 2026-08-27. That commit includes the
+against `origin/main` at `a3f9c2e2` on 2026-08-27. Every file cited below is
+byte-identical between that commit and `dbfa3753`, the baseline of the previous
+revision, so every line reference still resolves. `dbfa3753` carries the
 structured-host inventory and kill work from #1203. No OpenClaw state was
 written, and the operator's running Gateway was not started, stopped or
 reconfigured.
@@ -39,8 +42,8 @@ and cites what was measured instead.
 | a | Engine surface | Add `openclaw` to `Engine` and `Fmt`. Use explicit third arms at the viewing call sites. Defer the repository-wide hostability predicate and root-descriptor abstraction. |
 | b | Viewing | The session file alone is authoritative for the message chain **and** for model/provider. The trajectory supplies only `sessionKey`. Checkpoints are excluded from discovery. |
 | c | Project attribution | Add an exact-workspace pure path recognizer before disk-dependent resolution, and call the existing overlay for OpenClaw roots. Descendant repositories retain normal repository attribution. |
-| d | Hosting transport | Keep ACP as the leading candidate. Do not select it for implementation until an isolated Gateway proves cancellation and kill parity. The installed bridge lacks status and model methods and hides `chat.abort` failures. |
-| e | Phasing | Phase 1 ships viewing in one PR: discovery, stable attribution, list/search, model and effort display, turn state, and structured feed rendering. Hosting remains phase 2 after its transport gates pass. |
+| d | Hosting | **Not designed here.** No transport is selected, so there is nothing to build a lifecycle on. **(d) Deferred — hosting** records the measured candidates, the termination gate that has to be passed before one is chosen, and the ownership, concurrency and lifecycle questions a hosting design must answer. |
+| e | Phasing | Phase 1 ships viewing in one PR: discovery, stable attribution, list/search, model and effort display, turn state, structured feed rendering, awaiting-user state, and Viewer snapshots. Hosting is a separate design that does not start until the termination gate passes. |
 
 ---
 
@@ -104,7 +107,7 @@ creates the work.
 
 ### The branches, classified
 
-At `origin/main` `dbfa3753`, the repeated
+At `origin/main` `a3f9c2e2`, the repeated
 `engine === "claude" || engine === "codex"` idiom appears in 33 non-test
 files. A repository-wide replacement would dominate phase 1 while preserving
 its current behavior. Phase 1 changes only the viewing call sites that must
@@ -115,6 +118,15 @@ accept OpenClaw:
 - `src/lib/scanner/scanCache.ts:173` primes persisted turn evidence.
 - `src/lib/scanner/projectCatalog.ts:582` decides whether a transcript enters
   the complete list/search catalog.
+- `src/hooks/useSwitchboardData.ts:72` decides whether a recent conversation
+  counts as awaiting the user, which drives the waiting bucket and the
+  attention counter.
+- `src/lib/view/snapshot.ts:58` decides whether a focused or selected path
+  resolves to a conversation the Viewer snapshot reports at all.
+
+The last two are viewing surfaces outside the scanner. Without them an OpenClaw
+card is scanned, attributed and rendered, then vanishes from the waiting bucket
+and from every snapshot an agent reads, which is not the parity phase 1 claims.
 
 The other narrowing predicates govern host lifecycle, launch, account
 migration, tasks, workflows, and runtime controls. They keep excluding
@@ -123,8 +135,12 @@ OpenClaw during phase 1.
 Eight erasure coercions use `engine === "codex" ? "codex" : "claude"`.
 Phase 1 fixes the two feed coercions at
 `src/components/feed/parse.ts:1311,1486`, because OpenClaw prose and tool rows
-reach them. The launch, review-flow, task-send, inbox, and live-turn coercions
-remain unreachable for a view-only engine and move to phase 2.
+reach them. A ninth erasure of the same kind, the
+`entry.engine as "claude" | "codex"` cast at `src/lib/view/snapshot.ts:63`, is
+fixed together with the snapshot filter above it, since a widened filter that
+kept the cast would report OpenClaw entries as Claude. The launch,
+review-flow, task-send, inbox, and live-turn coercions remain unreachable for
+a view-only engine and move with the hosting work.
 
 The root-specific viewing work is bounded:
 
@@ -138,6 +154,8 @@ The root-specific viewing work is bounded:
 | Effort | `scanner/effort.ts:10,17-30,62-64` | Admit the root and read `thinking_level_change`. |
 | Complete catalog | `conversationCatalog.ts:15`; `projectCatalog.ts:582` | Add OpenClaw to the catalog type and filter. |
 | Feed | `feed/parse.ts:226,1374,2127`; `feed/tools.ts:184-188` | Add a structured renderer and carry the engine through prose and tool rows. |
+| Awaiting-user state | `src/hooks/useSwitchboardData.ts:72` | Admit `openclaw`, so a finished OpenClaw turn reaches the waiting bucket. |
+| Viewer snapshot | `src/lib/view/snapshot.ts:58,63`; `src/lib/view/types.ts:81` | Admit `openclaw` in the transcript filter, the reported engine, and `SnapshotConversation`. |
 | Persisted shapes | `scanCache.ts:105,109,111`; `projectCatalog.ts:124,136-137`; `resourceCollector.worker.ts:53` | Widen validators together and bump the scan schema from 9 to 10. |
 
 `turnStateFromRecords(records, codex: boolean, authoritative)` cannot express
@@ -155,15 +173,15 @@ Phase 1 uses the seams already present:
    `src/components/feed/parse.ts`.
 2. `RootKey` selects the explicit scanner branch in discovery, metadata, model,
    effort, and turn-state code.
-3. `EngineHost` remains the phase-2 host boundary at
-   `src/lib/runtime/engineHost.ts:100-108`.
+3. `EngineHost` at `src/lib/runtime/engineHost.ts:100-108` remains the
+   boundary any hosting design has to satisfy. Phase 1 does not touch it.
 
 A root descriptor adds an abstraction around three transcript roots and does
 not reduce the phase-1 edits above. A global `isHostableEngine` migration adds
 changes across 33 files before OpenClaw is hostable. Both move to
-**Deferred — not currently justified**. Phase 2 can introduce one narrow
-hostability helper after its transport is proven and its real call sites are
-known.
+**Deferred — not currently justified**. A hosting design can introduce one
+narrow hostability helper once its transport is proven and its real call sites
+are known.
 
 ---
 
@@ -221,8 +239,9 @@ modelId, modelApi, data}`. Event types: `session.started`, `context.compiled`,
 
 Everything there except `sessionKey` duplicates the session file. `sessionKey`
 does not appear in the session file and is needed only for hosting. Phase 1
-excludes trajectories. Phase 2 reads the first `session.started` event and uses
-its `data.sessionFile` back-pointer to join the key to the transcript.
+excludes trajectories; the `data.sessionFile` back-pointer that would join the
+key to a transcript is recorded in **(d) Deferred — hosting** as the one join a
+hosting design will have to make.
 
 "session" in the trajectory names a *run*. There were 143
 `session.started` events across 58 files, one per submitted prompt.
@@ -406,112 +425,81 @@ future card subtitle or sidebar grouping.
 
 ---
 
-## (d) Hosting transport
+## (d) Deferred — hosting
 
-### What the transport has to do
+**Hosting is not designed in this document.** The candidate transports were
+measured and none can be selected yet, so this is a requirement list for a
+hosting design carrying its own issue. **Nothing in it is answered here.**
 
-`EngineHost` at `src/lib/runtime/engineHost.ts:100-108` has six methods. Current
-`origin/main` adds lifecycle requirements around that interface:
+### The candidates, and the gate that picks one
 
-| Requirement | Current contract |
-|---|---|
-| Deliver a message | `send(entry): Promise<DeliveryReceipt>` with a truthful delivery outcome |
-| Stream a turn | `attach(afterSeq): AsyncIterable<RuntimeEvent>` |
-| Observe turn state | `health()` with status, active turn, event cursor, pid, and process start identity |
-| Resume | Reconstruct a host for the same session and replay durable events |
-| Interrupt | `interrupt(turnRef)` must fail when the engine does not confirm the abort |
-| Release and resource kill | `release()` plus identity-bound `releaseIfOwned` in the concrete host |
-| Inventory | The registry row must pass `structuredHostControl.ts:23-67` and the structured resource types at `resources.ts:163-207` |
-| Process safety | `structuredHostControl.ts:268-451` fences termination by pid and start identity and verifies that the process tree is gone |
+From read-only inspection of OpenClaw 2026.6.10 on the development machine:
 
-### The three candidates
+- **ACP bridge, `openclaw acp`** — leading, closest to the existing Codex stdio
+  host. The installed server advertises no status and no model capability, and
+  its cancel handler swallows a failed `chat.abort` and resolves as cancelled,
+  so a failed Gateway abort looks successful and killing the bridge only closes
+  the client.
+- **Gateway WebSocket** — a direct client keeps the `chat.abort` result, at the
+  cost of a private protocol, a direct connection to the operator's messaging
+  service, and its own security review.
+- **`openclaw agent --json`** — rejected: one terminal result, no streamed
+  deltas, no permission channel, no proven remote abort.
 
-**1. ACP bridge, `openclaw acp`.** This is the closest transport shape to the
-existing Codex stdio host. Read-only inspection of OpenClaw 2026.6.10 found
-handlers for initialization, session create/load/list/resume/close,
-prompt/cancel, mode, and config-option changes. It emits `session/update` and
-calls the client for permission decisions.
+**No transport is selected and no hosting work starts until one passes this
+gate against an isolated Gateway:** cancel a deliberately long turn and verify
+the Gateway run terminates, transcript growth stops, and the client sees a
+**failure** when `chat.abort` fails; release the host mid-turn and verify the
+same outcome through the runtime and resource kill surfaces; resume through a
+fresh bridge and prove replay plus new events without duplication. The gate runs
+under an isolated `HOME`, `XDG_CONFIG_HOME`, `OPENCLAW_STATE_DIR`,
+`LLV_STATE_DIR` and `TMPDIR` and never touches the operator's Gateway. If stock
+ACP fails the cancel step, hosting carries an upstream bridge fix or selects the
+Gateway transport after its own proof. A detach-only release cannot ship under a
+control labelled kill.
 
-The installed server has no `session/status` handler and advertises no status
-capability. It also has no `session/set_model` handler or model capability.
-Its config options cover thinking level and several session behaviors; model
-selection is absent. Generic methods found in the bundled ACP client and SDK
-are not evidence that this bridge server implements them.
+### Requirements a hosting design must answer
 
-Health can be derived locally without a status RPC: child exit means dead,
-release means unhosted, a pending prompt means active, a permission callback
-means attention, and prompt completion means idle. The host must test this
-state machine against protocol fixtures.
+**1. Ownership and concurrency for sessions that also receive Gateway turns.**
+Session keys are channel-bound: a session a Viewer-owned bridge holds can also
+receive turns from a messaging channel or from cron, with no Viewer
+involvement. Bridge-local health inference — child exit means dead, a pending
+prompt means active, prompt completion means idle — describes only the turns
+the bridge itself issued, so a Gateway-originated turn leaves an idle-looking
+host that is busy and an abort aimed at the wrong run. The design must say who
+owns a session, what happens when a second writer takes a turn (refuse, observe
+or serialise), what `health()` reports and `send()` promises while a foreign
+turn runs, and how a writer fence behaves when the Viewer is not the only
+writer.
 
-Cancellation remains a blocker. The bridge's cancel handler sends
-`chat.abort`, catches and logs any failure, clears its local pending prompt,
-and resolves it as cancelled. A failed Gateway abort therefore looks
-successful to an ACP client. Killing the bridge process only closes the client;
-the Gateway may continue the run.
+**2. The lifecycle surfaces.** Beyond the six `EngineHost` methods, at minimum:
+**startup re-adoption** of hosts that outlived the Viewer process; **persistence
+binding** between the registry row, the durable event store and the transcript;
+**registry host-kind validation** for a third kind, through
+`structuredHostControl.ts:23-67` and `resources.ts:163-207`; **successor
+publication** when a host is replaced, rebound or generation-bumped; and
+**restart failure handling** — what the board shows when re-adoption fails, and
+how a half-adopted host retires without reporting a kill it never performed.
 
-**2. Gateway WebSocket.** A direct client could call `chat.abort` and preserve
-its result, which gives it a possible route to real interruption. The cost is a
-private Gateway protocol and a direct connection to the operator's messaging
-service. This option stays behind the same isolated proof gate and needs a
-separate security review before selection.
+**3. Identity, model and effort.** `src/lib/agent/sessionKey.ts:7-19` accepts a
+bare v4-shaped id, which a `-topic-<n>` filename cannot supply; the bare id is
+in the transcript header and the trajectory's first `session.started` event
+joins `sessionKey` to it through `data.sessionFile`. That join is the whole cost
+of phase 1's trajectory exclusion. For Expected 5, effort may map to
+`session/set_mode` or the advertised thought-level option, while model control
+has no route in the installed ACP server — the selector stays disabled with an
+explicit unsupported reason until one is demonstrated.
 
-**3. `openclaw agent --json` per turn.** The command returns one terminal JSON
-result. It provides no streamed deltas, permission channel, or proven remote
-abort. It cannot meet the structured-host requirement.
+### The `node:sqlite` preflight, retained
 
-### Transport decision gate
-
-ACP is the leading candidate because it already provides session lifecycle,
-stream updates, and permission callbacks over stdio. Implementation is blocked
-until an isolated Gateway test proves all of these properties:
-
-1. Start a synthetic session and a deliberately long turn.
-2. Send `session/cancel` and verify the Gateway run terminates, transcript
-   growth stops, and the client receives a failure when `chat.abort` fails.
-3. Release the host during an active turn and verify the same termination
-   outcome through the runtime and resource kill surfaces.
-4. Resume the session through a fresh bridge and prove replay plus new streamed
-   events without duplication.
-
-The test uses an isolated `HOME`, `XDG_CONFIG_HOME`, `OPENCLAW_STATE_DIR`,
-`LLV_STATE_DIR`, and `TMPDIR`. It must never connect to the operator's Gateway.
-If stock ACP fails step 2, phase 2 must either add an upstream bridge fix that
-propagates abort failure or select the direct Gateway transport after its own
-proof. A detach-only release cannot ship under a control labelled kill.
-
-Expected 5 has a separate gate. Effort maps to `session/set_mode` or the
-advertised thought-level config option. Model control has no route in this ACP
-server. Phase 2 must demonstrate a supported model method before enabling the
-Viewer's model selector. Until then, OpenClaw model selection stays disabled
-with an explicit unsupported reason.
-
-Once the transport passes, replay remains Viewer-owned through a durable event
-store. The session transcript is canonical across bridge restarts, while each
-bridge process has its own runtime event cursor.
-
-### The `node:sqlite` obstacle: root cause, fix, diagnosis
-
-The observed failure comes from resolving `node` through a Bun child-process
-shim. `openclaw` uses `#!/usr/bin/env node`, and the Viewer forwards `PATH`
-through `CHILD_ENV_ALLOWLIST` and `subscriptionEnv` at
-`src/lib/runtime/codexAppServerHost.ts:226,396-400`.
-
-Bun 1.3.3 exposes a sharper trap: `require("node:sqlite")` can exit zero without
-returning `DatabaseSync`. An ESM named import fails under that shim. The earlier
-CommonJS exit-code probe therefore accepted the broken runtime.
-
-The host resolves a Node interpreter and the OpenClaw entry script explicitly,
-then spawns:
-
-```
-<node> <openclaw-dist-entry> acp --session <key> [--require-existing] ...
-```
-
-`LLV_OPENCLAW_NODE` and `LLV_OPENCLAW_ENTRY` provide explicit overrides. The
-default resolver must reject Bun shim directories and include the selected
-interpreter in any launch diagnostic.
-
-The preflight stays small:
+Kept because it is diagnosed and should not be rediscovered. `openclaw` uses
+`#!/usr/bin/env node` and the Viewer forwards `PATH`
+(`src/lib/runtime/codexAppServerHost.ts:226,396-400`), so `node` can resolve to
+a Bun 1.3.3 shim where `require("node:sqlite")` exits zero without returning
+`DatabaseSync` — which is why an exit-code probe accepted a broken runtime. A
+host resolves interpreter and entry script explicitly (`LLV_OPENCLAW_NODE`,
+`LLV_OPENCLAW_ENTRY`), rejects Bun shim directories, names the interpreter in
+every launch diagnostic, and preflights three codes:
 
 | Code | Check | Message must name |
 |---|---|---|
@@ -519,10 +507,8 @@ The preflight stays small:
 | `openclaw_runtime_lacks_sqlite` | `<node> --input-type=module -e 'import { DatabaseSync } from "node:sqlite"; if (typeof DatabaseSync !== "function") process.exit(1)'` fails | the resolved interpreter and its version |
 | `openclaw_entry_missing` | entry script is absent | the path that was probed |
 
-Gateway reachability is part of ACP initialization and should surface the
-bridge's own failure. A separate probe would duplicate the connection and auth
-path. Tests prove that the Bun shim produces
-`openclaw_runtime_lacks_sqlite`, while supported Node 22 and 26 runtimes pass.
+Gateway reachability is part of ACP initialization and surfaces as the bridge's
+own failure, so it needs no separate probe.
 
 ---
 
@@ -530,13 +516,10 @@ path. Tests prove that the Bun shim produces
 
 ### The boundary
 
-**Phase 1: viewing. Phase 2: hosting.** Viewing depends only on transcript
-files and existing feed primitives. Hosting depends on a Gateway, a real Node
-runtime, and remote-run termination semantics that remain unproven.
-
-Phase 2 must build `SessionKey` from the transcript header id and the trajectory
-session key. `src/lib/agent/sessionKey.ts:7-19` accepts a bare v4-shaped id;
-OpenClaw topic filenames carry a suffix and cannot supply that value.
+**Phase 1 is viewing, and it is the only phase this document designs.**
+Viewing depends only on transcript files and existing feed primitives. Hosting
+depends on a Gateway, a real Node runtime, and remote-run termination semantics
+that remain unproven, so it is a separate design gated on section (d).
 
 ### What phase 1 ships
 
@@ -545,7 +528,7 @@ catalog, receives stable project attribution, displays its real model and
 effort, reports turn state, and opens through `renderOpenclaw`. The PR has no
 plain-text fallback.
 
-Work plan against `origin/main` at `dbfa3753`:
+Work plan against `origin/main` at `a3f9c2e2`:
 
 **1. Core unions.** In `src/lib/types.ts`, add `openclaw-sessions` to
 `RootKey` and `openclaw` to `Engine` and `Fmt`. Keep both `AgentEngine` unions,
@@ -592,6 +575,18 @@ when the real provider/model changes. Update `FeedItem.tsx`, `utils.ts`, and
 the board and in the feed. The mapping table in section (b) defines the record
 behavior.
 
+**8. Awaiting-user state and Viewer snapshots.** `isAwaitingUser` at
+`src/hooks/useSwitchboardData.ts:72` admits `openclaw`, so a recent OpenClaw
+conversation that finished its turn reaches the waiting bucket and the attention
+counter instead of sinking into the recency buckets. In
+`src/lib/view/snapshot.ts`, `transcriptEntry` at `:58` admits `openclaw` so a
+focused or selected OpenClaw path resolves instead of being dropped, and
+`conversation` at `:63` drops the `"claude" | "codex"` cast and reports the real
+engine; `SnapshotConversation["engine"]` at
+`src/lib/view/types.ts:81` widens to match. `SnapshotSpawnStub`'s
+`launch.engine` at `src/lib/view/types.ts:103` stays two-membered, because it
+describes a spawn and phase 1 creates none.
+
 **Tests**, all against invented fixtures under an isolated
 `HOME`/`XDG_CONFIG_HOME`/`LLV_STATE_DIR`/`TMPDIR`, run by path:
 
@@ -618,6 +613,12 @@ behavior.
   identity.
 - `src/components/scheme/offscreenClusters.test.ts` covers the OpenClaw board
   color.
+- `src/hooks/useSwitchboardData.dom.test.tsx`: a recent OpenClaw conversation
+  lands in the waiting bucket, while an OpenClaw subagent and a non-recent
+  OpenClaw entry still do not.
+- `src/lib/view/view.test.ts`: a selected OpenClaw path appears in the snapshot
+  as `engine: "openclaw"` rather than being omitted or reported as Claude, and
+  a path with no scan entry is still omitted.
 
 **Gates:** `bunx tsc --noEmit --incremental false`; the touched test files by
 path; `bun scripts/privacy-publication-gate.ts --base <merge-base>
@@ -630,56 +631,27 @@ recognition, spawn path, registry entry, delivery controller, model selector,
 or effort selector. It displays recorded model, provider, and effort values.
 The repository-wide hostability predicate also stays out of phase 1.
 
-### Phase 2, sketched
-
-Phase 2 starts with the isolated transport proof in section (d). After that
-gate passes, its implementation map follows current `origin/main`:
-
-1. Parse the bare session id from the transcript header, join the trajectory
-   session key through `data.sessionFile`, widen `AgentEngine` in
-   `src/lib/agent/cli.ts` and `SessionKey`, then add the two structured-spawn
-   construction arms.
-2. Implement the selected host with all six `EngineHost` methods,
-   identity-bound `releaseIfOwned`, process start identity in `health()`, and a
-   writer fence. `releaseIfOwned` must abort and verify the Gateway run before
-   it reaps the bridge child.
-3. Publish the host through `structuredDeliveryController.ts`, including state
-   projection, generation rebind, owned termination, and registry retirement.
-4. Extend `structuredHostControl.ts:23-67`, `resources.ts:163-207`, the resource
-   validators, and the runtime-host API so OpenClaw appears in inventory and
-   the resource kill path carries the same pid/start-identity fence. An orphan
-   bridge cannot report kill success unless a fresh control path verifies the
-   Gateway run ended.
-5. Extend `scanner/process.ts` so the bridge process carries the structured-host
-   stamp and is attributable without matching the shared Gateway process.
-6. Wire effort control through the proven ACP mode/config method. Enable model
-   control only after the transport proof demonstrates a supported model
-   method.
-
-This is a separate PR and issue. It includes protocol fixtures plus isolated
-Gateway tests for prompt streaming, attention, resume, runtime kill, resource
-kill, abort failure, process-identity mismatch, controller rebind, and replay.
-
 ---
 
 ## Baseline and file ownership
 
 The evidence and line references in this revision use `origin/main` at
-`dbfa3753` (2026-08-27). That baseline includes the merged structured-host
-inventory, process-stamp, identity-fenced release, and resource-kill work from
-#1203, plus the feed and orchestration work named in the task.
+`a3f9c2e2` (2026-08-27); every cited file is unchanged since `dbfa3753`, which
+carries the merged structured-host inventory, process-stamp, identity-fenced
+release, and resource-kill work from #1203, plus the feed and orchestration work
+named in the task.
 
 No file fence remains. The implementer rebases this branch on current main
 before editing, records the new merge base, and rechecks every cited branch
-whose line moved. Phase 1 may edit the feed renderer directly and ships its
-scanner, catalog, attribution, model, effort, cache, and presentation changes
-in the same PR.
+whose line moved. Phase 1 ships its scanner, catalog, attribution, model,
+effort, cache, feed, awaiting-user and snapshot changes in one PR.
 
 ---
 
 ## Deferred — not currently justified
 
-Cut from this design, with the reason. None of it is discarded.
+Cut from this design, with the reason. None of it is discarded. Hosting has its
+own list in section (d).
 
 **An engine-descriptor registry spanning the UI.** Would not fix the 107 binary
 ternaries, which are the actual cost, and would abstract for a fourth engine
@@ -691,8 +663,8 @@ shorter and keep each parser beside the shape it understands.
 
 **The 33-file hostability-predicate migration.** Most of those predicates
 guard launch, lifecycle, tasks, workflows, or account behavior. OpenClaw cannot
-reach them during phase 1. Phase 2 may introduce a helper for the smaller set
-its proven transport actually needs.
+reach them during phase 1. A hosting design may introduce a helper for the
+smaller set its proven transport actually needs.
 
 **Host-only erasure coercions.** Draft launch, direct reviews, task send, inbox,
 and live-turn rows have no OpenClaw producer in phase 1. They move with the
@@ -718,19 +690,11 @@ snapshot. OpenClaw runs OpenAI-family models through an OpenAI response API, so
 context window is accurate. Adding OpenAI model windows creates a separate
 maintenance surface.
 
-**OpenClaw model control.** The installed ACP server exposes no model method or
-model config option. Keep the selector disabled until the phase-2 transport
-proof identifies a supported route.
-
 **Account and limits integration.** `LimitsCache`
 (`src/lib/limits.ts:38,50`) is `Record<EngineName, …>` behind `version: 2`;
 adding a third key is a persisted-shape migration. OpenClaw has no Viewer-owned
 subscription window to display. This stays out of scope until OpenClaw's
 account model is understood.
-
-**`openclaw agent --json` as a reduced send mode.** It can send one message and
-return one terminal result. Streaming, attention, resume, and verified abort
-remain unavailable, so it cannot satisfy the originating host requirement.
 
 **Per-agent-id project grouping.** Presentational; can ride on card titles
 without a second project-id namespace. See (c).
@@ -746,13 +710,15 @@ in one PR. Discovery, complete catalog/search, attribution, turn state,
 model/provider/effort display, and the structured renderer ship together.
 
 *"the Viewer can host an OpenClaw agent as a structured host (spawn, deliver a
-message, stream the turn, resume, kill)"* remains phase 2. ACP is eligible only
-after the isolated proof shows real run termination and propagated abort
-failure. A transport that only detaches the Viewer fails this requirement and
-does not ship.
+message, stream the turn, resume, kill)"* is **not answered here**, and is not
+claimed to be. No transport has passed the termination gate, so there is nothing
+to design a lifecycle against; section (d) carries the open questions to the
+design that will.
 
 *"at the same level Claude and Codex already are"* is met for the phase-1
-viewing surface. Hosting reaches that bar only after runtime and resource kill,
-resume, delivery, streaming, attention, inventory, and process identity pass
-the phase-2 gates. Accounts, subscription limits, and shared-Gateway process
-liveness have no equivalent OpenClaw concept and remain outside the request.
+viewing surface: discovery, attribution, catalog and search, turn state,
+model/effort display, feed rendering, the awaiting-user bucket, and Viewer
+snapshots. Hosting reaches that bar only after section (d)'s gate and
+requirements are both answered. Accounts, subscription limits, and
+shared-Gateway process liveness have no equivalent OpenClaw concept and remain
+outside the request.
