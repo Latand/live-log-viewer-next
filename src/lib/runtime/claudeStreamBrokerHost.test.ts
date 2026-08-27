@@ -10,6 +10,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
+import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/process";
 import { saveTelegramSession, TELEGRAM_CONNECTOR_TOKEN_ENV } from "@/lib/telegram/sessionStore";
 
 import {
@@ -351,7 +352,13 @@ describe("ClaudeStreamBrokerHost", () => {
       spawnProcess: fakeSpawn(child, captured),
     });
 
-    expect(captured.options?.env).toEqual({ NODE_ENV: "test", PATH: process.env.PATH });
+    /* The allowlisted env, plus the provenance stamp the resources rail needs
+       to tell this host from any other process wearing the same argv (#1199). */
+    expect(captured.options?.env).toEqual({
+      NODE_ENV: "test",
+      PATH: process.env.PATH,
+      [STRUCTURED_HOST_STAMP_ENV]: structuredHostStamp(),
+    });
     expect(captured.args).toContain("--input-format");
     expect(captured.args).toContain("--output-format");
     expect(captured.args).not.toContain("--safe-mode");
@@ -1150,6 +1157,7 @@ describe("ClaudeStreamBrokerHost", () => {
       NODE_ENV: "test",
       PATH: process.env.PATH,
       CLAUDE_CONFIG_DIR: configDir,
+      [STRUCTURED_HOST_STAMP_ENV]: structuredHostStamp(),
     });
     expect(await host.send({ id: "managed-entry", text: "managed prompt" })).toEqual({ outcome: "turn-started", turnId: "managed-entry" });
     expect(child.inputs).toHaveLength(0);
@@ -1826,6 +1834,28 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(await host.health()).toMatchObject({ status: "unhosted", pid: null, endpoint: "stdio:released" });
     expect(states.at(-1)).toMatchObject({ status: "unhosted", pid: null });
     await expect(host.release()).resolves.toBeUndefined();
+  });
+
+  test("an identity-bound release refuses a recycled child before signalling", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    let processIdentity = "5150:owned";
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+      processIdentity: () => processIdentity,
+    });
+    processIdentity = "5150:replacement";
+
+    expect(await host.releaseIfOwned({ pid: child.pid, startIdentity: "5150:owned" })).toBeFalse();
+    expect(child.signals).toEqual([]);
+
+    processIdentity = "5150:owned";
+    await host.release();
   });
 
   test("a late Claude reap after ledger failure releases the persisted writer claim", async () => {
