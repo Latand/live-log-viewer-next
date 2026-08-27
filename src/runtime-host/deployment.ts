@@ -75,6 +75,11 @@ export interface ViewerDeploymentCoordinatorOptions {
       succeeded deployment AND after the successor staging is durable — never
       as a same-image self-restart, which would boot the stale image again. */
   onHostHandoff?: (context: RuntimeHostHandoffContext) => void;
+  /** #1216: the deployment's own narration. Three deployments in a row left
+      no trace of whether a runtime-host successor was even attempted, because
+      the only step that stages one decided silently and parked its failures in
+      the journal without printing them. */
+  log?: (line: string) => void;
 }
 
 function validRequestedRevision(revision: string): boolean {
@@ -119,6 +124,7 @@ export class ViewerDeploymentCoordinator {
   private readonly ownerAlive: (owner: ViewerDeploymentOwner) => boolean;
   private readonly hostGeneration?: () => RuntimeHostGeneration;
   private readonly onHostHandoff?: (context: RuntimeHostHandoffContext) => void;
+  private readonly log: (line: string) => void;
 
   constructor(
     private readonly journal: RuntimeJournal,
@@ -132,6 +138,7 @@ export class ViewerDeploymentCoordinator {
       && (candidate.startIdentity === null || procBackend.processIdentity(candidate.pid) === candidate.startIdentity));
     this.hostGeneration = options.hostGeneration;
     this.onHostHandoff = options.onHostHandoff;
+    this.log = options.log ?? ((line) => console.error(line));
   }
 
   async requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> {
@@ -246,10 +253,19 @@ export class ViewerDeploymentCoordinator {
       host-handoff phase until staging succeeds. Only then does it become
       terminal and signal the predecessor to release the singleton fence. */
   private async stageDriftedHostSuccessor(status: ViewerDeploymentStatus): Promise<RuntimeHostHandoffContext | null> {
-    if (!this.hostGeneration || !status.candidate) return null;
+    const trace = (line: string) => this.log(`[viewer deployment] ${status.deploymentId} host-handoff ${line}`);
+    if (!this.hostGeneration || !status.candidate) {
+      trace("skipped: this runtime host does not track its own generation, so no successor can be staged");
+      return null;
+    }
     const running = this.hostGeneration();
-    if (running.revision === status.revision && running.image === status.candidate.image) return null;
+    if (running.revision === status.revision && running.image === status.candidate.image) {
+      trace(`not required: the runtime host already runs ${status.revision}`);
+      return null;
+    }
+    trace(`staging a successor for ${status.revision}; the running generation is ${running.revision ?? "untracked"}`);
     await this.adapter.stageRuntimeHostSuccessor(status.candidate);
+    trace(`staged; the successor waits for the singleton fence while this generation hands off ${status.revision}`);
     return {
       deploymentId: status.deploymentId,
       revision: status.revision,
@@ -261,7 +277,7 @@ export class ViewerDeploymentCoordinator {
   private start(status: ViewerDeploymentStatus): void {
     if (this.tasks.has(status.deploymentId) || status.terminal) return;
     const task = this.run(status)
-      .catch((error) => console.error(`[viewer deployment] ${safeError(error)}`))
+      .catch((error) => this.log(`[viewer deployment] ${safeError(error)}`))
       .finally(() => this.tasks.delete(status.deploymentId));
     this.tasks.set(status.deploymentId, task);
   }
@@ -322,6 +338,13 @@ export class ViewerDeploymentCoordinator {
         if (status.phase === "promoting") {
           if (!status.candidate) throw new Error("candidate identity is missing");
           const publication = await this.adapter.promote(status.candidate);
+          /* #1216: the promote's hot-state hand-over used to leave no trace in
+             the runtime-host log at all — the ordered steps and their waits
+             lived only in the adapter phase file, which is deleted the moment
+             the action returns. */
+          if (publication.hotStateHandOver) {
+            this.log(`[viewer deployment] ${status.deploymentId} promote hot-state hand-over: ${publication.hotStateHandOver}`);
+          }
           const runtime = mcpRuntimeStatus(status);
           status = this.journal.updateViewerDeployment(status.deploymentId, {
             phase: "post-promotion-health",
@@ -382,6 +405,7 @@ export class ViewerDeploymentCoordinator {
       const message = safeError(error);
       const latest = this.journal.viewerDeployment(status.deploymentId) ?? status;
       if (latest.phase === "host-handoff") {
+        this.log(`[viewer deployment] ${latest.deploymentId} host-handoff failed and stays retryable: ${message}`);
         this.journal.updateViewerDeployment(latest.deploymentId, {
           error: message,
           phase: "host-handoff",

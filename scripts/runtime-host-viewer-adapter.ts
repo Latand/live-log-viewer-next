@@ -967,12 +967,19 @@ async function reconcileMcpRuntime(
     the predecessor generation is allowed to exit; this adapter process never
     needs to survive that exit. Only the runtime-host generation changes —
     Viewer containers and the engine processes they own are never signalled. */
-async function stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<void> {
+async function stageRuntimeHostSuccessor(
+  candidate: ViewerReleaseIdentity,
+  phase: (value: string) => void = () => {},
+): Promise<void> {
   const registryBackendMode = viewerRegistryBackendMode(
     viewerComposeServiceFromConfig(fs.readFileSync(composeConfigFile(candidate.container), "utf8")),
   );
   await stageRuntimeHostSuccessorContainer(candidate, runtimeHostImageTag, {
     docker: (argv) => command(["docker", ...argv]),
+    /* #1216: the staging action has an eleven-second stability wait and half a
+       dozen Docker calls inside a sixty-second host budget. Without a phase it
+       reported "waiting for the adapter process" and named nothing. */
+    reportPhase: phase,
     writeRelease: (record) => writeRuntimeHostRelease(record, runtimeHostReleaseFile()),
     readRelease: () => readRuntimeHostRelease(runtimeHostReleaseFile()),
     readHandoffIntent: () => readRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
@@ -1117,7 +1124,7 @@ async function main(): Promise<unknown> {
   }
   if (action === "stage-host-successor") {
     const candidate = release(input.candidate);
-    await stageRuntimeHostSuccessor(candidate);
+    await stageRuntimeHostSuccessor(candidate, (phase) => reportAdapterPhase(action, phase));
     return {};
   }
   if (action === "complete-host-handoff") {

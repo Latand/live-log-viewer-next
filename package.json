@@ -28,6 +28,7 @@
     "build:mcp": "bun scripts/build-mcp.ts",
     "demo:capture": "bun scripts/demo-capture.ts",
     "deploy:staging": "bun scripts/deploy-staging.ts",
+    "bootstrap:runtime-host": "bun scripts/bootstrap-runtime-host.ts",
     "demo:motion": "bun scripts/demo-motion.ts",
     "start": "bun --bun node_modules/.bin/next start",
     "lint": "eslint",
