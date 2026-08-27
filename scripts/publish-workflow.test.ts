@@ -68,9 +68,11 @@ const publishPackage = workflowStepScript("Publish package with OIDC").replace(
 
 type VerifyScenario = {
   expectedIntegrity?: string;
+  integritySequence?: string;
   publishedThisRun?: boolean;
   registryIntegrity?: string;
   sequence: string;
+  tagSequence?: string;
   tagVersion?: string;
 };
 
@@ -97,9 +99,11 @@ function installNodeEvalShim(bin: string): void {
 
 function runVerifyScenario({
   expectedIntegrity = "sha512-fixture-integrity",
+  integritySequence = "configured",
   publishedThisRun = true,
   registryIntegrity = "sha512-fixture-integrity",
   sequence,
+  tagSequence = "configured",
   tagVersion = "1.2.3",
 }: VerifyScenario) {
   const directory = mkdtempSync(join(tmpdir(), "llv-publish-verify-"));
@@ -129,13 +133,18 @@ function runVerifyScenario({
       "#!/bin/sh",
       'printf \'%s\\n\' "$*" >> "$NPM_TEST_CALLS"',
       'if [ "$1" != "view" ]; then exit 90; fi',
+      "next_response() {",
+      '  counter="$1"',
+      '  sequence="$2"',
+      "  count=0",
+      '  if [ -f "$counter" ]; then count="$(cat "$counter")"; fi',
+      "  count=$((count + 1))",
+      '  printf \'%s\\n\' "$count" > "$counter"',
+      '  printf \'%s\\n\' "$sequence" | awk -F, -v field="$count" \'{ value = $field; if (value == "") value = $NF; print value }\'',
+      "}",
       'case "$3" in',
       "  version)",
-      "    count=0",
-      '    if [ -f "$NPM_TEST_COUNTER" ]; then count="$(cat "$NPM_TEST_COUNTER")"; fi',
-      "    count=$((count + 1))",
-      '    printf \'%s\\n\' "$count" > "$NPM_TEST_COUNTER"',
-      '    response="$(printf \'%s\\n\' "$NPM_TEST_SEQUENCE" | awk -F, -v field="$count" \'{ value = $field; if (value == "") value = $NF; print value }\')"',
+      '    response="$(next_response "${NPM_TEST_COUNTER}-version" "$NPM_TEST_SEQUENCE")"',
       '    case "$response" in',
       "      404) printf 'npm error code E404\\n' >&2; exit 1 ;;",
       "      fatal) printf 'npm error code E403 synthetic registry refusal\\n' >&2; exit 43 ;;",
@@ -143,8 +152,25 @@ function runVerifyScenario({
       "      *) exit 92 ;;",
       "    esac",
       "    ;;",
-      '  dist-tags) printf \'{"%s":"%s"}\\n\' "$NPM_TEST_TAG" "$NPM_TEST_TAG_VERSION" ;;',
-      '  dist.integrity) printf \'"%s"\\n\' "$NPM_TEST_REGISTRY_INTEGRITY" ;;',
+      "  dist-tags)",
+      '    response="$(next_response "${NPM_TEST_COUNTER}-tag" "$NPM_TEST_TAG_SEQUENCE")"',
+      '    case "$response" in',
+      "      404) printf 'npm error code E404\\n' >&2; exit 1 ;;",
+      "      fatal) printf 'npm error code E503 synthetic tag refusal\\n' >&2; exit 44 ;;",
+      '      configured) printf \'{"%s":"%s"}\\n\' "$NPM_TEST_TAG" "$NPM_TEST_TAG_VERSION" ;;',
+      '      visible) printf \'{"%s":"%s"}\\n\' "$NPM_TEST_TAG" "$NPM_TEST_VERSION" ;;',
+      "      *) exit 92 ;;",
+      "    esac",
+      "    ;;",
+      "  dist.integrity)",
+      '    response="$(next_response "${NPM_TEST_COUNTER}-integrity" "$NPM_TEST_INTEGRITY_SEQUENCE")"',
+      '    case "$response" in',
+      "      404) printf 'npm error code E404\\n' >&2; exit 1 ;;",
+      "      fatal) printf 'npm error code E500 synthetic integrity refusal\\n' >&2; exit 45 ;;",
+      '      configured) printf \'"%s"\\n\' "$NPM_TEST_REGISTRY_INTEGRITY" ;;',
+      "      *) exit 92 ;;",
+      "    esac",
+      "    ;;",
       "  *) exit 91 ;;",
       "esac",
       "",
@@ -181,6 +207,8 @@ function runVerifyScenario({
       NPM_TEST_COUNTER: counter,
       NPM_TEST_SLEEPS: sleeps,
       NPM_TEST_SEQUENCE: sequence,
+      NPM_TEST_TAG_SEQUENCE: tagSequence,
+      NPM_TEST_INTEGRITY_SEQUENCE: integritySequence,
       NPM_TEST_VERSION: "1.2.3",
       NPM_TEST_TAG: "latest",
       NPM_TEST_TAG_VERSION: tagVersion,
@@ -267,7 +295,6 @@ test("registry preflight makes trusted publication idempotent and verifies the r
   expect(publish).toBeGreaterThan(packageStep);
   expect(workflow).toContain('npm publish "${{ steps.package.outputs.tarball }}"');
   expect(verify).toBeGreaterThan(publish);
-  expect(workflow).toContain('npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --json');
   expect(workflow).toContain("id-token: write");
   expect(workflow).not.toContain("NODE_AUTH_TOKEN");
 });
@@ -343,6 +370,40 @@ test("publish verification backs off through E404 before checking tag and integr
   expect(result.stderr).toBe("");
 });
 
+test("publish verification retries E404 while integrity metadata propagates", () => {
+  const result = runVerifyScenario({
+    integritySequence: "404,configured",
+    sequence: "visible",
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(
+    result.calls.filter((call) => call.endsWith(" version --json")),
+  ).toHaveLength(2);
+  expect(
+    result.calls.filter((call) => call.endsWith(" dist.integrity --json")),
+  ).toHaveLength(2);
+  expect(result.sleeps).toEqual(["5"]);
+  expect(result.outputs).toContain("visibility=visible");
+});
+
+test("publish verification retries E404 while the dist-tag propagates", () => {
+  const result = runVerifyScenario({
+    sequence: "visible",
+    tagSequence: "404,configured",
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(
+    result.calls.filter((call) => call.endsWith(" version --json")),
+  ).toHaveLength(2);
+  expect(
+    result.calls.filter((call) => call.endsWith(" dist-tags --json")),
+  ).toHaveLength(2);
+  expect(result.sleeps).toEqual(["5"]);
+  expect(result.outputs).toContain("visibility=visible");
+});
+
 test("an already-published visible version passes without a publish integrity output", () => {
   const result = runVerifyScenario({
     expectedIntegrity: "",
@@ -364,6 +425,27 @@ test("publish verification fails on the first non-E404 registry error", () => {
   expect(result.calls).toHaveLength(1);
   expect(result.sleeps).toEqual([]);
   expect(result.stderr).toContain("E403 synthetic registry refusal");
+});
+
+test("publish verification fails immediately on a non-E404 dist-tag error", () => {
+  const result = runVerifyScenario({ sequence: "visible", tagSequence: "fatal" });
+
+  expect(result.exitCode).toBe(44);
+  expect(result.sleeps).toEqual([]);
+  expect(result.calls).toHaveLength(2);
+  expect(result.stderr).toContain("E503 synthetic tag refusal");
+});
+
+test("publish verification fails immediately on a non-E404 integrity error", () => {
+  const result = runVerifyScenario({
+    integritySequence: "fatal",
+    sequence: "visible",
+  });
+
+  expect(result.exitCode).toBe(45);
+  expect(result.sleeps).toEqual([]);
+  expect(result.calls).toHaveLength(3);
+  expect(result.stderr).toContain("E500 synthetic integrity refusal");
 });
 
 test("a successful publish timeout reports a pending visibility outcome", () => {

@@ -1200,11 +1200,11 @@ const commitMessageFindingClasses = new Set<FindingClass>([
  *
  * A commit message is a publication surface and its trailers are the one part
  * of it a human never writes by hand, so they need a rule of their own. The
- * local part must be exactly `noreply`/`no-reply`: that address belongs to a
- * vendor and identifies nobody. The forge also uses the `support` local part
- * on its own `github.com` domain in automated sign-off trailers. Other local
- * parts remain attributable, including `<id>+<handle>@users.noreply.github.com`,
- * which is an account handle with a number in front of it.
+ * general vendor carve-out requires the exact local part `noreply`/`no-reply`.
+ * The forge's automated sign-off uses one additional role address: the
+ * `support` local part on its own `github.com` domain. Other local parts remain
+ * attributable, including `<id>+<handle>@users.noreply.github.com`, which is
+ * an account handle with a number in front of it.
  */
 const FORGE_ROLE_ADDRESS_PATTERN = ["support", String.raw`github\.com`].join(
   "@",
@@ -1213,12 +1213,37 @@ const MACHINE_ATTRIBUTION_TRAILER = new RegExp(
   String.raw`^(?:co-authored-by|signed-off-by)\s*:\s*[^<>\r\n]*<(?:(?:noreply|no-reply)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|${FORGE_ROLE_ADDRESS_PATTERN})>\s*$`,
   "i",
 );
+const COMMIT_TRAILER_LINE = /^[A-Za-z0-9][A-Za-z0-9-]*\s*:\s*.+$/;
 
 /** The message as it reads once machine attribution is set aside. */
 export function commitMessageWithoutMachineTrailers(message: string): string {
-  return message
-    .split(/\r?\n/)
-    .filter((line) => !MACHINE_ATTRIBUTION_TRAILER.test(line.trim()))
+  const lines = message.split(/\r?\n/);
+  let trailerEnd = lines.length;
+  while (trailerEnd > 0 && lines[trailerEnd - 1].trim() === "") {
+    trailerEnd -= 1;
+  }
+
+  let trailerStart = trailerEnd;
+  while (trailerStart > 0 && lines[trailerStart - 1].trim() !== "") {
+    trailerStart -= 1;
+  }
+  const hasSeparatedTrailerBlock = trailerStart > 0;
+  const trailerLines = lines.slice(trailerStart, trailerEnd);
+  if (
+    !hasSeparatedTrailerBlock ||
+    trailerLines.length === 0 ||
+    !trailerLines.every((line) => COMMIT_TRAILER_LINE.test(line.trim()))
+  ) {
+    return message;
+  }
+
+  return lines
+    .filter(
+      (line, index) =>
+        index < trailerStart ||
+        index >= trailerEnd ||
+        !MACHINE_ATTRIBUTION_TRAILER.test(line.trim()),
+    )
     .join("\n");
 }
 

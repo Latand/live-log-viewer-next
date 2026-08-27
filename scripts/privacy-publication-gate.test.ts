@@ -2854,7 +2854,10 @@ describe("commitMessageFindings", () => {
   test("the forge support role address remains flagged in the commit body", () => {
     const repo = gitRepo();
     const forgeRole = ["support", "github.com"].join("@");
-    commit(repo, `fix: route registry reports through ${forgeRole}`);
+    commit(
+      repo,
+      `fix: document the dependency report\n\nSigned-Off-By: Dependency Tool <${forgeRole}>\n\nThe quoted line above came from the report body.`,
+    );
     const findings = commitMessageFindings(repo, "main");
     expect(findings.has("email_address")).toBe(true);
   });

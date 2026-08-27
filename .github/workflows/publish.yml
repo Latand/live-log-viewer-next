@@ -284,13 +284,33 @@ jobs:
           verify_delays=(5 10 20 30 45 60 75 90 120 120)
           visible=false
 
-          for ((attempt = 0; attempt <= ${#verify_delays[@]}; attempt += 1)); do
-            set +e
-            published_json="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --json 2>"$error_file")"
-            view_status=$?
-            set -e
+          registry_view() {
+            local output_variable="$1"
+            shift
+            local registry_output
 
-            if [ "$view_status" -eq 0 ]; then
+            set +e
+            registry_output="$(npm view "$@" --json 2>"$error_file")"
+            registry_status=$?
+            set -e
+            printf -v "$output_variable" '%s' "$registry_output"
+          }
+
+          registry_returned_e404() {
+            grep -Eq '(^|[[:space:]])E404([[:space:]]|$)' "$error_file"
+          }
+
+          fail_registry_view() {
+            local field="$1"
+            cat "$error_file" >&2
+            echo "Registry verification failed while reading ${field} for ${PACKAGE_NAME}@${PACKAGE_VERSION}" >&2
+            exit "$registry_status"
+          }
+
+          for ((attempt = 0; attempt <= ${#verify_delays[@]}; attempt += 1)); do
+            pending_field=""
+            registry_view published_json "${PACKAGE_NAME}@${PACKAGE_VERSION}" version
+            if [ "$registry_status" -eq 0 ]; then
               published_version="$(node -e '
                 const value = JSON.parse(process.argv[1]);
                 if (typeof value !== "string") throw new Error("npm returned a non-string version");
@@ -300,57 +320,74 @@ jobs:
                 echo "Registry returned $published_version for ${PACKAGE_NAME}@${PACKAGE_VERSION}" >&2
                 exit 1
               fi
+            elif registry_returned_e404; then
+              pending_field="package version"
+            else
+              fail_registry_view "package version"
+            fi
+
+            if [ -z "$pending_field" ]; then
+              registry_view dist_tags_json "$PACKAGE_NAME" dist-tags
+              if [ "$registry_status" -eq 0 ]; then
+                published_tag_version="$(node -e '
+                  const value = JSON.parse(process.argv[1]);
+                  const tag = process.argv[2];
+                  if (!value || typeof value !== "object" || typeof value[tag] !== "string") {
+                    throw new Error(`npm returned no ${tag} dist-tag`);
+                  }
+                  process.stdout.write(value[tag]);
+                ' "$dist_tags_json" "$PUBLISH_TAG")"
+                if [ "$published_tag_version" != "$PACKAGE_VERSION" ]; then
+                  echo "Registry dist-tag ${PUBLISH_TAG} points at ${published_tag_version}, expected ${PACKAGE_VERSION}" >&2
+                  exit 1
+                fi
+              elif registry_returned_e404; then
+                pending_field="dist-tag ${PUBLISH_TAG}"
+              else
+                fail_registry_view "dist-tag ${PUBLISH_TAG}"
+              fi
+            fi
+
+            if [ -z "$pending_field" ]; then
+              registry_view integrity_json "${PACKAGE_NAME}@${PACKAGE_VERSION}" dist.integrity
+              if [ "$registry_status" -eq 0 ]; then
+                published_integrity="$(node -e '
+                  const value = JSON.parse(process.argv[1]);
+                  if (typeof value !== "string" || value.length === 0) {
+                    throw new Error("npm returned no dist.integrity");
+                  }
+                  process.stdout.write(value);
+                ' "$integrity_json")"
+                if [ "$PUBLISHED_THIS_RUN" = "true" ]; then
+                  if [ -z "$EXPECTED_INTEGRITY" ]; then
+                    echo "The successful publish produced no integrity output" >&2
+                    exit 1
+                  fi
+                  if [ "$published_integrity" != "$EXPECTED_INTEGRITY" ]; then
+                    echo "Registry dist.integrity does not match the published tarball" >&2
+                    exit 1
+                  fi
+                fi
+              elif registry_returned_e404; then
+                pending_field="dist.integrity"
+              else
+                fail_registry_view "dist.integrity"
+              fi
+            fi
+
+            if [ -z "$pending_field" ]; then
               visible=true
               break
             fi
 
-            if ! grep -q 'E404' "$error_file"; then
-              cat "$error_file" >&2
-              echo "Registry verification failed for ${PACKAGE_NAME}@${PACKAGE_VERSION}" >&2
-              exit "$view_status"
-            fi
-
             if (( attempt < ${#verify_delays[@]} )); then
               delay="${verify_delays[$attempt]}"
-              echo "${PACKAGE_NAME}@${PACKAGE_VERSION} is not visible yet; retrying in ${delay}s"
+              echo "${pending_field} for ${PACKAGE_NAME}@${PACKAGE_VERSION} is not visible yet; retrying in ${delay}s"
               sleep "$delay"
             fi
           done
 
           if [ "$visible" = "true" ]; then
-            dist_tags_json="$(npm view "$PACKAGE_NAME" dist-tags --json)"
-            published_tag_version="$(node -e '
-              const value = JSON.parse(process.argv[1]);
-              const tag = process.argv[2];
-              if (!value || typeof value !== "object" || typeof value[tag] !== "string") {
-                throw new Error(`npm returned no ${tag} dist-tag`);
-              }
-              process.stdout.write(value[tag]);
-            ' "$dist_tags_json" "$PUBLISH_TAG")"
-            if [ "$published_tag_version" != "$PACKAGE_VERSION" ]; then
-              echo "Registry dist-tag ${PUBLISH_TAG} points at ${published_tag_version}, expected ${PACKAGE_VERSION}" >&2
-              exit 1
-            fi
-
-            integrity_json="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" dist.integrity --json)"
-            published_integrity="$(node -e '
-              const value = JSON.parse(process.argv[1]);
-              if (typeof value !== "string" || value.length === 0) {
-                throw new Error("npm returned no dist.integrity");
-              }
-              process.stdout.write(value);
-            ' "$integrity_json")"
-            if [ "$PUBLISHED_THIS_RUN" = "true" ]; then
-              if [ -z "$EXPECTED_INTEGRITY" ]; then
-                echo "The successful publish produced no integrity output" >&2
-                exit 1
-              fi
-              if [ "$published_integrity" != "$EXPECTED_INTEGRITY" ]; then
-                echo "Registry dist.integrity does not match the published tarball" >&2
-                exit 1
-              fi
-            fi
-
             printf 'visibility=visible\n' >> "$GITHUB_OUTPUT"
             echo "Verified ${PACKAGE_NAME}@${PACKAGE_VERSION}, dist-tag ${PUBLISH_TAG}, and dist.integrity in the npm registry"
             exit 0
