@@ -46,6 +46,18 @@ import { useOrchestratorSeat } from "./useOrchestratorSeat";
 import { useSeatConfirm, type SeatConfirmFlow } from "./useSeatConfirm";
 import { useSeatSurface } from "./useSeatSurface";
 
+/**
+ * How often an UNBOUND seat re-asks the status read while its attempts are
+ * failing (issue #1189).
+ *
+ * The incumbent poll's own cadence answers «how full is the context window»,
+ * which moves over tens of minutes. This one answers «where does the seat's
+ * conversation live now», during the seconds a restarting viewer is unable to
+ * say — so it is set by the bound the dock is held to
+ * ({@link SEAT_BIND_TIMEOUT_MS}), with room for several attempts inside it.
+ */
+export const UNBOUND_STATUS_RETRY_MS = 2_000;
+
 /** Create and rotate keep SEPARATE drafts: they are different decisions about
     different orchestrators, and a half-written rotation must never overwrite the
     create draft the operator would need if the seat were vacated. */
@@ -192,6 +204,22 @@ export function OrchestratorPanel({
   useEffect(() => {
     if (unboundWithReading) void refreshIncumbent();
   }, [unboundWithReading, refreshIncumbent]);
+  /* One ask is not enough while the answer is the thing that is missing. A
+     status read that FAILS — the restart this panel is waiting out is exactly
+     when it does — leaves the retained reading stale with the trigger above
+     already spent, so nothing asks again until the 60 s wear poll: the bound
+     passes with no live-host evidence, which is also the evidence a Re-bind
+     control needs before it may be offered (issue #1189). So while the seat is
+     unbound and no attempt has answered, the SAME read is taken again on a
+     bounded cadence. It stops the moment one lands — a fresh reading either
+     binds the seat or lets the bound name what is missing — and it designates,
+     rotates and spawns nothing on the way. */
+  const unboundWithoutFreshReading = bindPending && readStale;
+  useEffect(() => {
+    if (!unboundWithoutFreshReading) return;
+    const timer = setInterval(() => void refreshIncumbent(), UNBOUND_STATUS_RETRY_MS);
+    return () => clearInterval(timer);
+  }, [unboundWithoutFreshReading, refreshIncumbent]);
   /* Liveness is only evidence while someone is still answering for it. The
      header may keep a cached reading — an engine and a context percent from a
      minute ago beat a row of dashes — but a cached «alive» carried across the

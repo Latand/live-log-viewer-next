@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "titles": [
+    {
+      "key": "path:__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-kanban/orchestrator.jsonl",
+      "title": "Kanban orchestrator",
+      "revision": 1,
+      "updatedAt": "2100-01-02T11:33:00.000Z"
+    }
+  ]
+}

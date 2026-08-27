@@ -275,12 +275,17 @@ test("structured: stop+terminal+kill+runtime enabled, compact follows the engine
   expect(state("kill", f, view)).toBe("enabled");
   // Compact is a real durable control on codex-app-server (#862)...
   expect(state("compact", f, view)).toBe("enabled");
-  // ...and a genuine protocol gap on claude-broker, which names the engine.
-  expect(reason("compact", f, rv("claude-broker", "hosted"))).toBe("strip.compactEngineUnsupported");
-  // The cell gates on exactly what the server gates on: host kind as well as
-  // engine. A session view whose sessionKey never arrived defaults its engine to
-  // codex, so the host kind is what keeps a claude-broker cell honest...
-  expect(reason("compact", f, rvWithoutSessionKey("claude-broker"))).toBe("strip.compactEngineUnsupported");
+  /* ...and on claude-broker it is enabled too (#1214): the host types
+     `/compact` into the conversation, which is the only mechanism the
+     stream-json transport offers. The note is the caveat, and it is about what
+     the Viewer can confirm — never about what Claude can do. */
+  expect(state("compact", f, rv("claude-broker", "hosted"))).toBe("enabled");
+  expect(note("compact", f, rv("claude-broker", "hosted"))).toBe("strip.compactClaudeMessage");
+  /* The cell gates on exactly what the server gates on: host kind as well as
+     engine. A session view whose sessionKey never arrived defaults its engine to
+     codex, so the host kind decides the mechanism... */
+  expect(note("compact", f, rvWithoutSessionKey("claude-broker"))).toBe("strip.compactClaudeMessage");
+  expect(reason("compact", f, rvWithoutSessionKey("codex-app-server"))).toBe("strip.compactHostUnsupported");
   // ...and the turn, because admission rejects a compaction that races one.
   expect(reason("compact", f, rvTurn("running"))).toBe("strip.compactBusyTurn");
   expect(reason("compact", f, rvTurn("interrupt_requested"))).toBe("strip.compactBusyTurn");

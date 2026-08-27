@@ -78,11 +78,11 @@ test("hidden controls never reach the DOM (resume hides stop/compact/kill)", () 
 });
 
 test("a disabled control keeps aria-disabled and appends the reason to its aria-label", () => {
-  // A structured Claude host has no compact control in its protocol (#862), so
-  // that cell is the disabled one and names the engine gap.
-  const html = render(file({ proc: "running" }), rv("claude-broker", "hosted"));
-  expect(html).toContain('data-strip-surface="structured"');
-  const reason = translate("en", "strip.compactEngineUnsupported");
+  /* A subagent cannot be compacted on its own — the control belongs to the root
+     conversation — so that cell is the disabled one and names the surface. */
+  const html = render(file({ proc: "running", parent: "/root.jsonl" }), null);
+  expect(html).toContain('data-strip-surface="live-subagent"');
+  const reason = translate("en", "strip.compactSubagent");
   expect(html).toContain('aria-disabled="true"');
   expect(html).toContain(`context (/compact) — ${reason}`);
 });
@@ -91,7 +91,23 @@ test("a structured Codex host renders Compact as a real, enabled control (#862)"
   const html = render(file({ proc: "running" }), rv("codex-app-server", "hosted"));
   expect(html).toContain('data-strip-surface="structured"');
   expect(html).toContain('aria-label="Compact the agent&#x27;s context (/compact)"');
-  expect(html).not.toContain(`context (/compact) — ${translate("en", "strip.compactEngineUnsupported")}`);
+});
+
+test("a structured Claude host renders Compact enabled, noting what the Viewer can confirm (#1214)", () => {
+  for (const locale of ["en", "uk"] as const) {
+    const localized = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) =>
+      translate(locale, key, params);
+    const html = render(file({ proc: "running" }), rv("claude-broker", "hosted"), { t: localized });
+    expect(html).toContain('data-strip-surface="structured"');
+    /* Enabled: the operator asked for the command to be sent, and it is. */
+    expect(html).not.toContain('aria-disabled="true"');
+    /* The note is about what the Viewer can confirm, in both languages — the
+       strip never again tells the operator the engine lacks /compact. */
+    const note = translate(locale, "strip.compactClaudeMessage");
+    expect(note).toContain("/compact");
+    const label = `${translate(locale, "composer.compactAria")} \u2014 ${note}`.replace(/'/g, "&#x27;");
+    expect(html).toContain(`aria-label="${label}"`);
+  }
 });
 
 test("the structured surface renders no mode chip — the «structured» badge is gone (issue #390)", () => {

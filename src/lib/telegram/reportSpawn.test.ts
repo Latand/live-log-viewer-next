@@ -15,11 +15,14 @@ const { after } = await import("next/server");
 const { reportSpawnHeaders, reportSpawnOverrides, startDeferredSpawnWork } = await import("./reportSpawn");
 const { SCHEDULED_REPORT_SESSION_CLASS } = await import("@/lib/agent/mcpAllowlist");
 const { TELEGRAM_REPORT_PROJECT } = await import("./reportLineage");
+const { reportConversationTitle } = await import("./reportPrompt");
 
 /** An invented run id, in the shape the runner mints. Assembled rather than
     written out: the publication privacy gate refuses any literal with the
     shape of a session identifier, invented or not. */
 const REPORT_RUN_ID = ["0192d4f1", "8f43", "4a10", "9c1e", "6b0f0a5d77c2"].join("-");
+const REPORT_WINDOW = { windowStart: "2026-08-20T07:00:00.000Z", windowEnd: "2026-08-21T07:00:00.000Z" };
+const REPORT_TITLE = reportConversationTitle(REPORT_WINDOW);
 const { executeSpawnRequest, productionSpawnCommandDependencies } = await import("@/lib/agent/spawnCommand");
 const { ensureOperatorSpawnCapability } = await import("@/lib/agent/operatorCapability");
 const { VIEWER_SPAWN_CAPABILITY_HEADER } = await import("@/lib/agent/spawnPolicy");
@@ -150,13 +153,14 @@ test("the report class decides the whole capability surface admission reserves",
     engine: "codex",
     cwd: SANDBOX,
     accountId: "account-pinned",
+    title: REPORT_TITLE,
     /* The durable report-run marker the runner sends (#1091). It rides the real
        admission path here because both halves are admitted, not decorative: an
        explicit project is refused outright for a launch admission reads as
        agent-initiated, which would settle every report run `launch_failed`. */
     clientAttemptId: `telegram-report-${REPORT_RUN_ID}`,
     project: TELEGRAM_REPORT_PROJECT,
-    ["prompt"]: "Telegram daily report — window A → B.\n\nThe operator's own brief.",
+    ["prompt"]: `${REPORT_TITLE}\n\nThe operator's own brief.`,
   };
   const response = await executeSpawnRequest(reportLaunchRequest(body), dependencies);
   if (captured.profiles.length === 0) throw new Error(`no launch reserved: ${response.status} ${JSON.stringify(await response.json())}`);
@@ -172,6 +176,7 @@ test("the report class decides the whole capability surface admission reserves",
   expect(captured.requests[0]).toMatchObject({
     clientAttemptId: `telegram-report-${REPORT_RUN_ID}`,
     explicitProject: TELEGRAM_REPORT_PROJECT,
+    launchProfile: expect.objectContaining({ title: REPORT_TITLE }),
   });
   expect(captured.requests[0].parentConversationId ?? null).toBeNull();
   expect(captured.requests[0].role ?? null).toBeNull();

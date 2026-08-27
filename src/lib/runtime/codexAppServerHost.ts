@@ -3,8 +3,10 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 import { createHash, type Hash } from "node:crypto";
 
 import { isKnownEffortTier } from "@/lib/agent/efforts";
+import type { ProcessIdentity } from "@/lib/agent/registry";
 import { procBackend } from "@/lib/proc";
 import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "@/lib/processGroup";
+import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/process";
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { grantedPluginServerNames, grantedPlugins } from "@/lib/agent/pluginAllowlist";
 import { hardenedRedact } from "@/lib/view/compactText";
@@ -400,6 +402,10 @@ function subscriptionEnv(
   }
   if (forwardGitHubConfig && source.GH_CONFIG_DIR !== undefined) env.GH_CONFIG_DIR = source.GH_CONFIG_DIR;
   if (codexHome) env.CODEX_HOME = codexHome;
+  /* Provenance the resources rail can verify later: `codex app-server` is a
+     public command line, so only this stamp says the process is a host of
+     ours rather than someone else's client (#1199). */
+  env[STRUCTURED_HOST_STAMP_ENV] = structuredHostStamp();
   return env;
 }
 
@@ -1749,6 +1755,19 @@ export class CodexAppServerHost implements EngineHost {
       });
     }
     return this.releasePromise;
+  }
+
+  /** Ends this host only while its child still has the exact kernel identity
+      carried by the operator's resource row. */
+  async releaseIfOwned(expected: Readonly<ProcessIdentity>): Promise<boolean> {
+    const pid = this.child.pid;
+    if (this.released || this.releasing || this.releasePromise !== null
+      || !pid || expected.startIdentity === null
+      || pid !== expected.pid
+      || this.childStartIdentity !== expected.startIdentity
+      || this.childProcessOwnership() !== "owned") return false;
+    await this.release();
+    return true;
   }
 
   private async releaseAndReap(): Promise<void> {

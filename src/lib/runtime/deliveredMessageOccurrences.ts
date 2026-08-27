@@ -63,25 +63,34 @@ const APPROVED_DEFAULT_MANDATE = ORCHESTRATOR_SYSTEM_PROMPT.trim();
 /**
  * WHICH mandate one seat holds, as far as its own record proves it.
  *
- * `promptVersion` records the default the mandate was BASED ON, and a rotation
- * — or an MCP creation carrying the caller's own text — keeps the incumbent's
- * number regardless of what was actually delivered, so the number alone can
- * never say the text IS that default. The seat also stores the mandate itself,
- * and this checkout holds exactly one approved default: the current one. That
- * is the whole of the evidence, and it answers three ways:
+ * `promptVersion` is what the seat recorded its mandate as being based on, and
+ * it IS the answer whenever it names a default: a seat carrying v8 says v8,
+ * whether or not this checkout still ships v8's text to compare it against
+ * (#1190). Dropping the number because the text is unavailable told the
+ * operator less than the seat itself knows.
  *
- *  - the stored mandate opens with the current approved default → that version;
- *  - it does not, and the seat recorded the current version or none at all →
- *    the text is somebody's own edit: `custom`;
- *  - it does not, and the seat recorded an OLDER version whose text this
- *    checkout no longer carries → nothing is proven, so nothing is claimed.
+ * The stored mandate decides exactly one case — the CURRENT version, the one
+ * default this checkout does carry, and therefore the only one whose text can
+ * be checked. A rotation composing the caller's own words, or an MCP creation
+ * carrying them, passes the incumbent's number through unchanged, so there the
+ * number alone cannot say the text IS that default. So:
+ *
+ *  - no version recorded at all → the text is somebody's own: `custom`;
+ *  - an older version → that version, on the seat's own record;
+ *  - the current version → that version when the stored mandate opens with the
+ *    approved default (a rotation appends its handoff, so the default is a
+ *    PREFIX of what the seat kept), and `custom` when it does not.
+ *
+ * `unqualified` is never an answer here. A seat record IS the metadata, so it
+ * always names one of the three; the unqualified card belongs to the delivery
+ * whose seat record is gone (see `mandateForDelivery`).
  */
 function seatMandate(seat: OrchestratorSeat): MandateDelivery {
-  if (seat.mandate.trimStart().startsWith(APPROVED_DEFAULT_MANDATE)) {
-    return { kind: "version", version: ORCHESTRATOR_PROMPT_VERSION };
-  }
-  if (seat.promptVersion === null || seat.promptVersion === ORCHESTRATOR_PROMPT_VERSION) return { kind: "custom" };
-  return { kind: "unqualified" };
+  if (seat.promptVersion === null) return { kind: "custom" };
+  if (seat.promptVersion !== ORCHESTRATOR_PROMPT_VERSION) return { kind: "version", version: seat.promptVersion };
+  return seat.mandate.trimStart().startsWith(APPROVED_DEFAULT_MANDATE)
+    ? { kind: "version", version: ORCHESTRATOR_PROMPT_VERSION }
+    : { kind: "custom" };
 }
 
 /**

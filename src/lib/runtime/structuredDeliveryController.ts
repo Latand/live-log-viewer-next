@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
-import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type ProcessIdentity } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
@@ -16,6 +16,9 @@ import { runtimeImageCapability } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 
 type ObservableEngineHost = EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+type IdentityBoundEngineHost = ObservableEngineHost & {
+  releaseIfOwned?(expected: Readonly<ProcessIdentity>): Promise<boolean>;
+};
 type StructuredConversationRecovery = typeof import("./structuredRecovery")["recoverDeadStructuredConversation"];
 export interface StructuredDeliveryHost {
   key: SessionKey;
@@ -61,7 +64,7 @@ interface ControllerState {
   activeRegistrations: (() => readonly StructuredDeliveryHost[]) | null;
   republishActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   releaseActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
-  terminateActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
+  terminateActiveHost: ((key: SessionKey, expected?: Readonly<ProcessIdentity>) => Promise<boolean>) | null;
   completeActive: ((adopted: readonly StructuredDeliveryHost[]) => Promise<void>) | null;
   stopActive: () => void;
   /* Distinguishes "this process hosts the controller and is between
@@ -797,12 +800,28 @@ export async function bindStructuredDeliveryQueue(
     }
     return true;
   };
-  state.terminateActiveHost = async (key) => {
+  state.terminateActiveHost = async (key, expected) => {
     const id = sessionKeyId(key);
-    const registered = takeRegistration(id);
+    const current = registrations.get(id);
+    if (!current) return false;
+    /* Bound to the process the caller authorized, never to the seat alone: a
+       replacement host that claimed this key since the caller's snapshot is
+       somebody else's live work and must survive untouched (#1199). */
+    if (expected) {
+      const releaseIfOwned = (current.host as IdentityBoundEngineHost).releaseIfOwned;
+      /* A health read can go stale before a later release signal. Real
+         structured hosts expose an operation that rechecks the kernel
+         identity inside that signal boundary. */
+      if (!releaseIfOwned || !await releaseIfOwned.call(current.host, expected)) return false;
+      const registered = takeRegistration(id, current.host);
+      registry.terminateStructuredHost(key, expected);
+      if (registered) await detachRegistration(id, registered);
+      return true;
+    }
+    const registered = takeRegistration(id, current.host);
     if (!registered) return false;
     await registered.host.release();
-    registry.terminateStructuredHost(key);
+    registry.terminateStructuredHost(key, expected);
     await detachRegistration(id, registered);
     return true;
   };
@@ -920,4 +939,19 @@ export async function republishStructuredDeliveryHost(key: SessionKey): Promise<
 
 export async function releaseStructuredDeliveryHost(key: SessionKey): Promise<boolean> {
   return await state.releaseActiveHost?.(key) ?? false;
+}
+
+/**
+ * Ends a host this generation still holds, through its own lifecycle: the
+ * engine host is released and its registry row retired in one move. `expected`
+ * pins that to one process — a registration whose host is a different process
+ * is refused rather than terminated. False when no registration owns the key,
+ * or when the one that does is not the caller's host: the caller then has only
+ * the process to go on (the resources rail's released/orphaned rows, #1199).
+ */
+export async function terminateStructuredDeliveryHost(
+  key: SessionKey,
+  expected?: Readonly<ProcessIdentity>,
+): Promise<boolean> {
+  return await state.terminateActiveHost?.(key, expected) ?? false;
 }

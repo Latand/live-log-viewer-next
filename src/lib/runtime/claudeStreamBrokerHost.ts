@@ -7,14 +7,30 @@ import { StringDecoder } from "node:string_decoder";
 
 import { statePath } from "@/lib/configDir";
 import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
+import type { ProcessIdentity } from "@/lib/agent/registry";
 import { applyClaudeSpawnPolicy, NATIVE_MULTI_AGENT_TOOLS } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
 import { signalDetachedProcessGroup, type ProcessSignal } from "@/lib/processGroup";
+import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/process";
 import { hardenedRedact } from "@/lib/view/compactText";
 
-import type { DeliveryReceipt, EngineHost, HostState, NormalizedQueueEntry, QueueEntry, RuntimeEvent } from "./engineHost";
-import { normalizeQueueEntry, RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
+import type {
+  DeliveryReceipt,
+  EngineHost,
+  HostState,
+  NormalizedQueueEntry,
+  QueueEntry,
+  RuntimeCompactOutcome,
+  RuntimeCompactRequest,
+  RuntimeEvent,
+} from "./engineHost";
+import {
+  normalizeQueueEntry,
+  RuntimeReplayGapError,
+  StructuredCompactError,
+  StructuredHostAdoptionCleanupError,
+} from "./engineHost";
 import {
   FileRuntimeEventStore,
   nextRuntimeEventSequence,
@@ -52,6 +68,13 @@ type PendingAnswer = {
   resolve(): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
+};
+type PendingCompaction = {
+  promise: Promise<RuntimeCompactOutcome>;
+  resolve(outcome: RuntimeCompactOutcome): void;
+  reject(error: StructuredCompactError): void;
+  settled: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
 };
 
 export interface ClaudeDeliveryState {
@@ -198,8 +221,10 @@ export interface ClaudeStreamBrokerHostOptions {
   onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   signalProcess?: ProcessSignal;
+  processIdentity?: (pid: number) => string | null;
   readAuthStatus?: () => ClaudeAuthStatus | Promise<ClaudeAuthStatus>;
   readTranscript?: (cwd: string, sessionId: string) => ClaudeTranscriptUser[];
+  compactEvidenceTimeoutMs?: number;
   eventStore?: RuntimeEventStore;
   deliveryLedger?: ClaudeDeliveryLedger;
   readImage?: (ref: StructuredImageRef) => Buffer;
@@ -222,6 +247,35 @@ const CHILD_ENV_ALLOWLIST = [
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
+
+/** The command this control types into the conversation (#1214). */
+export const CLAUDE_COMPACT_COMMAND = "/compact";
+
+/**
+ * The durable receipt reason for a compaction that was sent and never
+ * witnessed. It is a machine token like every other receipt reason
+ * (`busy-turn`, `stale-generation`, …) so the strip can say it in both
+ * languages: "sent — completion could not be confirmed". It is an outcome, not
+ * a failure to act: the operator asked for the command and the command went.
+ */
+export const CLAUDE_COMPACT_UNOBSERVED_REASON = "compact-sent-unobserved";
+
+/**
+ * The durable receipt reason for a `/compact` the engine handled and declined.
+ * The CLI answers the command with a `result` frame once it is done with it,
+ * and that frame belongs to no turn — the compaction takes no turn slot. A
+ * boundary always precedes it when there was one to emit, so a `result` with
+ * no boundary behind it is the engine saying it compacted nothing ("Error: No
+ * messages to compact" is the everyday case). Waiting out the evidence budget
+ * for a boundary the engine already declined to write would be a silent wait,
+ * so this terminalizes at once.
+ */
+export const CLAUDE_COMPACT_DECLINED_REASON = "compact-declined";
+
+/** How long a compaction may run before its outcome counts as unobservable.
+    Compaction re-reads the whole thread through the model — a manual one
+    observed locally took ~2.5 minutes — so the budget is generous. */
+const DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS = 5 * 60_000;
 
 /** Durable launch evidence: hosts that launched with the native multi-agent
     denial advertise the effective denied-tool set so registry snapshots and
@@ -327,6 +381,10 @@ function subscriptionEnv(
   for (const name of CHILD_ENV_ALLOWLIST) if (source[name] !== undefined) env[name] = source[name];
   if (forwardGitHubConfig && source.GH_CONFIG_DIR !== undefined) env.GH_CONFIG_DIR = source.GH_CONFIG_DIR;
   if (claudeConfigDir) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+  /* Provenance the resources rail can verify later: a process wearing this
+     command line is only ever treated as the viewer's host — and only ever
+     killable from the rail — when it carries this viewer's stamp (#1199). */
+  env[STRUCTURED_HOST_STAMP_ENV] = structuredHostStamp();
   return env;
 }
 
@@ -494,10 +552,13 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly eventStore: RuntimeEventStore;
   private readonly deliveryLedger: ClaudeDeliveryLedger;
   private readonly readImage: (ref: StructuredImageRef) => Buffer;
+  private readonly compactEvidenceTimeoutMs: number;
   private readonly requestTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly signalProcess: ProcessSignal;
+  private readonly processIdentity: (pid: number) => string | null;
+  private readonly childStartIdentity: string | null;
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly deliveries: ClaudeDeliveryState[] = [];
@@ -505,6 +566,10 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly attentions = new Map<string, JsonObject>();
   private readonly pendingControls = new Map<string, PendingControl>();
   private readonly pendingAnswers = new Map<string, PendingAnswer>();
+  /** Compactions this host issued, keyed by durable operation and kept after
+      they settle: a retry replays the outcome instead of typing `/compact` a
+      second time into the conversation (#1214). */
+  private readonly compactions = new Map<string, PendingCompaction>();
   private readonly interruptedTurns = new Set<string>();
   private readonly partialTurns = new Set<string>();
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
@@ -527,6 +592,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private releaseCleanup: (() => void) | null;
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
   private terminationStarted = false;
+  private releaseFence: Readonly<ProcessIdentity> | null = null;
   private readonly reapedPromise: Promise<void>;
   private resolveReaped!: () => void;
   private readonly launchFlags: readonly string[];
@@ -542,10 +608,13 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.deliveryLedger = options.deliveryLedger ?? new FileClaudeDeliveryLedger();
     this.readImage = options.readImage ?? ((ref) => runtimeImageStore().read(ref));
+    this.compactEvidenceTimeoutMs = options.compactEvidenceTimeoutMs ?? DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.signalProcess = options.signalProcess ?? process.kill;
+    this.processIdentity = options.processIdentity ?? ((pid) => procBackend.processIdentity(pid));
+    this.childStartIdentity = child.pid ? this.processIdentity(child.pid) : null;
     this.releaseCleanup = options.releaseCleanup ?? null;
     this.cursor = options.initialEventCursor ?? 0;
     this.protocolVersion = auth.version ?? null;
@@ -798,6 +867,106 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     });
   }
 
+  /**
+   * Manual context compaction (#1214). The stream-json transport exposes
+   * `interrupt` and `can_use_tool` as its whole client-originated control
+   * channel — there is no compact subtype to send — so this control reaches
+   * compaction the one way the transport allows: it types `/compact` into the
+   * conversation, exactly as the operator would in the terminal.
+   *
+   * That mechanism buys no knowledge of the outcome, so none is claimed. The
+   * promise settles only on a *witnessed* compaction: the `compact_boundary`
+   * frame the CLI announces on this host's own stream, which is the same
+   * boundary it writes to the transcript and arrives without anyone tailing a
+   * file for it. An engine that declines the command answers it with a
+   * boundary-less `result` and terminalizes `CLAUDE_COMPACT_DECLINED_REASON`
+   * on the spot. Only a compaction that neither finished nor was declined
+   * inside the evidence budget terminalizes `unverified` with
+   * `CLAUDE_COMPACT_UNOBSERVED_REASON` — "sent, completion not observable" —
+   * which is the honest verdict and an acceptable outcome. It is never
+   * reported as success, and it never spins forever.
+   *
+   * The compaction is deliberately left out of the turn plane: it is not a
+   * delivery, so it takes no ledger row and no turn slot, which is exactly why
+   * the `result` the CLI answers with is legible as this command's. The
+   * delivery queue holds messages behind an unfinished compaction, so the turn
+   * queue is empty for the duration.
+   */
+  async compact(request: RuntimeCompactRequest): Promise<RuntimeCompactOutcome> {
+    /* One durable operation, one `/compact`. A caller that timed out and
+       retried — or a queue pass that re-read the same effect — joins the
+       in-flight control or replays the settled outcome; it never types the
+       command into the conversation a second time. */
+    const existing = this.compactions.get(request.operationId);
+    if (existing) return existing.promise;
+    if (this.unavailable()) throw new StructuredCompactError("Claude stream host is unavailable", "refused");
+    if (request.threadId && request.threadId !== this.identity.sessionId) {
+      throw new StructuredCompactError("compact target session is not the session this host owns", "refused");
+    }
+    /* Admission fenced the durable turn axis, but a turn can start in between,
+       and a `/compact` typed underneath a running turn is queued behind it
+       instead of compacting anything the operator is looking at. */
+    if (this.activeTurnId) {
+      throw new StructuredCompactError("a turn is active; compaction would race it", "refused");
+    }
+    if ([...this.compactions.values()].some((compaction) => !compaction.settled)) {
+      throw new StructuredCompactError("a compaction is already running on this conversation", "refused");
+    }
+
+    let resolveOutcome!: PendingCompaction["resolve"];
+    let rejectOutcome!: PendingCompaction["reject"];
+    const promise = new Promise<RuntimeCompactOutcome>((resolve, reject) => {
+      resolveOutcome = resolve;
+      rejectOutcome = reject;
+    });
+    const compaction: PendingCompaction = {
+      promise,
+      resolve: (outcome) => resolveOutcome(outcome),
+      reject: (error) => rejectOutcome(error),
+      settled: false,
+      timer: null,
+    };
+    /* A retry that arrives while the command is being written finds the entry
+       here, so the registration happens before the frame. */
+    this.compactions.set(request.operationId, compaction);
+    void promise.catch(() => undefined);
+    this.write({
+      type: "user",
+      session_id: this.identity.sessionId,
+      message: { role: "user", content: [{ type: "text", text: CLAUDE_COMPACT_COMMAND }] },
+    });
+    compaction.timer = setTimeout(() => {
+      this.settleCompaction(
+        compaction,
+        new StructuredCompactError(CLAUDE_COMPACT_UNOBSERVED_REASON, "unverified"),
+      );
+    }, this.compactEvidenceTimeoutMs);
+    return promise;
+  }
+
+  /** Settles one compaction exactly once and drops its evidence budget. The
+      entry stays in the map so a later retry replays this outcome. */
+  private settleCompaction(
+    compaction: PendingCompaction,
+    outcome: RuntimeCompactOutcome | StructuredCompactError,
+  ): void {
+    if (compaction.settled) return;
+    compaction.settled = true;
+    if (compaction.timer) clearTimeout(compaction.timer);
+    compaction.timer = null;
+    if (outcome instanceof StructuredCompactError) compaction.reject(outcome);
+    else compaction.resolve(outcome);
+  }
+
+  /** Every compaction still awaiting evidence, settled with one verdict. A
+      host that dies or is released mid-compaction leaves the engine outcome
+      unknown, which is `unverified`, never a failure to have acted. */
+  private settlePendingCompactions(outcome: RuntimeCompactOutcome | StructuredCompactError): void {
+    for (const compaction of this.compactions.values()) {
+      if (!compaction.settled) this.settleCompaction(compaction, outcome);
+    }
+  }
+
   async answer(attentionRef: string, value: unknown): Promise<void> {
     if (this.unavailable()) throw new Error("Claude stream host is unavailable");
     if (!this.attentions.has(attentionRef)) throw new Error("attention request is missing or already answered");
@@ -849,6 +1018,25 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     return this.releasePromise;
   }
 
+  /** Resource cleanup may release only the exact child the operator's row
+      authorized. The kernel identity is checked here and again inside the
+      synchronous signal boundary. */
+  async releaseIfOwned(expected: Readonly<ProcessIdentity>): Promise<boolean> {
+    const pid = this.child.pid;
+    if (this.released || this.releasing || this.releasePromise !== null
+      || !pid || expected.startIdentity === null
+      || pid !== expected.pid
+      || this.childStartIdentity !== expected.startIdentity
+      || this.processIdentity(pid) !== expected.startIdentity) return false;
+    this.releaseFence = expected;
+    try {
+      await this.release();
+      return true;
+    } finally {
+      if (this.releaseFence === expected) this.releaseFence = null;
+    }
+  }
+
   private unavailable(): boolean {
     if (this.dead || this.releasing || this.released) return true;
     try { return this.writerFence?.() === false; } catch { return true; }
@@ -866,7 +1054,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       sessionKey: this.identity.sessionId,
       endpoint: pid ? `stdio:${pid}` : "stdio:released",
       pid,
-      processStartIdentity: pid ? procBackend.processIdentity(pid) : null,
+      processStartIdentity: pid ? this.processIdentity(pid) : null,
       eventCursor: this.cursor,
       protocolVersion: this.protocolVersion,
       activeTurnRef: this.activeTurnId,
@@ -989,6 +1177,13 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       if (message.apiKeySource !== "none") return this.fail(new Error("Claude stream process did not use subscription OAuth"));
       return;
     }
+    /* Where a compaction is witnessed (#1214). The CLI announces the same
+       boundary it writes to the transcript on this stream, so the evidence is
+       already here: nothing tails the transcript for a second copy of it. */
+    if (type === "system" && message.subtype === "compact_boundary") {
+      this.settlePendingCompactions({ compactionId: stringField(message, "uuid") });
+      return;
+    }
     if (type === "user") {
       const content = messageContent(message);
       const directUserEcho = stringField(message.message, "role") === "user" && content !== null;
@@ -1091,7 +1286,17 @@ export class ClaudeStreamBrokerHost implements EngineHost {
 
   private acceptResult(message: JsonObject): void {
     const turnId = this.turnQueue.shift() ?? this.activeTurnId;
-    if (!turnId) return;
+    if (!turnId) {
+      /* No turn owns this result, so it closes the `/compact` this host typed
+         into the conversation (#1214) — the only thing running off the turn
+         plane. A boundary would have come first, so reaching here means the
+         engine handled the command and compacted nothing. Say that now
+         instead of sitting out the evidence budget in silence. */
+      this.settlePendingCompactions(
+        new StructuredCompactError(CLAUDE_COMPACT_DECLINED_REASON, "refused"),
+      );
+      return;
+    }
     this.partialTurns.delete(turnId);
     const interrupted = this.interruptedTurns.delete(turnId);
     const status = interrupted || message.subtype === "interrupted"
@@ -1131,9 +1336,15 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private async releaseAndReap(): Promise<void> {
     this.releasing = true;
     this.rejectPending(new Error("Claude stream host released"));
-    this.startTermination();
+    if (!this.startTermination() && this.releaseFence) {
+      this.releasing = false;
+      throw new Error("Claude child identity changed before signalling");
+    }
     if (!await this.waitForReap(this.shutdownGraceMs * 2)) {
-      signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      if (!this.signalReleaseGroup("SIGKILL") && this.releaseFence) {
+        this.releasing = false;
+        throw new Error("Claude child identity changed before signalling");
+      }
       if (!await this.waitForReap(this.shutdownGraceMs)) {
         /* "close" waits on the stdio pipes, which an escaped descendant can
            hold open long after the leader died — a kill that keeps failing
@@ -1216,16 +1427,29 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.startTermination();
   }
 
-  private startTermination(): void {
-    if (this.terminationStarted || this.reaped) return;
-    this.terminationStarted = true;
+  private signalReleaseGroup(signal: NodeJS.Signals): boolean {
+    const expected = this.releaseFence;
+    if (expected) {
+      const pid = this.child.pid;
+      if (!pid || expected.startIdentity === null
+        || pid !== expected.pid
+        || this.childStartIdentity !== expected.startIdentity
+        || this.processIdentity(pid) !== expected.startIdentity) return false;
+    }
+    return signalDetachedProcessGroup(this.child, signal, this.signalProcess);
+  }
+
+  private startTermination(): boolean {
+    if (this.terminationStarted || this.reaped) return true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
-    signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
+    if (!this.signalReleaseGroup("SIGTERM")) return false;
+    this.terminationStarted = true;
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
       if (this.reaped) return;
-      signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      this.signalReleaseGroup("SIGKILL");
     }, this.shutdownGraceMs);
+    return true;
   }
 
   private rejectPending(error: Error): void {
@@ -1244,6 +1468,12 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       pending.reject(new Error(safeError(error)));
     }
     this.pendingAnswers.clear();
+    /* A `/compact` that was already typed into the conversation cannot be
+       taken back, and a host that goes away mid-compaction proves nothing
+       about what became of it — which is exactly the unobserved outcome. */
+    this.settlePendingCompactions(
+      new StructuredCompactError(CLAUDE_COMPACT_UNOBSERVED_REASON, "unverified"),
+    );
   }
 
   private closeSubscribers(): void {

@@ -16,6 +16,7 @@ import type {
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { ViewerDeploymentAdapter } from "./deployment";
+import { PROMOTE_ACTION_TIMEOUT_MS } from "./deploymentHotState";
 import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 import {
   createMcpHealthProbeAdmissionChannel,
@@ -33,7 +34,10 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "current-mcp-runtime": 90_000,
   "reconcile-mcp-runtime": 10 * 60_000,
   "verify-candidate": 90_000,
-  promote: 30_000,
+  /* #1216: strictly larger than the adapter-side hand-over budgets it
+     contains, so the adapter reports its own named reason instead of being
+     killed mid-wait and leaving the operator a bare phase string. */
+  promote: PROMOTE_ACTION_TIMEOUT_MS,
   "verify-promoted": 120_000,
   rollback: 90_000,
   retire: 60_000,
@@ -59,8 +63,14 @@ interface AdapterPhaseRecord {
   phase: string;
 }
 
+/** Slow enough to stay quiet through a long build, fast enough that a stalled
+    promote names its wait while it is still stalling. */
+const PHASE_LOG_INTERVAL_MS = 5_000;
+
 export interface HostCommandViewerDeploymentAdapterOptions {
   stateFile?: string;
+  log?(...args: unknown[]): void;
+  phaseLogIntervalMs?: number;
   timeouts?: Partial<Record<AdapterAction, number>>;
   proc?: ProcBackend;
   mcpHealthProbeAdmissions?: Pick<McpHealthProbeAdmissions, "issue" | "consume" | "revoke">;
@@ -206,7 +216,18 @@ function publication(value: unknown): ViewerMcpRuntimePublicationEvidence {
     || item.durable !== true) {
     throw new Error("deployment adapter returned invalid MCP runtime publication evidence");
   }
-  return { ...runtime, action: item.action, publishedAt: item.publishedAt, durable: true };
+  /* #1216: the hand-over summary is what the journal keeps about the promote's
+     ordered hot-state steps, so it survives normalization here. */
+  const hotStateHandOver = typeof item.hotStateHandOver === "string"
+    ? item.hotStateHandOver.slice(0, 200)
+    : null;
+  return {
+    ...runtime,
+    action: item.action,
+    publishedAt: item.publishedAt,
+    durable: true,
+    ...(hotStateHandOver ? { hotStateHandOver } : {}),
+  };
 }
 
 function evidence(value: unknown): ViewerHealthEvidence {
@@ -290,6 +311,8 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
     const stateFile = options.stateFile ?? statePath("viewer-deployment-adapter-process.json");
     const phaseFile = `${stateFile}.phase`;
     const proc = options.proc ?? procBackend;
+    const log = options.log ?? console.error;
+    const phaseLogIntervalMs = Math.max(1, options.phaseLogIntervalMs ?? PHASE_LOG_INTERVAL_MS);
     const timeouts = { ...ACTION_TIMEOUTS, ...options.timeouts };
     const reconcile = async () => {
       const previous = readProcessRecord(stateFile);
@@ -307,6 +330,7 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       input: Record<string, unknown>,
       healthAdmissions?: Pick<McpHealthProbeAdmissions, "consume">,
     ): Promise<unknown> => {
+      const timeoutMs = Math.max(1, timeouts[action]);
       const admissionChannel = healthAdmissions
         ? await createMcpHealthProbeAdmissionChannel()
         : null;
@@ -322,6 +346,9 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
             ...withoutWakatimeCredential(process.env),
             LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1",
             LLV_DEPLOYMENT_ADAPTER_PHASE_FILE: phaseFile,
+            /* #1216: the deadline this host will enforce, so the adapter can
+               fit its own waits inside it instead of being killed mid-wait. */
+            LLV_DEPLOYMENT_ADAPTER_ACTION_DEADLINE_MS: String(timeoutMs),
           },
           detached: true,
         });
@@ -372,8 +399,18 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       const stdoutPromise = readStream(child.stdout);
       const stderrPromise = readStream(child.stderr);
       let timer: ReturnType<typeof setTimeout> | null = null;
+      /* #1216: a deployment used to leave no trace in the runtime-host log, so
+         a promote that stalled was invisible next to the journal maintenance
+         chatter. Phase transitions are the adapter's own progress report. */
+      let reportedPhase: string | null = null;
+      const phaseLog = setInterval(() => {
+        const phase = readAdapterPhase(phaseFile, action);
+        if (phase === null || phase === reportedPhase) return;
+        reportedPhase = phase;
+        log(`[viewer deployment] ${action} ${phase}`);
+      }, phaseLogIntervalMs);
+      phaseLog.unref?.();
       try {
-        const timeoutMs = Math.max(1, timeouts[action]);
         const outcome = await Promise.race([
           exitPromise.then((exitCode) => ({ type: "exit" as const, exitCode })),
           new Promise<{ type: "timeout" }>((resolve) => { timer = setTimeout(() => resolve({ type: "timeout" }), timeoutMs); }),
@@ -391,6 +428,7 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
         catch { throw new Error(`deployment adapter ${action} returned invalid JSON`); }
       } finally {
         if (timer) clearTimeout(timer);
+        clearInterval(phaseLog);
         closeHealthAdmission?.();
         clearProcessRecord(stateFile, record);
         fs.rmSync(phaseFile, { force: true });

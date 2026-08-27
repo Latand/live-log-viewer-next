@@ -84,6 +84,8 @@ interface CurrentReleaseControllerLoaders {
   /** Optional so a test can supply the two controllers it exercises and get
       nothing else. Production always passes it. */
   loadTelegramReportScheduler?: () => Promise<{ ensureTelegramReportScheduler: () => void }>;
+  /** Optional for the same reason. */
+  loadTelegramConnectorBoot?: () => Promise<{ provisionTelegramConnectorAtStartup: () => Promise<unknown> }>;
 }
 
 interface ViewerRuntimeActivationSteps {
@@ -327,10 +329,26 @@ export async function startCurrentReleaseControllers(
     loadFlowPipelineController: () => import("@/lib/pipelines/controller"),
     loadAccountMigrationController: () => import("@/lib/accounts/migration/controller"),
     loadTelegramReportScheduler: () => import("@/lib/telegram/reportRunner"),
+    loadTelegramConnectorBoot: () => import("@/lib/telegram/connectorBoot"),
   },
 ): Promise<void> {
   const { startFlowPipelineController } = await loaders.loadFlowPipelineController();
   startFlowPipelineController();
+  /* The shared Telegram connector dies with the viewer container it is a child
+     of (#1133), and the supervisor only ever started one when a consumer asked
+     — so the Daily Report run after a restart was the thing that discovered it
+     was gone, and failed. The release that owns traffic brings it back for an
+     account that already has one. NOT awaited: verifying a connector takes
+     tens of seconds and the release-ready marker must not sit behind it. */
+  try {
+    const connector = await loaders.loadTelegramConnectorBoot?.();
+    if (connector) {
+      void connector.provisionTelegramConnectorAtStartup()
+        .catch((error) => console.error("[telegram connector] boot provisioning failed", error instanceof Error ? error.name : "unknown"));
+    }
+  } catch (error) {
+    console.error("[telegram connector] boot provisioning unavailable", error instanceof Error ? error.name : "unknown");
+  }
   /* The Daily Report timer (#1086) belongs to the release that owns traffic,
      like every other controller here. Starting it from the Telegram route
      alone would mean a standalone Viewer nobody has opened in a browser runs

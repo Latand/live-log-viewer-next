@@ -12,7 +12,7 @@ import { interruptRuntime, refreshRuntime } from "@/hooks/useRuntime";
 import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { humanReceiptReasonKey, mintIdempotencyKey } from "@/components/runtime/runtimeModel";
+import { humanReceiptReasonKey, mintIdempotencyKey, type RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import { turnIsRunning } from "./turnDuration";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import {
@@ -189,6 +189,36 @@ function compactFailureText(
 }
 
 /**
+ * What the durable compact receipt turned out to be (#1214). The strip's own
+ * "sent" line is optimistic by necessity — it is written the moment the journal
+ * admits the operation — so the receipt replaces it as soon as the operation
+ * terminalizes. The Claude path has two endings of its own, and the operator is
+ * told both in words rather than left to guess: `uncertain` means the command
+ * was typed and no boundary was ever witnessed, while a `failed`
+ * `compact-declined` means the engine answered the command and compacted
+ * nothing.
+ */
+function compactReceiptStatus(
+  t: TFunction,
+  receipt: RuntimeReceipt | undefined,
+): { kind: "ok" | "info" | "err"; text: string } | null {
+  if (!receipt) return null;
+  if (receipt.status === "delivered") return { kind: "ok", text: t("composer.compactObserved") };
+  if (receipt.status === "uncertain") {
+    return {
+      kind: "info",
+      text: humanReceiptReasonKey(receipt.reason)
+        ? t(humanReceiptReasonKey(receipt.reason)!)
+        : t("receipt.human.compactSentUnobserved"),
+    };
+  }
+  if (receipt.status === "rejected" || receipt.status === "failed") {
+    return { kind: "err", text: compactFailureText(t, receipt.reason, undefined, undefined) };
+  }
+  return null;
+}
+
+/**
  * Presentational unified control strip (issue #241). Pure — its control set,
  * disabled-with-tooltip vs. hidden treatment, 44px mobile targets, and busy
  * states are DOM-tested against capability fixtures. Mounted once by
@@ -359,8 +389,19 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
   const [compactArmed, setCompactArmed] = useState(false);
   /** The durable operation a confirmed compact gesture owns until it lands. */
   const compactOperationRef = useRef<string | null>(null);
+  /** The admitted compact operation whose durable receipt the strip is still
+      waiting on, so its real outcome replaces the optimistic line (#1214). */
+  const [compactWatch, setCompactWatch] = useState<string | null>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [status, setStatus] = useState<StripStatus | null>(null);
+
+  /** Every action starts from a clean line — including a settled compaction
+      outcome, which would otherwise sit on the status line forever and hide the
+      note the NEXT action wants to show (#1214). */
+  const clearStatus = () => {
+    setStatus(null);
+    setCompactWatch(null);
+  };
 
   /* One click, one command (operator request): the terminal button copies the
      COMPLETE resume command (cd + env + CLI) straight to the clipboard and
@@ -373,7 +414,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
       setAttachOpen(true);
       return;
     }
-    setStatus(null);
+    clearStatus();
     try {
       const response = await fetch(`/api/attach-command?path=${encodeURIComponent(file.path)}`);
       const body = (await response.json()) as { fullCommand?: string; error?: string };
@@ -413,12 +454,24 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
     return () => window.clearTimeout(id);
   }, [compactArmed]);
 
+  /* A claude-broker host has no compact subtype in its transport, so its
+     compaction is a typed `/compact` whose completion the Viewer can only
+     witness in the transcript (#1214). The strip's wording follows. */
+  const claudeCompact = structuredSession?.session.hostKind === "claude-broker";
+  const compactOutcome = compactReceiptStatus(
+    t,
+    compactWatch
+      ? structuredSession?.receipts.find((receipt) =>
+          receipt.kind === "compact" && receipt.operationId === compactWatch)
+      : undefined,
+  );
+
   if (!stripHasVisibleControls(caps)) return null;
 
   const stop = async () => {
     if (stopBusy) return;
     setStopBusy(true);
-    setStatus(null);
+    clearStatus();
     try {
       const result = structuredSession
         ? await interruptRuntime(structuredSession.session.conversationId, mintIdempotencyKey())
@@ -445,7 +498,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
   const recheck = async () => {
     if (recheckBusy) return;
     setRecheckBusy(true);
-    setStatus(null);
+    clearStatus();
     try {
       const ok = await refreshRuntime();
       if (!ok) setStatus({ kind: "err", text: t("deadHost.recheckFailed") });
@@ -462,7 +515,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
     setCompactArmed(false);
     if (compactBusy) return;
     setCompactBusy(true);
-    setStatus(null);
+    clearStatus();
     /* #862: one durable operation per confirmed gesture. On a structured host
        this admits a real compaction, so a retry after a timeout or a failed
        response must replay that same operation — the id is only released once
@@ -497,8 +550,12 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
          compact this conversation again. It is held only while the outcome is
          genuinely unknown: a transport failure, or a throw below. */
       if (accepted || settled) compactOperationRef.current = null;
+      setCompactWatch(accepted ? operationId : null);
       setStatus(accepted
-        ? { kind: "ok", text: t("composer.compactSent") }
+        /* The Claude path reaches compaction by typing `/compact` into the
+           conversation, so the admitted line promises a sent command and
+           nothing more; the durable receipt says how it ended. */
+        ? { kind: "ok", text: t(claudeCompact ? "composer.compactSentClaude" : "composer.compactSent") }
         : { kind: "err", text: compactFailureText(t, body.receipt?.reason, body.error, body.code) });
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
@@ -524,7 +581,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
         onRecheck={() => void recheck()}
         onTerminal={() => void copyAttachCommand()}
         onToggleOverflow={() => setOverflowOpen((open) => !open)}
-        status={resolvedStatus(status, file, t)}
+        status={compactOutcome ?? resolvedStatus(status, file, t)}
       />
       {attachOpen ? <AttachTerminalDialog file={file} mode={attachMode} onClose={() => setAttachOpen(false)} /> : null}
     </div>

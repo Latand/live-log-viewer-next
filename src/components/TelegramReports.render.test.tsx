@@ -332,6 +332,7 @@ test("after a reload, a run the history row cannot name is still linked from the
       identityIdUpgradedAt: null,
     }),
     readPort: () => { throw new Error("this run reads nothing"); },
+    connectorReady: async () => { throw new Error("this run waits for nothing"); },
     migrateIdentity: async () => {},
     spawn: async () => { throw new Error("this run launches nothing"); },
     /* Exactly the production lookup, against a registry loaded from cold. */
@@ -346,4 +347,13 @@ test("after a reload, a run the history row cannot name is still linked from the
     <TelegramReportsSection state={stateFor(runner.payload())} onClose={() => {}} />,
   );
   expect(html).toContain(`href="#c=${begun.receipt.conversationId}"`);
+});
+
+test("a run that waited for a restarted connector says so instead of blaming the chat list", () => {
+  /* #1133: a viewer restart orphans the connector, and the run that follows
+     used to read as `sources_failed` — a sentence about chats, for a failure
+     that was about a process. */
+  const html = render(stateFor({ settings: { enabled: true, time: "10:00", groups: [], promptIsDefault: true } }, { failure: { code: "connector_unavailable" } }));
+  expect(html).toContain("The Telegram connector was not available");
+  expect(html).not.toContain("The chats to read could not be listed.");
 });

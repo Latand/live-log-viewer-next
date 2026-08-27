@@ -330,6 +330,11 @@ export interface TelegramConnectorReadPorts {
 }
 
 const CONNECTOR_READINESS_TIMEOUT_MS = 30_000;
+/** How long a REPORT RUN waits for the connector to come up before it reads
+    anything (#1133). Longer than one read's recovery lane on purpose: after a
+    viewer restart the supervisor's own spawn-and-verify takes most of that
+    lane's budget, so a single ensure attempt is not a wait at all. */
+export const REPORT_CONNECTOR_READINESS_TIMEOUT_MS = 90_000;
 const CONNECTOR_READINESS_INITIAL_BACKOFF_MS = 250;
 const CONNECTOR_READINESS_MAX_BACKOFF_MS = 2_000;
 
@@ -448,6 +453,59 @@ export async function callTelegramConnectorWithReadiness(
     backoffMs = Math.min(backoffMs * 2, CONNECTOR_READINESS_MAX_BACKOFF_MS);
   }
   throw new Error("Telegram connector is unavailable");
+}
+
+/**
+ * The readiness a report run waits for BEFORE it reads anything (#1133).
+ *
+ * The connector runs as a child of the viewer container's entrypoint, so a
+ * viewer restart kills it and nothing brings it back until a consumer trips
+ * over its absence. A run that starts inside that gap used to spend its very
+ * first read on a listener that was not there and terminalize `sources_failed`
+ * in seconds. This asks the SUPERVISOR — never the account — to have the
+ * connector up, with the same exponential backoff the per-read recovery lane
+ * uses, and it costs no Telegram read at all, so the sequential single-reader
+ * rule of #1087 is untouched.
+ *
+ * Two outcomes are not the same thing to the caller: a connector that has not
+ * come up inside the budget is `unavailable` and will heal on its own, which
+ * is what makes a single bounded re-queue worth arming; a policy or
+ * configuration refusal, and a credential generation that moved out from under
+ * the wait, are `refused` and will not heal with another sleep, so the run
+ * fails immediately instead of spending the budget.
+ */
+export type TelegramConnectorReadiness =
+  | { ready: true }
+  | { ready: false; reason: "unavailable" | "refused" };
+
+export async function awaitTelegramConnectorReady(
+  credentialRef: string,
+  ports: TelegramConnectorReadPorts = productionConnectorReadPorts,
+): Promise<TelegramConnectorReadiness> {
+  const timeoutMs = Math.max(1, ports.readinessTimeoutMs ?? REPORT_CONNECTOR_READINESS_TIMEOUT_MS);
+  const deadline = ports.now() + timeoutMs;
+  let backoffMs = CONNECTOR_READINESS_INITIAL_BACKOFF_MS;
+  while (ports.now() < deadline) {
+    let session: StoredTelegramSession;
+    try {
+      session = currentReadSession(credentialRef, ports);
+    } catch {
+      return { ready: false, reason: "refused" };
+    }
+    let ready: ConnectorEnsureResult;
+    try {
+      ready = await ports.ensureConnector(session);
+    } catch {
+      ready = { ok: false, code: "connector_failed" };
+    }
+    if (ready.ok) return { ready: true };
+    if (ready.code !== "connector_failed") return { ready: false, reason: "refused" };
+    const remaining = deadline - ports.now();
+    if (remaining <= 0) break;
+    await ports.sleep(Math.min(backoffMs, remaining));
+    backoffMs = Math.min(backoffMs * 2, CONNECTOR_READINESS_MAX_BACKOFF_MS);
+  }
+  return { ready: false, reason: "unavailable" };
 }
 
 /**

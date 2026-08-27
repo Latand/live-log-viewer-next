@@ -673,9 +673,20 @@ export interface ResourcesSystem {
 /** One tmux pane hosting an agent CLI, with its whole process tree's memory.
     `path` is null for orphans — panes running an agent the scanner could not
     match to any transcript; they are still killable via their target. */
+/** How many structured hosts one resources payload may carry. The footer polls
+    this list, so the bound belongs to the payload rather than to any one
+    producer: the registry read, the process scan and the served rows all stop
+    here however many hosts the machine accumulated. */
+export const RESOURCE_STRUCTURED_HOST_LIMIT = 512;
+
 export interface ResourceSession {
   target: string;
+  /** Root pid of the attributed tree: the tmux pane for a legacy row, the host
+      process itself for a structured one. */
   panePid: number;
+  /** Transport that owns this row. Absent on observations persisted before
+      structured hosts were listed, which only ever held tmux panes. */
+  kind?: "tmux" | "structured";
   path: string | null;
   engine: "claude" | "codex" | null;
   /** Several live panes claim the same stable conversation identity. */
@@ -690,6 +701,24 @@ export interface ResourceSession {
   rssBytes: number;
   swapBytes: number;
   procCount: number;
+  /** Structured rows only, from the registry record behind the host. */
+  model?: string | null;
+  role?: string | null;
+  conversationId?: string | null;
+  /** Pipeline stage this host serves, when it belongs to one. */
+  stage?: string | null;
+  /** `owned`: the runtime still holds the host and can terminate it through its
+      own lifecycle. `released`: only the registry knows it. `orphaned`: its
+      worktree is gone, or no registry record covers the process at all. */
+  ownership?: "owned" | "released" | "orphaned";
+  /** A live orchestrator seat. Listed like any other host, but left out of the
+      bulk kills unless the operator ticks it explicitly. Null means the scan
+      found the process without registry evidence, so bulk kills leave it
+      alone. */
+  seat?: boolean | null;
+  /** The engine turn has not settled: killing this host interrupts work. Null
+      means no registry turn state can prove that it settled. */
+  turnBusy?: boolean | null;
 }
 
 /** GET /api/resources response. `system` is null when no platform probe worked. */

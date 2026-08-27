@@ -12,6 +12,7 @@ import {
 import {
   DAILY_REPORT_PROMPT_VERSION,
   classifyReportOutput,
+  reportConversationTitle,
   renderDailyReportPrompt,
 } from "./reportPrompt";
 import {
@@ -22,7 +23,13 @@ import {
   slotInstant,
 } from "./reportSchedule";
 import { reportAttemptId, TELEGRAM_REPORT_PROJECT } from "./reportLineage";
-import { connectorReadPort, planReportSources, type TelegramReadPort } from "./reportSources";
+import {
+  awaitTelegramConnectorReady,
+  connectorReadPort,
+  planReportSources,
+  type TelegramConnectorReadiness,
+  type TelegramReadPort,
+} from "./reportSources";
 import { launchReportConversation, type ReportSpawnInput, type ReportSpawnResult } from "./reportSpawn";
 import {
   clearTelegramReports,
@@ -36,6 +43,7 @@ import {
   saveReportText,
   updateTelegramReports,
   writeReportSources,
+  type TelegramReportsFile,
 } from "./reportStore";
 import { readTelegramConnection, type StoredTelegramConnection } from "./sessionStore";
 
@@ -77,11 +85,18 @@ import { readTelegramConnection, type StoredTelegramConnection } from "./session
 /** A run that has produced nothing by then is over, whatever the board says. */
 export const RUN_TIMEOUT_MS = 45 * 60 * 1000;
 const TICK_MS = 60_000;
+/** How long an armed re-queue waits for the connector to reach `connected`
+    before it is dropped (#1133). A report is about a window, and a re-queue
+    that fired hours later would file today's reading against a boundary
+    nobody is waiting for any more; the next scheduled run still covers the
+    window this one left owed. */
+export const CONNECTOR_RETRY_WINDOW_MS = 30 * 60 * 1000;
 
 /** Everything this module will ever write to the host log. */
 export type ReportRunnerLogCode =
   | "tick_failed"
   | "account_check_failed"
+  | "connector_unavailable"
   | "account_mismatch"
   | "sources_failed"
   | "launch_failed"
@@ -99,6 +114,10 @@ export interface ReportRunnerPorts {
       sequential source pass. Optional only for injected fixtures that never
       enter the read path; a real read fails closed without it. */
   beginReadPhase?(): Promise<() => void>;
+  /** Waits, bounded, for the shared connector to be up for this credential
+      generation before the run reads anything (#1133). It asks the supervisor
+      and reads no chat, so it adds no concurrent connector reader (#1087). */
+  connectorReady(credentialRef: string): Promise<TelegramConnectorReadiness>;
   /** Runs the one-time id migration a pre-#1091 connection is owed: the
       ordinary health check, which re-reads the account through the login
       bridge and persists whatever id it reports. */
@@ -163,6 +182,7 @@ export const productionReportRunnerPorts: ReportRunnerPorts = {
     const { telegramService } = await import("./service");
     return await telegramService().beginReportReadPhase();
   },
+  connectorReady: (credentialRef) => awaitTelegramConnectorReady(credentialRef),
   migrateIdentity,
   spawn: launchReportConversation,
   reportRunConversation,
@@ -235,6 +255,7 @@ export class TelegramReportRunner {
       await this.finalizeActiveRun();
       const file = readTelegramReports();
       if (file.active) return;
+      if (await this.runOwedConnectorRetry(file)) return;
       if (!scheduledRunDue({ now: this.ports.now(), settings: file.settings, cursor: file.cursor })) return;
       const day = localDayKey(this.ports.now(), REPORT_TIME_ZONE);
       /* Stamp the day BEFORE launching: a launch that throws must not leave
@@ -287,6 +308,37 @@ export class TelegramReportRunner {
     await Promise.all(pending);
   }
 
+  /**
+   * The one bounded re-queue a connector-unavailable failure is owed (#1133).
+   *
+   * A run that failed purely because the shared connector was not up yet is a
+   * report nobody read, and the connector heals on its own within a minute of
+   * a viewer restart — so the operator's "Run now" is re-queued once the
+   * durable record says `connected` rather than being silently lost. It is the
+   * SAME record the launch's grant is resolved from, so a re-queue can never
+   * open a conversation the connector grant would be withheld from.
+   *
+   * Bounded on both sides: the marker is consumed before the run starts (so a
+   * crash cannot replay it), the re-queued run is marked as the retry (so its
+   * own connector failure arms nothing), and a marker the connector never
+   * comes back for expires instead of firing a stale report hours later.
+   */
+  private async runOwedConnectorRetry(file: TelegramReportsFile): Promise<boolean> {
+    const owed = file.retry;
+    if (!owed) return false;
+    const armedAt = Date.parse(owed.armedAt);
+    const expired = !Number.isFinite(armedAt) || this.ports.now() - armedAt > CONNECTOR_RETRY_WINDOW_MS;
+    if (expired || !file.settings.enabled) {
+      updateTelegramReports((state) => { if (state.retry?.runId === owed.runId) state.retry = null; });
+      return false;
+    }
+    if (this.ports.connection().status !== "connected") return false;
+    updateTelegramReports((state) => { if (state.retry?.runId === owed.runId) state.retry = null; });
+    const begun = this.beginRun(owed.trigger, { retry: true });
+    if (begun.ok) await this.execute(begun.runId);
+    return true;
+  }
+
   /** A Telegram that is neither connected nor holding a credential has been
       logged out or locally deleted; its reports are readings of that account
       and go with it. */
@@ -304,7 +356,7 @@ export class TelegramReportRunner {
    * has something truthful to show while that pass runs, and so a run
    * interrupted mid-pass is a row somebody can settle rather than a silence.
    */
-  private beginRun(trigger: TelegramReportTrigger): RunLaunchResult {
+  private beginRun(trigger: TelegramReportTrigger, options: { retry?: boolean } = {}): RunLaunchResult {
     const file = readTelegramReports();
     const connection = this.ports.connection();
     if (!file.settings.enabled) return this.recordFailure(trigger, "reports_disabled");
@@ -313,6 +365,9 @@ export class TelegramReportRunner {
     const window = reportWindowFor(this.ports.now(), file.cursor);
     this.planning.add(runId);
     updateTelegramReports((state) => {
+      /* Any run that starts supersedes an owed re-queue: it covers the same
+         window, so firing the old one afterwards would report it twice. */
+      state.retry = null;
       state.active = {
         runId,
         trigger,
@@ -321,6 +376,7 @@ export class TelegramReportRunner {
         windowEnd: window.endAt,
         conversationId: null,
         promptVersion: DAILY_REPORT_PROMPT_VERSION,
+        ...(options.retry ? { retry: true as const } : {}),
       };
     });
     return { ok: true, runId };
@@ -399,6 +455,20 @@ export class TelegramReportRunner {
     if (!this.ports.beginReadPhase) throw new Error("Telegram report read lease is unavailable");
     const releaseReadPhase = await this.ports.beginReadPhase();
     try {
+      /* The connector is a child of the viewer container's entrypoint, so a
+         viewer restart kills it and the next run finds nothing listening
+         (#1133). Waiting for the supervisor to bring it back — bounded, and
+         INSIDE the lease so no health check can replace the connector between
+         readiness and the first read — is the difference between a restart
+         costing the day's report and costing it a minute. A connector that is
+         refused rather than absent will not heal with another sleep, so that
+         one fails now and re-queues nothing. */
+      const readiness = await this.ports.connectorReady(recorded.credentialRef);
+      if (!readiness.ready) {
+        this.ports.log("connector_unavailable");
+        this.settle(runId, "failed", "connector_unavailable", false, { requeue: readiness.reason === "unavailable" });
+        return;
+      }
       /* A mismatch is the issue's `account-mismatch` outcome: no report, no
          window advance, and — because this runs before the source pass — no
          read of the wrong account's dialogs either. */
@@ -470,6 +540,7 @@ export class TelegramReportRunner {
           model: CODEX_SOL_MODEL,
           effort: "medium",
           cwd: reportWorkspaceDir(),
+          title: reportConversationTitle({ windowStart: window.startAt, windowEnd: window.endAt }),
           /* The durable report-run marker (#1091), in the two fields the
              ordinary spawn path already makes durable: the receipt's attempt
              id spells the run id, and explicit project ownership is what the
@@ -583,11 +654,18 @@ export class TelegramReportRunner {
     status: TelegramReportRow["status"],
     errorCode: TelegramReportErrorCode | null,
     hasReport: boolean,
+    options: { requeue?: boolean } = {},
   ): void {
     updateTelegramReports((state) => {
       const active = state.active;
       if (!active || active.runId !== runId) return;
       state.active = null;
+      /* The one bounded re-queue (#1133), armed only by a run that failed
+         purely on the connector being absent and only when that run was not
+         itself the re-queue. */
+      state.retry = options.requeue && !active.retry
+        ? { runId: active.runId, trigger: active.trigger, armedAt: new Date(this.ports.now()).toISOString() }
+        : null;
       state.history = [{
         id: active.runId,
         trigger: active.trigger,

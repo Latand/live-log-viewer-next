@@ -189,6 +189,70 @@ export function permitAttentionHandoff(
   };
 }
 
+/**
+ * Who may put words in the operator's own composer (#1202).
+ *
+ * `suggest_replies` writes the drafts that render under the manager's message
+ * and land in the composer on a tap. Like `request_attention` above, that is an
+ * OPERATION contract rather than an availability gate, and it is entitled to
+ * exactly the same identities: the operator's own root/gateway session, and a
+ * validated designated orchestrator seat. Workers and unidentified callers are
+ * refused with nothing written.
+ *
+ * The TARGET is gated too, which attention has no equivalent of, and it is
+ * gated for EVERY caller including the root: drafts are offered under YOUR OWN
+ * message, in the conversation the operator is answering YOU in. Writing them
+ * into somebody else's pane would put words under a question a third party
+ * asked — and would not even reach that pane on its own, because a surface
+ * re-reads its drafts when ITS transcript moves, which a call made elsewhere
+ * does not do. So a target that is not the caller's own conversation is
+ * refused rather than written somewhere nothing will look.
+ *
+ * Identities are compared through the registry's alias chain, so a seat that
+ * was rekeyed by an account migration still recognises its own conversation.
+ */
+export type ReplySuggestionsVerdict =
+  | { allowed: true; via: "root" | "orchestrator" }
+  | { allowed: false; refusedAs: "unidentified" | "worker" | "cross-conversation"; error: string };
+
+export function permitReplySuggestions(
+  authority: AttentionCallerAuthority,
+  seats: readonly { conversationId: string }[],
+  /** The conversation the drafts would land under, or null to settle only the
+      identity half — the same two-phase shape {@link permitAttentionHandoff}
+      uses, so a refused caller learns nothing from target resolution. */
+  targetConversationId: string | null = null,
+  /** The registry's alias chain. Identity, not formatting: two ids for one
+      conversation must compare equal. */
+  canonical: (conversationId: string) => string = (conversationId) => conversationId,
+): ReplySuggestionsVerdict {
+  if (authority.kind === "unidentified") {
+    return {
+      allowed: false,
+      refusedAs: "unidentified",
+      error: "suggest_replies writes drafts into the operator's composer, and no durable evidence names this caller; only the root session or the designated orchestrator may offer them",
+    };
+  }
+  if (authority.kind !== "root" && !seats.some((seat) => seat.conversationId === authority.conversationId)) {
+    return {
+      allowed: false,
+      refusedAs: "worker",
+      error: "suggest_replies writes drafts into the operator's composer; a worker session may not offer them — signal the orchestrator or the root session instead",
+    };
+  }
+  const via = authority.kind === "root" ? "root" as const : "orchestrator" as const;
+  if (targetConversationId === null) return { allowed: true, via };
+  const own = authority.conversationId;
+  if (!own || canonical(targetConversationId) !== canonical(own)) {
+    return {
+      allowed: false,
+      refusedAs: "cross-conversation",
+      error: "suggest_replies offers drafts under your own message; they may not be written into another conversation — omit conversationId, or ask that conversation's own session to offer them",
+    };
+  }
+  return { allowed: true, via };
+}
+
 /** The shape {@link import("./server").createMcpToolService} consults. Kept
     narrow so the service does not depend on how an identity was resolved. */
 export interface McpToolPolicy {

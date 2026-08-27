@@ -38,6 +38,7 @@ import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/p
 import { FeedItem } from "./feed/FeedItem";
 import { MessageProvenanceProvider, useDeliveredMessageProvenance } from "./feed/messageProvenance";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
+import { SuggestedReplies } from "./feed/SuggestedReplies";
 import { BoundedLru } from "./feed/scrollMemory";
 import { ConversationAttention } from "./runtime/ConversationAttention";
 import { speakableAnswer } from "./feed/speakableAnswer";
@@ -649,6 +650,12 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
      empty transcript is not "no output" — it is a conversation mid-launch. */
   const windowTail = visibleLiveTurnItems.length > 0 || pendingOutbox.length > 0 || Boolean(launch);
 
+  /* What says this conversation moved, for the reply-draft read (#1202): the
+     bytes the tail has seen plus the rows they parsed into. It changes exactly
+     when the transcript grows, so the drafts are read off the stream the pane
+     already has rather than off a timer of their own. */
+  const suggestionsRevision = `${tail.size}:${feed.items.length}`;
+
   /* The floating pill is centered on every surface — the same axis as the
      pinned TurnStatusBar below, per the issue #268 operator note: the two
      bottom elements share one axis and separate slots, so they can never
@@ -684,6 +691,20 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             <ArrowDown className="h-3.5 w-3.5" aria-hidden /> {newCount ? t("feed.newCount", { count: newCount }) : t("feed.down")}
           </button>
         )
+      ) : null}
+      {/* #1202: with the latest turn off-screen the drafts follow the operator
+          to the bottom of the pane — above the «back to live» chip, so the two
+          bottom controls never share a row. */}
+      {file && !magnet ? (
+        <div className="absolute inset-x-2 bottom-11 z-10 flex justify-center">
+          <SuggestedReplies
+            file={file}
+            revision={suggestionsRevision}
+            items={feed.items}
+            outbox={pendingOutbox}
+            floating
+          />
+        </div>
       ) : null}
       <div
         ref={scroller}
@@ -819,11 +840,36 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                 const switchHold = migrationHoldsDelivery(cardMigrationState(liveMigration))
                   ? { label: migrationTargetName(liveMigration) }
                   : null;
-                return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} switchHold={switchHold} />;
+                /* #1213: the bubble may only name a turn when the host says a
+                   turn is running, so it reads the same axes the composer's
+                   receipt rows do. */
+                return (
+                  <OutboxBubbles
+                    key="outbox"
+                    cardId={memoryKey!}
+                    entries={pendingOutbox}
+                    switchHold={switchHold}
+                    session={runtimeSession ? { host: runtimeSession.host, turn: runtimeSession.turn } : null}
+                  />
+                );
               }
               return <LiveTurnRows key="delta" items={visibleLiveTurnItems} />;
             })}
             <ConversationAttention file={file} />
+            {/* #1202: the manager's reply drafts, directly under its latest
+                turn — one tap from the operator's composer. Absent unless the
+                conversation actually has a set, and yielded to the pinned row
+                above the composer once the magnet is released and that turn is
+                no longer the thing the operator is looking at, so the drafts
+                are offered in exactly one place at a time. */}
+            {magnet ? (
+              <SuggestedReplies
+                file={file}
+                revision={suggestionsRevision}
+                items={feed.items}
+                outbox={pendingOutbox}
+              />
+            ) : null}
             {feed.items.length && !file.pendingQuestion && !file.waitingInput && endedQuestion ? (
               <div className="my-4 rounded-[8px] border border-border bg-sunken px-4 py-3 text-[13px] font-semibold text-muted">{endedQuestion}</div>
             ) : null}
