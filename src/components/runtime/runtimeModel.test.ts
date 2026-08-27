@@ -616,4 +616,15 @@ describe("humanReceiptReasonKey", () => {
       expect(sentence.toLowerCase()).not.toContain("engine");
     }
   });
+
+  test("a compaction the engine declined has words of its own (#1214)", () => {
+    expect(humanReceiptReasonKey("compact-declined")).toBe("receipt.human.compactDeclined");
+    for (const locale of ["en", "uk"] as const) {
+      const sentence = translate(locale, "receipt.human.compactDeclined");
+      /* Both halves, in both languages: the command went, and nothing was
+         compacted. Neither one alone is the truth. */
+      expect(sentence).toContain("/compact");
+      expect(sentence.length).toBeGreaterThan(0);
+    }
+  });
 });

@@ -7,14 +7,11 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 
 import { afterAll, expect, test } from "bun:test";
 
-import { claudeTranscriptPath } from "@/lib/agent/transcript";
-
 import {
   CLAUDE_COMPACT_COMMAND,
+  CLAUDE_COMPACT_DECLINED_REASON,
   CLAUDE_COMPACT_UNOBSERVED_REASON,
   ClaudeStreamBrokerHost,
-  fileClaudeCompactionEvidence,
-  type ClaudeCompactionEvidenceSource,
   type ClaudeDeliveryLedger,
   type ClaudeDeliveryState,
 } from "./claudeStreamBrokerHost";
@@ -25,10 +22,12 @@ import type { RuntimeEventStore } from "./eventStore";
  * The Claude compact control (#1214). The stream-json transport has no compact
  * subtype — `interrupt` and `can_use_tool` are the whole control channel — so
  * the host reaches compaction the only way the transport allows: it types
- * `/compact` into the conversation, then watches the session transcript for the
- * compaction boundary. Every assertion here is about the two things that decide
- * the control: the command is really sent (exactly once), and the outcome the
- * receipt carries is the one that was actually witnessed.
+ * `/compact` into the conversation and reads the outcome off the stream it
+ * already consumes: `system/compact_boundary` when the engine compacted, and
+ * the command's own boundary-less `result` when it declined. Every assertion
+ * here is about the two things that decide the control: the command is really
+ * sent (exactly once), and the outcome the receipt carries is the one that was
+ * actually witnessed.
  */
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-compact-"));
@@ -101,9 +100,9 @@ class FakeClaude extends EventEmitter {
 }
 
 /** Waits for a fixture condition without pinning the test to a stream tick. */
-async function waitFor(check: () => boolean, label: string): Promise<void> {
+async function waitFor(check: () => boolean | Promise<boolean>, label: string): Promise<void> {
   for (let attempt = 0; attempt < 300; attempt += 1) {
-    if (check()) return;
+    if (await check()) return;
     await Bun.sleep(2);
   }
   throw new Error(label);
@@ -118,25 +117,32 @@ function compactFrames(child: FakeClaude): Array<Record<string, unknown>> {
   });
 }
 
-/** A scripted evidence channel: the test decides when a boundary appears. */
-function scriptedEvidence(): ClaudeCompactionEvidenceSource & { announce(uuid: string | null): void } {
-  let pending: Array<{ uuid: string | null; trigger: string | null }> = [];
-  return {
-    cursor: () => 128,
-    read: ({ fromByte }) => {
-      const boundaries = pending;
-      pending = [];
-      return { boundaries, cursor: fromByte };
-    },
-    announce(uuid) { pending = [{ uuid, trigger: "manual" }]; },
-  };
+/** The boundary frame the CLI announces on stdout when it compacted. */
+function announceBoundary(child: FakeClaude, host: ClaudeStreamBrokerHost, uuid: string): void {
+  child.emitJson({
+    type: "system",
+    subtype: "compact_boundary",
+    session_id: host.identity.sessionId,
+    uuid,
+    compact_metadata: { trigger: "manual", pre_tokens: 850_932, post_tokens: 11_926 },
+  });
+}
+
+/** The frame the CLI answers `/compact` with once it is done with the command;
+    it belongs to no turn, because the compaction never took a turn slot. */
+function announceResult(child: FakeClaude, host: ClaudeStreamBrokerHost): void {
+  child.emitJson({
+    type: "result",
+    subtype: "success",
+    session_id: host.identity.sessionId,
+    is_error: false,
+    num_turns: 0,
+  });
 }
 
 function startHost(options: {
   child: FakeClaude;
-  compactionEvidence?: ClaudeCompactionEvidenceSource;
   compactEvidenceTimeoutMs?: number;
-  compactEvidencePollMs?: number;
 } ): Promise<ClaudeStreamBrokerHost> {
   return ClaudeStreamBrokerHost.start({
     cwd: sandbox,
@@ -144,9 +150,7 @@ function startHost(options: {
     deliveryLedger: new MemoryDeliveryLedger(),
     readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
     readTranscript: () => [],
-    compactEvidencePollMs: options.compactEvidencePollMs ?? 2,
     compactEvidenceTimeoutMs: options.compactEvidenceTimeoutMs ?? 2_000,
-    ...(options.compactionEvidence ? { compactionEvidence: options.compactionEvidence } : {}),
     /* A fixture never signals a real process group: the fake child's own
        `kill` is the fallback, and no pid on this machine is touched. */
     signalProcess: () => { throw new Error("fixture has no process group"); },
@@ -156,10 +160,9 @@ function startHost(options: {
   });
 }
 
-test("the compact control types /compact once and terminalizes on the observed transcript boundary", async () => {
+test("the compact control types /compact once and terminalizes on the boundary the CLI announces", async () => {
   const child = new FakeClaude();
-  const evidence = scriptedEvidence();
-  const host = await startHost({ child, compactionEvidence: evidence });
+  const host = await startHost({ child });
   try {
     const compaction = host.compact({ operationId: "op-compact", threadId: host.identity.sessionId });
 
@@ -172,8 +175,83 @@ test("the compact control types /compact once and terminalizes on the observed t
       message: { role: "user", content: [{ type: "text", text: "/compact" }] },
     });
 
-    evidence.announce("boundary-one");
+    announceBoundary(child, host, "boundary-one");
     expect(await compaction).toEqual({ compactionId: "boundary-one" });
+  } finally {
+    await host.release();
+  }
+});
+
+test("the boundary settles the control before the command's own result can call it declined", async () => {
+  /* The CLI emits the boundary and then closes the command with a `result`,
+     which is what makes a boundary-less `result` legible as a decline. */
+  const child = new FakeClaude();
+  const host = await startHost({ child, compactEvidenceTimeoutMs: 60_000 });
+  try {
+    const compaction = host.compact({ operationId: "op-order", threadId: host.identity.sessionId });
+    await waitFor(() => compactFrames(child).length === 1, "the /compact frame never reached the child");
+
+    announceBoundary(child, host, "boundary-then-result");
+    announceResult(child, host);
+
+    expect(await compaction).toEqual({ compactionId: "boundary-then-result" });
+  } finally {
+    await host.release();
+  }
+});
+
+test("a /compact the engine declines terminalizes at once instead of waiting out the budget", async () => {
+  /* "Error: No messages to compact" is the everyday shape: the CLI answers the
+     command, emits no boundary, and closes it with a `result` that belongs to
+     no turn. Sitting out five minutes for evidence the engine already declined
+     to produce would be an honest verdict reached silently and far too late. */
+  const child = new FakeClaude();
+  const host = await startHost({ child, compactEvidenceTimeoutMs: 60_000 });
+  try {
+    const compaction = host.compact({ operationId: "op-declined", threadId: host.identity.sessionId })
+      .then(() => "resolved", (error: unknown) => error);
+    await waitFor(() => compactFrames(child).length === 1, "the /compact frame never reached the child");
+
+    child.emitJson({
+      type: "assistant",
+      session_id: host.identity.sessionId,
+      message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "Error: No messages to compact" }] },
+    });
+    announceResult(child, host);
+
+    const outcome = await compaction;
+    expect(outcome).toBeInstanceOf(StructuredCompactError);
+    /* `refused` is the phase the queue turns into a visible failed receipt: the
+       engine did not compact, and the reason says so without claiming one. */
+    expect((outcome as StructuredCompactError).phase).toBe("refused");
+    expect((outcome as StructuredCompactError).message).toBe(CLAUDE_COMPACT_DECLINED_REASON);
+  } finally {
+    await host.release();
+  }
+});
+
+test("a result that belongs to a live turn is not a compaction decline", async () => {
+  /* Only the compaction runs off the turn plane, so only a result no turn
+     claims can be the `/compact` command's. A turn's own result must never
+     terminalize a compaction that is still running. */
+  const child = new FakeClaude();
+  const host = await startHost({ child, compactEvidenceTimeoutMs: 60_000 });
+  try {
+    const compaction = host.compact({ operationId: "op-turn-result", threadId: host.identity.sessionId });
+    await waitFor(() => compactFrames(child).length === 1, "the /compact frame never reached the child");
+
+    /* A delivery the queue's barrier would normally hold back; its echo opens a
+       turn, so the result that follows is that turn's. */
+    void host.send({ id: "entry-turn", text: "hello" }).catch(() => undefined);
+    await waitFor(async () => (await host.health()).activeTurnRef !== null, "the delivery never opened a turn");
+    announceResult(child, host);
+
+    /* Still running: nothing declined it. */
+    expect(await Promise.race([compaction.then(() => "settled", () => "settled"), Bun.sleep(30).then(() => "pending")]))
+      .toBe("pending");
+
+    announceBoundary(child, host, "boundary-after-turn");
+    expect(await compaction).toEqual({ compactionId: "boundary-after-turn" });
   } finally {
     await host.release();
   }
@@ -181,7 +259,7 @@ test("the compact control types /compact once and terminalizes on the observed t
 
 test("a compaction nobody witnessed terminalizes as sent-but-unobservable, never as success", async () => {
   const child = new FakeClaude();
-  const host = await startHost({ child, compactionEvidence: scriptedEvidence(), compactEvidenceTimeoutMs: 25 });
+  const host = await startHost({ child, compactEvidenceTimeoutMs: 25 });
   try {
     const outcome = await host.compact({ operationId: "op-silent", threadId: host.identity.sessionId })
       .then(() => "resolved", (error: unknown) => error);
@@ -199,14 +277,13 @@ test("a compaction nobody witnessed terminalizes as sent-but-unobservable, never
 
 test("a retry on the same operation replays the outcome instead of typing /compact twice", async () => {
   const child = new FakeClaude();
-  const evidence = scriptedEvidence();
-  const host = await startHost({ child, compactionEvidence: evidence });
+  const host = await startHost({ child });
   try {
     const first = host.compact({ operationId: "op-once", threadId: host.identity.sessionId });
     const concurrent = host.compact({ operationId: "op-once", threadId: host.identity.sessionId });
     await waitFor(() => compactFrames(child).length === 1, "the /compact frame never reached the child");
 
-    evidence.announce("boundary-once");
+    announceBoundary(child, host, "boundary-once");
     expect(await first).toEqual({ compactionId: "boundary-once" });
     expect(await concurrent).toEqual({ compactionId: "boundary-once" });
 
@@ -221,7 +298,7 @@ test("a retry on the same operation replays the outcome instead of typing /compa
 
 test("a compaction refused before the command is written sends nothing", async () => {
   const child = new FakeClaude();
-  const host = await startHost({ child, compactionEvidence: scriptedEvidence() });
+  const host = await startHost({ child });
   try {
     /* Someone else's session. */
     await expect(host.compact({ operationId: "op-foreign", threadId: "another-session" }))
@@ -244,7 +321,7 @@ test("a compaction refused before the command is written sends nothing", async (
 
 test("a host that dies mid-compaction terminalizes unverified rather than hanging", async () => {
   const child = new FakeClaude();
-  const host = await startHost({ child, compactionEvidence: scriptedEvidence(), compactEvidenceTimeoutMs: 60_000 });
+  const host = await startHost({ child, compactEvidenceTimeoutMs: 60_000 });
   const compaction = host.compact({ operationId: "op-dead", threadId: host.identity.sessionId })
     .then(() => "resolved", (error: unknown) => error);
   child.emitJson({ type: "system", subtype: "init", apiKeySource: "oops" });
@@ -252,62 +329,4 @@ test("a host that dies mid-compaction terminalizes unverified rather than hangin
   const outcome = await compaction;
   expect(outcome).toBeInstanceOf(StructuredCompactError);
   expect((outcome as StructuredCompactError).phase).toBe("unverified");
-});
-
-test("a compaction boundary announced on the stream settles the control immediately", async () => {
-  const child = new FakeClaude();
-  const host = await startHost({ child, compactionEvidence: scriptedEvidence(), compactEvidenceTimeoutMs: 60_000 });
-  try {
-    const compaction = host.compact({ operationId: "op-stream", threadId: host.identity.sessionId });
-    child.emitJson({
-      type: "system",
-      subtype: "compact_boundary",
-      session_id: host.identity.sessionId,
-      uuid: "boundary-stream",
-      compactMetadata: { trigger: "manual", preTokens: 900_000 },
-    });
-
-    expect(await compaction).toEqual({ compactionId: "boundary-stream" });
-  } finally {
-    await host.release();
-  }
-});
-
-test("the transcript evidence source reports only boundaries appended after the fence", () => {
-  const projectsRoot = fs.mkdtempSync(path.join(sandbox, "projects-"));
-  const cwd = path.join(sandbox, "repo");
-  const sessionId = "session-compact-evidence";
-  const transcript = claudeTranscriptPath(cwd, sessionId, projectsRoot);
-  fs.mkdirSync(path.dirname(transcript), { recursive: true });
-  /* The record shape the CLI writes: only `uuid` and the trigger are read, so
-     the fixture carries no identifier of any real conversation. */
-  const boundary = (uuid: string, trigger: string) => JSON.stringify({
-    type: "system",
-    subtype: "compact_boundary",
-    uuid,
-    compactMetadata: { trigger, preTokens: 850_932, postTokens: 11_926 },
-  });
-  fs.writeFileSync(transcript, `${boundary("older-boundary", "auto")}\n`);
-
-  const fence = fileClaudeCompactionEvidence.cursor({ cwd, sessionId, projectsRoot });
-  expect(fileClaudeCompactionEvidence.read({ cwd, sessionId, projectsRoot, fromByte: fence }).boundaries).toEqual([]);
-
-  /* A record still being written is not evidence until its newline lands. */
-  fs.appendFileSync(transcript, `${JSON.stringify({ type: "assistant" })}\n${boundary("fresh-boundary", "manual")}`);
-  const partial = fileClaudeCompactionEvidence.read({ cwd, sessionId, projectsRoot, fromByte: fence });
-  expect(partial.boundaries).toEqual([]);
-
-  fs.appendFileSync(transcript, "\n");
-  const observed = fileClaudeCompactionEvidence.read({ cwd, sessionId, projectsRoot, fromByte: partial.cursor });
-  expect(observed.boundaries).toEqual([{ uuid: "fresh-boundary", trigger: "manual" }]);
-  /* The cursor advances, so the same boundary is never counted twice. */
-  expect(fileClaudeCompactionEvidence.read({ cwd, sessionId, projectsRoot, fromByte: observed.cursor }).boundaries)
-    .toEqual([]);
-});
-
-test("a missing transcript is not evidence of anything", () => {
-  const projectsRoot = fs.mkdtempSync(path.join(sandbox, "empty-projects-"));
-  const input = { cwd: path.join(sandbox, "gone"), sessionId: "absent", projectsRoot };
-  expect(fileClaudeCompactionEvidence.cursor(input)).toBe(0);
-  expect(fileClaudeCompactionEvidence.read({ ...input, fromByte: 0 })).toEqual({ boundaries: [], cursor: 0 });
 });

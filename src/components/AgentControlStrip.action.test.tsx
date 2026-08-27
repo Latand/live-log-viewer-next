@@ -422,6 +422,22 @@ test("the Claude compact control is offered, sends the command, and reports what
   await act(async () => root.render(<AgentControlStrip file={structuredClaudeRoot} />));
   expect(statusText(host)).toBe(translate("en", "receipt.human.compactSentUnobserved"));
 
+  /* A compaction the engine declined is its own visible ending — the command
+     went and nothing was compacted — instead of the generic failure line. */
+  sessionView = structuredClaudeView([{
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: "conv-claude",
+    kind: "compact",
+    status: "failed",
+    reason: "compact-declined",
+    at: "2026-08-27T00:00:30.000Z",
+    revision: 3,
+  }]);
+  await act(async () => root.render(<AgentControlStrip file={structuredClaudeRoot} />));
+  expect(statusText(host)).toBe(translate("en", "receipt.human.compactDeclined"));
+  expect(statusText(host)).not.toBe(translate("en", "composer.failedCompact"));
+
   /* And a compaction that WAS witnessed says so. */
   sessionView = structuredClaudeView([{
     operationId,
@@ -431,7 +447,7 @@ test("the Claude compact control is offered, sends the command, and reports what
     status: "delivered",
     reason: "compaction:boundary-one",
     at: "2026-08-27T00:01:00.000Z",
-    revision: 3,
+    revision: 4,
   }]);
   await act(async () => root.render(<AgentControlStrip file={structuredClaudeRoot} />));
   expect(statusText(host)).toBe(translate("en", "composer.compactObserved"));

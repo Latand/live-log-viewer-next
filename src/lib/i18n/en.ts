@@ -470,6 +470,7 @@ export const en = {
   "receipt.human.noTurn": "there is no active turn",
   "receipt.human.unsupportedCapability": "the Viewer has no channel for this control here",
   "receipt.human.compactSentUnobserved": "sent — the Viewer couldn’t confirm the compaction finished",
+  "receipt.human.compactDeclined": "sent — the agent finished /compact without compacting",
   "receipt.human.verbatim": "not delivered: {reason}",
 
   // DraftAgentPane

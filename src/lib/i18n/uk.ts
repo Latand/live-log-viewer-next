@@ -498,6 +498,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "receipt.human.noTurn": "немає активного ходу",
   "receipt.human.unsupportedCapability": "Viewer не має каналу для цієї команди тут",
   "receipt.human.compactSentUnobserved": "надіслано — Viewer не зміг підтвердити завершення стискання",
+  "receipt.human.compactDeclined": "надіслано — агент завершив /compact, нічого не стиснувши",
   "receipt.human.verbatim": "не доставлено: {reason}",
 
   "draft.readPrompt": "Прочитай розмову агента у файлі {src} і продовж роботу звідти: ",

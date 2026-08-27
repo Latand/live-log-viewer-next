@@ -192,9 +192,11 @@ function compactFailureText(
  * What the durable compact receipt turned out to be (#1214). The strip's own
  * "sent" line is optimistic by necessity — it is written the moment the journal
  * admits the operation — so the receipt replaces it as soon as the operation
- * terminalizes. `uncertain` is the Claude path's honest ending: the command was
- * typed into the conversation and no compaction boundary was ever witnessed,
- * which the operator is told in those words rather than left to guess.
+ * terminalizes. The Claude path has two endings of its own, and the operator is
+ * told both in words rather than left to guess: `uncertain` means the command
+ * was typed and no boundary was ever witnessed, while a `failed`
+ * `compact-declined` means the engine answered the command and compacted
+ * nothing.
  */
 function compactReceiptStatus(
   t: TFunction,
