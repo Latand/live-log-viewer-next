@@ -572,3 +572,136 @@ test("a Codex description carries the provider-fork source from the first sessio
      consumer distinguishes "read, no fork" from "nobody has read this yet". */
   expect(describe("codex-sessions", root, plain, fs.statSync(plain)).nativeForkSourceThreadId).toBeNull();
 });
+
+/* ── OpenClaw (#1207) ──────────────────────────────────────────────────────
+   Every identifier below is invented; no OpenClaw record was copied. */
+
+const OPENCLAW_STATE = path.join(SANDBOX, "openclaw-state");
+
+function openclawTranscript(name: string, cwd: string, prompt: string): string {
+  const sessions = path.join(OPENCLAW_STATE, "agents", "primary", "sessions");
+  const transcript = path.join(sessions, name);
+  fs.mkdirSync(sessions, { recursive: true });
+  fs.writeFileSync(transcript, [
+    JSON.stringify({ type: "session", version: 3, id: "oc-header-" + name, timestamp: "2026-08-27T09:00:00.000Z", cwd }),
+    JSON.stringify({
+      type: "message",
+      id: "oc-user-1",
+      parentId: null,
+      timestamp: "2026-08-27T09:00:01.000Z",
+      message: { role: "user", content: prompt, timestamp: "2026-08-27T09:00:01.000Z" },
+    }),
+  ].join("\n") + "\n");
+  return transcript;
+}
+
+function withOpenclawStateDir<T>(state: string, run: () => T): T {
+  const previous = process.env.OPENCLAW_STATE_DIR;
+  process.env.OPENCLAW_STATE_DIR = state;
+  try {
+    return run();
+  } finally {
+    if (previous === undefined) delete process.env.OPENCLAW_STATE_DIR;
+    else process.env.OPENCLAW_STATE_DIR = previous;
+  }
+}
+
+test("an OpenClaw transcript is titled and searched by its first prompt", () => {
+  const workspace = path.join(OPENCLAW_STATE, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const transcript = openclawTranscript("oc-session-title.jsonl", workspace, "Draft the cobalt orchard note");
+  const root = path.dirname(transcript);
+  const stat = fs.statSync(transcript);
+
+  withOpenclawStateDir(OPENCLAW_STATE, () => {
+    expect(describe("openclaw-sessions", root, transcript, stat)).toMatchObject({
+      title: "Draft the cobalt orchard note",
+      engine: "openclaw",
+      fmt: "openclaw",
+      kind: "session",
+      cwd: workspace,
+      sessionStartedAt: "2026-08-27T09:00:00.000Z",
+    });
+  });
+  expect(searchTextForTranscript(transcript, stat.size, "openclaw")).toEqual({
+    title: "Draft the cobalt orchard note",
+    firstPrompt: "Draft the cobalt orchard note",
+  });
+});
+
+/* The invariant AGENTS.md names: the workspace is itself a remote-less git
+   repository, so the ordinary resolvers would mint `repo-…` while it exists and
+   `dir-…` once it is gone, fragmenting every channel-bound session at once. The
+   fixture is reached through a symlink so a `realpathSync` regression — which
+   resolves while the path exists and stops once it does not — fails the case. */
+test("the OpenClaw workspace keeps one project identity before and after deletion", () => {
+  useStateDirectory("openclaw-workspace-identity");
+  const state = path.join(SANDBOX, "openclaw-deletion", "real-state");
+  const link = path.join(SANDBOX, "openclaw-deletion", "linked-state");
+  const workspace = path.join(link, "workspace");
+  fs.mkdirSync(path.join(state, "workspace", ".git"), { recursive: true });
+  fs.symlinkSync(state, link);
+  /* The measured workspace is a real git repository with no `origin`, which is
+     exactly the shape that mints `repo-…` alive and `dir-…` once deleted. */
+  fs.writeFileSync(path.join(state, "workspace", ".git", "HEAD"), "ref: refs/heads/main\n");
+  fs.writeFileSync(path.join(state, "workspace", ".git", "config"), "[core]\n\tbare = false\n");
+
+  const alive = withOpenclawStateDir(link, () => projectInfoFromCwd(workspace, "openclaw-alive"));
+  expect(alive).toEqual({ project: expect.stringMatching(/^dir-[0-9a-f]{32}$/), displayName: "OpenClaw" });
+  expect(withOpenclawStateDir(link, () => projectRootForCwd(workspace))).toBeUndefined();
+
+  fs.rmSync(state, { recursive: true, force: true });
+  fs.rmSync(link, { force: true });
+  expect(fs.existsSync(workspace)).toBe(false);
+
+  const dead = withOpenclawStateDir(link, () => projectInfoFromCwd(workspace, "openclaw-dead"));
+  expect(dead).toEqual(alive!);
+});
+
+test("a repository nested under the OpenClaw workspace keeps repository attribution", () => {
+  useStateDirectory("openclaw-nested-repository");
+  const state = path.join(SANDBOX, "openclaw-nested", "state");
+  const workspace = path.join(state, "workspace");
+  const nested = path.join(workspace, "checkout");
+  fs.mkdirSync(nested, { recursive: true });
+  const identity = createRepository(nested, "ssh://git@example.invalid/team/openclaw-nested.git");
+
+  withOpenclawStateDir(state, () => {
+    expect(projectInfoFromCwd(nested, "openclaw-nested")).toMatchObject({ project: identity.project });
+    expect(projectForCwd(workspace)).toMatch(/^dir-[0-9a-f]{32}$/);
+  });
+});
+
+test("the OpenClaw overlay routes a transcript's workspace cwd through the recognizer", () => {
+  useStateDirectory("openclaw-overlay");
+  const state = path.join(SANDBOX, "openclaw-overlay-state");
+  const workspace = path.join(state, "workspace");
+  const sessions = path.join(state, "agents", "primary", "sessions");
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(sessions, { recursive: true });
+  const transcript = path.join(sessions, "oc-session-overlay.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: "session",
+    version: 3,
+    id: "oc-header-overlay",
+    timestamp: "2026-08-27T09:00:00.000Z",
+    cwd: workspace,
+  }) + "\n");
+
+  withOpenclawStateDir(state, () => {
+    expect(describe("openclaw-sessions", sessions, transcript, fs.statSync(transcript), "openclaw-overlay")).toMatchObject({
+      project: projectForCwd(workspace)!,
+      projectName: "OpenClaw",
+      projectRoot: null,
+    });
+  });
+});
+
+test("a workspace directory outside any OpenClaw state directory is not recognized", () => {
+  useStateDirectory("openclaw-foreign-workspace");
+  const foreign = path.join(SANDBOX, "not-openclaw", "workspace");
+  fs.mkdirSync(foreign, { recursive: true });
+  const info = withOpenclawStateDir(path.join(SANDBOX, "openclaw-elsewhere"), () =>
+    projectInfoFromCwd(foreign, "openclaw-foreign"));
+  expect(info).toMatchObject({ displayName: "workspace" });
+});

@@ -1,7 +1,6 @@
 import { effortMeter as meterOf } from "@/lib/agent/efforts";
 import { getLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
-import { cleanTitle } from "@/lib/title";
 
 export { cleanTitle, shortTitle } from "@/lib/title";
 
@@ -35,7 +34,7 @@ export function activityDot(activity: FileEntry["activity"]): string {
 
 export type ModelTint = { color: string; soft: string };
 
-/* Engine base identity: Codex blue, Claude orange. Model families shift the
+/* Engine base identity: Codex blue, Claude orange, OpenClaw magenta. Model families shift the
    hue so sibling agents on different models are tellable apart at a glance.
 
    Only the identity `color` is stored — a saturated hue that reads on any
@@ -47,6 +46,7 @@ export type ModelTint = { color: string; soft: string };
 const ENGINE_COLORS: Record<string, string> = {
   codex: "#2f6fd0",
   claude: "#d97757",
+  openclaw: "#b3407a",
 };
 const NEUTRAL_COLOR = "#9a9aa4";
 const CLAUDE_MODEL_COLORS: [RegExp, string][] = [
@@ -92,6 +92,9 @@ function modelBaseHex(file: FileEntry): string {
   const base = ENGINE_COLORS[file.engine];
   if (!base) return NEUTRAL_COLOR;
   const model = (file.model ?? "").toLowerCase();
+  /* OpenClaw runs other vendors' models through its own provider layer, so no
+     model-family table applies: its cards keep the flat engine identity. */
+  if (file.engine === "openclaw") return base;
   for (const [re, color] of file.engine === "codex" ? CODEX_MODEL_COLORS : CLAUDE_MODEL_COLORS) {
     if (re.test(model)) return color;
   }
@@ -180,41 +183,11 @@ export function engineEdge(file: FileEntry): { backgroundColor: string } {
 }
 
 export function engineBadgeFor(engine: string) {
-  const label = { codex: "Codex", claude: "Claude", shell: "Bash" }[engine] ?? engine;
+  const label = { codex: "Codex", claude: "Claude", shell: "Bash", openclaw: "OpenClaw" }[engine] ?? engine;
   const tint = tintOf(ENGINE_COLORS[engine] ?? NEUTRAL_COLOR);
   return { label, style: { backgroundColor: tint.soft, color: tint.color } };
 }
 
 export function engineBadge(file: FileEntry) {
   return engineBadgeFor(file.engine);
-}
-
-export function syntheticFile(pathname: string): FileEntry {
-  const root = pathname.includes("/.claude/projects/")
-    ? "claude-projects"
-    : /\/tmp\/claude-\d+\//.test(pathname)
-      ? "claude-tasks"
-      : "codex-sessions";
-  const fmt = pathname.endsWith(".jsonl") ? (root === "claude-projects" ? "claude" : "codex") : "plain";
-  const engine = root.startsWith("codex") ? "codex" : root === "claude-tasks" ? "shell" : "claude";
-  return {
-    path: pathname,
-    root,
-    fmt,
-    engine,
-    kind: "",
-    title: cleanTitle(pathname.split("/").pop() || pathname, 120),
-    project: "",
-    worktree: undefined,
-    mtime: Date.now() / 1000,
-    size: 0,
-    activity: "idle",
-    proc: null,
-    pid: null,
-    model: null,
-    pendingQuestion: null,
-    waitingInput: null,
-    parent: null,
-    name: pathname,
-  };
 }

@@ -281,6 +281,10 @@ export interface SendOptions {
   idempotencyKey: string;
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   images?: { base64: string; mime: string }[];
+  /** Non-image attachments (#1224): the server writes them to the
+      conversation's inbox and names their paths in the delivered text, so they
+      need no engine image capability at all. */
+  files?: { name: string; base64: string }[];
   kind?: OperationKind;
   /** The conversation's selected per-turn runtime snapshot (issue #390 §10):
       rides the send so a replay re-delivers with identical settings. Only
@@ -299,6 +303,7 @@ export function sendRuntimeMessage(options: SendOptions): Promise<CommandResult>
     conversationId: options.conversationId,
     text: options.text,
     images: options.images,
+    ...(options.files?.length ? { files: options.files } : {}),
     idempotencyKey: options.idempotencyKey,
     policy: options.policy ?? "interrupt-active",
     ...(options.runtime ? { runtime: options.runtime } : {}),

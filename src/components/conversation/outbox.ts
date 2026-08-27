@@ -36,8 +36,13 @@ export interface OutboxEntry {
   /** Idempotency key of this submission — also the bubble's stable identity. */
   id: string;
   text: string;
-  /** How many attachments rode with this submission (previews stay local). */
+  /** How many images rode with this submission (previews stay local). */
   images: number;
+  /** How many non-image attachments rode with it (#1224). Counted apart from
+      the images so the bubble can name what was actually carried, and counted
+      at all because the refresh fence below holds back any entry whose bytes
+      were memory-only — a document's are, exactly like an image's. */
+  files?: number;
   /** Submission moment (ms). Ordering and history navigation read this. */
   at: number;
   state: OutboxState;
@@ -49,7 +54,7 @@ export interface OutboxEntry {
   error?: string;
   /** The attachment bytes of this submission did not survive a page refresh
       (previews are memory-only). The entry is held back rather than delivered
-      text-only, and says so, so no image is ever silently dropped. */
+      text-only, and says so, so no attachment is ever silently dropped. */
   needsReattach?: true;
   /** The initial launch prompt (issue #561/#569): the SPAWN delivers it, not the
       composer. It renders as the conversation's first optimistic user bubble but
@@ -326,20 +331,27 @@ function persistedQueue(cardId: string): readonly OutboxEntry[] {
     return raw.filter(isEntry).slice(-OUTBOX_LIMIT).map((rawEntry) => {
       const entry = normalizeOutboxOwner(rawEntry);
       const images = typeof entry.images === "number" ? entry.images : 0;
+      const files = typeof entry.files === "number" ? entry.files : 0;
+      /* Both counts are what a stored row SAYS it carried, so both are read
+         defensively before anything adds them up or renders them. */
+      const counted: OutboxEntry = { ...entry, images };
+      if (files) counted.files = files;
+      else delete counted.files;
       /* The initial launch prompt is owned by the spawn, not the composer: it
          survives a refresh exactly as it was (never re-dispatched, never
          re-queued) and retires on its transcript echo. */
-      if (entry.launchOwned) return { ...entry, images };
+      if (entry.launchOwned) return counted;
       const unsettled = entry.state === "delivering" || entry.state === "queued";
       /* A `delivering` entry recorded before a refresh has no owner in this
          mount: it returns to the queue so the serial dispatcher replays it
          under its original idempotency key rather than stranding it. An entry
-         that carried images cannot be replayed — the bytes were memory-only —
-         so it is held for the operator instead of quietly losing them. */
-      if (unsettled && images > 0) {
-        return { ...entry, images, state: "failed" as const, needsReattach: true as const };
+         that carried ATTACHMENTS cannot be replayed — image or document, the
+         bytes were memory-only — so it is held for the operator instead of
+         being delivered without them (#1224). */
+      if (unsettled && images + files > 0) {
+        return { ...counted, state: "failed" as const, needsReattach: true as const };
       }
-      return { ...entry, images, state: unsettled ? ("queued" as const) : entry.state };
+      return { ...counted, state: unsettled ? ("queued" as const) : entry.state };
     });
   } catch {
     return EMPTY;

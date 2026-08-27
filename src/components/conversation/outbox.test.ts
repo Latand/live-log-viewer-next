@@ -1744,6 +1744,20 @@ test("an image-bearing entry that could not survive a refresh is held for re-att
   expect(nextDispatch(restored)).toBeNull();
 });
 
+test("a file-bearing entry is held for re-attachment too, not delivered without its document", () => {
+  /* #1224: a document's bytes are memory-only for the same reason an image's
+     are. An entry that carried one must not be replayed as bare text, and an
+     attachment-only submission must not be cancelled out of the queue —
+     either way the operator would never learn the file did not go. */
+  enqueueOutbox("conv", { id: "k1", text: "read this", images: 0, files: 1, at: Date.now() });
+  updateOutbox("conv", "k1", { state: "delivering" });
+  resetOutboxForTests();
+  const restored = readOutbox("conv");
+  expect(restored[0]!.state).toBe("failed");
+  expect(restored[0]!.needsReattach).toBe(true);
+  expect(nextDispatch(restored)).toBeNull();
+});
+
 test("a text-only delivering entry returns to the queue for replay after a refresh", () => {
   submit("conv", "k1", "text only");
   updateOutbox("conv", "k1", { state: "delivering" });

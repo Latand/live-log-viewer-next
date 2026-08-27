@@ -138,6 +138,18 @@ export function resetProjectDirectoryCacheForTests(): void {
   projectDirectoryCache.clear();
 }
 
+/** The distinct launch roots of every project the local state knows about;
+    create-project anchors its directory suggestions on their parents (#1223). */
+export function knownProjectRoots(max = 40): string[] {
+  const roots: string[] = [];
+  for (const entry of localProjectDirectories()) {
+    if (roots.includes(entry.projectRoot)) continue;
+    roots.push(entry.projectRoot);
+    if (roots.length >= max) break;
+  }
+  return roots;
+}
+
 export function projectDirectoryCandidates(project: string, max = 10): string[] {
   if (!project) return [];
   return localProjectDirectories()

@@ -114,7 +114,10 @@ test("duplicate identities are refused, in the store and against the visible cat
 
 test("invalid inputs are refused without touching the store", () => {
   expect(createManualProject("", path.join(SANDBOX, "plain-folder"))).toMatchObject({ ok: false, code: "INVALID_NAME" });
-  expect(createManualProject("Name", "relative/path")).toMatchObject({ ok: false, code: "INVALID_ROOT" });
+  /* A bare directory name is a path that was never finished, and it says so
+     (issue #1223) — the "not found" wording belongs to an absolute path that
+     genuinely is not there. */
+  expect(createManualProject("Name", "relative/path")).toMatchObject({ ok: false, code: "RELATIVE_ROOT" });
   const file = path.join(SANDBOX, "a-file");
   fs.writeFileSync(file, "not a directory\n");
   expect(createManualProject("Name", file)).toMatchObject({ ok: false, code: "INVALID_ROOT" });
@@ -139,7 +142,7 @@ test("a missing directory refuses with MISSING_DIRECTORY; opting in mkdirs recur
 
 test("createMissingRoot never overrides the relative-path and file-path refusals", () => {
   expect(createManualProject("Name", "relative/path", new Set(), { createMissingRoot: true }))
-    .toMatchObject({ ok: false, code: "INVALID_ROOT" });
+    .toMatchObject({ ok: false, code: "RELATIVE_ROOT" });
   const file = path.join(SANDBOX, "still-a-file");
   fs.writeFileSync(file, "not a directory\n");
   expect(createManualProject("Name", file, new Set(), { createMissingRoot: true }))
@@ -160,4 +163,57 @@ test("a failed mkdir surfaces MKDIR_FAILED with the readable cause", () => {
     fs.chmodSync(sealed, 0o700);
   }
   expect(projectCurationSnapshot().manualProjects).toEqual([]);
+});
+
+/* Issue #1223: the same bound that limits what the picker may suggest limits
+   what creation accepts, so a path outside the viewer's known areas cannot be
+   created into by typing one in. */
+test("with roots bound, creation refuses outside them and never mkdirs there", () => {
+  const anchor = path.join(SANDBOX, "bounded-anchor");
+  const inside = path.join(anchor, "inside-project");
+  const beyond = path.join(SANDBOX, "beyond-anchor", "outside-project");
+  fs.mkdirSync(inside, { recursive: true });
+  fs.mkdirSync(beyond, { recursive: true });
+  const allowedRoots = [anchor];
+
+  expect(createManualProject("Outside", beyond, new Set(), { allowedRoots }))
+    .toMatchObject({ ok: false, code: "OUTSIDE_ROOTS" });
+  const absent = path.join(SANDBOX, "beyond-anchor", "absent-project");
+  expect(createManualProject("Absent", absent, new Set(), { allowedRoots, createMissingRoot: true }))
+    .toMatchObject({ ok: false, code: "OUTSIDE_ROOTS" });
+  expect(fs.existsSync(absent)).toBe(false);
+
+  /* A link inside the bound pointing out of it is outside it: the refusal
+     reads the directory the path actually resolves to — and it lands before
+     the mkdir opt-in could create anything through that link. */
+  const escape = path.join(anchor, "escape-link");
+  fs.symlinkSync(beyond, escape);
+  expect(createManualProject("Escape", escape, new Set(), { allowedRoots }))
+    .toMatchObject({ ok: false, code: "OUTSIDE_ROOTS" });
+  expect(createManualProject("Through", path.join(escape, "made-through-a-link"), new Set(), { allowedRoots, createMissingRoot: true }))
+    .toMatchObject({ ok: false, code: "OUTSIDE_ROOTS" });
+  expect(fs.existsSync(path.join(beyond, "made-through-a-link"))).toBe(false);
+
+  /* The same link with a `..` behind it, which is the shape a lexical check
+     cannot see (issue #1223): `path.normalize`/`path.resolve` collapse the
+     segment against the *spelling* and read this as `<anchor>/escaped`, well
+     inside the bound, while the kernel walks the link first and lands two
+     levels away. Checking the normalized string and then handing the raw one
+     to mkdir created this directory outside the roots. */
+  const behindTheLink = escape + "/../escaped-behind-a-link";
+  expect(path.normalize(behindTheLink)).toBe(path.join(anchor, "escaped-behind-a-link"));
+  expect(createManualProject("Behind", behindTheLink, new Set(), { allowedRoots, createMissingRoot: true }))
+    .toMatchObject({ ok: false, code: "OUTSIDE_ROOTS" });
+  expect(fs.existsSync(path.join(path.dirname(beyond), "escaped-behind-a-link"))).toBe(false);
+  expect(fs.existsSync(path.join(anchor, "escaped-behind-a-link"))).toBe(false);
+
+  /* A missing directory inside the bound is still creatable through it. */
+  const fresh = path.join(anchor, "fresh-nested", "project");
+  const grown = createManualProject("Fresh Nested", fresh, new Set(), { allowedRoots, createMissingRoot: true });
+  if (!grown.ok) throw new Error(`expected creation, got ${grown.code}`);
+  expect(fs.statSync(fresh).isDirectory()).toBe(true);
+
+  const created = createManualProject("Inside", inside, new Set(), { allowedRoots });
+  if (!created.ok) throw new Error(`expected creation, got ${created.code}`);
+  expect(created.entry.root).toBe(fs.realpathSync.native(inside));
 });

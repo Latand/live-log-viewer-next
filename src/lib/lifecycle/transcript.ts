@@ -81,7 +81,7 @@ export async function readLivenessTranscriptEvidence(
 ): Promise<LivenessTranscriptEvidence | null> {
   const read = await readStableTailRecords(transcriptPath);
   if (read.integrity !== "complete") return null;
-  const turn = turnStateFromRecords(read.records, engine === "codex");
+  const turn = turnStateFromRecords(read.records, engine);
   return {
     turn: turn.state === "terminal" ? "idle" : turn.state === "busy" ? "busy" : "unknown",
     lastRecordTs: newestRecordTimestamp(read.records),

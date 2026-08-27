@@ -10,6 +10,7 @@ import {
   draftWorkingDirectory,
   descendantCounts,
   isConversation,
+  isSubagent,
   kidsIndex,
   quietHistoryRows,
   quietRootsWithActiveDescendants,
@@ -251,6 +252,12 @@ describe("buildBranchGroups", () => {
   test("a compaction-chain predecessor is no conversation root", () => {
     expect(isConversation(entry({ path: "/root" }))).toBe(true);
     expect(isConversation(entry({ path: "/root", parent: "/older" }))).toBe(false);
+  });
+
+  test("an OpenClaw transcript is a conversation root of its own (#1207)", () => {
+    const openclaw = { root: "openclaw-sessions" as const, engine: "openclaw" as const, fmt: "openclaw" as const };
+    expect(isConversation(entry({ path: "/openclaw/oc-session-alpha.jsonl", ...openclaw }))).toBe(true);
+    expect(isSubagent(entry({ path: "/openclaw/oc-session-alpha.jsonl", ...openclaw }))).toBe(false);
   });
 
   test("a standalone viewer-spawned conversation stays a root despite its spawner parent", () => {

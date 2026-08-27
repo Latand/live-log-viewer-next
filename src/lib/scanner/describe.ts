@@ -1,10 +1,12 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { stateDir } from "@/lib/configDir";
 import { canonicalProject, projectAliasSnapshot } from "@/lib/projects/aliases";
 import { readStateCollectionsRows } from "@/lib/state/sqliteStateStore";
 import {
+  directoryProjectId,
   displayNameFromProjectIdentity,
   isCanonicalProjectId,
   projectIdentityFromDirectory,
@@ -14,12 +16,13 @@ import {
   UNRESOLVED_PROJECT_NAME,
 } from "@/lib/projects/identity";
 
-import type { Engine, Fmt, RootKey } from "../types";
+import type { Engine, Fmt, RootKey, TranscriptEngine } from "../types";
 import { cleanTitle } from "../title";
 import { globalCache } from "./caches";
 import { nativeCodexSessionMetaResult } from "./codexNative";
 import { HEAD_READ_CHUNK_BYTES, headFingerprint, readHead, type HeadReadResult } from "./head";
 import { readJsonResult, recordValue, recordsValue, stringValue } from "./json";
+import { openclawMessage } from "./openclawNative";
 import { projectResolutionStateKey } from "./projectState";
 
 export interface FileDescription {
@@ -524,7 +527,42 @@ function persistedProjects(stateKey = projectResolutionStateKey()): {
   return maps;
 }
 
-/** Project identity for a real cwd, shared by both engines: resolve a
+/* `~/.openclaw`, plus the `~/.openclaw-dev` and `~/.openclaw-<profile>`
+   siblings the `--dev` and `--profile` flags create. */
+const OPENCLAW_STATE_DIRECTORY = /^\.openclaw(?:-[A-Za-z0-9._-]+)?$/;
+
+/**
+ * The OpenClaw workspace directory, recognized by path alone.
+ *
+ * Nearly every OpenClaw session runs in one shared directory — its sessions are
+ * bound to messaging channels, not to repositories — and that directory happens
+ * to be a git repository with no remote. Left to the ordinary resolution order
+ * it would mint a `repo-` identity from its own `.git` while it exists and a
+ * `dir-` identity once it is deleted, splitting every OpenClaw conversation
+ * across two projects at once. AGENTS.md requires a pure path recognizer
+ * wherever the path itself names the project, and this is that recognizer: it
+ * runs before every disk-dependent resolver and reads nothing off disk, so the
+ * identity is the same before and after the workspace is gone.
+ *
+ * The match is exact. A repository nested *under* the workspace keeps ordinary
+ * repository attribution, and a session running somewhere else entirely keeps
+ * whatever the normal resolvers give it.
+ */
+function projectInfoFromOpenclawWorkspace(cwd: string): ProjectInfo | null {
+  const resolved = path.resolve(cwd);
+  if (path.basename(resolved) !== "workspace") return null;
+  const state = path.dirname(resolved);
+  const configured = process.env.OPENCLAW_STATE_DIR?.trim();
+  const recognized = (configured !== undefined && configured !== "" && path.resolve(configured) === state)
+    || (path.dirname(state) === os.homedir() && OPENCLAW_STATE_DIRECTORY.test(path.basename(state)));
+  if (!recognized) return null;
+  /* Deliberately not `projectIdentityFromDirectory`: that helper resolves
+     symlinks through the live filesystem, which is exactly the before/after
+     deletion split this recognizer exists to remove. */
+  return { project: directoryProjectId(resolved), displayName: "OpenClaw" };
+}
+
+/** Project identity for a real cwd, shared by every engine: resolve a
     worktree checkout to its main repository, then derive the stable key and
     human label from that repository's canonical remote. */
 export function projectInfoFromCwd(cwd: string, requestedState?: string): ProjectInfo | null {
@@ -536,6 +574,11 @@ export function projectInfoFromCwd(cwd: string, requestedState?: string): Projec
   if (scratchpad) {
     projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolutionState, scratchpad]);
     return scratchpad;
+  }
+  const openclawWorkspace = projectInfoFromOpenclawWorkspace(cwd);
+  if (openclawWorkspace) {
+    projectInfoCwdCache.set(cwd, [Date.now() + PROJECT_INFO_CWD_TTL_MS, resolutionState, openclawWorkspace]);
+    return openclawWorkspace;
   }
   const codexWorktree = worktreeFromCodexPath(cwd);
   let worktree =
@@ -592,6 +635,10 @@ export function projectForCwd(cwd: string): string | null {
 export function projectRootForCwd(cwd: string): string | undefined {
   const scratchpad = projectInfoFromClaudeTaskCwd(cwd);
   if (scratchpad) return scratchpad.repo;
+  /* The workspace's own remote-less `.git` would answer here while the
+     directory exists and vanish with it, reintroducing across `projectRoot`
+     the very before/after split the recognizer removes from `project`. */
+  if (projectInfoFromOpenclawWorkspace(cwd)) return undefined;
   const worktree =
     worktreeFromPath(cwd) ??
     worktreeFromNested(cwd) ??
@@ -684,8 +731,22 @@ function goodTitle(text: unknown): string | null {
   return val && !skipTitlePrefixes.some((prefix) => val.startsWith(prefix)) ? val : null;
 }
 
-function userPromptFromRecord(obj: Record<string, unknown>, wantCodex: boolean): string | null {
-  if (wantCodex) {
+function userPromptFromRecord(obj: Record<string, unknown>, engine: TranscriptEngine): string | null {
+  if (engine === "openclaw") {
+    /* OpenClaw wraps every role, the operator's included, in a top-level
+       `message` envelope, so the Claude arm's `type === "user"` never fires. */
+    const message = openclawMessage(obj);
+    if (!message || message.role !== "user") return null;
+    const content = message.content;
+    if (typeof content === "string") return content.trim() || null;
+    const text = recordsValue(content)
+      .filter((part) => part.type === "text")
+      .map((part) => stringValue(part.text) ?? "")
+      .join(" ")
+      .trim();
+    return text || null;
+  }
+  if (engine === "codex") {
     const payload = recordValue(obj.payload) ?? {};
     if (payload.type === "user_message") {
       const prompt = typeof payload.message === "string" ? payload.message.trim() : "";
@@ -711,7 +772,7 @@ function userPromptFromRecord(obj: Record<string, unknown>, wantCodex: boolean):
   return null;
 }
 
-function titleFromLines(lines: string[], wantCodex: boolean): string | null {
+function titleFromLines(lines: string[], engine: TranscriptEngine): string | null {
   for (const line of lines) {
     let obj: Record<string, unknown>;
     try {
@@ -729,13 +790,13 @@ function titleFromLines(lines: string[], wantCodex: boolean): string | null {
       const title = goodTitle(obj.aiTitle);
       if (title) return title;
     }
-    const title = goodTitle(userPromptFromRecord(obj, wantCodex));
+    const title = goodTitle(userPromptFromRecord(obj, engine));
     if (title) return title;
   }
   return null;
 }
 
-function conversationTextFromLines(lines: string[], wantCodex: boolean): ConversationSearchText {
+function conversationTextFromLines(lines: string[], engine: TranscriptEngine): ConversationSearchText {
   let title: string | null = null;
   let firstPrompt: string | null = null;
   for (const line of lines) {
@@ -755,7 +816,7 @@ function conversationTextFromLines(lines: string[], wantCodex: boolean): Convers
     if (obj.type === "ai-title") {
       title ??= goodTitle(obj.aiTitle);
     }
-    const prompt = userPromptFromRecord(obj, wantCodex);
+    const prompt = userPromptFromRecord(obj, engine);
     if (!prompt) continue;
     firstPrompt ??= prompt;
     title ??= goodTitle(prompt);
@@ -860,7 +921,7 @@ function projectInfoFromSlug(slug: string, stateKey?: string): ProjectInfo | nul
   return persisted ? aliasedProjectInfo(persisted.project, persisted.worktree, persisted.repo) : null;
 }
 
-function scanJsonlTitle(pathname: string, st: fs.Stats, wantCodex: boolean): MetadataReadResult<string | null> {
+function scanJsonlTitle(pathname: string, st: fs.Stats, engine: TranscriptEngine): MetadataReadResult<string | null> {
   const cached = titleCache.get(pathname);
   if (cached?.size === st.size && cached.mtimeMs === st.mtimeMs) {
     return { value: cached.value, complete: true, headPreserved: true };
@@ -874,16 +935,16 @@ function scanJsonlTitle(pathname: string, st: fs.Stats, wantCodex: boolean): Met
       return { value: reused.value, complete: true, headPreserved: true };
     }
   }
-  const title = titleFromLines(head.value.text.split("\n").slice(0, 151), wantCodex);
+  const title = titleFromLines(head.value.text.split("\n").slice(0, 151), engine);
   titleCache.set(pathname, cacheHeadMetadata(st, head.value, title));
   return { value: title, complete: true, headPreserved: false };
 }
 
 /** Title and first-prompt hydration owned entirely by list/search requests. */
-export function searchTextForTranscript(pathname: string, size: number, engine: "codex" | "claude"): ConversationSearchText {
+export function searchTextForTranscript(pathname: string, size: number, engine: TranscriptEngine): ConversationSearchText {
   const head = readSearchHead(pathname, size);
   if (!head) return { title: null, firstPrompt: null };
-  return conversationTextFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
+  return conversationTextFromLines(head.text.split("\n").slice(0, 151), engine);
 }
 
 function deriveTranscriptMetadata(
@@ -931,7 +992,7 @@ function deriveTranscriptMetadata(
     kind = "session";
     fmt = "codex";
     if (complete) {
-      const titleRead = scanJsonlTitle(pathname, st, true);
+      const titleRead = scanJsonlTitle(pathname, st, "codex");
       complete &&= titleRead.complete;
       title = titleRead.value;
     }
@@ -963,7 +1024,7 @@ function deriveTranscriptMetadata(
          transcript still carries the delegated sidechain prompt, so the first
          real user message names the card instead of a generic «Subagent …». */
       if (!title && complete) {
-        const titleRead = scanJsonlTitle(pathname, st, false);
+        const titleRead = scanJsonlTitle(pathname, st, "claude");
         complete &&= titleRead.complete;
         title = titleRead.value;
       }
@@ -971,12 +1032,38 @@ function deriveTranscriptMetadata(
     } else {
       kind = "session";
       if (complete) {
-        const titleRead = scanJsonlTitle(pathname, st, false);
+        const titleRead = scanJsonlTitle(pathname, st, "claude");
         complete &&= titleRead.complete;
         title = titleRead.value;
       }
       title ??= "Claude session";
     }
+  } else if (rootName === "openclaw-sessions") {
+    /* The header record carries `cwd` and `timestamp` at the top level, the
+       same place `transcriptCwd`/`transcriptStartedAt` already look, so both
+       readers work unchanged. No OpenClaw record carries a title — there is no
+       `summary` or `ai-title` analogue on disk — so the first user prompt
+       names the card, through the same `goodTitle` path the other engines use. */
+    const cwdRead = complete
+      ? transcriptCwd(pathname, st)
+      : { value: null, complete: false, headPreserved: false };
+    complete &&= cwdRead.complete;
+    cwdComplete = cwdRead.complete;
+    cwd = cwdRead.value ?? undefined;
+    if (complete) {
+      const startedAtRead = transcriptStartedAt(pathname, st);
+      complete &&= startedAtRead.complete;
+      sessionStartedAt = startedAtRead.value;
+    }
+    engine = "openclaw";
+    kind = "session";
+    fmt = "openclaw";
+    if (complete) {
+      const titleRead = scanJsonlTitle(pathname, st, "openclaw");
+      complete &&= titleRead.complete;
+      title = titleRead.value;
+    }
+    title ??= "OpenClaw session";
   } else if (rootName === "claude-tasks") {
     engine = "shell";
     kind = "background";
@@ -1028,6 +1115,12 @@ function resolveProjectOverlay(
       ?? (worktreeInfo
         ? aliasedProjectInfo(worktreeInfo.project, worktreeInfo.worktree, worktreeInfo.repo)
         : aliasedProjectInfo(projectFromSlug(slug)));
+  } else if (rootName === "openclaw-sessions") {
+    /* The workspace recognizer inside `projectInfoFromCwd` is what gives an
+       OpenClaw session a stable project, and it only runs if this branch calls
+       it: the overlay reaches `projectInfoFromCwd` from the Codex and Claude
+       branches alone. */
+    info = (cwd ? projectInfoFromCwd(cwd, stateKey) : null) ?? projectInfoFromTranscript(pathname, stateKey);
   } else if (rootName === "claude-tasks") {
     const rel = path.relative(root, pathname);
     const slug = rel.split(path.sep)[0] ?? "";

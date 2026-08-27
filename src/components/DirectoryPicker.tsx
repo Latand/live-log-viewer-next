@@ -62,11 +62,21 @@ export function matchesDirectoryQuery(dir: string, query: string): boolean {
 
 export type PickerRow = { key: string; value: string; kind: "known" | "typed" };
 
-/** Whether a query is the operator naming a place rather than filtering. Only
-    a path shape is offered as a directory: the spawn route resolves anything
-    else against ITS own working directory, which is never what was meant. */
-export function looksLikeDirectoryPath(query: string): boolean {
-  return query.startsWith("/") || query.startsWith("~") || query.includes("/");
+/**
+ * Whether a query names a place rather than filters — the one definition of a
+ * path this control and its callers share (issue #1223).
+ *
+ * A place is named from somewhere fixed: the filesystem root, or the home
+ * directory the spawn route expands `~` and `~/…` to. Anything else, a bare
+ * word or a fragment with a slash in it alike, is a filter: nothing downstream
+ * can turn `notes/idea` into a directory except by resolving it against ITS own
+ * working directory, which is never where the operator meant. Counting a slash
+ * as a path made every such fragment a row to commit, and create-project would
+ * then send it on to be refused.
+ */
+export function isDirectoryPath(query: string): boolean {
+  const trimmed = query.trim();
+  return trimmed.startsWith("/") || trimmed === "~" || trimmed.startsWith("~/");
 }
 
 /** The known directories, current one first — relaunching from the same place
@@ -83,14 +93,24 @@ export function directoryChoices(value: string, dirs: readonly string[]): string
   return out;
 }
 
-/** Rows the open popup lists for a query: the matching known directories, plus
-    the typed path itself when it is not one of them (free-text entry). */
+/** Rows the open popup lists for a query: the typed path itself when it is not
+    one of the known directories (free-text entry), then the known directories
+    the query matches. */
 export function directoryRows(known: readonly string[], query: string, pristine: boolean): PickerRow[] {
   const matched = pristine ? [...known] : known.filter((dir) => matchesDirectoryQuery(dir, query));
   const rows: PickerRow[] = matched.map((dir) => ({ key: "known:" + dir, value: dir, kind: "known" }));
   const typed = query.trim();
-  if (!pristine && typed && looksLikeDirectoryPath(typed) && !known.includes(typed)) {
-    rows.push({ key: "typed", value: typed, kind: "typed" });
+  if (!pristine && typed && isDirectoryPath(typed) && !known.includes(typed)) {
+    /* The typed path leads (issue #1223). Enter commits the highlighted row and
+       the highlight starts at the top, so listing it last handed the operator a
+       known lookalike instead of what they spelled: every path is a substring
+       of its own longer siblings, so `/repos/api` committed `/repos/api-old`
+       and create-project registered a project — named from that basename — at a
+       directory nobody typed. A path being spelled out is an answer, not a
+       filter; the directory create-project is after is precisely the one no
+       known-directories list carries. Bare filter words never reach here, so
+       they still rank as they did. */
+    rows.unshift({ key: "typed", value: typed, kind: "typed" });
   }
   return rows;
 }
@@ -127,6 +147,8 @@ export function DirectoryPicker({
   dirs,
   disabled,
   ariaLabel,
+  onQueryChange,
+  openSignal,
   onChange,
 }: {
   /** Stable id prefix for the listbox and option ids this control owns. */
@@ -136,6 +158,24 @@ export function DirectoryPicker({
   disabled?: boolean;
   /** Accessible name for the trigger; the chosen path is appended to it. */
   ariaLabel: string;
+  /**
+   * The filter text, reported as it changes (issue #1223). The picker still
+   * only filters `dirs`; this lets a caller whose suggestions come from the
+   * filesystem widen that list as the operator points somewhere new — which is
+   * what create-project needs, since the directory it is after is precisely the
+   * one no known-directories list carries.
+   *
+   * `typed` says whether the operator spelled this out or the picker merely
+   * opened on the value it already holds. The two are different questions: a
+   * typed query is a prefix to match, while an opening is a request to browse
+   * where the current directory lives, and a caller that read them alike would
+   * answer a plain "open the list" with the one path already chosen.
+   */
+  onQueryChange?: (query: string, typed: boolean) => void;
+  /** Bumped by a caller that wants the list opened — a create form that
+      refused the typed root answers with the completion, on the spot, rather
+      than with a rejection the operator has to reopen the picker to act on. */
+  openSignal?: number;
   onChange: (value: string) => void;
 }) {
   const { t } = useLocale();
@@ -147,6 +187,19 @@ export function DirectoryPicker({
   const [query, setQuery] = useState(value);
   const [pristine, setPristine] = useState(true);
   const [active, setActive] = useState(0);
+  /* Render-phase edge, the repo's pattern for following a prop transition: the
+     caller's signal opens the list on the value it already holds, without an
+     effect that would race the frame the refusal is drawn in. */
+  const [seenOpenSignal, setSeenOpenSignal] = useState(openSignal);
+  if (openSignal !== seenOpenSignal) {
+    setSeenOpenSignal(openSignal);
+    if (!disabled && !expanded) {
+      setQuery(value);
+      setPristine(true);
+      setActive(0);
+      setExpanded(true);
+    }
+  }
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -171,16 +224,41 @@ export function DirectoryPicker({
     setPristine(true);
     setActive(Math.max(known.indexOf(chosen), 0));
     setExpanded(true);
+    onQueryChange?.(value, false);
   };
-  const close = () => {
+
+  const close = (restoreFocus = true) => {
     setExpanded(false);
-    triggerRef.current?.focus();
+    if (restoreFocus) triggerRef.current?.focus();
   };
-  const commit = (next: string) => {
+  const commit = (next: string, restoreFocus = true) => {
     const trimmed = next.trim();
     if (trimmed && trimmed !== chosen) onChange(trimmed);
-    close();
+    close(restoreFocus);
   };
+  /**
+   * Leaving the popup by pointing somewhere else is not cancelling it
+   * (issue #1223). The filter field is where a path gets spelled out, and for
+   * create-project it is the only place the root can be typed at all: dropping
+   * that text on dismissal meant typing a path and then reaching for the
+   * Create button — which the popup covers — left the root empty and answered
+   * "Choose a directory", a step that worked before the root became a picker.
+   * So a path shape is committed on the way out. A bare filter word is not: it
+   * is not a directory, and the routes downstream resolve one against their own
+   * working directory. Escape still reverts, which is what Escape is for.
+   */
+  const dismiss = (restoreFocus: boolean) => {
+    const typed = query.trim();
+    if (!pristine && typed && isDirectoryPath(typed)) commit(typed, restoreFocus);
+    else close(restoreFocus);
+  };
+  /* The outside-press listener attaches once per opening; this ref keeps it
+     reading the freshest query. Synced in an effect — effects settle before
+     any pointer event fires. */
+  const dismissRef = useRef(dismiss);
+  useEffect(() => {
+    dismissRef.current = dismiss;
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -193,7 +271,9 @@ export function DirectoryPicker({
     const onPointerDown = (event: Event) => {
       const target = event.target as Node | null;
       if (target && rootRef.current?.contains(target)) return;
-      setExpanded(false);
+      /* No focus restore: the operator is already pointing somewhere else, and
+         pulling focus back to the trigger would fight the press they made. */
+      dismissRef.current(false);
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
@@ -232,7 +312,7 @@ export function DirectoryPicker({
         data-directory-trigger
         data-directory-value={chosen}
         title={chosen || undefined}
-        onClick={() => (open ? close() : openPicker())}
+        onClick={() => (open ? dismiss(true) : openPicker())}
         onKeyDown={(event) => {
           if (event.key !== "ArrowDown" || open) return;
           event.preventDefault();
@@ -264,6 +344,7 @@ export function DirectoryPicker({
               setQuery(event.target.value);
               setPristine(false);
               setActive(0);
+              onQueryChange?.(event.target.value, true);
             }}
             onKeyDown={(event) => {
               if (event.key === "ArrowDown") {

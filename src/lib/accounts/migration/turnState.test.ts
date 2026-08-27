@@ -20,12 +20,12 @@ test("issue 51 keeps a Codex turn busy through interim assistant text and tool w
     { payload: { type: "custom_tool_call", id: "tool-1" } },
     { payload: { type: "agent_message" } },
   ];
-  expect(turnStateFromRecords(records, true)).toMatchObject({ state: "busy", source: "tool" });
+  expect(turnStateFromRecords(records, "codex")).toMatchObject({ state: "busy", source: "tool" });
   expect(turnStateFromRecords([
     ...records,
     { payload: { type: "custom_tool_call_output", call_id: "tool-1" } },
     { timestamp: "2026-07-10T12:00:00.000Z", payload: { type: "turn_complete" } },
-  ], true)).toEqual({ state: "terminal", source: "lifecycle", terminalAt: "2026-07-10T12:00:00.000Z" });
+  ], "codex")).toEqual({ state: "terminal", source: "lifecycle", terminalAt: "2026-07-10T12:00:00.000Z" });
 });
 
 test("issue 51 requires the matching terminal event after every open tool closes", () => {
@@ -34,28 +34,28 @@ test("issue 51 requires the matching terminal event after every open tool closes
     { type: "event_msg", timestamp: "2026-07-10T00:00:01Z", payload: { type: "agent_message", message: "I am checking" } },
     { type: "response_item", timestamp: "2026-07-10T00:00:02Z", payload: { type: "custom_tool_call", id: "tool-1" } },
   ];
-  expect(turnStateFromRecords(open, true).state).toBe("busy");
+  expect(turnStateFromRecords(open, "codex").state).toBe("busy");
 
   const closedTool = [...open, {
     type: "response_item",
     timestamp: "2026-07-10T00:00:03Z",
     payload: { type: "custom_tool_call_output", call_id: "tool-1", output: "ok" },
   }];
-  expect(turnStateFromRecords(closedTool, true).state).toBe("busy");
+  expect(turnStateFromRecords(closedTool, "codex").state).toBe("busy");
 
   const prematureTerminal = [...open, {
     type: "event_msg",
     timestamp: "2026-07-10T00:00:02.500Z",
     payload: { type: "task_complete", turn_id: "turn-1" },
   }];
-  expect(turnStateFromRecords(prematureTerminal, true).state).toBe("busy");
+  expect(turnStateFromRecords(prematureTerminal, "codex").state).toBe("busy");
 
   const terminal = [...closedTool, {
     type: "event_msg",
     timestamp: "2026-07-10T00:00:04Z",
     payload: { type: "task_complete", turn_id: "turn-1" },
   }];
-  expect(turnStateFromRecords(terminal, true)).toMatchObject({
+  expect(turnStateFromRecords(terminal, "codex")).toMatchObject({
     state: "terminal",
     source: "lifecycle",
     terminalAt: "2026-07-10T00:00:04Z",
@@ -68,7 +68,7 @@ test("later work after a terminal event reopens the Codex turn", () => {
     { type: "event_msg", timestamp: "2026-07-10T00:00:01Z", payload: { type: "task_complete", turn_id: "turn-1" } },
     { type: "response_item", timestamp: "2026-07-10T00:00:02Z", payload: { type: "function_call", call_id: "late-tool" } },
   ];
-  expect(turnStateFromRecords(records, true).state).toBe("busy");
+  expect(turnStateFromRecords(records, "codex").state).toBe("busy");
 });
 
 test("Claude migration waits for a top-level result event", () => {
@@ -77,7 +77,7 @@ test("Claude migration waits for a top-level result event", () => {
     timestamp: "2026-07-10T00:00:01Z",
     message: { stop_reason: "end_turn" },
   };
-  expect(turnStateFromRecords([assistant], false, true)).toEqual({
+  expect(turnStateFromRecords([assistant], "claude", true)).toEqual({
     state: "busy",
     source: "assistant",
     terminalAt: null,
@@ -85,7 +85,7 @@ test("Claude migration waits for a top-level result event", () => {
   expect(turnStateFromRecords([
     assistant,
     { type: "result", timestamp: "2026-07-10T00:00:02Z", subtype: "success" },
-  ], false, true)).toEqual({
+  ], "claude", true)).toEqual({
     state: "terminal",
     source: "lifecycle",
     terminalAt: "2026-07-10T00:00:02Z",
@@ -173,13 +173,13 @@ describe("issue 516 — structured Claude API-error records project the terminal
 
   for (const { name, records, expected } of authoritativeCases) {
     test(`authoritative: ${name}`, () => {
-      expect(turnStateFromRecords(records, false, true)).toEqual(expected as ReturnType<typeof turnStateFromRecords>);
+      expect(turnStateFromRecords(records, "claude", true)).toEqual(expected as ReturnType<typeof turnStateFromRecords>);
     });
   }
 
   test("activity: a terminal API error without a stop reason closes the turn", () => {
     const records = [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", "authentication_failed", true, null)];
-    expect(turnStateFromRecords(records, false)).toEqual({
+    expect(turnStateFromRecords(records, "claude")).toEqual({
       state: "terminal",
       source: "lifecycle",
       terminalAt: "2026-07-17T15:00:01Z",
@@ -188,12 +188,12 @@ describe("issue 516 — structured Claude API-error records project the terminal
 
   test("activity: an unknown API error without a stop reason keeps the busy-assistant projection", () => {
     const records = [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", "model_not_found", true, null)];
-    expect(turnStateFromRecords(records, false)).toEqual({ state: "busy", source: "assistant", terminalAt: null });
+    expect(turnStateFromRecords(records, "claude")).toEqual({ state: "busy", source: "assistant", terminalAt: null });
   });
 
   test("activity: an ordinary stop_sequence assistant record keeps its terminal projection", () => {
     const records = [user("2026-07-17T15:00:00Z"), apiError("2026-07-17T15:00:01Z", null, false)];
-    expect(turnStateFromRecords(records, false)).toEqual({
+    expect(turnStateFromRecords(records, "claude")).toEqual({
       state: "terminal",
       source: "lifecycle",
       terminalAt: "2026-07-17T15:00:01Z",
@@ -202,7 +202,7 @@ describe("issue 516 — structured Claude API-error records project the terminal
 });
 
 describe("issue 516 — recovery records must not reopen a released turn", () => {
-  const authoritative = (records: Record<string, unknown>[]) => turnStateFromRecords(records, false, true);
+  const authoritative = (records: Record<string, unknown>[]) => turnStateFromRecords(records, "claude", true);
   const released = { state: "terminal", source: "lifecycle", terminalAt: OAUTH_FAILURE_AT } as const;
 
   test("the production recovery tail after a terminal OAuth failure projects a released turn", () => {
@@ -270,10 +270,82 @@ describe("issue 516 — recovery records must not reopen a released turn", () =>
   });
 
   test("the activity projection keeps its own live semantics for the same tail", () => {
-    expect(turnStateFromRecords(oauthFailureWithRecoveryTail(), false)).toEqual({
+    expect(turnStateFromRecords(oauthFailureWithRecoveryTail(), "claude")).toEqual({
       state: "busy",
       source: "lifecycle",
       terminalAt: null,
     });
+  });
+});
+
+describe("OpenClaw turn state (#1207)", () => {
+  const at = (second: number) => `2026-08-27T09:0${second}:00.000Z`;
+  const assistant = (
+    second: number,
+    stopReason: string,
+    provider = "openai",
+  ): Record<string, unknown> => ({
+    type: "message",
+    id: `oc-assistant-${second}`,
+    parentId: `oc-parent-${second}`,
+    timestamp: at(second),
+    message: { role: "assistant", provider, model: "demo-model", api: "demo-api", stopReason, content: [] },
+  });
+  const prompt = (second: number): Record<string, unknown> => ({
+    type: "message",
+    id: `oc-user-${second}`,
+    parentId: null,
+    timestamp: at(second),
+    message: { role: "user", content: "invented prompt", timestamp: at(second) },
+  });
+  const toolResult = (second: number, callId: string): Record<string, unknown> => ({
+    type: "message",
+    id: `oc-result-${second}`,
+    parentId: `oc-parent-${second}`,
+    timestamp: at(second),
+    message: { role: "toolResult", toolCallId: callId, toolName: "demo_tool", isError: false, content: [] },
+  });
+
+  test("a completed turn ends on the assistant record that stopped", () => {
+    expect(turnStateFromRecords([prompt(1), assistant(2, "stop")], "openclaw")).toEqual({
+      state: "terminal",
+      source: "lifecycle",
+      terminalAt: at(2),
+    });
+  });
+
+  test("a tool call keeps the turn busy, through its own result record", () => {
+    expect(turnStateFromRecords([prompt(1), assistant(2, "toolUse")], "openclaw"))
+      .toEqual({ state: "busy", source: "assistant", terminalAt: null });
+    expect(turnStateFromRecords([prompt(1), assistant(2, "toolUse"), toolResult(3, "call-one")], "openclaw"))
+      .toEqual({ state: "busy", source: "assistant", terminalAt: null });
+  });
+
+  test("error and aborted end the turn", () => {
+    expect(turnStateFromRecords([prompt(1), assistant(2, "error")], "openclaw"))
+      .toEqual({ state: "terminal", source: "lifecycle", terminalAt: at(2) });
+    expect(turnStateFromRecords([prompt(1), assistant(2, "aborted")], "openclaw"))
+      .toEqual({ state: "terminal", source: "lifecycle", terminalAt: at(2) });
+  });
+
+  test("a prompt with no answer yet is busy, and an empty tail is unknown", () => {
+    expect(turnStateFromRecords([prompt(1)], "openclaw"))
+      .toEqual({ state: "busy", source: "lifecycle", terminalAt: null });
+    expect(turnStateFromRecords([{ type: "session", version: 3, id: "oc-session-alpha" }], "openclaw"))
+      .toEqual({ state: "unknown", source: "empty", terminalAt: null });
+  });
+
+  /* The whole reason the reader keys on the provider: OpenClaw appends
+     assistant records of its own mid-turn, always stopping on "stop". */
+  test("a synthetic-provider record appended after a tool call cannot end the turn", () => {
+    const records = [prompt(1), assistant(2, "toolUse"), assistant(3, "stop", "openclaw")];
+    expect(turnStateFromRecords(records, "openclaw"))
+      .toEqual({ state: "busy", source: "assistant", terminalAt: null });
+  });
+
+  test("a synthetic-provider record trailing a finished turn keeps the real terminal time", () => {
+    const records = [prompt(1), assistant(2, "stop"), assistant(3, "stop", "openclaw")];
+    expect(turnStateFromRecords(records, "openclaw"))
+      .toEqual({ state: "terminal", source: "lifecycle", terminalAt: at(2) });
   });
 });

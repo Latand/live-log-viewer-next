@@ -4,6 +4,7 @@ import type { FileEntry } from "../types";
 import { headRecordsResult, tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { readJson, recordValue, stringValue } from "./json";
+import { openclawProviderAssistant } from "./openclawNative";
 
 export interface EntryModels {
   display: string | null;
@@ -27,6 +28,12 @@ function pickModel(entry: FileEntry, obj: Record<string, unknown>): string | nul
     if (obj.type === "turn_context" || obj.type === "session_meta") {
       return stringValue(recordValue(obj.payload)?.model);
     }
+  } else if (entry.root === "openclaw-sessions") {
+    /* Only a record a real provider served may name the displayed model. The
+       synthetic assistant records OpenClaw writes for itself carry model labels
+       no provider ever ran, and they are appended often enough to become the
+       newest assistant record in an ordinary session. */
+    return stringValue(openclawProviderAssistant(obj)?.model);
   } else if (obj.type === "assistant") {
     const model = stringValue(recordValue(obj.message)?.model);
     if (model && model !== "<synthetic>") return model;
@@ -40,7 +47,10 @@ export function entryModelsResult(entry: FileEntry): EntryModelsResult {
     const model = stringValue(meta.model);
     if (model) return { value: { display: shortModel(model), launch: model }, complete: true };
   }
-  if ((entry.root !== "claude-projects" && entry.root !== "codex-sessions") || !entry.path.endsWith(".jsonl")) {
+  if (
+    (entry.root !== "claude-projects" && entry.root !== "codex-sessions" && entry.root !== "openclaw-sessions")
+    || !entry.path.endsWith(".jsonl")
+  ) {
     return { value: { display: null, launch: null }, complete: true };
   }
   const mtimeMs = entry.mtime * 1000;

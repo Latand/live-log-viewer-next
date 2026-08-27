@@ -4,7 +4,7 @@ import { cleanTitle } from "@/lib/title";
 import { searchTextForTranscript } from "./describe";
 
 type TranscriptSearchText = ReturnType<typeof searchTextForTranscript>;
-type SearchTextReader = (pathname: string, size: number, engine: "codex" | "claude") => TranscriptSearchText;
+type SearchTextReader = (pathname: string, size: number, engine: ConversationCatalogEntry["engine"]) => TranscriptSearchText;
 type YieldControl = () => Promise<void>;
 
 interface SearchTextCacheEntry extends TranscriptSearchText {

@@ -10,7 +10,7 @@ const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-timeline-cache-test-"
 
 afterAll(() => fs.rmSync(SANDBOX, { recursive: true, force: true }));
 
-function entry(pathname: string): FileEntry {
+function entry(pathname: string, overrides: Partial<FileEntry> = {}): FileEntry {
   const stat = fs.statSync(pathname);
   return {
     path: pathname,
@@ -30,6 +30,7 @@ function entry(pathname: string): FileEntry {
     model: null,
     pendingQuestion: null,
     waitingInput: null,
+    ...overrides,
   };
 }
 
@@ -74,4 +75,40 @@ test("an incomplete timeline read stays retryable for the same identity", () => 
   } finally {
     fs.openSync = originalOpenSync;
   }
+});
+
+/* Issue #1207: an OpenClaw conversation reaches a project's recent-actions
+   timeline like any other. Its records wrap every role in a top-level
+   `message` envelope, so neither the Claude nor the Codex arm sees one and the
+   card would otherwise be scanned, attributed, rendered — and then contribute
+   nothing here. Every identifier below is invented. */
+test("an OpenClaw conversation contributes its prompts and answers to the timeline", () => {
+  const pathname = path.join(SANDBOX, "oc-session-alpha.jsonl");
+  const started = Date.now() - 60_000;
+  const at = (offset: number) => new Date(started + offset).toISOString();
+  const message = (id: string, offset: number, message: Record<string, unknown>) =>
+    JSON.stringify({ type: "message", id, parentId: "oc-parent", timestamp: at(offset), message }) + "\n";
+  fs.writeFileSync(pathname, [
+    JSON.stringify({ type: "session", version: 3, id: "oc-header", timestamp: at(0), cwd: SANDBOX }) + "\n",
+    message("oc-user-1", 1_000, { role: "user", content: "Plant the cobalt orchard", timestamp: at(1_000) }),
+    message("oc-assistant-1", 2_000, {
+      role: "assistant",
+      provider: "demo-provider",
+      model: "demo-model",
+      stopReason: "toolUse",
+      content: [{ type: "toolCall", id: "oc-call-1", name: "Bash", arguments: { command: "plant" } }],
+    }),
+    message("oc-result-1", 3_000, { role: "toolResult", toolCallId: "oc-call-1", isError: false, content: [{ type: "text", text: "planted" }] }),
+    message("oc-assistant-2", 4_000, {
+      role: "assistant",
+      provider: "demo-provider",
+      model: "demo-model",
+      stopReason: "stop",
+      content: [{ type: "thinking", thinking: "not an action" }, { type: "text", text: "Three rows are in." }],
+    }),
+  ].join(""));
+  const file = entry(pathname, { root: "openclaw-sessions", engine: "openclaw", fmt: "openclaw" });
+
+  expect(projectTimeline([file], file.project, 10).map((event) => [event.kind, event.label]))
+    .toEqual([["turn", "Three rows are in."], ["user", "Plant the cobalt orchard"]]);
 });

@@ -381,7 +381,7 @@ export function boardClusters(
       label: cleanTitle(node.file.title),
       rect: node,
       priority: isCurrentWorkFile(node.file) ? 4 : 2,
-      color: node.file.engine === "codex" ? "var(--color-codex)" : "var(--color-claude)",
+      color: `var(--color-${node.file.engine === "codex" ? "codex" : node.file.engine === "openclaw" ? "openclaw" : "claude"})`,
     });
   }
   return clusters;

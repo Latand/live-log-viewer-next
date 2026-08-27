@@ -30,10 +30,46 @@ function claudeTasksRoot(): string {
   return tmpdirCandidate;
 }
 
+/**
+ * OpenClaw keeps its whole state under one directory: `~/.openclaw` by default,
+ * `~/.openclaw-dev` under `--dev` and `~/.openclaw-<name>` under
+ * `--profile <name>`. Both flags work by pointing `OPENCLAW_STATE_DIR` at the
+ * profile directory, so honouring that variable covers every profile without
+ * the scanner learning the flag vocabulary. Resolved per call rather than at
+ * import so a relocated state directory takes effect without a restart.
+ */
+export function openclawStateDir(): string {
+  const configured = process.env.OPENCLAW_STATE_DIR?.trim();
+  return configured ? path.resolve(configured) : path.join(os.homedir(), ".openclaw");
+}
+
+/**
+ * The transcript directories under an OpenClaw state dir — one per agent id,
+ * at `<stateDir>/agents/<agentId>/sessions`. Each is its own scan root so a
+ * transcript's `name` stays the bare filename, the way a Codex rollout's does,
+ * and so an agent directory holding no sessions costs nothing.
+ */
+export function openclawSessionRoots(): string[] {
+  const agents = path.join(openclawStateDir(), "agents");
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(agents, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && !entry.name.startsWith("."))
+    .map((entry) => path.join(agents, entry.name, "sessions"))
+    .sort();
+}
+
 export const ROOTS: Record<RootKey, string> = {
   "codex-sessions": path.join(HOME, ".codex/sessions"),
   "claude-projects": path.join(HOME, ".claude/projects"),
   "claude-tasks": claudeTasksRoot(),
+  /* Every OpenClaw scan root is a descendant of this one; the per-agent roots
+     that discovery actually walks come from `openclawSessionRoots()`. */
+  "openclaw-sessions": path.join(HOME, ".openclaw/agents"),
 };
 
 /** Every scanner root, including all account homes, with real-path dedupe. */
@@ -42,6 +78,7 @@ export function scanRootEntries(): [RootKey, string][] {
     ...codexSessionRoots().map((root): [RootKey, string] => ["codex-sessions", root]),
     ...claudeProjectRoots().map((root): [RootKey, string] => ["claude-projects", root]),
     ["claude-tasks", ROOTS["claude-tasks"]],
+    ...openclawSessionRoots().map((root): [RootKey, string] => ["openclaw-sessions", root]),
   ];
   const seen = new Set<string>();
   return entries.filter(([, root]) => { const real = realpathSafe(root) ?? path.resolve(root); if (seen.has(real)) return false; seen.add(real); return true; });
