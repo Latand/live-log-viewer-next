@@ -65,7 +65,7 @@
     "happy-dom": "^20.10.6",
     "playwright-core": "1.62.1",
     "tailwindcss": "^4",
-    "typescript": "^7"
+    "typescript": "^5"
   },
   "ignoreScripts": [
     "sharp",
