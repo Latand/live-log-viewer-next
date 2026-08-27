@@ -124,8 +124,12 @@ export async function dispatchStructuredControl(
   }
 
   if (request.action === "compact") {
+    /* #1214: both structured host kinds can compact — codex-app-server through
+       `thread/compact/start`, claude-broker by typing `/compact` into the
+       conversation. The 409 is left for a host kind that has neither. */
     const capability = runtimeCompactCapability(conversation.engine);
-    if (!capability.supported || entry.structuredHost?.kind !== "codex-app-server") {
+    const hostKind = entry.structuredHost?.kind;
+    if (!capability.supported || (hostKind !== "codex-app-server" && hostKind !== "claude-broker")) {
       return {
         status: 409,
         body: {
@@ -168,8 +172,9 @@ export async function dispatchStructuredControl(
     const command: RuntimeOperationCommand = request.action === "kill"
       ? { kind: "kill", operationId, idempotencyKey: operationId, conversationId: conversation.id, sessionKey }
       /* #862: a compact command carries a generation fence and nothing else.
-         There is no text field to fill, so this control cannot degrade into a
-         `/compact` user turn on any path. */
+         There is no text field to fill, so no caller's text can ride this
+         control into the conversation — the Claude host's `/compact` is the
+         host's own fixed command, not anything that travelled from here. */
       : request.action === "compact"
         ? { kind: "compact", operationId, idempotencyKey: operationId, conversationId: conversation.id, sessionKey }
         : request.action === "reconfigure"

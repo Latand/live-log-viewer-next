@@ -1439,7 +1439,12 @@ export class RuntimeJournal {
       if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
-      } else if (!capability.supported || session.hostKind !== "codex-app-server") {
+      } else if (!capability.supported
+        || (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker")) {
+        /* #1214: claude-broker admits compaction too — its host types
+           `/compact` into the conversation, the only mechanism the stream-json
+           transport offers. A host kind with neither path is still refused
+           here rather than left to the delivery queue. */
         status = "rejected";
         reason = "unsupported-capability";
       } else if (session.sessionKey.engine !== command.sessionKey.engine

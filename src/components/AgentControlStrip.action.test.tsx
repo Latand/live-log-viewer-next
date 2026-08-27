@@ -109,6 +109,27 @@ afterEach(() => {
   localStorage.clear();
 });
 
+/** The bus's own endpoints — never a control anyone asserts on. */
+const RUNTIME_BUS_URLS = ["/api/runtime/snapshot", "/api/runtime/stream"];
+
+/**
+ * Every test's fetch stub, with the runtime bus's own traffic kept out of it.
+ * The first strip mount starts the tab-wide bus, which fetches
+ * `/api/runtime/snapshot` on its own schedule — landing in whichever test's
+ * recorder happens to be installed when it resolves and adding a request nobody
+ * made (it made the whole file order-dependent). The guard answers the bus
+ * itself so each test only ever records the controls it asked about; every
+ * other URL, `/api/runtime/interrupt` included, reaches the test's handler.
+ */
+function stubFetch(handler: (url: string, init?: RequestInit) => Promise<Response>): void {
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    if (RUNTIME_BUS_URLS.some((busUrl) => String(url).startsWith(busUrl))) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) } as unknown as Response);
+    }
+    return handler(String(url), init);
+  }) as typeof fetch;
+}
+
 const stopButton = (host: HTMLElement) =>
   host.querySelector(`button[aria-label^="${translate("en", "composer.interruptAria")}"]`) as HTMLButtonElement | null;
 
@@ -157,10 +178,10 @@ test("the width observer attaches when the strip mounts late (gated → live roo
 
 test("Stop on a structured-root subagent relays to the root's structured interrupt — zero /api/tmux, /api/proc", async () => {
   const calls: { url: string; body: unknown }[] = [];
-  globalThis.fetch = ((url: string, init?: RequestInit) => {
+  stubFetch((url: string, init?: RequestInit) => {
     calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, operationId: "op-1" }) } as unknown as Response);
-  }) as typeof fetch;
+  });
 
   const { host, root } = await mount(subagent);
   const stop = stopButton(host)!;
@@ -182,10 +203,10 @@ test("Stop on a structured-root subagent relays to the root's structured interru
 test("Stop on a live TMUX-root subagent keeps the canonical /api/tmux child path", async () => {
   rootKind = "tmux-legacy";
   const calls: { url: string; body: unknown }[] = [];
-  globalThis.fetch = ((url: string, init?: RequestInit) => {
+  stubFetch((url: string, init?: RequestInit) => {
     calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, target: "root:%1" }) } as unknown as Response);
-  }) as typeof fetch;
+  });
 
   const { host, root } = await mount(subagent);
   expect(host.querySelector('[data-strip-surface="live-subagent"]')).not.toBeNull();
@@ -244,7 +265,7 @@ const statusText = (host: HTMLElement) =>
 test("a rejected compaction is reported as the refusal, not as a started compaction", async () => {
   sessionView = structuredCodexView();
   const bodies: Array<Record<string, unknown>> = [];
-  globalThis.fetch = ((url: string, init?: RequestInit) => {
+  stubFetch((url: string, init?: RequestInit) => {
     bodies.push(init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {});
     /* Structured controls answer 202 `ok` for a receipt the journal REFUSED,
        so the receipt decides what the operator is told. */
@@ -258,7 +279,7 @@ test("a rejected compaction is reported as the refusal, not as a started compact
         receipt: { operationId: String(bodies.at(-1)!.operationId), status: "rejected", reason: "busy-turn" },
       }),
     } as unknown as Response);
-  }) as typeof fetch;
+  });
 
   const { host, root } = await mount(structuredRoot);
   expect(host.querySelector('[data-strip-surface="structured"]')).not.toBeNull();
@@ -283,19 +304,19 @@ test("a rejected compaction is reported as the refusal, not as a started compact
 test("a typed capability refusal is localized from its code, not echoed in English", async () => {
   sessionView = structuredCodexView();
   const calls: string[] = [];
-  globalThis.fetch = ((url: string) => {
+  stubFetch((url: string) => {
     calls.push(String(url));
     return Promise.resolve({
     ok: false,
     json: () => Promise.resolve({
       /* `dispatchStructuredControl`'s capability body: the sentence is a
          server-side English string, so the code is what the operator reads. */
-      error: "The Claude stream-json protocol has no client-originated compact control; only interrupt is exposed.",
+      error: "the codex structured host does not expose a compact control",
       code: "unsupported-capability",
-      capability: { control: "compact", engine: "claude", supported: false },
+      capability: { control: "compact", engine: "codex", supported: false },
     }),
     } as unknown as Response);
-  }) as typeof fetch;
+  });
 
   const { host, root } = await mount(structuredRoot);
   await confirmCompact(host);
@@ -309,7 +330,7 @@ test("a typed capability refusal is localized from its code, not echoed in Engli
 test("an ambiguous transport failure keeps the gesture on one operation", async () => {
   sessionView = structuredCodexView();
   const bodies: Array<Record<string, unknown>> = [];
-  globalThis.fetch = ((url: string, init?: RequestInit) => {
+  stubFetch((url: string, init?: RequestInit) => {
     bodies.push(init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {});
     /* The runtime-host socket failed and no receipt came back: the compaction
        may or may not have been admitted, so the retry must name the same
@@ -318,7 +339,7 @@ test("an ambiguous transport failure keeps the gesture on one operation", async 
       ok: false,
       json: () => Promise.resolve({ error: "runtime host request timed out" }),
     } as unknown as Response);
-  }) as typeof fetch;
+  });
 
   const { host, root } = await mount(structuredRoot);
   await confirmCompact(host);
@@ -330,16 +351,124 @@ test("an ambiguous transport failure keeps the gesture on one operation", async 
   await act(async () => root.unmount());
 });
 
+/* --------------------- #1214 the Claude compact path --------------------- */
+
+const structuredClaudeRoot: FileEntry = {
+  path: "/claude-root.jsonl", root: "claude-projects", name: "claude-root.jsonl", project: "viewer", title: "root",
+  engine: "claude", kind: "session", fmt: "claude", parent: null, mtime: 1, size: 1,
+  activity: "live", proc: "running", pid: null, model: "opus", effort: "high", fast: false,
+  pendingQuestion: null, waitingInput: null,
+} as FileEntry;
+
+function structuredClaudeView(receipts: RuntimeSessionView["receipts"] = []): RuntimeSessionView {
+  return {
+    session: {
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "idle",
+      sessionKey: { engine: "claude", sessionId: "session-claude" },
+      conversationId: "conv-claude",
+      capabilities: { steer: true, structuredAttention: true },
+    } as unknown as RuntimeSessionView["session"],
+    uiState: {} as RuntimeSessionView["uiState"],
+    attentions: [],
+    receipts,
+    legacy: false,
+    structuredControlsEnabled: true,
+  };
+}
+
+test("the Claude compact control is offered, sends the command, and reports what was witnessed", async () => {
+  sessionView = structuredClaudeView();
+  const bodies: Array<Record<string, unknown>> = [];
+  stubFetch((url: string, init?: RequestInit) => {
+    bodies.push(init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {});
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        ok: true,
+        structured: true,
+        target: "conv-claude",
+        operationId: String(bodies.at(-1)!.operationId),
+        receipt: { operationId: String(bodies.at(-1)!.operationId), status: "pending" },
+      }),
+    } as unknown as Response);
+  });
+
+  const { host, root } = await mount(structuredClaudeRoot);
+  /* The control is there and live — not a disabled cell explaining that the
+     engine the operator uses daily has no /compact. */
+  expect(compactButton(host)!.disabled).toBe(false);
+  await confirmCompact(host);
+
+  expect(bodies).toHaveLength(1);
+  expect(bodies[0]!.action).toBe("compact");
+  /* The admitted line promises a sent command, not a finished compaction. */
+  expect(statusText(host)).toBe(translate("en", "composer.compactSentClaude"));
+
+  /* The durable receipt then replaces it with the outcome that was actually
+     witnessed — here, none. */
+  const operationId = String(bodies[0]!.operationId);
+  sessionView = structuredClaudeView([{
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: "conv-claude",
+    kind: "compact",
+    status: "uncertain",
+    reason: "compact-sent-unobserved",
+    at: "2026-08-27T00:00:00.000Z",
+    revision: 2,
+  }]);
+  await act(async () => root.render(<AgentControlStrip file={structuredClaudeRoot} />));
+  expect(statusText(host)).toBe(translate("en", "receipt.human.compactSentUnobserved"));
+
+  /* A compaction the engine declined is its own visible ending — the command
+     went and nothing was compacted — instead of the generic failure line. */
+  sessionView = structuredClaudeView([{
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: "conv-claude",
+    kind: "compact",
+    status: "failed",
+    reason: "compact-declined",
+    at: "2026-08-27T00:00:30.000Z",
+    revision: 3,
+  }]);
+  await act(async () => root.render(<AgentControlStrip file={structuredClaudeRoot} />));
+  expect(statusText(host)).toBe(translate("en", "receipt.human.compactDeclined"));
+  expect(statusText(host)).not.toBe(translate("en", "composer.failedCompact"));
+
+  /* And a compaction that WAS witnessed says so. */
+  sessionView = structuredClaudeView([{
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: "conv-claude",
+    kind: "compact",
+    status: "delivered",
+    reason: "compaction:boundary-one",
+    at: "2026-08-27T00:01:00.000Z",
+    revision: 4,
+  }]);
+  await act(async () => root.render(<AgentControlStrip file={structuredClaudeRoot} />));
+  expect(statusText(host)).toBe(translate("en", "composer.compactObserved"));
+
+  /* A settled compaction is a note about one action, not a permanent line: the
+     next action starts from a clean status, or its own note would never show. */
+  await act(async () => stopButton(host)!.click());
+  expect(statusText(host)).not.toBe(translate("en", "composer.compactObserved"));
+  await act(async () => root.unmount());
+});
+
 test("compact still mints an operation id without a secure context", async () => {
   sessionView = structuredCodexView();
   const bodies: Array<Record<string, unknown>> = [];
-  globalThis.fetch = ((url: string, init?: RequestInit) => {
+  stubFetch((url: string, init?: RequestInit) => {
     bodies.push(init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {});
     return Promise.resolve({
       ok: true,
       json: () => Promise.resolve({ ok: true, structured: true, target: "conv-root", receipt: { status: "pending" } }),
     } as unknown as Response);
-  }) as typeof fetch;
+  });
   /* Plain-http LAN access has no `crypto.randomUUID`. Reaching for it directly
      would throw outside the try, leaving the button permanently busy. */
   const cryptoObject = globalThis.crypto as { randomUUID?: unknown };

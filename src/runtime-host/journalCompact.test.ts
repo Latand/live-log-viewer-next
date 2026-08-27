@@ -121,15 +121,15 @@ test("a caller-supplied turn fence cannot smuggle a compaction past the busy-tur
   journal.close();
 });
 
-test("compact admission refuses a lost host, a stale generation, and an unsupported engine", () => {
+test("compact admission refuses a lost host, a stale generation, and a host with no compact path", () => {
   const journal = new RuntimeJournal(path.join(sandbox("refusals"), "events.sqlite"), { structuredHosts: true, now: () => 100 });
   hostedCodexSession(journal, { conversationId: "conv-dead", host: "dead" });
   hostedCodexSession(journal, { conversationId: "conv-stale", sessionId: "thread-current" });
   hostedCodexSession(journal, {
-    conversationId: "conv-claude",
+    conversationId: "conv-paned",
     engine: "claude",
-    hostKind: "claude-broker",
-    sessionId: "session-claude",
+    hostKind: "tmux-pane",
+    sessionId: "session-paned",
   });
 
   const dead = journal.executeOperation({
@@ -146,7 +146,31 @@ test("compact admission refuses a lost host, a stale generation, and an unsuppor
     conversationId: "conv-stale",
     sessionKey: { engine: "codex", sessionId: "thread-previous" },
   });
-  const claude = journal.executeOperation({
+  const paned = journal.executeOperation({
+    kind: "compact",
+    operationId: "op-paned",
+    idempotencyKey: "op-paned",
+    conversationId: "conv-paned",
+    sessionKey: { engine: "claude", sessionId: "session-paned" },
+  });
+
+  expect(dead.receipt).toMatchObject({ status: "rejected", reason: "dead-host" });
+  expect(stale.receipt).toMatchObject({ status: "rejected", reason: "stale-generation" });
+  expect(paned.receipt).toMatchObject({ status: "rejected", reason: "unsupported-capability" });
+  expect(journal.effectBatch()).toHaveLength(0);
+  journal.close();
+});
+
+test("an idle owned claude-broker conversation admits its compaction like any other (#1214)", () => {
+  const journal = new RuntimeJournal(path.join(sandbox("claude"), "events.sqlite"), { structuredHosts: true, now: () => 100 });
+  hostedCodexSession(journal, {
+    conversationId: "conv-claude",
+    engine: "claude",
+    hostKind: "claude-broker",
+    sessionId: "session-claude",
+  });
+
+  const result = journal.executeOperation({
     kind: "compact",
     operationId: "op-claude",
     idempotencyKey: "op-claude",
@@ -154,10 +178,31 @@ test("compact admission refuses a lost host, a stale generation, and an unsuppor
     sessionKey: { engine: "claude", sessionId: "session-claude" },
   });
 
-  expect(dead.receipt).toMatchObject({ status: "rejected", reason: "dead-host" });
-  expect(stale.receipt).toMatchObject({ status: "rejected", reason: "stale-generation" });
-  expect(claude.receipt).toMatchObject({ status: "rejected", reason: "unsupported-capability" });
-  expect(journal.effectBatch()).toHaveLength(0);
+  expect(result.receipt).toMatchObject({ kind: "compact", status: "pending", turnId: null });
+  const effects = journal.effectBatch();
+  expect(effects).toHaveLength(1);
+  expect(effects[0]!.kind).toBe("runtime.compact");
+  expect(effects[0]!.payload).toMatchObject({
+    kind: "compact",
+    operationId: "op-claude",
+    conversationId: "conv-claude",
+    sessionKey: { engine: "claude", sessionId: "session-claude" },
+  });
+  /* Nothing on the effect can be replayed as user input: the `/compact` the
+     Claude host types is its own fixed command, not payload from a caller. */
+  expect(effects[0]!.payload).not.toHaveProperty("text");
+
+  /* A retry of the same operation replays the admitted receipt rather than
+     admitting a second compaction into the same conversation. */
+  const retry = journal.executeOperation({
+    kind: "compact",
+    operationId: "op-claude",
+    idempotencyKey: "op-claude",
+    conversationId: "conv-claude",
+    sessionKey: { engine: "claude", sessionId: "session-claude" },
+  });
+  expect(retry.receipt.operationId).toBe(result.receipt.operationId);
+  expect(journal.effectBatch()).toHaveLength(1);
   journal.close();
 });
 

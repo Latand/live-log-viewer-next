@@ -140,3 +140,137 @@ test("a missing or torn artifact yields no durable evidence", async () => {
   fs.writeFileSync(torn, '{"type":"assistant","message":{"stop_reason":"end_turn"\n', "utf8");
   expect(await durableStageTurnEvidence("claude", torn)).toBeNull();
 });
+
+/* #1141 — a provider limit cuts the turn off mid-flight, so the transcript's
+   last record is the CLI's own notice and there is no verdict to read. The
+   invented notices below are the two shapes the CLIs write; never copy a real
+   transcript into a fixture. */
+const CLAUDE_SESSION_LIMIT = "You've hit your session limit. Try again once the window resets.";
+
+function claudeLimitRecord(timestamp: string, text = CLAUDE_SESSION_LIMIT): Record<string, unknown> {
+  return {
+    type: "assistant",
+    timestamp,
+    isApiErrorMessage: true,
+    error: "rate_limit",
+    message: { role: "assistant", model: "<synthetic>", stop_reason: "stop_sequence", content: [{ type: "text", text }] },
+  };
+}
+
+test("a Claude turn cut off by a session limit reports the provider's notice as terminal evidence (#1141)", async () => {
+  const file = writeTranscript("claude-session-limit.jsonl", [
+    { type: "user", timestamp: "2026-08-27T09:00:00.000Z", message: { role: "user", content: "prompt" } },
+    {
+      type: "assistant",
+      timestamp: "2026-08-27T09:20:00.000Z",
+      message: { role: "assistant", stop_reason: null, content: [{ type: "text", text: "halfway through the fix" }] },
+    },
+    claudeLimitRecord("2026-08-27T09:41:00.000Z"),
+  ]);
+
+  const evidence = await durableStageTurnEvidence("claude", file);
+  expect(evidence).toMatchObject({
+    turn: "terminal",
+    terminalProviderMessage: { text: CLAUDE_SESSION_LIMIT },
+  });
+  expect(evidence!.terminalProviderMessage!.ts).toBe(Date.parse("2026-08-27T09:41:00.000Z"));
+});
+
+test("a limit notice under trailing bookkeeping records still closes the turn (#1141)", async () => {
+  const file = writeTranscript("claude-session-limit-bookkeeping.jsonl", [
+    { type: "user", timestamp: "2026-08-27T09:00:00.000Z", message: { role: "user", content: "prompt" } },
+    claudeLimitRecord("2026-08-27T09:41:00.000Z"),
+    { type: "file-history-snapshot", timestamp: "2026-08-27T09:41:01.000Z", snapshot: { trackedFileBackups: {} } },
+  ]);
+
+  expect(await durableStageTurnEvidence("claude", file)).toMatchObject({
+    turn: "terminal",
+    terminalProviderMessage: { text: CLAUDE_SESSION_LIMIT },
+  });
+});
+
+test("a turn that ended on its own verdict carries no provider notice (#1141)", async () => {
+  const file = writeTranscript("claude-verdict-no-notice.jsonl", [
+    { type: "user", timestamp: "2026-08-27T09:00:00.000Z", message: { role: "user", content: "prompt" } },
+    {
+      type: "assistant",
+      timestamp: "2026-08-27T09:05:00.000Z",
+      message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: PASS_TEXT }] },
+    },
+  ]);
+
+  expect(await durableStageTurnEvidence("claude", file)).toMatchObject({
+    turn: "terminal",
+    message: { text: PASS_TEXT },
+    terminalProviderMessage: null,
+  });
+});
+
+test("a silent mid-work transcript carries no provider notice (#1141)", async () => {
+  const file = writeTranscript("claude-silent-midwork.jsonl", [
+    { type: "user", timestamp: "2026-08-27T09:00:00.000Z", message: { role: "user", content: "prompt" } },
+    {
+      type: "assistant",
+      timestamp: "2026-08-27T09:02:00.000Z",
+      message: { role: "assistant", stop_reason: null, content: [{ type: "text", text: "reading the failing test" }] },
+    },
+  ]);
+
+  expect(await durableStageTurnEvidence("claude", file)).toMatchObject({ turn: "busy", terminalProviderMessage: null });
+});
+
+test("prose that merely quotes a limit notice is not one (#1141)", async () => {
+  const file = writeTranscript("claude-quoted-limit.jsonl", [
+    { type: "user", timestamp: "2026-08-27T09:00:00.000Z", message: { role: "user", content: "prompt" } },
+    {
+      type: "assistant",
+      timestamp: "2026-08-27T09:05:00.000Z",
+      message: {
+        role: "assistant",
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: `The stage agent stopped on "${CLAUDE_SESSION_LIMIT}" last night.` }],
+      },
+    },
+  ]);
+
+  expect(await durableStageTurnEvidence("claude", file)).toMatchObject({ turn: "terminal", terminalProviderMessage: null });
+});
+
+test("a prompt after the limit notice reopens the turn and withdraws the evidence (#1141)", async () => {
+  const file = writeTranscript("claude-limit-then-prompt.jsonl", [
+    { type: "user", timestamp: "2026-08-27T09:00:00.000Z", message: { role: "user", content: "prompt" } },
+    claudeLimitRecord("2026-08-27T09:41:00.000Z"),
+    { type: "user", timestamp: "2026-08-27T13:00:00.000Z", message: { role: "user", content: "carry on now that the window reset" } },
+  ]);
+
+  expect(await durableStageTurnEvidence("claude", file)).toMatchObject({ turn: "busy", terminalProviderMessage: null });
+});
+
+test("a Codex turn refused for usage carries the provider's notice (#1141)", async () => {
+  const file = writeTranscript("codex-usage-limit.jsonl", [
+    { timestamp: "2026-08-27T10:00:00.000Z", payload: { type: "task_started" } },
+    { timestamp: "2026-08-27T10:04:00.000Z", payload: { type: "agent_message", message: "starting on the stage" } },
+    {
+      timestamp: "2026-08-27T10:05:00.000Z",
+      payload: {
+        type: "task_complete",
+        error: { message: "You've hit your usage limit. Try again after reset.", codex_error_info: "usage_limit_exceeded" },
+      },
+    },
+  ]);
+
+  expect(await durableStageTurnEvidence("codex", file)).toMatchObject({
+    turn: "terminal",
+    terminalProviderMessage: { text: "You've hit your usage limit. Try again after reset." },
+  });
+});
+
+test("a Codex turn that completed normally carries no provider notice (#1141)", async () => {
+  const file = writeTranscript("codex-clean-complete.jsonl", [
+    { timestamp: "2026-08-27T10:00:00.000Z", payload: { type: "task_started" } },
+    { timestamp: "2026-08-27T10:04:00.000Z", payload: { type: "agent_message", message: PASS_TEXT } },
+    { timestamp: "2026-08-27T10:05:00.000Z", payload: { type: "task_complete", last_agent_message: PASS_TEXT } },
+  ]);
+
+  expect(await durableStageTurnEvidence("codex", file)).toMatchObject({ turn: "terminal", terminalProviderMessage: null });
+});

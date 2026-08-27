@@ -18,6 +18,7 @@ import { deflateSync } from "node:zlib";
 
 import { auditGithubPublication, shouldFailGithubAudit } from "./privacy-github-audit";
 import {
+  commitMessageAddressReview,
   commitMessageFindings,
   formatPrivacyReport,
   TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES,
@@ -529,6 +530,24 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     expect(output).not.toContain(syntheticAddress);
     expect(output).not.toContain(syntheticCredential);
     expect(output).not.toContain(directory);
+    expect(result.stderr.toString()).toBe("");
+  });
+
+  test("scans changed text for a quoted mailbox", () => {
+    /* `"fixture person"@host` is a mailbox RFC 5322 spells with quotes around
+       the local part, and it reaches whoever the plain form would. */
+    const directory = mkdtempSync(join(tmpdir(), "llv-privacy-gate-quoted-"));
+    temporaryDirectories.push(directory);
+    const text = join(directory, "release-notes.md");
+    const quotedAddress = ['"fixture person"', "internal.local"].join("@");
+    writeFileSync(text, `Reported by ${quotedAddress}.\n`);
+
+    const result = runGate([text]);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\nemail_address: 1\n");
+    expect(output).not.toContain(quotedAddress);
     expect(result.stderr.toString()).toBe("");
   });
 
@@ -2803,6 +2822,19 @@ describe("commitMessageFindings", () => {
     Bun.spawnSync({ cmd: ["git", "-C", repo, "commit", "-m", message], stderr: "pipe", stdout: "pipe" });
   }
 
+  function git(repo: string, ...arguments_: string[]): string {
+    const result = Bun.spawnSync({
+      cmd: ["git", "-C", repo, ...arguments_],
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    return result.stdout.toString();
+  }
+
+  /* The footer `git cherry-pick -x` appends, spelled out where a test needs the
+     shape without performing the pick. */
+  const cherryPickLine = `(cherry picked from commit ${"0123456789abcdef".repeat(2) + "01234567"})`;
+
   test("flags a personal email in a Co-Authored-By trailer", () => {
     const repo = gitRepo();
     const localPart = "someone";
@@ -2840,6 +2872,81 @@ describe("commitMessageFindings", () => {
     expect(findings.has("email_address")).toBe(false);
   });
 
+  test("the forge support role address is exempt in a sign-off trailer", () => {
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: Dependency Tool <${forgeRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("the forge role exemption preserves another address on the trailer line", () => {
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    const otherAddress = ["someone", "personal.example"].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: ${otherAddress} Dependency Tool <${forgeRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("the forge role exemption preserves other private trailer content", () => {
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    const syntheticHome = ["", "home", "fixture-person", "records"].join("/");
+    const syntheticCredential =
+      ["api", "token"].join("_") + "=synthetic-test-value-1234567890";
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: ${syntheticHome} ${syntheticCredential} Dependency Tool <${forgeRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("credential")).toBe(true);
+    expect(findings.has("home_path")).toBe(true);
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("the forge support role address remains flagged in the commit body", () => {
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    commit(
+      repo,
+      `fix: document the dependency report\n\nSigned-Off-By: Dependency Tool <${forgeRole}>\n\nThe quoted line above came from the report body.`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("a support role address on another domain remains flagged in a trailer", () => {
+    const repo = gitRepo();
+    const otherRole = ["support", "forge.example.com"].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: Dependency Tool <${otherRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("an account-form no-reply address remains flagged in a trailer", () => {
+    const repo = gitRepo();
+    const accountAddress = [
+      "4242+fixture-account",
+      "users.noreply.github.com",
+    ].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: Dependency Tool <${accountAddress}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
   test("a GitHub no-reply address is still an account handle and is still flagged", () => {
     /* The carve-out is the LOCAL PART being exactly noreply, and this is why:
        `<id>+<handle>@users.noreply.github.com` reads as a no-reply address and
@@ -2859,6 +2966,183 @@ describe("commitMessageFindings", () => {
     commit(repo, `fix: reported by ${vendor} in the incident thread`);
     const findings = commitMessageFindings(repo, "main");
     expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("a trailer-shaped line in the body stays body prose", () => {
+    /* The first round filtered every line that looked like a trailer wherever
+       it sat, so an address quoted into the body left the scan with it. Git
+       reads a trailer block as the final paragraph, and this address is not
+       in it. */
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(
+      repo,
+      `fix: quote the incident report\n\nThe report reads:\nSigned-off-by: Some Person <${vendor}>\nand the thread continues below.`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("a quoted local part in the commit body is an address", () => {
+    /* Commit message detection could not see a quoted mailbox at all, so
+       writing the local part in quotes cleared the gate outright. */
+    const repo = gitRepo();
+    const quoted = ['"some one"', "personal.example"].join("@");
+    commit(repo, `fix: reported by ${quoted} in the incident thread`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("a quoted local part on the exempt trailer line is an address", () => {
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    const quoted = ['"some one"', "personal.example"].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: ${quoted} Dependency Tool <${forgeRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("a quoted forge role local part is still an address", () => {
+    /* Quoting is not the form the forge signs off with, and reading it as the
+       same mailbox would mean unquoting RFC 5322 inside a gate that fails
+       closed. */
+    const repo = gitRepo();
+    const quotedRole = ['"support"', "github.com"].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: Dependency Tool <${quotedRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("a trailer that is not machine attribution keeps its address", () => {
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nReported-By: Dependency Tool <${forgeRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("a folded trailer continuation keeps its address", () => {
+    /* Git folds a value onto a following indented line; the exemption reads
+       the trailer that starts its own line and nothing else. */
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: Dependency Tool\n <${forgeRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("a cherry-picked attribution trailer is still inside the trailer block", () => {
+    /* `git cherry-pick -x` writes its own line into the trailer block it
+       copies, and git keeps reading that block as one. Requiring every line of
+       the final paragraph to be `Token: value` discarded the whole block
+       instead, so the standing agent trailer became a finding and a branch
+       carrying a cherry-pick could only clear a required check by removing a
+       trailer AGENTS.md forbids removing. */
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    git(repo, "checkout", "-b", "source");
+    commit(repo, `feat: something\n\nCo-Authored-By: Some Model <${vendor}>`);
+    const picked = git(repo, "rev-parse", "HEAD").trim();
+    git(repo, "checkout", "feature");
+    git(repo, "cherry-pick", "-x", picked);
+
+    const message = git(repo, "log", "--format=%B", "-1", "HEAD");
+    expect(message).toContain("(cherry picked from commit ");
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("a cherry-pick line does not turn body prose into a trailer block", () => {
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(
+      repo,
+      `fix: quote the report\n\nThe report reads:\nCo-Authored-By: Some Model <${vendor}>\n${cherryPickLine}`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("the forge's own co-author paragraph does not demote the trailer above it", () => {
+    /* A squash merge writes the pull request's commits into one message and
+       appends its own co-author paragraph behind a horizontal rule. Reading
+       only the message's last paragraph left every trailer the forge wrote
+       above that rule outside the block. */
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(
+      repo,
+      `feat: something (#1)\n\nA body paragraph.\n\nCo-Authored-By: Some Model <${vendor}>\n\n---------\n\nCo-authored-by: Some Model <${vendor}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("a squashed pull request keeps the trailer block of every commit in it", () => {
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(
+      repo,
+      `feat: two things (#2)\n\n* feat: the first thing\n\nFirst body.\n\nCo-Authored-By: Some Model <${vendor}>\n\n* feat: the second thing\n\nSecond body.\n\nCo-Authored-By: Some Model <${vendor}>\n\n---------\n\nCo-authored-by: Some Model <${vendor}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("neither concatenation shape launders a person", () => {
+    const repo = gitRepo();
+    const person = ["someone", "personal.dev"].join("@");
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(repo, `feat: something\n\nCo-Authored-By: Someone <${person}>\n${cherryPickLine}`);
+    commit(
+      repo,
+      `feat: something (#3)\n\n* feat: the first thing\n\nCo-Authored-By: Someone <${person}>\n\n---------\n\nCo-authored-by: Some Model <${vendor}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.get("email_address")).toBe(2);
+  });
+
+  test("a bullet after a trailer paragraph is not a squashed message", () => {
+    /* The bullets only mark embedded messages when the text is the forge's
+       concatenation, which it marks by bulleting the paragraph right after the
+       title. A body that merely holds a list is one message with one trailer
+       block, and this address is not in it. */
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    commit(
+      repo,
+      `fix: document the dependency report\n\nSigned-Off-By: Dependency Tool <${forgeRole}>\n\n* the line above came from the report body`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("the review exempts a detected address rather than skipping text", () => {
+    const forgeRole = ["support", "github.com"].join("@");
+    const trailer = commitMessageAddressReview(
+      `chore: refresh dependencies\n\nSigned-off-by: Dependency Tool <${forgeRole}>`,
+    );
+    expect(trailer.exempt).toEqual([forgeRole]);
+    expect(trailer.attributable).toEqual([]);
+
+    /* The same address in the body is detected by the same scan and stays
+       attributable: nothing is removed from the message, the exemption is
+       subtracted from what the scan reported. */
+    const body = commitMessageAddressReview(`chore: write to ${forgeRole} about it`);
+    expect(body.exempt).toEqual([]);
+    expect(body.attributable).toEqual([forgeRole]);
   });
 
   test("ignores resource_identifier and transcript_content classes", () => {
