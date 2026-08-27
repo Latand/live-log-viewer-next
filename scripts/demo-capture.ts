@@ -91,6 +91,13 @@ export const claudePath = (project: string, session: string) =>
 
 export const PENDING_QUESTION_FILE = claudePath("atlas", `${fixtureSessionId("2")}.jsonl`);
 
+/* The conversation the fixture's orchestrator seat holds
+   (`state/orchestrator-seats.json`). Named rather than numbered because the
+   seat record, the session-title record and this manifest all have to point at
+   the same transcript, and a repeated-digit id in three files is three chances
+   to get one digit wrong. */
+export const ORCHESTRATOR_SEAT_FILE = claudePath("kanban", "orchestrator.jsonl");
+
 export const SHOTS: DemoShot[] = [
   {
     id: "chat-feed",
@@ -186,6 +193,48 @@ export const SHOTS: DemoShot[] = [
          first screen. */
       absentText: ["No logs yet", "Nothing found"],
       pixels: FIRST_RUN_PIXELS,
+    },
+  },
+  {
+    /* Issues #1160/#1171: the surface docs/orchestrator.md walks a newcomer
+       through — the project's own orchestrator seat, docked beside its board.
+       The frame gates the three things that make it that surface rather than a
+       chat column: WHO holds the seat (the incumbent row), what the dock says
+       it is doing (the badge), and the seat's own conversation with the
+       greeting a fresh orchestrator opens with. The dock is opened from its
+       header toggle during the run, exactly as an operator opens it. */
+    id: "orchestrator-dock",
+    output: "orchestrator-dock.png",
+    project: "kanban",
+    file: null,
+    /* The board's own shots' frame. Narrower crowds the board chrome into
+       itself: the attention island lands on the zoom controls and the minimap
+       covers the create bar, both of which sit over the canvas. */
+    viewport: { width: 1180, height: 720 },
+    stableText: [
+      "Orchestrator",
+      "Ready in kanban",
+      "Nothing starts until you ask",
+      "One lane per issue",
+      "opus",
+      /* The incumbent row's context reading: transcript bytes / 4, marked as
+         the estimate it is. Pinned so both deterministic passes wait for the
+         slower incumbent read rather than racing it — and pinned to the
+         NUMBER, so editing the fixture transcript without re-reading this
+         fails the capture instead of publishing two different frames.
+         `scripts/demo-capture.test.ts` derives it from the fixture. */
+      "~231",
+    ],
+    frame: {
+      visible: [
+        { selector: "[data-orchestrator-panel]", text: "Orchestrator", minWidth: 340, minHeight: 420 },
+        { selector: "[data-orchestrator-incumbent]", text: "opus", minWidth: 300, minHeight: 18 },
+        { selector: "[data-orchestrator-badge]", text: "live", minWidth: 24, minHeight: 12 },
+        { selector: "[data-orchestrator-conversation]", text: "One lane per issue", minWidth: 300, minHeight: 200 },
+      ],
+      /* A seated project must never render the create draft behind the dock. */
+      absentText: ["Create this project's orchestrator"],
+      pixels: FRAME_PIXELS,
     },
   },
   {
@@ -533,15 +582,43 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+/** Keep `argv[2]` open for writing and stay alive. The scanner attributes a
+    transcript to the process holding it open, so this is the whole of what
+    makes a fixture conversation read as hosted rather than finished. */
+export const FIXTURE_HOLDER_SOURCE = 'const fs = require("node:fs"); fs.openSync(process.argv[2], "a"); setInterval(() => {}, 60_000);\n';
+
 async function startPendingQuestionPane(root: string, pendingPath: string, env: NodeJS.ProcessEnv, paneScript?: { source: string; args: string[] }): Promise<void> {
   const holderPath = path.join(root, "pending-question-holder.cjs");
-  const source = paneScript?.source ?? 'const fs = require("node:fs"); fs.openSync(process.argv[2], "a"); setInterval(() => {}, 60_000);\n';
+  const source = paneScript?.source ?? FIXTURE_HOLDER_SOURCE;
   fs.writeFileSync(holderPath, source, "utf8");
   const args = [pendingPath, ...(paneScript?.args ?? [])];
   const holderCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(holderPath)} ${args.map(shellQuote).join(" ")}`;
   await runProcess(
     "tmux",
     ["new-session", "-d", "-s", "demo-capture", "-n", "pending-question", holderCommand],
+    { cwd: env.HOME, env, stdio: "ignore" },
+  );
+}
+
+/**
+ * A second window of the same fixture session, holding the orchestrator seat's
+ * transcript open (#1160/#1171).
+ *
+ * The seat file designates the conversation; that alone makes the dock's panel
+ * LIVE, but the conversation itself would read as a finished run that the
+ * operator has to resume — the dock would say so, over the greeting turn the
+ * shot exists to show. A process holding the transcript is the same evidence a
+ * real agent leaves, so the shot states what a seated project actually looks
+ * like. Its own window, so the pending-question holder keeps its own process:
+ * one pid is attributed to one transcript.
+ */
+async function startOrchestratorSeatPane(root: string, seatPath: string, env: NodeJS.ProcessEnv): Promise<void> {
+  const holderPath = path.join(root, "orchestrator-seat-holder.cjs");
+  fs.writeFileSync(holderPath, FIXTURE_HOLDER_SOURCE, "utf8");
+  const holderCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(holderPath)} ${shellQuote(seatPath)}`;
+  await runProcess(
+    "tmux",
+    ["new-window", "-d", "-t", "demo-capture:", "-n", "orchestrator-seat", holderCommand],
     { cwd: env.HOME, env, stdio: "ignore" },
   );
 }
@@ -571,6 +648,20 @@ export type DemoRuntime = {
   shutdown: () => Promise<void>;
 };
 
+/**
+ * The repository's own `next`, run on Bun, the way `package.json` runs it.
+ *
+ * Two things are load-bearing. `--bun` is the runtime: the Viewer's startup
+ * instrumentation opens its state stores through `bun:sqlite`, so a dev server
+ * started under Node fails to boot at all. And the binary is named explicitly
+ * because `bunx next` resolves through an install step that rewrites
+ * `package.json` to whatever versions happen to be in `node_modules` — a
+ * capture run must not edit the manifest of the repository it is documenting.
+ */
+function nextCommand(repoRoot: string, args: string[]): [string, string[]] {
+  return [process.execPath, ["--bun", path.join(repoRoot, "node_modules/.bin/next"), ...args]];
+}
+
 export function demoPort(raw: string | undefined, fallback: number, name: string): number {
   const port = Number(raw ?? fallback);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error(`${name} must be a valid non-privileged port`);
@@ -599,17 +690,18 @@ export async function bootstrapDemoRuntime(
   setStableTimes(env.HOME!);
 
   /* The interactive holder belongs to the populated seed's pending-question
-     transcript. The zero-session seed has no transcript to hold open, and a
-     first run has no live agent by definition — so nothing is started for it,
-     and nothing is torn down for it either (see `shutdown` below). */
+     transcript, and the seat holder to its orchestrator conversation. The
+     zero-session seed has neither transcript, and a first run has no live agent
+     by definition — so nothing is started for it, and nothing is torn down for
+     it either (see `shutdown` below). */
   const startedQuestionPane = seed === "demo";
   if (startedQuestionPane) {
     const pendingPath = renderFixtureTemplate(PENDING_QUESTION_FILE, env.HOME!);
     await startPendingQuestionPane(root, pendingPath, env, questionPaneScript);
+    await startOrchestratorSeatPane(root, renderFixtureTemplate(ORCHESTRATOR_SEAT_FILE, env.HOME!), env);
   }
   const server = spawn(
-    "bunx",
-    ["next", "dev", "--hostname", "0.0.0.0", "--port", String(port)],
+    ...nextCommand(repoRoot, ["dev", "--hostname", "0.0.0.0", "--port", String(port)]),
     { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"] },
   );
   const serverLogs = outputLines(server, "demo server output");
@@ -638,7 +730,8 @@ export async function bootstrapDemoRuntime(
 /** Rebuild the route type manifest the dev server left behind. */
 export async function regenerateNextTypes(repoRoot: string, env: NodeJS.ProcessEnv): Promise<void> {
   fs.rmSync(path.join(repoRoot, ".next/dev/types"), { recursive: true, force: true });
-  await runProcess("bunx", ["next", "typegen"], {
+  const [command, args] = nextCommand(repoRoot, ["typegen"]);
+  await runProcess(command, args, {
     cwd: repoRoot,
     env: { ...env, NODE_ENV: "production" },
     stdio: "inherit",

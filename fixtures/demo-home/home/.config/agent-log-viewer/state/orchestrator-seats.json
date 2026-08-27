@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "nextSeatEpoch": 2,
+  "seats": {
+    "kanban": {
+      "project": "kanban",
+      "seatEpoch": 1,
+      "conversationId": "conversation_kanban_orchestrator",
+      "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-kanban/orchestrator.jsonl",
+      "engine": "claude",
+      "model": "opus",
+      "runtimeIdentityFrozen": true,
+      "mandate": "You own the kanban board. Open one lane per issue, spawn an implementer, run a fresh reviewer every round, merge on APPROVE, and report what landed. Nothing starts until the operator asks for it.",
+      "promptVersion": null,
+      "predecessorConversationId": null,
+      "state": "active",
+      "intent": {
+        "clientRequestId": "demo-fixture-kanban-orchestrator",
+        "mode": "spawn",
+        "launchId": null,
+        "error": null
+      },
+      "designatedAt": "2100-01-02T11:32:00.000Z",
+      "activatedAt": "2100-01-02T11:32:30.000Z"
+    }
+  },
+  "pending": {},
+  "revocations": [],
+  "history": []
+}
