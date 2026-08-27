@@ -296,42 +296,56 @@ export type RuntimePendingReconfigure = Omit<RuntimeReconfigureCommand, "kind" |
 
 /**
  * A manual context compaction requested against one owned structured
- * generation (issue #862). It is a control, never a message: the command
- * carries no text and no images, so no path through the runtime can replay it
- * as a user prompt. `sessionKey` fences the compaction to the exact generation
- * the caller was looking at. There is deliberately no turn fence: a compaction
- * is only ever admitted against an idle generation, so any turn a caller could
- * name would already have made the request a `busy-turn` rejection.
+ * generation (issue #862, extended by #1214). The command itself carries no
+ * text and no images: it names a generation to compact and nothing else, so no
+ * caller can smuggle a prompt through this channel. How the compaction then
+ * reaches the engine is the host's business — the Codex host sends
+ * `thread/compact/start`, the Claude host types `/compact` into the
+ * conversation because its transport offers no control subtype.
+ * `sessionKey` fences the compaction to the exact generation the caller was
+ * looking at. There is deliberately no turn fence: a compaction is only ever
+ * admitted against an idle generation, so any turn a caller could name would
+ * already have made the request a `busy-turn` rejection.
  */
 export interface RuntimeCompactCommand extends RuntimeCommandBase {
   kind: "compact";
   sessionKey: { engine: RuntimeEngine; sessionId: string };
 }
 
-/** An engine's truthful support for one client-originated engine control. */
+/**
+ * An engine's truthful support for one client-originated engine control, and
+ * how far its outcome can be trusted. `confirmation` is the honest half:
+ * `observed` means the engine reports completion on its own channel, while
+ * `best-effort` means the control reaches the engine but its completion can
+ * only be witnessed indirectly — and may not be witnessed at all.
+ */
 export interface RuntimeControlCapability {
   control: "compact";
   engine: RuntimeEngine;
   supported: boolean;
+  confirmation?: "observed" | "best-effort";
   reason?: string;
 }
 
 /**
- * Codex app-server 0.146 exposes `thread/compact/start` and reports completion
- * through the `contextCompaction` item lifecycle. The Claude stream-json
- * transport exposes interrupt as its only client-originated control and has no
- * manual compact subtype, so the capability reports false with the reason
- * rather than degrading into a `/compact` prompt.
+ * Both engines can compact; they differ in what the Viewer can promise about
+ * the outcome (#1214).
+ *
+ * Codex app-server exposes `thread/compact/start` and reports completion
+ * through the `contextCompaction` item lifecycle, so the receipt terminalizes
+ * on the engine's own evidence. The Claude stream-json transport has no
+ * compact subtype at all — `interrupt` and `can_use_tool` are the whole
+ * control channel — so the host types `/compact` into the conversation, the
+ * way the operator does in the terminal, and witnesses the outcome only if a
+ * compaction boundary appears in the transcript. That is best-effort
+ * confirmation, and it is stated rather than hidden: the alternative, refusing
+ * to compact at all, leaves the operator with a full context window and a
+ * button that lies about the engine.
  */
 export function runtimeCompactCapability(engine: RuntimeEngine): RuntimeControlCapability {
   return engine === "codex"
-    ? { control: "compact", engine, supported: true }
-    : {
-        control: "compact",
-        engine,
-        supported: false,
-        reason: "The Claude stream-json protocol has no client-originated compact control; only interrupt is exposed.",
-      };
+    ? { control: "compact", engine, supported: true, confirmation: "observed" }
+    : { control: "compact", engine, supported: true, confirmation: "best-effort" };
 }
 
 export interface RuntimeAnswerCommand extends RuntimeCommandBase {

@@ -794,6 +794,14 @@ export const RECEIPT_REASON_KEYS: Record<string, MessageKey> = {
   "stale-generation": "receipt.human.staleKey",
   "stale-turn": "receipt.human.staleKey",
   "unsupported-capability": "receipt.human.unsupportedCapability",
+  /* #1214: the Claude compact control typed `/compact` into the conversation
+     and no compaction boundary was ever observed. An outcome, not a refusal —
+     the command went, and this says exactly how far the Viewer can vouch for
+     it. */
+  "compact-sent-unobserved": "receipt.human.compactSentUnobserved",
+  /* #1214: the engine answered the `/compact` this control typed and compacted
+     nothing. The command still went, so the sentence says both halves. */
+  "compact-declined": "receipt.human.compactDeclined",
 };
 
 /** The human sentence key for a receipt's reason, or null for an unknown one. */

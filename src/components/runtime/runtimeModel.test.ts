@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
+import { translate } from "@/lib/i18n";
+
 import type { Flow } from "@/lib/flows/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { streamingVoiceDelivery } from "@/lib/runtime/voiceDelivery";
@@ -602,5 +604,27 @@ describe("humanReceiptReasonKey", () => {
     expect(humanReceiptReasonKey(" unhosted ")).toBe("receipt.human.deadHost"); // trimmed
     expect(humanReceiptReasonKey("quota-exceeded")).toBeNull();
     expect(humanReceiptReasonKey(null)).toBeNull();
+  });
+
+  test("a compaction that was sent and never witnessed has words of its own (#1214)", () => {
+    expect(humanReceiptReasonKey("compact-sent-unobserved")).toBe("receipt.human.compactSentUnobserved");
+    for (const locale of ["en", "uk"] as const) {
+      const sentence = translate(locale, "receipt.human.compactSentUnobserved");
+      expect(sentence.length).toBeGreaterThan(0);
+      /* The sentence is about what the Viewer could confirm, never about a
+         capability Claude is missing. */
+      expect(sentence.toLowerCase()).not.toContain("engine");
+    }
+  });
+
+  test("a compaction the engine declined has words of its own (#1214)", () => {
+    expect(humanReceiptReasonKey("compact-declined")).toBe("receipt.human.compactDeclined");
+    for (const locale of ["en", "uk"] as const) {
+      const sentence = translate(locale, "receipt.human.compactDeclined");
+      /* Both halves, in both languages: the command went, and nothing was
+         compacted. Neither one alone is the truth. */
+      expect(sentence).toContain("/compact");
+      expect(sentence.length).toBeGreaterThan(0);
+    }
   });
 });

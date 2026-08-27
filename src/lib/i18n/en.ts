@@ -399,6 +399,8 @@ export const en = {
   "composer.compactConfirm": "Compact?",
   "composer.compactConfirmTitle": "Click again to send /compact",
   "composer.compactSent": "compaction started — the band will appear in the feed once it's done",
+  "composer.compactSentClaude": "/compact sent — the band appears in the feed if the agent compacts",
+  "composer.compactObserved": "context compacted",
   "composer.failedCompact": "couldn't start compaction",
   "composer.addImages": "Add images",
   "composer.moreTools": "More actions",
@@ -420,7 +422,8 @@ export const en = {
   "strip.stopSubagent": "interrupts the root agent",
   "strip.compactSubagent": "not available for subagents",
   "strip.structuredUnsupported": "the structured host does not support this action yet",
-  "strip.compactEngineUnsupported": "this engine has no compact control",
+  "strip.compactHostUnsupported": "the Viewer has no compact channel to this host",
+  "strip.compactClaudeMessage": "sends /compact into the conversation; the Viewer confirms it only if the compaction band appears",
   "strip.compactBusyTurn": "not while a turn is running",
   "strip.resolving": "resolving the agent host…",
 
@@ -465,7 +468,9 @@ export const en = {
   "receipt.human.duplicate": "already delivered",
   "receipt.human.turnActive": "the agent is mid-turn",
   "receipt.human.noTurn": "there is no active turn",
-  "receipt.human.unsupportedCapability": "this engine has no such control",
+  "receipt.human.unsupportedCapability": "the Viewer has no channel for this control here",
+  "receipt.human.compactSentUnobserved": "sent — the Viewer couldn’t confirm the compaction finished",
+  "receipt.human.compactDeclined": "sent — the agent finished /compact without compacting",
   "receipt.human.verbatim": "not delivered: {reason}",
 
   // DraftAgentPane
