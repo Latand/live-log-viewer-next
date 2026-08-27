@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # dependabot-lockfile.yml commits the regenerated bun.lock with the repository
+  # GITHUB_TOKEN, and GitHub raises no `synchronize` for that push, so the audit
+  # is dispatched against the refreshed branch instead.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,12 +26,21 @@ jobs:
           bun-version: 1.3.3
 
       - name: Require a lockfile change with dependency changes
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'push'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
           set -euo pipefail
+
+          # A dispatched run carries no pull request payload, and the rule still
+          # has to hold for the branch it names against the protected base.
+          if [[ -z "$BASE_SHA" ]]; then
+            git fetch --no-tags --force origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+            BASE_SHA="$(git merge-base "refs/remotes/origin/${DEFAULT_BRANCH}" HEAD)"
+            export BASE_SHA
+          fi
 
           bun -e '
           const { execFileSync } = require("node:child_process");

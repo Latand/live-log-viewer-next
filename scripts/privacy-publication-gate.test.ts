@@ -1491,7 +1491,9 @@ exec "$LLV_TEST_REAL_GIT" "$@"
     const workflow = readFileSync(join(import.meta.dir, "..", ".github", "workflows", "privacy-publication.yml"), "utf8");
 
     expect(workflow).not.toContain("github.event.pull_request.base.sha");
-    expect(workflow).toContain("PRIVACY_BASE_REF: ${{ github.event.pull_request.base.ref }}");
+    expect(workflow).toMatch(
+      /PRIVACY_BASE_REF: \$\{\{[^}]*github\.event\.pull_request\.base\.ref[^}]*\}\}/,
+    );
     expect(workflow).toContain(
       'git fetch --no-tags --force origin "+refs/heads/${PRIVACY_BASE_REF}:refs/remotes/origin/${PRIVACY_BASE_REF}"',
     );
