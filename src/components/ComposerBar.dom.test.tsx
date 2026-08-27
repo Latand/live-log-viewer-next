@@ -142,7 +142,7 @@ test("unsupported image capability disables picker, paste, and drop before admis
     clipboardData: { items: [{ type: "image/png", getAsFile: () => ({ type: "image/png" }) }] },
     preventDefault: () => { pastePrevented = true; },
   });
-  const dragTransfer = { items: [{ type: "image/png" }], dropEffect: "" };
+  const dragTransfer = { items: [{ kind: "file", type: "image/png" }], dropEffect: "" };
   props.onDragOver({
     dataTransfer: dragTransfer,
     preventDefault: () => { dragOverPrevented = true; },
@@ -206,7 +206,7 @@ test("an enabled image dragover is claimed so the drop delivers the files exactl
 
   /* The enabled image dragover must be cancelled — otherwise the browser
      never fires the drop and navigates to the image instead. */
-  const imageDrag = { items: [{ type: "image/png" }], dropEffect: "" };
+  const imageDrag = { items: [{ kind: "file", type: "image/png" }], dropEffect: "" };
   let dragOverPrevented = false;
   props.onDragOver({
     dataTransfer: imageDrag,
@@ -218,26 +218,40 @@ test("an enabled image dragover is claimed so the drop delivers the files exactl
   /* The drop consumes the event (no parent double-handling) and delivers the
      image files exactly once. */
   const imageFile = { name: "shot.png", type: "image/png" } as File;
+  const notesFile = { name: "notes.txt", type: "text/plain" } as File;
   let dropPrevented = false;
   let dropStopped = false;
   props.onDrop({
-    dataTransfer: { files: [imageFile, { name: "notes.txt", type: "text/plain" }] },
+    dataTransfer: { files: [imageFile, notesFile] },
     preventDefault: () => { dropPrevented = true; },
     stopPropagation: () => { dropStopped = true; },
   });
   expect(dropPrevented).toBe(true);
   expect(dropStopped).toBe(true);
-  expect(delivered).toEqual([[imageFile]]);
+  /* #1224: the document rides along instead of being filtered out of the batch
+     on its way to the handler — a silent discard is the defect, not the rule. */
+  expect(delivered).toEqual([[imageFile, notesFile]]);
 
-  /* Non-image drags keep their default behavior end to end. */
+  /* A dragged FILE of any type is claimed too, so the drop affordance appears
+     for a PDF or a log and the browser never navigates to it (#1224). */
+  const documentDrag = { items: [{ kind: "file", type: "application/pdf" }], dropEffect: "" };
+  let documentDragPrevented = false;
+  props.onDragOver({
+    dataTransfer: documentDrag,
+    preventDefault: () => { documentDragPrevented = true; },
+  });
+  expect(documentDragPrevented).toBe(true);
+  expect(documentDrag.dropEffect).toBe("copy");
+
+  /* Dragged TEXT is not a file and keeps its default behavior end to end. */
   let textDragPrevented = false;
   props.onDragOver({
-    dataTransfer: { items: [{ type: "text/plain" }], dropEffect: "" },
+    dataTransfer: { items: [{ kind: "string", type: "text/plain" }], dropEffect: "" },
     preventDefault: () => { textDragPrevented = true; },
   });
   let textDropPrevented = false;
   props.onDrop({
-    dataTransfer: { files: [{ name: "notes.txt", type: "text/plain" }] },
+    dataTransfer: { files: [] },
     preventDefault: () => { textDropPrevented = true; },
     stopPropagation: () => {},
   });
@@ -418,6 +432,7 @@ test("attachment preview copy remains accurate for structured and tmux delivery 
     base64: "AA==",
     file: new dom.File([new Uint8Array([0])], "shot.png", { type: "image/png" }) as unknown as File,
     ownsPreview: false,
+    kind: "image" as const,
   };
   for (const [locale, expected] of [["en", "attached to the message"], ["uk", "додано до повідомлення"]] as const) {
     setLocale(locale);

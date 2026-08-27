@@ -7,6 +7,7 @@ import { SlidersHorizontal } from "lucide-react";
 import { Loader2, Play } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
+import { inboxImageExt } from "@/lib/imagePolicy";
 import type { UseComposerReturn } from "@/hooks/useComposer";
 import { prewarmLiveToken } from "@/hooks/useDictation";
 
@@ -78,6 +79,21 @@ export interface ComposerBarProps {
 }
 
 const NO_HISTORY: readonly string[] = [];
+
+/** Whether this MIME is one the composer stages as an image (the server's own
+    whitelist). Everything else — a PDF, a log, an unconvertible `image/heic` —
+    is a general attachment and travels by inbox path instead (#1224). */
+function isDeliverableImageType(mime: string): boolean {
+  return inboxImageExt(mime ?? "") !== null;
+}
+
+/** The files an intake actually admits. With the host's image capability
+    unavailable the images are dropped from the batch — the standing reason on
+    the status line says why — while everything else still rides through, so a
+    dropped document is never lost to a limit that is not about it. */
+function admissiblePaste(files: readonly File[], imageDisabled: boolean): File[] {
+  return imageDisabled ? files.filter((file) => !isDeliverableImageType(file.type)) : [...files];
+}
 
 function SendMenu({ label, actions, onClose }: { label: string; actions: SendMenuAction[]; onClose: () => void }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -210,9 +226,9 @@ export function ComposerBar({
   /* An attachment still decoding (or one that failed to read) blocks Send with a
      visible reason, so no image is silently dropped mid-read (issue #419). */
   const attachmentBlockedReason = attachments.hasReading
-    ? t("img.blockedReading")
+    ? t(attachments.hasFiles ? "attach.blockedReading" : "img.blockedReading")
     : attachments.hasError
-      ? t("img.blockedFailed")
+      ? t(attachments.hasFiles ? "attach.blockedFailed" : "img.blockedFailed")
       : undefined;
   const sendBlocked = Boolean(sendDisabledReason);
   const effectiveCanSend = canSend || (sendPayloadAvailable && !fieldsDisabled && !dictationBusy && !attachmentsBlocked);
@@ -338,40 +354,37 @@ export function ComposerBar({
              token here hides its round-trip from the eventual mic press. */
           onFocus={prewarmLiveToken}
           onPaste={(event) => {
+            /* EVERY pasted file, not only images (#1224). `kind` separates a
+               file from the plain text of an ordinary paste, which must keep
+               its default behaviour. */
             const picks = Array.from(event.clipboardData.items)
-              .filter((entry) => entry.type.startsWith("image/"))
+              .filter((entry) => entry.kind !== "string")
               .map((entry) => entry.getAsFile())
               .filter((entry): entry is File => entry !== null);
-            if (imageDisabled && picks.length) {
-              event.preventDefault();
-              return;
-            }
-            if (onImageFiles) {
-              if (picks.length) {
-                event.preventDefault();
-                onImageFiles(picks);
-              }
-              return;
-            }
-            attachments.handlePaste(event);
+            if (!picks.length) return;
+            event.preventDefault();
+            const admitted = admissiblePaste(picks, imageDisabled);
+            if (admitted.length) (onImageFiles ?? attachments.addFiles)(admitted);
           }}
           onDragOver={(event) => {
             /* A file drop only fires when its dragover was cancelled — without
-               this the browser navigates to the dropped image instead of
-               attaching it. Image drags are claimed whether the picker is
-               enabled (copy) or disabled (none, keeping the rejection); other
-               drag payloads keep their default behavior. */
-            if (Array.from(event.dataTransfer.items).some((item) => item.type.startsWith("image/"))) {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = imageDisabled ? "none" : "copy";
-            }
+               this the browser navigates to the dropped file instead of
+               attaching it, which is what a dragged PDF used to do. ANY file
+               drag is claimed now; a drag that is only images while images are
+               disabled keeps its rejection cursor. */
+            const items = Array.from(event.dataTransfer.items).filter((item) => item.kind === "file");
+            if (!items.length) return;
+            event.preventDefault();
+            const onlyImages = items.every((item) => isDeliverableImageType(item.type));
+            event.dataTransfer.dropEffect = imageDisabled && onlyImages ? "none" : "copy";
           }}
           onDrop={(event) => {
-            const files = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith("image/"));
+            const files = Array.from(event.dataTransfer.files);
             if (!files.length) return;
             event.preventDefault();
             event.stopPropagation();
-            if (!imageDisabled) (onImageFiles ?? attachments.addFiles)(files);
+            const admitted = admissiblePaste(files, imageDisabled);
+            if (admitted.length) (onImageFiles ?? attachments.addFiles)(admitted);
           }}
           onKeyDown={(event) => {
             /* ArrowUp/ArrowDown recall previously queued and sent messages
@@ -442,10 +455,14 @@ export function ComposerBar({
           {showImage ? (
             <Hint label={imageAriaLabel}>
               <ImagePickerButton
+                acceptFiles={attachments.acceptsFiles}
                 ariaLabel={imageAriaLabel}
                 className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
                 onFiles={onImageFiles ?? attachments.addFiles}
-                disabled={imageDisabled}
+                /* An unavailable image capability no longer closes the picker
+                   outright where files are deliverable (#1224) — a document
+                   needs no such capability; a picked image is refused by name. */
+                disabled={imageDisabled && !attachments.acceptsFiles}
                 disabledReason={imageDisabledReason}
               />
             </Hint>

@@ -69,10 +69,20 @@ function terminalRetryIdempotencyKey(operationId: string): string {
   return `retry_${createHash("sha256").update(operationId).digest("hex")}`;
 }
 
-export async function handleRuntimeCommand(
+/**
+ * One send's general (non-image) attachments, threaded through the dispatch so
+ * the wrapper below can clean them up on any refusal (#1224). Kept as a handle
+ * rather than a return value because every failure exit is a plain response.
+ */
+interface CommandAttachments {
+  filePaths: string[];
+}
+
+async function dispatchRuntimeCommand(
   request: NextRequest,
   kind: RuntimeOperationKind,
-  dependencies: RuntimeHttpDependencies = DEFAULT_DEPENDENCIES,
+  dependencies: RuntimeHttpDependencies,
+  attachments: CommandAttachments,
 ): Promise<NextResponse> {
   const rejection = rejectCrossOrigin(request);
   if (rejection) return rejection;
@@ -105,6 +115,28 @@ export async function handleRuntimeCommand(
           };
         });
         parseValue = { ...body, images: admissionRefs };
+      }
+      /* #1224: general attachments take the by-path road instead of the
+         base64-into-the-turn one — the bytes land in the viewer inbox and their
+         paths are folded into the text the agent receives, so a document needs
+         no engine image capability at all. Folded BEFORE the command is parsed,
+         because an attachment-only send has no text of its own to validate. */
+      if (body.files !== undefined && body.files !== null) {
+        const { admitInboxFilePayload, buildFilePayload, inboxFileBatchToken } = await import("@/lib/inboxFiles");
+        const admittedFiles = admitInboxFilePayload({ files: body.files });
+        if (admittedFiles.error) {
+          return NextResponse.json({ error: admittedFiles.error.error }, { status: admittedFiles.error.status });
+        }
+        if (admittedFiles.files.length) {
+          const parsed = parseValue as Record<string, unknown>;
+          const bundle = buildFilePayload(
+            typeof parsed.text === "string" ? parsed.text : "",
+            admittedFiles.files,
+            inboxFileBatchToken(typeof body.idempotencyKey === "string" ? body.idempotencyKey : null),
+          );
+          attachments.filePaths = bundle.filePaths;
+          parseValue = { ...parsed, text: bundle.payload };
+        }
       }
     }
     command = parseRuntimeCommand(kind, parseValue);
@@ -188,6 +220,25 @@ export async function handleRuntimeCommand(
     const status = error instanceof RuntimeHostUnavailableError && error.code === "idempotency-conflict" ? 409 : 503;
     return NextResponse.json({ error: error instanceof Error ? error.message : "runtime command failed" }, { status });
   }
+}
+
+/**
+ * A runtime send/steer, with its attachments' retention attached to its fate: a
+ * command that was refused leaves no bytes in the inbox, and one that was
+ * admitted keeps them, because the agent still has to open the path it was
+ * handed (#1224 — the same rule `deleteInboxImages` follows for images).
+ */
+export async function handleRuntimeCommand(
+  request: NextRequest,
+  kind: RuntimeOperationKind,
+  dependencies: RuntimeHttpDependencies = DEFAULT_DEPENDENCIES,
+): Promise<NextResponse> {
+  const attachments: CommandAttachments = { filePaths: [] };
+  const response = await dispatchRuntimeCommand(request, kind, dependencies, attachments);
+  if (attachments.filePaths.length && !response.ok) {
+    (await import("@/lib/inboxFiles")).deleteInboxFiles(attachments.filePaths);
+  }
+  return response;
 }
 
 export async function handleRuntimeRetry(

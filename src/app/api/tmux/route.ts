@@ -28,6 +28,7 @@ import {
   resolveTmuxAttach,
   tmuxEndpointDescriptor,
 } from "@/lib/tmux";
+import type { InboxFileAdmissionResult } from "@/lib/inboxFiles";
 import type { ApiError, FileEntry } from "@/lib/types";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
 
@@ -52,6 +53,9 @@ interface SendResponse {
   ok: true;
   target: string | null;
   imagePaths?: string[];
+  /** Inbox paths the general (non-image) attachments were written to (#1224):
+      the same by-path handover images get, minus the base64-into-the-turn half. */
+  filePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
   outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured" | "queued" | "delivering" | "delivered";
@@ -324,7 +328,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   if (imageError) {
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
   }
-  if (!text.trim() && !images.length) {
+  /* #1224: a general attachment is admitted against the same shared policy the
+     composer refuses against, so an over-budget file is answered with the reason
+     rather than dropped from the batch on its way through. Imported lazily: only
+     a request that actually carries files touches the inbox module. */
+  const rawFiles = (body as { files?: unknown }).files;
+  const fileAdmission: InboxFileAdmissionResult = rawFiles === undefined || rawFiles === null
+    ? { files: [], error: null }
+    : (await import("@/lib/inboxFiles")).admitInboxFilePayload({ files: rawFiles });
+  if (fileAdmission.error) {
+    return NextResponse.json({ error: fileAdmission.error.error }, { status: fileAdmission.error.status });
+  }
+  if (!text.trim() && !images.length && !fileAdmission.files.length) {
     return NextResponse.json({ error: "empty message" }, { status: 400 });
   }
 
@@ -364,28 +379,58 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     retireReplySuggestionsOnOperatorMessage(operatorAction.conversationId, acceptedAt, clientMessageId);
   }
 
+  /* The attachments hit disk HERE, after every early refusal above — a rejected
+     request never orphans bytes — and the paths ride the delivered text the way
+     `buildImagePayload` folds image paths in. The batch is keyed by the client's
+     own message id, so a retried delivery rewrites the same paths instead of
+     leaving a second copy behind. */
+  let payloadText = text;
+  let filePaths: string[] = [];
+  if (fileAdmission.files.length) {
+    const { buildFilePayload, inboxFileBatchToken } = await import("@/lib/inboxFiles");
+    try {
+      const bundle = buildFilePayload(text, fileAdmission.files, inboxFileBatchToken(clientMessageId));
+      payloadText = bundle.payload;
+      filePaths = bundle.filePaths;
+    } catch (error) {
+      return NextResponse.json({
+        error: error instanceof Error ? error.message : "attachments could not be saved",
+      }, { status: 500 });
+    }
+  }
+  /* A delivery that failed leaves no bytes behind (#1224). A delivery that was
+     accepted — including one held for a switch — keeps them: the agent still
+     has to open the path it was handed. */
+  const discardAttachments = async (): Promise<void> => {
+    if (!filePaths.length) return;
+    (await import("@/lib/inboxFiles")).deleteInboxFiles(filePaths);
+    filePaths = [];
+  };
+  const attachmentField = () => (filePaths.length ? { filePaths } : {});
+
   if (structuredHostsEnabled()) {
     const { enqueueStructuredMessage } = await import("@/lib/runtime/structuredMessageDelivery");
     const structured = await enqueueStructuredMessage({
       path: filePath,
       ...(conversationId ? { conversationId } : {}),
       ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
-      text: text.trim(),
+      text: payloadText.trim(),
       images,
       ...(origin ? { origin } : {}),
     });
     if (structured) {
+      if (!structured.ok) await discardAttachments();
       const { status, ...response } = structured.ok ? { ...structured, status: 200 } : structured;
-      return NextResponse.json(response, { status });
+      return NextResponse.json({ ...response, ...attachmentField() }, { status });
     }
   }
 
-  const response = respond(await deliverConversationMessage({
+  const outcome = await deliverConversationMessage({
     pid: hasPid ? pid : null,
     path: filePath,
     ...(conversationId ? { conversationId } : {}),
     ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
-    text,
+    text: payloadText,
     images,
     ...(origin ? { origin } : {}),
     // The "on resume" profile (issue #241 §4): honored only when this send
@@ -393,6 +438,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     ...(typeof body.model === "string" ? { resumeModel: body.model } : {}),
     ...(typeof body.effort === "string" ? { resumeEffort: body.effort } : {}),
     ...(typeof body.fast === "boolean" ? { resumeFast: body.fast } : {}),
-  }));
-  return response;
+  });
+  /* `started` actuation is the uncertain case the image path also keeps: the
+     agent may already hold the message, so its attachments stay readable. */
+  if (!outcome.ok && outcome.actuation !== "started") await discardAttachments();
+  if (!outcome.ok) return respond(outcome);
+  return NextResponse.json({ ...outcome, ...attachmentField() });
 }

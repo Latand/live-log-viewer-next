@@ -328,6 +328,7 @@ export const en = {
 
   // TmuxComposer
   "composer.imagesCount": { one: "{count} image", other: "{count} images" },
+  "composer.attachmentsCount": { one: "{count} attachment", other: "{count} attachments" },
   "composer.spawned": "launched agent in tmux {target}",
   "composer.sentPaths": "sent {count} path(s)",
   "composer.failedInterrupt": "couldn't interrupt",
@@ -403,6 +404,7 @@ export const en = {
   "composer.compactObserved": "context compacted",
   "composer.failedCompact": "couldn't start compaction",
   "composer.addImages": "Add images",
+  "composer.addAttachments": "Add files or images",
   "composer.moreTools": "More actions",
   "composer.stopAndSend": "Stop recording and send",
   "composer.launchAgent": "Launch the agent",
@@ -909,6 +911,20 @@ export const en = {
   "rename.saved": "Renamed to {title}",
   "rename.conflict": "Name changed elsewhere — adopted the latest and retried",
   "rename.failed": "Couldn't save the name",
+
+  // Attachments that are not images (#1224)
+  "attach.file": "file",
+  "attach.error": "attachment error",
+  "attach.imagesOnlyHere": "{name} wasn't attached — this composer takes PNG, JPEG, GIF or WebP images only",
+  "attach.tooLarge": "{name}: too large ({max} MB limit)",
+  "attach.tooMany": "Up to {max} files can be attached at once",
+  "attach.aggregateTooLarge": "Attachments exceed the {max} MB request limit",
+  "attach.readingAria": "loading {name}",
+  "attach.removeAria": "Remove {name}",
+  "attach.retryAria": "Retry {name}",
+  "attach.clearAllAria": "Remove all attachments",
+  "attach.blockedReading": "Waiting for the attachment to finish loading…",
+  "attach.blockedFailed": "Remove or retry the failed attachment to send",
 
   // imageAttachments
   "img.readFailed": "couldn't read the image",
