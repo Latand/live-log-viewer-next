@@ -69,7 +69,10 @@ export function isAwaitingUser(file: FileEntry, now = Date.now() / 1000): boolea
      entries sink into the recency buckets instead of inflating the waiting
      counter. The attention queue owns that TTL judgement. */
   if (file.activity === "stalled") return attentionId(file, now) !== null;
-  return file.activity === "recent" && (file.engine === "claude" || file.engine === "codex") && isConversation(file) && !isSubagent(file);
+  return file.activity === "recent"
+    && (file.engine === "claude" || file.engine === "codex" || file.engine === "openclaw")
+    && isConversation(file)
+    && !isSubagent(file);
 }
 
 export function useSwitchboardData(

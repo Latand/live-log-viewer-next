@@ -9,7 +9,7 @@ import { globalCache } from "@/lib/scanner/caches";
 import { primePersistedLineageFacts } from "@/lib/scanner/links";
 import { QUESTION_CACHE_NAME } from "@/lib/scanner/questions";
 import { coordinatedFileScan, resetFileScanCoordinatorForTests, runFileCatalogScan } from "@/lib/scanner/scanCoordinator";
-import type { FileEntry, PendingQuestion } from "@/lib/types";
+import type { Engine, FileEntry, PendingQuestion, TranscriptEngine } from "@/lib/types";
 import type { TurnState } from "@/lib/accounts/migration/contracts";
 
 export type FileScanSnapshot = Awaited<ReturnType<typeof listFilesWithProjectCatalog>>;
@@ -72,7 +72,7 @@ const FILE_SCAN_PIN_CACHE_MAX = 8;
 // and must be recomputed.
 // Bumped to 9 for issue #339: engine-native subagent titles/lineage and the
 // `spawnOrigin` provenance marker must not replay from a pre-#339 snapshot.
-const FILE_SCAN_CACHE_SCHEMA_VERSION = 9 as const;
+const FILE_SCAN_CACHE_SCHEMA_VERSION = 10 as const;
 const FILE_SCAN_SNAPSHOT_VERSION = 1 as const;
 const FILE_SCAN_SNAPSHOT_FILE = "files-scan-snapshot.json";
 const FILE_SCAN_PERSISTENCE_DIAGNOSTIC_MS = 60_000;
@@ -102,13 +102,13 @@ function isFileScanSnapshot(value: unknown): value is FileScanSnapshot {
   const filesValid = value.files.every((candidate) => {
     if (!isRecord(candidate)) return false;
     return typeof candidate.path === "string"
-      && (candidate.root === "codex-sessions" || candidate.root === "claude-projects" || candidate.root === "claude-tasks")
+      && (candidate.root === "codex-sessions" || candidate.root === "claude-projects" || candidate.root === "claude-tasks" || candidate.root === "openclaw-sessions")
       && typeof candidate.name === "string"
       && typeof candidate.project === "string"
       && typeof candidate.title === "string"
-      && (candidate.engine === "codex" || candidate.engine === "claude" || candidate.engine === "shell")
+      && (candidate.engine === "codex" || candidate.engine === "claude" || candidate.engine === "shell" || candidate.engine === "openclaw")
       && typeof candidate.kind === "string"
-      && (candidate.fmt === "codex" || candidate.fmt === "claude" || candidate.fmt === "plain")
+      && (candidate.fmt === "codex" || candidate.fmt === "claude" || candidate.fmt === "plain" || candidate.fmt === "openclaw")
       && (candidate.parent === null || typeof candidate.parent === "string")
       && typeof candidate.mtime === "number" && Number.isFinite(candidate.mtime)
       && typeof candidate.size === "number" && Number.isFinite(candidate.size)
@@ -129,6 +129,12 @@ function isFileScanSnapshot(value: unknown): value is FileScanSnapshot {
     && typeof candidate.conversations === "number" && Number.isSafeInteger(candidate.conversations)
     && (candidate.projectRoot === undefined || typeof candidate.projectRoot === "string"));
   return filesValid && catalogValid;
+}
+
+/* The primed evidence above is only meaningful for an engine whose transcript
+   the turn reader parses; background-task output logs carry no turn. */
+function isTranscriptEngine(engine: Engine): engine is TranscriptEngine {
+  return engine === "claude" || engine === "codex" || engine === "openclaw";
 }
 
 function persistedTurnState(entry: FileEntry): TurnState | undefined {
@@ -170,12 +176,13 @@ function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
     if (current.size !== entry.size || current.mtimeMs / 1000 !== entry.mtime) continue;
     const mtimeMs = entry.mtime * 1000;
     const turnState = persistedTurnState(entry);
-    if (turnState !== undefined && entry.path.endsWith(".jsonl") && (entry.engine === "claude" || entry.engine === "codex")) {
+    if (turnState !== undefined && entry.path.endsWith(".jsonl") && isTranscriptEngine(entry.engine)) {
+      const engine = entry.engine;
       primeTranscriptTurnEvidence(
         entry.path,
         entry.size,
         mtimeMs,
-        entry.engine === "codex",
+        engine,
         turnState,
         {
           authoritative: false,
@@ -187,16 +194,16 @@ function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
           entry.path,
           entry.size,
           mtimeMs,
-          entry.engine === "codex",
+          engine,
           entry.authoritativeTurn,
           { composerReleased: entry.activityReason === "pane_at_composer" },
         );
-      } else if (entry.engine === "codex" || turnState.state !== "terminal") {
+      } else if (engine !== "claude" || turnState.state !== "terminal") {
         primeTranscriptTurnEvidence(
           entry.path,
           entry.size,
           mtimeMs,
-          entry.engine === "codex",
+          engine,
           turnState,
           { composerReleased: entry.activityReason === "pane_at_composer" },
         );

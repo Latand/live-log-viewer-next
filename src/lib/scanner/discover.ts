@@ -8,6 +8,7 @@ import { sessionProjectProjection } from "../session/titleProjection";
 import { scheduleTranscriptIndex, type TranscriptIndexFeed } from "../search/transcriptFeed";
 import { isClaudeWorkflowBookkeeping } from "./claudeNative";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
+import { isOpenclawTranscript } from "./openclawNative";
 import { describe } from "./describe";
 import type { ConversationCatalogEntry } from "./conversationCatalog";
 import {
@@ -20,7 +21,7 @@ import {
 import { projectResolutionStateKey } from "./projectState";
 import { EXTS, ROOTS, scanRootEntries } from "./roots";
 import { selectSchemeWindow } from "./schemeWindow";
-import { cachedTranscriptTurn, transcriptTurnResult } from "./activity";
+import { cachedTranscriptTurn, transcriptEngineForRoot, transcriptTurnResult } from "./activity";
 import {
   canonicalizeTranscriptPaths,
   createTranscriptPathCanonicalizer,
@@ -102,6 +103,11 @@ async function walkPaths(rootName: RootKey, root: string, dir: string, limit: Li
       return walkPaths(rootName, root, path.join(dir, entry.name), limit);
     }
     if (!entry.isFile() || !EXTS.some((ext) => entry.name.endsWith(ext))) return { paths: [], complete: true };
+    /* An OpenClaw sessions directory holds far more sidecars than transcripts
+       (trajectories, ACP streams, checkpoint forks, prompt caches, dated
+       backups). Filtering here rather than at hydration keeps them out of the
+       resource-scope inventory too, which only checks the `.jsonl` suffix. */
+    if (rootName === "openclaw-sessions" && !isOpenclawTranscript(entry.name)) return { paths: [], complete: true };
     return { paths: [{ rootName, root, path: path.join(dir, entry.name) }], complete: true };
   }));
   return {
@@ -184,13 +190,19 @@ function transcriptIndexFeed(
 ): TranscriptIndexFeed {
   return {
     complete,
-    sources: catalog.map((entry) => ({
+    /* The full-text transcript index parses per-engine record shapes and pins
+       its engine column to the two it can parse, so an OpenClaw transcript is
+       excluded from it rather than inserted as an unparseable row. OpenClaw
+       conversations stay searchable through the catalog's title and
+       first-prompt text; full-text search over their bodies moves with the
+       index's own schema migration. */
+    sources: catalog.flatMap((entry) => (entry.engine === "openclaw" ? [] : [{
       path: entry.path,
       project: projectByPath?.get(entry.path) ?? entry.project,
       engine: entry.engine,
       size: entry.size,
       mtimeMs: entry.mtime * 1_000,
-    })),
+    }])),
   };
 }
 
@@ -274,7 +286,7 @@ function schemeBucket(entry: RawEntry, projectByPath: ReadonlyMap<string, string
 function isLiveEntry(entry: RawEntry, hosted: ReadonlySet<string> | undefined): boolean {
   if (hosted?.has(entry.path)) return true;
   if (!entry.path.endsWith(".jsonl")) return false;
-  const turn = cachedTranscriptTurn(entry.path, entry.st.size, entry.st.mtimeMs, entry.rootName === "codex-sessions");
+  const turn = cachedTranscriptTurn(entry.path, entry.st.size, entry.st.mtimeMs, transcriptEngineForRoot(entry.rootName));
   return turn?.state === "busy";
 }
 
@@ -290,8 +302,8 @@ async function primeElidedOpenTurns(ranked: readonly RawEntry[], selected: Reado
   for (const entry of ranked) {
     if (candidates.length >= OPEN_TURN_PROBE_LIMIT) break;
     if (selected.has(entry.path) || !entry.path.endsWith(".jsonl") || entry.st.mtimeMs <= horizon) continue;
-    const codex = entry.rootName === "codex-sessions";
-    if (!cachedTranscriptTurn(entry.path, entry.st.size, entry.st.mtimeMs, codex)) candidates.push(entry);
+    const engine = transcriptEngineForRoot(entry.rootName);
+    if (!cachedTranscriptTurn(entry.path, entry.st.size, entry.st.mtimeMs, engine)) candidates.push(entry);
   }
   let open = false;
   await forEachCooperatively(candidates, (entry) => {
@@ -299,7 +311,7 @@ async function primeElidedOpenTurns(ranked: readonly RawEntry[], selected: Reado
       entry.path,
       entry.st.size,
       entry.st.mtimeMs,
-      entry.rootName === "codex-sessions",
+      transcriptEngineForRoot(entry.rootName),
       false,
     );
     open ||= turn.turn.state === "busy";
@@ -339,12 +351,18 @@ function resourceActivity(previous: FileEntry | undefined, mtime: number, size: 
   return { activity: "idle", activityReason: "mtime_old" };
 }
 
+/** Placeholder card labels for the resource scope, which names a transcript
+    before any of its bytes have been read. */
+const ENGINE_LABEL = { codex: "Codex", claude: "Claude", openclaw: "OpenClaw" } as const;
+
 function resourceScopeFromPaths(raw: RawPath[], baseline?: ResourceScopeSnapshot): ResourceScopeSnapshot {
   const previousByPath = new Map((baseline?.files ?? []).map((entry) => [entry.path, entry] as const));
   const conversations = raw.filter((entry) => entry.rootName !== "claude-tasks" && entry.path.endsWith(".jsonl"));
   const files = conversations.map((entry): FileEntry => {
     const previous = previousByPath.get(entry.path);
-    const engine = entry.rootName === "codex-sessions" ? "codex" as const : "claude" as const;
+    const engine = entry.rootName === "codex-sessions"
+      ? "codex" as const
+      : entry.rootName === "openclaw-sessions" ? "openclaw" as const : "claude" as const;
     const mtime = previous?.mtime ?? Date.now() / 1000;
     const size = previous?.size ?? 1;
     const activity = resourceActivity(previous, mtime, size);
@@ -362,7 +380,7 @@ function resourceScopeFromPaths(raw: RawPath[], baseline?: ResourceScopeSnapshot
       nativeForkSourceThreadId: previous?.nativeForkSourceThreadId,
       projectRoot: previous?.projectRoot,
       worktree: previous?.worktree,
-      title: previous?.title ?? (filename.startsWith("agent-") ? `Subagent ${filename.slice(6).split(".")[0]}` : `${engine === "codex" ? "Codex" : "Claude"} session`),
+      title: previous?.title ?? (filename.startsWith("agent-") ? `Subagent ${filename.slice(6).split(".")[0]}` : `${ENGINE_LABEL[engine]} session`),
       engine,
       kind: previous?.kind ?? (filename.startsWith("agent-") ? "subagent" : "session"),
       fmt: engine,

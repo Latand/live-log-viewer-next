@@ -240,7 +240,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const parentConversation = entry.parent ? conversationByPath.get(entry.parent) ?? null : null;
     const owner = accountManager.resolveTranscriptOwner(engine, entry.path);
     const mtimeMs = entry.mtime * 1000;
-    const observedTurn = transcriptTurnResult(entry.path, entry.size, mtimeMs, engine === "codex");
+    const observedTurn = transcriptTurnResult(entry.path, entry.size, mtimeMs, engine);
     const hostedPath = hostedPaths.has(entry.path);
     const parsed = observedTurn.complete ? hostFencedTurn(observedTurn, hostedPath) : null;
     const releasedDeadTurn = deadStalledTurn(entry, existing, hostedPath);
@@ -249,7 +249,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       || currentPaneWall(entry)
       || releasedDeadTurn
     )) {
-      recordTranscriptComposerRelease(entry.path, entry.size, mtimeMs, engine === "codex");
+      recordTranscriptComposerRelease(entry.path, entry.size, mtimeMs, engine);
     }
     const turn = projectedInventoryTurn(entry, parsed, existing, hostedPath);
     const currentProfile = launchProfileByPath.get(entry.path)
@@ -504,7 +504,7 @@ function completeProviderTurnObservation(
   } catch (error) {
     return virtualSource && (error as NodeJS.ErrnoException).code === "ENOENT";
   }
-  const observed = transcriptTurnResult(source.path, before.size, before.mtimeMs, conversation.engine === "codex");
+  const observed = transcriptTurnResult(source.path, before.size, before.mtimeMs, conversation.engine);
   if (!observed.complete) return false;
   let after: fs.Stats;
   try {

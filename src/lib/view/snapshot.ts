@@ -55,12 +55,12 @@ function validateExplicitMembership(session: StoredViewSession, explicit: readon
 
 function transcriptEntry(byPath: ReadonlyMap<string, FileEntry>, pathname: string): FileEntry | undefined {
   const entry = byPath.get(pathname);
-  return entry?.engine === "claude" || entry?.engine === "codex" ? entry : undefined;
+  return entry?.engine === "claude" || entry?.engine === "codex" || entry?.engine === "openclaw" ? entry : undefined;
 }
 
 function conversation(entry: FileEntry): SnapshotConversation {
   const attention = entry.pendingQuestion ? { state: "question" as const, since: entry.pendingQuestion.askedAt } : entry.waitingInput ? { state: "terminal" as const, since: new Date(entry.waitingInput.since * 1000).toISOString() } : entry.activity === "stalled" ? { state: "stalled" as const, since: new Date(entry.mtime * 1000).toISOString() } : null;
-  return { path: entry.path, project: entry.project, title: entry.title, engine: entry.engine as "claude" | "codex", model: entry.model, activity: entry.activity, proc: entry.proc, attention };
+  return { path: entry.path, project: entry.project, title: entry.title, engine: entry.engine as SnapshotConversation["engine"], model: entry.model, activity: entry.activity, proc: entry.proc, attention };
 }
 
 export async function composeSnapshot(input: { request: SnapshotRequestV1; files: FileEntry[]; scannerDurationMs: number; scannerScannedAt?: number; siblings: ViewerSnapshotV1["siblings"]; registry?: RegistryFile; snapshotSpawns?: (launchIds: readonly string[]) => SnapshotSpawnProjection; now?: number }): Promise<ViewerSnapshotV1> {

@@ -8,11 +8,18 @@ import type { TurnState } from "@/lib/accounts/migration/contracts";
 export type RootKey =
   | "codex-sessions"
   | "claude-projects"
-  | "claude-tasks";
+  | "claude-tasks"
+  | "openclaw-sessions";
 
-export type Engine = "codex" | "claude" | "shell";
+export type Engine = "codex" | "claude" | "shell" | "openclaw";
 export type Activity = "live" | "recent" | "stalled" | "idle";
-export type Fmt = "codex" | "claude" | "plain";
+export type Fmt = "codex" | "claude" | "plain" | "openclaw";
+
+/** The engines that write a structured transcript the Viewer parses — every
+    `Engine` except `"shell"`, whose background tasks are plain output logs.
+    Named once so the readers that must switch on the dialect (title and search
+    text, turn state, model, effort, the feed) all agree on the same set. */
+export type TranscriptEngine = Extract<Engine, "codex" | "claude" | "openclaw">;
 
 declare const epochSecondsBrand: unique symbol;
 /**

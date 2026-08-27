@@ -342,8 +342,8 @@ function persistedTurnState(
   engine: "codex" | "claude",
   prefixTruncated: boolean,
 ) {
-  if (engine === "claude") return turnStateFromRecords(records, false);
-  if (!prefixTruncated) return turnStateFromRecords(records, true, true);
+  if (engine === "claude") return turnStateFromRecords(records, "claude");
+  if (!prefixTruncated) return turnStateFromRecords(records, "codex", true);
 
   const turnStartIndex = records.findLastIndex((record) => {
     const payload = record.payload;
@@ -352,12 +352,12 @@ function persistedTurnState(
     return type === "task_started" || type === "turn_started" || type === "user_message";
   });
   if (turnStartIndex < 0) {
-    const turn = turnStateFromRecords(records, true, true);
+    const turn = turnStateFromRecords(records, "codex", true);
     return turn.state === "terminal"
       ? { state: "unknown" as const, source: "empty" as const, terminalAt: null }
       : turn;
   }
-  return turnStateFromRecords(records.slice(turnStartIndex), true, true);
+  return turnStateFromRecords(records.slice(turnStartIndex), "codex", true);
 }
 
 async function refreshStructuredTranscriptState(registry: AgentRegistry): Promise<void> {

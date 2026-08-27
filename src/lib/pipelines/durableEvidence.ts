@@ -96,7 +96,7 @@ export async function durableStageTurnEvidence(
   const read = await readStableTailRecords(transcriptPath);
   if (read.integrity !== "complete") return null;
   const codex = engine === "codex";
-  const turn = turnStateFromRecords(read.records, codex);
+  const turn = turnStateFromRecords(read.records, codex ? "codex" : "claude");
   let fallbackTs = 0;
   try {
     fallbackTs = fs.statSync(transcriptPath).mtimeMs;
