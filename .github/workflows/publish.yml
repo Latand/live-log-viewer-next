@@ -236,25 +236,81 @@ jobs:
         run: bun test bin/server-runtime.test.ts bin/mcp-server.test.ts docs/media/issue-626/evidence.test.ts
 
       - name: Publish package with OIDC
+        id: publish
         if: steps.registry.outputs.exists == 'false'
-        run: npm publish "${{ steps.package.outputs.tarball }}"
-
-      - name: Verify published package version
         shell: bash
         env:
           PACKAGE_NAME: ${{ steps.registry.outputs.package_name }}
           PACKAGE_VERSION: ${{ steps.registry.outputs.package_version }}
+          PUBLISH_TAG: latest
+        run: |
+          set -euo pipefail
+
+          publish_json="$(npm publish "${{ steps.package.outputs.tarball }}" --tag "$PUBLISH_TAG" --json)"
+          printf '%s\n' "$publish_json"
+          publish_integrity="$(node -e '
+            const value = JSON.parse(process.argv[1]);
+            const packageName = process.argv[2];
+            const packageVersion = process.argv[3];
+            const candidates = value && typeof value === "object"
+              ? [value, ...Object.values(value)]
+              : [];
+            const published = candidates.find((candidate) =>
+              candidate && typeof candidate === "object"
+                && candidate.name === packageName
+                && candidate.version === packageVersion
+            );
+            if (!published || typeof published.integrity !== "string" || published.integrity.length === 0) {
+              throw new Error("npm publish returned no tarball integrity");
+            }
+            process.stdout.write(published.integrity);
+          ' "$publish_json" "$PACKAGE_NAME" "$PACKAGE_VERSION")"
+          printf 'integrity=%s\n' "$publish_integrity" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$PUBLISH_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Verify published package version
+        id: verify
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.registry.outputs.package_name }}
+          PACKAGE_VERSION: ${{ steps.registry.outputs.package_version }}
+          PUBLISHED_THIS_RUN: ${{ steps.registry.outputs.exists == 'false' }}
+          PUBLISH_TAG: ${{ steps.publish.outputs.tag || 'latest' }}
+          EXPECTED_INTEGRITY: ${{ steps.publish.outputs.integrity }}
         run: |
           set -euo pipefail
 
           error_file="$(mktemp "${RUNNER_TEMP}/npm-verify.XXXXXX")"
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            set +e
-            published_json="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version --json 2>"$error_file")"
-            view_status=$?
-            set -e
+          verify_delays=(5 10 20 30 45 60 75 90 120 120)
+          visible=false
 
-            if [ "$view_status" -eq 0 ]; then
+          registry_view() {
+            local output_variable="$1"
+            shift
+            local registry_output
+
+            set +e
+            registry_output="$(npm view "$@" --json 2>"$error_file")"
+            registry_status=$?
+            set -e
+            printf -v "$output_variable" '%s' "$registry_output"
+          }
+
+          registry_returned_e404() {
+            grep -Eq '(^|[[:space:]])E404([[:space:]]|$)' "$error_file"
+          }
+
+          fail_registry_view() {
+            local field="$1"
+            cat "$error_file" >&2
+            echo "Registry verification failed while reading ${field} for ${PACKAGE_NAME}@${PACKAGE_VERSION}" >&2
+            exit "$registry_status"
+          }
+
+          for ((attempt = 0; attempt <= ${#verify_delays[@]}; attempt += 1)); do
+            pending_field=""
+            registry_view published_json "${PACKAGE_NAME}@${PACKAGE_VERSION}" version
+            if [ "$registry_status" -eq 0 ]; then
               published_version="$(node -e '
                 const value = JSON.parse(process.argv[1]);
                 if (typeof value !== "string") throw new Error("npm returned a non-string version");
@@ -264,15 +320,91 @@ jobs:
                 echo "Registry returned $published_version for ${PACKAGE_NAME}@${PACKAGE_VERSION}" >&2
                 exit 1
               fi
-              echo "Verified ${PACKAGE_NAME}@${PACKAGE_VERSION} in the npm registry"
-              exit 0
+            elif registry_returned_e404; then
+              pending_field="package version"
+            else
+              fail_registry_view "package version"
             fi
 
-            if [ "$attempt" -lt 12 ]; then
-              sleep 5
+            if [ -z "$pending_field" ]; then
+              registry_view dist_tags_json "$PACKAGE_NAME" dist-tags
+              if [ "$registry_status" -eq 0 ]; then
+                published_tag_version="$(node -e '
+                  const value = JSON.parse(process.argv[1]);
+                  const tag = process.argv[2];
+                  if (!value || typeof value !== "object" || typeof value[tag] !== "string") {
+                    throw new Error(`npm returned no ${tag} dist-tag`);
+                  }
+                  process.stdout.write(value[tag]);
+                ' "$dist_tags_json" "$PUBLISH_TAG")"
+                if [ "$published_tag_version" != "$PACKAGE_VERSION" ]; then
+                  echo "Registry dist-tag ${PUBLISH_TAG} points at ${published_tag_version}, expected ${PACKAGE_VERSION}" >&2
+                  exit 1
+                fi
+              elif registry_returned_e404; then
+                pending_field="dist-tag ${PUBLISH_TAG}"
+              else
+                fail_registry_view "dist-tag ${PUBLISH_TAG}"
+              fi
+            fi
+
+            if [ -z "$pending_field" ]; then
+              registry_view integrity_json "${PACKAGE_NAME}@${PACKAGE_VERSION}" dist.integrity
+              if [ "$registry_status" -eq 0 ]; then
+                published_integrity="$(node -e '
+                  const value = JSON.parse(process.argv[1]);
+                  if (typeof value !== "string" || value.length === 0) {
+                    throw new Error("npm returned no dist.integrity");
+                  }
+                  process.stdout.write(value);
+                ' "$integrity_json")"
+                if [ "$PUBLISHED_THIS_RUN" = "true" ]; then
+                  if [ -z "$EXPECTED_INTEGRITY" ]; then
+                    echo "The successful publish produced no integrity output" >&2
+                    exit 1
+                  fi
+                  if [ "$published_integrity" != "$EXPECTED_INTEGRITY" ]; then
+                    echo "Registry dist.integrity does not match the published tarball" >&2
+                    exit 1
+                  fi
+                fi
+              elif registry_returned_e404; then
+                pending_field="dist.integrity"
+              else
+                fail_registry_view "dist.integrity"
+              fi
+            fi
+
+            if [ -z "$pending_field" ]; then
+              visible=true
+              break
+            fi
+
+            if (( attempt < ${#verify_delays[@]} )); then
+              delay="${verify_delays[$attempt]}"
+              echo "${pending_field} for ${PACKAGE_NAME}@${PACKAGE_VERSION} is not visible yet; retrying in ${delay}s"
+              sleep "$delay"
             fi
           done
 
+          if [ "$visible" = "true" ]; then
+            printf 'visibility=visible\n' >> "$GITHUB_OUTPUT"
+            echo "Verified ${PACKAGE_NAME}@${PACKAGE_VERSION}, dist-tag ${PUBLISH_TAG}, and dist.integrity in the npm registry"
+            exit 0
+          fi
+
+          if [ "$PUBLISHED_THIS_RUN" = "true" ]; then
+            message="Published ${PACKAGE_NAME}@${PACKAGE_VERSION}, not yet visible after registry verification polling. Do not publish or retag it again."
+            echo "::warning title=Published, not yet visible::$message"
+            {
+              echo "### Published, not yet visible"
+              echo
+              echo "$message"
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf 'visibility=pending\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           cat "$error_file" >&2
-          echo "Could not verify ${PACKAGE_NAME}@${PACKAGE_VERSION} in the npm registry" >&2
+          echo "Timed out waiting for ${PACKAGE_NAME}@${PACKAGE_VERSION} to become visible" >&2
           exit 1
