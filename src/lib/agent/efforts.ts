@@ -38,12 +38,21 @@ const CODEX_MODEL_SCALES: readonly (readonly [RegExp, readonly string[]])[] = [
   [/^gpt-5\.6\b/, ["low", "medium", "high", "xhigh", "max"]],
 ];
 
+/* OpenClaw's `--thinking` ladder, kept out of ENGINE_EFFORTS because it is a
+   display scale: the Viewer reads a recorded tier off the transcript and
+   offers no OpenClaw selector. `off` is the bottom rung; `adaptive` hands the
+   choice to the model and so is not a rung at all — it stays out of the scale
+   and reads as an unranked tier, which hides the meter and leaves the value in
+   the chip tooltip. */
+const OPENCLAW_EFFORTS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
 /** Reasoning tiers a given engine+model pair can run at, lowest first; null
     for engines without a reasoning dial (shell). Model may be the viewer's
     display-shortened id — matching is prefix-based on the codex slug, and
     claude models all share one CLI scale. */
 export function effortScale(engine: string, model: string | null | undefined): readonly string[] | null {
   if (engine === "claude") return ENGINE_EFFORTS.claude;
+  if (engine === "openclaw") return OPENCLAW_EFFORTS;
   if (engine !== "codex") return null;
   const id = (model ?? "").trim().toLowerCase();
   for (const [re, scale] of CODEX_MODEL_SCALES) {

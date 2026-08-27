@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
 import type { TurnState } from "@/lib/accounts/migration/contracts";
-import type { Activity, RootKey } from "../types";
+import type { Activity, RootKey, TranscriptEngine } from "../types";
 import { globalCache } from "./caches";
 import { readHead } from "./head";
 import { outputHolders } from "./process";
@@ -10,7 +10,7 @@ import { claudeRecoveryTailRelease, turnStateFromRecords as structuredTurnStateF
 type CachedTurnEvidence = {
   size: number;
   mtimeMs: number;
-  codex: boolean;
+  engine: TranscriptEngine;
   authoritative: boolean;
   turn: TurnState;
   composerReleased: boolean;
@@ -19,7 +19,10 @@ type CachedTurnEvidence = {
 
 globalCache<unknown>("turn").clear();
 globalCache<unknown>("turn-evidence-v1").clear();
-const turnEvidenceCache = globalCache<CachedTurnEvidence>("turn-evidence-v2");
+/* v3 replaces the entry's `codex: boolean` discriminator with the engine, so a
+   v2 entry surviving a hot reload can no longer be matched by identity. */
+globalCache<unknown>("turn-evidence-v2").clear();
+const turnEvidenceCache = globalCache<CachedTurnEvidence>("turn-evidence-v3");
 const TURN_EVIDENCE_CACHE_CAP = 4_096;
 
 /** Shared tail read+parse, keyed by path and file identity. Within one
@@ -143,11 +146,18 @@ export interface TranscriptTurnResult {
 function recoveryRelease(
   turn: TurnState,
   records: Record<string, unknown>[],
-  codex: boolean,
+  engine: TranscriptEngine,
   authoritative: boolean,
 ): boolean {
-  if (codex || !authoritative || turn.state !== "terminal") return false;
+  if (engine !== "claude" || !authoritative || turn.state !== "terminal") return false;
   return claudeRecoveryTailRelease(records) !== null;
+}
+
+/** The transcript dialect a scanner root's files are written in. */
+export function transcriptEngineForRoot(root: RootKey): TranscriptEngine {
+  if (root === "codex-sessions") return "codex";
+  if (root === "openclaw-sessions") return "openclaw";
+  return "claude";
 }
 
 /** Complete, identity-bound turn evidence shared by scanner and migration
@@ -157,12 +167,12 @@ export function transcriptTurnResult(
   pathname: string,
   size: number,
   mtimeMs: number,
-  codex: boolean,
+  engine: TranscriptEngine,
   authoritative = true,
 ): TranscriptTurnResult {
   const key = `${authoritative ? "authoritative" : "activity"}:${pathname}`;
   const cached = turnEvidenceCache.get(key);
-  if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.codex === codex) {
+  if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.engine === engine) {
     storeTurnEvidence(pathname, cached);
     return {
       turn: { ...cached.turn },
@@ -172,26 +182,26 @@ export function transcriptTurnResult(
     };
   }
   const tail = tailRecordsResult(pathname, size, mtimeMs);
-  const turn = structuredTurnStateFromRecords(tail.records, codex, authoritative);
-  const recoveryReleased = tail.complete && recoveryRelease(turn, tail.records, codex, authoritative);
+  const turn = structuredTurnStateFromRecords(tail.records, engine, authoritative);
+  const recoveryReleased = tail.complete && recoveryRelease(turn, tail.records, engine, authoritative);
   if (tail.complete) {
-    storeTurnEvidence(pathname, { size, mtimeMs, codex, authoritative, turn, composerReleased: false, recoveryReleased });
+    storeTurnEvidence(pathname, { size, mtimeMs, engine, authoritative, turn, composerReleased: false, recoveryReleased });
     const companionAuthoritative = !authoritative;
     const companionKey = `${companionAuthoritative ? "authoritative" : "activity"}:${pathname}`;
     const cachedCompanion = turnEvidenceCache.get(companionKey);
     const companionComposerReleased = cachedCompanion?.size === size
       && cachedCompanion.mtimeMs === mtimeMs
-      && cachedCompanion.codex === codex
+      && cachedCompanion.engine === engine
       && cachedCompanion.composerReleased;
-    const companionTurn = structuredTurnStateFromRecords(tail.records, codex, companionAuthoritative);
+    const companionTurn = structuredTurnStateFromRecords(tail.records, engine, companionAuthoritative);
     storeTurnEvidence(pathname, {
       size,
       mtimeMs,
-      codex,
+      engine,
       authoritative: companionAuthoritative,
       turn: companionTurn,
       composerReleased: companionComposerReleased,
-      recoveryReleased: recoveryRelease(companionTurn, tail.records, codex, companionAuthoritative),
+      recoveryReleased: recoveryRelease(companionTurn, tail.records, engine, companionAuthoritative),
     });
   }
   return { turn, complete: tail.complete, composerReleased: false, recoveryReleased };
@@ -205,11 +215,11 @@ export function cachedTranscriptTurn(
   pathname: string,
   size: number,
   mtimeMs: number,
-  codex: boolean,
+  engine: TranscriptEngine,
 ): TurnState | null {
   for (const key of [`activity:${pathname}`, `authoritative:${pathname}`]) {
     const cached = turnEvidenceCache.get(key);
-    if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.codex === codex) {
+    if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.engine === engine) {
       return { ...cached.turn };
     }
   }
@@ -227,17 +237,17 @@ export function primeTranscriptTurnEvidence(
   pathname: string,
   size: number,
   mtimeMs: number,
-  codex: boolean,
+  engine: TranscriptEngine,
   turn: TurnState,
   options: { authoritative?: boolean; composerReleased?: boolean } = {},
 ): void {
   const authoritative = options.authoritative ?? true;
   const composerReleased = options.composerReleased ?? false;
-  if (!codex && authoritative && turn.state === "terminal") return;
+  if (engine === "claude" && authoritative && turn.state === "terminal") return;
   storeTurnEvidence(pathname, {
     size,
     mtimeMs,
-    codex,
+    engine,
     authoritative,
     turn: { ...turn },
     composerReleased,
@@ -249,11 +259,11 @@ export function recordTranscriptComposerRelease(
   pathname: string,
   size: number,
   mtimeMs: number,
-  codex: boolean,
+  engine: TranscriptEngine,
 ): void {
   const key = `authoritative:${pathname}`;
   const cached = turnEvidenceCache.get(key);
-  if (!cached || cached.size !== size || cached.mtimeMs !== mtimeMs || cached.codex !== codex) return;
+  if (!cached || cached.size !== size || cached.mtimeMs !== mtimeMs || cached.engine !== engine) return;
   storeTurnEvidence(pathname, { ...cached, composerReleased: true });
 }
 
@@ -397,8 +407,8 @@ function readTail(pathname: string, size: number, nbytes: number): TailRecordsRe
 }
 
 /** Compatibility projection retained for scanner callers. */
-export function turnStateFromRecords(records: Record<string, unknown>[], codex: boolean): "done" | "busy" | null {
-  const state = structuredTurnStateFromRecords(records, codex).state;
+export function turnStateFromRecords(records: Record<string, unknown>[], engine: TranscriptEngine): "done" | "busy" | null {
+  const state = structuredTurnStateFromRecords(records, engine).state;
   return state === "terminal" ? "done" : state === "busy" ? "busy" : null;
 }
 
@@ -425,7 +435,7 @@ export function activityVerdict(
   let complete = true;
   if (pathname.endsWith(".jsonl")) {
     const mtimeMs = mtime * 1000;
-    const turn = transcriptTurnResult(pathname, size, mtimeMs, root.startsWith("codex"), false);
+    const turn = transcriptTurnResult(pathname, size, mtimeMs, transcriptEngineForRoot(root), false);
     const state = turn.turn.state === "terminal" ? "done" : turn.turn.state === "busy" ? "busy" : null;
     complete = turn.complete;
     if (state === "busy") {

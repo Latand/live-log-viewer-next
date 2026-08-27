@@ -13,7 +13,7 @@ import { discoverFiles, discoverFilesWithProjectCatalog, type RawEntry } from ".
 import { projectForCwd } from "./describe";
 import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
 import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./projectState";
-import { FILE_CAP } from "./roots";
+import { FILE_CAP, openclawSessionRoots } from "./roots";
 import { DEFAULT_SCHEME_CARDS_PER_PROJECT } from "./schemeWindow";
 
 async function writeFixture(pathname: string, content: string, mtimeSeconds: number): Promise<void> {
@@ -67,6 +67,7 @@ test("pure project-catalog discovery leaves the state directory unchanged", asyn
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
@@ -87,6 +88,7 @@ test("request refreshes persist the per-file scanner index", async () => {
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const transcript = path.join(roots["codex-sessions"], "indexed.jsonl");
@@ -117,6 +119,7 @@ test("a poisoned durable alias source defers only itself in the persist scan", a
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     await mkdir(process.env.LLV_STATE_DIR, { recursive: true });
@@ -162,6 +165,7 @@ test("project catalog persistence repairs private modes and atomically replaces 
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const transcript = path.join(roots["codex-sessions"], "private.jsonl");
@@ -209,6 +213,7 @@ test("a non-ENOENT directory failure leaves the completed catalog index authorit
     "codex-sessions": path.join(base, "codex-sessions"),
     "claude-projects": path.join(base, "claude-projects"),
     "claude-tasks": path.join(base, "claude-tasks"),
+    "openclaw-sessions": path.join(base, "openclaw"),
   };
   try {
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
@@ -251,6 +256,7 @@ test("project index publication failures preserve the canonical file, clean temp
     "codex-sessions": path.join(base, "codex-sessions"),
     "claude-projects": path.join(base, "claude-projects"),
     "claude-tasks": path.join(base, "claude-tasks"),
+    "openclaw-sessions": path.join(base, "openclaw"),
   };
   try {
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
@@ -332,6 +338,7 @@ test("an append reparses its file and reuses unchanged persisted summaries", asy
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const unchanged = path.join(roots["claude-projects"], "incremental", "session", "subagents", "agent-unchanged.jsonl");
@@ -380,6 +387,7 @@ test("a same-size transcript rewrite with a newer mtime reparses cwd and project
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const transcript = path.join(roots["codex-sessions"], "rewritten.jsonl");
@@ -417,6 +425,7 @@ test("larger Codex and Claude rewrites replace cached head metadata", async () =
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const codex = path.join(roots["codex-sessions"], "rewritten.jsonl");
@@ -474,6 +483,7 @@ test("Codex and Claude true appends retain head metadata through repeated EIO an
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const codex = path.join(roots["codex-sessions"], "append-recovery.jsonl");
@@ -557,6 +567,7 @@ test("a one-shot transcript read failure stays incomplete and recovers in memory
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const transcript = path.join(roots["codex-sessions"], "rewritten.jsonl");
@@ -622,6 +633,7 @@ test("first-ever repeated transcript read failures publish and persist only afte
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const transcript = path.join(roots["codex-sessions"], "first.jsonl");
@@ -678,6 +690,7 @@ test("a same-size subagent sidecar rewrite with a newer mtime reparses its title
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const transcript = path.join(roots["claude-projects"], "sidecar", "session", "subagents", "agent-rewritten.jsonl");
@@ -711,6 +724,7 @@ test("a one-shot sidecar read failure stays incomplete and recovers in memory an
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const transcript = path.join(roots["claude-projects"], "sidecar", "session", "subagents", "agent-x.jsonl");
@@ -767,6 +781,7 @@ test("a corrupt per-file scanner index falls back to a full parse and repairs it
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const transcript = path.join(roots["claude-projects"], "recovered", "session", "subagents", "agent-child.jsonl");
@@ -794,6 +809,7 @@ test("a pinned discovery identifies only rows outside the global scheme window",
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const transcripts: string[] = [];
@@ -953,6 +969,7 @@ test("project catalog carries the canonical root for projects outside the capped
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const repo = path.join(base, "catalog-project");
@@ -996,6 +1013,7 @@ test("archived migration predecessors cannot outvote the current project root", 
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const archivedPaths = [
@@ -1061,6 +1079,7 @@ test("persisted scheme metadata excludes unbounded first-prompt text", async () 
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const marker = "PROMPT_TAIL_MUST_STAY_OUT_OF_SCHEME_STATE";
@@ -1106,6 +1125,7 @@ test("a legacy cached Claude subagent is migrated into the conversation catalog"
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const subagent = path.join(roots["claude-projects"], "legacy-project", "session", "subagents", "agent-child.jsonl");
@@ -1156,6 +1176,7 @@ test("project catalog omits task-only residue from a clean state", async () => {
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const taskPath = path.join(roots["claude-tasks"], "orphan-project", "missing-session", "tasks", "task.output");
@@ -1184,6 +1205,7 @@ test("a Claude transcript appearing in a previously sessionless project director
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const repository = path.join(base, "late-session-repository");
@@ -1227,6 +1249,7 @@ test("first-ever EIO and EACCES task twin lookups publish only after recovery", 
         "codex-sessions": path.join(base, "codex-sessions"),
         "claude-projects": path.join(base, "claude-projects"),
         "claude-tasks": path.join(base, "claude-tasks"),
+        "openclaw-sessions": path.join(base, "openclaw"),
       };
       await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
       const taskPath = path.join(roots["claude-tasks"], "project-a", "session-a", "tasks", "task-a.output");
@@ -1270,6 +1293,7 @@ test("a first-ever ENOTDIR task twin lookup stays incomplete and publishes no du
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const taskPath = path.join(roots["claude-tasks"], "project-a", "session-a", "tasks", "task-a.output");
@@ -1300,6 +1324,7 @@ test("project and conversation catalogs retain a project whose only transcript i
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const subagent = path.join(roots["claude-projects"], "project-only-child", "session", "subagents", "agent-child.jsonl");
@@ -1326,6 +1351,7 @@ test("discoverFiles preserves scanner filters, mtime ordering, and the per-proje
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const repository = path.join(base, "recent-project");
@@ -1398,6 +1424,7 @@ test("discoverFiles applies the card cap independently to each visible project",
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const projectA = path.join(base, "project-a");
@@ -1519,6 +1546,7 @@ test("discoverFiles keeps native Codex spawn parents outside the recent cap", as
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
 
@@ -1557,6 +1585,7 @@ test("discoverFilesWithProjectCatalog keeps quiet projects in the recent cap", a
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
 
@@ -1605,6 +1634,7 @@ test("registry launch cwd governs scheme caps and the uncapped project catalog",
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const paths: string[] = [];
@@ -1651,6 +1681,7 @@ test("discoverFilesWithProjectCatalog keeps a selected project inside the scheme
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
 
@@ -1706,6 +1737,7 @@ test("discoverFilesWithProjectCatalog refreshes cached projects when flow state 
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
 
@@ -1770,6 +1802,7 @@ test("current-production catalog records converge two legacy buckets for one rep
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all([...Object.values(roots), stateDir].map((root) => mkdir(root, { recursive: true })));
 
@@ -1889,6 +1922,7 @@ test("an ambiguous legacy project key defers catalog and board migration", async
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all([...Object.values(roots), stateDir].map((root) => mkdir(root, { recursive: true })));
 
@@ -1974,6 +2008,7 @@ test("demoted archived predecessors rank below live transcripts for the recency 
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
 
@@ -2027,6 +2062,7 @@ test("a live conversation keeps its card past the per-project card cap", async (
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const slug = path.join(roots["claude-projects"], "-repo");
@@ -2110,5 +2146,121 @@ test("a transcript reached through a symlinked account home has one identity in 
     if (previousClaudeHome === undefined) delete process.env.LLV_CLAUDE_HOME;
     else process.env.LLV_CLAUDE_HOME = previousClaudeHome;
     await rm(base, { recursive: true, force: true });
+  }
+});
+
+/* Issue #1207. An OpenClaw sessions directory holds several sidecar formats
+   beside the transcripts, and a scan that admitted them would multiply the
+   board's OpenClaw cards. Every identifier in the fixture is invented. */
+test("an OpenClaw agent tree yields one card per transcript and none for its sidecars", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-openclaw-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  const previousOpenclawStateDir = process.env.OPENCLAW_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  process.env.OPENCLAW_STATE_DIR = path.join(base, "openclaw");
+  try {
+    const workspace = path.join(base, "openclaw", "workspace");
+    await mkdir(workspace, { recursive: true });
+    const header = (id: string) => JSON.stringify({
+      type: "session",
+      version: 3,
+      id,
+      timestamp: "2026-08-27T09:00:00.000Z",
+      cwd: workspace,
+    });
+    const prompt = (text: string) => JSON.stringify({
+      type: "message",
+      id: "oc-user-1",
+      parentId: null,
+      timestamp: "2026-08-27T09:00:01.000Z",
+      message: { role: "user", content: text, timestamp: "2026-08-27T09:00:01.000Z" },
+    });
+
+    const mainSessions = path.join(base, "openclaw", "agents", "primary", "sessions");
+    const otherSessions = path.join(base, "openclaw", "agents", "secondary", "sessions");
+    const transcripts = [
+      path.join(mainSessions, "oc-session-alpha.jsonl"),
+      path.join(mainSessions, "oc-session-beta-topic-7.jsonl"),
+      path.join(otherSessions, "oc-session-gamma.jsonl"),
+    ];
+    for (const [index, transcript] of transcripts.entries()) {
+      await writeFixture(
+        transcript,
+        header(`oc-header-${index}`) + "\n" + prompt(`Invented prompt ${index}`) + "\n",
+        1_700_060_000 + index,
+      );
+    }
+    /* Everything the sessions directory holds that is NOT a conversation. */
+    const sidecars = [
+      path.join(mainSessions, "oc-session-alpha.trajectory.jsonl"),
+      path.join(mainSessions, "oc-session-alpha.checkpoint.oc-checkpoint-1.jsonl"),
+      path.join(mainSessions, "oc-session-alpha.acp-stream.jsonl"),
+      path.join(mainSessions, "oc-session-alpha.trajectory-path.json"),
+      path.join(mainSessions, "sessions.json"),
+      path.join(mainSessions, "oc-session-alpha.jsonl.pre-doctor-repair-2026-08-01T00-00-00.bak"),
+      path.join(mainSessions, "oc-session-alpha.jsonl.deleted.2026-08-01T00-00-00"),
+      path.join(mainSessions, "skills-prompts", "sha256", "aa", "invented-digest.txt"),
+    ];
+    for (const sidecar of sidecars) {
+      await writeFixture(sidecar, header("oc-header-sidecar") + "\n", 1_700_060_100);
+    }
+
+    const scan = await discoverFilesWithProjectCatalog(
+      [
+        ["openclaw-sessions", mainSessions],
+        ["openclaw-sessions", otherSessions],
+      ],
+      undefined,
+      { persist: false },
+    );
+    expect(scan.files.map((entry) => entry.path).sort()).toEqual([...transcripts].sort());
+    for (const entry of scan.files) {
+      expect(entry.engine).toBe("openclaw");
+      expect(entry.fmt).toBe("openclaw");
+      expect(entry.kind).toBe("session");
+      expect(entry.pid).toBeNull();
+    }
+    /* The title is the first prompt: OpenClaw writes no summary record. */
+    expect(scan.files.find((entry) => entry.path === transcripts[0])?.title).toBe("Invented prompt 0");
+    /* And the same transcripts enter the complete list/search catalog. */
+    const catalog = conversationCatalogSnapshot();
+    expect(catalog.map((item) => item.path).sort()).toEqual([...transcripts].sort());
+    expect(catalog.every((item) => item.engine === "openclaw" && item.fmt === "openclaw")).toBe(true);
+    expect(catalog.find((item) => item.path === transcripts[0])?.title).toBe("Invented prompt 0");
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    if (previousOpenclawStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
+    else process.env.OPENCLAW_STATE_DIR = previousOpenclawStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("openclawSessionRoots returns one root per agent id under the configured state dir", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-openclaw-roots-"));
+  const previousOpenclawStateDir = process.env.OPENCLAW_STATE_DIR;
+  process.env.OPENCLAW_STATE_DIR = path.join(base, "state-dir");
+  try {
+    await mkdir(path.join(base, "state-dir", "agents", "primary", "sessions"), { recursive: true });
+    await mkdir(path.join(base, "state-dir", "agents", "secondary", "sessions"), { recursive: true });
+    expect(openclawSessionRoots()).toEqual([
+      path.join(base, "state-dir", "agents", "primary", "sessions"),
+      path.join(base, "state-dir", "agents", "secondary", "sessions"),
+    ]);
+  } finally {
+    if (previousOpenclawStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
+    else process.env.OPENCLAW_STATE_DIR = previousOpenclawStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("openclawSessionRoots is empty when the state directory does not exist", () => {
+  const previousOpenclawStateDir = process.env.OPENCLAW_STATE_DIR;
+  process.env.OPENCLAW_STATE_DIR = path.join(os.tmpdir(), "llv-openclaw-absent", "state");
+  try {
+    expect(openclawSessionRoots()).toEqual([]);
+  } finally {
+    if (previousOpenclawStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
+    else process.env.OPENCLAW_STATE_DIR = previousOpenclawStateDir;
   }
 });

@@ -13,7 +13,7 @@ import {
 } from "@/lib/projects/aliases";
 import { displayNameFromProjectIdentity } from "@/lib/projects/identity";
 
-import type { ProjectCatalogEntry } from "../types";
+import type { Engine, Fmt, ProjectCatalogEntry } from "../types";
 import { replaceConversationCatalog, type ConversationCatalogEntry } from "./conversationCatalog";
 import {
   describeFile,
@@ -50,8 +50,8 @@ type CachedProjectFile = {
   nativeParentThreadId?: string | null;
   nativeForkSourceThreadId?: string | null;
   title?: string;
-  engine?: "codex" | "claude" | "shell";
-  fmt?: "codex" | "claude" | "plain";
+  engine?: Engine;
+  fmt?: Fmt;
 };
 
 export type ParsedFileSummary = FileDescription;
@@ -60,8 +60,8 @@ type ProjectCatalogFile = CachedProjectFile & {
   path: string;
   title: string;
   titleCached: boolean;
-  engine: "codex" | "claude" | "shell";
-  fmt: "codex" | "claude" | "plain";
+  engine: Engine;
+  fmt: Fmt;
 };
 
 type ProjectCatalogState = {
@@ -121,7 +121,7 @@ function readState(): ProjectCatalogState {
       if (!value || typeof value !== "object" || Array.isArray(value)) continue;
       const file = value as Partial<CachedProjectFile>;
       if (
-        (file.rootName !== "codex-sessions" && file.rootName !== "claude-projects" && file.rootName !== "claude-tasks") ||
+        (file.rootName !== "codex-sessions" && file.rootName !== "claude-projects" && file.rootName !== "claude-tasks" && file.rootName !== "openclaw-sessions") ||
         typeof file.size !== "number" ||
         typeof file.mtimeMs !== "number" ||
         typeof file.stateKey !== "string" ||
@@ -133,8 +133,8 @@ function readState(): ProjectCatalogState {
       ) {
         continue;
       }
-      const engine = file.engine === "codex" || file.engine === "claude" || file.engine === "shell" ? file.engine : undefined;
-      const fmt = file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" ? file.fmt : undefined;
+      const engine = file.engine === "codex" || file.engine === "claude" || file.engine === "shell" || file.engine === "openclaw" ? file.engine : undefined;
+      const fmt = file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" || file.fmt === "openclaw" ? file.fmt : undefined;
       const cwd = typeof file.cwd === "string" ? file.cwd : file.cwd === null ? null : undefined;
       const sessionStartedAt = typeof file.sessionStartedAt === "string"
         ? file.sessionStartedAt
@@ -235,18 +235,22 @@ function writeState(state: ProjectCatalogState): void {
 }
 
 function isConversation(rootName: RawEntry["rootName"], kind: string): boolean {
-  return rootName === "codex-sessions" || (rootName === "claude-projects" && (kind === "session" || kind === "subagent"));
+  return rootName === "codex-sessions"
+    || rootName === "openclaw-sessions"
+    || (rootName === "claude-projects" && (kind === "session" || kind === "subagent"));
 }
 
 function engineForRoot(rootName: RawEntry["rootName"]): ProjectCatalogFile["engine"] {
   if (rootName === "codex-sessions") return "codex";
   if (rootName === "claude-projects") return "claude";
+  if (rootName === "openclaw-sessions") return "openclaw";
   return "shell";
 }
 
 function fmtForRoot(rootName: RawEntry["rootName"]): ProjectCatalogFile["fmt"] {
   if (rootName === "codex-sessions") return "codex";
   if (rootName === "claude-projects") return "claude";
+  if (rootName === "openclaw-sessions") return "openclaw";
   return "plain";
 }
 
@@ -255,6 +259,7 @@ function fallbackTitle(raw: RawEntry, kind: string): string {
   if (kind === "subagent") return "Subagent " + filename.slice("agent-".length).split(".")[0];
   if (raw.rootName === "codex-sessions") return "Codex session";
   if (raw.rootName === "claude-projects") return "Claude session";
+  if (raw.rootName === "openclaw-sessions") return "OpenClaw session";
   return "Background task " + filename.split(".")[0];
 }
 
@@ -579,7 +584,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
       kind: file.kind,
       fmt: file.fmt,
     });
-    if (!file.session || (file.engine !== "codex" && file.engine !== "claude")) return;
+    if (!file.session || (file.engine !== "codex" && file.engine !== "claude" && file.engine !== "openclaw")) return;
     conversationCatalog.push({
       path: file.path,
       root: file.rootName,

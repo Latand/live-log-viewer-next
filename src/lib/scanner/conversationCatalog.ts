@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises";
 
-import type { FileEntry, Fmt, RootKey } from "../types";
+import type { FileEntry, Fmt, RootKey, TranscriptEngine } from "../types";
 
 export interface ConversationCatalogEntry {
   path: string;
@@ -12,7 +12,7 @@ export interface ConversationCatalogEntry {
   worktree?: string;
   title: string;
   firstPrompt: string;
-  engine: "codex" | "claude";
+  engine: TranscriptEngine;
   kind: string;
   fmt: Fmt;
   /** Unix seconds. */

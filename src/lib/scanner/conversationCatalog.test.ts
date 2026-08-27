@@ -131,3 +131,36 @@ test("a fresh transcript never reads idle in list rows — activity carries the 
   expect(fresh.activity).toBe("recent");
   expect(aged.activity).toBe("idle");
 });
+
+/* Issue #1207: an OpenClaw conversation must be a first-class row in the
+   complete list, reachable by both title and first-prompt search. */
+test("an OpenClaw conversation lists and searches beside Claude and Codex rows", () => {
+  const openclaw: ConversationCatalogEntry = {
+    path: "/openclaw/agents/primary/sessions/oc-session-alpha.jsonl",
+    root: "openclaw-sessions",
+    name: "oc-session-alpha.jsonl",
+    project: "viewer",
+    title: "Draft the cobalt orchard note",
+    firstPrompt: "Draft the cobalt orchard note about seedlings",
+    engine: "openclaw",
+    kind: "session",
+    fmt: "openclaw",
+    mtime: 9,
+    size: 512,
+  };
+  const catalog = [entry(1), openclaw, entry(2)];
+
+  expect(paginateConversationCatalog(catalog, { project: "viewer" }).items.map((item) => item.path))
+    .toContain(openclaw.path);
+  expect(paginateConversationCatalog(catalog, { query: "cobalt orchard" }).items.map((item) => item.path))
+    .toEqual([openclaw.path]);
+  /* Only the first prompt carries this phrase, so the match proves the
+     first-prompt column is searched and not just the title. */
+  expect(paginateConversationCatalog(catalog, { query: "seedlings" }).items.map((item) => item.path))
+    .toEqual([openclaw.path]);
+  expect(catalogEntryToFileEntry(openclaw)).toMatchObject({
+    engine: "openclaw",
+    fmt: "openclaw",
+    root: "openclaw-sessions",
+  });
+});

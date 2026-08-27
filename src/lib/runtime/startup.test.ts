@@ -2326,7 +2326,7 @@ test("startup keeps a Codex host eligible when the bounded tail cuts off an unma
     },
     { timestamp: "2026-07-15T10:00:02.000Z", payload: { type: "task_complete", turn_id: "turn-1" } },
   ];
-  expect(turnStateFromRecords(transcriptRecords, true)).toBe("busy");
+  expect(turnStateFromRecords(transcriptRecords, "codex")).toBe("busy");
   addStructuredRestartConversation(registry, directory, {
     sessionId,
     status: "live",

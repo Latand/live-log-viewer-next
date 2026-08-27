@@ -7,7 +7,7 @@ import { reviewerBindingTargetsForRound } from "@/components/flows/flowModel";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
-import { type SwitchboardData, useSwitchboardData } from "./useSwitchboardData";
+import { isAwaitingUser, type SwitchboardData, useSwitchboardData } from "./useSwitchboardData";
 
 const dom = new Window({ url: "http://localhost/" });
 const globals = globalThis as Record<string, unknown>;
@@ -152,6 +152,39 @@ test("keeps every durable same-round reviewer binding out of standalone switchbo
   const standalonePaths = [data!.waiting, data!.working, data!.recent, data!.older]
     .flatMap((items) => items.map((item) => item.file.path));
   expect(standalonePaths).toEqual([builder.path]);
+
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+/* Issue #1207: a finished OpenClaw turn is the operator's to answer, so it must
+   reach the waiting bucket and the attention counter instead of sinking into
+   the recency buckets. Every path below is invented. */
+test("a recent OpenClaw conversation lands in the waiting bucket", async () => {
+  const openclaw = {
+    root: "openclaw-sessions" as const,
+    engine: "openclaw" as const,
+    fmt: "openclaw" as const,
+  };
+  const waiting = entry({ path: "/openclaw/sessions/oc-session-alpha.jsonl", ...openclaw });
+  const idle = entry({ path: "/openclaw/sessions/oc-session-beta.jsonl", ...openclaw, activity: "idle" });
+  /* An OpenClaw transcript whose card belongs to a tree is not a standalone
+     root, so it is not the operator's to answer on its own. */
+  const nested = entry({ path: "/openclaw/sessions/oc-session-gamma.jsonl", ...openclaw, parent: "/openclaw/sessions/oc-session-alpha.jsonl" });
+
+  expect(isAwaitingUser(waiting, 1_100)).toBe(true);
+  expect(isAwaitingUser(idle, 1_100)).toBe(false);
+  expect(isAwaitingUser(nested, 1_100)).toBe(false);
+
+  let data: SwitchboardData | null = null;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(<Probe files={[waiting, idle, nested]} flows={[]} onData={(next) => { data = next; }} />);
+  });
+
+  expect(data!.waiting.map((item) => item.file.path)).toEqual([waiting.path]);
 
   await act(async () => { root.unmount(); });
   host.remove();

@@ -116,7 +116,7 @@ function seedCompletedFiles(sandbox: string, stateDir: string): FileEntry[] {
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), `${JSON.stringify({
     version: 1,
-    schemaVersion: 9,
+    schemaVersion: 10,
     snapshot: { files, projectCatalog, complete: true },
   })}\n`);
   return files;

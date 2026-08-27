@@ -11,6 +11,11 @@ import { normalizeEdit, type DiffModel } from "./diff";
    language-neutral summary, and a small set of redacted argument chips. It is
    total: any `Record<string, unknown>` yields a valid result and never throws. */
 
+/** The engines a rendered row can be attributed to. Background-task job logs
+    render Codex-shaped rows under the `shell` engine, so `shell` is not a
+    member: every row this taxonomy produces belongs to one of these three. */
+export type FeedEngine = "claude" | "codex" | "openclaw";
+
 export type ToolFamily = "shell" | "read" | "write" | "edit" | "search" | "web" | "spawn" | "plan" | "mcp" | "other";
 
 export const TOOL_FAMILIES: readonly ToolFamily[] = ["shell", "read", "write", "edit", "search", "web", "spawn", "plan", "mcp", "other"];
@@ -184,7 +189,7 @@ function shortUrl(url: string): string {
 export function summarizeTool(
   tool: string,
   args: Record<string, unknown>,
-  engine: "claude" | "codex",
+  engine: FeedEngine,
   precomputedDiff?: DiffModel,
 ): ToolSummary {
   const family = familyOf(tool);
