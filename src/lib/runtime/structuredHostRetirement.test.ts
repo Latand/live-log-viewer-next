@@ -1,16 +1,23 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 
 import { afterEach, expect, test } from "bun:test";
 
 import type { RegistryFile } from "@/lib/agent/registry";
+import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import type { StructuredHostKillRef } from "@/lib/resources";
 
+import { ClaudeStreamBrokerHost, type ClaudeDeliveryLedger } from "./claudeStreamBrokerHost";
+import { determined, undetermined } from "./determinable";
+import { normalizeQueueEntry } from "./engineHost";
+import { FileRuntimeEventStore } from "./eventStore";
 import type { HandoffRow } from "./handoffQueue";
 import { NATIVE_MULTI_AGENT_DENY_FLAG } from "./hostActivityFlags";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
@@ -23,10 +30,13 @@ import {
   startStructuredHostRetirement,
   stopStructuredHostRetirement,
   STRUCTURED_HOST_RETIREMENT_INTERVAL_MS,
+  structuredHostRetirementBatch,
   structuredHostRetirementIdleMs,
   structuredHostRetirementJournalRecord,
+  structuredHostRetirementVerdict,
   type StructuredHostRetirementClause,
   type StructuredHostRetirementDependencies,
+  type StructuredHostRetirementSubject,
 } from "./structuredHostRetirement";
 
 /* Ids are assembled from parts: a session/conversation-shaped literal is what
@@ -124,12 +134,12 @@ async function sweep(over: StructuredHostRetirementDependencies = {}): Promise<S
        hold them would give; the stand-down itself has its own case below. */
     publicationState: () => "ready",
     snapshot: () => snapshot(),
-    handoffRows: () => [],
-    durableEventTail: () => 12,
-    realtimeBound: () => false,
-    orchestratorSeatConversations: () => new Set<string>(),
-    transcriptStat: () => ({ mtimeMs: NOW - 24 * 3_600_000 }),
-    processIdentity: () => HOST_IDENTITY,
+    handoffRows: () => determined([]),
+    durableEventTail: () => determined(12),
+    realtimeBound: () => determined(false),
+    orchestratorSeatConversations: () => determined(new Set<string>()),
+    transcriptStat: () => determined({ mtimeMs: NOW - 24 * 3_600_000 }),
+    processIdentity: () => determined(HOST_IDENTITY),
     processMemory: () => new Map([[HOST_PID, { rssBytes: 110 * 1024 * 1024, swapBytes: 332 * 1024 * 1024 }]]),
     ppidMap: () => new Map([[HOST_PID, 1]]),
     owned: () => true,
@@ -145,22 +155,49 @@ async function sweep(over: StructuredHostRetirementDependencies = {}): Promise<S
   return { terminated, report };
 }
 
+/** N qualifying candidates, so a batch bound can be observed deferring. Ids are
+    assembled from parts for the same reason the single fixture's are. */
+function manyCandidates(count: number): { entries: Record<string, unknown>; conversations: Record<string, unknown> } {
+  const entries: Record<string, unknown> = {};
+  const conversations: Record<string, unknown> = {};
+  for (let index = 0; index < count; index += 1) {
+    const session = [`${index}19f4906`, "4c21", "7b72", "9fbc", "9ec3b5ad1326"].join("-");
+    const conversationId = ["conversation", `9ec3b5ad1326be${index}f`].join("_");
+    entries[`claude:${session}`] = entry({ key: { engine: "claude", sessionId: session } });
+    conversations[conversationId] = conversation({
+      id: conversationId,
+      generations: [{ ...((conversation().generations as Record<string, unknown>[])[0]!), id: session }],
+    });
+  }
+  return { entries, conversations };
+}
+
 /** Clauses a case in this file has proven blocks retirement on its own. The
     last test asserts the predicate has no clause that nothing pins. */
 const pinnedClauses = new Set<StructuredHostRetirementClause>();
 
-/** Every clause case asserts the same two things: nothing was signalled, and
-    the audit names the clause that refused. */
+/** Every clause case asserts the same three things: nothing was signalled, the
+    audit names the clause that refused, and it says whether the clause refused
+    on an established fact or on one it could not determine. */
 async function refusedBy(
   clause: StructuredHostRetirementClause,
   over: StructuredHostRetirementDependencies,
+  kind: "established" | "undetermined" = "established",
 ): Promise<void> {
   const probe = await sweep(over);
   expect(probe.terminated).toEqual([]);
   expect(probe.report.retired).toEqual([]);
   expect(probe.report.refused.map((item) => item.clause)).toEqual([clause]);
+  expect(probe.report.refused[0]!.undetermined).toBe(kind === "undetermined" ? true : undefined);
   expect(probe.report.evaluated).toBe(1);
   pinnedClauses.add(clause);
+}
+
+/** The real `/proc` read in the shape every reader now speaks: an identity the
+    kernel will not give is undetermined, never a substitutable null. */
+function observedIdentity(pid: number) {
+  const identity = procBackend.processIdentity(pid);
+  return identity === null ? undetermined(`no kernel identity can be observed for pid ${pid}`) : determined(identity);
 }
 
 /* Every pid a fixture tree put on this machine, torn down one by one. NOT by
@@ -322,17 +359,17 @@ test("an undelivered handoff entry blocks retirement", async () => {
     enqueuedAt: "2026-08-26T09:00:00.000Z",
     updatedAt: "2026-08-26T09:00:00.000Z",
   } as unknown as HandoffRow;
-  await refusedBy("handoff-queue-drained", { handoffRows: () => [row] });
+  await refusedBy("handoff-queue-drained", { handoffRows: () => determined([row]) });
 
   /* A terminal row whose delivery was replayed owes nothing, and neither does
      a claimed row that never carried one — a claim leaves an idle-turn row
      `claimed` until the next hand-over, so a status test would refuse the
      whole hosted population the moment the queue had a writer. */
   const settled = await sweep({
-    handoffRows: () => [
+    handoffRows: () => determined([
       { ...row, status: "claimed", pendingDeliveries: [] } as unknown as HandoffRow,
       { ...row, status: "terminal", replayedDeliveryIds: ["delivery-1"] } as unknown as HandoffRow,
-    ],
+    ]),
   });
   expect(settled.report.refused).toEqual([]);
   expect(settled.terminated).toHaveLength(1);
@@ -365,29 +402,29 @@ test("a pending registry action blocks retirement", async () => {
 });
 
 test("an unflushed event tail blocks retirement", async () => {
-  await refusedBy("events-flushed", { durableEventTail: () => 19 });
+  await refusedBy("events-flushed", { durableEventTail: () => determined(19) });
 });
 
 test("an unreadable event ledger blocks retirement", async () => {
-  await refusedBy("events-flushed", { durableEventTail: () => null });
+  await refusedBy("events-flushed", { durableEventTail: () => undetermined("the ledger tail could not be read") }, "undetermined");
 });
 
 test("a realtime-bound session blocks retirement", async () => {
-  await refusedBy("no-realtime-binding", { realtimeBound: () => true });
+  await refusedBy("no-realtime-binding", { realtimeBound: () => determined(true) });
 });
 
 test("a realtime binding that cannot be established blocks retirement", async () => {
   /* The ledgers are process-scoped: a process that does not hold the host
      answers nothing, not "no call". Null is that answer, and it refuses. */
-  await refusedBy("no-realtime-binding", { realtimeBound: () => null });
+  await refusedBy("no-realtime-binding", { realtimeBound: () => undetermined("this process holds no host") }, "undetermined");
 });
 
 test("a live orchestrator seat blocks retirement", async () => {
-  await refusedBy("seat-free", { orchestratorSeatConversations: () => new Set([CONVERSATION]) });
+  await refusedBy("seat-free", { orchestratorSeatConversations: () => determined(new Set([CONVERSATION])) });
 });
 
 test("a seat that cannot be established blocks retirement — unknown is never idle", async () => {
-  await refusedBy("seat-free", { snapshot: () => snapshot({ conversations: {} }) });
+  await refusedBy("seat-free", { snapshot: () => snapshot({ conversations: {} }) }, "undetermined");
 });
 
 test("a seat store that cannot be read blocks retirement — unknown is never idle", async () => {
@@ -395,18 +432,18 @@ test("a seat store that cannot be read blocks retirement — unknown is never id
      one, because authority fails closed on an absent seat. Retirement asks the
      same question with the opposite consequence, so its source can still say
      "unknown" — and unknown refuses instead of clearing a live orchestrator. */
-  await refusedBy("seat-free", { orchestratorSeatConversations: () => null });
+  await refusedBy("seat-free", { orchestratorSeatConversations: () => undetermined("the seat store could not be read") }, "undetermined");
 });
 
 test("an orchestrator membership establishes a seat even when the seat store cannot be read", async () => {
   await refusedBy("seat-free", {
-    orchestratorSeatConversations: () => null,
+    orchestratorSeatConversations: () => undetermined("the seat store could not be read"),
     snapshot: () => snapshot({ memberships: { [CONVERSATION]: [{ kind: "orchestrator", project: "repo-a" }] } }),
   });
 });
 
 test("a transcript that is gone from disk blocks retirement", async () => {
-  await refusedBy("resumable", { transcriptStat: () => null });
+  await refusedBy("resumable", { transcriptStat: () => determined(null) });
 });
 
 test("a host with no resume token blocks retirement", async () => {
@@ -416,11 +453,11 @@ test("a host with no resume token blocks retirement", async () => {
 });
 
 test("a transcript written inside the interval blocks retirement", async () => {
-  await refusedBy("transcript-idle", { transcriptStat: () => ({ mtimeMs: NOW - 60_000 }) });
+  await refusedBy("transcript-idle", { transcriptStat: () => determined({ mtimeMs: NOW - 60_000 }) });
 });
 
 test("a host whose process identity cannot be observed blocks retirement", async () => {
-  await refusedBy("process-identity", { processIdentity: () => null });
+  await refusedBy("process-identity", { processIdentity: () => undetermined("the kernel would not say") }, "undetermined");
 });
 
 test("a host whose record stored no kernel identity blocks retirement", async () => {
@@ -436,11 +473,11 @@ test("a host whose record stored no kernel identity blocks retirement", async ()
         }),
       },
     }),
-  });
+  }, "undetermined");
 });
 
 test("a pid that no longer carries the recorded identity blocks retirement", async () => {
-  await refusedBy("process-identity", { processIdentity: () => `${HOST_PID}:999999` });
+  await refusedBy("process-identity", { processIdentity: () => determined(`${HOST_PID}:999999`) });
 });
 
 test("a sweep defers past its batch bound rather than overrunning the next tick", async () => {
@@ -489,7 +526,7 @@ test("a sweep that retires nothing is distinguishable on disk from a sweep that 
 });
 
 test("the journal keeps every action whole and refusals as a count per clause", async () => {
-  const probe = await sweep({ realtimeBound: () => true, record: undefined });
+  const probe = await sweep({ realtimeBound: () => determined(true), record: undefined });
   const record = structuredHostRetirementJournalRecord(probe.report);
   expect(record.refusedByClause).toEqual({ "no-realtime-binding": 1 });
   expect(record).not.toHaveProperty("refused");
@@ -510,7 +547,7 @@ test("a qualifying host is retired with its whole tree, including a child in its
         }),
       },
     }),
-    processIdentity: (pid) => procBackend.processIdentity(pid),
+    processIdentity: observedIdentity,
     processMemory: (pids) => procBackend.processMemory(pids),
     ppidMap: () => procBackend.ppidMap(),
     owned: () => false,
@@ -552,7 +589,7 @@ test("a retired conversation keeps everything a resume needs", async () => {
     snapshot: record,
     /* The real stat, so the resume evidence read here is the file on disk. */
     transcriptStat: undefined,
-    processIdentity: (pid) => procBackend.processIdentity(pid),
+    processIdentity: observedIdentity,
     processMemory: (pids) => procBackend.processMemory(pids),
     ppidMap: () => procBackend.ppidMap(),
     owned: () => false,
@@ -593,7 +630,7 @@ test("a replacement host on the same session key is never reached", async () => 
         }),
       },
     }),
-    processIdentity: (pid) => procBackend.processIdentity(pid),
+    processIdentity: observedIdentity,
     processMemory: (pids) => procBackend.processMemory(pids),
     ppidMap: () => procBackend.ppidMap(),
     owned: () => false,
@@ -631,7 +668,7 @@ test("an identity that changes after the predicate passed is refused at the sign
         }),
       },
     }),
-    processIdentity: (pid) => procBackend.processIdentity(pid),
+    processIdentity: observedIdentity,
     processMemory: (pids) => procBackend.processMemory(pids),
     ppidMap: () => procBackend.ppidMap(),
     owned: () => false,
@@ -776,6 +813,271 @@ test("the sweep runs on its own timer, once per process", async () => {
   } finally {
     stopStructuredHostRetirement();
   }
+});
+
+/** A subject every clause of the predicate passes, built as a literal so the
+    property test below can take one field at a time away from it. */
+function qualifiedSubject(): StructuredHostRetirementSubject {
+  return {
+    key: { engine: "claude", sessionId: SESSION },
+    keyId: `claude:${SESSION}`,
+    conversationId: CONVERSATION,
+    title: "Retired lane",
+    role: "builder",
+    stage: null,
+    cwd: "/repo/worktree",
+    transcriptPath: TRANSCRIPT,
+    process: { pid: HOST_PID, startIdentity: HOST_IDENTITY },
+    status: "idle",
+    activeTurnRef: null,
+    turnBusy: determined(false),
+    pendingAttention: [],
+    activeFlags: [STRUCTURED_IMAGE_CAPABILITY, NATIVE_MULTI_AGENT_DENY_FLAG],
+    pendingAction: null,
+    structuredHostOperationId: null,
+    undeliveredHandoffEntries: determined(0),
+    openOperations: 0,
+    eventCursor: 12,
+    durableEventTail: determined(12),
+    realtimeBound: determined(false),
+    seat: determined(false),
+    transcriptFile: determined({ mtimeMs: NOW - 24 * 3_600_000 }),
+    observedStartIdentity: determined(HOST_IDENTITY),
+  };
+}
+
+function isDeterminable(value: unknown): boolean {
+  return typeof value === "object" && value !== null && "determined" in value;
+}
+
+test("no input the predicate reads can be undetermined and still retire", () => {
+  /* The rule this whole shape exists for, asserted structurally rather than
+     case by case: take the subject apart, and for EVERY field that can say
+     "unknown", the verdict must refuse and say which clause could not be
+     determined. Three rounds each found a different clause that had invented
+     its own fallback; a clause added later with a new undeterminable input
+     fails here unless it fails closed too. */
+  const options = { now: NOW, idleMs: IDLE_MS };
+  expect(structuredHostRetirementVerdict(qualifiedSubject(), options).retire).toBe(true);
+
+  const fields = Object.entries(qualifiedSubject())
+    .filter(([, value]) => isDeterminable(value))
+    .map(([field]) => field);
+  /* Everything a reader off the machine answers: seat, turn, queue, ledger,
+     realtime, transcript, kernel identity. */
+  expect(fields.length).toBe(7);
+
+  for (const field of fields) {
+    const subject = { ...qualifiedSubject(), [field]: undetermined(`${field} could not be read`) };
+    const verdict = structuredHostRetirementVerdict(subject as StructuredHostRetirementSubject, options);
+    expect(verdict.retire).toBe(false);
+    if (verdict.retire) throw new Error("unreachable");
+    expect(verdict.undetermined).toBe(true);
+    expect(STRUCTURED_HOST_RETIREMENT_CLAUSES).toContain(verdict.clause);
+    /* The reason is the failing reader's own words, so the audit line names
+       the read rather than the clause alone. */
+    expect(verdict.reason).toBe(`${field} could not be read`);
+  }
+});
+
+test("an undetermined input refuses at its clause and the sweep names it", async () => {
+  const undeterminable: [StructuredHostRetirementClause, StructuredHostRetirementDependencies][] = [
+    ["seat-free", { orchestratorSeatConversations: () => undetermined("the seat store could not be established") }],
+    ["turn-settled", {
+      snapshot: () => snapshot({
+        conversations: {
+          [CONVERSATION]: conversation({ turn: { state: "unknown", source: "assistant", terminalAt: null, observedAt: null } }),
+        },
+      }),
+    }],
+    ["handoff-queue-drained", { handoffRows: () => undetermined("the handoff queue could not be read") }],
+    ["events-flushed", { durableEventTail: () => undetermined("the runtime event ledger could not be opened (EACCES)") }],
+    ["no-realtime-binding", { realtimeBound: () => undetermined("this process holds no structured host") }],
+    ["resumable", { transcriptStat: () => undetermined("the transcript could not be read (EACCES)") }],
+    ["process-identity", { processIdentity: () => undetermined("no kernel identity can be observed for pid 4100") }],
+  ];
+
+  for (const [clause, over] of undeterminable) {
+    const probe = await sweep({ ...over, record: undefined });
+    expect(probe.terminated).toEqual([]);
+    expect(probe.report.retired).toEqual([]);
+    expect(probe.report.refused).toHaveLength(1);
+    const refusal = probe.report.refused[0]!;
+    expect(refusal.clause).toBe(clause);
+    expect(refusal.undetermined).toBe(true);
+    /* The journal counts the two apart, because a refusal is the predicate
+       working and an undetermined clause is a reader that stopped answering. */
+    const record = structuredHostRetirementJournalRecord(probe.report);
+    expect(record.undeterminedByClause).toEqual({ [clause]: 1 });
+    expect(record.refusedByClause).toEqual({ [clause]: 1 });
+    pinnedClauses.add(clause);
+  }
+
+  /* An established refusal is not counted as an undetermined one. */
+  const established = await sweep({ realtimeBound: () => determined(true), record: undefined });
+  expect(structuredHostRetirementJournalRecord(established.report).undeterminedByClause).toEqual({});
+});
+
+test("an unreadable handoff queue is not a drained one", async () => {
+  /* The sweep's own default reader used to answer an unreadable queue with an
+     empty list, which reads as "this key owes nothing" — the exact shape that
+     kept recurring. It says so instead, and the clause refuses. */
+  await refusedBy(
+    "handoff-queue-drained",
+    { handoffRows: () => undetermined("the handoff queue could not be read: EACCES") },
+    "undetermined",
+  );
+});
+
+test("the per-sweep batch is sized against the grace the sweep runs with", async () => {
+  /* The bound only means anything against the ladder it will actually wait
+     out: grace plus the 10 s deadline margin, per host. At the 60 s maximum an
+     eight-host batch is ~9 minutes of ladders against a 5-minute tick. */
+  const marginMs = 10_000;
+  expect(structuredHostRetirementBatch(5_000)).toBe(8);
+  expect(structuredHostRetirementBatch(60_000)).toBe(2);
+  for (const graceMs of [0, 1_000, 5_000, 20_000, 60_000]) {
+    const worstCaseMs = structuredHostRetirementBatch(graceMs) * (graceMs + marginMs);
+    expect(worstCaseMs).toBeLessThanOrEqual(STRUCTURED_HOST_RETIREMENT_INTERVAL_MS);
+  }
+  /* Past any grace the parser admits, one host per sweep is still attempted:
+     leaking hosts forever to protect a schedule is the worse failure. */
+  expect(structuredHostRetirementBatch(10 * 60_000)).toBe(1);
+
+  /* And the sweep uses it rather than a constant of its own. */
+  const probe = await sweep({ graceMs: 60_000, snapshot: () => snapshot(manyCandidates(3)) });
+  expect(probe.report.evaluated).toBe(3);
+  expect(probe.report.retired).toHaveLength(2);
+  expect(probe.report.deferred).toBe(1);
+});
+
+/** A child that stands in for the resumed engine. Its pid belongs to nothing on
+    this machine, and every signal the host sends is captured by an injected
+    `signalProcess`, so no real process or group is ever reached. */
+class ResumedEngineChild extends EventEmitter {
+  readonly stdin = new PassThrough();
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly pid = 5151;
+  private closed = false;
+
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    this.close(signal);
+    return true;
+  }
+
+  close(signal: NodeJS.Signals): void {
+    if (this.closed) return;
+    this.closed = true;
+    queueMicrotask(() => this.emit("close", 0, signal));
+  }
+}
+
+test("a retired conversation still opens and resumes from its transcript", async () => {
+  /* #747 asks for this as an assertion rather than an assumption: retire a
+     host for real, then OPEN the conversation's transcript and RESUME the
+     session from it, through the same adoption path production uses. */
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "llv-retirement-resume-"));
+  scratchDirs.push(home);
+  const projects = path.join(home, "projects");
+  const cwd = path.join(home, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+  const transcript = claudeTranscriptPath(cwd, SESSION, projects);
+  fs.mkdirSync(path.dirname(transcript), { recursive: true, mode: 0o700 });
+
+  const asked = "finish the lane and report";
+  const messageId = ["7b1f", "4c21", "9ec3b5ad1326"].join("-");
+  const askedAt = new Date(NOW - 25 * 3_600_000).toISOString();
+  fs.writeFileSync(transcript, `${JSON.stringify({
+    type: "user",
+    uuid: messageId,
+    timestamp: askedAt,
+    message: { role: "user", content: [{ type: "text", text: asked }] },
+  })}\n`, { mode: 0o600 });
+  const quiet = new Date(NOW - 24 * 3_600_000);
+  fs.utimesSync(transcript, quiet, quiet);
+  const before = fs.readFileSync(transcript);
+
+  const tree = await spawnFixtureHostTree();
+  const retired = await sweep({
+    snapshot: () => snapshot({
+      entries: {
+        [`claude:${SESSION}`]: entry({
+          artifactPath: transcript,
+          cwd,
+          structuredHost: { ...(entry().structuredHost as object), process: { pid: tree.pid, startIdentity: tree.startIdentity } },
+        }),
+      },
+    }),
+    /* The real stat, so the transcript this resume reads is the file on disk. */
+    transcriptStat: undefined,
+    processIdentity: observedIdentity,
+    processMemory: (pids) => procBackend.processMemory(pids),
+    ppidMap: () => procBackend.ppidMap(),
+    owned: () => false,
+    terminate: (ref) => terminateStructuredHostTree(ref, {
+      terminateOwnedHost: async () => false,
+      retireRegistryEntry: () => {},
+      graceMs: 200,
+      deadlineMs: 5_000,
+    }),
+  });
+  expect(retired.report.retired).toHaveLength(1);
+  for (const pid of tree.tree) expect(procBackend.pidAlive(pid)).toBe(false);
+
+  /* Opened: the transcript is byte-identical and still parses into the
+     conversation the retired host was serving. */
+  expect(fs.readFileSync(transcript)).toEqual(before);
+  const opened = fs.readFileSync(transcript, "utf8").trim().split("\n")
+    .map((line) => JSON.parse(line) as { message?: { content?: { text?: string }[] } });
+  expect(opened.at(-1)?.message?.content?.[0]?.text).toBe(asked);
+
+  /* Resumed: the same session key, adopted through the production path. The
+     ledger carries a message the retired host never got a receipt for, and the
+     surviving transcript is the only thing that can settle it. */
+  const confirmed: { entryId: string; engineMessageId: string | null }[] = [];
+  const ledger: ClaudeDeliveryLedger = {
+    load: () => [{
+      entry: normalizeQueueEntry({ id: "delivery-1", text: asked }),
+      disposition: "turn-started",
+      delivered: false,
+      queuedAt: new Date(NOW - 26 * 3_600_000).toISOString(),
+    }],
+    recordQueued: () => {},
+    confirmDelivered: (_session, entryId, engineMessageId) => { confirmed.push({ entryId, engineMessageId }); },
+  };
+  const child = new ResumedEngineChild();
+  const signalled: [number, NodeJS.Signals][] = [];
+  const argv: string[] = [];
+  const resumed = await ClaudeStreamBrokerHost.adopt(SESSION, {
+    cwd,
+    claudeProjectsDir: projects,
+    eventStore: new FileRuntimeEventStore(path.join(home, "events")),
+    deliveryLedger: ledger,
+    shutdownGraceMs: 50,
+    readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+    processIdentity: () => null,
+    signalProcess: (pid, signal) => {
+      /* Recorded, never sent: the fixture pid owns nothing here. */
+      signalled.push([pid, signal]);
+      child.close(signal);
+    },
+    spawnProcess: (_command, args) => {
+      argv.push(...args);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    },
+  });
+  try {
+    const resumeIndex = argv.indexOf("--resume");
+    expect(argv.slice(resumeIndex, resumeIndex + 2)).toEqual(["--resume", SESSION]);
+    /* A resume, not a fresh session that happens to carry the same id. */
+    expect(argv).not.toContain("--session-id");
+    expect(confirmed).toEqual([{ entryId: "delivery-1", engineMessageId: messageId }]);
+    expect((await resumed.health()).status).toBe("idle");
+  } finally {
+    await resumed.release();
+  }
+  expect(signalled.every(([pid]) => pid === child.pid || pid === -child.pid)).toBe(true);
 });
 
 test("every clause of the predicate has a case that proves it blocks retirement", () => {

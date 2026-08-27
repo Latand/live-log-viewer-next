@@ -11,6 +11,7 @@ import type { ProcessMemory } from "@/lib/proc/types";
 import type { StructuredHostKillRef } from "@/lib/resources";
 import { RESOURCE_STRUCTURED_HOST_LIMIT } from "@/lib/types";
 
+import { determined, mapDeterminable, undetermined, type Determinable } from "./determinable";
 import { durableRuntimeEventTailSeq } from "./eventStore";
 import type { HandoffRow } from "./handoffQueue";
 import { handoffQueue } from "./handoffQueueStore";
@@ -45,8 +46,17 @@ import { realtimeBoundConversationIds } from "./voiceViewBinding";
  * clause is a thing that would be lost, and where an unknown answer refuses,
  * because an unestablished fact is not an idle one.
  *
- * Two properties are load-bearing and easy to lose:
+ * Four properties are load-bearing and easy to lose:
  *
+ * - **An input that cannot be determined refuses, in one place.** Every source
+ *   that can fail to answer returns a {@link Determinable}, so no clause ever
+ *   sees a bare `null` it has to interpret, and
+ *   {@link structuredHostRetirementVerdict} is the single site that turns an
+ *   undetermined input into a decision. That decision is always the same one:
+ *   the host is not retired, and the report names the clause that could not be
+ *   determined. Three review rounds each found a different clause that had
+ *   invented its own fallback and happened to resolve unknown in favour of
+ *   killing; a fallback is now a thing a clause cannot express.
  * - **Staleness is transcript modification time, never process age.** A
  *   long-lived host still being written to is alive; a young host that has
  *   produced nothing since its last turn is not.
@@ -73,13 +83,46 @@ const DEFAULT_RETIREMENT_IDLE_HOURS = 6;
 const DEFAULT_RETIREMENT_GRACE_MS = 5_000;
 const MAX_RETIREMENT_GRACE_MS = 60_000;
 const TERMINATION_DEADLINE_MARGIN_MS = 10_000;
+
 /**
- * Retirements attempted per sweep. Each termination may wait out the grace
- * ladder, so an unbounded batch would let one sweep overrun the next tick.
- * Everything skipped is reported as deferred and picked up by the following
- * one; nothing is lost, it only takes another interval.
+ * How often the release that owns traffic sweeps.
+ *
+ * Far slower than the reconciliation controllers, and deliberately so: the
+ * default quiet interval is six hours, so a few minutes of latency costs
+ * nothing, while every tick reads `/proc` for each recorded host inside the
+ * process that is also serving the operator's board.
  */
-const RETIREMENT_BATCH = 8;
+export const STRUCTURED_HOST_RETIREMENT_INTERVAL_MS = 5 * 60_000;
+
+/** Retirements attempted per sweep, whatever the grace allows. Past this a
+    sweep is doing enough at once that the next one can finish the job. */
+const RETIREMENT_BATCH_CEILING = 8;
+/** The share of one interval a sweep may spend inside termination ladders. The
+    rest pays for the registry, `/proc` and transcript reads around them, and
+    leaves the tick after it a clear start. */
+const RETIREMENT_TERMINATION_BUDGET_RATIO = 0.5;
+
+/**
+ * How many retirements one sweep attempts, sized against the grace it will
+ * actually run with.
+ *
+ * Each termination waits out its own ladder — the graceful window plus the
+ * deadline margin — so a fixed batch only bounds a sweep for the grace it was
+ * chosen against. At the 60 s maximum an eight-host batch is ~9 minutes of
+ * ladders against a 5-minute tick, which is the overrun the bound exists to
+ * prevent. Everything skipped is reported as deferred and picked up by the
+ * following sweep; nothing is lost, it only takes another interval.
+ */
+export function structuredHostRetirementBatch(
+  graceMs: number,
+  intervalMs: number = STRUCTURED_HOST_RETIREMENT_INTERVAL_MS,
+): number {
+  const perHostMs = Math.max(1, graceMs + TERMINATION_DEADLINE_MARGIN_MS);
+  const budgetMs = intervalMs * RETIREMENT_TERMINATION_BUDGET_RATIO;
+  /* One is the floor: a single ladder can outlast any budget, and a sweep that
+     retires nothing at all would leak hosts forever to protect a schedule. */
+  return Math.max(1, Math.min(RETIREMENT_BATCH_CEILING, Math.floor(budgetMs / perHostMs)));
+}
 
 const REPORT_FILE = () => statePath("host-retirement-report.json");
 const JOURNAL_FILE = () => statePath("host-retirement-journal.ndjson");
@@ -111,8 +154,16 @@ export const STRUCTURED_HOST_RETIREMENT_CLAUSES = [
 
 export type StructuredHostRetirementClause = typeof STRUCTURED_HOST_RETIREMENT_CLAUSES[number];
 
-/** Everything the predicate reads about one host, gathered before any of it is
-    judged, so the audit can report the facts alongside the verdict. */
+/**
+ * Everything the predicate reads about one host, gathered before any of it is
+ * judged, so the audit can report the facts alongside the verdict.
+ *
+ * Every field a source might fail to answer is a {@link Determinable}, and it
+ * is the reader that says so, at the point it failed, with the reason. A field
+ * that is a plain value comes out of the registry snapshot the sweep already
+ * holds and cannot be unknown; a determined `null` inside one is a real,
+ * established absence, which is the distinction an overloaded `| null` lost.
+ */
 export interface StructuredHostRetirementSubject {
   key: SessionKey;
   keyId: string;
@@ -125,37 +176,77 @@ export interface StructuredHostRetirementSubject {
   process: ProcessIdentity;
   status: AgentHostStatus;
   activeTurnRef: string | null;
-  /** Null when no conversation record establishes a turn state. */
-  turnBusy: boolean | null;
+  /** Undetermined when no conversation record establishes a turn state. */
+  turnBusy: Determinable<boolean>;
   pendingAttention: readonly string[];
   activeFlags: readonly string[];
   pendingAction: string | null;
   structuredHostOperationId: string | null;
-  undeliveredHandoffEntries: number;
+  /** Undetermined when the handoff queue could not be read: an unreadable
+      queue is not a drained one. */
+  undeliveredHandoffEntries: Determinable<number>;
   openOperations: number;
   /** The registry's persisted cursor: the flushed one. */
   eventCursor: number;
-  /** The ledger's durable tail: the session's own cursor. Null when the ledger
-      exists but could not be read. */
-  durableEventTail: number | null;
-  /** Null when this process cannot establish whether a live transport is bound
-      — a state the sweep refuses on rather than reads as "no call". */
-  realtimeBound: boolean | null;
-  /** Null when neither the registry nor the durable seat store establishes
-      whether this host holds a seat. */
-  seat: boolean | null;
-  transcriptMtimeMs: number | null;
-  observedStartIdentity: string | null;
+  /** The ledger's durable tail: the session's own cursor. Undetermined when the
+      ledger exists but could not be read to its last complete record. */
+  durableEventTail: Determinable<number>;
+  /** Undetermined when this process cannot establish whether a live transport
+      is bound — a state the sweep refuses on rather than reads as "no call". */
+  realtimeBound: Determinable<boolean>;
+  /** Undetermined when neither the registry nor the durable seat store
+      establishes whether this host holds a seat. */
+  seat: Determinable<boolean>;
+  /** The transcript's modification time, a determined `null` when the host
+      names none or it is genuinely gone, and undetermined when the path could
+      not be read at all. */
+  transcriptFile: Determinable<{ mtimeMs: number } | null>;
+  /** Undetermined when the kernel will not say what is on the pid now. */
+  observedStartIdentity: Determinable<string>;
 }
 
 export type StructuredHostRetirementVerdict =
   | { retire: true; passed: StructuredHostRetirementClause[]; startIdentity: string }
-  | { retire: false; clause: StructuredHostRetirementClause; reason: string };
+  | {
+      retire: false;
+      clause: StructuredHostRetirementClause;
+      reason: string;
+      /** Set when the clause refused because it could not establish its input,
+          as opposed to establishing one that blocks. */
+      undetermined?: true;
+    };
 
 /**
- * The conjunction. Clause order is the order of the checks, and the first
- * refusal is the reported one, so a subject that fails several still names a
- * single cause the operator can act on.
+ * What one clause says about one subject: a determined `null` passes, a
+ * determined string is the reason it refuses, and an undetermined answer is a
+ * clause that could not read its own input. No clause decides what the third
+ * case means — {@link structuredHostRetirementVerdict} does, once, for all of
+ * them.
+ */
+type ClauseAnswer = Determinable<string | null>;
+
+const PASSES: ClauseAnswer = determined(null);
+const refuses = (reason: string): ClauseAnswer => determined(reason);
+
+/** The identity the kill is fenced to, or the reason there is none to fence to.
+ *
+ * The fence #1203 built binds a kill to the identity the record stored, and
+ * only to that. A stored null is not a gap to fill: the hosts write it
+ * precisely when they concluded their own pid was recycled or unverifiable, so
+ * substituting today's observation would compare an observation against itself
+ * and hand an unattended sweep a tree it never identified. Refusing costs one
+ * leaked host; substituting can cost an unrelated process tree.
+ */
+function recordedStartIdentity(subject: StructuredHostRetirementSubject): Determinable<string> {
+  return subject.process.startIdentity === null
+    ? undetermined(`the registry stored no kernel identity for pid ${subject.process.pid}`)
+    : determined(subject.process.startIdentity);
+}
+
+/**
+ * The clauses, each a function of the subject alone. Order comes from
+ * {@link STRUCTURED_HOST_RETIREMENT_CLAUSES}, so the list and the checks cannot
+ * disagree about what the predicate is.
  *
  * `seat-free` runs first because it is the clause an unestablished fact fails
  * first: with no conversation record neither the seat nor the turn can be
@@ -165,107 +256,112 @@ export type StructuredHostRetirementVerdict =
  * the host that sits quiet for hours between operator messages, so it would
  * pass every other clause.
  */
-export function structuredHostRetirementVerdict(
-  subject: StructuredHostRetirementSubject,
-  options: { now: number; idleMs: number },
-): StructuredHostRetirementVerdict {
-  const passed: StructuredHostRetirementClause[] = [];
-  const refuse = (clause: StructuredHostRetirementClause, reason: string) =>
-    ({ retire: false as const, clause, reason });
-  const pass = (clause: StructuredHostRetirementClause) => { passed.push(clause); };
+const CLAUSE_CHECKS: Record<
+  StructuredHostRetirementClause,
+  (subject: StructuredHostRetirementSubject, options: { now: number; idleMs: number }) => ClauseAnswer
+> = {
+  "seat-free": (subject) => mapDeterminable(subject.seat,
+    (held) => (held ? "the host holds a live orchestrator seat" : null)),
 
-  if (subject.seat === null) {
-    return refuse("seat-free", "the host's orchestrator-seat status cannot be established");
-  }
-  if (subject.seat) return refuse("seat-free", "the host holds a live orchestrator seat");
-  pass("seat-free");
+  "turn-settled": (subject) => {
+    if (subject.activeTurnRef !== null) return refuses(`turn ${subject.activeTurnRef} is in flight`);
+    return mapDeterminable(subject.turnBusy, (busy) => (busy ? "the conversation turn has not settled" : null));
+  },
 
-  if (subject.activeTurnRef !== null) return refuse("turn-settled", `turn ${subject.activeTurnRef} is in flight`);
-  if (subject.turnBusy === null) return refuse("turn-settled", "the host's turn state cannot be established");
-  if (subject.turnBusy) return refuse("turn-settled", "the conversation turn has not settled");
-  pass("turn-settled");
+  "attention-settled": (subject) => (subject.pendingAttention.length > 0
+    ? refuses(`${subject.pendingAttention.length} question(s) await an operator answer`)
+    : PASSES),
 
-  if (subject.pendingAttention.length > 0) {
-    return refuse("attention-settled", `${subject.pendingAttention.length} question(s) await an operator answer`);
-  }
-  pass("attention-settled");
-
-  if (!RETIRABLE_HOST_STATUSES.has(subject.status)) {
-    return refuse("host-idle-or-dead", `the host status is ${subject.status}`);
-  }
-  pass("host-idle-or-dead");
+  "host-idle-or-dead": (subject) => (RETIRABLE_HOST_STATUSES.has(subject.status)
+    ? PASSES
+    : refuses(`the host status is ${subject.status}`)),
 
   /* Capability advertisements are not activity: every Claude host carries
      `structured-image-v1` (and the multi-agent denial's tool set) for its whole
      life, so reading the raw array refuses every Claude host forever and
      retires nothing at all. Anything the classifier does not recognise still
      counts as activity and still refuses. */
-  const activityFlags = blockingHostActivityFlags(subject.activeFlags);
-  if (activityFlags.length > 0) {
-    return refuse("no-active-flags", `the host is flagged ${activityFlags.join(", ")}`);
-  }
-  pass("no-active-flags");
+  "no-active-flags": (subject) => {
+    const activityFlags = blockingHostActivityFlags(subject.activeFlags);
+    return activityFlags.length > 0 ? refuses(`the host is flagged ${activityFlags.join(", ")}`) : PASSES;
+  },
 
-  if (subject.undeliveredHandoffEntries > 0) {
-    return refuse("handoff-queue-drained", `${subject.undeliveredHandoffEntries} undelivered handoff entr(ies) name this key`);
-  }
-  pass("handoff-queue-drained");
+  "handoff-queue-drained": (subject) => mapDeterminable(subject.undeliveredHandoffEntries,
+    (count) => (count > 0 ? `${count} undelivered handoff entr(ies) name this key` : null)),
 
-  if (subject.pendingAction !== null) return refuse("no-open-operation", `a ${subject.pendingAction} action is pending`);
-  if (subject.structuredHostOperationId !== null) {
-    return refuse("no-open-operation", "a structured host operation is still in flight");
-  }
-  if (subject.openOperations > 0) {
-    return refuse("no-open-operation", `${subject.openOperations} spawn receipt(s) are pending or non-terminal`);
-  }
-  pass("no-open-operation");
+  "no-open-operation": (subject) => {
+    if (subject.pendingAction !== null) return refuses(`a ${subject.pendingAction} action is pending`);
+    if (subject.structuredHostOperationId !== null) return refuses("a structured host operation is still in flight");
+    return subject.openOperations > 0
+      ? refuses(`${subject.openOperations} spawn receipt(s) are pending or non-terminal`)
+      : PASSES;
+  },
 
-  if (subject.durableEventTail === null) {
-    return refuse("events-flushed", "the runtime event ledger tail cannot be read");
-  }
-  if (subject.eventCursor < subject.durableEventTail) {
-    return refuse("events-flushed", `the flushed cursor ${subject.eventCursor} is behind the session's ${subject.durableEventTail}`);
-  }
-  pass("events-flushed");
+  "events-flushed": (subject) => mapDeterminable(subject.durableEventTail,
+    (tail) => (subject.eventCursor < tail
+      ? `the flushed cursor ${subject.eventCursor} is behind the session's ${tail}`
+      : null)),
 
-  if (subject.realtimeBound === null) {
-    return refuse("no-realtime-binding", "whether a realtime session is bound cannot be established here");
-  }
-  if (subject.realtimeBound) return refuse("no-realtime-binding", "a realtime session is bound to this conversation");
-  pass("no-realtime-binding");
+  "no-realtime-binding": (subject) => mapDeterminable(subject.realtimeBound,
+    (bound) => (bound ? "a realtime session is bound to this conversation" : null)),
 
   /* Resumability is the whole reason retirement is safe, so it is proven, not
      assumed: the session key IS the resume token, and the transcript it names
      has to be on disk right now. */
-  if (subject.transcriptPath === "") return refuse("resumable", "the host names no transcript to resume from");
-  if (subject.transcriptMtimeMs === null) return refuse("resumable", "the transcript is not present on disk");
-  pass("resumable");
+  "resumable": (subject) => {
+    if (subject.transcriptPath === "") return refuses("the host names no transcript to resume from");
+    return mapDeterminable(subject.transcriptFile,
+      (stat) => (stat === null ? "the transcript is not present on disk" : null));
+  },
 
-  const idleMs = options.now - subject.transcriptMtimeMs;
-  if (idleMs < options.idleMs) {
-    return refuse("transcript-idle", `the transcript was written ${Math.max(0, Math.round(idleMs / 1_000))}s ago`);
-  }
-  pass("transcript-idle");
+  "transcript-idle": (subject, options) => mapDeterminable(subject.transcriptFile, (stat) => {
+    /* Order puts `resumable` first, so an absent transcript has already
+       refused; saying it again here keeps the clause true on its own terms
+       rather than relying on the clause before it. */
+    if (stat === null) return "the transcript is not present on disk";
+    const idleMs = options.now - stat.mtimeMs;
+    return idleMs < options.idleMs
+      ? `the transcript was written ${Math.max(0, Math.round(idleMs / 1_000))}s ago`
+      : null;
+  }),
 
-  /* The fence #1203 built binds the kill to the identity the record stored,
-     and only to that. A stored null is not a gap to fill: the hosts write it
-     precisely when they concluded their own pid was recycled or unverifiable,
-     so substituting today's observation would compare an observation against
-     itself and hand an unattended sweep a tree it never identified. Refusing
-     costs one leaked host; substituting can cost an unrelated process tree. */
-  const startIdentity = subject.process.startIdentity;
-  if (startIdentity === null) {
-    return refuse("process-identity", `the registry stored no kernel identity for pid ${subject.process.pid}`);
-  }
-  if (subject.observedStartIdentity === null) {
-    return refuse("process-identity", `no kernel identity can be observed for pid ${subject.process.pid}`);
-  }
-  if (subject.observedStartIdentity !== startIdentity) {
-    return refuse("process-identity", `pid ${subject.process.pid} is no longer the recorded host`);
-  }
-  pass("process-identity");
+  "process-identity": (subject) => {
+    const recorded = recordedStartIdentity(subject);
+    if (!recorded.determined) return recorded;
+    return mapDeterminable(subject.observedStartIdentity,
+      (observed) => (observed === recorded.value ? null : `pid ${subject.process.pid} is no longer the recorded host`));
+  },
+};
 
-  return { retire: true, passed, startIdentity };
+/**
+ * The conjunction, and the one place an undetermined input becomes a decision.
+ *
+ * Clause order is check order, and the first refusal is the reported one, so a
+ * subject that fails several still names a single cause the operator can act
+ * on. A clause that could not establish its input refuses exactly like one that
+ * established a blocking answer, and says which of the two it was: an
+ * unestablished fact is not an idle one, and no clause gets to decide that for
+ * itself.
+ */
+export function structuredHostRetirementVerdict(
+  subject: StructuredHostRetirementSubject,
+  options: { now: number; idleMs: number },
+): StructuredHostRetirementVerdict {
+  const passed: StructuredHostRetirementClause[] = [];
+  for (const clause of STRUCTURED_HOST_RETIREMENT_CLAUSES) {
+    const answer = CLAUSE_CHECKS[clause](subject, options);
+    if (!answer.determined) return { retire: false, clause, reason: answer.why, undetermined: true };
+    if (answer.value !== null) return { retire: false, clause, reason: answer.value };
+    passed.push(clause);
+  }
+  /* Re-resolved rather than carried out of the loop: the same reader the
+     `process-identity` clause used, so the identity the kill is fenced to is
+     the identity the clause passed on. */
+  const startIdentity = recordedStartIdentity(subject);
+  if (!startIdentity.determined) {
+    return { retire: false, clause: "process-identity", reason: startIdentity.why, undetermined: true };
+  }
+  return { retire: true, passed, startIdentity: startIdentity.value };
 }
 
 export interface StructuredHostRetirementReclaim {
@@ -299,6 +395,11 @@ export interface StructuredHostRetirementRefusal {
   conversationId: string | null;
   clause: StructuredHostRetirementClause;
   reason: string;
+  /** Set when the clause refused because its input could not be established.
+      This is the audit's answer to "which clause could not be determined", and
+      it is why an undetermined input is loud rather than silent: the host is
+      kept, and the reason it was kept is the reader that failed. */
+  undetermined?: true;
   /** Set when the host qualified on evaluation and stopped qualifying in the
       re-check taken one step before the signal — a turn that started, a seat
       that was taken, a message that arrived while earlier candidates in the
@@ -333,17 +434,35 @@ export interface StructuredHostRetirementReport {
   reclaimed: StructuredHostRetirementReclaim;
 }
 
+/**
+ * The sweep's reads, every one of them injectable.
+ *
+ * Each reader that can fail to answer returns a {@link Determinable}: the
+ * "unknown" shape is the seam's own contract, not something the sweep infers
+ * from a null at the far end of it. A reader that cannot fail returns a plain
+ * value, and that difference is the type telling the truth about the source.
+ *
+ * The sources behind these — `/proc`, the handoff queue, the seat store, the
+ * event ledger, `stat` — each keep their own idiom for "I could not answer".
+ * Each is translated exactly once, in the default reader below, and never
+ * again: past this boundary there is one way to say unknown and one place that
+ * decides what it means.
+ */
 export interface StructuredHostRetirementDependencies {
   publicationState?: () => "ready" | "rebinding" | "unbound";
   snapshot?: () => RegistryFile;
-  handoffRows?: () => readonly HandoffRow[];
-  durableEventTail?: (sessionId: string) => number | null;
-  realtimeBound?: (conversationId: string) => boolean | null;
-  /** Null when the durable seat store could not be established — the sweep
-      refuses rather than reading silence as "no seats". */
-  orchestratorSeatConversations?: () => ReadonlySet<string> | null;
-  transcriptStat?: (pathname: string) => { mtimeMs: number } | null;
-  processIdentity?: (pid: number) => string | null;
+  /** Undetermined when the queue could not be read: silence is not a drained
+      queue, and reading it as one strands the message it still holds. */
+  handoffRows?: () => Determinable<readonly HandoffRow[]>;
+  durableEventTail?: (sessionId: string) => Determinable<number>;
+  realtimeBound?: (conversationId: string) => Determinable<boolean>;
+  /** Undetermined when the durable seat store could not be established — the
+      sweep refuses rather than reading silence as "no seats". */
+  orchestratorSeatConversations?: () => Determinable<ReadonlySet<string>>;
+  /** A determined `null` is a transcript that is genuinely not there; an
+      unreadable path is undetermined. */
+  transcriptStat?: (pathname: string) => Determinable<{ mtimeMs: number } | null>;
+  processIdentity?: (pid: number) => Determinable<string>;
   processMemory?: (pids: Iterable<number>) => Map<number, ProcessMemory>;
   ppidMap?: () => Map<number, number>;
   owned?: (key: SessionKey) => boolean;
@@ -383,12 +502,23 @@ export function structuredHostRetirementGraceMs(
   return Math.min(value, MAX_RETIREMENT_GRACE_MS);
 }
 
-function transcriptStat(pathname: string): { mtimeMs: number } | null {
+/**
+ * The transcript the resume would read, or the reason its state is unknown.
+ *
+ * A transcript that is genuinely gone is an established fact and refuses at
+ * `resumable`; a path that could not be read — a permission error, an
+ * unreachable mount — is not the same fact, and collapsing the two would let a
+ * transient read error present as "this conversation has no history left".
+ */
+function transcriptStat(pathname: string): Determinable<{ mtimeMs: number } | null> {
   try {
     const stats = fs.statSync(pathname);
-    return stats.isFile() ? { mtimeMs: stats.mtimeMs } : null;
-  } catch {
-    return null;
+    return determined(stats.isFile() ? { mtimeMs: stats.mtimeMs } : null);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR"
+      ? determined(null)
+      : undetermined(`the transcript could not be read (${code ?? "unknown"})`);
   }
 }
 
@@ -400,16 +530,16 @@ function transcriptStat(pathname: string): { mtimeMs: number } | null {
  * process that holds the hosts. Asked anywhere else it does not answer "no
  * call", it answers nothing, and null is what the predicate refuses on.
  */
-function defaultRealtimeBound(conversationId: string): boolean | null {
+function defaultRealtimeBound(conversationId: string): Determinable<boolean> {
   try {
-    if (realtimeBoundConversationIds().has(conversationId)) return true;
+    if (realtimeBoundConversationIds().has(conversationId)) return determined(true);
     const host = structuredDeliveryHostForConversation(conversationId) as
       { currentRealtimeSessionId?: () => string | null } | null;
-    return typeof host?.currentRealtimeSessionId === "function"
+    return determined(typeof host?.currentRealtimeSessionId === "function"
       ? host.currentRealtimeSessionId() !== null
-      : false;
-  } catch {
-    return null;
+      : false);
+  } catch (error) {
+    return undetermined(`the realtime binding could not be read: ${safeReason(error)}`);
   }
 }
 
@@ -424,19 +554,24 @@ function defaultRealtimeBound(conversationId: string): boolean | null {
  * messages, so it passes every other clause. This reads the source that can
  * still say "unknown", and unknown refuses.
  */
-function defaultOrchestratorSeatConversations(): ReadonlySet<string> | null {
+function defaultOrchestratorSeatConversations(): Determinable<ReadonlySet<string>> {
   let active: ReturnType<typeof activeOrchestratorSeatsOrUnknown>;
   try {
     active = activeOrchestratorSeatsOrUnknown();
-  } catch {
-    return null;
+  } catch (error) {
+    return undetermined(`the orchestrator seat store could not be read: ${safeReason(error)}`);
   }
-  if (active === null) return null;
+  if (active === null) return undetermined("the orchestrator seat store could not be established");
   const seats = new Set<string>();
   for (const seat of active) {
     if (seat.conversationId) seats.add(seat.conversationId);
   }
-  return seats;
+  return determined(seats);
+}
+
+/** An error reduced to something an audit line can carry. */
+function safeReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function atomicWrite(filename: string, value: unknown): void {
@@ -454,14 +589,27 @@ function atomicWrite(filename: string, value: unknown): void {
  * 65 hosts refuses 65 times a minute, and writing each of those out in full
  * would push the actions that matter out of a rotated journal within hours. The
  * last sweep's refusals stay in full in the report file beside it.
+ *
+ * Clauses that could not be DETERMINED are counted separately, because the two
+ * mean opposite things about the machine: a refusal is the predicate working,
+ * an undetermined clause is a reader that stopped answering, and a ledger,
+ * queue or seat store that has gone quiet would otherwise hide inside a
+ * refusal count that looks entirely healthy.
  */
 export function structuredHostRetirementJournalRecord(
   report: StructuredHostRetirementReport,
-): Omit<StructuredHostRetirementReport, "refused"> & { refusedByClause: Record<string, number> } {
+): Omit<StructuredHostRetirementReport, "refused"> & {
+  refusedByClause: Record<string, number>;
+  undeterminedByClause: Record<string, number>;
+} {
   const { refused, ...rest } = report;
   const refusedByClause: Record<string, number> = {};
-  for (const item of refused) refusedByClause[item.clause] = (refusedByClause[item.clause] ?? 0) + 1;
-  return { ...rest, refusedByClause };
+  const undeterminedByClause: Record<string, number> = {};
+  for (const item of refused) {
+    refusedByClause[item.clause] = (refusedByClause[item.clause] ?? 0) + 1;
+    if (item.undetermined) undeterminedByClause[item.clause] = (undeterminedByClause[item.clause] ?? 0) + 1;
+  }
+  return { ...rest, refusedByClause, undeterminedByClause };
 }
 
 /**
@@ -491,6 +639,15 @@ function recordRetirementReport(report: StructuredHostRetirementReport): void {
   }
   for (const failure of report.failed) {
     console.warn(`[host retirement] left ${failure.key} intact: ${failure.error}`);
+  }
+  /* One aggregated line, not one per host: a broken seat store or ledger makes
+     every candidate undetermined at once, and the operator needs the clause
+     named, not the population enumerated once every five minutes. */
+  const clauses = Object.entries(structuredHostRetirementJournalRecord(report).undeterminedByClause);
+  if (clauses.length > 0) {
+    const named = clauses.map(([clause, count]) => `${clause} (${count})`).join(", ");
+    const example = report.refused.find((item) => item.undetermined)?.reason ?? "";
+    console.warn(`[host retirement] kept hosts whose clauses could not be determined: ${named} — ${example}`);
   }
 }
 
@@ -536,18 +693,27 @@ class RetirementWorkIndex {
  * moment the queue had a writer. The unreplayed pending delivery is the thing
  * a retirement would strand, so that is the whole test.
  */
-function undeliveredHandoffIndex(rows: readonly HandoffRow[], file: RegistryFile): RetirementWorkIndex {
-  const index = new RetirementWorkIndex();
-  for (const row of rows) {
-    const replayed = new Set(row.replayedDeliveryIds ?? []);
-    if (!(row.pendingDeliveries ?? []).some((delivery) => !replayed.has(delivery.deliveryId))) continue;
-    if (row.engine === "claude" || row.engine === "codex") index.addKey(`${row.engine}:${row.engineSessionId}`);
-    else index.addConversation(row.conversationId);
-  }
-  for (const delivery of Object.values(file.heldDeliveries ?? {})) {
-    if (UNDELIVERED_HELD_STATES.has(delivery.state)) index.addConversation(delivery.conversationId);
-  }
-  return index;
+function undeliveredHandoffIndex(
+  rows: Determinable<readonly HandoffRow[]>,
+  file: RegistryFile,
+): Determinable<RetirementWorkIndex> {
+  /* A queue that could not be read is not a drained one. The registry's held
+     deliveries would still be readable here, and counting only those would
+     produce a confident zero for a key whose queued message is sitting in the
+     source that failed. */
+  return mapDeterminable(rows, (readable) => {
+    const index = new RetirementWorkIndex();
+    for (const row of readable) {
+      const replayed = new Set(row.replayedDeliveryIds ?? []);
+      if (!(row.pendingDeliveries ?? []).some((delivery) => !replayed.has(delivery.deliveryId))) continue;
+      if (row.engine === "claude" || row.engine === "codex") index.addKey(`${row.engine}:${row.engineSessionId}`);
+      else index.addConversation(row.conversationId);
+    }
+    for (const delivery of Object.values(file.heldDeliveries ?? {})) {
+      if (UNDELIVERED_HELD_STATES.has(delivery.state)) index.addConversation(delivery.conversationId);
+    }
+    return index;
+  });
 }
 
 /** Spawn receipts that named a key or its conversation and have not settled.
@@ -570,19 +736,19 @@ function openOperationIndex(file: RegistryFile): RetirementWorkIndex {
 interface RetirementInputs {
   file: RegistryFile;
   conversationsBySession: Map<string, RegistryFile["conversations"][string]>;
-  undelivered: RetirementWorkIndex;
+  undelivered: Determinable<RetirementWorkIndex>;
   openOperations: RetirementWorkIndex;
   /** The seat file is one read per pass, not one per host: a candidate list is
-      bounded but not small, and this is a file. Null when it could not be read
-      at all, which is a refusal rather than an empty set. */
-  seatConversations: ReadonlySet<string> | null;
+      bounded but not small, and this is a file. Undetermined when it could not
+      be read at all, which is a refusal rather than an empty set. */
+  seatConversations: Determinable<ReadonlySet<string>>;
 }
 
 /** Per-host facts that come from a durable read the whole pass shares. */
 interface RetirementSources {
   snapshot: () => RegistryFile;
-  handoffRows: () => readonly HandoffRow[];
-  seatConversations: () => ReadonlySet<string> | null;
+  handoffRows: () => Determinable<readonly HandoffRow[]>;
+  seatConversations: () => Determinable<ReadonlySet<string>>;
 }
 
 function retirementInputs(sources: RetirementSources): RetirementInputs {
@@ -604,10 +770,10 @@ function retirementInputs(sources: RetirementSources): RetirementInputs {
     durable store. Every one is re-read on the re-check, because every one of
     them can change under it. */
 interface RetirementReaders {
-  durableEventTail: (sessionId: string) => number | null;
-  realtimeBound: (conversationId: string) => boolean | null;
-  transcriptStat: (pathname: string) => { mtimeMs: number } | null;
-  processIdentity: (pid: number) => string | null;
+  durableEventTail: (sessionId: string) => Determinable<number>;
+  realtimeBound: (conversationId: string) => Determinable<boolean>;
+  transcriptStat: (pathname: string) => Determinable<{ mtimeMs: number } | null>;
+  processIdentity: (pid: number) => Determinable<string>;
 }
 
 /** Candidate rows: registry-recorded structured hosts only. */
@@ -631,11 +797,10 @@ function retirementCandidates(file: RegistryFile) {
 function seatStatus(
   conversationId: string,
   memberships: readonly { kind: string }[],
-  seatConversations: ReadonlySet<string> | null,
-): boolean | null {
-  if (memberships.some((membership) => membership.kind === "orchestrator")) return true;
-  if (seatConversations === null) return null;
-  return seatConversations.has(conversationId);
+  seatConversations: Determinable<ReadonlySet<string>>,
+): Determinable<boolean> {
+  if (memberships.some((membership) => membership.kind === "orchestrator")) return determined(true);
+  return mapDeterminable(seatConversations, (seats) => seats.has(conversationId));
 }
 
 function retirementSubject(
@@ -665,22 +830,50 @@ function retirementSubject(
     process: hostProcess,
     status: entry.status,
     activeTurnRef: columns.activeTurnRef,
-    turnBusy: conversation === null || conversation.turn.state === "unknown"
-      ? null
-      : conversation.turn.state === "busy",
+    turnBusy: conversation === null
+      ? undetermined("no conversation record establishes this host's turn state")
+      : conversation.turn.state === "unknown"
+        ? undetermined("the conversation's turn state is unknown")
+        : determined(conversation.turn.state === "busy"),
     pendingAttention: columns.pendingAttention,
     activeFlags: columns.activeFlags,
     pendingAction: entry.pendingAction,
     structuredHostOperationId: entry.structuredHostOperationId ?? null,
-    undeliveredHandoffEntries: inputs.undelivered.count(keyId, conversationId),
+    undeliveredHandoffEntries: mapDeterminable(inputs.undelivered,
+      (index) => index.count(keyId, conversationId)),
     openOperations: inputs.openOperations.count(keyId, conversationId),
     eventCursor: columns.eventCursor,
     durableEventTail: readers.durableEventTail(key.sessionId),
-    realtimeBound: conversationId === null ? false : readers.realtimeBound(conversationId),
-    seat: conversation === null ? null : seatStatus(conversation.id, memberships, inputs.seatConversations),
-    transcriptMtimeMs: entry.artifactPath ? readers.transcriptStat(entry.artifactPath)?.mtimeMs ?? null : null,
+    realtimeBound: conversationId === null
+      ? undetermined("the host names no conversation, so no realtime binding can be looked up")
+      : readers.realtimeBound(conversationId),
+    seat: conversation === null
+      ? undetermined("no conversation record establishes whether this host holds a seat")
+      : seatStatus(conversation.id, memberships, inputs.seatConversations),
+    transcriptFile: entry.artifactPath
+      ? readers.transcriptStat(entry.artifactPath)
+      : determined(null),
     observedStartIdentity: readers.processIdentity(hostProcess.pid),
   };
+}
+
+/**
+ * Hands a fact to the interactive kill gate in the shape that gate speaks.
+ *
+ * `structuredHostKillRefusal` has its own "unknown", a null, and it refuses on
+ * one exactly as this predicate does — so an undetermined fact crossing as null
+ * is fail-closed on the far side too. Both of these are determined by the time
+ * a subject qualifies; this keeps the conversion total without a cast.
+ */
+function killRefFact<T>(input: Determinable<T>): T | null {
+  return input.determined ? input.value : null;
+}
+
+/** The transcript time a qualified subject was measured against. Determined and
+    present by construction — every clause has already passed — so the fallback
+    is a type narrowing rather than a decision. */
+function qualifiedTranscriptMtimeMs(subject: StructuredHostRetirementSubject): number | null {
+  return subject.transcriptFile.determined ? subject.transcriptFile.value?.mtimeMs ?? null : null;
 }
 
 /**
@@ -720,10 +913,11 @@ export async function runStructuredHostRetirementSweep(
     ?? structuredHostRetirementIdleMs()
     ?? DEFAULT_RETIREMENT_IDLE_HOURS * 3_600_000;
   const graceMs = dependencies.graceMs ?? structuredHostRetirementGraceMs();
-  const batch = dependencies.batch ?? RETIREMENT_BATCH;
+  const batch = dependencies.batch ?? structuredHostRetirementBatch(graceMs);
   const snapshot = dependencies.snapshot ?? (() => agentRegistry().readOnlySnapshot());
   const handoffRows = dependencies.handoffRows ?? (() => {
-    try { return handoffQueue().rows(); } catch { return []; }
+    try { return determined(handoffQueue().rows()); }
+    catch (error) { return undetermined(`the handoff queue could not be read: ${safeReason(error)}`); }
   });
   const sources: RetirementSources = {
     snapshot,
@@ -734,7 +928,12 @@ export async function runStructuredHostRetirementSweep(
     durableEventTail: dependencies.durableEventTail ?? ((sessionId: string) => durableRuntimeEventTailSeq(sessionId)),
     realtimeBound: dependencies.realtimeBound ?? defaultRealtimeBound,
     transcriptStat: dependencies.transcriptStat ?? transcriptStat,
-    processIdentity: dependencies.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid)),
+    processIdentity: dependencies.processIdentity ?? ((pid: number) => {
+      const identity = procBackend.processIdentity(pid);
+      return identity === null
+        ? undetermined(`no kernel identity can be observed for pid ${pid}`)
+        : determined(identity);
+    }),
   };
   const memoryOf = dependencies.processMemory ?? ((pids: Iterable<number>) => procBackend.processMemory(pids));
   const ppids = dependencies.ppidMap ?? (() => procBackend.ppidMap());
@@ -786,6 +985,7 @@ export async function runStructuredHostRetirementSweep(
         conversationId: subject.conversationId,
         clause: verdict.clause,
         reason: verdict.reason,
+        ...(verdict.undetermined ? { undetermined: true as const } : {}),
       });
       continue;
     }
@@ -824,11 +1024,13 @@ export async function runStructuredHostRetirementSweep(
         conversationId: subject.conversationId,
         clause: verdict.clause,
         reason: verdict.reason,
+        ...(verdict.undetermined ? { undetermined: true as const } : {}),
         changed: true,
       });
       continue;
     }
     const hostProcess = subject.process;
+    const transcriptMtimeMs = qualifiedTranscriptMtimeMs(subject);
 
     /* Measured before anything is signalled: a tree that is already gone
        reports nothing, and a reclaim claimed after the kill would be zero. */
@@ -848,10 +1050,10 @@ export async function runStructuredHostRetirementSweep(
       engine: subject.key.engine,
       sessionId: subject.key.sessionId,
       conversationId: subject.conversationId,
-      seat: subject.seat,
-      turnBusy: subject.turnBusy,
+      seat: killRefFact(subject.seat),
+      turnBusy: killRefFact(subject.turnBusy),
       owned: owned(subject.key),
-      lastActiveAt: subject.transcriptMtimeMs === null ? null : new Date(subject.transcriptMtimeMs).toISOString(),
+      lastActiveAt: transcriptMtimeMs === null ? null : new Date(transcriptMtimeMs).toISOString(),
     };
 
     let outcome: StructuredHostTerminationOutcome;
@@ -878,7 +1080,7 @@ export async function runStructuredHostRetirementSweep(
       role: subject.role,
       stage: subject.stage,
       cwd: subject.cwd,
-      idleMs: subject.transcriptMtimeMs === null ? 0 : startedAtMs - subject.transcriptMtimeMs,
+      idleMs: transcriptMtimeMs === null ? 0 : startedAtMs - transcriptMtimeMs,
       passed: verdict.passed,
       via: outcome.via,
       pids: outcome.pids,
@@ -919,16 +1121,6 @@ export async function reconcileStructuredHostRetirement(dependencies: {
     return null;
   }
 }
-
-/**
- * How often the release that owns traffic sweeps.
- *
- * Far slower than the reconciliation controllers, and deliberately so: the
- * default quiet interval is six hours, so a few minutes of latency costs
- * nothing, while every tick reads `/proc` for each recorded host inside the
- * process that is also serving the operator's board.
- */
-export const STRUCTURED_HOST_RETIREMENT_INTERVAL_MS = 5 * 60_000;
 
 const retirementHost = globalThis as typeof globalThis & {
   __llvStructuredHostRetirementTimer?: ReturnType<typeof setInterval>;

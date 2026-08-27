@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { statePath } from "@/lib/configDir";
 
+import { determined, undetermined, type Determinable } from "./determinable";
 import type { RuntimeEvent } from "./engineHost";
 import { normalizeVoiceDeliveries } from "./voiceDelivery";
 
@@ -184,50 +185,91 @@ function validEvent(value: unknown): value is RuntimeEvent {
   }
 }
 
-/** How much of a ledger's tail is read to find its last durable record. An
-    event record is orders of magnitude smaller than this, so the window always
-    spans several of them. */
-const EVENT_TAIL_PROBE_BYTES = 64 * 1024;
+/** Bytes per backwards step while looking for a record boundary. This bounds
+    the read, never the record: the scan keeps stepping until it finds the
+    newline, so a record larger than one step is found rather than missed. */
+const EVENT_TAIL_STEP_BYTES = 64 * 1024;
+/**
+ * The largest final record this will reassemble to read its sequence. It exists
+ * so a corrupt length cannot make the probe allocate the machine's memory, and
+ * a record past it is reported as UNDETERMINED — the one thing a size limit
+ * here must never do is answer "nothing pending" for a ledger it declined to
+ * read. A single runtime event is kilobytes; the whole-ledger cache above caps
+ * at 64 MiB, so nothing legitimate comes close.
+ */
+const EVENT_TAIL_MAX_RECORD_BYTES = 32 * 1024 * 1024;
 
 /**
- * Last sequence a thread's ledger holds *on disk*, or 0 when it holds nothing.
+ * Byte offset of the last `\n` strictly before `end`, or -1 when there is none.
  *
- * Null means the tail could not be read as an event, and null is not zero: a
- * caller deciding whether a host may be retired (#747) must treat an unreadable
- * ledger as "unknown", never as "nothing pending". A final record without its
- * terminating newline is a torn append, so the durable tail is the last
- * COMPLETE record before it — which is exactly what a reader would replay.
+ * Stepping backwards is what makes the probe independent of record size. The
+ * fixed-window version of this (#747, round 3) read the last 64 KiB and gave up
+ * when it held no complete line, so a well-formed ledger whose final record was
+ * larger than the window answered "unknown" — and unknown is an input the
+ * retirement predicate then has to refuse on, forever, for that ledger.
+ */
+function lastNewlineBefore(handle: number, end: number, buffer: Buffer): number {
+  let position = end;
+  while (position > 0) {
+    const length = Math.min(buffer.byteLength, position);
+    const start = position - length;
+    const read = fs.readSync(handle, buffer, 0, length, start);
+    if (read <= 0) return -1;
+    const index = buffer.lastIndexOf(0x0a, read - 1);
+    if (index >= 0) return start + index;
+    position = start;
+  }
+  return -1;
+}
+
+/**
+ * Last sequence a thread's ledger holds *on disk*, or a determined 0 when it
+ * holds nothing.
+ *
+ * Undetermined is not zero: a caller deciding whether a host may be retired
+ * (#747) must treat a ledger it could not read as "unknown", never as "nothing
+ * pending". A final record without its terminating newline is a torn append, so
+ * the durable tail is the last COMPLETE record before it — which is exactly
+ * what {@link FileRuntimeEventStore.load} would replay.
  */
 export function durableRuntimeEventTailSeq(
   threadId: string,
   directory: string = statePath("structured-host-events"),
-): number | null {
+): Determinable<number> {
   const filename = path.join(directory, `${encodeURIComponent(threadId)}.jsonl`);
   let handle: number;
   try {
     handle = fs.openSync(filename, "r");
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? 0 : null;
+    const code = (error as NodeJS.ErrnoException).code;
+    /* A ledger that was never created holds nothing, and that is an answer. */
+    return code === "ENOENT" ? determined(0) : undetermined(`the runtime event ledger could not be opened (${code ?? "unknown"})`);
   }
   try {
     const size = fs.fstatSync(handle).size;
-    if (size === 0) return 0;
-    const length = Math.min(size, EVENT_TAIL_PROBE_BYTES);
-    const buffer = Buffer.allocUnsafe(length);
-    const read = fs.readSync(handle, buffer, 0, length, size - length);
-    const text = buffer.toString("utf8", 0, read);
-    const lines = text.split("\n").filter((line) => line.length > 0);
-    if (!text.endsWith("\n")) lines.pop();
-    const last = lines.at(-1);
-    /* Nothing complete inside the window: only a whole-file read proves the
-       ledger really holds no finished record. */
-    if (last === undefined) return length === size ? 0 : null;
+    if (size === 0) return determined(0);
+    const buffer = Buffer.allocUnsafe(Math.min(EVENT_TAIL_STEP_BYTES, size));
+    const terminator = lastNewlineBefore(handle, size, buffer);
+    /* No newline anywhere: the file holds one unterminated append and no
+       complete record, so the durable tail really is nothing. */
+    if (terminator < 0) return determined(0);
+    const start = lastNewlineBefore(handle, terminator, buffer) + 1;
+    const length = terminator - start;
+    if (length === 0) return undetermined("the runtime event ledger ends with an empty record");
+    if (length > EVENT_TAIL_MAX_RECORD_BYTES) {
+      return undetermined(`the runtime event ledger's final record is ${length} bytes`);
+    }
+    const record = Buffer.allocUnsafe(length);
+    const read = fs.readSync(handle, record, 0, length, start);
+    if (read !== length) return undetermined("the runtime event ledger's final record could not be read whole");
     let parsed: unknown;
-    try { parsed = JSON.parse(last); } catch { return null; }
+    try { parsed = JSON.parse(record.toString("utf8")); } catch { return undetermined("the runtime event ledger's final record is not JSON"); }
     const seq = (parsed as { seq?: unknown } | null)?.seq;
-    return Number.isSafeInteger(seq) && (seq as number) > 0 ? seq as number : null;
-  } catch {
-    return null;
+    return Number.isSafeInteger(seq) && (seq as number) > 0
+      ? determined(seq as number)
+      : undetermined("the runtime event ledger's final record carries no sequence");
+  } catch (error) {
+    return undetermined(`the runtime event ledger could not be read (${(error as NodeJS.ErrnoException).code ?? "unknown"})`);
   } finally {
     fs.closeSync(handle);
   }
