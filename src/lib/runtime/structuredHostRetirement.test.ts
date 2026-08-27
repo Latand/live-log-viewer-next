@@ -390,6 +390,21 @@ test("a seat that cannot be established blocks retirement — unknown is never i
   await refusedBy("seat-free", { snapshot: () => snapshot({ conversations: {} }) });
 });
 
+test("a seat store that cannot be read blocks retirement — unknown is never idle", async () => {
+  /* The reader the authority path uses answers an unreadable file as an empty
+     one, because authority fails closed on an absent seat. Retirement asks the
+     same question with the opposite consequence, so its source can still say
+     "unknown" — and unknown refuses instead of clearing a live orchestrator. */
+  await refusedBy("seat-free", { orchestratorSeatConversations: () => null });
+});
+
+test("an orchestrator membership establishes a seat even when the seat store cannot be read", async () => {
+  await refusedBy("seat-free", {
+    orchestratorSeatConversations: () => null,
+    snapshot: () => snapshot({ memberships: { [CONVERSATION]: [{ kind: "orchestrator", project: "repo-a" }] } }),
+  });
+});
+
 test("a transcript that is gone from disk blocks retirement", async () => {
   await refusedBy("resumable", { transcriptStat: () => null });
 });

@@ -4,7 +4,7 @@ import path from "node:path";
 import { agentRegistry, type AgentHostStatus, type ProcessIdentity, type RegistryFile } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { statePath } from "@/lib/configDir";
-import { activeOrchestratorSeats } from "@/lib/orchestrator/seats";
+import { activeOrchestratorSeatsOrUnknown } from "@/lib/orchestrator/seats";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import type { ProcessMemory } from "@/lib/proc/types";
@@ -141,7 +141,8 @@ export interface StructuredHostRetirementSubject {
   /** Null when this process cannot establish whether a live transport is bound
       — a state the sweep refuses on rather than reads as "no call". */
   realtimeBound: boolean | null;
-  /** Null when the registry cannot establish whether this host holds a seat. */
+  /** Null when neither the registry nor the durable seat store establishes
+      whether this host holds a seat. */
   seat: boolean | null;
   transcriptMtimeMs: number | null;
   observedStartIdentity: string | null;
@@ -156,10 +157,13 @@ export type StructuredHostRetirementVerdict =
  * refusal is the reported one, so a subject that fails several still names a
  * single cause the operator can act on.
  *
- * `seat-free` runs first because it is the clause a missing conversation record
- * fails: without one, neither the seat nor the turn can be established, and an
- * unestablished seat is excluded rather than assumed free — the mistake #1199's
- * review already caught once.
+ * `seat-free` runs first because it is the clause an unestablished fact fails
+ * first: with no conversation record neither the seat nor the turn can be
+ * established, and with no readable seat store the live authority itself is
+ * silent. An unestablished seat is excluded rather than assumed free — the
+ * mistake #1199's review already caught once, and an orchestrator is exactly
+ * the host that sits quiet for hours between operator messages, so it would
+ * pass every other clause.
  */
 export function structuredHostRetirementVerdict(
   subject: StructuredHostRetirementSubject,
@@ -335,7 +339,9 @@ export interface StructuredHostRetirementDependencies {
   handoffRows?: () => readonly HandoffRow[];
   durableEventTail?: (sessionId: string) => number | null;
   realtimeBound?: (conversationId: string) => boolean | null;
-  orchestratorSeatConversations?: () => ReadonlySet<string>;
+  /** Null when the durable seat store could not be established — the sweep
+      refuses rather than reading silence as "no seats". */
+  orchestratorSeatConversations?: () => ReadonlySet<string> | null;
   transcriptStat?: (pathname: string) => { mtimeMs: number } | null;
   processIdentity?: (pid: number) => string | null;
   processMemory?: (pids: Iterable<number>) => Map<number, ProcessMemory>;
@@ -407,16 +413,28 @@ function defaultRealtimeBound(conversationId: string): boolean | null {
   }
 }
 
-function defaultOrchestratorSeatConversations(): ReadonlySet<string> {
-  const seats = new Set<string>();
+/**
+ * Conversations holding a live orchestrator seat, or null when the durable seat
+ * store could not be established.
+ *
+ * The reader the authority path uses answers an unreadable file as an EMPTY
+ * one, because authority fails closed on an absent seat. Here the same silence
+ * would mean the opposite — every live orchestrator reads as seat-free, and an
+ * orchestrator is precisely the host that sits quiet for hours between operator
+ * messages, so it passes every other clause. This reads the source that can
+ * still say "unknown", and unknown refuses.
+ */
+function defaultOrchestratorSeatConversations(): ReadonlySet<string> | null {
+  let active: ReturnType<typeof activeOrchestratorSeatsOrUnknown>;
   try {
-    for (const seat of activeOrchestratorSeats()) {
-      if (seat.conversationId) seats.add(seat.conversationId);
-    }
+    active = activeOrchestratorSeatsOrUnknown();
   } catch {
-    /* Unreadable seat evidence must not read as "no seats": the registry
-       memberships still answer, and a conversation with neither stays unknown
-       and therefore excluded. */
+    return null;
+  }
+  if (active === null) return null;
+  const seats = new Set<string>();
+  for (const seat of active) {
+    if (seat.conversationId) seats.add(seat.conversationId);
   }
   return seats;
 }
@@ -555,15 +573,16 @@ interface RetirementInputs {
   undelivered: RetirementWorkIndex;
   openOperations: RetirementWorkIndex;
   /** The seat file is one read per pass, not one per host: a candidate list is
-      bounded but not small, and this is a file. */
-  seatConversations: ReadonlySet<string>;
+      bounded but not small, and this is a file. Null when it could not be read
+      at all, which is a refusal rather than an empty set. */
+  seatConversations: ReadonlySet<string> | null;
 }
 
 /** Per-host facts that come from a durable read the whole pass shares. */
 interface RetirementSources {
   snapshot: () => RegistryFile;
   handoffRows: () => readonly HandoffRow[];
-  seatConversations: () => ReadonlySet<string>;
+  seatConversations: () => ReadonlySet<string> | null;
 }
 
 function retirementInputs(sources: RetirementSources): RetirementInputs {
@@ -599,6 +618,24 @@ function retirementCandidates(file: RegistryFile) {
       /* A pane-hosted entry belongs to the tmux lifecycle, not to this one. */
       && entry.host === null)
     .slice(0, RESOURCE_STRUCTURED_HOST_LIMIT);
+}
+
+/**
+ * Whether this conversation holds a live orchestrator seat, or null when that
+ * cannot be established.
+ *
+ * A registry orchestrator membership is durable evidence on its own. The seat
+ * store is the live authority, so when it cannot be read a conversation with no
+ * membership row is unknown — never free.
+ */
+function seatStatus(
+  conversationId: string,
+  memberships: readonly { kind: string }[],
+  seatConversations: ReadonlySet<string> | null,
+): boolean | null {
+  if (memberships.some((membership) => membership.kind === "orchestrator")) return true;
+  if (seatConversations === null) return null;
+  return seatConversations.has(conversationId);
 }
 
 function retirementSubject(
@@ -640,10 +677,7 @@ function retirementSubject(
     eventCursor: columns.eventCursor,
     durableEventTail: readers.durableEventTail(key.sessionId),
     realtimeBound: conversationId === null ? false : readers.realtimeBound(conversationId),
-    seat: conversation === null
-      ? null
-      : memberships.some((membership) => membership.kind === "orchestrator")
-        || inputs.seatConversations.has(conversation.id),
+    seat: conversation === null ? null : seatStatus(conversation.id, memberships, inputs.seatConversations),
     transcriptMtimeMs: entry.artifactPath ? readers.transcriptStat(entry.artifactPath)?.mtimeMs ?? null : null,
     observedStartIdentity: readers.processIdentity(hostProcess.pid),
   };
