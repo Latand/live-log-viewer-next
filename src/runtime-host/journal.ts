@@ -1469,6 +1469,7 @@ export class RuntimeJournal {
       status = "queued";
     }
     const revision = Number(this.db.query<{ revision: number }, [string]>("SELECT revision FROM scope_revisions WHERE scope = ?").get(`operation:${operationId}`)?.revision ?? 0) + 1;
+    const admittedAt = new Date(this.now()).toISOString();
     return {
       operationId,
       ...(retryOfOperationId ? { retryOfOperationId } : {}),
@@ -1486,7 +1487,12 @@ export class RuntimeJournal {
       text: command.kind === "send" || command.kind === "steer" ? command.text.slice(0, 240) : null,
       ...(command.kind === "send" || command.kind === "steer" ? { imageCount: command.images?.length ?? 0 } : {}),
       ...((command.kind === "send" || command.kind === "steer") && command.runtime ? { runtime: command.runtime } : {}),
-      at: new Date(this.now()).toISOString(),
+      at: admittedAt,
+      /* Immutable admission stamp (issue #1213). Every transition rewrites
+         `at`, so only this can say how long the operator has been waiting on a
+         message the queue keeps parking. A retry mints a NEW operation and
+         therefore a new stamp: the operator restarted the wait deliberately. */
+      admittedAt,
       revision,
     };
   }

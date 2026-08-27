@@ -38,6 +38,29 @@ Object.assign(globalThis, {
   removeEventListener() {},
 });
 
+/**
+ * The receipt stack's delivery-wait rendering is clock-driven (issue #1213):
+ * an admitted message that has waited past the uncertain bound stops reading as
+ * in flight. These fixtures assert status wording, not staleness, so they are
+ * read at the instant their newest receipt was written.
+ *
+ * They also describe a live agent mid-turn — that is what a parked send is
+ * waiting on here — so the host axes say so. The composer names a turn boundary
+ * only on the host's own evidence; without it the row says it is waiting
+ * without claiming to know why.
+ */
+function Receipts(props: React.ComponentProps<typeof RuntimeComposerReceipts>) {
+  const stamps = props.receipts.map((receipt) => Date.parse(receipt.at)).filter(Number.isFinite);
+  const newest = stamps.length ? Math.max(...stamps) : 0;
+  return (
+    <RuntimeComposerReceipts
+      {...props}
+      nowMs={props.nowMs ?? newest + 1_000}
+      session={props.session ?? { host: "hosted", turn: "running" }}
+    />
+  );
+}
+
 const realFetch = globalThis.fetch;
 
 afterEach(() => {
@@ -151,7 +174,7 @@ test("transitive retry composition exposes one current leaf and keeps independen
     document.body.append(host);
     const root = createRoot(host);
     flushSync(() => root.render(
-      <RuntimeComposerReceipts receipts={receipts} onRetry={() => {}} onEdit={() => {}} />,
+      <Receipts receipts={receipts} onRetry={() => {}} onEdit={() => {}} />,
     ));
 
     expect(receipts).toHaveLength(2);
@@ -177,7 +200,7 @@ test("repeated identical attempts share one grouped row with counts and final st
   const text = "Викинути TDLib history implementation і tests - давай";
 
   flushSync(() => root.render(
-    <RuntimeComposerReceipts
+    <Receipts
       receipts={[
         {
           operationId: "op-final",
@@ -246,7 +269,7 @@ test("multiple delivery attempts collapse into one bounded accessible receipt st
   const text = "Критичний user policy для structured delivery";
 
   flushSync(() => root.render(
-    <RuntimeComposerReceipts
+    <Receipts
       receipts={[
         {
           operationId: "op-current",
@@ -332,7 +355,7 @@ test("the 390px receipt row reserves preview space beside localized state counts
     const root = createRoot(host);
     const text = "A long structured delivery message keeps a readable preview";
     flushSync(() => root.render(
-      <RuntimeComposerReceipts
+      <Receipts
         receipts={[
           {
             operationId: `${locale}-busy`,
@@ -408,7 +431,7 @@ test("collapsed receipt disclosure keeps live status exposed through keyboard an
     revision: 1,
   };
   const render = (status: "queued" | "delivering" | "failed") => flushSync(() => root.render(
-    <RuntimeComposerReceipts
+    <Receipts
       receipts={[{
         ...receipt,
         status,
@@ -428,7 +451,12 @@ test("collapsed receipt disclosure keeps live status exposed through keyboard an
   expect(stack.contains(status)).toBe(false);
   expect(status.getAttribute("role")).toBe("status");
   expect(status.getAttribute("aria-live")).toBe("polite");
-  expect(status.textContent).toContain(translate("en", "runtime.receipt.queuedPos", { position: 2 }));
+  /* #1213: an admitted message parked at a turn boundary says which wait it is
+     in, and keeps its queue position inside that sentence. */
+  expect(status.textContent).toContain(translate("en", "runtime.receipt.awaitingTurnPos", {
+    position: 2,
+    waited: translate("en", "runtime.receipt.waitedSec", { n: 1 }),
+  }));
   expect(summary.getAttribute("aria-label")).toContain(translate("en", "runtime.receipt.showDetails"));
   expect(summary.getAttribute("aria-label")).toContain(translate("en", "runtime.receipt.summary", { count: 1 }));
   expect(summary.className).toContain("max-h-");
@@ -480,7 +508,7 @@ test("the disclosure state agrees with the details element across an empty-to-po
     revision: 1,
   });
   const render = (receipts: RuntimeReceipt[]) => flushSync(() => root.render(
-    <RuntimeComposerReceipts receipts={receipts} onRetry={() => {}} onEdit={() => {}} />,
+    <Receipts receipts={receipts} onRetry={() => {}} onEdit={() => {}} />,
   ));
 
   render([receipt("op-first", "queued")]);
@@ -511,7 +539,7 @@ test("receipt summary keeps the pending count beside busy retry feedback", () =>
   const root = createRoot(host);
 
   flushSync(() => root.render(
-    <RuntimeComposerReceipts
+    <Receipts
       receipts={[
         {
           operationId: "op-busy",
@@ -568,7 +596,7 @@ test("all active delivery states use a neutral pending summary in both locales",
     document.body.append(host);
     const root = createRoot(host);
     flushSync(() => root.render(
-      <RuntimeComposerReceipts
+      <Receipts
         receipts={activeStatuses.map((status, index) => ({
           operationId: `${locale}-${status}`,
           idempotencyKey: `${locale}-key-${status}`,
@@ -606,7 +634,7 @@ test("expanded active attempts retain localized lifecycle status and aggregate c
     document.body.append(host);
     const root = createRoot(host);
     flushSync(() => root.render(
-      <RuntimeComposerReceipts
+      <Receipts
         receipts={[
           ...active.map((receipt, index) => ({
             ...receipt,
@@ -641,10 +669,16 @@ test("expanded active attempts retain localized lifecycle status and aggregate c
     const details = host.querySelector("[data-runtime-receipt-details]")!;
     expect(details.querySelector('[data-receipt-status="pending"]')?.textContent)
       .toBe(translate(locale, "runtime.receipt.pending"));
+    /* #1213: `queued` is "admitted, parked until the turn ends" and names that
+       wait and its age instead of a bare lifecycle word; `uncertain` is the
+       opposite fact — the composer's own row for a send it never saw admitted —
+       and says exactly that. `pending`/`delivering` are momentary and keep
+       their own wording. */
+    const waited = (seconds: number) => translate(locale, "runtime.receipt.waitedSec", { n: seconds });
     expect(details.querySelector('[data-receipt-status="queued"]')?.textContent)
-      .toBe(translate(locale, "runtime.receipt.queuedPos", { position: 3 }));
+      .toBe(translate(locale, "runtime.receipt.awaitingTurnPos", { position: 3, waited: waited(4) }));
     expect(details.querySelector('[data-receipt-status="uncertain"]')?.textContent)
-      .toBe(translate(locale, "runtime.receipt.uncertain"));
+      .toBe(translate(locale, "runtime.receipt.admissionUnconfirmed", { waited: waited(3) }));
     expect(details.querySelector('[data-receipt-status="delivering"]')?.textContent)
       .toBe(translate(locale, "runtime.receipt.delivering"));
     expect(details.querySelector('[data-receipt-status="failed"]')?.textContent)
@@ -661,7 +695,7 @@ test("expanded receipt rows expose long multiline message text", () => {
   const text = `first line\n${"long content ".repeat(30)}`;
 
   flushSync(() => root.render(
-    <RuntimeComposerReceipts
+    <Receipts
       receipts={[{
         operationId: "op-long-multiline",
         idempotencyKey: "key-long-multiline",
@@ -691,7 +725,7 @@ test("editing a rejected receipt does not submit the composer form", async () =>
   let submits = 0;
   const { host, root } = await renderInto(
     <form onSubmit={(event) => { event.preventDefault(); submits += 1; }}>
-      <RuntimeComposerReceipts
+      <Receipts
         receipts={[{
           operationId: "op-rejected",
           idempotencyKey: "key-rejected",
@@ -816,7 +850,7 @@ test("editing and resending a rejected receipt uses a fresh delivery key", async
 async function renderInterruptAutoRetry(locale: "en" | "uk") {
   setLocale(locale);
   return renderInto(
-    <RuntimeComposerReceipts
+    <Receipts
       receipts={[{
         operationId: `op-interrupt-auto-retry-${locale}`,
         idempotencyKey: `key-interrupt-auto-retry-${locale}`,
