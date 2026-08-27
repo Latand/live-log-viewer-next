@@ -216,7 +216,18 @@ function publication(value: unknown): ViewerMcpRuntimePublicationEvidence {
     || item.durable !== true) {
     throw new Error("deployment adapter returned invalid MCP runtime publication evidence");
   }
-  return { ...runtime, action: item.action, publishedAt: item.publishedAt, durable: true };
+  /* #1216: the hand-over summary is what the journal keeps about the promote's
+     ordered hot-state steps, so it survives normalization here. */
+  const hotStateHandOver = typeof item.hotStateHandOver === "string"
+    ? item.hotStateHandOver.slice(0, 200)
+    : null;
+  return {
+    ...runtime,
+    action: item.action,
+    publishedAt: item.publishedAt,
+    durable: true,
+    ...(hotStateHandOver ? { hotStateHandOver } : {}),
+  };
 }
 
 function evidence(value: unknown): ViewerHealthEvidence {
@@ -319,6 +330,7 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       input: Record<string, unknown>,
       healthAdmissions?: Pick<McpHealthProbeAdmissions, "consume">,
     ): Promise<unknown> => {
+      const timeoutMs = Math.max(1, timeouts[action]);
       const admissionChannel = healthAdmissions
         ? await createMcpHealthProbeAdmissionChannel()
         : null;
@@ -334,6 +346,9 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
             ...withoutWakatimeCredential(process.env),
             LLV_DEPLOYMENT_ADAPTER_PROTOCOL: "1",
             LLV_DEPLOYMENT_ADAPTER_PHASE_FILE: phaseFile,
+            /* #1216: the deadline this host will enforce, so the adapter can
+               fit its own waits inside it instead of being killed mid-wait. */
+            LLV_DEPLOYMENT_ADAPTER_ACTION_DEADLINE_MS: String(timeoutMs),
           },
           detached: true,
         });
@@ -396,7 +411,6 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
       }, phaseLogIntervalMs);
       phaseLog.unref?.();
       try {
-        const timeoutMs = Math.max(1, timeouts[action]);
         const outcome = await Promise.race([
           exitPromise.then((exitCode) => ({ type: "exit" as const, exitCode })),
           new Promise<{ type: "timeout" }>((resolve) => { timer = setTimeout(() => resolve({ type: "timeout" }), timeoutMs); }),

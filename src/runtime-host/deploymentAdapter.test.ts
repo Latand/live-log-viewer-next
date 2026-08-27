@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 
 import { HostCommandViewerDeploymentAdapter } from "./deploymentAdapter";
 import { promotedViewerReadinessPhase } from "./deploymentHealth";
+import { PROMOTE_ACTION_TIMEOUT_MS } from "./deploymentHotState";
 
 const sandboxes: string[] = [];
 afterEach(() => {
@@ -222,6 +223,31 @@ test("a running adapter action reports its phase transitions to the host log", a
     revision: "a".repeat(40),
   })).rejects.toThrow(`deployment adapter promote timed out while ${phase}`);
   expect(new Set(lines)).toEqual(new Set([`[viewer deployment] promote ${phase}`]));
+});
+
+/* #1216: the adapter cannot fit its waits inside a deadline it cannot see, and
+   the hand-over outcome is lost unless it survives publication normalization. */
+test("the host publishes its promote deadline and keeps the hand-over the adapter reports", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-adapter-handover-"));
+  sandboxes.push(directory);
+  const executable = path.join(directory, "adapter.sh");
+  fs.writeFileSync(executable, `#!/bin/sh
+printf '{"action":"activate","source":"legacy","revision":"${"a".repeat(40)}","releaseId":null,"artifactDigest":"${"b".repeat(64)}","stagedAt":null,"publishedAt":"2026-08-27T00:00:01.000Z","durable":true,"hotStateHandOver":"incumbent released hot state after 4s; activation published after 12s; deadline %s"}\n' "$LLV_DEPLOYMENT_ADAPTER_ACTION_DEADLINE_MS"
+`, { mode: 0o700 });
+  const adapter = HostCommandViewerDeploymentAdapter.fromExecutable(executable, {
+    stateFile: path.join(directory, "adapter-process.json"),
+  });
+
+  const publication = await adapter.promote({
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:18001",
+    revision: "a".repeat(40),
+    hotStateBackend: "sqlite-v1",
+  });
+
+  expect(publication.hotStateHandOver)
+    .toBe(`incumbent released hot state after 4s; activation published after 12s; deadline ${PROMOTE_ACTION_TIMEOUT_MS}`);
 });
 
 test("promotion deadline reports the active handoff phase", async () => {

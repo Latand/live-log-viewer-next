@@ -5,8 +5,10 @@ import type { HotStateAuthority } from "@/lib/state/hotStateAuthority";
 import {
   awaitHotStateActivation,
   awaitIncumbentHotStateRelease,
+  fitHandOverBudgets,
   hotStateActivationObservation,
   hotStateActivationPhase,
+  hotStateHandOverSummary,
   HOT_STATE_ACTIVATION_TIMEOUT_MS,
   incumbentHotStateReleasePhase,
   INCUMBENT_RELEASE_TIMEOUT_MS,
@@ -28,13 +30,26 @@ function authority(overrides: Partial<HotStateAuthority> = {}): HotStateAuthorit
   };
 }
 
-/** Time advances only when the wait sleeps, so every elapsed value in these
-    assertions is the budget the wait actually spent. */
+/** Time advances only when the wait sleeps or when a bound it set actually
+    fires, so every elapsed value in these assertions is the budget the wait
+    really spent — a bound abandoned because the work finished costs nothing,
+    exactly as a cleared timer does on a wall clock. */
 function clock() {
   let elapsedMs = 0;
   return {
     now: () => elapsedMs,
     sleep: async (delayMs: number) => { elapsedMs += delayMs; },
+    timer: (delayMs: number) => {
+      let cancelled = false;
+      const expired = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          if (cancelled) return;
+          elapsedMs += delayMs;
+          resolve();
+        }, 0);
+      });
+      return { expired, cancel: () => { cancelled = true; } };
+    },
   };
 }
 
@@ -64,8 +79,26 @@ test("every reported phase survives the host phase-file alphabet", () => {
     hotStateActivationPhase("x".repeat(400), 1_000, 180_000),
   ];
   for (const phase of phases) expect(phase).toMatch(PHASE_ALPHABET);
-  expect(phases[0]).toBe("releasing incumbent hot state - 12s of 60s - incumbent running");
-  expect(phases[2]).toBe("waiting for hot-state activation - 91s of 180s - authority mode fencing revision matches epoch 4 activation pending");
+  /* Elapsed is reported in 5s steps: the phase file costs two fsyncs on the
+     state directory the hand-over contends on, and its consumer samples every
+     few seconds, so a per-second value would defeat the dedupe upstream. */
+  expect(phases[0]).toBe("releasing incumbent hot state - 10s of 60s - incumbent running");
+  expect(phases[2]).toBe("waiting for hot-state activation - 90s of 180s - authority mode fencing revision matches epoch 4 activation pending");
+});
+
+/* A budget configured past the host deadline restores exactly the inversion
+   this fix removes, so the adapter fits what it was given instead of it. */
+test("configured hand-over budgets are fitted inside the host deadline", () => {
+  const fitted = fitHandOverBudgets({ releaseMs: 10 * 60_000, activationMs: 30 * 60_000 });
+
+  expect(fitted.releaseMs + fitted.activationMs).toBeLessThan(PROMOTE_ACTION_TIMEOUT_MS);
+  expect(fitted.releaseMs).toBeGreaterThan(0);
+  expect(fitted.activationMs).toBeGreaterThan(0);
+  expect(fitHandOverBudgets({ releaseMs: 150, activationMs: 400 }))
+    .toEqual({ releaseMs: 150, activationMs: 400 });
+  expect(fitHandOverBudgets({ releaseMs: 4_000, activationMs: 4_000 }, 2_000).releaseMs
+    + fitHandOverBudgets({ releaseMs: 4_000, activationMs: 4_000 }, 2_000).activationMs)
+    .toBeLessThan(2_000);
 });
 
 test("activation that never arrives fails with a named reason", async () => {
@@ -144,6 +177,62 @@ test("an incumbent that never lets go is reported rather than fatal", async () =
   });
 
   expect(release).toEqual({ outcome: "retained", state: "running", waitedMs: 60_000 });
+});
+
+/* A wedged dockerd used to freeze the release loop on an unbounded inspect:
+   it never re-read the activation signal, never expired, and the host killed a
+   promote whose activation had landed normally. */
+test("a container inspection that never settles does not freeze the release step", async () => {
+  let activationChecks = 0;
+  const release = await awaitIncumbentHotStateRelease({
+    inspect: () => new Promise<never>(() => {}),
+    activated: () => { activationChecks += 1; return false; },
+    ...clock(),
+    timeoutMs: 15_000,
+    pollMs: 5_000,
+    inspectionTimeoutMs: 5_000,
+  });
+
+  expect(release).toEqual({ outcome: "unobservable", state: "unknown", waitedMs: 15_000 });
+  expect(activationChecks).toBeGreaterThan(1);
+});
+
+test("a wedged inspection cannot outrun the budget of the step that started it", async () => {
+  const release = await awaitIncumbentHotStateRelease({
+    inspect: () => new Promise<never>(() => {}),
+    activated: () => false,
+    ...clock(),
+    timeoutMs: 300,
+    pollMs: 100,
+    inspectionTimeoutMs: 5_000,
+  });
+
+  expect(release).toEqual({ outcome: "unobservable", state: "unknown", waitedMs: 300 });
+});
+
+test("a candidate inspection that never settles still names the activation timeout", async () => {
+  await expect(awaitHotStateActivation({
+    revision,
+    readAuthority: () => authority({ mode: "preparing" }),
+    inspectCandidate: () => new Promise<never>(() => {}),
+    ...clock(),
+    timeoutMs: 200,
+    pollMs: 100,
+    inspectionTimeoutMs: 5_000,
+  })).rejects.toThrow(
+    `promoted Viewer never published hot-state activation for revision ${revision}`
+    + "; waited 0s of 0s"
+    + "; last observed authority mode preparing revision matches epoch 4 activation pending"
+    + "; candidate container state is unobservable"
+    + "; incumbent release not required",
+  );
+});
+
+test("a hand-over that completed reports both ordered steps to the journal", () => {
+  expect(hotStateHandOverSummary({ outcome: "released", state: "exited", waitedMs: 4_000 }, 12_000))
+    .toBe("incumbent released hot state after 4s; activation published after 12s");
+  expect(hotStateHandOverSummary({ outcome: "not required", state: "unknown", waitedMs: 0 }, 1_400))
+    .toBe("incumbent release not required; activation published after 1s");
 });
 
 test("an unobservable incumbent does not stall the promote", async () => {

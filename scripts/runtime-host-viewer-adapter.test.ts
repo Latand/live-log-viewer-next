@@ -511,11 +511,14 @@ test("promote that never sees hot-state activation fails with a named reason", a
     action: "promote",
     input: { candidate },
     setupState: (state) => { initializeHotStateFixture(state, sqliteIncumbent); },
+    /* The release budget has to outlast a real `docker inspect` spawn, or the
+       step reports the daemon as unobservable rather than the incumbent as
+       retained — which is the honest outcome, but not the one under test. */
     environment: {
       LLV_HOT_STATE_ACTIVATION_TIMEOUT_MS: "400",
       LLV_HOT_STATE_ACTIVATION_POLL_MS: "10",
-      LLV_INCUMBENT_HOT_STATE_RELEASE_TIMEOUT_MS: "150",
-      LLV_INCUMBENT_HOT_STATE_RELEASE_POLL_MS: "10",
+      LLV_INCUMBENT_HOT_STATE_RELEASE_TIMEOUT_MS: "3000",
+      LLV_INCUMBENT_HOT_STATE_RELEASE_POLL_MS: "300",
     },
     dockerScript: liveIncumbentDocker,
   });
@@ -574,8 +577,38 @@ test("promote succeeds when hot-state activation arrives late but inside the bud
   });
   expect(phases.some((phase) => phase.startsWith("releasing incumbent hot state"))).toBe(true);
   expect(phases.some((phase) => /^waiting for hot-state activation - \d+s of \d+s - /.test(phase))).toBe(true);
+  /* The phase file is deleted when the action ends, so the hand-over outcome
+     rides the publication evidence into the deployment journal instead. */
+  expect((JSON.parse(result.stdout) as { hotStateHandOver?: string }).hotStateHandOver)
+    .toMatch(/^incumbent (released hot state|still|state unobservable|release not required).*activation published after \d+s$/);
   fs.rmSync(path.dirname(phaseFile), { recursive: true, force: true });
 });
+
+/* A configured budget above the deadline the host will enforce puts the two
+   back in the inversion this fix removes: the host would kill the adapter
+   mid-wait and the operator would read the bare phase string again. Without
+   the clamp this promote waits ten minutes and the test times out. */
+test("hand-over budgets configured past the host deadline still expire inside it", async () => {
+  const candidate = sqliteCandidate("6".repeat(40), "deploy-1216-clamped");
+  const startedAt = Date.now();
+  const result = await runAction({
+    action: "promote",
+    input: { candidate },
+    setupState: (state) => { initializeHotStateFixture(state, sqliteIncumbent); },
+    environment: {
+      LLV_DEPLOYMENT_ADAPTER_ACTION_DEADLINE_MS: "3000",
+      LLV_HOT_STATE_ACTIVATION_TIMEOUT_MS: "600000",
+      LLV_HOT_STATE_ACTIVATION_POLL_MS: "20",
+      LLV_INCUMBENT_HOT_STATE_RELEASE_TIMEOUT_MS: "600000",
+      LLV_INCUMBENT_HOT_STATE_RELEASE_POLL_MS: "20",
+    },
+    dockerScript: liveIncumbentDocker,
+  });
+
+  expect(result.code).not.toBe(0);
+  expect(result.stderr).toContain("promoted Viewer never published hot-state activation");
+  expect(Date.now() - startedAt).toBeLessThan(20_000);
+}, 30_000);
 
 test("promotion from SQLite to a legacy release checkpoints rollback mirrors first", async () => {
   const current = { ...release, hotStateBackend: HOT_STATE_BACKEND };
