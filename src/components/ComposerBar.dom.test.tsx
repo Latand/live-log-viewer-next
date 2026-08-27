@@ -11,6 +11,23 @@ import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 import { ComposerBar } from "./ComposerBar";
 import { ImagePreviewStrip, type PendingImage } from "./imageAttachments";
 
+/* A settle-on-demand FileReader: an intake's read is resolved inside the test's
+   own flush, so a staged slot can be observed in its settled state. */
+class QueuedReader {
+  static queue: QueuedReader[] = [];
+  result: string | null = null;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  readAsDataURL() { QueuedReader.queue.push(this); }
+  static settleAll(dataUrl: string) {
+    for (const reader of QueuedReader.queue.splice(0, QueuedReader.queue.length)) {
+      reader.result = dataUrl;
+      reader.onload?.();
+    }
+  }
+}
+
 const dom = new Window();
 let mobileViewport = false;
 Object.assign(globalThis, {
@@ -20,6 +37,7 @@ Object.assign(globalThis, {
   Node: dom.Node,
   HTMLElement: dom.HTMLElement,
   Event: dom.Event,
+  FileReader: QueuedReader,
   requestAnimationFrame: dom.requestAnimationFrame.bind(dom),
   cancelAnimationFrame: dom.cancelAnimationFrame.bind(dom),
 });
@@ -32,6 +50,7 @@ Object.assign(globalThis, {
 
 afterEach(() => {
   document.body.replaceChildren();
+  QueuedReader.queue = [];
   mobileViewport = false;
   setLocale("en");
 });
@@ -119,12 +138,14 @@ test("390px staged images occupy the first compact row inside the composer (#440
   flushSync(() => root.unmount());
 });
 
-test("unsupported image capability disables picker, paste, and drop before admission", () => {
+test("an unavailable image capability leaves paste, drop and the picker agreeing: the image stages and Send blocks with the reason", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
   flushSync(() => root.render(<Harness />));
 
+  /* This composer has no by-path road for a general file, so its picker stays
+     closed with the reason — the images-only surfaces are unchanged (#1224). */
   const picker = host.querySelector('button[aria-label="Add images"]') as HTMLButtonElement;
   expect(picker.disabled).toBe(true);
   expect(picker.title).toBe("Capability unavailable");
@@ -138,24 +159,38 @@ test("unsupported image capability disables picker, paste, and drop before admis
   let pastePrevented = false;
   let dragOverPrevented = false;
   let dropPrevented = false;
-  props.onPaste({
-    clipboardData: { items: [{ type: "image/png", getAsFile: () => ({ type: "image/png" }) }] },
+  flushSync(() => props.onPaste({
+    clipboardData: { items: [{ kind: "file", type: "image/png", getAsFile: () => ({ name: "pasted.png", type: "image/png", size: 12 }) }] },
     preventDefault: () => { pastePrevented = true; },
-  });
+  }));
   const dragTransfer = { items: [{ kind: "file", type: "image/png" }], dropEffect: "" };
-  props.onDragOver({
+  flushSync(() => props.onDragOver({
     dataTransfer: dragTransfer,
     preventDefault: () => { dragOverPrevented = true; },
-  });
-  props.onDrop({
-    dataTransfer: { files: [{ type: "image/png" }] },
+  }));
+  flushSync(() => props.onDrop({
+    dataTransfer: { files: [{ name: "dropped.png", type: "image/png", size: 12 }] },
     preventDefault: () => { dropPrevented = true; },
     stopPropagation: () => {},
-  });
+  }));
+  flushSync(() => QueuedReader.settleAll("data:image/png;base64,cmVhZHk="));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
   expect(pastePrevented).toBe(true);
   expect(dragOverPrevented).toBe(true);
-  expect(dragTransfer.dropEffect).toBe("none");
+  /* The drag is claimed whatever it carries: waving it away with a rejection
+     cursor is a file the browser never delivers, explained by nothing but a
+     pointer — and it made a drop behave unlike the picker, which stages the
+     same image and lets the send-time gate speak (#1224 round-2 finding 3). */
+  expect(dragTransfer.dropEffect).toBe("copy");
   expect(dropPrevented).toBe(true);
+
+  /* Both intakes staged, visibly, and the send-time gate is what refuses. */
+  const tiles = Array.from(host.querySelectorAll('[data-testid="attachment-tile"]'));
+  expect(tiles).toHaveLength(2);
+  expect(tiles.map((tile) => tile.getAttribute("data-status"))).toEqual(["ready", "ready"]);
+  const send = host.querySelector('button[aria-label="Send"]') as HTMLButtonElement;
+  expect(send.disabled).toBe(true);
   expect(host.textContent).toContain("Capability unavailable");
   flushSync(() => root.unmount());
 });

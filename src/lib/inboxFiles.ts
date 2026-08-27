@@ -30,7 +30,11 @@ export function inboxFilesDir(): string {
 
 export interface InboxFileUpload {
   name: string;
-  base64: string;
+  /** Decoded once, at admission, and carried from there: the request already
+      holds the base64, so decoding it a second time at write time (and
+      re-encoding it to compare strings) tripled the peak footprint of a batch
+      this process has no spare memory for. */
+  data: Buffer;
 }
 
 export interface InboxFileAdmissionFailure {
@@ -58,10 +62,13 @@ function rawBytesFromBase64(value: string): number {
   return Math.max(0, Math.floor(value.length * 3 / 4) - padding);
 }
 
-function canonicalBase64(value: string): Buffer | null {
+/** Decodes an attachment payload, or null when it is not base64 this can write.
+    The charset/length regex bounds the input before `Buffer.from` sees it, so
+    what comes back is either real bytes or nothing. */
+function decodeAttachment(value: string): Buffer | null {
   if (!value || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return null;
   const data = Buffer.from(value, "base64");
-  return data.length > 0 && data.toString("base64") === value ? data : null;
+  return data.length > 0 ? data : null;
 }
 
 /**
@@ -92,13 +99,13 @@ export function admitInboxFilePayload(body: { files?: unknown }): InboxFileAdmis
     if (rawBytesFromBase64(candidate.base64) > MAX_INBOX_FILE_BYTES) {
       return failure(`${name} is too large (${attachmentMegabytes(MAX_INBOX_FILE_BYTES)} MB limit)`, 413);
     }
-    const data = canonicalBase64(candidate.base64);
+    const data = decodeAttachment(candidate.base64);
     if (!data) return failure(`${name} could not be read`, 400);
     totalBytes += data.byteLength;
     if (totalBytes > MAX_INBOX_FILES_TOTAL_BYTES) {
       return failure(`attachments exceed the ${attachmentMegabytes(MAX_INBOX_FILES_TOTAL_BYTES)} MB request limit`, 413);
     }
-    files.push({ name, base64: candidate.base64 });
+    files.push({ name, data });
   }
   return { files, error: null };
 }
@@ -146,7 +153,7 @@ export function saveInboxFiles(files: readonly InboxFileUpload[], token: string)
       used.add(unique);
       const filePath = path.resolve(dir, unique);
       if (!filePath.startsWith(dir + path.sep)) throw new Error("inbox attachment escapes the inbox");
-      fs.writeFileSync(filePath, Buffer.from(file.base64, "base64"));
+      fs.writeFileSync(filePath, file.data);
       written.push(filePath);
     }
   } catch (error) {

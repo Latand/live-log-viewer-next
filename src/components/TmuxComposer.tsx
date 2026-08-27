@@ -54,7 +54,7 @@ import {
 } from "./composerAdmissionDeadline";
 import { RuntimePill } from "./RuntimePill";
 import { savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
-import { type PendingFile, type PendingImage } from "./imageAttachments";
+import { type PendingAttachment, type PendingFile, type PendingImage, type RestoredFile } from "./imageAttachments";
 import {
   DELIVERY_WAIT_TICK_MS,
   deliveryUncertainWhy,
@@ -641,6 +641,10 @@ const SETTLED_SEND_KEY_LIMIT = 32;
     is memory-only — previews don't survive a refresh either). */
 const pendingSendKey = (id: string) => "llvPendingSend:" + id;
 const draftImagesKey = (id: string) => "llvDraftImages:" + id;
+/** Names only, never bytes (#1224): a staged document is far too big for
+    synchronous session storage, so what survives a card switch or a phone tab
+    restore is enough to say WHICH file has to be attached again. */
+const draftFilesKey = (id: string) => "llvDraftFiles:" + id;
 
 interface PersistedPendingDelivery {
   key?: unknown;
@@ -678,6 +682,44 @@ function persistedImages(value: unknown): PendingImage[] | null {
     });
   }
   return images;
+}
+
+function persistedFiles(value: unknown): RestoredFile[] | null {
+  if (!Array.isArray(value)) return null;
+  const files: RestoredFile[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+    const raw = candidate as Record<string, unknown>;
+    if (typeof raw.name !== "string" || !raw.name) return null;
+    files.push({
+      ...(typeof raw.id === "string" ? { id: raw.id } : {}),
+      name: raw.name,
+      ...(typeof raw.mime === "string" ? { mime: raw.mime } : {}),
+    });
+  }
+  return files;
+}
+
+function readDraftFiles(id: string): RestoredFile[] {
+  try {
+    const raw = sessionStorage.getItem(draftFilesKey(id));
+    return (raw === null ? null : persistedFiles(JSON.parse(raw))) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Persists the NAMES of every staged non-image slot, whatever its status: a
+    slot that came back un-restored is still a file the operator has to attach
+    again, so its marker has to survive the next switch too. */
+function writeDraftFiles(id: string, slots: readonly PendingAttachment[]): void {
+  try {
+    const files = slots
+      .filter((slot) => slot.kind === "file")
+      .map((slot) => ({ id: slot.id, name: slot.name, mime: slot.mime }));
+    if (!files.length) sessionStorage.removeItem(draftFilesKey(id));
+    else sessionStorage.setItem(draftFilesKey(id), JSON.stringify(files));
+  } catch { /* The visible in-memory tray remains authoritative. */ }
 }
 
 function readDraftImages(id: string): PendingImage[] | null {
@@ -924,7 +966,7 @@ export function adoptComposerState(path: string, cardId: string): void {
     const previousOwner = sessionStorage.getItem(composerOwnerKey(path));
     for (const from of [previousOwner, path]) {
       if (!from || from === cardId) continue;
-      for (const keyOf of [draftKey, draftImagesKey, pendingSendKey, sentKey, dismissedReceiptsKey]) {
+      for (const keyOf of [draftKey, draftImagesKey, draftFilesKey, pendingSendKey, sentKey, dismissedReceiptsKey]) {
         const legacy = sessionStorage.getItem(keyOf(from));
         if (legacy === null) continue;
         if (sessionStorage.getItem(keyOf(cardId)) === null) sessionStorage.setItem(keyOf(cardId), legacy);
@@ -1511,7 +1553,8 @@ export function TmuxComposerCore({
     const draftImages = readDraftImages(cardId);
     attachmentDraftHydrated.current = false;
     const trayImages = draftImages ?? (resumable?.text === draftNow ? resumable.images : []);
-    const restoredImages = attachments.replace(trayImages.map((image) => ({ ...image })));
+    const draftFiles = readDraftFiles(cardId);
+    const restoredImages = attachments.replace(trayImages.map((image) => ({ ...image })), draftFiles);
     queueMicrotask(() => { attachmentDraftHydrated.current = true; });
     if (resumable && restoredImages && resumable.runtimeCaptured) {
       runtimeSendSnapshots.current.set(resumable.key, resumable.runtime);
@@ -1520,6 +1563,17 @@ export function TmuxComposerCore({
     const hasIncompletePayload = restoredPending.some((entry) => entry.payloadComplete === false);
     setReconcilingSend(reconcilingKeys.length > 0 || hasIncompletePayload);
     if (reconcilingKeys.length || hasIncompletePayload) setStatus({ kind: "err", text: t("composer.admissionTimedOut") });
+    /* A staged document cannot be persisted, only named (#1224): the restored
+       slots block Send, and the status says which files have to be attached
+       again — a card switch or a phone tab restore never empties them out in
+       silence. Yields to the admission message, which is about a send already
+       in flight. */
+    else if (draftFiles.length) {
+      setStatus({
+        kind: "err",
+        text: t("attach.refused", { names: draftFiles.map((entry) => entry.name).join(", "), reason: t("attach.notRestored") }),
+      });
+    }
     for (const key of reconcilingKeys) startReceiptReconciliation(key);
     settledSendKeys.current = new Set();
     /* Keyed by identity alone: a path migration under a stable id must not
@@ -1533,6 +1587,13 @@ export function TmuxComposerCore({
     if (!attachmentDraftHydrated.current) return;
     writeDraftImages(cardId, attachments.images, pendingDeliveries.current.length > 0);
   }, [attachments.images, cardId]);
+
+  /* The marker for every staged document, written from the full intake list so
+     an un-restored slot keeps its name across the next switch too (#1224). */
+  useEffect(() => {
+    if (!attachmentDraftHydrated.current) return;
+    writeDraftFiles(cardId, attachments.attachments);
+  }, [attachments.attachments, cardId]);
 
   /* Settle submitted generations against the receipt stream: a durably
      admitted receipt (queued or beyond) for a remembered key means the server

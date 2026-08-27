@@ -915,11 +915,16 @@ export const en = {
   // Attachments that are not images (#1224)
   "attach.file": "file",
   "attach.error": "attachment error",
-  "attach.imagesOnlyHere": "{name} wasn't attached — this composer takes PNG, JPEG, GIF or WebP images only",
-  "attach.empty": "{name} is empty — there is nothing to attach",
-  "attach.tooLarge": "{name}: too large ({max} MB limit)",
-  "attach.tooMany": "Up to {max} files can be attached at once",
-  "attach.aggregateTooLarge": "Attachments exceed the {max} MB request limit",
+  /* One refusal, one line: `{names}: {reason}`. Every reason below is written
+     to follow that colon, so several files refused for the same reason are
+     named together in ONE status instead of overwriting one another. */
+  "attach.refused": "{names}: {reason}",
+  "attach.imagesOnlyHere": "this composer takes PNG, JPEG, GIF or WebP images only",
+  "attach.empty": "empty — there is nothing to attach",
+  "attach.tooLarge": "too large ({max} MB limit)",
+  "attach.tooMany": "up to {max} files can be attached at once",
+  "attach.notRestored": "not restored — attach it again to send it",
+  "attach.aggregateTooLarge": "over the {max} MB request limit",
   "attach.readingAria": "loading {name}",
   "attach.removeAria": "Remove {name}",
   "attach.retryAria": "Retry {name}",

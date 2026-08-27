@@ -7,7 +7,6 @@ import { SlidersHorizontal } from "lucide-react";
 import { Loader2, Play } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
-import { inboxImageExt } from "@/lib/imagePolicy";
 import type { UseComposerReturn } from "@/hooks/useComposer";
 import { prewarmLiveToken } from "@/hooks/useDictation";
 
@@ -79,21 +78,6 @@ export interface ComposerBarProps {
 }
 
 const NO_HISTORY: readonly string[] = [];
-
-/** Whether this MIME is one the composer stages as an image (the server's own
-    whitelist). Everything else — a PDF, a log, an unconvertible `image/heic` —
-    is a general attachment and travels by inbox path instead (#1224). */
-function isDeliverableImageType(mime: string): boolean {
-  return inboxImageExt(mime ?? "") !== null;
-}
-
-/** The files an intake actually admits. With the host's image capability
-    unavailable the images are dropped from the batch — the standing reason on
-    the status line says why — while everything else still rides through, so a
-    dropped document is never lost to a limit that is not about it. */
-function admissiblePaste(files: readonly File[], imageDisabled: boolean): File[] {
-  return imageDisabled ? files.filter((file) => !isDeliverableImageType(file.type)) : [...files];
-}
 
 function SendMenu({ label, actions, onClose }: { label: string; actions: SendMenuAction[]; onClose: () => void }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -363,28 +347,27 @@ export function ComposerBar({
               .filter((entry): entry is File => entry !== null);
             if (!picks.length) return;
             event.preventDefault();
-            const admitted = admissiblePaste(picks, imageDisabled);
-            if (admitted.length) (onImageFiles ?? attachments.addFiles)(admitted);
+            (onImageFiles ?? attachments.addFiles)(picks);
           }}
           onDragOver={(event) => {
             /* A file drop only fires when its dragover was cancelled — without
                this the browser navigates to the dropped file instead of
                attaching it, which is what a dragged PDF used to do. ANY file
-               drag is claimed now; a drag that is only images while images are
-               disabled keeps its rejection cursor. */
+               drag is claimed, with no per-type exception: the tray is what
+               decides what it can hold, and it decides identically for a paste,
+               a drop and the picker (#1224). A drag waved away here would be a
+               file lost with only a cursor to explain it. */
             const items = Array.from(event.dataTransfer.items).filter((item) => item.kind === "file");
             if (!items.length) return;
             event.preventDefault();
-            const onlyImages = items.every((item) => isDeliverableImageType(item.type));
-            event.dataTransfer.dropEffect = imageDisabled && onlyImages ? "none" : "copy";
+            event.dataTransfer.dropEffect = "copy";
           }}
           onDrop={(event) => {
             const files = Array.from(event.dataTransfer.files);
             if (!files.length) return;
             event.preventDefault();
             event.stopPropagation();
-            const admitted = admissiblePaste(files, imageDisabled);
-            if (admitted.length) (onImageFiles ?? attachments.addFiles)(admitted);
+            (onImageFiles ?? attachments.addFiles)(files);
           }}
           onKeyDown={(event) => {
             /* ArrowUp/ArrowDown recall previously queued and sent messages

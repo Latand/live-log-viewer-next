@@ -160,3 +160,19 @@ test("a name collision inside one send keeps both files distinguishable", () => 
   expect(fs.readFileSync(bundle.filePaths[1]!, "utf8")).toBe("second");
   deleteInboxFiles(bundle.filePaths);
 });
+
+test("an admitted attachment carries its decoded bytes, so nothing decodes it a second time", () => {
+  /* Round-2 finding 4: admission used to decode the payload, re-encode the whole
+     buffer only to compare strings, and then hand the string on for the write to
+     decode AGAIN — roughly 3x peak memory for a batch, on a process with a
+     GC-pressure freeze history. The bytes are decoded once and travel as bytes. */
+  const admitted = admitInboxFilePayload({ files: [upload("ledger.bin", "invented binary bytes")] });
+  expect(admitted.error).toBeNull();
+  const carried = admitted.files[0]!.data;
+  expect(Buffer.isBuffer(carried)).toBe(true);
+  expect(carried.toString("utf8")).toBe("invented binary bytes");
+
+  const bundle = buildFilePayload("", admitted.files, inboxFileBatchToken("client-message-decode-once"));
+  expect(fs.readFileSync(bundle.filePaths[0]!).equals(carried)).toBe(true);
+  deleteInboxFiles(bundle.filePaths);
+});

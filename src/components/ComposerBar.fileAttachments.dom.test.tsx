@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import { ComposerBar } from "./ComposerBar";
 import { useComposer } from "@/hooks/useComposer";
+import { translate } from "@/lib/i18n";
 import { MAX_INBOX_FILES, MAX_INBOX_FILE_BYTES } from "@/lib/filePolicy";
 
 /* Issue #1224: the composer accepts any file, not only images. A dropped
@@ -55,7 +56,7 @@ const tick = async () => { await Promise.resolve(); await new Promise((r) => set
 
 let staged: { images: number; files: { name: string; base64: string }[] } = { images: 0, files: [] };
 
-function Harness({ acceptFiles }: { acceptFiles: boolean }) {
+function Harness({ acceptFiles, imageDisabled = false }: { acceptFiles: boolean; imageDisabled?: boolean }) {
   const composer = useComposer({ initialText: () => "", persistText: () => {}, submit: () => {}, acceptFiles });
   const { images, files } = composer.attachments;
   /* Published after commit, never during render: the assertions read what the
@@ -73,6 +74,8 @@ function Harness({ acceptFiles }: { acceptFiles: boolean }) {
       sendLabelIdle="Send"
       sendLabelRecording="Stop"
       sendIdleClassName="bg-accent"
+      imageDisabled={imageDisabled}
+      imageDisabledReason={imageDisabled ? "This host has no negotiated image capability." : undefined}
     />
   );
 }
@@ -94,11 +97,11 @@ beforeEach(() => {
 });
 afterEach(async () => { for (const r of roots) flushSync(() => r.unmount()); roots = []; await tick(); });
 
-function mount(acceptFiles = true) {
+function mount(acceptFiles = true, imageDisabled = false) {
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
   const root = createRoot(host as unknown as Element);
-  flushSync(() => root.render(<Harness acceptFiles={acceptFiles} />));
+  flushSync(() => root.render(<Harness acceptFiles={acceptFiles} imageDisabled={imageDisabled} />));
   roots.push(root);
   return host as unknown as HTMLElement;
 }
@@ -279,4 +282,126 @@ test("a read that comes back with no bytes errors its slot rather than sitting r
   expect(tiles(host).map((tile) => tile.getAttribute("data-status"))).toEqual(["error"]);
   expect(staged.files).toEqual([]);
   expect(host.textContent).toContain("truncated.log");
+});
+
+test("round-2 finding 1: every file refused in one gesture is named, not just the last one", async () => {
+  const host = mount();
+  flushSync(() => textareaProps(host).onDrop({
+    dataTransfer: {
+      files: [
+        fileOf("first-archive.zip", "application/zip", MAX_INBOX_FILE_BYTES + 1),
+        fileOf("second-archive.zip", "application/zip", MAX_INBOX_FILE_BYTES + 1),
+        fileOf("notes.pdf", "application/pdf"),
+      ],
+    },
+    preventDefault() {},
+    stopPropagation() {},
+  }));
+  flushSync(() => DeferredReader.settleAll());
+  await tick();
+
+  /* One status slot holds one message, so a call per refusal left only the LAST
+     refused file named and every earlier one vanished without a word — the
+     silent discard #1224 exists to remove, wearing a new coat. */
+  expect(host.textContent).toContain("first-archive.zip");
+  expect(host.textContent).toContain("second-archive.zip");
+  expect(staged.files.map((file) => file.name)).toEqual(["notes.pdf"]);
+});
+
+test("round-2 finding 1: two different reasons in one gesture both survive, and one shared reason is said once", async () => {
+  const host = mount();
+  flushSync(() => textareaProps(host).onDrop({
+    dataTransfer: {
+      files: [
+        fileOf("empty.log", "text/plain", 0),
+        fileOf("huge.bin", "application/octet-stream", MAX_INBOX_FILE_BYTES + 1),
+      ],
+    },
+    preventDefault() {},
+    stopPropagation() {},
+  }));
+  await tick();
+
+  expect(tiles(host)).toHaveLength(0);
+  expect(host.textContent).toContain("empty.log");
+  expect(host.textContent).toContain("huge.bin");
+
+  /* An identical reason for several files is not repeated verbatim: it is the
+     names that have to survive, not the sentence. */
+  const overCount = mount();
+  flushSync(() => textareaProps(overCount).onDrop({
+    dataTransfer: {
+      files: Array.from({ length: MAX_INBOX_FILES + 2 }, (_, index) => fileOf(`note-${index}.txt`, "text/plain")),
+    },
+    preventDefault() {},
+    stopPropagation() {},
+  }));
+  flushSync(() => DeferredReader.settleAll());
+  await tick();
+  const status = Array.from(overCount.querySelectorAll('[role="status"]')).map((node) => node.textContent ?? "").join(" ");
+  expect(status).toContain(`note-${MAX_INBOX_FILES}.txt, note-${MAX_INBOX_FILES + 1}.txt`);
+  const sharedReason = translate("en", "attach.tooMany", { max: MAX_INBOX_FILES });
+  expect(status.split(sharedReason)).toHaveLength(2);
+});
+
+test("round-2 finding 3: a mixed drop with images unavailable keeps both files and lets the send-time gate speak", async () => {
+  const host = mount(true, true);
+  flushSync(() => textareaProps(host).onDrop({
+    dataTransfer: { files: [fileOf("shot.png", "image/png"), fileOf("notes.pdf", "application/pdf")] },
+    preventDefault() {},
+    stopPropagation() {},
+  }));
+  flushSync(() => DeferredReader.settleAll("data:image/png;base64,cmVhZHk="));
+  await tick();
+
+  /* The picker on this same state stages the image and blocks Send with the
+     standing reason; a drop that quietly filtered it out disagreed with the
+     picker AND lost a file with nothing said. Both intakes admit now. */
+  expect(tiles(host).map((tile) => tile.getAttribute("data-kind"))).toEqual(["image", "file"]);
+  expect(staged.images).toBe(1);
+  expect(staged.files.map((file) => file.name)).toEqual(["notes.pdf"]);
+  expect(host.textContent).toContain("This host has no negotiated image capability.");
+  expect((host.querySelector('button[aria-label="Send"]') as unknown as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("round-2 finding 2: a restored draft names the attachment it could not bring back", async () => {
+  const host = dom.document.createElement("div");
+  dom.document.body.appendChild(host);
+  const root = createRoot(host as unknown as Element);
+  let replaced = false;
+  function RestoreHarness() {
+    const composer = useComposer({ initialText: () => "", persistText: () => {}, submit: () => {}, acceptFiles: true });
+    useLayoutEffect(() => {
+      if (replaced) return;
+      replaced = true;
+      composer.attachments.replace(
+        [{ base64: "AA==", mime: "image/png", preview: "data:image/png;base64,AA==" }],
+        [{ id: "att-restored", name: "quarterly-notes.pdf", mime: "application/pdf" }],
+      );
+    }, [composer.attachments]);
+    return (
+      <ComposerBar
+        composer={composer}
+        placeholder="Prompt"
+        textareaAriaLabel="Prompt"
+        imageAriaLabel="Add files or images"
+        leftSlot={null}
+        sendLabelIdle="Send"
+        sendLabelRecording="Stop"
+        sendIdleClassName="bg-accent"
+      />
+    );
+  }
+  flushSync(() => root.render(<RestoreHarness />));
+  roots.push(root);
+  await tick();
+
+  const slots = tiles(host as unknown as HTMLElement);
+  expect(slots.map((tile) => tile.getAttribute("data-kind"))).toEqual(["image", "file"]);
+  /* The image comes back whole; the document comes back as a NAMED slot that
+     blocks Send, never as bytes and never as an empty tray. */
+  expect(slots.map((tile) => tile.getAttribute("data-status"))).toEqual(["ready", "error"]);
+  expect((host as unknown as HTMLElement).textContent).toContain("quarterly-notes.pdf");
+  const send = (host as unknown as HTMLElement).querySelector('button[aria-label="Send"]') as unknown as HTMLButtonElement;
+  expect(send.disabled).toBe(true);
 });

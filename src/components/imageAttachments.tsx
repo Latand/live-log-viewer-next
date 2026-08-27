@@ -44,6 +44,16 @@ export interface PendingFile {
   base64: string;
 }
 
+/** What survives a persisted draft for a non-image attachment: the operator's
+    own filename and its type, never the bytes (issue #1224). Enough to name the
+    file that has to be attached again, and small enough for the synchronous
+    session storage a document's base64 could never fit. */
+export interface RestoredFile {
+  id?: string;
+  name: string;
+  mime?: string;
+}
+
 /** One intake slot in the composer tray: committed synchronously as a
     placeholder the instant a file is picked/pasted/dropped, then settled
     independently into `ready` (base64 decoded) or `error` (per-item message +
@@ -100,6 +110,24 @@ function rawBytesFromBase64(value: string): number {
 
 function encodedBytesForRawBytes(value: number): number {
   return Math.ceil(value / 3) * 4;
+}
+
+/**
+ * The whole batch's refusals as ONE status line (issue #1224 round-2 finding 1).
+ * The composer status holds exactly one message, so a call per refused file left
+ * only the last one on screen and every earlier file disappeared unnamed. Files
+ * refused for the same reason are named together, in the order they were handed
+ * over, and the single-file case still reads exactly as it always did.
+ */
+function refusalStatus(refusals: readonly { name: string; reason: string }[]): string {
+  const grouped = new Map<string, string[]>();
+  for (const { name, reason } of refusals) {
+    const names = grouped.get(reason);
+    if (names) names.push(name);
+    else grouped.set(reason, [name]);
+  }
+  return [...grouped].map(([reason, names]) =>
+    translate(getLocale(), "attach.refused", { names: names.join(", "), reason })).join("; ");
 }
 
 function megabytes(value: number): string {
@@ -254,7 +282,7 @@ export function useImageAttachments(handlers: {
            leaves with the send, which is the silent discard #1224 removes. */
         if (!decoded.base64) {
           const name = current.name || translate(getLocale(), current.kind === "image" ? "img.image" : "attach.file");
-          const message = translate(getLocale(), "attach.empty", { name });
+          const message = refusalStatus([{ name, reason: translate(getLocale(), "attach.empty") }]);
           handlers.onError(message);
           patch(id, (attachment) => ({ ...attachment, status: "error", base64: undefined, error: message }));
           return;
@@ -304,101 +332,107 @@ export function useImageAttachments(handlers: {
 
   const addFiles = (input: File[]) => {
     if (!input.length) return;
-    const accepted: { file: File; kind: AttachmentKind }[] = [];
-    let refused = false;
-    const refuse = (message: string) => {
-      refused = true;
-      handlers.onError(message);
+    let accepted: { file: File; kind: AttachmentKind }[] = [];
+    /* Every refusal in ONE intake is accumulated and written to the status as a
+       single message. `onError` owns a single slot, so a call per file left only
+       the last refusal on screen and every other refused file disappeared
+       unnamed — the silent discard #1224 exists to remove, in a new form. */
+    const refusals: { name: string; reason: string }[] = [];
+    const refuse = (name: string, reason: string) => { refusals.push({ name, reason }); };
+    const reportRefusals = (): boolean => {
+      if (!refusals.length) return false;
+      handlers.onError(refusalStatus(refusals));
+      return true;
     };
 
-    /* A file with no bytes is refused BY NAME before anything is staged: there
-       is nothing to hand an agent, and a slot that stages anyway settles as
-       `ready` with an empty payload the send then leaves behind (#1224). Only
-       an explicit zero counts, so a picker that reports no size at all still
-       goes through the read, where the same emptiness is caught again. */
-    const usable: File[] = [];
+    /* One pass in the operator's own selection order, so the status names the
+       refused files in the order they were handed over. */
+    const liveFiles = attachmentsRef.current.filter((attachment) => attachment.kind === "file" && attachment.status !== "error");
+    const stagedBytes = liveFiles.reduce((total, attachment) => total + attachment.file.size, 0);
+    let addedFiles = 0;
+    let addedBytes = 0;
     for (const file of input) {
-      if (file.size !== 0) {
-        usable.push(file);
+      const image = isImage(file);
+      const name = file.name || translate(getLocale(), image ? "img.image" : "attach.file");
+      /* A file with no bytes is refused BY NAME before anything is staged:
+         there is nothing to hand an agent, and a slot that stages anyway
+         settles as `ready` with an empty payload the send then leaves behind
+         (#1224). Only an explicit zero counts, so a picker that reports no size
+         at all still goes through the read, where the same emptiness is caught
+         again. */
+      if (file.size === 0) {
+        refuse(name, translate(getLocale(), "attach.empty"));
         continue;
       }
-      refuse(translate(getLocale(), "attach.empty", {
-        name: file.name || translate(getLocale(), isImage(file) ? "img.image" : "attach.file"),
-      }));
-    }
-    const pickedImages = usable.filter(isImage);
-    const pickedFiles = usable.filter((file) => !isImage(file));
-
-    /* Images: unchanged behaviour and unchanged capability gate. An engine that
-       cannot take an image says so here rather than at delivery time. */
-    if (pickedImages.length) {
-      if (capability && !capability.supported) {
-        refuse(capability.reason ?? translate(getLocale(), "composer.structuredImagesUnavailable"));
-      } else {
-        for (const file of pickedImages) {
-          const rawLimit = capability?.maxRawBytesPerImage ?? MAX_INBOX_IMAGE_BYTES;
-          if (file.size > rawLimit) {
-            refuse(capability
-              ? translate(getLocale(), "img.structuredTooLarge", { max: megabytes(rawLimit) })
-              : translate(getLocale(), "img.tooLarge", { name: file.name || translate(getLocale(), "img.image") }));
-            continue;
-          }
-          accepted.push({ file, kind: "image" });
+      if (image) {
+        /* Images: unchanged behaviour and unchanged capability gate. An engine
+           that cannot take an image says so here rather than at delivery time. */
+        if (capability && !capability.supported) {
+          refuse(name, capability.reason ?? translate(getLocale(), "composer.structuredImagesUnavailable"));
+          continue;
         }
+        const rawLimit = capability?.maxRawBytesPerImage ?? MAX_INBOX_IMAGE_BYTES;
+        if (file.size > rawLimit) {
+          refuse(name, capability
+            ? translate(getLocale(), "img.structuredTooLarge", { max: megabytes(rawLimit) })
+            : translate(getLocale(), "attach.tooLarge", { max: megabytes(rawLimit) }));
+          continue;
+        }
+        accepted.push({ file, kind: "image" });
+        continue;
       }
-    }
-
-    /* Everything else. A composer with no by-path road refuses BY NAME — the
-       silent discard this issue exists to remove must not come back as an
-       attachment that simply never appears. */
-    if (pickedFiles.length) {
-      const liveFiles = attachmentsRef.current.filter((attachment) => attachment.kind === "file" && attachment.status !== "error");
-      const stagedBytes = liveFiles.reduce((total, attachment) => total + attachment.file.size, 0);
-      let addedFiles = 0;
-      let addedBytes = 0;
-      for (const file of pickedFiles) {
-        const name = file.name || translate(getLocale(), "attach.file");
-        if (!acceptFiles) {
-          refuse(translate(getLocale(), "attach.imagesOnlyHere", { name }));
-          continue;
-        }
-        if (file.size > MAX_INBOX_FILE_BYTES) {
-          refuse(translate(getLocale(), "attach.tooLarge", { name, max: attachmentMegabytes(MAX_INBOX_FILE_BYTES) }));
-          continue;
-        }
-        if (liveFiles.length + addedFiles + 1 > MAX_INBOX_FILES) {
-          refuse(translate(getLocale(), "attach.tooMany", { max: MAX_INBOX_FILES }));
-          continue;
-        }
-        if (stagedBytes + addedBytes + file.size > MAX_INBOX_FILES_TOTAL_BYTES) {
-          refuse(translate(getLocale(), "attach.aggregateTooLarge", { max: attachmentMegabytes(MAX_INBOX_FILES_TOTAL_BYTES) }));
-          continue;
-        }
-        addedFiles += 1;
-        addedBytes += file.size;
-        accepted.push({ file, kind: "file" });
+      /* Everything else. A composer with no by-path road refuses BY NAME — the
+         silent discard this issue exists to remove must not come back as an
+         attachment that simply never appears. */
+      if (!acceptFiles) {
+        refuse(name, translate(getLocale(), "attach.imagesOnlyHere"));
+        continue;
       }
+      if (file.size > MAX_INBOX_FILE_BYTES) {
+        refuse(name, translate(getLocale(), "attach.tooLarge", { max: attachmentMegabytes(MAX_INBOX_FILE_BYTES) }));
+        continue;
+      }
+      if (liveFiles.length + addedFiles + 1 > MAX_INBOX_FILES) {
+        refuse(name, translate(getLocale(), "attach.tooMany", { max: MAX_INBOX_FILES }));
+        continue;
+      }
+      if (stagedBytes + addedBytes + file.size > MAX_INBOX_FILES_TOTAL_BYTES) {
+        refuse(name, translate(getLocale(), "attach.aggregateTooLarge", { max: attachmentMegabytes(MAX_INBOX_FILES_TOTAL_BYTES) }));
+        continue;
+      }
+      addedFiles += 1;
+      addedBytes += file.size;
+      accepted.push({ file, kind: "file" });
     }
 
-    if (!accepted.length) return;
     /* Count and aggregate ceilings are enforced pre-read against file sizes, so
-       an over-budget batch is rejected whole before any placeholder mounts —
-       the tray never shows a slot that could never deliver. Non-error slots
-       (reading or ready) count toward the cap since they all intend to send.
-       Only image slots are weighed here: the host's image budget is theirs. */
+       an over-budget batch is rejected before any placeholder mounts — the tray
+       never shows a slot that could never deliver. Non-error slots (reading or
+       ready) count toward the cap since they all intend to send. Only image
+       slots are weighed here: the host's image budget is theirs, and a breach
+       refuses the IMAGES by name rather than the whole batch — a document in
+       the same gesture is not over any budget of its own. */
     const acceptedImages = accepted.filter((entry) => entry.kind === "image");
     if (capability && acceptedImages.length) {
       const liveImages = attachmentsRef.current.filter((attachment) => attachment.kind === "image" && attachment.status !== "error");
-      if (liveImages.length + acceptedImages.length > capability.maxImages) {
-        handlers.onError(translate(getLocale(), "img.tooManyStructured", { max: capability.maxImages }));
-        return;
-      }
       const encodedBytes = liveImages.reduce((total, attachment) => total + (attachment.base64?.length ?? encodedBytesForRawBytes(attachment.file.size)), 0)
         + acceptedImages.reduce((total, entry) => total + encodedBytesForRawBytes(entry.file.size), 0);
-      if (encodedBytes > capability.maxEncodedBytesPerRequest) {
-        handlers.onError(translate(getLocale(), "img.structuredAggregateTooLarge", { max: megabytes(capability.maxEncodedBytesPerRequest) }));
-        return;
+      const overBudget = liveImages.length + acceptedImages.length > capability.maxImages
+        ? translate(getLocale(), "img.tooManyStructured", { max: capability.maxImages })
+        : encodedBytes > capability.maxEncodedBytesPerRequest
+          ? translate(getLocale(), "img.structuredAggregateTooLarge", { max: megabytes(capability.maxEncodedBytesPerRequest) })
+          : null;
+      if (overBudget) {
+        for (const entry of acceptedImages) {
+          refuse(entry.file.name || translate(getLocale(), "img.image"), overBudget);
+        }
+        accepted = accepted.filter((entry) => entry.kind !== "image");
       }
+    }
+
+    if (!accepted.length) {
+      reportRefusals();
+      return;
     }
     /* Commit every placeholder synchronously in selection order, then settle
        each read independently: a slow file never blocks its siblings from
@@ -420,7 +454,7 @@ export function useImageAttachments(handlers: {
     commit([...attachmentsRef.current, ...placeholders]);
     /* onAdded clears the status line at both call sites; a mixed batch keeps
        the rejection message on screen instead of wiping it right away. */
-    if (!refused) handlers.onAdded?.();
+    if (!reportRefusals()) handlers.onAdded?.();
     for (const placeholder of placeholders) settle(placeholder.id, placeholder.file);
   };
 
@@ -506,10 +540,16 @@ export function useImageAttachments(handlers: {
     settleDelivered,
     /** Drop everything after a send (no confirmation), revoking previews. */
     clear: clearAll,
-    replace: (next: PendingImage[]) => {
+    /* Restores a persisted draft tray. Images come back whole, because their
+       bytes are small enough to persist; a general attachment comes back as a
+       NAMED, un-restored slot and never as bytes (#1224). A document's base64
+       does not fit synchronous browser storage, so the alternative to naming it
+       is the file evaporating on a card switch or a phone tab restore with
+       nothing said — the same treatment the outbox gives `needsReattach`. */
+    replace: (next: PendingImage[], files: readonly RestoredFile[] = []) => {
       if (!reportPendingLimit(next)) return false;
       for (const attachment of attachmentsRef.current) revokePreview(attachment);
-      commit(next.map((image): PendingAttachment => ({
+      const restoredImages = next.map((image): PendingAttachment => ({
         id: image.id ?? mintAttachmentId(),
         kind: "image",
         status: "ready",
@@ -519,7 +559,24 @@ export function useImageAttachments(handlers: {
         base64: image.base64,
         file: new File([], translate(getLocale(), "img.image"), { type: image.mime }),
         ownsPreview: false,
-      })));
+      }));
+      const restoredFiles = files.map((file): PendingAttachment => {
+        const name = file.name || translate(getLocale(), "attach.file");
+        return {
+          id: file.id ?? mintAttachmentId(),
+          kind: "file",
+          /* `error` is what blocks Send and shows the reason: the slot must not
+             read as deliverable when the bytes are gone. */
+          status: "error",
+          name,
+          mime: file.mime || "application/octet-stream",
+          preview: "",
+          error: refusalStatus([{ name, reason: translate(getLocale(), "attach.notRestored") }]),
+          file: new File([], name, { type: file.mime || "application/octet-stream" }),
+          ownsPreview: false,
+        };
+      });
+      commit([...restoredImages, ...restoredFiles]);
       return true;
     },
     validate: () => reportPendingLimit(imagesRef.current),
