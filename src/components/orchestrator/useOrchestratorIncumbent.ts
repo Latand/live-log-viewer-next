@@ -15,8 +15,10 @@ import { parseIncumbent, type OrchestratorIncumbent } from "./incumbent";
  * That parse is the expensive thing on the panel's account, so the cadence is
  * set by what the answer is FOR: context pressure and a rotation recommendation
  * both move over tens of minutes, and nothing here is ever acted on
- * automatically. The moments that do matter — the seat changing, and opening
- * the rotate draft — refresh on their own instead of waiting for a tick.
+ * automatically. The moments that do matter — the seat changing, opening the
+ * rotate draft, and a seat the dock has not bound yet, whose resolution the
+ * panel re-asks for on its own much faster cadence (`UNBOUND_STATUS_RETRY_MS`,
+ * issue #1189) — refresh on their own instead of waiting for a tick.
  */
 export const INCUMBENT_POLL_MS = 60_000;
 
