@@ -159,7 +159,7 @@ const dashboardProps = (over: Partial<DashboardProps> = {}): DashboardProps => (
 let roots: Root[] = [];
 beforeEach(() => {
   roots = [];
-  boardRevision = 1;
+  boardRevision += 1;
   boardPrefs = {};
   catalogRows = [];
   seatAnswer = { seat: null, pending: null, exists: true, viewerMcpRegistered: false };

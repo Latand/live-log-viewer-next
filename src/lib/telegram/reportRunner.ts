@@ -12,6 +12,7 @@ import {
 import {
   DAILY_REPORT_PROMPT_VERSION,
   classifyReportOutput,
+  reportConversationTitle,
   renderDailyReportPrompt,
 } from "./reportPrompt";
 import {
@@ -470,6 +471,7 @@ export class TelegramReportRunner {
           model: CODEX_SOL_MODEL,
           effort: "medium",
           cwd: reportWorkspaceDir(),
+          title: reportConversationTitle({ windowStart: window.startAt, windowEnd: window.endAt }),
           /* The durable report-run marker (#1091), in the two fields the
              ordinary spawn path already makes durable: the receipt's attempt
              id spells the run id, and explicit project ownership is what the
