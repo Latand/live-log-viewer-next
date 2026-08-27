@@ -184,11 +184,21 @@ test("with roots bound, creation refuses outside them and never mkdirs there", (
   expect(fs.existsSync(absent)).toBe(false);
 
   /* A link inside the bound pointing out of it is outside it: the refusal
-     reads the directory the path actually resolves to. */
+     reads the directory the path actually resolves to — and it lands before
+     the mkdir opt-in could create anything through that link. */
   const escape = path.join(anchor, "escape-link");
   fs.symlinkSync(beyond, escape);
   expect(createManualProject("Escape", escape, new Set(), { allowedRoots }))
     .toMatchObject({ ok: false, code: "OUTSIDE_ROOTS" });
+  expect(createManualProject("Through", path.join(escape, "made-through-a-link"), new Set(), { allowedRoots, createMissingRoot: true }))
+    .toMatchObject({ ok: false, code: "OUTSIDE_ROOTS" });
+  expect(fs.existsSync(path.join(beyond, "made-through-a-link"))).toBe(false);
+
+  /* A missing directory inside the bound is still creatable through it. */
+  const fresh = path.join(anchor, "fresh-nested", "project");
+  const grown = createManualProject("Fresh Nested", fresh, new Set(), { allowedRoots, createMissingRoot: true });
+  if (!grown.ok) throw new Error(`expected creation, got ${grown.code}`);
+  expect(fs.statSync(fresh).isDirectory()).toBe(true);
 
   const created = createManualProject("Inside", inside, new Set(), { allowedRoots });
   if (!created.ok) throw new Error(`expected creation, got ${created.code}`);

@@ -178,6 +178,23 @@ function resolvedPath(directory: string): string {
   }
 }
 
+/** The deepest part of a path that exists, read through its symlinks. A bound
+    is checked against this rather than against the requested path alone: it is
+    where a missing directory would be created, so a link inside the bound that
+    leads out of it is caught before anything is written. */
+function resolvedExistingAncestor(directory: string): string {
+  let current = path.resolve(directory);
+  for (;;) {
+    try {
+      return fs.realpathSync.native(current);
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return current;
+      current = parent;
+    }
+  }
+}
+
 /**
  * Register an operator-named project rooted at a directory. The identity is
  * minted exactly the way the scanner mints it for sessions running in that
@@ -203,8 +220,15 @@ export function createManualProject(
   if (!path.isAbsolute(requested)) {
     return { ok: false, code: "RELATIVE_ROOT", message: "root must be an absolute directory path" };
   }
+  /* The bound is read twice on purpose: on the path as typed, so a traversal
+     never reaches the filesystem, and on the deepest directory that actually
+     exists along it, so neither a symlink out of the bound nor a mkdir under
+     one can leave it. Both happen before anything is created. The roots are
+     resolved for the second comparison — a root reached through a link (a
+     `/tmp` that is really `/private/tmp`) still bounds its own contents. */
   const bound = options.allowedRoots;
-  if (bound && !withinSuggestionRoots(requested, bound)) {
+  if (bound && !(withinSuggestionRoots(requested, bound)
+    && withinSuggestionRoots(resolvedExistingAncestor(requested), bound.map(resolvedPath)))) {
     return { ok: false, code: "OUTSIDE_ROOTS", message: "root is outside the known project directories" };
   }
   let resolved: string;
@@ -221,14 +245,6 @@ export function createManualProject(
       const detail = error instanceof Error ? error.message : String(error);
       return { ok: false, code: "MKDIR_FAILED", message: detail };
     }
-  }
-  /* The bound is checked twice on purpose: once on the path as typed, so a
-     traversal never reaches the filesystem, and once on what it resolves to,
-     so a symlink sitting inside the bound cannot lead out of it. The roots are
-     resolved for that second comparison — a root reached through a link (a
-     `/tmp` that is really `/private/tmp`) still bounds its own contents. */
-  if (bound && !withinSuggestionRoots(resolved, bound.map(resolvedPath))) {
-    return { ok: false, code: "OUTSIDE_ROOTS", message: "root is outside the known project directories" };
   }
   try {
     if (!fs.statSync(resolved).isDirectory()) throw new Error("not a directory");
