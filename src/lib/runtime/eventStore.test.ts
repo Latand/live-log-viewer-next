@@ -4,7 +4,7 @@ import path from "node:path";
 import { expect, spyOn, test } from "bun:test";
 
 import type { RuntimeEvent } from "./engineHost";
-import { FileRuntimeEventStore, reconcileRuntimeEventCursor } from "./eventStore";
+import { durableRuntimeEventTailSeq, FileRuntimeEventStore, reconcileRuntimeEventCursor } from "./eventStore";
 import { streamingVoiceDelivery } from "./voiceDelivery";
 
 test("runtime event store durably replays ordered events and ignores a partial tail", () => {
@@ -313,4 +313,24 @@ test("runtime event store rejects every structurally invalid event variant", () 
     fs.writeFileSync(filename, `${JSON.stringify(event)}\n`);
     expect(() => store.load("shape-thread")).toThrow("invalid event");
   }
+});
+
+test("the durable event tail reports the last complete record and separates unknown from empty", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-tail-"));
+  const store = new FileRuntimeEventStore(directory);
+  /* A ledger nobody has written is empty, and empty is a fact: 0, not null. */
+  expect(durableRuntimeEventTailSeq("thread-missing", directory)).toBe(0);
+
+  store.append("thread-tail", { kind: "session-status", status: "idle", seq: 1 });
+  store.append("thread-tail", { kind: "turn-started", turnId: "turn-1", seq: 2 });
+  expect(durableRuntimeEventTailSeq("thread-tail", directory)).toBe(2);
+
+  /* A torn append is not durable, so the tail is the last complete record. */
+  fs.appendFileSync(path.join(directory, "thread-tail.jsonl"), '{"kind":"delta","turnId":"turn-1"');
+  expect(durableRuntimeEventTailSeq("thread-tail", directory)).toBe(2);
+
+  /* A tail that is not an event at all is unknown, and a caller deciding
+     whether a host may be retired must not read unknown as nothing. */
+  fs.writeFileSync(path.join(directory, "thread-broken.jsonl"), "not json\n");
+  expect(durableRuntimeEventTailSeq("thread-broken", directory)).toBeNull();
 });

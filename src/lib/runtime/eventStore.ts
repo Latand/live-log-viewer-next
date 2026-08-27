@@ -184,6 +184,55 @@ function validEvent(value: unknown): value is RuntimeEvent {
   }
 }
 
+/** How much of a ledger's tail is read to find its last durable record. An
+    event record is orders of magnitude smaller than this, so the window always
+    spans several of them. */
+const EVENT_TAIL_PROBE_BYTES = 64 * 1024;
+
+/**
+ * Last sequence a thread's ledger holds *on disk*, or 0 when it holds nothing.
+ *
+ * Null means the tail could not be read as an event, and null is not zero: a
+ * caller deciding whether a host may be retired (#747) must treat an unreadable
+ * ledger as "unknown", never as "nothing pending". A final record without its
+ * terminating newline is a torn append, so the durable tail is the last
+ * COMPLETE record before it — which is exactly what a reader would replay.
+ */
+export function durableRuntimeEventTailSeq(
+  threadId: string,
+  directory: string = statePath("structured-host-events"),
+): number | null {
+  const filename = path.join(directory, `${encodeURIComponent(threadId)}.jsonl`);
+  let handle: number;
+  try {
+    handle = fs.openSync(filename, "r");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? 0 : null;
+  }
+  try {
+    const size = fs.fstatSync(handle).size;
+    if (size === 0) return 0;
+    const length = Math.min(size, EVENT_TAIL_PROBE_BYTES);
+    const buffer = Buffer.allocUnsafe(length);
+    const read = fs.readSync(handle, buffer, 0, length, size - length);
+    const text = buffer.toString("utf8", 0, read);
+    const lines = text.split("\n").filter((line) => line.length > 0);
+    if (!text.endsWith("\n")) lines.pop();
+    const last = lines.at(-1);
+    /* Nothing complete inside the window: only a whole-file read proves the
+       ledger really holds no finished record. */
+    if (last === undefined) return length === size ? 0 : null;
+    let parsed: unknown;
+    try { parsed = JSON.parse(last); } catch { return null; }
+    const seq = (parsed as { seq?: unknown } | null)?.seq;
+    return Number.isSafeInteger(seq) && (seq as number) > 0 ? seq as number : null;
+  } catch {
+    return null;
+  } finally {
+    fs.closeSync(handle);
+  }
+}
+
 export class FileRuntimeEventStore implements RuntimeEventStore {
   /* The structured host claim makes this store the single writer of its
      ledger, so the durable tail (last sequence and byte length) is owned in

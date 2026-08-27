@@ -424,6 +424,8 @@ All optional. Transcription variables are documented in full in
 | `LLV_SCHEME_CARDS_PER_PROJECT` | Maximum scanner entries rendered per scheme project (default `80`). List and search remain complete. |
 | `NEXT_PUBLIC_LLV_SCHEME_AGE_HORIZON_HOURS` | Age horizon in hours for automatic card placement on the project scheme (default `48`). A root conversation with activity inside the horizon keeps an automatic card even while idle; older roots leave the canvas for quiet history and «All conversations». Live or running conversations and manually placed cards are never removed by the horizon. Inlined at build time (`NEXT_PUBLIC_*`). |
 | `LLV_HEADLESS_REAPER_THRESHOLD_MS` | Minimum age in milliseconds for the always-active leaked Codex/MCP safety reaper (default `7200000`, two hours; minimum accepted value `60000`). |
+| `LLV_HOST_RETIREMENT_IDLE_HOURS` | How long a structured host's transcript must have been quiet before the automatic retirement sweep may end it (default `6`). `0` turns the sweep off. Staleness is transcript modification time, never process age, and the sweep still refuses any host with a turn in flight, a pending question, an undelivered handoff entry, an open spawn receipt, an unflushed event tail, a realtime binding, or an orchestrator seat. |
+| `LLV_HOST_RETIREMENT_GRACE_MS` | How long a retiring host may take to honour SIGTERM before its tree is force-killed (default `5000`, capped at `60000`). |
 | `LLV_DOCKER_NSENTER_SHIMS` | `1` makes the agent CLI resolver prefer the container's `/usr/local/bin` nsenter shims for host CLIs. Set automatically by the Docker image; leave unset on a host runtime. See [docs/docker.md](docs/docker.md). |
 
 ## Config paths

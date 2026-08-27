@@ -16,6 +16,7 @@ import { coordinatedControllerScan } from "@/lib/scanner/scanCoordinator";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { runReaperCycle } from "@/lib/reaperRuntime";
 import { runHeadlessProcessReaper } from "@/lib/headlessProcessReaper";
+import { reconcileStructuredHostRetirement } from "@/lib/runtime/structuredHostRetirement";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { mutateTasks } from "@/lib/tasks/store";
 import { reconcileWorkflowConversationOwnershipCooperatively } from "@/lib/workflows/store";
@@ -138,6 +139,12 @@ async function reconcileControllerRuntime(registry: AgentRegistry, files: Contro
   } catch (error) {
     console.error("[headless process reaper] reconciliation failed", error);
   }
+  /* Structured host retirement (#747). The headless reaper above excludes every
+     engine owner unconditionally, so nothing here ever ended a host whose
+     conversation had simply finished; this is the pass that does, under the
+     full predicate and never by process group alone. Enablement and failure
+     containment live with the sweep so the two cannot drift. */
+  await reconcileStructuredHostRetirement();
 }
 
 function reconcileControllerTasks(registry: AgentRegistry, files: ControllerScan["files"]): void {
