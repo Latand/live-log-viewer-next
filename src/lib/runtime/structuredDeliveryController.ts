@@ -16,6 +16,9 @@ import { runtimeImageCapability } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 
 type ObservableEngineHost = EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+type IdentityBoundEngineHost = ObservableEngineHost & {
+  releaseIfOwned?(expected: Readonly<ProcessIdentity>): Promise<boolean>;
+};
 type StructuredConversationRecovery = typeof import("./structuredRecovery")["recoverDeadStructuredConversation"];
 export interface StructuredDeliveryHost {
   key: SessionKey;
@@ -805,10 +808,15 @@ export async function bindStructuredDeliveryQueue(
        replacement host that claimed this key since the caller's snapshot is
        somebody else's live work and must survive untouched (#1199). */
     if (expected) {
-      const health = await current.host.health().catch(() => null);
-      if (health === null
-        || health.pid !== expected.pid
-        || health.processStartIdentity !== expected.startIdentity) return false;
+      const releaseIfOwned = (current.host as IdentityBoundEngineHost).releaseIfOwned;
+      /* A health read can go stale before a later release signal. Real
+         structured hosts expose an operation that rechecks the kernel
+         identity inside that signal boundary. */
+      if (!releaseIfOwned || !await releaseIfOwned.call(current.host, expected)) return false;
+      const registered = takeRegistration(id, current.host);
+      registry.terminateStructuredHost(key, expected);
+      if (registered) await detachRegistration(id, registered);
+      return true;
     }
     const registered = takeRegistration(id, current.host);
     if (!registered) return false;

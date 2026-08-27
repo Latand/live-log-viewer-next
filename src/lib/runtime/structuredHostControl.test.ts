@@ -78,6 +78,19 @@ function spawnFixtureTree(): { pid: number; startIdentity: string } {
   return { pid, startIdentity };
 }
 
+function spawnPersistentWrapperTree(): { pid: number; startIdentity: string } {
+  const child = spawn("/bin/sh", ["-c", "trap '' TERM; sleep 30 & wait; while :; do sleep 30; done"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  fixtures.push(child);
+  const pid = child.pid;
+  if (pid === undefined) throw new Error("fixture wrapper did not start");
+  const startIdentity = procBackend.processIdentity(pid);
+  if (startIdentity === null) throw new Error("fixture wrapper has no process identity");
+  return { pid, startIdentity };
+}
+
 function ref(over: Partial<StructuredHostKillRef> & Pick<StructuredHostKillRef, "pid">): StructuredHostKillRef {
   return {
     kind: "structured",
@@ -222,6 +235,29 @@ test("an owned host ends through the runtime, bound to the process it authorized
   expect(procBackend.pidAlive(tree.pid)).toBeFalse();
 });
 
+test("a runtime-confirmed exit receives no fallback group signal", async () => {
+  let alive = true;
+  const signals: number[] = [];
+  const outcome = await terminateStructuredHostTree(
+    ref({ pid: 5_500, startIdentity: "5500:start", sessionId: CLAUDE_SESSION, owned: true }),
+    {
+      processIdentity: () => alive ? "5500:start" : null,
+      pidAlive: () => alive,
+      ppidMap: () => new Map(),
+      processGroupId: () => 5_500,
+      protectedPids: () => new Set(),
+      terminateOwnedHost: async () => {
+        alive = false;
+        return true;
+      },
+      signal: (pid) => { signals.push(pid); },
+    },
+  );
+
+  expect(outcome).toMatchObject({ ok: true, via: "runtime" });
+  expect(signals).toEqual([]);
+});
+
 test("a replacement host holding the seat is left to the runtime, and the row is retired on the killed pid", async () => {
   const tree = spawnFixtureTree();
   const retired: Array<{ key: SessionKey; expected: { pid: number; startIdentity: string | null } }> = [];
@@ -245,17 +281,85 @@ test("a replacement host holding the seat is left to the runtime, and the row is
   expect(procBackend.pidAlive(tree.pid)).toBeFalse();
 });
 
+test("the root identity is rechecked after the runtime handoff and before any signal", async () => {
+  const tree = spawnFixtureTree();
+  let rebound = false;
+  const signals: number[] = [];
+
+  const outcome = await terminateStructuredHostTree(
+    ref({ pid: tree.pid, startIdentity: tree.startIdentity, sessionId: CLAUDE_SESSION, owned: true }),
+    {
+      processIdentity: (pid) => pid === tree.pid && rebound
+        ? `${tree.startIdentity}:replacement`
+        : procBackend.processIdentity(pid),
+      terminateOwnedHost: async () => {
+        rebound = true;
+        throw new Error("runtime release saw a replacement process");
+      },
+      signal: (pid) => { signals.push(pid); },
+      graceMs: 0,
+      deadlineMs: 0,
+    },
+  );
+
+  expect(outcome).toMatchObject({
+    ok: false,
+    status: 409,
+    stale: true,
+    error: expect.stringContaining("identity changed before signalling"),
+  });
+  expect(signals).toEqual([]);
+  expect(procBackend.pidAlive(tree.pid)).toBeTrue();
+});
+
+test("a descendant identity change refuses the group signal", async () => {
+  const tree = spawnFixtureTree();
+  let childPid: number | null = null;
+  for (let attempt = 0; attempt < 100 && childPid === null; attempt += 1) {
+    childPid = [...procBackend.ppidMap()].find(([, parent]) => parent === tree.pid)?.[0] ?? null;
+    if (childPid === null) await Bun.sleep(10);
+  }
+  if (childPid === null) throw new Error("fixture child did not start");
+  let rebound = false;
+  const signals: number[] = [];
+
+  const outcome = await terminateStructuredHostTree(
+    ref({ pid: tree.pid, startIdentity: tree.startIdentity, sessionId: CLAUDE_SESSION, owned: true }),
+    {
+      processIdentity: (pid) => pid === childPid && rebound
+        ? `${procBackend.processIdentity(pid)}:replacement`
+        : procBackend.processIdentity(pid),
+      terminateOwnedHost: async () => {
+        rebound = true;
+        return false;
+      },
+      signal: (pid) => { signals.push(pid); },
+      graceMs: 0,
+      deadlineMs: 0,
+    },
+  );
+
+  expect(outcome).toMatchObject({
+    ok: false,
+    status: 409,
+    error: expect.stringContaining(`process ${childPid} identity changed before signalling`),
+  });
+  expect(signals).toEqual([]);
+  expect(procBackend.pidAlive(tree.pid)).toBeTrue();
+});
+
 test("every process in the tree is signalled exactly once per pass", async () => {
-  const alive = new Set([5_000, 5_001, 5_002]);
+  const alive = new Set([5_000, 5_001, 5_002, 5_003]);
   const signalled: number[] = [];
-  const group = new Map([[5_000, 5_000], [5_001, 5_000], [5_002, 5_002]]);
+  const group = new Map([[5_000, 5_000], [5_001, 5_000], [5_002, 5_002], [5_003, 5_000]]);
 
   const outcome = await terminateStructuredHostTree(
     ref({ pid: 5_000, startIdentity: "5000:start" }),
     {
       processIdentity: (pid) => (alive.has(pid) ? `${pid}:start` : null),
       pidAlive: (pid) => alive.has(pid),
-      ppidMap: () => new Map([[5_001, 5_000], [5_002, 5_001]]),
+      /* 5003 already reparented but remains in the detached process group. */
+      ppidMap: () => new Map([[5_001, 5_000], [5_002, 5_001], [5_003, 1]]),
       processGroupId: (pid) => group.get(pid) ?? null,
       protectedPids: () => new Set(),
       signal: (pid) => {
@@ -269,9 +373,9 @@ test("every process in the tree is signalled exactly once per pass", async () =>
     },
   );
 
-  expect(outcome).toMatchObject({ ok: true, via: "process-group", pids: [5_000, 5_001, 5_002] });
-  /* The group covers 5000 and 5001; only the descendant that left the group
-     is named on its own, and nothing is signalled twice. */
+  expect(outcome).toMatchObject({ ok: true, via: "process-group", pids: [5_000, 5_001, 5_002, 5_003] });
+  /* The group covers 5000, 5001 and the reparented 5003. Only the descendant
+     that left the group is named on its own, and nothing is signalled twice. */
   expect(signalled).toEqual([-5_000, 5_002]);
 });
 
@@ -346,6 +450,37 @@ test("a process that outlives the whole ladder is reported, not called killed", 
   expect(retired).toEqual([]);
 });
 
+test("a surviving wrapper is returned as a survivor", async () => {
+  const wrapper = spawnPersistentWrapperTree();
+  let childPid: number | null = null;
+  for (let attempt = 0; attempt < 100 && childPid === null; attempt += 1) {
+    childPid = [...procBackend.ppidMap()].find(([, parent]) => parent === wrapper.pid)?.[0] ?? null;
+    if (childPid === null) await Bun.sleep(10);
+  }
+  expect(childPid).not.toBeNull();
+
+  const outcome = await terminateStructuredHostTree(
+    ref({ pid: wrapper.pid, startIdentity: wrapper.startIdentity }),
+    {
+      processGroupId: () => null,
+      signal: (pid, signal) => {
+        if (pid !== wrapper.pid) process.kill(pid, signal);
+      },
+      terminateOwnedHost: async () => false,
+      graceMs: 0,
+      deadlineMs: 60,
+    },
+  );
+
+  expect(outcome).toMatchObject({
+    ok: false,
+    status: 500,
+    remaining: expect.arrayContaining([wrapper.pid]),
+    error: expect.stringContaining("outlived the kill"),
+  });
+  expect(procBackend.pidAlive(wrapper.pid)).toBeTrue();
+});
+
 test("a pid outside the viewer's own chain is required before any signal", async () => {
   const outcome = await terminateStructuredHostTree(ref({ pid: 4_242, startIdentity: "4242:start" }), {
     protectedPids: () => new Set([4_242]),
@@ -405,6 +540,16 @@ test("kill idle refuses a host that started a turn since the list was taken", ()
   expect(refusal).toMatchObject({ status: 409, error: expect.stringContaining("mid-turn") });
 });
 
+test("kill idle refuses a host whose current turn state is unknown", () => {
+  const refusal = structuredHostKillRefusal(quiet, { kind: "idle", hours: 2 }, false, {
+    snapshot: () => gateSnapshot({ turn: "unknown" }),
+    transcriptMtimeMs: () => NOW_MS - 6 * 3_600_000,
+    now: () => NOW_MS,
+  });
+
+  expect(refusal).toMatchObject({ status: 409, error: expect.stringContaining("turn state is unknown") });
+});
+
 test("kill idle refuses a host whose transcript moved since the list was taken", () => {
   const dependencies = { snapshot: () => gateSnapshot(), now: () => NOW_MS };
 
@@ -433,6 +578,23 @@ test("a seat taken since the list was taken survives both bulk kills until ticke
       .toMatchObject({ status: 409, error: expect.stringContaining("orchestrator seat") });
     expect(structuredHostKillRefusal(quiet, intent, true, dependencies)).toBeNull();
   }
+});
+
+test("a session key rebound to another process grants no bulk-kill state", () => {
+  const replacement = gateSnapshot();
+  replacement.entries[`claude:${CLAUDE_SESSION}`]!.structuredHost!.process = {
+    pid: 9_900,
+    startIdentity: "9900:replacement",
+  };
+  const dependencies = {
+    snapshot: () => replacement,
+    transcriptMtimeMs: () => NOW_MS - 6 * 3_600_000,
+    now: () => NOW_MS,
+  };
+
+  expect(structuredHostKillRefusal(quiet, { kind: "all" }, false, dependencies))
+    .toMatchObject({ status: 409, error: expect.stringContaining("seat status is unknown") });
+  expect(structuredHostKillRefusal(quiet, { kind: "row" }, true, dependencies)).toBeNull();
 });
 
 test("kill all takes a live host, and a row kill takes a mid-turn one", () => {

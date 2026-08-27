@@ -1709,6 +1709,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "resources.hostOrphanedHint": "робочої копії вже немає і власника теж — лишилося саме дерево процесів",
   "resources.hostSeat": "місце оркестратора",
   "resources.hostSeatTick": "включити це місце оркестратора в масове закриття",
+  "resources.hostSeatUnknown": "статус місця невідомий",
+  "resources.hostSeatUnknownHint": "реєстр не може встановити статус місця оркестратора для цього хоста; масове закриття його пропускає",
   "resources.hostBusy": "хід триває",
   "resources.hostUntitled": "хост без назви",
   "resources.bulkLabel": "неактивні довше ніж",

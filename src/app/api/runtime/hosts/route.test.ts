@@ -132,6 +132,27 @@ test("a live orchestrator seat is only killed when the operator ticks it", async
   expect(await settle(() => !procBackend.pidAlive(tree.pid))).toBeTrue();
 });
 
+test("bulk kill refuses a scan-only host whose orchestrator-seat status is unknown", async () => {
+  const tree = spawnFixtureTree();
+  const target = `structured:pid:${tree.pid}`;
+  noteSessionTargets([{
+    target,
+    ref: ref({
+      pid: tree.pid,
+      startIdentity: tree.startIdentity,
+      seat: null,
+      turnBusy: null,
+    }),
+  }]);
+
+  const response = await POST(post({ action: "kill", target, intent: "all" }));
+
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ error: expect.stringContaining("seat status is unknown") });
+  expect(procBackend.pidAlive(tree.pid)).toBeTrue();
+  expect((await POST(post({ action: "kill", target, intent: "row" }))).status).toBe(200);
+});
+
 test("kill idle refuses a host whose idle age cannot be proven at kill time", async () => {
   const tree = spawnFixtureTree();
   const target = `structured:pid:${tree.pid}`;

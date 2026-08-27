@@ -41,8 +41,8 @@ test("idle means the turn settled and the transcript went quiet for the threshol
 
 test("a live orchestrator seat is listed but stays out of both bulk kills until ticked", () => {
   const sessions = [
-    session({ target: "lane", kind: "structured", lastActiveAt: hoursAgo(6) }),
-    session({ target: "seat", kind: "structured", seat: true, lastActiveAt: hoursAgo(6) }),
+    session({ target: "lane", kind: "structured", seat: false, turnBusy: false, lastActiveAt: hoursAgo(6) }),
+    session({ target: "seat", kind: "structured", seat: true, turnBusy: false, lastActiveAt: hoursAgo(6) }),
   ];
 
   expect(idleKillTargets(sessions, 2, NOW, new Set()).map((item) => item.target)).toEqual(["lane"]);
@@ -51,6 +51,19 @@ test("a live orchestrator seat is listed but stays out of both bulk kills until 
   const ticked = new Set(["seat"]);
   expect(idleKillTargets(sessions, 2, NOW, ticked).map((item) => item.target)).toEqual(["lane", "seat"]);
   expect(bulkKillTargets(sessions, ticked).map((item) => item.target)).toEqual(["lane", "seat"]);
+});
+
+test("a structured host whose seat status is unknown stays out of every bulk kill", () => {
+  const unknown = session({
+    target: "scan-only-host",
+    kind: "structured",
+    seat: null,
+    turnBusy: null,
+    lastActiveAt: hoursAgo(6),
+  });
+
+  expect(idleKillTargets([unknown], 2, NOW, new Set())).toEqual([]);
+  expect(bulkKillTargets([unknown], new Set())).toEqual([]);
 });
 
 test("kill all takes live hosts too — that is the point of the clean slate", () => {
@@ -64,8 +77,8 @@ test("kill all takes live hosts too — that is the point of the clean slate", (
 
 test("the footer counts hosts, idle hosts and the resident memory they hold", () => {
   const sessions = [
-    session({ target: "a", kind: "structured", rssBytes: 600, swapBytes: 40, lastActiveAt: hoursAgo(6) }),
-    session({ target: "b", kind: "structured", rssBytes: 300, swapBytes: 7, activity: "live" }),
+    session({ target: "a", kind: "structured", seat: false, turnBusy: false, rssBytes: 600, swapBytes: 40, lastActiveAt: hoursAgo(6) }),
+    session({ target: "b", kind: "structured", seat: false, turnBusy: true, rssBytes: 300, swapBytes: 7, activity: "live" }),
     session({ target: "c", rssBytes: 100, swapBytes: 0, lastActiveAt: hoursAgo(3) }),
   ];
 

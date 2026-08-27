@@ -2677,6 +2677,21 @@ describe("CodexAppServerHost", () => {
     expect(await host.health()).toMatchObject({ status: "unhosted", pid: null, endpoint: "stdio:released" });
   });
 
+  test("an identity-bound release refuses a different authorized process", async () => {
+    const server = new FakeAppServer("identity-bound-release-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      ...ownedFakeProcess,
+    });
+
+    expect(await host.releaseIfOwned({ pid: server.pid, startIdentity: "4242:other" })).toBeFalse();
+    expect(server.signals).toEqual([]);
+
+    await host.release();
+  });
+
   test("release preserves ownership when the initial identity lookup is unknown", async () => {
     const server = new FakeAppServer("initial-identity-unknown-thread");
     const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];

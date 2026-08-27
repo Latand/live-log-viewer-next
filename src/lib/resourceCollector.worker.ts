@@ -36,6 +36,10 @@ function nullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
+function nullableBoolean(value: unknown): value is boolean | null {
+  return value === null || typeof value === "boolean";
+}
+
 function resourceFileObservation(value: unknown): value is ResourceWorkerFileObservation {
   if (!record(value)) return false;
   const keys = ["path", "parent", "title", "project", "activity", "mtime", "engine", "pid", "proc", "conversationId"];
@@ -71,8 +75,8 @@ function structuredHostRecord(value: unknown): value is StructuredHostRecord {
     && nullableString(value.role)
     && nullableString(value.model)
     && nullableString(value.stage)
-    && typeof value.seat === "boolean"
-    && typeof value.turnBusy === "boolean"
+    && nullableBoolean(value.seat)
+    && nullableBoolean(value.turnBusy)
     && typeof value.owned === "boolean";
 }
 

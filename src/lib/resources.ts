@@ -176,9 +176,11 @@ export interface StructuredHostRecord {
   model: string | null;
   /** Pipeline stage this host serves, when it belongs to one. */
   stage: string | null;
-  /** A live orchestrator seat, excluded from bulk kills unless ticked. */
-  seat: boolean;
-  turnBusy: boolean;
+  /** A live orchestrator seat, excluded from bulk kills unless ticked. Null
+      means the registry cannot establish whether this host holds one. */
+  seat: boolean | null;
+  /** Null means the registry cannot establish whether the turn settled. */
+  turnBusy: boolean | null;
   /** The runtime still holds this host and can end it through its own lifecycle. */
   owned: boolean;
 }
@@ -200,8 +202,8 @@ export interface StructuredHostKillRef {
   engine: "claude" | "codex";
   sessionId: string | null;
   conversationId: string | null;
-  seat: boolean;
-  turnBusy: boolean;
+  seat: boolean | null;
+  turnBusy: boolean | null;
   owned: boolean;
   lastActiveAt: string | null;
 }
@@ -396,6 +398,26 @@ export async function readResourceFileSnapshot(fresh: boolean): Promise<Resource
   return resourceWorkerFileSnapshot(scan.snapshot.files, () => null);
 }
 
+/** The outermost consecutive ancestor carrying this viewer's host stamp.
+    Scan-only discovery often sees the inner Claude/Codex CLI while the
+    viewer-owned `nsenter`/`setpriv`/shell wrapper sits above it. That wrapper
+    is the root the resource row must verify, account for, and terminate. */
+function structuredHostRoot(
+  pid: number,
+  ppids: ReadonlyMap<number, number>,
+  stampOf: (pid: number) => string | null,
+  expectedStamp: string,
+): number {
+  let root = pid;
+  const seen = new Set([pid]);
+  while (true) {
+    const parent = ppids.get(root);
+    if (parent === undefined || parent <= 1 || seen.has(parent) || stampOf(parent) !== expectedStamp) return root;
+    seen.add(parent);
+    root = parent;
+  }
+}
+
 /**
  * Every structured host worth listing, with its process tree.
  *
@@ -439,14 +461,17 @@ async function structuredHostTrees(
        to: the command line is public, and a Codex client or another harness
        wearing it is nobody's to kill. Only this viewer's stamp gets in. */
     if (stampOf(candidate.pid) !== ourStamp) continue;
-    const observed = identity(candidate.pid);
+    const rootPid = structuredHostRoot(candidate.pid, ppids, stampOf, ourStamp);
+    if (claimed.has(rootPid)) continue;
+    const observed = identity(rootPid);
     if (observed === null) continue;
     claimed.add(candidate.pid);
+    claimed.add(rootPid);
     live.push({
-      id: `pid:${candidate.pid}`,
+      id: `pid:${rootPid}`,
       engine,
       sessionId: null,
-      pid: candidate.pid,
+      pid: rootPid,
       startIdentity: observed,
       cwd: candidate.cwd,
       path: null,
@@ -455,8 +480,8 @@ async function structuredHostTrees(
       role: null,
       model: null,
       stage: null,
-      seat: false,
-      turnBusy: false,
+      seat: null,
+      turnBusy: null,
       owned: false,
     });
   }
@@ -1014,6 +1039,10 @@ function nullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
+function nullableBoolean(value: unknown): value is boolean | null {
+  return value === null || typeof value === "boolean";
+}
+
 function validResourceSystem(value: unknown): boolean {
   if (value === null) return true;
   if (!record(value) || !exactKeys(value, ["ramTotal", "ramAvailable", "swapTotal", "swapUsed", "capturedAt"])) return false;
@@ -1036,8 +1065,8 @@ function validResourceSession(value: unknown): boolean {
     || (value.role !== undefined && !nullableString(value.role))
     || (value.conversationId !== undefined && !nullableString(value.conversationId))
     || (value.stage !== undefined && !nullableString(value.stage))
-    || (value.seat !== undefined && typeof value.seat !== "boolean")
-    || (value.turnBusy !== undefined && typeof value.turnBusy !== "boolean")) return false;
+    || (value.seat !== undefined && !nullableBoolean(value.seat))
+    || (value.turnBusy !== undefined && !nullableBoolean(value.turnBusy))) return false;
   return typeof value.target === "string" && value.target.length > 0
     && Number.isSafeInteger(value.panePid) && (value.panePid as number) > 0
     && nullableString(value.path)
@@ -1104,8 +1133,8 @@ function validStructuredHostKillRef(value: unknown): value is StructuredHostKill
     && (value.engine === "claude" || value.engine === "codex")
     && nullableString(value.sessionId)
     && nullableString(value.conversationId)
-    && typeof value.seat === "boolean"
-    && typeof value.turnBusy === "boolean"
+    && nullableBoolean(value.seat)
+    && nullableBoolean(value.turnBusy)
     && typeof value.owned === "boolean"
     && nullableString(value.lastActiveAt)
     && (value.lastActiveAt === null || Number.isFinite(Date.parse(value.lastActiveAt as string)));

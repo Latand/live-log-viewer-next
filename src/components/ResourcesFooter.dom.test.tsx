@@ -180,6 +180,19 @@ test("kill idle skips the live host and the unticked orchestrator seat", async (
   ]);
 });
 
+test("a scan-only host shows its unknown seat status and stays row-kill only", () => {
+  const view = mount([host({
+    target: "structured:pid:4100",
+    ownership: "orphaned",
+    seat: null,
+    turnBusy: null,
+  })]);
+
+  expect(view.textContent).toContain("seat unknown");
+  expect((buttonLabelled(view, "Kill all agents") as HTMLButtonElement).disabled).toBeTrue();
+  expect(buttonLabelled(view, "Kill")).not.toBeNull();
+});
+
 test("ticking an orchestrator seat brings it into the bulk kills", async () => {
   const calls = stubFetch();
   const view = mount([

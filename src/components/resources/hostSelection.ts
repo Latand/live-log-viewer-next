@@ -16,7 +16,9 @@ export function isStructuredHost(session: ResourceSession): boolean {
 }
 
 function killable(session: ResourceSession, ticked: ReadonlySet<string>): boolean {
-  return session.seat !== true || ticked.has(session.target);
+  if (!isStructuredHost(session)) return true;
+  if (session.seat === null || session.seat === undefined) return false;
+  return session.seat === false || ticked.has(session.target);
 }
 
 /**
@@ -33,7 +35,7 @@ export function idleKillTargets(
   const cutoff = (nowSeconds - hours * 3_600) * 1_000;
   return sessions.filter((session) => killable(session, ticked)
     && session.activity !== "live"
-    && session.turnBusy !== true
+    && (!isStructuredHost(session) || session.turnBusy === false)
     && session.lastActiveAt !== null
     && Date.parse(session.lastActiveAt) < cutoff);
 }

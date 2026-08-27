@@ -712,10 +712,13 @@ export interface ResourceSession {
       worktree is gone, or no registry record covers the process at all. */
   ownership?: "owned" | "released" | "orphaned";
   /** A live orchestrator seat. Listed like any other host, but left out of the
-      bulk kills unless the operator ticks it explicitly. */
-  seat?: boolean;
-  /** The engine turn has not settled: killing this host interrupts work. */
-  turnBusy?: boolean;
+      bulk kills unless the operator ticks it explicitly. Null means the scan
+      found the process without registry evidence, so bulk kills leave it
+      alone. */
+  seat?: boolean | null;
+  /** The engine turn has not settled: killing this host interrupts work. Null
+      means no registry turn state can prove that it settled. */
+  turnBusy?: boolean | null;
 }
 
 /** GET /api/resources response. `system` is null when no platform probe worked. */

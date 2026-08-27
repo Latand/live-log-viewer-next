@@ -1836,6 +1836,28 @@ describe("ClaudeStreamBrokerHost", () => {
     await expect(host.release()).resolves.toBeUndefined();
   });
 
+  test("an identity-bound release refuses a recycled child before signalling", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    let processIdentity = "5150:owned";
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+      processIdentity: () => processIdentity,
+    });
+    processIdentity = "5150:replacement";
+
+    expect(await host.releaseIfOwned({ pid: child.pid, startIdentity: "5150:owned" })).toBeFalse();
+    expect(child.signals).toEqual([]);
+
+    processIdentity = "5150:owned";
+    await host.release();
+  });
+
   test("a late Claude reap after ledger failure releases the persisted writer claim", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-late-ledger-reap-"));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));

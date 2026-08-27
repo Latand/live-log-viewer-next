@@ -6,7 +6,12 @@ import path from "node:path";
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 
 import { procBackend } from "@/lib/proc";
-import { structuredHostStamp, type AgentProcess } from "@/lib/scanner/process";
+import {
+  readStructuredHostStamp,
+  STRUCTURED_HOST_STAMP_ENV,
+  structuredHostStamp,
+  type AgentProcess,
+} from "@/lib/scanner/process";
 import type { FileEntry, ResourceSession } from "@/lib/types";
 
 import {
@@ -82,6 +87,16 @@ function agent(over: Partial<AgentProcess> & Pick<AgentProcess, "pid">): AgentPr
 
 function memory(pids: number[]): Map<number, { rssBytes: number; swapBytes: number }> {
   return new Map(pids.map((pid) => [pid, { rssBytes: 1, swapBytes: 0 }]));
+}
+
+async function settle<T>(read: () => T | null, timeoutMs = 3_000): Promise<T | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = read();
+    if (value !== null) return value;
+    await Bun.sleep(20);
+  }
+  return read();
 }
 
 function dependencies(over: Partial<ResourceSnapshotDependencies> = {}): ResourceSnapshotDependencies {
@@ -197,6 +212,55 @@ test("a host process no record covers is listed as orphaned so it can be reclaim
   const orphan = payload.sessions.find((session) => session.target === "structured:pid:7000");
   expect(orphan?.conversationId).toBeNull();
   expect(orphan?.cwd).toBe("/repo/other");
+});
+
+test("a scan-only inner CLI is rooted at its stamped wrapper", async () => {
+  const wrapper = spawn("/bin/sh", ["-c", "sleep 30 & wait"], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, [STRUCTURED_HOST_STAMP_ENV]: structuredHostStamp() },
+  });
+  const wrapperPid = wrapper.pid;
+  if (wrapperPid === undefined) throw new Error("fixture wrapper did not start");
+  try {
+    const innerPid = await settle(() => [...procBackend.ppidMap()]
+      .find(([, parent]) => parent === wrapperPid)?.[0] ?? null);
+    if (innerPid === null) throw new Error("fixture inner process did not start");
+
+    const payload = await buildResourceSnapshot(true, dependencies({
+      listAgentProcesses: () => [agent({ pid: innerPid, engine: "codex", argv: CODEX_HOST_ARGV })],
+      proc: {
+        systemMemory: () => null,
+        ppidMap: () => procBackend.ppidMap(),
+        processMemory: (pids) => procBackend.processMemory(pids),
+      },
+      processIdentity: (pid) => procBackend.processIdentity(pid),
+      hostStamp: readStructuredHostStamp,
+    }));
+
+    expect(payload.sessions).toHaveLength(1);
+    expect(payload.sessions[0]).toMatchObject({
+      target: `structured:pid:${wrapperPid}`,
+      panePid: wrapperPid,
+      kind: "structured",
+      engine: "codex",
+      ownership: "orphaned",
+      seat: null,
+      turnBusy: null,
+    });
+    expect(payload.sessions[0]!.procCount).toBeGreaterThanOrEqual(2);
+    expect(allowedStructuredHostTarget(`structured:pid:${wrapperPid}`)).toBeNull();
+    expect(lastResourceTargetRefs()).toContainEqual({
+      target: `structured:pid:${wrapperPid}`,
+      ref: expect.objectContaining({
+        kind: "structured",
+        pid: wrapperPid,
+        startIdentity: procBackend.processIdentity(wrapperPid),
+      }),
+    });
+  } finally {
+    try { process.kill(-wrapperPid, "SIGKILL"); } catch { /* already gone */ }
+  }
 });
 
 test("the operator's own CLIs and account-migration successors never enter the list", async () => {

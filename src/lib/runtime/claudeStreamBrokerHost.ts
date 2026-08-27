@@ -7,6 +7,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import { statePath } from "@/lib/configDir";
 import { effectiveClaudePermissionMode } from "@/lib/agent/cli";
+import type { ProcessIdentity } from "@/lib/agent/registry";
 import { applyClaudeSpawnPolicy, NATIVE_MULTI_AGENT_TOOLS } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
@@ -199,6 +200,7 @@ export interface ClaudeStreamBrokerHostOptions {
   onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   signalProcess?: ProcessSignal;
+  processIdentity?: (pid: number) => string | null;
   readAuthStatus?: () => ClaudeAuthStatus | Promise<ClaudeAuthStatus>;
   readTranscript?: (cwd: string, sessionId: string) => ClaudeTranscriptUser[];
   eventStore?: RuntimeEventStore;
@@ -503,6 +505,8 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly shutdownGraceMs: number;
   private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly signalProcess: ProcessSignal;
+  private readonly processIdentity: (pid: number) => string | null;
+  private readonly childStartIdentity: string | null;
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly deliveries: ClaudeDeliveryState[] = [];
@@ -532,6 +536,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private releaseCleanup: (() => void) | null;
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
   private terminationStarted = false;
+  private releaseFence: Readonly<ProcessIdentity> | null = null;
   private readonly reapedPromise: Promise<void>;
   private resolveReaped!: () => void;
   private readonly launchFlags: readonly string[];
@@ -551,6 +556,8 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.signalProcess = options.signalProcess ?? process.kill;
+    this.processIdentity = options.processIdentity ?? ((pid) => procBackend.processIdentity(pid));
+    this.childStartIdentity = child.pid ? this.processIdentity(child.pid) : null;
     this.releaseCleanup = options.releaseCleanup ?? null;
     this.cursor = options.initialEventCursor ?? 0;
     this.protocolVersion = auth.version ?? null;
@@ -854,6 +861,25 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     return this.releasePromise;
   }
 
+  /** Resource cleanup may release only the exact child the operator's row
+      authorized. The kernel identity is checked here and again inside the
+      synchronous signal boundary. */
+  async releaseIfOwned(expected: Readonly<ProcessIdentity>): Promise<boolean> {
+    const pid = this.child.pid;
+    if (this.released || this.releasing || this.releasePromise !== null
+      || !pid || expected.startIdentity === null
+      || pid !== expected.pid
+      || this.childStartIdentity !== expected.startIdentity
+      || this.processIdentity(pid) !== expected.startIdentity) return false;
+    this.releaseFence = expected;
+    try {
+      await this.release();
+      return true;
+    } finally {
+      if (this.releaseFence === expected) this.releaseFence = null;
+    }
+  }
+
   private unavailable(): boolean {
     if (this.dead || this.releasing || this.released) return true;
     try { return this.writerFence?.() === false; } catch { return true; }
@@ -871,7 +897,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       sessionKey: this.identity.sessionId,
       endpoint: pid ? `stdio:${pid}` : "stdio:released",
       pid,
-      processStartIdentity: pid ? procBackend.processIdentity(pid) : null,
+      processStartIdentity: pid ? this.processIdentity(pid) : null,
       eventCursor: this.cursor,
       protocolVersion: this.protocolVersion,
       activeTurnRef: this.activeTurnId,
@@ -1136,9 +1162,15 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private async releaseAndReap(): Promise<void> {
     this.releasing = true;
     this.rejectPending(new Error("Claude stream host released"));
-    this.startTermination();
+    if (!this.startTermination() && this.releaseFence) {
+      this.releasing = false;
+      throw new Error("Claude child identity changed before signalling");
+    }
     if (!await this.waitForReap(this.shutdownGraceMs * 2)) {
-      signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      if (!this.signalReleaseGroup("SIGKILL") && this.releaseFence) {
+        this.releasing = false;
+        throw new Error("Claude child identity changed before signalling");
+      }
       if (!await this.waitForReap(this.shutdownGraceMs)) {
         /* "close" waits on the stdio pipes, which an escaped descendant can
            hold open long after the leader died — a kill that keeps failing
@@ -1221,16 +1253,29 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.startTermination();
   }
 
-  private startTermination(): void {
-    if (this.terminationStarted || this.reaped) return;
-    this.terminationStarted = true;
+  private signalReleaseGroup(signal: NodeJS.Signals): boolean {
+    const expected = this.releaseFence;
+    if (expected) {
+      const pid = this.child.pid;
+      if (!pid || expected.startIdentity === null
+        || pid !== expected.pid
+        || this.childStartIdentity !== expected.startIdentity
+        || this.processIdentity(pid) !== expected.startIdentity) return false;
+    }
+    return signalDetachedProcessGroup(this.child, signal, this.signalProcess);
+  }
+
+  private startTermination(): boolean {
+    if (this.terminationStarted || this.reaped) return true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
-    signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
+    if (!this.signalReleaseGroup("SIGTERM")) return false;
+    this.terminationStarted = true;
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
       if (this.reaped) return;
-      signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      this.signalReleaseGroup("SIGKILL");
     }, this.shutdownGraceMs);
+    return true;
   }
 
   private rejectPending(error: Error): void {

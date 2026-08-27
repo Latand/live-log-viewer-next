@@ -571,6 +571,13 @@ function SessionRow({
             />
             {t("resources.hostSeat")}
           </label>
+        ) : structured && (session.seat === null || session.seat === undefined) ? (
+          <span
+            className="shrink-0 rounded-full border border-warning/50 px-1.5 py-0.5 text-[9.5px] font-semibold text-warning"
+            title={t("resources.hostSeatUnknownHint")}
+          >
+            {t("resources.hostSeatUnknown")}
+          </span>
         ) : null}
         <span className="shrink-0 text-right">
           <span className="block text-[11.5px] font-bold tabular-nums">{fmtBytes(session.rssBytes)}</span>

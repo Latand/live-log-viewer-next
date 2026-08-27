@@ -1754,6 +1754,8 @@ export const en = {
   "resources.hostOrphanedHint": "no worktree and no owner left — nothing but the process tree remains",
   "resources.hostSeat": "orchestrator seat",
   "resources.hostSeatTick": "include this orchestrator seat in the bulk kills",
+  "resources.hostSeatUnknown": "seat unknown",
+  "resources.hostSeatUnknownHint": "the registry cannot establish this host's orchestrator-seat status; bulk kills leave it alone",
   "resources.hostBusy": "mid-turn",
   "resources.hostUntitled": "untitled host",
   "resources.bulkLabel": "idle longer than",
