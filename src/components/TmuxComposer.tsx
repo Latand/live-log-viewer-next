@@ -32,6 +32,7 @@ import {
   enqueueOutbox,
   markOutboxResponded,
   outboxHistory,
+  outboxAwaitsTurnBoundary,
   outboxStateForReceiptStatus,
   rebindOutboxEchoText,
   releaseHeldOutbox,
@@ -53,12 +54,19 @@ import {
 import { RuntimePill } from "./RuntimePill";
 import { savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
 import { type PendingImage } from "./imageAttachments";
-import { ReceiptChip, runtimeReceiptStatusText } from "./runtime/ReceiptChip";
+import {
+  DELIVERY_WAIT_TICK_MS,
+  deliveryWaitFor,
+  deliveryWaitText,
+  type DeliveryWait,
+} from "./runtime/deliveryWait";
+import { humanReason, ReceiptChip, runtimeReceiptStatusText } from "./runtime/ReceiptChip";
 import {
   deliveryAttemptGroups,
   deliveryEchoes,
   deliveryProblem,
   dismissedReceiptsKey,
+  type DeliveryAttemptGroup,
   messageReceiptForAssistantTurn,
   readDismissedReceipts,
   visibleStandaloneReceipts,
@@ -248,23 +256,42 @@ export function RuntimeComposerReceipts({
   receipts,
   actionsDisabled = false,
   dismissed = NO_DISMISSED,
+  nowMs,
   onRetry,
   onEdit,
   onDismiss,
+  onDiscard,
 }: {
   receipts: RuntimeReceipt[];
   actionsDisabled?: boolean;
   /** Operation ids the user dismissed (issue #264 rule 3): settled problems in
       this set stay hidden; a still-moving attempt always renders. */
   dismissed?: ReadonlySet<string>;
+  /** Clock the delivery waits are measured against (issue #1213). Production
+      omits it and the row ticks itself; a test pins the instant. */
+  nowMs?: number;
   onRetry: (receipt: RuntimeReceipt) => void;
   onEdit: (receipt: RuntimeReceipt) => void;
   /** Persists a dismissal — receives every settled operation id of the row. */
   onDismiss?: (operationIds: string[]) => void;
+  /** Give up on a delivery that never arrived (issue #1213). */
+  onDiscard?: (receipt: RuntimeReceipt) => void;
 }) {
   const { t } = useLocale();
   const statusId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
+  /* A wait only becomes news by getting older, and nothing else re-renders this
+     row while a message is parked at a turn boundary. One local interval, no
+     store and no bus: the elapsed label advances and the uncertain bound is
+     crossed on its own. */
+  const [tick, setTick] = useState(() => nowMs ?? Date.now());
+  const pinnedNow = nowMs !== undefined;
+  useEffect(() => {
+    if (pinnedNow) return;
+    const timer = setInterval(() => setTick(Date.now()), DELIVERY_WAIT_TICK_MS);
+    return () => clearInterval(timer);
+  }, [pinnedNow]);
+  const now = nowMs ?? tick;
   const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
   const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
     && (receipt.status === "failed" || receipt.status === "rejected")
@@ -277,6 +304,15 @@ export function RuntimeComposerReceipts({
      dismissed settled problems stay dismissed. */
   const attemptGroups = deliveryAttemptGroups(receipts, dismissed);
   const visibleAttempts = attemptGroups.flatMap((group) => group.attempts);
+  /* The wait belongs to the logical message, so it is measured from its OLDEST
+     visible attempt — "how long it waited" survives an auto-retry. */
+  const waitFor = (group: DeliveryAttemptGroup): DeliveryWait | null => deliveryWaitFor({
+    status: group.current.status,
+    reason: group.current.reason,
+    firstAttemptAt: group.attempts.at(-1)!.at,
+    attempts: group.attempts.length,
+    nowMs: now,
+  });
   const supersededStatusLabels = (attempts: RuntimeReceipt[]): string[] => {
     const counts = new Map<string, number>();
     for (const attempt of attempts.slice(1)) {
@@ -362,9 +398,16 @@ export function RuntimeComposerReceipts({
                 const history = supersededStatusLabels(group.attempts);
                 const failed = receipt.status === "failed";
                 const pending = !receiptIsTerminal(receipt.status);
+                const wait = waitFor(group);
+                const uncertain = wait?.phase === "uncertain";
                 const retryingBusy = pending
+                  && !uncertain
                   && typeof receipt.reason === "string"
                   && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason);
+                /* A host that is gone gets its own line: the phase sentence
+                   says the message is parked, this says the window died and
+                   nothing has taken the conversation back (#1213). */
+                const hostGone = wait?.phase === "awaiting-host";
                 return (
                   <div
                     key={receipt.operationId}
@@ -395,9 +438,11 @@ export function RuntimeComposerReceipts({
                       ) : null}
                       <ReceiptChip
                         receipt={receipt}
+                        wait={wait}
                         actionsDisabled={actionsDisabled}
-                        onRetry={failed ? () => onRetry(receipt) : undefined}
+                        onRetry={failed || uncertain ? () => onRetry(receipt) : undefined}
                         onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
+                        onDiscard={uncertain && onDiscard ? () => onDiscard(receipt) : undefined}
                       />
                       {/* A settled problem is dismissible (issue #264 rule 3):
                           the dismissal records every settled attempt of the
@@ -418,7 +463,7 @@ export function RuntimeComposerReceipts({
                           <X className="h-3 w-3" aria-hidden />
                         </button>
                       ) : null}
-                      {receipt.status === "pending" ? (
+                      {receipt.status === "pending" && !uncertain ? (
                         <span
                           className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-muted motion-reduce:animate-none"
                           aria-hidden
@@ -434,6 +479,25 @@ export function RuntimeComposerReceipts({
                         </span>
                       ) : null}
                     </div>
+                    {hostGone ? (
+                      <span
+                        className="min-w-0 max-w-full text-right text-caption text-muted"
+                        data-receipt-host-gone
+                      >
+                        {humanReason(t, receipt.reason)}
+                      </span>
+                    ) : null}
+                    {/* Why it is not coming, in one sentence, next to the exit
+                        (issue #1213). Wraps rather than truncates: this is the
+                        only place the operator learns the message was parked. */}
+                    {uncertain ? (
+                      <span
+                        className="min-w-0 max-w-full text-right text-caption text-muted"
+                        data-receipt-uncertain-why
+                      >
+                        {t("runtime.receipt.unconfirmedWhy")}
+                      </span>
+                    ) : null}
                     {history.length ? (
                       <span
                         className="min-w-0 max-w-full truncate text-caption text-muted"
@@ -460,7 +524,12 @@ export function RuntimeComposerReceipts({
               problems: t("runtime.receipt.statusProblems", { count: problemReceipts.length }),
             })}
             {` ${attemptGroups
-              .map((group) => [runtimeReceiptStatusText(t, group.current), ...supersededStatusLabels(group.attempts)].join(" · "))
+              .map((group) => {
+                const wait = waitFor(group);
+                const current = (wait && deliveryWaitText(t, wait, group.current.queuePosition))
+                  ?? runtimeReceiptStatusText(t, group.current);
+                return [current, ...supersededStatusLabels(group.attempts)].join(" · ");
+              })
               .join(". ")}.`}
             {busyRetry ? ` ${t("runtime.receipt.busyRetry")}` : null}
           </span>
@@ -493,6 +562,26 @@ export function RuntimeComposerReceipts({
       })}
     </>
   );
+}
+
+/**
+ * The retry request one receipt needs (issue #1213).
+ *
+ * A terminal failure retries as it always did. An UNCONFIRMED delivery — one
+ * still parked at a turn boundary — must be abandoned first: the server
+ * terminalizes the parked attempt, retiring its durable send effect, in the
+ * same step that mints the replacement. That is what makes Retry unable to put
+ * the same message into the agent's turn twice; a delivery that landed while
+ * the operator was reading the screen refuses the transition and comes back as
+ * delivered, with nothing resent.
+ */
+export function runtimeRetryRequestInit(receipt: RuntimeReceipt): RequestInit {
+  if (receiptIsTerminal(receipt.status)) return { method: "POST" };
+  return {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ abandonUnconfirmed: true }),
+  };
 }
 
 /**
@@ -1487,7 +1576,12 @@ export function TmuxComposerCore({
         const receipt = displayedRuntimeReceipts.find((candidate) =>
           candidate.idempotencyKey === settlement.entry.key && receiptIsAdmitted(candidate.status));
         const state = receipt ? outboxStateForReceiptStatus(receipt.status) : "delivered";
-        updateOutbox(cardId, settlement.entry.key, { state, settledAt: nowMs() });
+        updateOutbox(cardId, settlement.entry.key, {
+          state,
+          settledAt: nowMs(),
+          /* #1213: parked at a turn boundary is not "on the wire". */
+          awaitingTurn: receipt ? outboxAwaitsTurnBoundary(receipt.status) : undefined,
+        });
       } else {
         const next = draftAfterDelivery(textRef.current, settlement.text);
         if (next !== textRef.current) setText(next);
@@ -1521,7 +1615,11 @@ export function TmuxComposerCore({
       /* A failed bubble only advances on PROVEN admission — never on another
          failure, and never to "delivering" off an unproven receipt. */
       if (entry.state === "failed" && !(next === "delivered" || (next === "delivering" && receiptIsAdmitted(receipt.status)))) continue;
-      updateOutbox(cardId, entry.id, { state: next, settledAt: nowMs() });
+      updateOutbox(cardId, entry.id, {
+        state: next,
+        settledAt: nowMs(),
+        awaitingTurn: outboxAwaitsTurnBoundary(receipt.status),
+      });
     }
   }, [displayedRuntimeReceipts, outbox, cardId]);
 
@@ -1699,7 +1797,7 @@ export function TmuxComposerCore({
         direct (non-queued) send, which reports through the status line. The
         bubble takes the state the receipt PROVES: a bare admission stays
         `delivering`, only a delivered receipt reads `delivered` (round-1 P1#4). */
-    const settleOutbox = (state: OutboxState, error?: string, held?: boolean) => {
+    const settleOutbox = (state: OutboxState, error?: string, held?: boolean, awaitingTurn?: true) => {
       if (!outboxId) return;
       /* A held settlement stamps the entry so `releaseHeldOutbox` can requeue
          it level-wise once the switch is over — a parked hold looks exactly
@@ -1707,6 +1805,7 @@ export function TmuxComposerCore({
       updateOutbox(cardId, outboxId, {
         state,
         settledAt: nowMs(),
+        awaitingTurn,
         ...(error ? { error } : {}),
         ...(held ? { heldForSwitch: true as const } : {}),
       });
@@ -1718,7 +1817,12 @@ export function TmuxComposerCore({
       if (receiptIsAdmitted(receipt.status)) commitBridgeFor(clientMessageId);
       /* `queued` is the admitted-and-held state on the structured plane: the
          server parked the message (the account-switch delivery fence). */
-      return settleOutbox(outboxStateForReceiptStatus(receipt.status), undefined, receipt.status === "queued");
+      return settleOutbox(
+        outboxStateForReceiptStatus(receipt.status),
+        undefined,
+        receipt.status === "queued",
+        outboxAwaitsTurnBoundary(receipt.status),
+      );
     };
     /* Resolve the key before selecting the payload. A generation retained after
        uncertain admission owns an immutable text/image snapshot; later edits
@@ -2118,7 +2222,35 @@ export function TmuxComposerCore({
     setBusy(true);
     setStatus(null);
     try {
-      const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, { method: "POST" });
+      const response = await fetch(
+        `/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`,
+        runtimeRetryRequestInit(receipt),
+      );
+      const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
+      if (!response.ok || !body.receipt) {
+        setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
+        return;
+      }
+      setImmediateRuntimeReceipts((current) => [
+        body.receipt!,
+        ...current.filter((candidate) => candidate.operationId !== body.receipt!.operationId),
+      ].slice(0, 8));
+    } catch {
+      setStatus({ kind: "err", text: t("common.serverUnavailable") });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /* Give up on a delivery that never arrived (issue #1213). The server
+     terminalizes the operation and retires its durable send effect, so the
+     message the operator discarded can no longer be handed over later. */
+  const discardRuntimeReceipt = async (receipt: RuntimeReceipt) => {
+    if (busy || voiceSending) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, { method: "DELETE" });
       const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
       if (!response.ok || !body.receipt) {
         setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
@@ -2263,6 +2395,7 @@ export function TmuxComposerCore({
               onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
               onEdit={editRuntimeReceipt}
               onDismiss={dismissReceipts}
+              onDiscard={(receipt) => void discardRuntimeReceipt(receipt)}
             />
           : undefined
       }

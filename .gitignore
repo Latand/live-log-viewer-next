@@ -75,3 +75,6 @@ evidence/**/*.png
 # carry no privacy-manifest provenance and stay out of the commit. Regenerate
 # with `bun run build && bun evidence/issue-1086/drive.ts`.
 /.artifacts/
+
+# Issue #1213 lane: isolated HOME/XDG/state/TMPDIR for test runs.
+.tmp-1213/

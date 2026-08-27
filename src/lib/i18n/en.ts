@@ -2214,6 +2214,20 @@ export const en = {
   "runtime.receipt.rejected": "rejected: {reason}",
   "runtime.receipt.failed": "failed: {reason}",
   "runtime.receipt.uncertain": "uncertain — recovering",
+  /* Issue #1213 — the three delivery waits, told apart. A structured send is
+     handed to the agent only at a turn boundary, so "admitted" and "on the
+     wire" are different facts and a wait can outlive any useful spinner. */
+  "runtime.receipt.awaitingTurn": "waiting for the agent to finish its turn",
+  "runtime.receipt.awaitingTurnFor": "waiting for the agent to finish its turn · {waited}",
+  "runtime.receipt.awaitingTurnPos": "waiting for the agent to finish its turn · #{position} · {waited}",
+  "runtime.receipt.awaitingHost": "waiting for the agent’s window to come back",
+  "runtime.receipt.awaitingHostFor": "waiting for the agent’s window to come back · {waited}",
+  "runtime.receipt.unconfirmed": "not delivered — no confirmation after {waited}",
+  "runtime.receipt.unconfirmedWhy": "The agent stayed inside a turn, so this message was never handed over. Nothing else will retry it — send it again or discard it.",
+  "runtime.receipt.discard": "Discard this message",
+  "runtime.receipt.waitedSec": "{n}s",
+  "runtime.receipt.waitedMin": "{n} min",
+  "runtime.receipt.waitedHour": "{n} h",
   "runtime.receipt.retry": "Retry",
   "runtime.receipt.edit": "Edit & resend",
   "runtime.receipt.dismiss": "Dismiss",

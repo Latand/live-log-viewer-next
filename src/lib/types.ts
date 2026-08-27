@@ -322,6 +322,10 @@ export interface FileEntry {
   /** Live per-session migration annotation while an intent drains. Absent for
       every session not currently migrating. */
   migration?: ConversationMigration;
+  /** The operator's oldest message this conversation has not handed over yet
+      (issue #1213). Present only while an unsettled held-delivery reservation
+      exists, so a conversation with nothing owed carries no field at all. */
+  stuckDelivery?: StuckDelivery;
   /** Durable launch projection shown before its transcript enters the scan. */
   spawn?: StructuredSpawnCardState;
   /** Transient launch/delivery facts of the launch that CREATED this live
@@ -329,6 +333,24 @@ export interface FileEntry {
       once its transcript exists — it folds into this conversation's own window
       as compact status chips, and drops off once it stops being news. */
   launch?: StructuredSpawnCardState;
+}
+
+/**
+ * An operator message this conversation has admitted but not delivered
+ * (issue #1213).
+ *
+ * A structured send only crosses at a turn boundary, so a message can wait
+ * minutes behind a long turn — and, when nothing ever hands it over, forever.
+ * The annotation is what lets the attention queue say the operator is blocked
+ * on it instead of leaving them to watch a spinner.
+ */
+export interface StuckDelivery {
+  /** ISO moment the message was admitted — how long it has waited. */
+  since: string;
+  /** Delivery attempts spent on it so far. */
+  attempts: number;
+  /** The reservation's own state, verbatim from the registry. */
+  state: "held" | "assigned" | "delivered" | "failed" | "delivery-uncertain";
 }
 
 /** Per-session migration annotation carried on a {@link FileEntry} while an

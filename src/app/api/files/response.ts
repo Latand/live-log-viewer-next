@@ -48,7 +48,7 @@ import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryFallbacks } from "@/lib/scanner/projectDirectories";
-import type { FilesResponse, ProjectCatalogEntry } from "@/lib/types";
+import type { FilesResponse, ProjectCatalogEntry, StuckDelivery } from "@/lib/types";
 
 interface FilesRouteDependencies {
   listFilesWithProjectCatalog: (
@@ -394,6 +394,20 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     }
     return round;
   };
+  /* Oldest unsettled operator message per conversation (issue #1213), indexed
+     once: the attention queue needs to know a message is owed, and until this
+     projection existed nothing outside a migration ever said so. */
+  const owedDeliveries = new Map<string, StuckDelivery>();
+  for (const delivery of Object.values(registrySnapshot.heldDeliveries)) {
+    if (delivery.state === "delivered" || delivery.state === "failed") continue;
+    const current = owedDeliveries.get(delivery.conversationId);
+    if (current && current.since <= delivery.createdAt) continue;
+    owedDeliveries.set(delivery.conversationId, {
+      since: delivery.createdAt,
+      attempts: delivery.attempts,
+      state: delivery.state,
+    });
+  }
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
     if (file.spawn) continue;
@@ -552,6 +566,12 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
           file.parentRemoved = { conversationId: canonicalParentId, path: parentPath };
         }
       }
+    }
+    /* Only the live generation carries it: a superseded round can no longer
+       take delivery of anything, and a retired card must not raise an alarm. */
+    if (latest?.path === file.path && !conversation.supersededBy) {
+      const owed = owedDeliveries.get(conversation.id);
+      if (owed) file.stuckDelivery = owed;
     }
     if (conversation.migration && conversation.migration.phase !== "committed") {
       const intent = registrySnapshot.migrationIntents[conversation.migration.intentId];

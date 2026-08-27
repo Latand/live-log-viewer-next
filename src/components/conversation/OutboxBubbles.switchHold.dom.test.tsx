@@ -87,6 +87,9 @@ test("with no switch running the bubble reads exactly as before", async () => {
     <OutboxBubblesView
       entries={[entry({ state: "delivering" })]}
       t={translator("en")}
+      /* #1213: the wording is clock-driven now. Read at the submission instant,
+         an attempt on the wire keeps its historical "Delivering". */
+      nowMs={1_770_000_000_000}
       onCancel={() => {}}
       onRetry={() => {}}
     />,

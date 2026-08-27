@@ -1,0 +1,234 @@
+/**
+ * Issue #1213 — the composer says which of the three waits this is.
+ *
+ * The operator saw one spinner for a delivery that took two seconds, one that
+ * took twenty-one minutes and one that never arrived. These tests pin all three
+ * renderings and the exit the uncertain one now carries.
+ *
+ * Self-contained: the receipt stack is rendered directly, so nothing here mocks
+ * a module, touches the runtime bus, or reads any state directory.
+ */
+import { expect, test } from "bun:test";
+import { act } from "react";
+import { Window } from "happy-dom";
+import { createRoot, type Root } from "react-dom/client";
+
+import { installActEnv } from "@/test-helpers/actEnv";
+import { translate } from "@/lib/i18n";
+
+import type { RuntimeReceipt } from "./runtimeModel";
+
+const dom = new Window();
+installActEnv();
+Object.assign(globalThis, {
+  window: dom,
+  document: dom.document,
+  navigator: dom.navigator,
+  Node: dom.Node,
+  HTMLElement: dom.HTMLElement,
+  HTMLButtonElement: dom.HTMLButtonElement,
+  Event: dom.Event,
+  CustomEvent: dom.CustomEvent,
+  MouseEvent: dom.MouseEvent,
+  localStorage: dom.localStorage,
+  sessionStorage: dom.sessionStorage,
+});
+
+const { RuntimeComposerReceipts, runtimeRetryRequestInit } = await import("@/components/TmuxComposer");
+const { DELIVERY_UNCERTAIN_MS } = await import("./deliveryWait");
+
+const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
+
+const SUBMITTED_AT = "2026-08-27T10:00:00.000Z";
+const at = (offsetMs: number) => Date.parse(SUBMITTED_AT) + offsetMs;
+
+function receipt(overrides: Partial<RuntimeReceipt> = {}): RuntimeReceipt {
+  return {
+    operationId: "op-1213",
+    idempotencyKey: "msg-1213",
+    conversationId: "conversation_1213",
+    kind: "send",
+    status: "queued",
+    text: "status of the merge queue",
+    at: SUBMITTED_AT,
+    revision: 1,
+    ...overrides,
+  };
+}
+
+interface Mounted {
+  host: HTMLElement;
+  root: Root;
+  status: () => string;
+  cleanup: () => void;
+}
+
+function mount(node: React.ReactElement): Mounted {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  act(() => { root.render(node); });
+  return {
+    host,
+    root,
+    status: () => host.querySelector("[data-runtime-receipt-status]")?.textContent ?? "",
+    cleanup: () => {
+      act(() => { root.unmount(); });
+      host.remove();
+    },
+  };
+}
+
+function open(host: HTMLElement): HTMLElement {
+  const details = host.querySelector("details[data-runtime-receipt-stack]") as HTMLDetailsElement;
+  act(() => { details.open = true; details.dispatchEvent(new dom.Event("toggle") as unknown as Event); });
+  return host.querySelector("[data-runtime-receipt-details]") as HTMLElement;
+}
+
+const noop = () => {};
+
+test("#1213 an attempt on the wire reads as transmitting and keeps its live pulse", () => {
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ status: "delivering" })]}
+      nowMs={at(4_000)}
+      onRetry={noop}
+      onEdit={noop}
+    />,
+  );
+  const details = open(view.host);
+  const chip = details.querySelector("[data-receipt-status]")!;
+  expect(chip.getAttribute("data-receipt-status")).toBe("delivering");
+  expect(chip.textContent).toContain(t("runtime.receipt.delivering"));
+  expect(details.querySelector("[data-receipt-discard]")).toBeNull();
+  view.cleanup();
+});
+
+test("#1213 an admitted message waiting for a turn boundary says so, with the elapsed wait", () => {
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ status: "queued" })]}
+      nowMs={at(4 * 60_000)}
+      onRetry={noop}
+      onEdit={noop}
+    />,
+  );
+  const details = open(view.host);
+  const chip = details.querySelector("[data-receipt-status]")!;
+  expect(chip.getAttribute("data-receipt-wait")).toBe("awaiting-turn");
+  expect(chip.textContent).toContain(t("runtime.receipt.awaitingTurn"));
+  expect(chip.textContent).toContain(t("runtime.receipt.waitedMin", { n: 4 }));
+  /* The old rendering claimed transmission was under way. It is not: the
+     message is journaled and parked until the agent's turn ends. */
+  expect(chip.textContent).not.toContain(t("runtime.receipt.delivering"));
+  expect(view.status()).toContain(t("runtime.receipt.awaitingTurn"));
+  view.cleanup();
+});
+
+test("#1213 a delivery unconfirmed past the bound is terminal, explains itself, and offers an exit", () => {
+  const retried: string[] = [];
+  const discarded: string[] = [];
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ status: "queued" })]}
+      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      onRetry={(item) => retried.push(item.operationId)}
+      onEdit={noop}
+      onDiscard={(item) => discarded.push(item.operationId)}
+    />,
+  );
+  const details = open(view.host);
+  const chip = details.querySelector("[data-receipt-status]")!;
+
+  expect(chip.getAttribute("data-receipt-wait")).toBe("uncertain");
+  /* Says it was not delivered, and how long it waited. */
+  expect(chip.textContent).toContain(t("runtime.receipt.unconfirmed", {
+    waited: t("runtime.receipt.waitedMin", { n: 21 }),
+  }));
+  /* Says why. */
+  expect(details.textContent).toContain(t("runtime.receipt.unconfirmedWhy"));
+  /* Nothing on this row implies the message is still moving. */
+  expect(details.querySelector(".animate-pulse")).toBeNull();
+  expect(details.querySelector(".animate-spin")).toBeNull();
+
+  const retry = details.querySelector("[data-receipt-uncertain-retry]") as HTMLButtonElement;
+  const discard = details.querySelector("[data-receipt-discard]") as HTMLButtonElement;
+  expect(retry.textContent).toBe(t("runtime.receipt.retry"));
+  expect(discard.getAttribute("aria-label")).toBe(t("runtime.receipt.discard"));
+  act(() => { retry.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event); });
+  act(() => { discard.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event); });
+  expect(retried).toEqual(["op-1213"]);
+  expect(discarded).toEqual(["op-1213"]);
+  view.cleanup();
+});
+
+test("#1213 a delivery that lands late supersedes its own uncertain rendering", () => {
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ status: "delivered", revision: 2 })]}
+      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      onRetry={noop}
+      onEdit={noop}
+      onDiscard={noop}
+    />,
+  );
+  /* A resolved delivery renders no chrome at all — the feed bubble is the
+     receipt. The 21-minute success must not leave an "unconfirmed" row behind. */
+  expect(view.host.querySelector("[data-runtime-receipt-stack]")).toBeNull();
+  view.cleanup();
+});
+
+test("#1213 a genuinely failed delivery keeps its existing failure rendering and retry", () => {
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ status: "failed", reason: "dead-host" })]}
+      nowMs={at(30_000)}
+      onRetry={noop}
+      onEdit={noop}
+      onDiscard={noop}
+    />,
+  );
+  const details = open(view.host);
+  const chip = details.querySelector("[data-receipt-status]")!;
+  expect(chip.getAttribute("data-receipt-status")).toBe("failed");
+  expect(chip.getAttribute("data-receipt-wait")).toBeNull();
+  expect(details.querySelector("[data-receipt-uncertain-retry]")).toBeNull();
+  view.cleanup();
+});
+
+test("#1213 retrying an unconfirmed delivery asks the server to abandon it first", () => {
+  /* The linchpin of "a retry cannot duplicate an already-delivered message":
+     the parked attempt is terminalized — and its durable effect retired — in
+     the same server step that mints the replacement. */
+  const unconfirmed = runtimeRetryRequestInit(receipt({ status: "queued" }));
+  expect(unconfirmed.method).toBe("POST");
+  expect(JSON.parse(String(unconfirmed.body))).toEqual({ abandonUnconfirmed: true });
+
+  /* A terminal failure has nothing left to abandon and retries as it always did. */
+  const failed = runtimeRetryRequestInit(receipt({ status: "failed", reason: "dead-host" }));
+  expect(failed.body).toBeUndefined();
+});
+
+test("#1213 a delivery stranded by a dead host says the window is gone, not that a turn is running", () => {
+  /* The deployment-rollback population: every structured host is terminated at
+     once and each in-flight send is left `queued` with a `dead-host` reason. */
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ status: "queued", reason: "dead-host" })]}
+      nowMs={at(3 * 60_000)}
+      onRetry={noop}
+      onEdit={noop}
+      onDiscard={noop}
+    />,
+  );
+  const details = open(view.host);
+  const chip = details.querySelector("[data-receipt-status]")!;
+  expect(chip.getAttribute("data-receipt-wait")).toBe("awaiting-host");
+  expect(chip.textContent).toContain(t("runtime.receipt.awaitingHost"));
+  expect(chip.textContent).not.toContain(t("runtime.receipt.awaitingTurn"));
+  /* And the reason itself, in human words, beside it. */
+  expect(details.querySelector("[data-receipt-host-gone]")?.textContent)
+    .toBe(t("receipt.human.deadHost"));
+  expect(details.querySelector(".animate-pulse")).toBeNull();
+  view.cleanup();
+});

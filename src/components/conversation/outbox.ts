@@ -83,6 +83,12 @@ export interface OutboxEntry {
       already scoped to the pane. Legacy launch rows with a missing/string owner
       fail closed on production render until the server projection upgrades them. */
   owner?: OutboxOwner;
+  /** The server admitted this submission and journaled it, but the agent is
+      inside a turn so it has not been handed over (issue #1213). A structured
+      send only crosses at a turn boundary, so this is a genuinely different
+      fact from "on the wire" — the bubble says which wait it is in. Cleared
+      whenever a receipt proves the entry moved. */
+  awaitingTurn?: true;
   /** The server admitted this submission but HELD it (the account-switch
       delivery fence) instead of delivering: the entry is parked `delivering`
       with nothing on the wire. Its release is level-triggered — see
@@ -131,6 +137,15 @@ function reconciledLaunchState(
  * message is in the turn/transcript settles the bubble to `delivered`;
  * `rejected`/`failed` settle it to `failed`.
  */
+/**
+ * Whether a receipt status means "admitted and parked at a turn boundary"
+ * rather than "on the wire" (issue #1213). Both map to the same
+ * {@link OutboxState}; only the bubble's wording differs.
+ */
+export function outboxAwaitsTurnBoundary(status: ReceiptStatus): true | undefined {
+  return status === "queued" || status === "uncertain" ? true : undefined;
+}
+
 export function outboxStateForReceiptStatus(status: ReceiptStatus): OutboxState {
   switch (status) {
     case "queued":

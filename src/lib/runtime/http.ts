@@ -11,7 +11,7 @@ import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorAct
 
 import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { parseRuntimeCommand } from "./commands";
-import { runtimePresentationReceipt, type RuntimeOperationKind } from "./contracts";
+import { runtimePresentationReceipt, type RuntimeOperationKind, type RuntimeOperationReceipt, type RuntimeReceiptStatus } from "./contracts";
 import { runtimeEventsEnabled, structuredHostsEnabled } from "./flags";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
@@ -67,6 +67,114 @@ const DEFAULT_RETRY_DEPENDENCIES: RuntimeRetryHttpDependencies = {
 
 function terminalRetryIdempotencyKey(operationId: string): string {
   return `retry_${createHash("sha256").update(operationId).digest("hex")}`;
+}
+
+/**
+ * The reason stamped on a delivery the operator gave up on (issue #1213).
+ *
+ * A structured send is handed over only at a turn boundary, so an admitted
+ * message can sit `queued` — with a `delivery-uncertain` reservation behind it
+ * — for as long as the host stays inside a turn. Nothing terminalizes that
+ * while the conversation is live: the reaper's stale-delivery convergence skips
+ * live conversations and the controller only settles a reservation whose
+ * receipt already went terminal. This reason is the operator taking ownership.
+ */
+export const DELIVERY_UNCONFIRMED_REASON = "delivery-unconfirmed";
+
+/** Statuses the journal will not transition out of. Mirrors the client model's
+    `receiptIsTerminal`; kept here so the server path carries no UI import. */
+const TERMINAL_RECEIPT_STATUSES: ReadonlySet<RuntimeReceiptStatus> = new Set([
+  "delivered", "applied", "answered", "rejected", "failed", "interrupted",
+]);
+
+function receiptIsTerminal(status: RuntimeReceiptStatus): boolean {
+  return TERMINAL_RECEIPT_STATUSES.has(status);
+}
+
+/**
+ * Terminalizes an unconfirmed send/steer so it can never be handed over later.
+ *
+ * `transitionOperation(…, "failed")` marks the operation's outbox row completed
+ * in the SAME journal transaction that writes the failed receipt, so the
+ * delivery queue can no longer drain the effect — which is exactly what makes a
+ * following retry unable to duplicate the message. The journal refuses the
+ * transition once the operation has settled, so a delivery that landed while
+ * the operator was reading the screen wins the race: this returns the settled
+ * receipt untouched and the caller must not retry.
+ */
+async function abandonUnconfirmedOperation(
+  client: RuntimeHostClient,
+  operationId: string,
+  registry: (() => AgentRegistry) | undefined,
+): Promise<{ receipt: RuntimeOperationReceipt; abandoned: boolean }> {
+  let result;
+  try {
+    result = await client.transitionOperation(operationId, "failed", { reason: DELIVERY_UNCONFIRMED_REASON });
+  } catch (error) {
+    const settled = await client.operationStatus(operationId, { currentRetryLeaf: true });
+    if (!settled) throw error;
+    return { receipt: settled.receipt, abandoned: false };
+  }
+  const conversationId = result.receipt.conversationId;
+  if (conversationId.startsWith("conversation_")) {
+    /* The reservation the composer is rendering settles with the receipt. The
+       delivery controller's own transition wrapper is not in this path, so the
+       registry write belongs here. */
+    try {
+      (registry ?? agentRegistry)().recordDeliveryOutcomeForOperation(
+        conversationId as `conversation_${string}`,
+        result.receipt.presentationOperationId ?? operationId,
+        "failed",
+        DELIVERY_UNCONFIRMED_REASON,
+      );
+    } catch (error) {
+      console.error("[runtime abandon] held delivery did not settle with its receipt", { operationId, error });
+    }
+  }
+  return { receipt: result.receipt, abandoned: true };
+}
+
+/**
+ * Discard: the operator's exit from a delivery that never arrived (#1213).
+ *
+ * Idempotent by construction — an operation that already settled is reported
+ * as it stands and nothing is written, so pressing Discard on a message that
+ * landed a moment ago cannot unsay the delivery.
+ */
+export async function handleRuntimeAbandon(
+  request: NextRequest,
+  operationId: string,
+  dependencies: RuntimeRetryHttpDependencies = DEFAULT_RETRY_DEPENDENCIES,
+): Promise<NextResponse> {
+  const rejection = rejectCrossOrigin(request);
+  if (rejection) return rejection;
+  if (!dependencies.enabled()) return NextResponse.json({ error: "structured hosts are disabled" }, { status: 503 });
+  if (!operationId || operationId.includes(":") || /\s/.test(operationId)) {
+    return NextResponse.json({ error: "operationId is invalid" }, { status: 400 });
+  }
+  const client = dependencies.client();
+  if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
+  try {
+    const previous = await client.operationStatus(operationId, { currentRetryLeaf: true });
+    if (!previous) return NextResponse.json({ error: "operation not found" }, { status: 404 });
+    if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
+      return NextResponse.json({ error: "runtime operation does not support discard" }, { status: 409 });
+    }
+    if (receiptIsTerminal(previous.receipt.status)) {
+      return NextResponse.json({
+        operationId: previous.operationId,
+        receipt: runtimePresentationReceipt(previous.receipt),
+      });
+    }
+    const { receipt } = await abandonUnconfirmedOperation(client, previous.operationId, dependencies.registry);
+    return NextResponse.json({
+      operationId: previous.operationId,
+      receipt: runtimePresentationReceipt(receipt),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "runtime operation discard failed";
+    return NextResponse.json({ error: message }, { status: /unknown/.test(message) ? 404 : 503 });
+  }
 }
 
 export async function handleRuntimeCommand(
@@ -205,15 +313,16 @@ export async function handleRuntimeRetry(
   if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
   try {
     let nextIdempotencyKey: string | undefined;
+    let abandonUnconfirmed = false;
     const rawBody = await request.text();
     if (rawBody.trim()) {
-      let value: { idempotencyKey?: unknown };
+      let value: { idempotencyKey?: unknown; abandonUnconfirmed?: unknown };
       try {
         const parsed = JSON.parse(rawBody) as unknown;
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
           return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
         }
-        value = parsed as { idempotencyKey?: unknown };
+        value = parsed as { idempotencyKey?: unknown; abandonUnconfirmed?: unknown };
       } catch {
         return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
       }
@@ -226,11 +335,40 @@ export async function handleRuntimeRetry(
         }
         nextIdempotencyKey = value.idempotencyKey;
       }
+      if (value.abandonUnconfirmed !== undefined) {
+        if (typeof value.abandonUnconfirmed !== "boolean") {
+          return NextResponse.json({ error: "abandonUnconfirmed is invalid" }, { status: 400 });
+        }
+        abandonUnconfirmed = value.abandonUnconfirmed;
+      }
     }
-    const previous = await client.operationStatus(operationId, { currentRetryLeaf: true });
+    let previous = await client.operationStatus(operationId, { currentRetryLeaf: true });
     if (!previous) return NextResponse.json({ error: "operation not found" }, { status: 404 });
     if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
       return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
+    }
+    /* The operator's exit from an unconfirmed delivery (issue #1213): abandon
+       the parked attempt BEFORE minting a replacement, so the durable effect is
+       retired first and only one copy of the message stays deliverable. A
+       delivery that landed in the meantime refuses the transition and is
+       reported as delivered — the retry never happens. */
+    if (abandonUnconfirmed && previous.receipt.status !== "failed" && previous.receipt.status !== "rejected") {
+      /* A message that landed while the operator was reading the screen is not
+         an error to raise at them — it is the answer to what they asked. */
+      if (receiptIsTerminal(previous.receipt.status)) {
+        return NextResponse.json({
+          operationId: previous.operationId,
+          receipt: runtimePresentationReceipt(previous.receipt),
+        });
+      }
+      const outcome = await abandonUnconfirmedOperation(client, previous.operationId, dependencies.registry);
+      if (!outcome.abandoned) {
+        return NextResponse.json({
+          operationId: previous.operationId,
+          receipt: runtimePresentationReceipt(outcome.receipt),
+        });
+      }
+      previous = { operationId: previous.operationId, receipt: outcome.receipt, replayed: false };
     }
     if (previous.receipt.status !== "failed" && previous.receipt.status !== "rejected") {
       if (previous.operationId !== operationId) {
