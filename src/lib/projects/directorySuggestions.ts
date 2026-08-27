@@ -15,7 +15,8 @@ import path from "node:path";
  * already live (see `suggestionRoots`). Everything here is expressed against
  * that set — a browse lists one level below each root, a typed path completes
  * inside the roots one directory read at a time, and nothing outside them is
- * ever read or returned. There is no recursive walk anywhere in this module.
+ * ever read or returned, symlinks followed (see `SuggestionBound`). There is
+ * no recursive walk anywhere in this module.
  */
 
 /** Most suggestions one answer carries; the picker is a list to read, not a listing. */
@@ -59,13 +60,60 @@ export function withinSuggestionRoots(target: string, roots: readonly string[]):
   );
 }
 
+/**
+ * The bound as both halves of the check need it: the roots **as written**,
+ * which a query is measured against before anything is read, and the roots
+ * **as the filesystem sees them**, which every directory that will be read or
+ * offered is measured against once its symlinks are followed.
+ *
+ * The written comparison alone is not enough. A link inside an anchor
+ * (`<anchor>/linked-projects` → somewhere else entirely) is spelled like a
+ * path inside the bound while it lands outside it, so completion would offer
+ * directories that `createManualProject` — which resolves the same link before
+ * it accepts a root — then refuses as OUTSIDE_ROOTS: a refusal aimed at a row
+ * the operator picked out of the list this module produced. Both sides resolve,
+ * so what is suggested is what creation's bound takes.
+ */
+interface SuggestionBound {
+  written: string[];
+  resolved: string[];
+}
+
+function realDirectory(directory: string): string | null {
+  try {
+    return fs.realpathSync.native(directory);
+  } catch {
+    return null;
+  }
+}
+
+function boundedRoots(roots: readonly string[]): SuggestionBound {
+  const written = normalizeSuggestionRoots(roots).slice(0, SUGGESTION_ROOT_SCAN_LIMIT);
+  /* A root whose realpath fails keeps its written spelling: dropping it would
+     narrow the bound away from a directory the operator can still read, while
+     anything under it that resolves elsewhere is refused all the same. */
+  return { written, resolved: normalizeSuggestionRoots(written.map((root) => realDirectory(root) ?? root)) };
+}
+
+/** Whether a directory may be read at all: inside the bound as written, so a
+    typed `..` never reaches a stat, and still inside it once resolved. */
+function readableDirectory(directory: string, bound: SuggestionBound): boolean {
+  if (!withinSuggestionRoots(directory, bound.written)) return false;
+  const real = realDirectory(directory);
+  return real !== null && withinSuggestionRoots(real, bound.resolved);
+}
+
 /** A symlinked project directory is a directory to the operator, so it is one
-    here too; the stat only runs for the rare link entry. */
-function entryIsDirectory(directory: string, entry: fs.Dirent): boolean {
+    here too — as long as it lands inside the bound. A real subdirectory of a
+    directory already proven inside cannot leave it, so the resolve runs for
+    the rare link entry alone. */
+function entryIsOfferableDirectory(target: string, entry: fs.Dirent, bound: SuggestionBound): boolean {
   if (entry.isDirectory()) return true;
   if (!entry.isSymbolicLink()) return false;
+  const real = realDirectory(target);
+  if (real === null || !withinSuggestionRoots(real, bound.resolved)) return false;
   try {
-    return fs.statSync(path.join(directory, entry.name)).isDirectory();
+    return fs.statSync(real).isDirectory();
   } catch {
     return false;
   }
@@ -74,7 +122,8 @@ function entryIsDirectory(directory: string, entry: fs.Dirent): boolean {
 /** One directory read: the child directories of `directory`, alphabetical.
     Dot directories answer only a dot prefix — a browse is about projects, and
     caches are what a home directory otherwise fills the list with. */
-function childDirectories(directory: string, prefix = ""): string[] {
+function childDirectories(directory: string, bound: SuggestionBound, prefix = ""): string[] {
+  if (!readableDirectory(directory, bound)) return [];
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(directory, { withFileTypes: true });
@@ -88,7 +137,7 @@ function childDirectories(directory: string, prefix = ""): string[] {
     if (names.length >= SUGGESTION_ENTRY_SCAN_LIMIT) break;
     if (entry.name.startsWith(".") && !wantsHidden) continue;
     if (lowered && !entry.name.toLowerCase().startsWith(lowered)) continue;
-    if (!entryIsDirectory(directory, entry)) continue;
+    if (!entryIsOfferableDirectory(path.join(directory, entry.name), entry, bound)) continue;
     names.push(entry.name);
   }
   names.sort((a, b) => a.localeCompare(b));
@@ -98,11 +147,11 @@ function childDirectories(directory: string, prefix = ""): string[] {
 /** What the anchors offer without a path to complete: one level below each
     root. `withRoots` adds the roots themselves, which a typed prefix reaching
     down towards them is asking about. */
-function anchoredCandidates(roots: readonly string[], withRoots: boolean): string[] {
+function anchoredCandidates(bound: SuggestionBound, withRoots: boolean): string[] {
   const candidates: string[] = [];
-  for (const root of roots) {
+  for (const root of bound.written) {
     if (withRoots) candidates.push(root);
-    candidates.push(...childDirectories(root));
+    candidates.push(...childDirectories(root, bound));
   }
   return candidates;
 }
@@ -129,7 +178,7 @@ function matchesTokens(directory: string, query: string): boolean {
  * else is a filter word, and filters the anchors' children.
  */
 export function suggestDirectories(query: string, roots: readonly string[], limit = SUGGESTION_LIMIT): string[] {
-  const bounded = normalizeSuggestionRoots(roots).slice(0, SUGGESTION_ROOT_SCAN_LIMIT);
+  const bound = boundedRoots(roots);
   const trimmed = query.trim();
   if (path.isAbsolute(trimmed)) {
     /* Split on the raw query, not a normalized one: a trailing "." is a prefix
@@ -137,14 +186,18 @@ export function suggestDirectories(query: string, roots: readonly string[], limi
     const cut = trimmed.lastIndexOf("/");
     const parent = normalizeDirectory(trimmed.slice(0, cut + 1));
     const prefix = trimmed.slice(cut + 1);
-    if (parent && withinSuggestionRoots(parent, bounded)) {
-      return childDirectories(parent, prefix).slice(0, limit);
+    /* The branch is decided on the written bound: a query aimed above the
+       roots is not a directory to read but a prefix reaching down towards
+       them. Whether the named directory may actually be read — the resolved
+       half of the bound — is `childDirectories`' to answer, in one place. */
+    if (parent && withinSuggestionRoots(parent, bound.written)) {
+      return childDirectories(parent, bound, prefix).slice(0, limit);
     }
     const lowered = trimmed.toLowerCase();
-    return anchoredCandidates(bounded, true)
+    return anchoredCandidates(bound, true)
       .filter((directory) => directory.toLowerCase().startsWith(lowered))
       .slice(0, limit);
   }
-  const candidates = anchoredCandidates(bounded, false);
+  const candidates = anchoredCandidates(bound, false);
   return (trimmed ? candidates.filter((directory) => matchesTokens(directory, trimmed)) : candidates).slice(0, limit);
 }

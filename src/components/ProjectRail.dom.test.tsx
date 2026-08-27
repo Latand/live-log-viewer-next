@@ -329,6 +329,26 @@ test("create-project: typing a path stays possible, and points the suggestions a
   expect(suggestionQueries).toEqual(["", "/data/elsewhere/"]);
 });
 
+test("create-project: a typed path that a suggestion begins with is not swapped for it", async () => {
+  /* The directory create-project is for does not exist yet, so it is routinely
+     a prefix of one that does (`api` beside `api-old`). Committing the
+     suggestion instead would name the project from the wrong basename and
+     register it where nobody typed (issue #1223). */
+  suggestedDirs = ["/data/projects/api-old"];
+  const creations: Array<[string, string]> = [];
+  const ui = await openCreateForm(async (name, root) => {
+    creations.push([name, root]);
+    return { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
+  });
+  ui.openPicker();
+  ui.typePath("/data/projects/api");
+  expect(ui.chosenRoot()).toBe("/data/projects/api");
+  expect(ui.nameInput().value).toBe("api");
+  ui.submit();
+  await settle();
+  expect(creations).toEqual([["api", "/data/projects/api"]]);
+});
+
 /* The three outcomes, told apart. First: a path that was never made absolute
    says exactly that and answers with the completion. */
 async function refuseRelativeRoot(expectedMessage: string) {

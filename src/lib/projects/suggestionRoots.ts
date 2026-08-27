@@ -20,6 +20,15 @@ export function anchorForProjectRoot(root: string): string {
   return parent === path.parse(root).root ? root : parent;
 }
 
+/* $HOME first, the same way `/api/artifact` reads it: it is what the isolated
+   demo/evidence runtimes (and this module's tests) repoint, and Bun's
+   `os.homedir()` ignores the env override. Taking `os.homedir()` directly here
+   would mean a viewer running under an isolated home still suggests — and
+   readdirs — the machine's real one. */
+function homeRoot(): string {
+  return path.resolve(process.env.HOME?.trim() || os.homedir());
+}
+
 /**
  * The directories create-project may suggest from and create into (#1223).
  *
@@ -34,6 +43,6 @@ export function suggestionRoots(): string[] {
   const candidates: string[] = [];
   for (const root of knownProjectRoots(ANCHOR_SCAN_LIMIT)) candidates.push(anchorForProjectRoot(root));
   for (const entry of projectCurationSnapshot().manualProjects) candidates.push(anchorForProjectRoot(entry.root));
-  candidates.push(os.homedir());
+  candidates.push(homeRoot());
   return normalizeSuggestionRoots(candidates);
 }

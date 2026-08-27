@@ -82,6 +82,28 @@ test("nothing outside the roots is ever suggested, however the query is aimed", 
   expect(suggestDirectories("private", ROOTS)).toEqual([]);
 });
 
+test("a link that leads out of the roots is not a way out of them", () => {
+  /* Containment on the written path alone would offer everything behind this
+     link — a path spelled inside an anchor, landing outside it — and creation,
+     which resolves the link before it accepts a root, would then refuse the
+     very row the list handed over (issue #1223). */
+  const escaping = path.join(PROJECTS, "escaping-link");
+  const staying = path.join(PROJECTS, "staying-link");
+  fs.symlinkSync(OUTSIDE, escaping);
+  fs.symlinkSync(path.join(WORK, "gamma-service"), staying);
+  try {
+    expect(suggestDirectories("", ROOTS)).not.toContain(escaping);
+    expect(suggestDirectories(escaping + "/", ROOTS)).toEqual([]);
+    expect(suggestDirectories(path.join(escaping, "private-notes"), ROOTS)).toEqual([]);
+    /* A link that stays inside the bound is still a directory to the operator,
+       so it is still offered. */
+    expect(suggestDirectories("", ROOTS)).toContain(staying);
+  } finally {
+    fs.rmSync(escaping, { force: true });
+    fs.rmSync(staying, { force: true });
+  }
+});
+
 test("hidden directories and plain files stay out of the browse list, and a dot prefix asks for them", () => {
   expect(suggestDirectories("", ROOTS)).not.toContain(path.join(PROJECTS, ".hidden-cache"));
   expect(suggestDirectories("", ROOTS)).not.toContain(path.join(PROJECTS, "a-file.txt"));

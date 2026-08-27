@@ -83,14 +83,24 @@ export function directoryChoices(value: string, dirs: readonly string[]): string
   return out;
 }
 
-/** Rows the open popup lists for a query: the matching known directories, plus
-    the typed path itself when it is not one of them (free-text entry). */
+/** Rows the open popup lists for a query: the typed path itself when it is not
+    one of the known directories (free-text entry), then the known directories
+    the query matches. */
 export function directoryRows(known: readonly string[], query: string, pristine: boolean): PickerRow[] {
   const matched = pristine ? [...known] : known.filter((dir) => matchesDirectoryQuery(dir, query));
   const rows: PickerRow[] = matched.map((dir) => ({ key: "known:" + dir, value: dir, kind: "known" }));
   const typed = query.trim();
   if (!pristine && typed && looksLikeDirectoryPath(typed) && !known.includes(typed)) {
-    rows.push({ key: "typed", value: typed, kind: "typed" });
+    /* The typed path leads (issue #1223). Enter commits the highlighted row and
+       the highlight starts at the top, so listing it last handed the operator a
+       known lookalike instead of what they spelled: every path is a substring
+       of its own longer siblings, so `/repos/api` committed `/repos/api-old`
+       and create-project registered a project — named from that basename — at a
+       directory nobody typed. A path being spelled out is an answer, not a
+       filter; the directory create-project is after is precisely the one no
+       known-directories list carries. Bare filter words never reach here, so
+       they still rank as they did. */
+    rows.unshift({ key: "typed", value: typed, kind: "typed" });
   }
   return rows;
 }

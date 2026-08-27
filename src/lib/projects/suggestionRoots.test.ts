@@ -11,12 +11,14 @@ import { anchorForProjectRoot, suggestionRoots } from "./suggestionRoots";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-suggestion-roots-"));
 const STATE = path.join(SANDBOX, "state");
-/* `os.homedir()` is resolved once per process, so the fallback root is read
-   from the runtime rather than pointed somewhere by this test. */
-const HOME = os.homedir();
+/* The fallback root is $HOME, so it is pointed at the sandbox: the operator's
+   own home is neither an input to these assertions nor a path this file can
+   print. `os.homedir()` would be, and it ignores the override under Bun. */
+const HOME = path.join(SANDBOX, "home");
 const SCANNED_ANCHOR = path.join(SANDBOX, "scanned-anchor");
 const MANUAL_ANCHOR = path.join(SANDBOX, "manual-anchor");
 const ORIGINAL_STATE = process.env.LLV_STATE_DIR;
+const ORIGINAL_HOME = process.env.HOME;
 
 function initializeRepository(repository: string): void {
   fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
@@ -30,6 +32,7 @@ function initializeRepository(repository: string): void {
 
 beforeEach(() => {
   process.env.LLV_STATE_DIR = STATE;
+  process.env.HOME = HOME;
   fs.rmSync(STATE, { recursive: true, force: true });
   resetProjectCurationForTests();
   resetProjectDirectoryCacheForTests();
@@ -38,6 +41,8 @@ beforeEach(() => {
 afterAll(() => {
   if (ORIGINAL_STATE === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = ORIGINAL_STATE;
+  if (ORIGINAL_HOME === undefined) delete process.env.HOME;
+  else process.env.HOME = ORIGINAL_HOME;
   fs.rmSync(SANDBOX, { recursive: true, force: true });
   resetProjectCurationForTests();
   resetProjectDirectoryCacheForTests();
@@ -76,5 +81,7 @@ test("the roots are the home directory and the parents of the project roots the 
 });
 
 test("with nothing known yet the home directory is still a root, so the picker is never empty", () => {
+  /* And it is the running viewer's home: a runtime under an isolated $HOME
+     suggests from that one, never from the machine's real home. */
   expect(suggestionRoots()).toEqual([HOME]);
 });

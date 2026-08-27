@@ -169,6 +169,25 @@ test("a path that is not in the list is committed exactly as typed", () => {
   expect(picks).toEqual(["/mnt/scratch/one-off checkout"]);
 });
 
+/* Issue #1223: every path is a substring of its own longer siblings, so the
+   typed row has to lead — otherwise Enter answers a spelled-out path with a
+   lookalike, and create-project registers a project where nobody named. */
+test("a typed path that is a prefix of a known one still commits what was typed", () => {
+  const picks: string[] = [];
+  render(REPO, (next) => picks.push(next));
+  click(trigger());
+  type(`${REPO}/.worktrees/fix-88`);
+  /* Both rows are offered — the known sibling is one arrow key away — but the
+     path being spelled out is the one under the highlight. */
+  expect(optionValues()).toEqual([`${REPO}/.worktrees/fix-88`, `${REPO}/.worktrees/fix-887`]);
+  expect(activeValue()).toBe(`${REPO}/.worktrees/fix-88`);
+  press(search(), "ArrowDown");
+  expect(activeValue()).toBe(`${REPO}/.worktrees/fix-887`);
+  press(search(), "ArrowUp");
+  press(search(), "Enter");
+  expect(picks).toEqual([`${REPO}/.worktrees/fix-88`]);
+});
+
 test("Tab commits the highlighted row instead of dropping what was typed", () => {
   const picks: string[] = [];
   render(REPO, (next) => picks.push(next));
