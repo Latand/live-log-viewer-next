@@ -21,7 +21,7 @@
 
 import { useSyncExternalStore } from "react";
 
-import type { ReceiptStatus } from "@/components/runtime/runtimeModel";
+import { receiptIsAdmitted, receiptIsTerminal, type ReceiptStatus } from "@/components/runtime/runtimeModel";
 
 export type OutboxState = "queued" | "delivering" | "delivered" | "failed";
 
@@ -83,6 +83,12 @@ export interface OutboxEntry {
       already scoped to the pane. Legacy launch rows with a missing/string owner
       fail closed on production render until the server projection upgrades them. */
   owner?: OutboxOwner;
+  /** The server admitted this submission and journaled it, but the agent is
+      inside a turn so it has not been handed over (issue #1213). A structured
+      send only crosses at a turn boundary, so this is a genuinely different
+      fact from "on the wire" — the bubble says which wait it is in. Cleared
+      whenever a receipt proves the entry moved. */
+  awaitingTurn?: true;
   /** The server admitted this submission but HELD it (the account-switch
       delivery fence) instead of delivering: the entry is parked `delivering`
       with nothing on the wire. Its release is level-triggered — see
@@ -131,6 +137,20 @@ function reconciledLaunchState(
  * message is in the turn/transcript settles the bubble to `delivered`;
  * `rejected`/`failed` settle it to `failed`.
  */
+/**
+ * Whether a receipt status means "admitted and parked at a turn boundary"
+ * rather than "on the wire" (issue #1213). Both map to the same
+ * {@link OutboxState}; only the bubble's wording differs.
+ *
+ * `queued` and nothing else: it is the state the delivery queue parks a send in
+ * while the host is inside a turn. `uncertain` is the opposite fact — the
+ * admission itself was never confirmed — and claiming a turn boundary for it
+ * would assert the very thing that could not be established.
+ */
+export function outboxAwaitsTurnBoundary(status: ReceiptStatus): true | undefined {
+  return status === "queued" ? true : undefined;
+}
+
 export function outboxStateForReceiptStatus(status: ReceiptStatus): OutboxState {
   switch (status) {
     case "queued":
@@ -147,6 +167,39 @@ export function outboxStateForReceiptStatus(status: ReceiptStatus): OutboxState 
       // delivered, applied, answered, steered, turn-started, interrupted
       return "delivered";
   }
+}
+
+/**
+ * The bubble patch a durable receipt implies for an entry, or `null` when it
+ * implies nothing.
+ *
+ * The state alone cannot decide this (issue #1213): `pending`, `queued`,
+ * `delivering`, `applying` and `uncertain` all project to ONE `delivering`
+ * bubble, so a send being parked at a turn boundary — and a parked send being
+ * taken off the park and put on the wire — are invisible to a state comparison,
+ * and those are precisely the two transitions whose WORDING has to change. The
+ * turn-boundary flag is therefore part of the comparison, not just the patch.
+ *
+ * A failed bubble still only advances on PROVEN admission: never on another
+ * failure, and never to `delivering` off an unproven receipt.
+ */
+export function outboxReceiptPatch(
+  entry: Pick<OutboxEntry, "state" | "awaitingTurn">,
+  status: ReceiptStatus,
+): { state: OutboxState; awaitingTurn?: true } | null {
+  /* Only a receipt that PROVES admission or settlement says anything about a
+     bubble. `pending`, `applying` and `uncertain` are the request path still
+     working, or an admission nobody confirmed: the bubble already reads
+     `delivering`, and letting them move a `failed` one would claim exactly the
+     admission that was never established. */
+  if (!receiptIsAdmitted(status) && !receiptIsTerminal(status)) return null;
+  const state = outboxStateForReceiptStatus(status);
+  const awaitingTurn = outboxAwaitsTurnBoundary(status);
+  if (state === entry.state && awaitingTurn === entry.awaitingTurn) return null;
+  /* A failed bubble is never re-churned by another failure; it only advances on
+     the proven admission or delivery above. */
+  if (entry.state === "failed" && state === "failed") return null;
+  return { state, awaitingTurn };
 }
 
 /** Bounded per conversation: the queue is working state plus recent history for

@@ -32,6 +32,8 @@ import {
   enqueueOutbox,
   markOutboxResponded,
   outboxHistory,
+  outboxAwaitsTurnBoundary,
+  outboxReceiptPatch,
   outboxStateForReceiptStatus,
   rebindOutboxEchoText,
   releaseHeldOutbox,
@@ -53,19 +55,28 @@ import {
 import { RuntimePill } from "./RuntimePill";
 import { savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
 import { type PendingImage } from "./imageAttachments";
+import {
+  DELIVERY_WAIT_TICK_MS,
+  deliveryUncertainWhy,
+  deliveryWaitFor,
+  deliveryWaitPossible,
+  deliveryWaitText,
+  type DeliveryWait,
+} from "./runtime/deliveryWait";
 import { ReceiptChip, runtimeReceiptStatusText } from "./runtime/ReceiptChip";
 import {
   deliveryAttemptGroups,
   deliveryEchoes,
   deliveryProblem,
   dismissedReceiptsKey,
+  type DeliveryAttemptGroup,
   messageReceiptForAssistantTurn,
   readDismissedReceipts,
   visibleStandaloneReceipts,
   withDismissedReceipts,
   writeDismissedReceipts,
 } from "./runtime/deliveryState";
-import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
+import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal, type HostAxis, type TurnAxis } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton } from "./VoiceConversation";
 import { commitBridgeTurn, useBridgeTurnStartDrain } from "@/hooks/useBridgeReportRelay";
@@ -248,6 +259,8 @@ export function RuntimeComposerReceipts({
   receipts,
   actionsDisabled = false,
   dismissed = NO_DISMISSED,
+  nowMs,
+  session = null,
   onRetry,
   onEdit,
   onDismiss,
@@ -257,6 +270,15 @@ export function RuntimeComposerReceipts({
   /** Operation ids the user dismissed (issue #264 rule 3): settled problems in
       this set stay hidden; a still-moving attempt always renders. */
   dismissed?: ReadonlySet<string>;
+  /** Clock the delivery waits are measured against (issue #1213). Production
+      omits it and the row ticks itself; a test pins the instant. */
+  nowMs?: number;
+  /** The conversation's own host and turn axes, when a structured session is
+      behind this composer (issue #1213). The authority for whether a parked
+      message waits on a running turn or on a window that is gone — a receipt's
+      reason cannot answer that, and guessing prints a false explanation under a
+      message that never arrived. */
+  session?: { host: HostAxis; turn: TurnAxis } | null;
   onRetry: (receipt: RuntimeReceipt) => void;
   onEdit: (receipt: RuntimeReceipt) => void;
   /** Persists a dismissal — receives every settled operation id of the row. */
@@ -265,18 +287,47 @@ export function RuntimeComposerReceipts({
   const { t } = useLocale();
   const statusId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
-  const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
-    && (receipt.status === "failed" || receipt.status === "rejected")
-    && typeof receipt.text === "string"
-    && receipt.text.length > 0
-    && receipt.text.length < 240;
   /* Visibility and grouping live in the delivery-state model (issue #264):
      resolved successes render nothing (the feed bubble is the receipt), a
      group superseded by a successful resend of the same text goes quiet, and
      dismissed settled problems stay dismissed. */
   const attemptGroups = deliveryAttemptGroups(receipts, dismissed);
   const visibleAttempts = attemptGroups.flatMap((group) => group.attempts);
+  /* A wait only becomes news by getting older, and nothing else re-renders this
+     row while a message is parked at a turn boundary. One local interval, no
+     store and no bus: the elapsed label advances and the uncertain bound is
+     crossed on its own. It runs only while some attempt is still in a wait —
+     a composer whose stack is empty or wholly settled has no label to advance,
+     and re-rendering it every 15 s buys nothing. */
+  const [tick, setTick] = useState(() => nowMs ?? Date.now());
+  const pinnedNow = nowMs !== undefined;
+  const unsettled = visibleAttempts.some((receipt) => deliveryWaitPossible(receipt.status));
+  useEffect(() => {
+    if (pinnedNow || !unsettled) return;
+    const timer = setInterval(() => setTick(Date.now()), DELIVERY_WAIT_TICK_MS);
+    return () => clearInterval(timer);
+  }, [pinnedNow, unsettled]);
+  const now = nowMs ?? tick;
+  const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
+  const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
+    && (receipt.status === "failed" || receipt.status === "rejected")
+    && typeof receipt.text === "string"
+    && receipt.text.length > 0
+    && receipt.text.length < 240;
+  /* Measured from the receipt's own IMMUTABLE admission stamp, never from
+     `at`: the queue bounces a parked send `delivering`→`queued` on every
+     auto-retry and `at` moves with it, which both under-reports the wait and
+     keeps it from ever crossing the uncertain bound. An auto-retry is a
+     transition of the same operation, so one stamp still covers the whole wait;
+     a retry the OPERATOR pressed mints a new operation and starts a new one,
+     which is what they asked for. */
+  const waitFor = (group: DeliveryAttemptGroup): DeliveryWait | null => deliveryWaitFor({
+    status: group.current.status,
+    host: session?.host ?? null,
+    turn: session?.turn ?? null,
+    admittedAt: group.current.admittedAt ?? group.current.at,
+    nowMs: now,
+  });
   const supersededStatusLabels = (attempts: RuntimeReceipt[]): string[] => {
     const counts = new Map<string, number>();
     for (const attempt of attempts.slice(1)) {
@@ -286,8 +337,20 @@ export function RuntimeComposerReceipts({
     return [...counts].map(([label, count]) => (count > 1 ? `${label} ×${count}` : label));
   };
   const standaloneReceipts = visibleStandaloneReceipts(receipts, dismissed);
-  const pendingReceipts = visibleAttempts.filter((receipt) => !receiptIsTerminal(receipt.status));
-  const problemReceipts = visibleAttempts.filter((receipt) => deliveryProblem(receipt.status));
+  /* Collapsed is the default state, and it is what the operator photographed:
+     a warning badge counting an attempt that was never coming. A row that went
+     terminally uncertain counts as a PROBLEM here, so the summary reads
+     differently for "still arriving" and for "never arrived" (issue #1213). */
+  const uncertainCurrent = attemptGroups
+    .filter((group) => waitFor(group)?.phase === "uncertain")
+    .map((group) => group.current);
+  const uncertainOperationIds = new Set(uncertainCurrent.map((receipt) => receipt.operationId));
+  const pendingReceipts = visibleAttempts.filter((receipt) =>
+    !receiptIsTerminal(receipt.status) && !uncertainOperationIds.has(receipt.operationId));
+  const problemReceipts = [
+    ...visibleAttempts.filter((receipt) => deliveryProblem(receipt.status)),
+    ...uncertainCurrent,
+  ];
   const busyRetry = pendingReceipts.some((receipt) => typeof receipt.reason === "string" && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason));
   const receiptSummaryLabel = t("runtime.receipt.summary", { count: visibleAttempts.length });
   const disclosureLabel = t(detailsOpen ? "runtime.receipt.hideDetails" : "runtime.receipt.showDetails");
@@ -362,7 +425,10 @@ export function RuntimeComposerReceipts({
                 const history = supersededStatusLabels(group.attempts);
                 const failed = receipt.status === "failed";
                 const pending = !receiptIsTerminal(receipt.status);
+                const wait = waitFor(group);
+                const uncertain = wait?.phase === "uncertain";
                 const retryingBusy = pending
+                  && !uncertain
                   && typeof receipt.reason === "string"
                   && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason);
                 return (
@@ -395,6 +461,7 @@ export function RuntimeComposerReceipts({
                       ) : null}
                       <ReceiptChip
                         receipt={receipt}
+                        wait={wait}
                         actionsDisabled={actionsDisabled}
                         onRetry={failed ? () => onRetry(receipt) : undefined}
                         onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
@@ -418,7 +485,7 @@ export function RuntimeComposerReceipts({
                           <X className="h-3 w-3" aria-hidden />
                         </button>
                       ) : null}
-                      {receipt.status === "pending" ? (
+                      {receipt.status === "pending" && !uncertain ? (
                         <span
                           className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-muted motion-reduce:animate-none"
                           aria-hidden
@@ -434,6 +501,18 @@ export function RuntimeComposerReceipts({
                         </span>
                       ) : null}
                     </div>
+                    {/* Why it is not coming, in one sentence (issue #1213).
+                        Wraps rather than truncates: this is the only place the
+                        operator learns the message was parked, and the only
+                        thing that will move it now is sending it again. */}
+                    {uncertain ? (
+                      <span
+                        className="min-w-0 max-w-full text-right text-caption text-muted"
+                        data-receipt-uncertain-why
+                      >
+                        {deliveryUncertainWhy(t, wait!)}
+                      </span>
+                    ) : null}
                     {history.length ? (
                       <span
                         className="min-w-0 max-w-full truncate text-caption text-muted"
@@ -460,7 +539,12 @@ export function RuntimeComposerReceipts({
               problems: t("runtime.receipt.statusProblems", { count: problemReceipts.length }),
             })}
             {` ${attemptGroups
-              .map((group) => [runtimeReceiptStatusText(t, group.current), ...supersededStatusLabels(group.attempts)].join(" · "))
+              .map((group) => {
+                const wait = waitFor(group);
+                const current = (wait && deliveryWaitText(t, wait, group.current.queuePosition))
+                  ?? runtimeReceiptStatusText(t, group.current);
+                return [current, ...supersededStatusLabels(group.attempts)].join(" · ");
+              })
               .join(". ")}.`}
             {busyRetry ? ` ${t("runtime.receipt.busyRetry")}` : null}
           </span>
@@ -1487,7 +1571,12 @@ export function TmuxComposerCore({
         const receipt = displayedRuntimeReceipts.find((candidate) =>
           candidate.idempotencyKey === settlement.entry.key && receiptIsAdmitted(candidate.status));
         const state = receipt ? outboxStateForReceiptStatus(receipt.status) : "delivered";
-        updateOutbox(cardId, settlement.entry.key, { state, settledAt: nowMs() });
+        updateOutbox(cardId, settlement.entry.key, {
+          state,
+          settledAt: nowMs(),
+          /* #1213: parked at a turn boundary is not "on the wire". */
+          awaitingTurn: receipt ? outboxAwaitsTurnBoundary(receipt.status) : undefined,
+        });
       } else {
         const next = draftAfterDelivery(textRef.current, settlement.text);
         if (next !== textRef.current) setText(next);
@@ -1516,12 +1605,9 @@ export function TmuxComposerCore({
         candidate.idempotencyKey === entry.id
         && (receiptIsAdmitted(candidate.status) || receiptIsTerminal(candidate.status)));
       if (!receipt) continue;
-      const next = outboxStateForReceiptStatus(receipt.status);
-      if (next === entry.state) continue;
-      /* A failed bubble only advances on PROVEN admission — never on another
-         failure, and never to "delivering" off an unproven receipt. */
-      if (entry.state === "failed" && !(next === "delivered" || (next === "delivering" && receiptIsAdmitted(receipt.status)))) continue;
-      updateOutbox(cardId, entry.id, { state: next, settledAt: nowMs() });
+      const patch = outboxReceiptPatch(entry, receipt.status);
+      if (!patch) continue;
+      updateOutbox(cardId, entry.id, { ...patch, settledAt: nowMs() });
     }
   }, [displayedRuntimeReceipts, outbox, cardId]);
 
@@ -1699,7 +1785,7 @@ export function TmuxComposerCore({
         direct (non-queued) send, which reports through the status line. The
         bubble takes the state the receipt PROVES: a bare admission stays
         `delivering`, only a delivered receipt reads `delivered` (round-1 P1#4). */
-    const settleOutbox = (state: OutboxState, error?: string, held?: boolean) => {
+    const settleOutbox = (state: OutboxState, error?: string, held?: boolean, awaitingTurn?: true) => {
       if (!outboxId) return;
       /* A held settlement stamps the entry so `releaseHeldOutbox` can requeue
          it level-wise once the switch is over — a parked hold looks exactly
@@ -1707,6 +1793,7 @@ export function TmuxComposerCore({
       updateOutbox(cardId, outboxId, {
         state,
         settledAt: nowMs(),
+        awaitingTurn,
         ...(error ? { error } : {}),
         ...(held ? { heldForSwitch: true as const } : {}),
       });
@@ -1718,7 +1805,12 @@ export function TmuxComposerCore({
       if (receiptIsAdmitted(receipt.status)) commitBridgeFor(clientMessageId);
       /* `queued` is the admitted-and-held state on the structured plane: the
          server parked the message (the account-switch delivery fence). */
-      return settleOutbox(outboxStateForReceiptStatus(receipt.status), undefined, receipt.status === "queued");
+      return settleOutbox(
+        outboxStateForReceiptStatus(receipt.status),
+        undefined,
+        receipt.status === "queued",
+        outboxAwaitsTurnBoundary(receipt.status),
+      );
     };
     /* Resolve the key before selecting the payload. A generation retained after
        uncertain admission owns an immutable text/image snapshot; later edits
@@ -2260,6 +2352,9 @@ export function TmuxComposerCore({
               receipts={displayedRuntimeReceipts}
               actionsDisabled={busy || voiceSending || deadHostBlocksSend}
               dismissed={dismissedReceipts}
+              session={structuredSession
+                ? { host: structuredSession.session.host, turn: structuredSession.session.turn }
+                : null}
               onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
               onEdit={editRuntimeReceipt}
               onDismiss={dismissReceipts}

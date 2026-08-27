@@ -191,6 +191,12 @@ export interface RuntimeOperationReceipt {
       rode this exact message. Absent when the send carried no selection. */
   runtime?: RuntimeSendSettings;
   at: string;
+  /** When the journal ADMITTED this operation, stamped once and never rewritten
+      (issue #1213). `at` moves with every transition — a parked send that the
+      queue bounces `delivering`→`queued` restarts it — so it cannot answer "how
+      long has this message been waiting". Absent on receipts written before
+      this field existed; readers fall back to `at`. */
+  admittedAt?: string;
   revision: number;
 }
 export type RuntimeReceipt = RuntimeOperationReceipt;

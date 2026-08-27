@@ -1,13 +1,30 @@
 "use client";
 
 import { Clock3, RotateCcw, TriangleAlert } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { Loader2, X } from "@/components/icons";
 import { mdBlocks } from "@/components/feed/markdown";
 
+import { DELIVERY_WAIT_TICK_MS, deliveryWaitFor, deliveryWaitText } from "@/components/runtime/deliveryWait";
+import type { HostAxis, TurnAxis } from "@/components/runtime/runtimeModel";
 import { type TFunction, useLocale } from "@/lib/i18n";
 
 import { cancelOutbox, retryOutbox, type OutboxEntry } from "./outbox";
+
+/**
+ * The conversation's own host and turn axes (issue #1213).
+ *
+ * The bubble may only say a message waits for a turn when the host says a turn
+ * is running: the receipt's own reason cannot establish that, and a message
+ * stranded by a window that died would otherwise be announced as waiting on an
+ * agent that is not there. `null` when nothing structured is behind this feed,
+ * and the bubble then says the wait without naming its cause.
+ */
+export interface OutboxSessionAxes {
+  host: HostAxis;
+  turn: TurnAxis;
+}
 
 /**
  * Optimistic user bubbles for the conversation outbox (issue #561).
@@ -32,7 +49,9 @@ function stateChip(
   t: TFunction,
   entry: OutboxEntry,
   switchHold: SwitchHold | null,
-): { label: string; icon: React.ReactNode; className: string } {
+  nowMs: number,
+  session: OutboxSessionAxes | null,
+): { label: string; icon: React.ReactNode; className: string; wait?: string } {
   /* An unsettled message on a switching card is held for the successor, and its
      bubble is the ONE place that says so. A bare "Delivering" left the operator
      with a spinner and no reason during the exact window the card is hardest to
@@ -49,13 +68,43 @@ function stateChip(
       className: "text-warning",
     };
   }
-  switch (entry.state) {
-    case "delivering":
+  /* Issue #1213: "Delivering" meant three different things — an attempt on the
+     wire, a message parked until the agent's turn ends, and a message nothing
+     will ever hand over. The bubble now says which, and how long it waited. */
+  if (entry.state === "delivering") {
+    const wait = deliveryWaitFor({
+      status: entry.awaitingTurn ? "queued" : "delivering",
+      host: session?.host ?? null,
+      turn: session?.turn ?? null,
+      /* The enqueue stamp: written once when the operator pressed send and
+         never rewritten, which is what the wait has to be measured from. */
+      admittedAt: new Date(entry.at).toISOString(),
+      nowMs,
+    });
+    const waitLabel = wait ? deliveryWaitText(t, wait) : null;
+    if (wait?.phase === "uncertain") {
+      return { label: waitLabel!, icon: <TriangleAlert className="h-3 w-3" aria-hidden />, className: "text-danger", wait: wait.phase };
+    }
+    if (waitLabel) {
       return {
-        label: t("outbox.delivering"),
-        icon: <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" aria-hidden />,
-        className: "text-warning",
+        label: waitLabel,
+        icon: <Clock3 className="h-3 w-3" aria-hidden />,
+        className: wait!.phase === "awaiting-host" ? "text-danger" : "text-warning",
+        wait: wait!.phase,
       };
+    }
+    /* A hand-over genuinely in progress keeps the wording it always had: it is
+       momentary, and a ticking duration beside it would be noise. The phase is
+       still published, so the row says which wait it is in even when the words
+       do not change. */
+    return {
+      label: t("outbox.delivering"),
+      icon: <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" aria-hidden />,
+      className: "text-warning",
+      wait: wait?.phase ?? "transmitting",
+    };
+  }
+  switch (entry.state) {
     case "failed":
       return {
         label: entry.needsReattach ? t("outbox.reattach") : entry.error ?? t("outbox.failed"),
@@ -72,15 +121,23 @@ function stateChip(
 export function OutboxBubblesView({
   entries,
   t,
+  nowMs = 0,
   onCancel,
   onRetry,
   switchHold = null,
+  session = null,
 }: {
   entries: readonly OutboxEntry[];
   t: TFunction;
+  /** Clock the delivery waits are read at (issue #1213). The container ticks
+      it; a caller that omits it reads every wait as zero, which renders the
+      historical "Delivering" wording and never manufactures a false alarm. */
+  nowMs?: number;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
   switchHold?: SwitchHold | null;
+  /** The conversation's live host/turn axes — see {@link OutboxSessionAxes}. */
+  session?: OutboxSessionAxes | null;
 }) {
   if (!entries.length) return null;
   return (
@@ -93,12 +150,13 @@ export function OutboxBubblesView({
       aria-live="polite"
     >
       {entries.map((entry) => {
-        const chip = stateChip(t, entry, switchHold);
+        const chip = stateChip(t, entry, switchHold, nowMs, session);
         return (
           <div
             key={entry.id}
             data-outbox-entry={entry.id}
             data-outbox-state={entry.state}
+            {...(chip.wait ? { "data-outbox-wait": chip.wait } : {})}
             className="group/msg my-3 flex items-start justify-end gap-1.5"
           >
             <div className="flex max-w-[75%] flex-col items-end gap-1">
@@ -118,7 +176,11 @@ export function OutboxBubblesView({
                 <span data-outbox-status className="min-w-0 truncate">{chip.label}</span>
                 {/* A failed message that carried its payload can be retried in
                     place: the entry re-queues under its ORIGINAL idempotency key,
-                    so the dispatcher replays it idempotently (round-1 P1#4). */}
+                    so the dispatcher replays it idempotently (round-1 P1#4).
+                    An ADMITTED message is not retryable here and never was:
+                    `retryOutbox` refuses anything but `failed`, and re-queueing
+                    it locally would not touch the journaled send the server is
+                    still holding (issue #1213). */}
                 {entry.state === "failed" && !entry.needsReattach ? (
                   <button
                     type="button"
@@ -132,7 +194,9 @@ export function OutboxBubblesView({
                   </button>
                 ) : null}
                 {/* Only a message that has not left for the wire can be taken
-                    back — cancelling a delivering send would be a lie. */}
+                    back — cancelling a delivering send would be a lie, and
+                    dropping the bubble would leave the server still holding a
+                    message the operator believes is gone. */}
                 {entry.state === "queued" || entry.state === "failed" ? (
                   <button
                     type="button"
@@ -158,19 +222,30 @@ export function OutboxBubbles({
   cardId,
   entries,
   switchHold = null,
+  session = null,
 }: {
   cardId: string;
   entries: readonly OutboxEntry[];
   switchHold?: SwitchHold | null;
+  session?: OutboxSessionAxes | null;
 }) {
   const { t } = useLocale();
+  /* A wait only becomes news by getting older, and nothing else re-renders the
+     bubble while a message is parked. One local interval, no store, no bus. */
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), DELIVERY_WAIT_TICK_MS);
+    return () => clearInterval(timer);
+  }, []);
   return (
     <OutboxBubblesView
       entries={entries}
       t={t}
+      nowMs={nowMs}
       onCancel={(id) => cancelOutbox(cardId, id)}
       onRetry={(id) => retryOutbox(cardId, id)}
       switchHold={switchHold}
+      session={session}
     />
   );
 }
