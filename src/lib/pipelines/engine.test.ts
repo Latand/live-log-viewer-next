@@ -23,6 +23,7 @@ const createPipelineFromRequest: typeof rawCreatePipelineFromRequest = async (re
   await rawCreatePipelineFromRequest({ src: "/codex/creator.jsonl", ...request }, ports, options);
 const { registerPipelineTick } = await import("./controllerSignal");
 const { loadPipelines, savePipelines } = await import("./store");
+const { durableStageTurnEvidence } = await import("./durableEvidence");
 const { saveTasks } = await import("@/lib/tasks/store");
 type PipelinePorts = import("./engine").PipelinePorts;
 type PipelineStageStopResult = import("./engine").PipelineStageStopResult;
@@ -5498,6 +5499,196 @@ test("close terminalizes host-unavailable attempts from durable evidence and rec
     expect(terminal.runs[0]!.attempts[0]!.completedAt).toBeTruthy();
     expect(terminal.stateDetail).toContain(stopError);
   }
+});
+
+/* #1141 — the sibling case of transcript terminalization. A provider limit cuts
+   the stage turn off mid-flight, so the transcript's last record is the CLI's
+   own notice and there is no verdict to read; the close then had no terminal
+   reading at all and refused, parking the lane on the board forever. The
+   fixtures below are written here, never lifted from a live transcript. */
+const PROVIDER_LIMIT_NOTICE = "You've hit your session limit. Try again once the window resets.";
+
+function stageTranscript(name: string, records: Record<string, unknown>[]): string {
+  const file = path.join(process.env.LLV_STATE_DIR!, `${name}.jsonl`);
+  fs.writeFileSync(file, records.map((record) => JSON.stringify(record)).join("\n") + "\n", "utf8");
+  return file;
+}
+
+function limitInterruptedTranscript(name: string): string {
+  return stageTranscript(name, [
+    { type: "user", timestamp: "2026-08-27T09:00:00.000Z", message: { role: "user", content: "run the stage" } },
+    {
+      type: "assistant",
+      timestamp: "2026-08-27T09:20:00.000Z",
+      message: { role: "assistant", stop_reason: null, content: [{ type: "text", text: "opening the failing test" }] },
+    },
+    {
+      type: "assistant",
+      timestamp: "2026-08-27T09:41:00.000Z",
+      isApiErrorMessage: true,
+      error: "rate_limit",
+      message: {
+        role: "assistant",
+        model: "<synthetic>",
+        stop_reason: "stop_sequence",
+        content: [{ type: "text", text: PROVIDER_LIMIT_NOTICE }],
+      },
+    },
+  ]);
+}
+
+function verdictTranscript(name: string, status: "pass" | "needs_decision" = "pass"): string {
+  return stageTranscript(name, [
+    { type: "user", timestamp: "2026-08-27T09:00:00.000Z", message: { role: "user", content: "run the stage" } },
+    {
+      type: "assistant",
+      timestamp: "2026-08-27T09:30:00.000Z",
+      message: {
+        role: "assistant",
+        stop_reason: "end_turn",
+        content: [{
+          type: "text",
+          text: `done\n\n\`\`\`json\n${JSON.stringify({ status, findings: [], confidence: 0.9 })}\n\`\`\``,
+        }],
+      },
+    },
+  ]);
+}
+
+function silentTranscript(name: string): string {
+  return stageTranscript(name, [
+    { type: "user", timestamp: "2026-08-27T09:00:00.000Z", message: { role: "user", content: "run the stage" } },
+    {
+      type: "assistant",
+      timestamp: "2026-08-27T09:20:00.000Z",
+      message: { role: "assistant", stop_reason: null, content: [{ type: "text", text: "opening the failing test" }] },
+    },
+  ]);
+}
+
+/** Read the stage's durable evidence out of a fixture transcript through the
+    same reader production uses, so the close is exercised against real records
+    rather than a hand-shaped evidence object. */
+function readFixtures(h: ReturnType<typeof harness>, fixtures: Record<string, string>): void {
+  h.ports.durableTurnEvidence = async (engine, transcriptPath) => {
+    const fixture = fixtures[transcriptPath];
+    return fixture ? await durableStageTurnEvidence(engine, fixture) : null;
+  };
+}
+
+test("close retires an attempt whose turn a provider limit cut off, naming the notice (#1141)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.setHostsResident(true);
+  h.setStageHost("conversation_stage_1", { outcome: "failed", error: "structured runtime host is unavailable" });
+  readFixtures(h, { "/codex/stage-1.jsonl": limitInterruptedTranscript("close-limit-interrupted") });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.error).toBeUndefined();
+  expect(closed.close?.stillRunning).toEqual([]);
+  expect(closed.close?.alreadyStopped).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+  const stored = loadPipelines()[0]!;
+  expect(stored.state).toBe("closed");
+  /* Retired as failed, with the provider's own words as the reason — on the
+     attempt and on the lane, so nothing reads as a stage that produced one. */
+  const attempt = stored.runs[0]!.attempts[0]!;
+  expect(attempt.state).toBe("failed");
+  expect(attempt.completedAt).toBeTruthy();
+  expect(attempt.error).toContain("terminal provider message");
+  expect(attempt.error).toContain(PROVIDER_LIMIT_NOTICE);
+  expect(stored.stateDetail).toContain(PROVIDER_LIMIT_NOTICE);
+});
+
+test("a transcript that ends on a valid fenced verdict still closes on the verdict path (#1141)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.setHostsResident(true);
+  h.setStageHost("conversation_stage_1", { outcome: "failed", error: "structured runtime host is unavailable" });
+  readFixtures(h, { "/codex/stage-1.jsonl": verdictTranscript("close-verdict") });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.error).toBeUndefined();
+  const detail = closed.close?.notes[0]?.detail ?? "";
+  expect(detail).toContain("valid fenced verdict");
+  /* A lane closed on a real verdict stays distinguishable from one closed on a
+     provider notice — the two reasons never collapse into one. */
+  expect(detail).not.toContain("terminal provider message");
+  expect(loadPipelines()[0]!.state).toBe("closed");
+});
+
+test("a transcript silent under a live host is not terminalized by the provider-message rule (#1141)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.setHostsResident(true);
+  h.setStageHost("conversation_stage_1", { outcome: "failed", error: "structured runtime host is unavailable" });
+  readFixtures(h, { "/codex/stage-1.jsonl": silentTranscript("close-silent") });
+
+  const refused = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  /* Silence is not evidence that the turn ended: the stall path keeps it. */
+  expect(refused.status).toBe(409);
+  expect(refused.close?.stillRunning).toMatchObject([{ stageId: "plan", attempt: 1 }]);
+  const stored = loadPipelines()[0]!;
+  expect(stored.state).toBe("running");
+  expect(stored.runs[0]!.attempts[0]!.state).toBe("running");
+});
+
+test("a pipeline blocked only by a limit-interrupted attempt closes end to end (#1141)", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  /* The board shape from the issue: earlier attempts of the same stage ended on
+     verdicts and terminalize from their transcripts; the parked one was cut off
+     by the limit and is the whole reason the close was refused. */
+  const stored = loadPipelines()[0]!;
+  const run = stored.runs[0]!;
+  const parked = run.attempts[0]!;
+  const settled = structuredClone(parked);
+  settled.n = 1;
+  settled.state = "failed";
+  settled.conversationId = "conversation_stage_2";
+  settled.agentPath = "/codex/stage-2.jsonl";
+  settled.paneId = "%2";
+  parked.n = 2;
+  parked.state = "needs_decision";
+  parked.error = "stage verdict recovery exhausted after 3 checks";
+  run.attempts = [settled, parked];
+  stored.state = "needs_decision";
+  stored.stateDetail = parked.error;
+  savePipelines([stored]);
+  h.setHostsResident(true);
+  for (const conversationId of ["conversation_stage_1", "conversation_stage_2"]) {
+    h.setStageHost(conversationId, { outcome: "failed", error: "structured runtime host is unavailable" });
+  }
+  readFixtures(h, {
+    "/codex/stage-1.jsonl": limitInterruptedTranscript("close-blocker-limit"),
+    "/codex/stage-2.jsonl": verdictTranscript("close-blocker-verdict", "needs_decision"),
+  });
+
+  const closed = await patchPipeline(pipeline.id, { action: "close" }, h.ports);
+
+  expect(closed.error).toBeUndefined();
+  expect(closed.close?.stillRunning).toEqual([]);
+  expect(closed.close?.alreadyStopped).toHaveLength(2);
+  const terminal = loadPipelines()[0]!;
+  expect(terminal.state).toBe("closed");
+  expect(terminal.closedAt).toBeTruthy();
+  /* Nothing unconfirmed is left, so the lane leaves the board. */
+  expect(terminal.hiddenAt).toBe(terminal.closedAt);
+  expect(terminal.runs[0]!.attempts.map((item) => item.completedAt).every(Boolean)).toBeTrue();
+  /* The parking attempt keeps the reason it parked with; the close reason it
+     was retired on rides the lane's own detail. */
+  expect(terminal.runs[0]!.attempts[1]!.error).toBe("stage verdict recovery exhausted after 3 checks");
+  expect(terminal.stateDetail).toContain(PROVIDER_LIMIT_NOTICE);
 });
 
 test("closing preserves uncommitted stage work and names what it left behind (#670)", async () => {
