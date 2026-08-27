@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { canonicalProject } from "@/lib/projects/aliases";
 import { createManualProject } from "@/lib/projects/curation";
+import { suggestionRoots } from "@/lib/projects/suggestionRoots";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
@@ -12,6 +13,8 @@ const headers = { "Cache-Control": "no-store" };
 const FAILURE_STATUS: Record<string, number> = {
   INVALID_NAME: 400,
   INVALID_ROOT: 400,
+  RELATIVE_ROOT: 400,
+  OUTSIDE_ROOTS: 400,
   MISSING_DIRECTORY: 400,
   MKDIR_FAILED: 500,
   DUPLICATE_PROJECT: 409,
@@ -41,7 +44,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   for (const entry of conversationCatalogSnapshot()) {
     existing.add(canonicalProject(entry.project));
   }
-  const result = createManualProject(name, root, existing, { createMissingRoot: record?.createRoot === true });
+  /* The same roots the picker suggests from bound what may be created
+     (issue #1223): a typed path outside the directories the viewer knows is
+     refused here, mkdir opt-in included. */
+  const result = createManualProject(name, root, existing, {
+    createMissingRoot: record?.createRoot === true,
+    allowedRoots: suggestionRoots(),
+  });
   if (!result.ok) {
     return NextResponse.json(
       { error: result.code, message: result.message },

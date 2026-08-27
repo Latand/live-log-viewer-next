@@ -13,6 +13,7 @@ import type { Workflow } from "@/lib/workflows/types";
 
 import { AccessQrButton } from "./AccessQrButton";
 import { CatalogFailureNotice } from "./CatalogFailureNotice";
+import { DirectoryPicker, isDirectoryPath, splitDirectoryPath } from "./DirectoryPicker";
 import { FlipRow } from "./FlipRow";
 import { Archive, ChevronRight, Crown, FolderPlus, Loader2 } from "./icons";
 import { LanguageToggle } from "./LanguageToggle";
@@ -340,13 +341,36 @@ export function ProjectRail({ files, projectCatalog, projectDisplayNames = {}, p
 }
 
 /* The create-error codes the server can answer with, mapped onto rail copy;
-   anything unrecognized falls back to the generic failure line. */
-const CREATE_ERROR_KEYS: Record<string, "rail.invalidName" | "rail.invalidRoot" | "rail.duplicateProject"> = {
+   anything unrecognized falls back to the generic failure line. Each code that
+   the operator can act on differently gets its own words (issue #1223): a path
+   that was never made absolute, a path outside the areas the viewer knows, and
+   a path that already carries a project are three different objections, and
+   spelling all of them "Directory not found" told the operator the one thing
+   that was not true. RELATIVE_ROOT and MISSING_DIRECTORY are handled in the
+   form itself, because both answer with more than a line of text. */
+const CREATE_ERROR_KEYS: Record<string, "rail.invalidName" | "rail.invalidRoot" | "rail.outsideRoots" | "rail.duplicateProject"> = {
   INVALID_NAME: "rail.invalidName",
   INVALID_ROOT: "rail.invalidRoot",
-  INVALID_REQUEST: "rail.invalidRoot",
+  OUTSIDE_ROOTS: "rail.outsideRoots",
   DUPLICATE_PROJECT: "rail.duplicateProject",
 };
+
+/**
+ * Where a browse starts: the directory a path points at, or nothing at all.
+ *
+ * This is what the picker is asked for when it opens rather than when someone
+ * types — opening is a request to see what is around the current root, not a
+ * prefix to match, and answering it with the chosen path itself would list the
+ * one directory already in hand. Everything the operator actually types goes to
+ * the server verbatim, because the server is the only side that can look past
+ * the rows already fetched. `isDirectoryPath` is the picker's own definition:
+ * the two sides of this form agree on what a path is (issue #1223).
+ */
+function suggestionScope(query: string): string {
+  const trimmed = query.trim();
+  if (!isDirectoryPath(trimmed)) return "";
+  return trimmed.slice(0, trimmed.lastIndexOf("/") + 1);
+}
 
 function CreateProjectForm({
   onCreate,
@@ -360,12 +384,74 @@ function CreateProjectForm({
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [name, setName] = useState("");
+  /* Once the operator has written a name it is theirs; until then the chosen
+     directory names the project (issue #1223). Clearing the field hands the
+     default back. */
+  const [nameEdited, setNameEdited] = useState(false);
   const [root, setRoot] = useState("");
+  const [dirs, setDirs] = useState<readonly string[]>([]);
+  const [suggestQuery, setSuggestQuery] = useState("");
+  const [openSignal, setOpenSignal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   /* Set on a MISSING_DIRECTORY refusal: the error line turns into a notice
      and the mkdir-and-create action renders below it (issue #1122). */
   const [offerCreateRoot, setOfferCreateRoot] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  /* The suggestion source the picker cannot have (issue #1223): a project that
+     does not exist yet is absent from every known-directories list, so the
+     rows come from the filesystem, bounded server-side to the directories
+     where this machine's projects already live.
+
+     The whole query goes over, not just the directory it points at. The picker
+     filters what it has been handed, and what it has been handed is one bounded
+     answer: a word matching a directory under a quiet anchor, or a name past
+     the first screenful of a crowded one, is simply not in it. Only the server
+     can look, so it is asked each time the query moves. */
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/projects/directories?q=" + encodeURIComponent(suggestQuery))
+      .then(async (response) => (response.ok ? await response.json() as { dirs?: unknown } : null))
+      .then((payload) => {
+        if (cancelled || !Array.isArray(payload?.dirs)) return;
+        setDirs(payload.dirs.filter((dir): dir is string => typeof dir === "string"));
+      })
+      .catch(() => {
+        /* No suggestions is the pre-#1223 state: the path can still be typed. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [suggestQuery]);
+
+  const chooseRoot = (next: string) => {
+    setRoot(next);
+    setOfferCreateRoot(false);
+    setError(null);
+    if (nameEdited) return;
+    const { tail } = splitDirectoryPath(next);
+    if (tail && tail !== "/") setName(tail);
+  };
+
+  /**
+   * The two refusals about the root itself — none given, and one the server
+   * answers RELATIVE_ROOT because it was never made absolute. Both say what is
+   * missing and then answer with the completion rather than with a rejection
+   * (issue #1223), so they are one action.
+   *
+   * Neither keeps what was refused. The picker puts the value it holds at the
+   * head of its list, highlighted and badged "current", so leaving it there
+   * would open the completion on the very input the completion exists to
+   * replace; and the suggestions go back to the browse, since a query narrowed
+   * to what was just refused opens the list on nothing.
+   */
+  const askForADirectory = (message: "rail.invalidRoot" | "rail.relativeRoot") => {
+    setRoot("");
+    setOfferCreateRoot(false);
+    setError(t(message));
+    setSuggestQuery("");
+    setOpenSignal((value) => value + 1);
+  };
   const inputClass = `w-full rounded-[9px] border border-border bg-canvas px-2.5 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
     isMobile ? "min-h-11" : "py-1.5"
   }`;
@@ -375,22 +461,30 @@ function CreateProjectForm({
       setError(t("rail.invalidName"));
       return;
     }
-    if (!root.trim()) {
-      setError(t("rail.invalidRoot"));
+    const target = root.trim();
+    if (!target) {
+      askForADirectory("rail.invalidRoot");
       return;
     }
     setBusy(true);
     setError(null);
     setOfferCreateRoot(false);
-    const outcome = await onCreate(name.trim(), root.trim(), createRoot ? { createRoot: true } : undefined);
+    const outcome = await onCreate(name.trim(), target, createRoot ? { createRoot: true } : undefined);
     setBusy(false);
     if (outcome.ok) {
       onCreated(outcome.project);
       return;
     }
     if (outcome.code === "MISSING_DIRECTORY") {
+      /* An absent directory is recoverable, and says so in the same words the
+         pipeline preflight uses for it (issue #1223) — the two surfaces no
+         longer disagree about whether this is fatal. */
       setOfferCreateRoot(true);
-      setError(t("rail.missingRoot"));
+      setError(t("rail.missingRoot", { path: target }));
+      return;
+    }
+    if (outcome.code === "RELATIVE_ROOT") {
+      askForADirectory("rail.relativeRoot");
       return;
     }
     if (outcome.code === "MKDIR_FAILED") {
@@ -414,21 +508,28 @@ function CreateProjectForm({
         value={name}
         maxLength={80}
         autoFocus
-        onChange={(event) => setName(event.target.value)}
-      />
-      <input
-        className={inputClass}
-        placeholder={t("rail.newProjectRoot")}
-        value={root}
-        spellCheck={false}
         onChange={(event) => {
-          setRoot(event.target.value);
-          setOfferCreateRoot(false);
+          setName(event.target.value);
+          setNameEdited(Boolean(event.target.value.trim()));
         }}
       />
+      {/* Above the picker, because the popup drops out of the trigger and
+          covers everything under it — and two of these refusals open that popup
+          in the same commit that sets the message, so underneath it the
+          explanation was drawn and immediately hidden (issue #1223). */}
       {error ? (
         <div className={`px-0.5 text-[11px] font-semibold ${offerCreateRoot ? "text-warning" : "text-danger"}`}>{error}</div>
       ) : null}
+      <DirectoryPicker
+        id="rail-create-root"
+        value={root}
+        dirs={dirs}
+        disabled={busy}
+        ariaLabel={t("rail.newProjectRoot")}
+        openSignal={openSignal}
+        onQueryChange={(query, typed) => setSuggestQuery(typed ? query.trim() : suggestionScope(query))}
+        onChange={chooseRoot}
+      />
       {offerCreateRoot ? (
         <button
           type="button"
