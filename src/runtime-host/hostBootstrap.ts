@@ -26,11 +26,15 @@ import {
  * live agent sessions on it.
  */
 
-/** The successor waits on the singleton fence for ten minutes (#518), but a
-    predecessor that is going to exit does so in seconds: it drains the socket
-    server, closes the journal and releases the fence. Two minutes is generous
-    for that and short enough that a predecessor which is NOT exiting is
-    reported while the operator is still watching. */
+/** How long THIS RUN waits for the successor to take the fence after it stops
+    the predecessor. It bounds the operator's wait, not the successor's: a
+    bootstrap-staged successor is parked and waits without a deadline
+    (`RuntimeHostSuccessorFenceWait`), so a give-up here reports a predecessor
+    that did not exit and leaves the successor still able to take over. A
+    predecessor that is going to exit does so in seconds — it drains the socket
+    server, closes the journal and releases the fence — so two minutes is
+    generous for that and short enough to be reported while the operator is
+    still watching. */
 export const RUNTIME_HOST_FENCE_TIMEOUT_MS = 120_000;
 export const RUNTIME_HOST_FENCE_POLL_MS = 1_000;
 
@@ -120,6 +124,13 @@ export function renderRuntimeHostBootstrapPlan(plan: RuntimeHostBootstrapPlan): 
       "the successor container is created and proven stable while the predecessor keeps serving",
       "the predecessor restart policy is set to no, so a predecessor that dies later will not come back",
       "the durable runtime-host release record is repointed at the successor",
+    ]),
+    "",
+    "while the successor is staged and the predecessor still serves:",
+    bullet([
+      "the successor is parked on the singleton fence with no deadline; it never times out and never restart-loops",
+      "there is no window to beat — a hand-over run hours later resumes this same successor container",
+      `${plan.stableEndpoint} keeps being served by the predecessor throughout`,
     ]),
     "",
     "during the hand-over:",
@@ -229,9 +240,10 @@ export async function executeRuntimeHostBootstrap(
   }
   ports.log(`staging runtime-host successor ${plan.successorContainer} for ${plan.revision}; ${predecessor.name} keeps serving`);
   const staged = await ports.stageSuccessor(candidate);
-  ports.log(`staged runtime-host successor ${staged.successorContainer}; it is waiting for the singleton fence`);
+  ports.log(`staged runtime-host successor ${staged.successorContainer}; it is parked on the singleton fence with no deadline`);
   if (plan.mode === "stage") {
     ports.log(`nothing was stopped; re-run with --hand-over to stop ${predecessor.name} and let the successor take over`);
+    ports.log("there is no window to beat: the parked successor neither times out nor restart-loops, so the hand-over can run whenever you are ready");
     return { successorContainer: staged.successorContainer, handedOver: false, fenceWaitedMs: null };
   }
   ports.log(`stopping the predecessor runtime-host container ${predecessor.name}; ${plan.stableEndpoint} is unserved until the successor acquires the fence`);

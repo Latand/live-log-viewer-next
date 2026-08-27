@@ -19,6 +19,7 @@ const {
   currentRuntimeHostGeneration,
   RUNTIME_HOST_CONTAINER_ENV,
 } = await import("./hostRelease");
+const { acquireRuntimeHostFence, runtimeHostFenceWaitPlan } = await import("./fenceWait");
 
 const { runtimeHostActivationRefusal } = await import("@/lib/runtime/flags");
 
@@ -35,18 +36,16 @@ if (process.env.LLV_RUNTIME_LEGACY_SCHEDULER === "1" && process.env.LLV_ACCOUNT_
 const fence = new RuntimeHostFence(`${socketPath}.lock`);
 /* #518: a staged successor generation boots while its predecessor still holds
    the singleton fence, and must wait for the predecessor's graceful exit
-   instead of failing its container. Ordinary boots keep the immediate throw. */
-const fenceWaitMs = Number(process.env.LLV_RUNTIME_HOST_FENCE_WAIT_MS || 0);
-const fenceDeadline = Date.now() + (Number.isFinite(fenceWaitMs) && fenceWaitMs > 0 ? fenceWaitMs : 0);
-for (;;) {
-  try {
-    fence.acquire();
-    break;
-  } catch (error) {
-    if (Date.now() >= fenceDeadline) throw error;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-}
+   instead of failing its container. Ordinary boots keep the immediate throw.
+   #1216: a successor parked by an operator bootstrap waits without a deadline,
+   because nothing has asked its predecessor to exit yet. Either wait names
+   what it is waiting for and how long it has waited. */
+await acquireRuntimeHostFence({
+  acquire: () => fence.acquire(),
+  plan: runtimeHostFenceWaitPlan(process.env),
+  container: process.env[RUNTIME_HOST_CONTAINER_ENV],
+  report: (line) => console.error(line),
+});
 const journal = new RuntimeJournal(process.env.LLV_RUNTIME_JOURNAL || statePath("runtime-events.sqlite"));
 if (journal.isWritable()) journal.claimHostEpoch();
 const deploymentsEnabled = process.env.LLV_VIEWER_DEPLOYMENTS === "1";

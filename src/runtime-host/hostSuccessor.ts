@@ -4,6 +4,7 @@ import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
 import { withoutWakatimeCredentialEntries } from "@/lib/wakatime/credential";
 
 import { AGENT_REGISTRY_SQLITE_ENV, type AgentRegistryBackendMode } from "./candidateContainer";
+import { RUNTIME_HOST_FENCE_PARK_ENV, RUNTIME_HOST_FENCE_WAIT_ENV } from "./fenceWait";
 
 import {
   RUNTIME_HOST_CONTAINER_ENV,
@@ -13,16 +14,15 @@ import {
   type RuntimeHostReleaseRecord,
 } from "./hostRelease";
 
-/** Environment variable read by main.ts: a successor boots while the
-    predecessor still holds the singleton fence and must wait for it instead
-    of failing its container. */
-export const RUNTIME_HOST_FENCE_WAIT_ENV = "LLV_RUNTIME_HOST_FENCE_WAIT_MS";
+export { RUNTIME_HOST_FENCE_PARK_ENV, RUNTIME_HOST_FENCE_WAIT_ENV };
+
 const SUCCESSOR_FENCE_WAIT_MS = 10 * 60_000;
 const DOCKER_RESTART_POLICY_STABILITY_MS = 11_000;
 export const RUNTIME_HOST_SUCCESSOR_LABEL = "dev.live-log-viewer.runtime-host-successor";
 export const RUNTIME_HOST_PREDECESSOR_LABEL = "dev.live-log-viewer.runtime-host-predecessor";
 const RUNTIME_HOST_GENERATION_ENV = [
   RUNTIME_HOST_FENCE_WAIT_ENV,
+  RUNTIME_HOST_FENCE_PARK_ENV,
   RUNTIME_HOST_IMAGE_ENV,
   RUNTIME_HOST_REVISION_ENV,
   RUNTIME_HOST_CONTAINER_ENV,
@@ -67,8 +67,18 @@ export interface RuntimeHostGenerationIdentity {
   container: string;
 }
 
+/** How the staged successor waits for the singleton fence at boot (#1216).
+    `handoff-budget` is the #518 deployment case: the predecessor has been
+    asked to exit, so a bound on the wait is the detector for a hand-over that
+    wedges. `parked` is the bootstrap `--stage` case: nothing has asked the
+    predecessor to exit and nothing will until the operator runs the
+    hand-over, so the bound detects nothing and only converts a deliberately
+    waiting container into a ten-minute dockerd restart loop. */
+export type RuntimeHostSuccessorFenceWait = "handoff-budget" | "parked";
+
 export interface RuntimeHostSuccessorOptions {
   registryBackendMode?: AgentRegistryBackendMode;
+  fenceWait?: RuntimeHostSuccessorFenceWait;
 }
 
 export interface RuntimeHostPredecessorIdentity {
@@ -216,7 +226,9 @@ function successorRunArgs(
     ...(options.registryBackendMode === undefined
       ? []
       : ["-e", `${AGENT_REGISTRY_SQLITE_ENV}=${options.registryBackendMode}`]),
-    "-e", `${RUNTIME_HOST_FENCE_WAIT_ENV}=${SUCCESSOR_FENCE_WAIT_MS}`,
+    ...(options.fenceWait === "parked"
+      ? ["-e", `${RUNTIME_HOST_FENCE_PARK_ENV}=1`]
+      : ["-e", `${RUNTIME_HOST_FENCE_WAIT_ENV}=${SUCCESSOR_FENCE_WAIT_MS}`]),
     "-e", `${RUNTIME_HOST_IMAGE_ENV}=${candidate.image}`,
     "-e", `${RUNTIME_HOST_REVISION_ENV}=${candidate.revision}`,
     "-e", `${RUNTIME_HOST_CONTAINER_ENV}=${name}`,
@@ -321,6 +333,40 @@ export function runtimeHostSuccessorObservation(
   const restarts = typeof container.RestartCount === "number" ? `, ${container.RestartCount} restarts` : "";
   const exitCode = typeof state.ExitCode === "number" && status !== "running" ? `, exit ${state.ExitCode}` : "";
   return `${generation}, status ${status}${restarting}${restarts}${exitCode}`;
+}
+
+/** A resume dockerd refuses reads as a runtime-host state, not as a daemon
+    error surfaced from three steps in (#1216). A staged successor that is
+    currently `restarting`, or that was removed between staging and a later
+    hand-over, is exactly the case an operator hits when they come back to a
+    successor they staged earlier, so it gets the same named vocabulary as
+    every other gate here. */
+async function resumeSuccessorContainer(
+  name: string,
+  candidate: ViewerReleaseIdentity,
+  ports: RuntimeHostSuccessorPorts,
+  options: RuntimeHostSuccessorOptions,
+): Promise<void> {
+  try {
+    await ports.docker(["container", "start", name]);
+  } catch (error) {
+    let observation: string;
+    try {
+      observation = runtimeHostSuccessorObservation(
+        await ports.docker(["container", "inspect", name]),
+        name,
+        candidate,
+        options,
+      );
+    } catch {
+      const message = error instanceof Error ? error.message.trim() : "";
+      observation = message ? message.slice(0, 200) : "the container is unreadable";
+    }
+    throw new Error(
+      `runtime-host successor container ${name} could not be resumed - ${observation}`,
+      { cause: error },
+    );
+  }
 }
 
 /** Two identity-aware observations: both must report the ready running state,
@@ -432,7 +478,7 @@ export async function stageRuntimeHostSuccessorContainer(
        predecessor discovery is forbidden here — it would select, disable,
        and exit the successor itself. Both identities come from the intent. */
     phase("resuming the recorded runtime-host successor container");
-    await ports.docker(["container", "start", name]);
+    await resumeSuccessorContainer(name, candidate, ports, options);
     await observeStableSuccessor(name, candidate, ports, options);
     phase("disabling the runtime-host predecessor restart policy");
     await disablePredecessorRestart(intent.predecessorId, ports);
@@ -461,7 +507,7 @@ export async function stageRuntimeHostSuccessorContainer(
     if (!encoded) throw new Error("runtime-host successor container lacks durable predecessor identity");
     predecessorId = encoded;
     phase("resuming a same-attempt runtime-host successor container");
-    await ports.docker(["container", "start", name]);
+    await resumeSuccessorContainer(name, candidate, ports, options);
   }
   await observeStableSuccessor(name, candidate, ports, options);
   phase("recording the runtime-host handoff intent");

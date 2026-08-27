@@ -88,6 +88,21 @@ test("issue 1216: the plan names the one container a hand-over stops before anyt
   expect(rendered).toContain(`${stableEndpoint} is unserved between the predecessor exit and the successor acquiring the singleton fence`);
 });
 
+/* The runbook invites the operator to stage now and hand over later, so the
+   plan has to say what that staged successor does in between. Its predecessor
+   has not been asked to exit, so a bounded fence wait would detect nothing and
+   only crash-loop the container the plan calls staged. */
+test("issue 1216: the plan states that a staged successor waits with no deadline", () => {
+  for (const mode of ["plan", "stage", "hand-over"] as const) {
+    const rendered = renderRuntimeHostBootstrapPlan(plan(mode));
+
+    expect(rendered).toContain("while the successor is staged and the predecessor still serves:");
+    expect(rendered).toContain("the successor is parked on the singleton fence with no deadline; it never times out and never restart-loops");
+    expect(rendered).toContain("there is no window to beat — a hand-over run hours later resumes this same successor container");
+    expect(rendered).toContain(`${stableEndpoint} keeps being served by the predecessor throughout`);
+  }
+});
+
 test("issue 1216: the plan and stage modes both promise to stop nothing", () => {
   for (const mode of ["plan", "stage"] as const) {
     expect(renderRuntimeHostBootstrapPlan(plan(mode)))
@@ -133,6 +148,10 @@ test("issue 1216: stage mode creates the successor and leaves the predecessor se
   expect(outcome.handedOver).toBe(false);
   expect(recorded.calls).toEqual([`stage:${revision}`]);
   expect(recorded.lines.some((line) => line.startsWith("nothing was stopped;"))).toBe(true);
+  /* The completion line is what an operator reads before walking away, so it
+     carries the same promise the plan made. */
+  expect(recorded.lines).toContain(`staged runtime-host successor ${runtimeHostSuccessorName(revision, image)}; it is parked on the singleton fence with no deadline`);
+  expect(recorded.lines).toContain("there is no window to beat: the parked successor neither times out nor restart-loops, so the hand-over can run whenever you are ready");
 });
 
 test("issue 1216: a hand-over stops the predecessor only after the successor is staged", async () => {

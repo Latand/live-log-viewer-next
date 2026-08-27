@@ -31,6 +31,15 @@ test("issue 1216: the plan is rendered before anything is built, staged, or stop
   expect(executeAt).toBeGreaterThan(buildAt);
 });
 
+/* An operator stages now and hands over when they are ready, so the successor
+   this script creates has to wait without the #518 deadline — that bound
+   exists for a hand-over already in flight, and here there is none until the
+   operator starts one. */
+test("issue 1216: the bootstrap stages its successor parked rather than on the deployment fence budget", () => {
+  expect(source).toContain('fenceWait: "parked"');
+  expect(source).not.toContain("LLV_RUNTIME_HOST_FENCE_WAIT_MS");
+});
+
 /* The bootstrap replaces the runtime-host generation and nothing else. A
    Viewer container stop or removal here would take down the promoted release
    and the agent sessions inside it. */

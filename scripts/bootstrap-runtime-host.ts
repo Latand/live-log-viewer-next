@@ -212,6 +212,12 @@ async function main(): Promise<number> {
       clearHandoffIntent: () => clearRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
       fenceOwnerPid,
       reportPhase: (phase) => log(phase),
+    }, {
+      /* #1216: the operator decides when the hand-over happens, and it may be
+         hours after the staging. A deployment's bounded fence wait would exit
+         this successor at its budget and let dockerd restart-loop the very
+         container the runbook calls idle. */
+      fenceWait: "parked",
     }),
     stopPredecessor: async (predecessorId) => {
       await docker(["container", "stop", "--time", String(PREDECESSOR_STOP_GRACE_SECONDS), predecessorId]);
@@ -222,7 +228,7 @@ async function main(): Promise<number> {
     log,
   });
   if (!outcome.handedOver) {
-    log(`successor ${outcome.successorContainer} is staged and idle; the predecessor still serves ${stableEndpoint}`);
+    log(`successor ${outcome.successorContainer} is staged and parked; the predecessor still serves ${stableEndpoint}`);
   }
   return 0;
 }

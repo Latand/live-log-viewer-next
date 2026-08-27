@@ -101,9 +101,15 @@ bun scripts/bootstrap-runtime-host.ts --hand-over  # also stop the predecessor
 ```
 
 `--stage` builds the image from a clean canonical worktree and creates the
-successor container. The successor waits on the singleton fence, the
-predecessor keeps serving, and the durable release record is repointed. Nothing
-is stopped, so this is safe to run ahead of the moment you want the switch.
+successor container. The successor is *parked* on the singleton fence — it
+waits there with no deadline, so it neither times out nor restart-loops — while
+the predecessor keeps serving and the durable release record is repointed.
+Nothing is stopped and there is no window to beat: the hand-over can follow
+minutes or hours later and resumes that same container.
+
+A successor staged by a *deployment* keeps the bounded #518 wait instead. There
+the predecessor has already been asked to exit, so a bound on the wait is what
+makes a wedged hand-over visible.
 
 `--hand-over` performs the staging and then stops the predecessor runtime-host
 container so the successor acquires the fence. `127.0.0.1:8898` is unserved for

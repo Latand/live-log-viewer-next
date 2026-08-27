@@ -13,6 +13,7 @@ import {
 import {
   completeRuntimeHostHandoff,
   findRuntimeHostPredecessor,
+  RUNTIME_HOST_FENCE_PARK_ENV,
   RUNTIME_HOST_FENCE_WAIT_ENV,
   RUNTIME_HOST_PREDECESSOR_LABEL,
   RUNTIME_HOST_SUCCESSOR_LABEL,
@@ -152,6 +153,8 @@ function harness(overrides: {
   successorImage?: string;
   registryBackendMode?: string;
   updateFailure?: Error;
+  startFailure?: Error;
+  predecessorInspect?: string;
   wait?: (milliseconds: number) => Promise<void>;
 } = {}): Harness {
   const calls: string[][] = [];
@@ -195,7 +198,10 @@ function harness(overrides: {
       calls.push([...argv]);
       events.push(`docker:${argv.join(" ")}`);
       if (argv[0] === "container" && argv[1] === "ls") return "abc123\n";
-      if (argv[0] === "container" && argv[1] === "inspect" && argv[2] === "abc123") return predecessorInspect;
+      if (argv[0] === "container" && argv[1] === "inspect" && argv[2] === "abc123") {
+        return overrides.predecessorInspect ?? predecessorInspect;
+      }
+      if (argv[0] === "container" && argv[1] === "start" && overrides.startFailure) throw overrides.startFailure;
       if (argv[0] === "run") {
         if (overrides.runFailure) throw overrides.runFailure;
         if (overrides.runConflict) throw new Error(`docker: Error response from daemon: Conflict. The container name "/${argv[3]}" is already in use`);
@@ -601,6 +607,101 @@ test("issue 521 review: A to B to A stages each deployment generation and never 
   }
   expect(containers).toHaveLength(1);
   expect(intent).toBeNull();
+});
+
+/* The reopened #1216 defect, one level down. `--stage` advertises a successor
+   the operator hands over whenever they are ready; the #518 fence budget made
+   that container exit after ten minutes into a dockerd restart loop. The two
+   staging paths want opposite things from a bound, so the mode is threaded to
+   the container rather than picked once for both. */
+test("issue 1216: a bootstrap-staged successor is parked on the fence with no deadline", async () => {
+  const { ports, calls } = harness();
+
+  await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports, { fenceWait: "parked" });
+
+  const run = calls.find((argv) => argv[0] === "run");
+  expect(run).toContain(`${RUNTIME_HOST_FENCE_PARK_ENV}=1`);
+  expect(run?.some((entry) => entry.startsWith(`${RUNTIME_HOST_FENCE_WAIT_ENV}=`))).toBe(false);
+});
+
+test("issue 518: a deployment-staged successor keeps the bounded ten-minute fence wait", async () => {
+  for (const options of [undefined, { fenceWait: "handoff-budget" as const }]) {
+    const { ports, calls } = harness();
+
+    await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports, options);
+
+    const run = calls.find((argv) => argv[0] === "run");
+    expect(run).toContain(`${RUNTIME_HOST_FENCE_WAIT_ENV}=600000`);
+    expect(run?.some((entry) => entry.startsWith(`${RUNTIME_HOST_FENCE_PARK_ENV}=`))).toBe(false);
+  }
+});
+
+/* A parked generation that later becomes the predecessor must not hand its
+   park down: the next successor is staged by a deployment, whose predecessor
+   IS being asked to exit. */
+test("issue 1216: a parked predecessor never passes its park down to the next successor", async () => {
+  const parkedPredecessor = JSON.parse(predecessorInspect) as Array<Record<string, unknown>>;
+  const config = parkedPredecessor[0]!.Config as Record<string, unknown>;
+  config.Env = [...(config.Env as string[]), `${RUNTIME_HOST_FENCE_PARK_ENV}=1`];
+  const { ports, calls } = harness({ predecessorInspect: JSON.stringify(parkedPredecessor) });
+
+  await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports);
+
+  const run = calls.find((argv) => argv[0] === "run");
+  expect(run?.filter((entry) => entry.startsWith(`${RUNTIME_HOST_FENCE_PARK_ENV}=`))).toEqual([]);
+  expect(run).toContain(`${RUNTIME_HOST_FENCE_WAIT_ENV}=600000`);
+});
+
+/* The recovery tool is reached when production is already stuck, so a resume
+   dockerd refuses has to read as a runtime-host state rather than as a raw
+   daemon error from three steps in (#1216). */
+test("issue 1216: a successor that cannot be resumed is named with the state it was in", async () => {
+  const successorContainer = runtimeHostSuccessorName(revision, candidate.image);
+  const { ports, records, events } = harness({
+    successorState: "restarting",
+    startFailure: new Error(`Error response from daemon: container ${successorContainer} is restarting, wait until the container is running`),
+    handoffIntent: {
+      revision: candidate.revision,
+      image: candidate.image,
+      successorContainer,
+      predecessorId: "abc123",
+      recordedAt: "2026-07-21T08:00:00.000Z",
+    },
+  });
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", ports))
+    .rejects.toThrow(`runtime-host successor container ${successorContainer} could not be resumed - generation matches, status restarting, restarting, 0 restarts`);
+
+  expect(records).toEqual([]);
+  expect(events.some((event) => event.startsWith("docker:container update --restart no"))).toBe(false);
+});
+
+test("issue 1216: a resume of a container that is gone reports the daemon's own reason by name", async () => {
+  const successorContainer = runtimeHostSuccessorName(revision, candidate.image);
+  const { ports } = harness({
+    startFailure: new Error(`Error: No such container: ${successorContainer}`),
+    handoffIntent: {
+      revision: candidate.revision,
+      image: candidate.image,
+      successorContainer,
+      predecessorId: "abc123",
+      recordedAt: "2026-07-21T08:00:00.000Z",
+    },
+  });
+  /* The inspect that would describe it fails too, so the daemon's sentence is
+     the observation rather than a swallowed one. */
+  const inspectFails: RuntimeHostSuccessorPorts = {
+    ...ports,
+    docker: async (argv) => {
+      if (argv[0] === "container" && argv[1] === "inspect" && argv[2] === successorContainer) {
+        throw new Error(`Error: No such container: ${successorContainer}`);
+      }
+      return ports.docker(argv);
+    },
+  };
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", inspectFails))
+    .rejects.toThrow(`runtime-host successor container ${successorContainer} could not be resumed - Error: No such container: ${successorContainer}`);
 });
 
 test("issue 518: a successor that is not running never becomes the durable release", async () => {
