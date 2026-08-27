@@ -496,6 +496,43 @@ test("the Telegram report scheduler starts with the release that owns traffic", 
   expect(started).toEqual(["pipelines", "telegram-report"]);
 });
 
+test("automatic host retirement starts with the release that owns traffic, not with the account controller", async () => {
+  /* #747: ownership of a structured host and its live transports are
+     process-scoped state of the process that bound the delivery queue, so the
+     sweep can only run here. It used to hang off the account-migration
+     reconciliation, which runs in a separate inventory sidecar process where
+     every one of those reads answers nothing. Turning account migration off
+     must not stop reclaiming hosts either — retirement has its own switch. */
+  const started: string[] = [];
+  await startCurrentReleaseControllers(
+    { LLV_ACCOUNT_CONTROLLER_DISABLED: "1" },
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { started.push("pipelines"); } }),
+      loadAccountMigrationController: async () => ({ startAccountMigrationController: async () => { started.push("account"); } }),
+      loadStructuredHostRetirement: async () => ({ startStructuredHostRetirement: () => { started.push("host-retirement"); } }),
+    },
+  );
+  expect(started).toEqual(["pipelines", "host-retirement"]);
+});
+
+test("a host retirement sweep that cannot start does not take the other controllers down", async () => {
+  const started: string[] = [];
+  await startCurrentReleaseControllers(
+    {},
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { started.push("pipelines"); } }),
+      loadAccountMigrationController: async () => {
+        started.push("account-loaded");
+        return { startAccountMigrationController: async () => { started.push("account"); } };
+      },
+      loadStructuredHostRetirement: async () => { throw new Error("runtime state unavailable"); },
+    },
+  );
+  /* The account controller is still reached: a sweep that cannot start is one
+     feature down, not a release that never finished booting. */
+  expect(started).toEqual(["pipelines", "account-loaded"]);
+});
+
 test("the release that owns traffic re-provisions the Telegram connector without holding startup", async () => {
   /* #1133: the connector dies with the viewer container it is a child of, and
      used to stay dead until a consumer tripped over it — which for the Daily

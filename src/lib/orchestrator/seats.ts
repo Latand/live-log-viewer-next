@@ -182,21 +182,26 @@ function retainNewestSeat(collection: Record<string, OrchestratorSeat>, seat: Or
 }
 
 /**
- * A malformed or future-schema file reads as EMPTY, not as an error: authority
- * fails closed on an absent seat, and the next designation overwrites the
- * corrupt file — the same recovery shape the legacy record uses. Individual
- * malformed rows are dropped for the same reason.
+ * The tolerant read, with one distinction the callers above do not need and
+ * #747 does: null means the durable store could not be ESTABLISHED — an
+ * unreadable file, a torn write, a future schema — while an empty file means
+ * the store answered and holds nothing. A machine that has never designated an
+ * orchestrator has no file at all, and that is a real "no seats".
+ *
+ * Individual malformed rows are still dropped rather than refused: a row that
+ * does not normalize is not evidence of a seat, and the next designation
+ * overwrites it.
  */
-export function readOrchestratorSeatFile(): OrchestratorSeatFile {
+function readOrchestratorSeatFileOrNull(): OrchestratorSeatFile | null {
   let raw: string;
   try {
     raw = fs.readFileSync(seatsFile(), "utf8");
-  } catch {
-    return emptyFile();
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | null)?.code === "ENOENT" ? emptyFile() : null;
   }
   try {
     const parsed = JSON.parse(raw) as Partial<OrchestratorSeatFile>;
-    if (parsed.schemaVersion !== ORCHESTRATOR_SEATS_SCHEMA_VERSION) return emptyFile();
+    if (parsed.schemaVersion !== ORCHESTRATOR_SEATS_SCHEMA_VERSION) return null;
     const file = emptyFile();
     file.nextSeatEpoch = typeof parsed.nextSeatEpoch === "number" && Number.isInteger(parsed.nextSeatEpoch) && parsed.nextSeatEpoch >= 1
       ? parsed.nextSeatEpoch
@@ -251,8 +256,18 @@ export function readOrchestratorSeatFile(): OrchestratorSeatFile {
     if (file.nextSeatEpoch <= highest) file.nextSeatEpoch = highest + 1;
     return file;
   } catch {
-    return emptyFile();
+    return null;
   }
+}
+
+/**
+ * A malformed or future-schema file reads as EMPTY, not as an error: authority
+ * fails closed on an absent seat, and the next designation overwrites the
+ * corrupt file — the same recovery shape the legacy record uses. Individual
+ * malformed rows are dropped for the same reason.
+ */
+export function readOrchestratorSeatFile(): OrchestratorSeatFile {
+  return readOrchestratorSeatFileOrNull() ?? emptyFile();
 }
 
 type OrchestratorSeatMigrationEvidence = {
@@ -579,6 +594,21 @@ export function failOrchestratorSeatIntent(project: string, clientRequestId: str
 /** Every active seat, for the authority resolver. */
 export function activeOrchestratorSeats(): OrchestratorSeat[] {
   return Object.values(readOrchestratorSeatFile().seats);
+}
+
+/**
+ * Every active seat, or null when the durable store could not be established.
+ *
+ * {@link activeOrchestratorSeats} is fail-closed for AUTHORITY: an unreadable
+ * file means nobody can prove a seat, so nobody is granted one. Automatic host
+ * retirement (#747) asks the same question with the opposite consequence — a
+ * silent "no seats" would clear a live orchestrator for the kill, and an
+ * orchestrator is exactly the host that sits quiet for hours between operator
+ * messages. So it reads this one and refuses on null.
+ */
+export function activeOrchestratorSeatsOrUnknown(): OrchestratorSeat[] | null {
+  const file = readOrchestratorSeatFileOrNull();
+  return file === null ? null : Object.values(file.seats);
 }
 
 /** Active-seat evidence for the one-time identity migration. A missing store

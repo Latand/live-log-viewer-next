@@ -85,6 +85,18 @@ export function releaseVoiceSession(conversationId: string): void {
   sessions.delete(conversationId);
 }
 
+/**
+ * Conversations a live voice call is bound to right now.
+ *
+ * Automatic host retirement (#747) reads this: a realtime-bound session holds a
+ * transport that no transcript can restore, so it is never a retirement
+ * candidate. Process-scoped like the ledger it reads — a call does not survive
+ * the process, so a restarted Viewer correctly reports none.
+ */
+export function realtimeBoundConversationIds(): ReadonlySet<string> {
+  return new Set(sessions.keys());
+}
+
 export interface VoiceSelectedContextAdmissionInput {
   conversationId: string;
   /** The credential the caller presented; must be the call's own. */

@@ -38,6 +38,7 @@ import {
   type RuntimeEventCursorRecoveryReporter,
   type RuntimeEventStore,
 } from "./eventStore";
+import { NATIVE_MULTI_AGENT_DENY_FLAG } from "./hostActivityFlags";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
 import { withTelegramConnectorGrant } from "./telegramConnectorEnv";
 import {
@@ -277,10 +278,10 @@ export const CLAUDE_COMPACT_DECLINED_REASON = "compact-declined";
     observed locally took ~2.5 minutes — so the budget is generous. */
 const DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS = 5 * 60_000;
 
-/** Durable launch evidence: hosts that launched with the native multi-agent
-    denial advertise the effective denied-tool set so registry snapshots and
-    incident review (#381) can verify the restriction without the argv. */
-export const NATIVE_MULTI_AGENT_DENY_FLAG = `native-multi-agent-deny:${NATIVE_MULTI_AGENT_TOOLS.join(",")}`;
+/* The flag itself lives beside the classifier that has to recognise it as an
+   advertisement rather than as activity (#747); re-exported here because this
+   is the host that raises it. */
+export { NATIVE_MULTI_AGENT_DENY_FLAG };
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
 const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
 

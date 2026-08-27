@@ -9,6 +9,7 @@ import {
   ORCHESTRATOR_SEAT_HISTORY_CAP,
   activeOrchestratorSeats,
   activeOrchestratorSeatsForMigration,
+  activeOrchestratorSeatsOrUnknown,
   beginOrchestratorSeatIntent,
   completeOrchestratorSeatIntent,
   failOrchestratorSeatIntent,
@@ -287,6 +288,29 @@ test("a malformed file reads as empty and the epoch counter postdates everything
   raw.nextSeatEpoch = 0;
   fs.writeFileSync(path.join(sandbox, "orchestrator-seats.json"), JSON.stringify(raw), "utf8");
   expect(readOrchestratorSeatFile().nextSeatEpoch).toBe(2);
+});
+
+test("an unestablished seat store answers unknown, and an absent one answers none", () => {
+  /* Automatic host retirement (#747) asks the seat question with the opposite
+     consequence to authority: reading an unreadable file as "no seats" would
+     clear a live orchestrator for the kill, and an orchestrator is exactly the
+     host that sits quiet for hours between operator messages. A machine that
+     never designated one has no file, and that is a real "no seats". */
+  expect(activeOrchestratorSeatsOrUnknown()).toEqual([]);
+
+  const file = path.join(sandbox, "orchestrator-seats.json");
+  fs.writeFileSync(file, "{not json", "utf8");
+  expect(activeOrchestratorSeatsOrUnknown()).toBeNull();
+  /* The authority reader keeps answering empty for exactly the same file. */
+  expect(activeOrchestratorSeats()).toEqual([]);
+
+  fs.writeFileSync(file, JSON.stringify({ schemaVersion: 99, nextSeatEpoch: 1, seats: {}, pending: {}, revocations: [], history: [] }), "utf8");
+  expect(activeOrchestratorSeatsOrUnknown()).toBeNull();
+
+  fs.rmSync(file);
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
+  expect(activeOrchestratorSeatsOrUnknown()?.map((seat) => seat.conversationId)).toEqual(["conversation_a"]);
 });
 
 test("identity migration rekeys the active seat path idempotently", () => {

@@ -4,7 +4,7 @@ import path from "node:path";
 import { expect, spyOn, test } from "bun:test";
 
 import type { RuntimeEvent } from "./engineHost";
-import { FileRuntimeEventStore, reconcileRuntimeEventCursor } from "./eventStore";
+import { durableRuntimeEventTailSeq, FileRuntimeEventStore, reconcileRuntimeEventCursor } from "./eventStore";
 import { streamingVoiceDelivery } from "./voiceDelivery";
 
 test("runtime event store durably replays ordered events and ignores a partial tail", () => {
@@ -313,4 +313,55 @@ test("runtime event store rejects every structurally invalid event variant", () 
     fs.writeFileSync(filename, `${JSON.stringify(event)}\n`);
     expect(() => store.load("shape-thread")).toThrow("invalid event");
   }
+});
+
+test("the durable event tail reports the last complete record and separates unknown from empty", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-tail-"));
+  const store = new FileRuntimeEventStore(directory);
+  /* A ledger nobody has written is empty, and empty is a fact: a determined 0,
+     never an undetermined answer. */
+  expect(durableRuntimeEventTailSeq("thread-missing", directory)).toEqual({ determined: true, value: 0 });
+
+  store.append("thread-tail", { kind: "session-status", status: "idle", seq: 1 });
+  store.append("thread-tail", { kind: "turn-started", turnId: "turn-1", seq: 2 });
+  expect(durableRuntimeEventTailSeq("thread-tail", directory)).toEqual({ determined: true, value: 2 });
+
+  /* A torn append is not durable, so the tail is the last complete record. */
+  fs.appendFileSync(path.join(directory, "thread-tail.jsonl"), '{"kind":"delta","turnId":"turn-1"');
+  expect(durableRuntimeEventTailSeq("thread-tail", directory)).toEqual({ determined: true, value: 2 });
+
+  /* A tail that is not an event at all is undetermined, and a caller deciding
+     whether a host may be retired must not read that as nothing. */
+  fs.writeFileSync(path.join(directory, "thread-broken.jsonl"), "not json\n");
+  expect(durableRuntimeEventTailSeq("thread-broken", directory)).toMatchObject({ determined: false });
+
+  /* A file holding only an unterminated append holds no complete record, and
+     that too is a fact rather than an unknown. */
+  fs.writeFileSync(path.join(directory, "thread-torn-only.jsonl"), '{"kind":"delta"');
+  expect(durableRuntimeEventTailSeq("thread-torn-only", directory)).toEqual({ determined: true, value: 0 });
+});
+
+test("a final record larger than the probe's read step is still read, not reported unknown", () => {
+  /* #747 round 3: the probe read a fixed 64 KiB window and gave up when it held
+     no complete line, so a WELL-FORMED ledger whose last record was bigger than
+     the window answered "unknown" — and unknown is an input the retirement
+     predicate has to refuse on, permanently, for that ledger. The scan steps
+     backwards to the record boundary instead, so record size is not a limit. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-tail-large-"));
+  const store = new FileRuntimeEventStore(directory);
+  store.append("thread-large", { kind: "session-status", status: "idle", seq: 1 });
+  store.append("thread-large", {
+    kind: "delta",
+    turnId: "turn-1",
+    /* 200 KiB, past the old window by more than three times. */
+    text: "x".repeat(200 * 1024),
+    seq: 2,
+  });
+  expect(fs.statSync(path.join(directory, "thread-large.jsonl")).size).toBeGreaterThan(200 * 1024);
+  expect(durableRuntimeEventTailSeq("thread-large", directory)).toEqual({ determined: true, value: 2 });
+
+  /* And when the big record is the only one, so the scan runs off the front of
+     the file rather than finding a preceding boundary. */
+  store.append("thread-only-large", { kind: "delta", turnId: "turn-1", text: "y".repeat(200 * 1024), seq: 1 });
+  expect(durableRuntimeEventTailSeq("thread-only-large", directory)).toEqual({ determined: true, value: 1 });
 });

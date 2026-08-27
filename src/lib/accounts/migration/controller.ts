@@ -138,6 +138,11 @@ async function reconcileControllerRuntime(registry: AgentRegistry, files: Contro
   } catch (error) {
     console.error("[headless process reaper] reconciliation failed", error);
   }
+  /* Structured host retirement (#747) is NOT called from here. This
+     reconciliation runs in the inventory sidecar, a separate OS process that
+     never bound the structured delivery queue, so it can establish neither a
+     host's ownership nor its live transports. The sweep runs with the release
+     that owns traffic instead — see `startStructuredHostRetirement`. */
 }
 
 function reconcileControllerTasks(registry: AgentRegistry, files: ControllerScan["files"]): void {
