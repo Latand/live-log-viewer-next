@@ -1,6 +1,6 @@
 {
   "name": "agent-log-viewer",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "bin": {
     "agent-log-viewer": "bin/cli.mjs",
     "agent-log-viewer-mcp": "bin/mcp-server.mjs"
