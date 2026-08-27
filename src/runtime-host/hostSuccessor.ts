@@ -460,6 +460,7 @@ export async function stageRuntimeHostSuccessorContainer(
     const encoded = encodedPredecessorId(collision, name);
     if (!encoded) throw new Error("runtime-host successor container lacks durable predecessor identity");
     predecessorId = encoded;
+    phase("resuming a same-attempt runtime-host successor container");
     await ports.docker(["container", "start", name]);
   }
   await observeStableSuccessor(name, candidate, ports, options);

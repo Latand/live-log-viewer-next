@@ -93,6 +93,18 @@ async function command(argv: string[], options: { cwd?: string } = {}): Promise<
   return stdout.trim();
 }
 
+/** The image build is the one step that runs for minutes, so its progress goes
+    to the operator's terminal instead of into a buffer they only see if it
+    fails. */
+async function streamedCommand(argv: string[]): Promise<void> {
+  const child = Bun.spawn(argv, {
+    stdout: "inherit",
+    stderr: "inherit",
+    env: withoutWakatimeCredential(process.env),
+  });
+  if (await child.exited !== 0) throw new Error(`${argv[0]} failed`);
+}
+
 function log(line: string): void {
   console.error(`[runtime-host bootstrap] ${line}`);
 }
@@ -145,7 +157,7 @@ async function buildRuntimeHostImage(revision: string, image: string): Promise<v
   await command(["git", "--git-dir", mirrorDir, "worktree", "add", "--detach", sourceDir, revision]);
   try {
     log(`building the runtime-host image for ${revision}; this takes several minutes`);
-    await command([
+    await streamedCommand([
       "docker", "build", "--pull",
       "--build-arg", `LLV_RUNTIME_HOME=${runtimeHome}`,
       "--label", `dev.live-log-viewer.revision=${revision}`,

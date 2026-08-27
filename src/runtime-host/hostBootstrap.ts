@@ -238,10 +238,10 @@ export async function executeRuntimeHostBootstrap(
   await ports.stopPredecessor(predecessor.id);
   const fence = await awaitRuntimeHostSuccessorFence({
     successorContainer: staged.successorContainer,
-    successorPid: ports.successorPid,
-    fenceOwnerPid: ports.fenceOwnerPid,
-    sleep: ports.sleep,
-    ...(ports.now ? { now: ports.now } : {}),
+    successorPid: () => ports.successorPid(),
+    fenceOwnerPid: () => ports.fenceOwnerPid(),
+    sleep: (milliseconds) => ports.sleep(milliseconds),
+    ...(ports.now ? { now: () => ports.now!() } : {}),
     report: (line) => ports.log(line),
     timeoutMs: plan.fenceTimeoutMs,
   });
