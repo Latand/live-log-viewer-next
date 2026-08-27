@@ -356,10 +356,14 @@ const CREATE_ERROR_KEYS: Record<string, "rail.invalidName" | "rail.invalidRoot" 
 };
 
 /**
- * The directory a typed path points at, which is the unit suggestions are
- * fetched by: refining a name inside one directory filters what has already
- * been fetched, and only pointing at a new directory asks the server again.
- * A query that is not a path leaves the browse list as it is.
+ * Where a browse starts: the directory a path points at, or nothing at all.
+ *
+ * This is what the picker is asked for when it opens rather than when someone
+ * types — opening is a request to see what is around the current root, not a
+ * prefix to match, and answering it with the chosen path itself would list the
+ * one directory already in hand. Everything the operator actually types goes to
+ * the server verbatim, because the server is the only side that can look past
+ * the rows already fetched.
  */
 function suggestionScope(query: string): string {
   const trimmed = query.trim();
@@ -385,7 +389,7 @@ function CreateProjectForm({
   const [nameEdited, setNameEdited] = useState(false);
   const [root, setRoot] = useState("");
   const [dirs, setDirs] = useState<readonly string[]>([]);
-  const [scope, setScope] = useState("");
+  const [suggestQuery, setSuggestQuery] = useState("");
   const [openSignal, setOpenSignal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   /* Set on a MISSING_DIRECTORY refusal: the error line turns into a notice
@@ -396,10 +400,16 @@ function CreateProjectForm({
   /* The suggestion source the picker cannot have (issue #1223): a project that
      does not exist yet is absent from every known-directories list, so the
      rows come from the filesystem, bounded server-side to the directories
-     where this machine's projects already live. */
+     where this machine's projects already live.
+
+     The whole query goes over, not just the directory it points at. The picker
+     filters what it has been handed, and what it has been handed is one bounded
+     answer: a word matching a directory under a quiet anchor, or a name past
+     the first screenful of a crowded one, is simply not in it. Only the server
+     can look, so it is asked each time the query moves. */
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/projects/directories?q=" + encodeURIComponent(scope))
+    fetch("/api/projects/directories?q=" + encodeURIComponent(suggestQuery))
       .then(async (response) => (response.ok ? await response.json() as { dirs?: unknown } : null))
       .then((payload) => {
         if (cancelled || !Array.isArray(payload?.dirs)) return;
@@ -411,7 +421,7 @@ function CreateProjectForm({
     return () => {
       cancelled = true;
     };
-  }, [scope]);
+  }, [suggestQuery]);
 
   const chooseRoot = (next: string) => {
     setRoot(next);
@@ -422,13 +432,30 @@ function CreateProjectForm({
     if (tail && tail !== "/") setName(tail);
   };
 
+  /* Both refusals that answer with the completion do so with no root in hand,
+     so the suggestions go back to the browse as the picker reopens on it.
+     Leaving them narrowed by the query that was just refused would open the
+     completion on the empty list that query matched. */
+  const reopenPickerOnBrowse = () => {
+    setSuggestQuery("");
+    setOpenSignal((value) => value + 1);
+  };
+
   /* A root that is not a full path is a path the operator never finished, so
      the answer is the completion rather than a refusal: the message says what
-     is missing and the picker opens on the suggestions (issue #1223). */
+     is missing and the picker opens on the suggestions (issue #1223).
+
+     The rejected text does not stay in the field. The picker puts the value it
+     holds at the head of its list and opens with the head highlighted and
+     badged "current", so keeping it would open the completion on the very input
+     the completion exists to replace — Enter would commit nothing, leave the
+     same refusal standing, and the operator would have to arrow past their own
+     rejected words to reach a real directory. */
   const askForFullPath = () => {
+    setRoot("");
     setOfferCreateRoot(false);
     setError(t("rail.relativeRoot"));
-    setOpenSignal((value) => value + 1);
+    reopenPickerOnBrowse();
   };
   const inputClass = `w-full rounded-[9px] border border-border bg-canvas px-2.5 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
     isMobile ? "min-h-11" : "py-1.5"
@@ -442,7 +469,7 @@ function CreateProjectForm({
     const target = root.trim();
     if (!target) {
       setError(t("rail.invalidRoot"));
-      setOpenSignal((value) => value + 1);
+      reopenPickerOnBrowse();
       return;
     }
     if (!target.startsWith("/")) {
@@ -503,7 +530,7 @@ function CreateProjectForm({
         disabled={busy}
         ariaLabel={t("rail.newProjectRoot")}
         openSignal={openSignal}
-        onQueryChange={(query) => setScope(suggestionScope(query))}
+        onQueryChange={(query, typed) => setSuggestQuery(typed ? query.trim() : suggestionScope(query))}
         onChange={chooseRoot}
       />
       {error ? (

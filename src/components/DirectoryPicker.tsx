@@ -154,8 +154,14 @@ export function DirectoryPicker({
    * filesystem widen that list as the operator points somewhere new — which is
    * what create-project needs, since the directory it is after is precisely the
    * one no known-directories list carries.
+   *
+   * `typed` says whether the operator spelled this out or the picker merely
+   * opened on the value it already holds. The two are different questions: a
+   * typed query is a prefix to match, while an opening is a request to browse
+   * where the current directory lives, and a caller that read them alike would
+   * answer a plain "open the list" with the one path already chosen.
    */
-  onQueryChange?: (query: string) => void;
+  onQueryChange?: (query: string, typed: boolean) => void;
   /** Bumped by a caller that wants the list opened — a create form that
       refused the typed root answers with the completion, on the spot, rather
       than with a rejection the operator has to reopen the picker to act on. */
@@ -208,18 +214,41 @@ export function DirectoryPicker({
     setPristine(true);
     setActive(Math.max(known.indexOf(chosen), 0));
     setExpanded(true);
-    onQueryChange?.(value);
+    onQueryChange?.(value, false);
   };
 
-  const close = () => {
+  const close = (restoreFocus = true) => {
     setExpanded(false);
-    triggerRef.current?.focus();
+    if (restoreFocus) triggerRef.current?.focus();
   };
-  const commit = (next: string) => {
+  const commit = (next: string, restoreFocus = true) => {
     const trimmed = next.trim();
     if (trimmed && trimmed !== chosen) onChange(trimmed);
-    close();
+    close(restoreFocus);
   };
+  /**
+   * Leaving the popup by pointing somewhere else is not cancelling it
+   * (issue #1223). The filter field is where a path gets spelled out, and for
+   * create-project it is the only place the root can be typed at all: dropping
+   * that text on dismissal meant typing a path and then reaching for the
+   * Create button — which the popup covers — left the root empty and answered
+   * "Choose a directory", a step that worked before the root became a picker.
+   * So a path shape is committed on the way out. A bare filter word is not: it
+   * is not a directory, and the routes downstream resolve one against their own
+   * working directory. Escape still reverts, which is what Escape is for.
+   */
+  const dismiss = (restoreFocus: boolean) => {
+    const typed = query.trim();
+    if (!pristine && typed && looksLikeDirectoryPath(typed)) commit(typed, restoreFocus);
+    else close(restoreFocus);
+  };
+  /* The outside-press listener attaches once per opening; this ref keeps it
+     reading the freshest query. Synced in an effect — effects settle before
+     any pointer event fires. */
+  const dismissRef = useRef(dismiss);
+  useEffect(() => {
+    dismissRef.current = dismiss;
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -232,7 +261,9 @@ export function DirectoryPicker({
     const onPointerDown = (event: Event) => {
       const target = event.target as Node | null;
       if (target && rootRef.current?.contains(target)) return;
-      setExpanded(false);
+      /* No focus restore: the operator is already pointing somewhere else, and
+         pulling focus back to the trigger would fight the press they made. */
+      dismissRef.current(false);
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
@@ -271,7 +302,7 @@ export function DirectoryPicker({
         data-directory-trigger
         data-directory-value={chosen}
         title={chosen || undefined}
-        onClick={() => (open ? close() : openPicker())}
+        onClick={() => (open ? dismiss(true) : openPicker())}
         onKeyDown={(event) => {
           if (event.key !== "ArrowDown" || open) return;
           event.preventDefault();
@@ -303,7 +334,7 @@ export function DirectoryPicker({
               setQuery(event.target.value);
               setPristine(false);
               setActive(0);
-              onQueryChange?.(event.target.value);
+              onQueryChange?.(event.target.value, true);
             }}
             onKeyDown={(event) => {
               if (event.key === "ArrowDown") {

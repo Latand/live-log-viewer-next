@@ -128,6 +128,33 @@ test("the scan is bounded: too many roots and too many children never become an 
   expect(suggestDirectories("", [crowded]).length).toBe(SUGGESTION_LIMIT);
 });
 
+test("a crowded anchor spends its share of the answer, never the whole of it", () => {
+  /* One container holding a screenful of checkouts is the normal shape of a
+     working machine, and concatenate-then-truncate let it fill the answer so
+     that every later anchor — the home-directory fallback included — was
+     unreachable without typing an absolute path (issue #1223). */
+  const wide = path.join(SANDBOX, "sharing");
+  const crowded = path.join(wide, "crowded");
+  const quiet = path.join(wide, "quiet");
+  const quieter = path.join(wide, "quieter");
+  for (let index = 0; index < SUGGESTION_LIMIT + 20; index += 1) {
+    makeDirs(path.join(crowded, `child-${String(index).padStart(3, "0")}`));
+  }
+  makeDirs(path.join(quiet, "starved-idea"), path.join(quieter, "also-starved"));
+
+  const browse = suggestDirectories("", [crowded, quiet, quieter]);
+  /* Every anchor is represented, the answer is still as full as the budget
+     allows, and the rows stay grouped by root in root order. */
+  expect(browse).toContain(path.join(quiet, "starved-idea"));
+  expect(browse).toContain(path.join(quieter, "also-starved"));
+  expect(browse).toHaveLength(SUGGESTION_LIMIT);
+  expect(browse.slice(-2)).toEqual([path.join(quiet, "starved-idea"), path.join(quieter, "also-starved")]);
+  expect(browse.filter((dir) => dir.startsWith(crowded + path.sep))).toHaveLength(SUGGESTION_LIMIT - 2);
+
+  /* A prefix reaching down towards the anchors is shared the same way. */
+  expect(suggestDirectories(wide + "/", [crowded, quiet, quieter])).toContain(quieter);
+});
+
 test("roots are normalized to absolute, deduplicated paths, and the filesystem root is never one", () => {
   expect(normalizeSuggestionRoots(["/a/b/", "/a/b", "relative/path", "", "/"])).toEqual(["/a/b"]);
   expect(normalizeSuggestionRoots(["/a/b/../c"])).toEqual(["/a/c"]);

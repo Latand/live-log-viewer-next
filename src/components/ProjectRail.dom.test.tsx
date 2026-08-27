@@ -250,8 +250,12 @@ function createForm(container: HTMLElement) {
     optionValues: () => ([...container.querySelectorAll("[data-directory-option]")] as unknown as HTMLElement[])
       .map((option) => option.getAttribute("data-directory-option")),
     openPicker: () => flushSync(() => trigger().dispatchEvent(click())),
+    /* The trigger toggles: pressed while the list is open it is how the
+       operator reaches the Create button the list covers. */
+    closePicker: () => flushSync(() => trigger().dispatchEvent(click())),
     pick: (dir: string) => flushSync(() =>
       (container.querySelector(`[data-directory-option="${dir}"]`) as unknown as HTMLElement).dispatchEvent(click())),
+    typeQuery: (value: string) => flushSync(() => type(filter()!, value)),
     typePath: (value: string) => {
       flushSync(() => type(filter()!, value));
       press(filter(), "Enter");
@@ -324,9 +328,57 @@ test("create-project: typing a path stays possible, and points the suggestions a
   ui.openPicker();
   ui.typePath("/data/elsewhere/hand-typed");
   expect(ui.chosenRoot()).toBe("/data/elsewhere/hand-typed");
-  /* Suggestions follow the directory being spelled out, and refining a name
-     inside it does not ask the server again. */
-  expect(suggestionQueries).toEqual(["", "/data/elsewhere/"]);
+  /* Suggestions follow what is being spelled out, verbatim: the picker filters
+     the rows it holds, and the directory create-project is after is exactly the
+     one no list of rows carries. */
+  expect(suggestionQueries).toEqual(["", "/data/elsewhere/hand-typed"]);
+  /* Reopening on a chosen path asks about the directory it sits in — that is a
+     request to browse, not a prefix to match against the one path in hand. */
+  ui.openPicker();
+  expect(suggestionQueries).toEqual(["", "/data/elsewhere/hand-typed", "/data/elsewhere/"]);
+});
+
+/* Issue #1223: the picker can only filter the rows it was handed, and one
+   bounded answer cannot hold every anchor's contents — a machine that keeps its
+   checkouts in one container fills the whole answer from that container alone.
+   So a filter word has to reach the server, which can see the rest. */
+test("create-project: a filter word is asked of the server, not just of the rows already held", async () => {
+  suggestedDirs = ["/data/projects/crowded-01", "/data/projects/crowded-02"];
+  const ui = await openCreateForm(async () => ({ ok: true, project: "dir-0123456789abcdef0123456789abcdef" }));
+  ui.openPicker();
+  expect(ui.optionValues()).toEqual(suggestedDirs);
+
+  suggestedDirs = ["/work/quiet-anchor/starved-idea"];
+  ui.typeQuery("starved");
+  expect(suggestionQueries).toEqual(["", "starved"]);
+  await settle();
+  /* The row from the anchor the browse never reached is now listed, and a bare
+     word is still not offered as a directory of its own. */
+  expect(ui.optionValues()).toEqual(["/work/quiet-anchor/starved-idea"]);
+  ui.pick("/work/quiet-anchor/starved-idea");
+  expect(ui.chosenRoot()).toBe("/work/quiet-anchor/starved-idea");
+});
+
+/* The list covers the Create button, so reaching Create means leaving the list
+   first — which used to discard the typed root and answer "Choose a directory",
+   a step that worked before the root became a picker (issue #1223). */
+test("create-project: a path typed into the list survives closing it, and Create carries it", async () => {
+  suggestedDirs = ["/data/projects/fresh-idea"];
+  const creations: Array<[string, string]> = [];
+  const ui = await openCreateForm(async (name, root) => {
+    creations.push([name, root]);
+    return { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
+  });
+  ui.openPicker();
+  ui.typeQuery("/data/projects/typed-then-closed");
+  ui.closePicker();
+  expect(ui.pickerOpen()).toBe(false);
+  expect(ui.chosenRoot()).toBe("/data/projects/typed-then-closed");
+  /* And the name it implies arrives with it, as with any other way of choosing. */
+  expect(ui.nameInput().value).toBe("typed-then-closed");
+  ui.submit();
+  await settle();
+  expect(creations).toEqual([["typed-then-closed", "/data/projects/typed-then-closed"]]);
 });
 
 test("create-project: a typed path that a suggestion begins with is not swapped for it", async () => {
@@ -366,10 +418,14 @@ async function refuseRelativeRoot(expectedMessage: string) {
 
   expect(creations).toEqual([]);
   expect(ui.form().textContent).toContain(expectedMessage);
-  /* The completion is offered rather than a rejection: the list is open on the
-     suggestions, one click from a real path. */
+  /* The completion is offered rather than the rejection: the list is open on
+     the suggestions and leads with one, one click from a real path. The
+     rejected text is gone from the field — the picker puts the value it holds
+     at the head of its list, highlighted and badged "current", so leaving it
+     there would open the completion on the very input it exists to replace. */
   expect(ui.pickerOpen()).toBe(true);
-  expect(ui.optionValues()).toContain("/data/projects/fresh-idea");
+  expect(ui.chosenRoot()).toBe("");
+  expect(ui.optionValues()).toEqual(["/data/projects/fresh-idea"]);
   expect(ui.offerButton()).toBeUndefined();
 }
 

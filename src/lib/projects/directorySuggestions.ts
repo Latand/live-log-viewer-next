@@ -145,15 +145,46 @@ function childDirectories(directory: string, bound: SuggestionBound, prefix = ""
 }
 
 /** What the anchors offer without a path to complete: one level below each
-    root. `withRoots` adds the roots themselves, which a typed prefix reaching
-    down towards them is asking about. */
-function anchoredCandidates(bound: SuggestionBound, withRoots: boolean): string[] {
-  const candidates: string[] = [];
-  for (const root of bound.written) {
-    if (withRoots) candidates.push(root);
-    candidates.push(...childDirectories(root, bound));
+    root, kept apart by root so no anchor can spend another's share. `withRoots`
+    adds the roots themselves, which a typed prefix reaching down towards them
+    is asking about. */
+function anchoredGroups(bound: SuggestionBound, withRoots: boolean): string[][] {
+  return bound.written.map((root) => [
+    ...(withRoots ? [root] : []),
+    ...childDirectories(root, bound),
+  ]);
+}
+
+/**
+ * Spends the answer's budget across the anchors a round at a time.
+ *
+ * Concatenating the anchors and truncating once meant the first crowded one
+ * filled the whole answer and every later anchor — the $HOME fallback
+ * included — was unreachable without typing an absolute path (issue #1223).
+ * A machine that keeps its checkouts in one container holds a hundred siblings
+ * there, so that was the default experience, not an edge case.
+ *
+ * Every anchor is served its first entry before any anchor is served a second,
+ * so a starved anchor is always represented; what is left once the small
+ * anchors are exhausted still goes to whoever has more to give, so the answer
+ * stays as full as it was. The rows come back grouped by root, in root order —
+ * this is a list to read, and round-robin ordering would interleave places that
+ * have nothing to do with each other.
+ */
+function shareBudget(groups: readonly (readonly string[])[], limit: number): string[] {
+  const taken = groups.map(() => 0);
+  let total = 0;
+  let served = true;
+  while (total < limit && served) {
+    served = false;
+    for (let index = 0; index < groups.length && total < limit; index += 1) {
+      if (taken[index] >= groups[index].length) continue;
+      taken[index] += 1;
+      total += 1;
+      served = true;
+    }
   }
-  return candidates;
+  return groups.flatMap((group, index) => group.slice(0, taken[index]));
 }
 
 /** Every whitespace-separated token appears somewhere in the path — the same
@@ -191,13 +222,17 @@ export function suggestDirectories(query: string, roots: readonly string[], limi
        them. Whether the named directory may actually be read — the resolved
        half of the bound — is `childDirectories`' to answer, in one place. */
     if (parent && withinSuggestionRoots(parent, bound.written)) {
+      /* One directory read, so there is only ever one root's worth to spend. */
       return childDirectories(parent, bound, prefix).slice(0, limit);
     }
     const lowered = trimmed.toLowerCase();
-    return anchoredCandidates(bound, true)
-      .filter((directory) => directory.toLowerCase().startsWith(lowered))
-      .slice(0, limit);
+    return shareBudget(
+      anchoredGroups(bound, true).map((group) => group.filter((directory) => directory.toLowerCase().startsWith(lowered))),
+      limit,
+    );
   }
-  const candidates = anchoredCandidates(bound, false);
-  return (trimmed ? candidates.filter((directory) => matchesTokens(directory, trimmed)) : candidates).slice(0, limit);
+  return shareBudget(
+    anchoredGroups(bound, false).map((group) => (trimmed ? group.filter((directory) => matchesTokens(directory, trimmed)) : group)),
+    limit,
+  );
 }
