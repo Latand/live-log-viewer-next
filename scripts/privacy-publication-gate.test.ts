@@ -2840,6 +2840,50 @@ describe("commitMessageFindings", () => {
     expect(findings.has("email_address")).toBe(false);
   });
 
+  test("the forge support role address is exempt in a sign-off trailer", () => {
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: Dependency Tool <${forgeRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(false);
+  });
+
+  test("the forge support role address remains flagged in the commit body", () => {
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    commit(repo, `fix: route registry reports through ${forgeRole}`);
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("a support role address on another domain remains flagged in a trailer", () => {
+    const repo = gitRepo();
+    const otherRole = ["support", "forge.example.com"].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: Dependency Tool <${otherRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("an account-form no-reply address remains flagged in a trailer", () => {
+    const repo = gitRepo();
+    const accountAddress = [
+      "4242+fixture-account",
+      "users.noreply.github.com",
+    ].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: Dependency Tool <${accountAddress}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
   test("a GitHub no-reply address is still an account handle and is still flagged", () => {
     /* The carve-out is the LOCAL PART being exactly noreply, and this is why:
        `<id>+<handle>@users.noreply.github.com` reads as a no-reply address and

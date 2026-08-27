@@ -1201,12 +1201,18 @@ const commitMessageFindingClasses = new Set<FindingClass>([
  * A commit message is a publication surface and its trailers are the one part
  * of it a human never writes by hand, so they need a rule of their own. The
  * local part must be exactly `noreply`/`no-reply`: that address belongs to a
- * vendor and identifies nobody. Anything else is a person until proven
- * otherwise — including `<id>+<handle>@users.noreply.github.com`, which reads
- * as a no-reply address and is in fact an account handle with a number in
- * front of it, exactly what this gate exists to keep out of a public repo.
+ * vendor and identifies nobody. The forge also uses the `support` local part
+ * on its own `github.com` domain in automated sign-off trailers. Other local
+ * parts remain attributable, including `<id>+<handle>@users.noreply.github.com`,
+ * which is an account handle with a number in front of it.
  */
-const MACHINE_ATTRIBUTION_TRAILER = /^(?:co-authored-by|signed-off-by)\s*:\s*[^<>\r\n]*<(?:noreply|no-reply)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}>\s*$/i;
+const FORGE_ROLE_ADDRESS_PATTERN = ["support", String.raw`github\.com`].join(
+  "@",
+);
+const MACHINE_ATTRIBUTION_TRAILER = new RegExp(
+  String.raw`^(?:co-authored-by|signed-off-by)\s*:\s*[^<>\r\n]*<(?:(?:noreply|no-reply)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|${FORGE_ROLE_ADDRESS_PATTERN})>\s*$`,
+  "i",
+);
 
 /** The message as it reads once machine attribution is set aside. */
 export function commitMessageWithoutMachineTrailers(message: string): string {
