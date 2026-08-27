@@ -3250,6 +3250,26 @@ function verdictRecoveryResetRefusal(
   return refusal(`the worktree HEAD ${local.sha} differs from the last-passed commit ${pipeline.lastPassedCommit}`);
 }
 
+/** One line of the provider's own words, for the close report and the board. */
+function providerNoticeSummary(text: string): string {
+  const line = text.split("\n").map((part) => part.trim()).find(Boolean) ?? text.trim();
+  return line.length > 160 ? `${line.slice(0, 159)}\u2026` : line;
+}
+
+/**
+ * What a transcript can prove about an attempt whose host refused to stop — the
+ * only thing standing between a superseded lane and the board it cannot leave.
+ *
+ * Two shapes count, and they are siblings. A completed turn carrying a valid
+ * fenced verdict says the stage finished (#1047, #988). A turn the provider cut
+ * off — a session or model limit, an expired credential — says the stage ended
+ * without producing one (#1141): the message that ended it is right there in the
+ * final record, so the attempt is terminal by evidence and retires as failed.
+ *
+ * Silence is neither. A transcript that simply stops mid-turn proves nothing
+ * about a host that may still be working, so it falls through to null and keeps
+ * refusing the close, exactly as before.
+ */
 async function closeStopFailureEvidence(
   candidate: StageHostCandidate,
   ports: PipelinePorts,
@@ -3261,11 +3281,17 @@ async function closeStopFailureEvidence(
   }
   if (!candidate.target.agentPath) return null;
   const durable = await ports.durableTurnEvidence(candidate.attempt.effectiveRole.engine, candidate.target.agentPath);
-  if (durable?.turn !== "terminal" || !durable.message) return null;
-  if (durable.message.ts <= unixMs(candidate.attempt.startedAt)) return null;
-  const parsed = parsePipelineStageVerdict(durable.message.text);
-  if (!parsed || "failureReason" in parsed) return null;
-  return "the attempt transcript holds a completed final assistant turn with a valid fenced verdict";
+  if (durable?.turn !== "terminal") return null;
+  const startedAt = unixMs(candidate.attempt.startedAt);
+  if (durable.message && durable.message.ts > startedAt) {
+    const parsed = parsePipelineStageVerdict(durable.message.text);
+    if (parsed && !("failureReason" in parsed)) {
+      return "the attempt transcript holds a completed final assistant turn with a valid fenced verdict";
+    }
+  }
+  const interrupted = durable.terminalProviderMessage;
+  if (!interrupted || interrupted.ts <= startedAt) return null;
+  return `the attempt transcript ending on a terminal provider message with no fenced verdict: ${providerNoticeSummary(interrupted.text)}`;
 }
 
 function terminalizeAttemptForClose(candidate: StageHostCandidate, note: string, ports: PipelinePorts): void {

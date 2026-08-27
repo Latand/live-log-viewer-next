@@ -4,6 +4,9 @@ import { turnStateFromRecords } from "@/lib/accounts/migration/turnState";
 import type { FlowEngine } from "@/lib/flows/types";
 import { lastAssistantMessageFromRecords } from "@/lib/flows/findings";
 import { readStableTailRecords } from "@/lib/scanner/activity";
+import { recordValue, recordsValue, stringValue } from "@/lib/scanner/json";
+
+type RecordLike = Record<string, unknown>;
 
 /**
  * Turn evidence read straight from the stage transcript artifact — the durable
@@ -17,7 +20,74 @@ import { readStableTailRecords } from "@/lib/scanner/activity";
 export type StageTurnEvidence = {
   turn: "terminal" | "busy" | "unknown";
   message: { text: string; ts: number } | null;
+  /** The provider's own end-of-turn notice, when the record that closed the
+      turn is one: a session or model limit, an expired credential, a refusal —
+      a message the CLI writes *instead of* the agent's answer, so the turn
+      ended with nothing to parse (#1141). Null whenever the turn ended on the
+      agent's own message, and null while the turn is still open, so silence
+      can never present as one. */
+  terminalProviderMessage?: { text: string; ts: number } | null;
 };
+
+function recordTs(record: RecordLike, fallbackTs: number): number {
+  return Date.parse(String(record.timestamp ?? "")) || fallbackTs;
+}
+
+function claudeAssistantText(record: RecordLike): string {
+  return recordsValue(recordValue(record.message)?.content)
+    .filter((part) => part.type === "text")
+    .map((part) => stringValue(part.text) ?? "")
+    .join("\n")
+    .trim();
+}
+
+/** Codex turn-end records that carry a provider failure instead of a result.
+    A clean completion has no error field at all, so it yields nothing here. */
+function codexTurnEndFailure(payload: RecordLike): string | null {
+  const error = recordValue(payload.error);
+  const info = stringValue(payload.codex_error_info) ?? stringValue(error?.codex_error_info);
+  const message = stringValue(error?.message)
+    ?? stringValue(payload.error)
+    ?? (info ? stringValue(payload.message) : null);
+  return message ?? info;
+}
+
+const CODEX_TURN_END_TYPES = new Set(["task_complete", "turn_complete", "turn_completed", "turn_aborted"]);
+const CODEX_TURN_START_TYPES = new Set(["task_started", "turn_started", "user_message"]);
+
+/**
+ * The notice the provider wrote when it ended the turn, read from the record
+ * that CLOSED it — the assistant record Claude flags `isApiErrorMessage`, or
+ * the Codex turn-end record carrying a failure. Everything after that record
+ * on Claude's side is bookkeeping the CLI appends once the turn is over.
+ *
+ * Read from the closing record rather than from prose, so an agent that merely
+ * quotes a limit notice in its answer is not mistaken for one, and a later
+ * prompt that reopened the turn withdraws the evidence.
+ */
+function terminalProviderMessageFromRecords(
+  records: RecordLike[],
+  codex: boolean,
+  fallbackTs: number,
+): { text: string; ts: number } | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]!;
+    if (codex) {
+      const payload = recordValue(record.payload) ?? {};
+      const type = stringValue(payload.type) ?? "";
+      if (CODEX_TURN_START_TYPES.has(type)) return null;
+      if (!CODEX_TURN_END_TYPES.has(type)) continue;
+      const failure = codexTurnEndFailure(payload);
+      return failure ? { text: failure, ts: recordTs(record, fallbackTs) } : null;
+    }
+    if (record.type === "user") return null;
+    if (record.type !== "assistant") continue;
+    if (record.isApiErrorMessage !== true) return null;
+    const text = claudeAssistantText(record);
+    return text ? { text, ts: recordTs(record, fallbackTs) } : null;
+  }
+  return null;
+}
 
 export async function durableStageTurnEvidence(
   engine: FlowEngine,
@@ -38,5 +108,11 @@ export async function durableStageTurnEvidence(
   return {
     turn: turn.state === "terminal" ? "terminal" : turn.state === "busy" ? "busy" : "unknown",
     message,
+    /* Gated on the same turn reading the rest of the engine trusts: a provider
+       error the CLI may still retry inside an open turn keeps the busy
+       projection (#516), and so never reads as the end of the turn here. */
+    terminalProviderMessage: turn.state === "terminal"
+      ? terminalProviderMessageFromRecords(read.records, codex, fallbackTs)
+      : null,
   };
 }

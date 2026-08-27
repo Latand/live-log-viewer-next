@@ -328,13 +328,25 @@ test("an unedited rotation is still the approved default the incumbent held", ()
   expect(mandates.get(ADOPTION_MANDATE_ID)).toEqual(APPROVED);
 });
 
-test("a seat based on a default this checkout no longer carries claims no version at all", () => {
-  /* Its text cannot be checked against the one approved default that ships
-     here, so the card names it a mandate and stops there. */
+test("a seat based on a default this checkout no longer carries is still that version (#1190)", () => {
+  /* v8's text does not ship here, so there is nothing to compare the stored
+     mandate against — and having nothing to compare is no reason to drop what
+     the seat itself recorded. The current default's text decides the CURRENT
+     version and nothing else, so a historical number stands on its own. */
   const mandates = orchestratorMandateDeliveries(seatFile([
-    seat({ mandate: BESPOKE_MANDATE, promptVersion: ORCHESTRATOR_PROMPT_VERSION - 1, intent: { clientRequestId: ADOPTION_REQUEST_ID, mode: "existing", launchId: null, error: null } }),
+    seat({ mandate: BESPOKE_MANDATE, promptVersion: 8, intent: { clientRequestId: ADOPTION_REQUEST_ID, mode: "existing", launchId: null, error: null } }),
   ]));
-  expect(mandates.get(ADOPTION_MANDATE_ID)).toEqual({ kind: "unqualified" });
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBeGreaterThan(8);
+  expect(mandates.get(ADOPTION_MANDATE_ID)).toEqual({ kind: "version", version: 8 });
+});
+
+test("a seat with no recorded version at all is the operator's own text (#1190)", () => {
+  /* `custom` is what an absent number means; `unqualified` is reserved for a
+     delivery whose seat record is gone entirely (the case below). */
+  const mandates = orchestratorMandateDeliveries(seatFile([
+    seat({ mandate: BESPOKE_MANDATE, promptVersion: null, intent: { clientRequestId: ADOPTION_REQUEST_ID, mode: "existing", launchId: null, error: null } }),
+  ]));
+  expect(mandates.get(ADOPTION_MANDATE_ID)).toEqual({ kind: "custom" });
 });
 
 test("identical bytes delivered under any other identity are not the seat's mandate", () => {
