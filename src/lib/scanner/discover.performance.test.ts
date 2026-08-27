@@ -43,6 +43,7 @@ test("large-catalog reconciliation keeps event-loop lag below the controller bud
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const padding = "x".repeat(1_900);
@@ -85,6 +86,7 @@ test("pipeline status churn keeps a 100 MB growing transcript scan incremental a
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
+      "openclaw-sessions": path.join(base, "openclaw"),
     };
     await Promise.all([...Object.values(roots), stateDir].map((root) => mkdir(root, { recursive: true })));
     const flowPath = path.join(stateDir, "flows.json");

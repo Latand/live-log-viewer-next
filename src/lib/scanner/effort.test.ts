@@ -93,3 +93,37 @@ describe("entryEffort", () => {
     expect(entryEffort(entry(pathname, { pid: 42 }))).toBe("max");
   });
 });
+
+/* OpenClaw fixtures (#1207). Every id and level below is invented. */
+describe("entryEffort for OpenClaw", () => {
+  function openclawEntry(name: string, rows: unknown[]): FileEntry {
+    const pathname = writeJsonl(name, rows);
+    return entry(pathname, { root: "openclaw-sessions", engine: "openclaw", fmt: "openclaw" });
+  }
+  const thinkingLevel = (level: string, id: string) => ({
+    type: "thinking_level_change",
+    id,
+    parentId: "oc-parent",
+    timestamp: "2026-08-27T09:00:00.000Z",
+    thinkingLevel: level,
+  });
+
+  test("reads the latest thinking_level_change", () => {
+    expect(entryEffort(openclawEntry("openclaw-effort.jsonl", [
+      { type: "session", version: 3, id: "oc-session-alpha", timestamp: "2026-08-27T08:59:00.000Z", cwd: SANDBOX },
+      thinkingLevel("low", "oc-level-1"),
+      thinkingLevel("high", "oc-level-2"),
+    ]))).toBe("high");
+  });
+
+  test("accepts the two tiers only OpenClaw has", () => {
+    expect(entryEffort(openclawEntry("openclaw-off.jsonl", [thinkingLevel("off", "oc-level-off")]))).toBe("off");
+    expect(entryEffort(openclawEntry("openclaw-adaptive.jsonl", [thinkingLevel("adaptive", "oc-level-adaptive")])))
+      .toBe("adaptive");
+  });
+
+  test("an unrecognised level reports no effort", () => {
+    expect(entryEffort(openclawEntry("openclaw-unknown.jsonl", [thinkingLevel("turbo", "oc-level-unknown")])))
+      .toBeNull();
+  });
+});

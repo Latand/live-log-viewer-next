@@ -473,8 +473,9 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               {/* Account badge (issue #229): the third meta-chip, after ctx and
                   the branch chip. Shell tasks carry no account, so they skip it;
                   the id is read from the live transcript path so a migrated
-                  conversation reflects its current account. */}
-              {file.engine === "shell" ? null : (
+                  conversation reflects its current account. OpenClaw skips it
+                  for the same reason: the Viewer owns no OpenClaw account. */}
+              {file.engine === "shell" || file.engine === "openclaw" ? null : (
                 <AccountBadge
                   engine={file.engine}
                   accountId={runtime?.session.accountId ?? file.spawn?.accountId ?? accountIdFromPath(file.path)}

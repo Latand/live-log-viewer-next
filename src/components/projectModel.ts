@@ -75,6 +75,11 @@ export function isConversation(file: FileEntry): boolean {
     return lineage?.kind === "spawn" && !lineage.memberships.length && !file.handoff;
   }
   if (file.root === "codex-sessions") return !file.parent;
+  /* OpenClaw has no subagent or compaction-successor shape on disk: every
+     transcript in an agent's sessions directory is a conversation in its own
+     right (#1207). Without this arm an OpenClaw card is scanned and attributed
+     and then belongs to no board tree at all. */
+  if (file.root === "openclaw-sessions") return !file.parent;
   return false;
 }
 

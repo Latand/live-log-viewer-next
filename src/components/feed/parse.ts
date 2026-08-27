@@ -20,7 +20,7 @@ import type { GlyphName } from "../icons";
 import { hhmm } from "../utils";
 import { decodeTerminalText } from "./ansi";
 import { diffFromApplyPatch, normalizeEdit, type DiffModel, type FileDiff } from "./diff";
-import { familyOf, summarizeTool, type ArgChip, type ToolFamily } from "./tools";
+import { familyOf, summarizeTool, type ArgChip, type FeedEngine, type ToolFamily } from "./tools";
 
 /* Feed labels resolve against the active locale at build/render time; a locale
    flip rebuilds the feed (see LogFeed's memo), so cached items re-localize. */
@@ -223,7 +223,7 @@ export type CmdGroupItem = {
     changes: this kind exists only between the resolver and the card. */
 export type MandateItem = { kind: "mandate"; ts: unknown; text: string; mandate: MandateDelivery };
 export type Item =
-  | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude"; sourceId?: string }
+  | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude" | "openclaw"; sourceId?: string }
   | { kind: "user"; ts: unknown; text: string; selectedContext?: SelectedContextRef }
   | MandateItem
   | VoiceTurnItem
@@ -354,6 +354,20 @@ function tmsgAttr(attrs: string, name: string): string {
 
 function textPart(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+/** The provider value OpenClaw stamps on assistant records it synthesised
+    itself (a channel delivery mirrored back, a Gateway injection) rather than
+    on a model's answer. Repeated from `@/lib/scanner/openclawNative`, which
+    reads files and so cannot be imported into a client bundle; both definitions
+    describe the same on-disk value. */
+const OPENCLAW_SYNTHETIC_PROVIDER = "openclaw";
+
+/** Narrow a session's configured engine to the set the rows carry. */
+function feedEngine(engine: string): FeedEngine {
+  if (engine === "codex") return "codex";
+  if (engine === "openclaw") return "openclaw";
+  return "claude";
 }
 
 function rec(value: unknown): Record<string, unknown> {
@@ -1152,7 +1166,7 @@ function sameCodexTextAtTime(leftTs: unknown, leftText: unknown, rightTs: unknow
  */
 export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const { showSvc, lineFilter } = cfg;
-  const jsonl = cfg.fmt === "claude" || cfg.fmt === "codex";
+  const jsonl = cfg.fmt === "claude" || cfg.fmt === "codex" || cfg.fmt === "openclaw";
 
   const entries: StoredEntry[] = [];
   const calls = new Map<string, CallRec>();
@@ -1192,6 +1206,15 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
      provisional record keeps a live tail visible until its echo arrives. */
   let pendingCodexUsers: PendingCodexUser[] = [];
   let codexCompacted: { src: number } | null = null;
+  /* The provider·model pair the last real OpenClaw assistant record ran on,
+     with the source line it came from. A change emits one service row; the
+     first pair a window sees is its baseline and announces nothing. */
+  let openclawModel: { pair: string; src: number } | null = null;
+  /* For each emitted model-change row, the line that established the pair it
+     changed FROM. Once that line slides out of the window, a fresh parse of the
+     shortened window would read the new pair as its baseline and emit no row,
+     so the window is re-parsed whole instead of keeping a row nothing justifies. */
+  let openclawModelBoundaries: number[] = [];
   let plainBlock: { lines: string[]; src: number } | null = null;
   let lastPlainCall: CallRec | null = null;
   /* Every ScheduleWakeup call, in transcript order. The active wakeup is the
@@ -1308,7 +1331,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (!text.trim()) return null;
     const firstSeq = pushSeq;
     if (pushBlobIfHuge(text, sourceId)) return { firstSeq, lastSeq: pushSeq - 1 };
-    const engine = cfg.engine === "codex" ? "codex" : "claude";
+    const engine = feedEngine(cfg.engine);
     if (pushStructured(ts, text, (segment) => push({
       kind: "prose",
       ts,
@@ -1371,7 +1394,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     id: string;
     tool: string;
     args?: Record<string, unknown>;
-    engine: "claude" | "codex";
+    engine: FeedEngine;
     command?: string;
     diff?: DiffModel;
     lang?: string | null;
@@ -1483,7 +1506,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
      a synthetic id keeps the row addressable (and the last one attachable). */
   const addShell = (ts: unknown, command: string, callId?: string, tool = "Bash", extraArgs?: Record<string, unknown>): ToolEvent => {
     const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
-    const engine = cfg.engine === "codex" ? "codex" : "claude";
+    const engine = feedEngine(cfg.engine);
     const event = newToolEvent({ ts, id, tool, args: { ...extraArgs, command }, engine, command });
     const rec = registerCall(event);
     if (!callId) lastPlainCall = rec;
@@ -2048,6 +2071,75 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     }
     addSvc(textPart(obj.type) || tr("render.record"));
   };
+  /* OpenClaw needs its own renderer rather than a translation into Claude's
+     shape: it stores a tool result as a TOP-LEVEL record with its own
+     `toolResult` role, where Claude nests one as a `tool_result` content block
+     inside a "user" record. Translating would synthesize user records the
+     operator never sent, so this arm calls `addOutput` directly. */
+  const renderOpenclaw = (obj: Record<string, unknown>) => {
+    const ts = obj.timestamp;
+    if (obj.type !== "message") {
+      if (obj.type === "model_change") {
+        const label = [textPart(obj.provider), textPart(obj.modelId)].filter(Boolean).join(" · ");
+        return addSvc(label || "model_change");
+      }
+      if (obj.type === "thinking_level_change") {
+        return addSvc(`thinking · ${textPart(obj.thinkingLevel) || tr("render.record")}`);
+      }
+      if (obj.type === "custom") return addSvc(textPart(obj.customType) || "custom");
+      return addSvc(textPart(obj.type) || tr("render.record"));
+    }
+    const message = rec(obj.message);
+    const content = message.content;
+    const role = textPart(message.role);
+    if (role === "user") {
+      if (typeof content === "string") return addUserText(ts, content);
+      for (const part of arr(content)) {
+        if (part.type === "text") addUserText(ts, textPart(part.text));
+      }
+      return;
+    }
+    if (role === "toolResult") {
+      /* The record itself owns the call id; the blocks carry camelCase and
+         snake_case aliases of it, which are copies rather than a second id. */
+      const callId = textPart(message.toolCallId);
+      const isError = message.isError === true;
+      const text = arr(content)
+        .map((part) => (part.type === "toolResult" ? textPart(part.content) || textPart(part.text) : textPart(part.text)))
+        .filter(Boolean)
+        .join("\n");
+      return addOutput(callId, text, isError);
+    }
+    if (role !== "assistant") return void addSvc(role || tr("render.record"));
+    /* A record a real provider served may announce a model switch; the
+       synthetic ones OpenClaw writes for itself carry labels no provider ran,
+       so they never move the displayed pair. */
+    if (textPart(message.provider) !== OPENCLAW_SYNTHETIC_PROVIDER) {
+      const pair = `${textPart(message.provider)} · ${textPart(message.model)}`;
+      if (pair !== openclawModel?.pair) {
+        if (openclawModel !== null) {
+          openclawModelBoundaries.push(openclawModel.src);
+          addSvc(pair);
+        }
+        openclawModel = { pair, src: curSrc };
+      }
+    }
+    const sourceId = textPart(obj.id) || undefined;
+    for (const part of arr(content)) {
+      if (part.type === "text" && textPart(part.text).trim()) {
+        addProse(ts, textPart(part.text), sourceId);
+      } else if (part.type === "thinking" && textPart(part.thinking).trim()) {
+        push({ kind: "think", text: textPart(part.thinking).replace(/\s+/g, " ").trim() });
+      } else if (part.type === "toolCall") {
+        const name = textPart(part.name) || "tool";
+        const args = rec(part.arguments ?? part.input);
+        const id = textPart(part.id) || "plain-" + pushSeq + "-" + String(ts ?? "");
+        const command = familyOf(name) === "shell" ? textPart(args.command ?? args.cmd) : undefined;
+        const lang = familyOf(name) === "read" ? extLang(textPart(args.file_path ?? args.path)) : undefined;
+        registerCall(newToolEvent({ ts, id, tool: name, args, engine: "openclaw", command, lang }));
+      }
+    }
+  };
   /* Job .output logs echo the final review/citation block as bare lines after the
      [codex] stream ends; collect that run so it renders as one structured card
      instead of per-line raw rows. Falls back to the old raw rows when the block
@@ -2125,6 +2217,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         const obj = JSON.parse(line);
         if (obj && typeof obj === "object" && !Array.isArray(obj)) {
           if (cfg.fmt === "claude") renderClaude(obj);
+          else if (cfg.fmt === "openclaw") renderOpenclaw(obj);
           else renderCodex(obj);
         } else addRecord(null, "malformed_record", { value: obj });
       } catch {
@@ -2144,6 +2237,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     codexAssistantRecord = null;
     pendingCodexUsers = [];
     codexCompacted = null;
+    openclawModel = null;
+    openclawModelBoundaries = [];
     plainBlock = null;
     lastPlainCall = null;
     wakeupCalls.length = 0;
@@ -2181,6 +2276,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (codexAssistantRecord && codexAssistantRecord.src < start) codexAssistantRecord = null;
     pendingCodexUsers = pendingCodexUsers.filter((pending) => pending.src >= start);
     if (codexCompacted && codexCompacted.src < start) codexCompacted = null;
+    if (openclawModel && openclawModel.src < start) openclawModel = null;
+    const openclawBoundaryEvicted = openclawModelBoundaries.some((src) => src < start);
+    openclawModelBoundaries = openclawModelBoundaries.filter((src) => src >= start);
     if (lastPlainCall && entryIndex(lastPlainCall.seq) < 0) lastPlainCall = null;
     /* Drop wakeup calls whose entry slid out of the window; recompute so the
        active/superseded assignment matches a fresh parse of the shortened
@@ -2190,7 +2288,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (entryIndex(wakeupCalls[i].seq) < 0) { wakeupCalls.splice(i, 1); wakeupsEvicted = true; }
     }
     if (wakeupsEvicted) recomputeWakeupStates();
-    return crossedEchoSeam || (plainBlock !== null && plainBlock.src < start);
+    return crossedEchoSeam || openclawBoundaryEvicted || (plainBlock !== null && plainBlock.src < start);
   };
 
   /* Collapses a run of >=2 consecutive foldable tool entries into one cmd-group

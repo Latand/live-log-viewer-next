@@ -1,4 +1,6 @@
+import { openclawMessage, openclawProviderAssistant } from "@/lib/scanner/openclawNative";
 import { recordValue, recordsValue, stringValue } from "@/lib/scanner/json";
+import type { TranscriptEngine } from "@/lib/types";
 
 import type { TurnState } from "./contracts";
 
@@ -87,10 +89,42 @@ export function claudeRecoveryTailRelease(records: RecordLike[]): { terminalAt: 
   return null;
 }
 
+/** OpenClaw's turn evidence, read backwards from the newest record.
+ *
+ * `stopReason` on an assistant record is the whole signal: `toolUse` means the
+ * model asked for a tool and the turn continues, while `stop`, `error` and
+ * `aborted` all end it. Tool-result records are skipped so the assistant record
+ * that requested the tool decides, and a user record reached before any
+ * assistant record is a prompt still waiting for its first answer.
+ *
+ * The provider qualifier is load-bearing. OpenClaw appends assistant records of
+ * its own — a channel delivery mirrored back, a Gateway injection — always with
+ * `stopReason: "stop"`, and they land in the middle of real turns. Taking the
+ * tail record unconditionally would report a session sitting inside a tool call
+ * as finished and drop it out of busy grading. */
+function openclawTurnState(records: RecordLike[]): TurnState {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]!;
+    const message = openclawMessage(record);
+    if (!message) continue;
+    if (message.role === "assistant") {
+      if (!openclawProviderAssistant(record)) continue;
+      const stop = stringValue(message.stopReason);
+      if (stop === "stop" || stop === "error" || stop === "aborted") {
+        return { state: "terminal", source: "lifecycle", terminalAt: timestamp(record) };
+      }
+      return { state: "busy", source: "assistant", terminalAt: null };
+    }
+    if (message.role === "user") return { state: "busy", source: "lifecycle", terminalAt: null };
+  }
+  return { state: "unknown", source: "empty", terminalAt: null };
+}
+
 /** The newest authoritative lifecycle or tool event wins. Assistant prose
     cannot close an active turn because it commonly precedes tool work. */
-export function turnStateFromRecords(records: RecordLike[], codex: boolean, authoritative = false): TurnState {
-  if (codex) {
+export function turnStateFromRecords(records: RecordLike[], engine: TranscriptEngine, authoritative = false): TurnState {
+  if (engine === "openclaw") return openclawTurnState(records);
+  if (engine === "codex") {
     let turnOpen = false;
     let terminalAt: string | null = null;
     let terminalSeen = false;

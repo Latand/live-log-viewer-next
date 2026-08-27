@@ -208,13 +208,16 @@ export function collectFileScanInWorker(
         if (currentScan) {
           (runtime.transcriptIndexScheduler ?? scheduleTranscriptIndex)({
             complete: completed.complete,
-            sources: completedConversationCatalog.map((entry) => ({
+            /* Same exclusion as `transcriptIndexFeed`: the full-text index has
+               no OpenClaw record parser and its engine column admits two
+               values. */
+            sources: completedConversationCatalog.flatMap((entry) => (entry.engine === "openclaw" ? [] : [{
               path: entry.path,
               project: entry.project,
               engine: entry.engine,
               size: entry.size,
               mtimeMs: entry.mtime * 1_000,
-            })),
+            }])),
           });
         }
       }

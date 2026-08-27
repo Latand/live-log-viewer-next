@@ -32,6 +32,22 @@ describe("board clusters", () => {
     expect(clusters.some((cluster) => cluster.key.startsWith("task::"))).toBe(false);
   });
 
+  test("an OpenClaw card keeps its own identity colour on the board (#1207)", () => {
+    const live: FileEntry = {
+      path: "/openclaw/agents/primary/sessions/oc-session-alpha.jsonl",
+      root: "openclaw-sessions", name: "oc-session-alpha.jsonl", project: "project", title: "Live OpenClaw agent",
+      engine: "openclaw", kind: "session", fmt: "openclaw", parent: null, mtime: 1, size: 1, activity: "live",
+      proc: null, pid: null, model: null, pendingQuestion: null, waitingInput: null,
+    };
+    const layout = {
+      groups: [],
+      nodes: [{ x: 0, y: 0, w: 600, h: 780, file: live, isRoot: true }],
+      stacks: [], decks: [], drafts: [], slots: [],
+    } as unknown as SchemeLayout;
+    expect(boardClusters(layout, new Set<string>()).map((cluster) => cluster.color))
+      .toEqual(["var(--color-openclaw)"]);
+  });
+
   test("keeps title text beyond the resting chip segment for progressive reveal", () => {
     const title = "Repair durable pipeline ownership while preserving every queued reviewer conversation title";
     const live: FileEntry = {

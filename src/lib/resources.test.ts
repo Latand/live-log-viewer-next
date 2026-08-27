@@ -2845,7 +2845,7 @@ describe("resource recurring reads", () => {
       mkdirSync(state, { recursive: true });
       writeFileSync(path.join(state, "files-scan-snapshot.json"), JSON.stringify({
         version: 1,
-        schemaVersion: 9,
+        schemaVersion: 10,
         snapshot: { complete: true, files: [], projectCatalog: [] },
       }));
       process.env.HOME = home;

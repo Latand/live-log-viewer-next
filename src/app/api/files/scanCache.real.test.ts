@@ -26,7 +26,7 @@ fs.mkdirSync(sessions, { recursive: true });
 
 const { listFilesWithProjectCatalog } = await import("@/lib/scanner");
 const { ROOTS } = await import("@/lib/scanner/roots");
-const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
+const { cachedFileScan, currentFileScan, persistedFileScanSnapshot, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
 const { linkEntries } = await import("@/lib/scanner/links");
 const { activityVerdict, transcriptTurnResult } = await import("@/lib/scanner/activity");
 const { entryEffort } = await import("@/lib/scanner/effort");
@@ -151,10 +151,10 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
     expect(persisted).toBeDefined();
     const mtimeMs = persisted!.mtime * 1000;
     const caches = cacheStore.__llvCaches ?? {};
-    expect(caches["turn-evidence-v2"]?.get(`authoritative:${transcript}`)).toMatchObject({
+    expect(caches["turn-evidence-v3"]?.get(`authoritative:${transcript}`)).toMatchObject({
       size: persisted!.size,
       mtimeMs,
-      codex: true,
+      engine: "codex",
       authoritative: true,
       turn: { state: "terminal", source: "lifecycle" },
       composerReleased: false,
@@ -342,7 +342,7 @@ test("a persisted completed generation primes permanent lineage facts", async ()
     fs.mkdirSync(testStateDir, { recursive: true });
     fs.writeFileSync(path.join(testStateDir, "files-scan-snapshot.json"), JSON.stringify({
       version: 1,
-      schemaVersion: 9,
+      schemaVersion: 10,
       snapshot: {
         complete: true,
         files: [sourceEntry, taskEntry, predecessorEntry, successorEntry],
@@ -591,12 +591,12 @@ test("a persisted Claude result rebuilds recovery evidence while a busy assistan
     const restarted = await cachedFileScan(undefined, undefined, 0);
     const restartedResult = restarted.snapshot.files.find((entry) => entry.path === resultPath)!;
     const restartedAssistant = restarted.snapshot.files.find((entry) => entry.path === assistantPath)!;
-    expect(transcriptTurnResult(resultPath, restartedResult.size, restartedResult.mtime * 1000, false)).toMatchObject({
+    expect(transcriptTurnResult(resultPath, restartedResult.size, restartedResult.mtime * 1000, "claude")).toMatchObject({
       complete: true,
       turn: { state: "terminal", source: "lifecycle" },
     });
     expect(transcriptReads).toBe(1);
-    expect(transcriptTurnResult(assistantPath, restartedAssistant.size, restartedAssistant.mtime * 1000, false)).toMatchObject({
+    expect(transcriptTurnResult(assistantPath, restartedAssistant.size, restartedAssistant.mtime * 1000, "claude")).toMatchObject({
       complete: true,
       turn: { state: "busy", source: "assistant" },
     });
@@ -605,9 +605,9 @@ test("a persisted Claude result rebuilds recovery evidence while a busy assistan
     fs.appendFileSync(resultPath, "\n");
     const changed = fs.statSync(resultPath);
     failPath = resultPath;
-    expect(transcriptTurnResult(resultPath, changed.size, changed.mtimeMs, false).complete).toBe(false);
+    expect(transcriptTurnResult(resultPath, changed.size, changed.mtimeMs, "claude").complete).toBe(false);
     failPath = null;
-    expect(transcriptTurnResult(resultPath, changed.size, changed.mtimeMs, false)).toMatchObject({
+    expect(transcriptTurnResult(resultPath, changed.size, changed.mtimeMs, "claude")).toMatchObject({
       complete: true,
       turn: { state: "terminal", source: "lifecycle" },
     });
@@ -665,7 +665,7 @@ test("a cold restart after upgrade rejects pre-#406 persisted lastTurn boundarie
       schemaVersion?: number;
       snapshot: { files: FileEntry[] };
     };
-    expect(persisted.schemaVersion).toBe(9);
+    expect(persisted.schemaVersion).toBe(10);
     delete persisted.schemaVersion;
     const persistedEntry = persisted.snapshot.files.find((entry) => entry.path === transcript)!;
     persistedEntry.lastTurn = { startedAt: echoStartedAt, endedAt };
@@ -683,7 +683,7 @@ test("a cold restart after upgrade rejects pre-#406 persisted lastTurn boundarie
     /* The recovery scan re-stamps the snapshot with the current schema, so
        the next restart warm-starts on the repaired boundary. */
     const restamped = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as { schemaVersion?: number };
-    expect(restamped.schemaVersion).toBe(9);
+    expect(restamped.schemaVersion).toBe(10);
     for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
     resetFilesRouteCacheForTests();
     const warm = await cachedFileScan(undefined, undefined, 0);
@@ -1341,6 +1341,76 @@ test("a restart served from the persisted scan cache adopts a Codex fork without
     fs.readSync = originalRead;
     fs.rmSync(fixtureDir, { recursive: true, force: true });
     process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+  }
+}, 30_000);
+
+/* Issue #1207: a persisted scan snapshot carrying OpenClaw entries must survive
+   validation on restart, and its turn evidence must be primed under the OpenClaw
+   discriminator. Every identifier below is invented. */
+test("a persisted snapshot keeps its OpenClaw entries and primes their turn evidence", async () => {
+  const testStateDir = path.join(sandbox, "openclaw-persisted-state");
+  const stateDirBefore = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = testStateDir;
+  const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+  try {
+    const sessionsDir = path.join(sandbox, "openclaw", "agents", "primary", "sessions");
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    const transcript = path.join(sessionsDir, "oc-session-alpha.jsonl");
+    fs.writeFileSync(transcript, [
+      JSON.stringify({ type: "session", version: 3, id: "oc-header", timestamp: "2026-08-27T09:00:00.000Z", cwd: sandbox }),
+      JSON.stringify({
+        type: "message",
+        id: "oc-assistant-1",
+        parentId: "oc-parent",
+        timestamp: "2026-08-27T09:00:01.000Z",
+        message: { role: "assistant", provider: "demo-provider", model: "demo-model", api: "demo-api", stopReason: "toolUse", content: [] },
+      }),
+    ].join("\n") + "\n");
+    const stat = fs.statSync(transcript);
+    const entry: FileEntry = {
+      path: transcript,
+      root: "openclaw-sessions",
+      name: "oc-session-alpha.jsonl",
+      project: "openclaw",
+      title: "Invented OpenClaw prompt",
+      engine: "openclaw",
+      kind: "session",
+      fmt: "openclaw",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "live",
+      activityReason: "jsonl_turn_open",
+      derivationComplete: true,
+      proc: null,
+      pid: null,
+      model: "demo-model",
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+    fs.mkdirSync(testStateDir, { recursive: true });
+    fs.writeFileSync(path.join(testStateDir, "files-scan-snapshot.json"), JSON.stringify({
+      version: 1,
+      schemaVersion: 10,
+      snapshot: { complete: true, files: [entry], projectCatalog: [] },
+    }));
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+
+    /* Reading the persisted snapshot is what runs the validator; a rejected
+       entry leaves no primed evidence at all. */
+    expect(persistedFileScanSnapshot()?.files.map((file) => file.path)).toEqual([transcript]);
+    await cachedFileScan(undefined, undefined, 0);
+    expect(transcriptTurnResult(transcript, entry.size, stat.mtimeMs, "openclaw").turn)
+      .toMatchObject({ state: "busy" });
+    expect(cacheStore.__llvCaches?.model?.get(transcript))
+      .toEqual([entry.size, stat.mtimeMs, { display: "demo-model", launch: null }]);
+  } finally {
+    if (stateDirBefore === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = stateDirBefore;
     resetFilesRouteCacheForTests();
     for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
     fs.rmSync(testStateDir, { recursive: true, force: true });

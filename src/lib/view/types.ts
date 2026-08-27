@@ -1,4 +1,4 @@
-import type { Activity, Engine, FileEntry } from "@/lib/types";
+import type { Activity, Engine, FileEntry, TranscriptEngine } from "@/lib/types";
 
 export const VIEW_SCHEMA_VERSION = 1 as const;
 export const MAX_PRESENCE_BYTES = 32 * 1024;
@@ -78,7 +78,7 @@ export interface SnapshotConversation {
   path: string;
   project: string;
   title: string;
-  engine: Extract<Engine, "claude" | "codex">;
+  engine: TranscriptEngine;
   model: string | null;
   activity: Activity;
   proc: FileEntry["proc"];

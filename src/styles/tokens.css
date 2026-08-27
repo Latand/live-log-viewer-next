@@ -108,6 +108,8 @@
   --color-codex-soft: #e8f0fb;
   --color-claude: #d97757;
   --color-claude-soft: #faeee9;
+  --color-openclaw: #b3407a;
+  --color-openclaw-soft: #fbeaf3;
 
   /* ── §1.6 Motion ───────────────────────────────────────────────────────── */
   --motion-fast: 120ms; /* hover, press, chip state         */
@@ -187,6 +189,8 @@
     --color-codex-soft: #152238;
     --color-claude: #e08a6d;
     --color-claude-soft: #2b1c15;
+    --color-openclaw: #e888b6;
+    --color-openclaw-soft: #2e1622;
 
     --color-user: #2a2a33;
 
@@ -242,6 +246,8 @@
   --color-codex-soft: #152238;
   --color-claude: #e08a6d;
   --color-claude-soft: #2b1c15;
+  --color-openclaw: #e888b6;
+  --color-openclaw-soft: #2e1622;
 
   --color-user: #2a2a33;
 

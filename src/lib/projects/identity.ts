@@ -43,8 +43,18 @@ export function projectIdentityFromDirectory(cwd: string): DirectoryProjectIdent
   const base = path.basename(resolved);
   if (!base || resolved === path.sep) return null;
   const displayName = resolved === os.homedir() ? `home-${base}` : base;
-  const digest = crypto.createHash("sha256").update(`dir:${resolved}`).digest("hex").slice(0, 32);
-  return { project: `dir-${digest}`, displayName };
+  return { project: directoryProjectId(resolved), displayName };
+}
+
+/** The durable id of a directory identity, over an already-resolved path.
+    Exported because a recognizer whose whole purpose is surviving the
+    directory's deletion cannot go through {@link projectIdentityFromDirectory}:
+    that one resolves symlinks while the path exists and stops resolving once it
+    is gone, so the same directory would mint two different ids across the
+    deletion boundary. Such a caller resolves the path itself, once, and asks
+    for the digest — which keeps the id shape defined in exactly one place. */
+export function directoryProjectId(resolvedPath: string): string {
+  return `dir-${crypto.createHash("sha256").update(`dir:${resolvedPath}`).digest("hex").slice(0, 32)}`;
 }
 
 export function displayNameFromProjectIdentity(project: string): string {

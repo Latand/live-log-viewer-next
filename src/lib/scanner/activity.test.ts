@@ -54,48 +54,48 @@ describe("turnStateFromRecords (claude)", () => {
     const unknown = { state: "unknown" as const, source: "empty" as const, terminalAt: null };
     const evidenceCacheCapacity = 4_096;
     for (let index = 0; index < evidenceCacheCapacity + 904; index += 1) {
-      primeTranscriptTurnEvidence(`/cache-primer-${index}.jsonl`, 1, 1, false, unknown);
+      primeTranscriptTurnEvidence(`/cache-primer-${index}.jsonl`, 1, 1, "claude", unknown);
     }
-    transcriptTurnResult(pathname, stat.size, stat.mtimeMs, false, false);
-    recordTranscriptComposerRelease(pathname, stat.size, stat.mtimeMs, false);
+    transcriptTurnResult(pathname, stat.size, stat.mtimeMs, "claude", false);
+    recordTranscriptComposerRelease(pathname, stat.size, stat.mtimeMs, "claude");
     for (let index = 0; index < evidenceCacheCapacity - 2; index += 1) {
-      primeTranscriptTurnEvidence(`/cache-churn-${index}.jsonl`, 1, 1, false, unknown);
+      primeTranscriptTurnEvidence(`/cache-churn-${index}.jsonl`, 1, 1, "claude", unknown);
     }
-    expect(transcriptTurnResult(pathname, stat.size, stat.mtimeMs, false).composerReleased).toBe(true);
-    primeTranscriptTurnEvidence("/cache-churn-final.jsonl", 1, 1, false, unknown);
+    expect(transcriptTurnResult(pathname, stat.size, stat.mtimeMs, "claude").composerReleased).toBe(true);
+    primeTranscriptTurnEvidence("/cache-churn-final.jsonl", 1, 1, "claude", unknown);
 
-    transcriptTurnResult(pathname, stat.size, stat.mtimeMs, false, false);
+    transcriptTurnResult(pathname, stat.size, stat.mtimeMs, "claude", false);
 
-    expect(transcriptTurnResult(pathname, stat.size, stat.mtimeMs, false).composerReleased).toBe(true);
+    expect(transcriptTurnResult(pathname, stat.size, stat.mtimeMs, "claude").composerReleased).toBe(true);
   });
 
   test("mid-turn narration — text record before its tool_use lands — keeps the turn open", () => {
     /* The exact window that mislabeled working subagents as «returned with
        result»: Claude appends the narration record first, then the tool_use. */
     const records = [{ type: "user" }, assistant(null, "thinking"), assistant(null, "text")];
-    expect(turnStateFromRecords(records, false)).toBe("busy");
+    expect(turnStateFromRecords(records, "claude")).toBe("busy");
   });
 
   test("end_turn closes the turn", () => {
     const records = [{ type: "user" }, assistant("end_turn", "text")];
-    expect(turnStateFromRecords(records, false)).toBe("done");
+    expect(turnStateFromRecords(records, "claude")).toBe("done");
   });
 
   test("stop_sequence closes the turn", () => {
-    expect(turnStateFromRecords([assistant("stop_sequence", "text")], false)).toBe("done");
+    expect(turnStateFromRecords([assistant("stop_sequence", "text")], "claude")).toBe("done");
   });
 
   test("tool_use stop_reason keeps the turn open", () => {
-    expect(turnStateFromRecords([assistant("tool_use", "tool_use")], false)).toBe("busy");
+    expect(turnStateFromRecords([assistant("tool_use", "tool_use")], "claude")).toBe("busy");
   });
 
   test("trailing user record (tool result pending) keeps the turn open", () => {
     const records = [assistant("tool_use", "tool_use"), { type: "user" }];
-    expect(turnStateFromRecords(records, false)).toBe("busy");
+    expect(turnStateFromRecords(records, "claude")).toBe("busy");
   });
 
   test("no assistant/user records yields no verdict", () => {
-    expect(turnStateFromRecords([{ type: "summary" }], false)).toBeNull();
+    expect(turnStateFromRecords([{ type: "summary" }], "claude")).toBeNull();
   });
 
   test("a restart prime cannot disable the recovery-release host fence", () => {
@@ -106,9 +106,9 @@ describe("turnStateFromRecords (claude)", () => {
     );
     const stat = fs.statSync(pathname);
     const terminal = { state: "terminal" as const, source: "lifecycle" as const, terminalAt: OAUTH_FAILURE_AT };
-    primeTranscriptTurnEvidence(pathname, stat.size, stat.mtimeMs, false, terminal);
+    primeTranscriptTurnEvidence(pathname, stat.size, stat.mtimeMs, "claude", terminal);
 
-    expect(transcriptTurnResult(pathname, stat.size, stat.mtimeMs, false).recoveryReleased).toBe(true);
+    expect(transcriptTurnResult(pathname, stat.size, stat.mtimeMs, "claude").recoveryReleased).toBe(true);
   });
 });
 
@@ -116,18 +116,18 @@ describe("turnStateFromRecords (codex)", () => {
   const payload = (type: string, extra: Record<string, unknown> = {}) => ({ type: "event_msg", payload: { type, ...extra } });
 
   test("lifecycle events are authoritative", () => {
-    expect(turnStateFromRecords([payload("task_started")], true)).toBe("busy");
-    expect(turnStateFromRecords([payload("task_started"), payload("task_complete")], true)).toBe("done");
+    expect(turnStateFromRecords([payload("task_started")], "codex")).toBe("busy");
+    expect(turnStateFromRecords([payload("task_started"), payload("task_complete")], "codex")).toBe("done");
   });
 
   test("interim agent_message after tool activity falls back to done only without newer lifecycle", () => {
     const records = [payload("task_started"), payload("function_call"), payload("agent_message")];
-    expect(turnStateFromRecords(records, true)).toBe("busy");
+    expect(turnStateFromRecords(records, "codex")).toBe("busy");
   });
 
   test("token_count and reasoning records are ignored", () => {
     const records = [payload("task_complete"), payload("token_count"), payload("reasoning")];
-    expect(turnStateFromRecords(records, true)).toBe("done");
+    expect(turnStateFromRecords(records, "codex")).toBe("done");
   });
 });
 

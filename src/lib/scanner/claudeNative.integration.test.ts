@@ -71,7 +71,7 @@ test("the sidechain yields real messages, tool activity, and an open turn state"
 
   const st = fs.statSync(child);
   // Trailing tool_use with no result → the subagent is mid-turn.
-  expect(transcriptTurnResult(child, st.size, st.mtimeMs, false).turn.state).toBe("busy");
+  expect(transcriptTurnResult(child, st.size, st.mtimeMs, "claude").turn.state).toBe("busy");
   const verdict = activityVerdict("claude-projects", child, st.mtimeMs / 1000, st.size);
   expect(verdict.reason).toBe("jsonl_turn_open");
 });
@@ -83,6 +83,7 @@ test("discovery surfaces the Workflow subagent but never its journal bookkeeping
     "codex-sessions": path.join(SANDBOX, "codex-sessions"),
     "claude-projects": ROOT,
     "claude-tasks": path.join(SANDBOX, "claude-tasks"),
+    "openclaw-sessions": path.join(SANDBOX, "openclaw"),
   };
   fs.mkdirSync(roots["codex-sessions"], { recursive: true });
   fs.mkdirSync(roots["claude-tasks"], { recursive: true });
