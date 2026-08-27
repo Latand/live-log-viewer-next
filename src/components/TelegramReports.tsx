@@ -75,6 +75,7 @@ export function reportErrorKey(code: string | null): Parameters<TFunction>[0] {
     reports_disabled: "telegram.report.err.reports_disabled",
     run_in_progress: "telegram.report.err.run_in_progress",
     account_check_failed: "telegram.report.err.account_check_failed",
+    connector_unavailable: "telegram.report.err.connector_unavailable",
     sources_failed: "telegram.report.err.sources_failed",
     launch_failed: "telegram.report.err.launch_failed",
     run_ended_without_report: "telegram.report.err.run_ended_without_report",

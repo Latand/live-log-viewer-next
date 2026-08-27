@@ -14,6 +14,7 @@ process.env.LLV_TELEGRAM_MCP_PORT = "59809";
 
 const {
   CHAT_PAGE_LIMIT,
+  awaitTelegramConnectorReady,
   callTelegramConnectorWithReadiness,
   connectorReadPort,
   listReportGroups,
@@ -550,6 +551,117 @@ test("repeated post-readiness failures stop at the same bounded deadline", async
   expect(ensures).toBe(3);
   expect(sleeps).toEqual([250, 500, 250]);
   expect(clock).toBe(1_000);
+});
+
+/* ------------------------------------------------------------------ #1133 */
+
+/** The stored credential a readiness wait is bound to. Nothing here is a real
+    session: the string is a placeholder and the port above listens nowhere. */
+function pinnedSession(): StoredTelegramSession {
+  return {
+    version: 1,
+    credentialRef: "credential-generation-placeholder",
+    connectorToken: "A".repeat(43),
+    sessionString: "1ApWapzMBu4placeholder-not-a-real-session",
+    savedAt: "2026-08-25T09:00:00.000Z",
+  };
+}
+
+test("a run waits with bounded backoff while the connector is still coming up", async () => {
+  /* #1133: a viewer restart kills the connector, so the run that follows finds
+     nothing listening. Waiting for the supervisor's own start is the whole
+     difference between a report and a `sources_failed` row. */
+  const session = pinnedSession();
+  let clock = 0;
+  let ensures = 0;
+  let reads = 0;
+  const sleeps: number[] = [];
+  const ports: TelegramConnectorReadPorts = {
+    readSession: () => session,
+    callTool: async () => { reads += 1; return {}; },
+    ensureConnector: async () => {
+      ensures += 1;
+      return ensures < 3 ? { ok: false, code: "connector_failed" } : { ok: true, url: "http://127.0.0.1:8809/mcp" };
+    },
+    sleep: async (ms) => { sleeps.push(ms); clock += ms; },
+    now: () => clock,
+    readinessTimeoutMs: 5_000,
+  };
+
+  await expect(awaitTelegramConnectorReady(session.credentialRef, ports)).resolves.toEqual({ ready: true });
+  expect(ensures).toBe(3);
+  expect(sleeps).toEqual([250, 500]);
+  /* The wait asks the SUPERVISOR, never the account: it adds no read of its
+     own to the one sequential pass the connector may serve (#1087). */
+  expect(reads).toBe(0);
+});
+
+test("the readiness wait stops at its bounded deadline instead of holding the run", async () => {
+  const session = pinnedSession();
+  let clock = 0;
+  const sleeps: number[] = [];
+  const ports: TelegramConnectorReadPorts = {
+    readSession: () => session,
+    callTool: async () => { throw new Error("nothing is listening"); },
+    ensureConnector: async () => ({ ok: false, code: "connector_failed" }),
+    sleep: async (ms) => { sleeps.push(ms); clock += ms; },
+    now: () => clock,
+    readinessTimeoutMs: 1_000,
+  };
+
+  await expect(awaitTelegramConnectorReady(session.credentialRef, ports)).resolves.toEqual({
+    ready: false,
+    reason: "unavailable",
+  });
+  expect(sleeps).toEqual([250, 500, 250]);
+  expect(clock).toBe(1_000);
+});
+
+test("a connector refused on policy fails the wait immediately", async () => {
+  /* A configuration or read-only refusal will not heal with another sleep, so
+     the run must fail fast with what is actually wrong rather than spending a
+     readiness budget on it. */
+  const session = pinnedSession();
+  let clock = 0;
+  const sleeps: number[] = [];
+  const ports: TelegramConnectorReadPorts = {
+    readSession: () => session,
+    callTool: async () => { throw new Error("nothing is listening"); },
+    ensureConnector: async () => ({ ok: false, code: "credentials_missing" }),
+    sleep: async (ms) => { sleeps.push(ms); clock += ms; },
+    now: () => clock,
+    readinessTimeoutMs: 60_000,
+  };
+
+  await expect(awaitTelegramConnectorReady(session.credentialRef, ports)).resolves.toEqual({
+    ready: false,
+    reason: "refused",
+  });
+  expect(sleeps).toEqual([]);
+  expect(clock).toBe(0);
+});
+
+test("a credential generation that moves during the wait refuses it", async () => {
+  const session = pinnedSession();
+  let clock = 0;
+  let ensures = 0;
+  const sleeps: number[] = [];
+  const ports: TelegramConnectorReadPorts = {
+    readSession: () => (ensures === 0
+      ? session
+      : { ...session, credentialRef: "credential-generation-second-placeholder" }),
+    callTool: async () => { throw new Error("nothing is listening"); },
+    ensureConnector: async () => { ensures += 1; return { ok: false, code: "connector_failed" }; },
+    sleep: async (ms) => { sleeps.push(ms); clock += ms; },
+    now: () => clock,
+    readinessTimeoutMs: 60_000,
+  };
+
+  await expect(awaitTelegramConnectorReady(session.credentialRef, ports)).resolves.toEqual({
+    ready: false,
+    reason: "refused",
+  });
+  expect(ensures).toBe(1);
 });
 
 test("a group below the connector's pre-filter ceiling is still selectable", async () => {

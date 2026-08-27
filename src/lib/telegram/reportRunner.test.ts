@@ -7,7 +7,7 @@ const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-telegram-runner-"));
 const OLD_STATE = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 
-const { TelegramReportRunner, RUN_TIMEOUT_MS } = await import("./reportRunner");
+const { CONNECTOR_RETRY_WINDOW_MS, TelegramReportRunner, RUN_TIMEOUT_MS } = await import("./reportRunner");
 const { readTelegramReports, readReportText, reportInboxPath, reportSourcesPath, updateTelegramReports } = await import("./reportStore");
 const { DEFAULT_DAILY_REPORT_PROMPT, reportConversationTitle } = await import("./reportPrompt");
 /* The tag lives in the operator's editable brief; fixtures use a synthetic
@@ -17,6 +17,7 @@ const DAILY_REPORT_TAG = "#report_tag";
 import { mcpServersForScheduledReport } from "@/lib/agent/mcpAllowlist";
 
 import type { ReportRunnerPorts } from "./reportRunner";
+import type { TelegramConnectorReadiness } from "./reportSources";
 import type { ReportSpawnInput, ReportSpawnResult } from "./reportSpawn";
 import type { StoredTelegramConnection } from "./sessionStore";
 import type { TelegramChatSummary, TelegramReadPort } from "./reportSources";
@@ -65,6 +66,15 @@ class FakePorts implements ReportRunnerPorts {
   /** The service-owned read lease exposed to the runner through its ports. */
   readPhaseActive = false;
   readPhaseGate: Promise<void> | null = null;
+  /** What the supervisor answers when the run asks for a connector (#1133).
+      The default models the ordinary case — one already up — so a test about
+      a restarted viewer has to say so. */
+  connectorReadiness: TelegramConnectorReadiness = { ready: true };
+  /** Holds the readiness wait open, to model a connector still coming up. */
+  connectorReadinessGate: Promise<void> | null = null;
+  /** Every readiness wait, with how many reads had happened when it ran: the
+      wait must come BEFORE the run's first read, never after it failed. */
+  readinessWaits: Array<{ credentialRef: string; readsSoFar: number }> = [];
   /** Every read the Viewer itself made, in order. */
   reads: string[] = [];
   spawns: Record<string, unknown>[] = [];
@@ -88,6 +98,11 @@ class FakePorts implements ReportRunnerPorts {
   logs: string[] = [];
   now() { return this.clock; }
   connection() { return this.connectionState; }
+  async connectorReady(credentialRef: string): Promise<TelegramConnectorReadiness> {
+    this.readinessWaits.push({ credentialRef, readsSoFar: this.reads.length });
+    if (this.connectorReadinessGate) await this.connectorReadinessGate;
+    return this.connectorReadiness;
+  }
   async beginReadPhase() {
     if (this.readPhaseGate) await this.readPhaseGate;
     this.readPhaseActive = true;
@@ -992,4 +1007,170 @@ test("a report is recognised by its markers whatever tag the operator chose", as
   agentWrites("#inbox_daily\nQUIET\n");
   await runner.tick();
   expect(readTelegramReports().history[0].status).toBe("quiet");
+});
+
+/* ------------------------------------------------------------------ #1133 */
+
+/** One turn of the event loop, so a run that Run now left in flight reaches
+    the point a test is about to inspect it at. */
+async function settleMicrotasks(): Promise<void> {
+  await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+}
+
+test("a run that starts while the connector is coming up waits for it and reports", async () => {
+  /* #1133: a viewer restart kills the connector, and the run the operator
+     triggers next used to spend its first read on a listener that was not
+     there and terminalize `sources_failed` within seconds. */
+  const ports = new FakePorts();
+  enableReports();
+  let connectorCameUp!: () => void;
+  ports.connectorReadinessGate = new Promise<void>((resolve) => { connectorCameUp = resolve; });
+  const runner = new TelegramReportRunner(ports);
+
+  const launched = await runner.runNow();
+  await settleMicrotasks();
+  /* Waiting, not failing: the row is live and nothing has been read yet. */
+  expect(runner.payload().history[0].status).toBe("running");
+  expect(ports.reads).toEqual([]);
+  expect(readTelegramReports().active?.runId).toBe(launched.ok ? launched.runId : "");
+
+  connectorCameUp();
+  await runner.settled();
+
+  /* The wait ran BEFORE the first read, for the generation the run verified. */
+  expect(ports.readinessWaits).toEqual([{ credentialRef: String(CONNECTED.credentialRef), readsSoFar: 0 }]);
+  expect(ports.reads[0]).toBe("getMe");
+  expect(ports.spawns.length).toBe(1);
+  expect(ports.logs).toEqual([]);
+  const file = readTelegramReports();
+  expect(file.active?.conversationId).toBe("conversation_report");
+  expect(file.history.some((row) => row.errorCode === "sources_failed")).toBe(false);
+});
+
+test("a connector that never comes up fails the run and arms one re-queue", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  ports.connectorReadiness = { ready: false, reason: "unavailable" };
+  const runner = new TelegramReportRunner(ports);
+
+  await runner.runNow();
+  await runner.settled();
+
+  const file = readTelegramReports();
+  expect(file.active).toBeNull();
+  expect(file.history[0]).toMatchObject({ status: "failed", errorCode: "connector_unavailable", trigger: "manual" });
+  /* Nothing was read and nothing was launched: the run never got past the
+     wait, so the connector served exactly one caller — the supervisor. */
+  expect(ports.reads).toEqual([]);
+  expect(ports.spawns.length).toBe(0);
+  expect(ports.logs).toEqual(["connector_unavailable"]);
+  /* The window it did not cover stays owed, like every other failure. */
+  expect(file.cursor.unreportedSinceAt).toBe(new Date(NOW - 24 * 3_600_000).toISOString());
+  expect(file.retry).toMatchObject({ trigger: "manual", runId: file.history[0].id });
+});
+
+test("the armed re-queue fires once the connector is connected, and never twice", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  ports.connectorReadiness = { ready: false, reason: "unavailable" };
+  const failing = new TelegramReportRunner(ports);
+  await failing.runNow();
+  await failing.settled();
+
+  /* A viewer that restarted between the failure and the retry: a new runner,
+     reading the marker back from durable state. */
+  const runner = new TelegramReportRunner(ports);
+  ports.connectionState = { ...CONNECTED, status: "error", errorCode: "connector_failed" };
+  ports.clock = NOW + 60_000;
+  await runner.tick();
+  expect(ports.spawns.length).toBe(0);
+  expect(readTelegramReports().retry).not.toBeNull();
+
+  ports.connectionState = { ...CONNECTED };
+  ports.connectorReadiness = { ready: true };
+  ports.clock = NOW + 120_000;
+  await runner.tick();
+
+  const file = readTelegramReports();
+  expect(ports.spawns.length).toBe(1);
+  /* The re-queued run is the same report the operator asked for. */
+  expect(file.active?.trigger).toBe("manual");
+  expect(file.retry).toBeNull();
+
+  ports.clock = NOW + 180_000;
+  await runner.tick();
+  expect(ports.spawns.length).toBe(1);
+});
+
+test("a re-queued run that finds the connector still down arms no second one", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  ports.connectorReadiness = { ready: false, reason: "unavailable" };
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+  expect(readTelegramReports().retry).not.toBeNull();
+
+  ports.clock = NOW + 60_000;
+  await runner.tick();
+
+  const file = readTelegramReports();
+  expect(file.history.filter((row) => row.errorCode === "connector_unavailable").length).toBe(2);
+  /* Single and bounded (#1087): the retry that failed the same way does not
+     re-queue itself into a loop of connector reads. */
+  expect(file.retry).toBeNull();
+  expect(ports.spawns.length).toBe(0);
+});
+
+test("an armed re-queue the connector never returns for expires instead of firing later", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  ports.connectorReadiness = { ready: false, reason: "unavailable" };
+  const runner = new TelegramReportRunner(ports);
+  await runner.runNow();
+  await runner.settled();
+
+  ports.connectorReadiness = { ready: true };
+  /* The day's own scheduled slot is already stamped, so the only thing that
+     could launch here is the expired re-queue. */
+  updateTelegramReports((state) => { state.cursor.lastScheduledDay = "2026-08-21"; });
+  ports.clock = NOW + CONNECTOR_RETRY_WINDOW_MS + 1;
+  await runner.tick();
+
+  expect(readTelegramReports().retry).toBeNull();
+  expect(ports.spawns.length).toBe(0);
+});
+
+test("a connector refused on policy fails fast and re-queues nothing", async () => {
+  const ports = new FakePorts();
+  enableReports();
+  ports.connectorReadiness = { ready: false, reason: "refused" };
+  const runner = new TelegramReportRunner(ports);
+
+  await runner.runNow();
+  await runner.settled();
+
+  const file = readTelegramReports();
+  expect(file.history[0]).toMatchObject({ status: "failed", errorCode: "connector_unavailable" });
+  expect(file.retry).toBeNull();
+  expect(ports.reads).toEqual([]);
+});
+
+test("a connector that is up but whose account is dead still fails with the real error", async () => {
+  /* The acceptance's other half: readiness is about the PROCESS. An account
+     that no longer authorizes answers the wait and then fails the account
+     check, which is a different sentence and no re-queue at all. */
+  const ports = new FakePorts();
+  enableReports();
+  ports.getMeError = new Error("get_me failed: the authorization is gone");
+  const runner = new TelegramReportRunner(ports);
+
+  await runner.runNow();
+  await runner.settled();
+
+  const file = readTelegramReports();
+  expect(file.history[0]).toMatchObject({ status: "failed", errorCode: "account_check_failed" });
+  expect(file.retry).toBeNull();
+  expect(ports.readinessWaits.length).toBe(1);
+  expect(ports.spawns.length).toBe(0);
 });

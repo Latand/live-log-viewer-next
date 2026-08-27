@@ -816,6 +816,7 @@ export const en = {
   "telegram.report.err.reports_disabled": "Daily reports are turned off.",
   "telegram.report.err.run_in_progress": "A report run is already going.",
   "telegram.report.err.account_check_failed": "The connected account could not be verified, so nothing was read.",
+  "telegram.report.err.connector_unavailable": "The Telegram connector was not available, so nothing was read.",
   "telegram.report.err.sources_failed": "The chats to read could not be listed. The connector may be restarting.",
   "telegram.report.err.launch_failed": "The report run could not be started.",
   "telegram.report.err.run_ended_without_report": "The run ended before it wrote a report. Run it again.",
