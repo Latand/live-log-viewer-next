@@ -15,8 +15,10 @@ does not demand is preserved in **Deferred — not currently justified**.
 
 ## Evidence discipline
 
-Two sources: this repository at `ac19703`, and read-only inspection of the
-OpenClaw 2026.6.10 install on the development machine. No OpenClaw state was
+Two sources: this repository, and read-only inspection of the OpenClaw
+2026.6.10 install on the development machine. Source evidence was first read at
+`ac197031` and re-verified against `main` at `e61c1ce4`, which is the baseline
+phase 1 is cut from — see *Baseline and lane ownership*. No OpenClaw state was
 written, and the operator's running Gateway was not started, stopped or
 reconfigured.
 
@@ -34,11 +36,11 @@ and cites what was measured instead.
 
 | # | Question | Decision |
 |---|----------|----------|
-| a | Engine surface | A third union member on `Engine`/`Fmt`, **not** an engine-descriptor registry. The seam is `Fmt` for rendering plus a named `hostable` predicate for lifecycle. |
+| a | Engine surface | A third union member on `Engine`/`Fmt`, in preference to an engine-descriptor registry. The seam is `Fmt` for rendering plus a named `hostable` predicate for lifecycle. |
 | b | Viewing | The session file alone is authoritative for the message chain **and** for model/provider. The trajectory supplies only `sessionKey`. Checkpoints are excluded from discovery. |
 | c | Project attribution | A pure path recognizer for the OpenClaw workspace, minting one stable directory identity, inserted ahead of every disk-dependent resolver. |
-| d | Hosting transport | The ACP bridge (`openclaw acp`), spawned through an explicit real-Node interpreter, with a preflight that names the failure. |
-| e | Phasing | Viewing (phase 1) / hosting (phase 2). The boundary is drawn so phase 1 also avoids both contended lanes' files except one. |
+| d | Hosting transport | The ACP bridge (`openclaw acp`), spawned through an explicit real-Node interpreter, behind a four-check preflight whose every message names the interpreter it resolved. |
+| e | Phasing | Viewing (phase 1) / hosting (phase 2). Phase 1 is one PR — scanning, attribution, turn state and structured rendering together — cut against `main` at `e61c1ce4`. |
 
 ---
 
@@ -142,10 +144,18 @@ Every one of them is asking *"is this an engine I can host, rename, hydrate or
 spawn?"* — and under a widened union each one keeps answering **no** for
 OpenClaw, which is exactly right for phase 1. The codebase already has a safe
 default for a third engine, and it spread the definition across 32 files
-without naming it. That spread is the argument for naming it before phase 2,
-and it is twice what a first pass over this surface suggests — the idiom
-appears in both operand orders and in files that have nothing else
-engine-shaped in them.
+without naming it. That spread is the argument for naming it before phase 2.
+
+**This count was wrong in an earlier draft of this document, and the correction
+is worth keeping visible: the first pass found 15 files, and the real figure is
+32.** Two reasons, both of which will bite anyone who re-derives this with a
+quick grep. The idiom appears in *both operand orders* — `claude || codex` and
+`codex || claude` — and a pattern anchored on one order silently halves the
+result. And it turns up in files with nothing else engine-shaped in them
+(`src/lib/view/snapshot.ts`, `src/hooks/useSwitchboardData.ts`,
+`src/lib/pipelines/store.ts`), so a search scoped to the files that *look*
+engine-related misses them too. Anyone sizing item 9 from a single-order grep
+will plan half the work.
 
 **Class B — erasure coercions (8 sites). Actively wrong. Must be fixed.**
 
@@ -676,16 +686,34 @@ failure string talks about a registry URL. Scraping it is the wrong primary
 mechanism. The host runs a **preflight before spawn**, each check with its own
 code, and a launch failure surfaces as that code rather than as a dead host:
 
-| Code | Check | Operator-facing meaning |
+| Code | Check | Message must name |
 |---|---|---|
-| `openclaw_runtime_missing` | configured interpreter is absent or not executable | "Set `LLV_OPENCLAW_NODE` to a Node runtime." |
-| `openclaw_runtime_lacks_sqlite` | `<node> -e 'require("node:sqlite")'` exits non-zero | "That runtime has no `node:sqlite`. Bun cannot run OpenClaw; point at Node 22+." |
-| `openclaw_entry_missing` | entry script is absent | "OpenClaw is not installed where the Viewer expects." |
-| `openclaw_gateway_unreachable` | no Gateway backing the bridge | "Start the OpenClaw Gateway; the Viewer will not start it for you." |
+| `openclaw_runtime_missing` | configured interpreter is absent or not executable | the path that was resolved, and where it came from (`LLV_OPENCLAW_NODE`, or `PATH` lookup) |
+| `openclaw_runtime_lacks_sqlite` | `<node> -e 'require("node:sqlite")'` exits non-zero | the resolved interpreter path and its `--version` output |
+| `openclaw_entry_missing` | entry script is absent | the path that was probed |
+| `openclaw_gateway_unreachable` | no Gateway backing the bridge | the gateway URL that was tried |
 
-The preflight costs two `statSync` calls, one short subprocess and one gateway
-reachability probe, cached per host launch. As a backstop, a post-spawn stderr matcher for `node:sqlite` maps
-into `openclaw_runtime_lacks_sqlite`, since the observed message does contain
+**Every message names the interpreter it resolved.** This is the whole value of
+the diagnosis, because the underlying fault is a name resolving to the wrong
+binary. "SQLite support is unavailable in this Node runtime" sends the operator
+to install a Node they already have. The same failure reported as —
+
+```
+openclaw_runtime_lacks_sqlite: resolved node -> /tmp/bun-node-<hash>/node
+  (from PATH); that runtime has no node:sqlite. Set LLV_OPENCLAW_NODE to a
+  real Node 22+ binary.
+```
+
+— shows a `/tmp/bun-node-*` path, and the operator is done reading. A
+diagnosis that reports only the symptom hides the one fact that identifies the
+cause.
+
+Keep it at these four checks. The preflight costs two `statSync` calls, one
+short subprocess and one gateway reachability probe, cached per host launch,
+and it earns that by turning a dead host into a sentence. Anything more
+belongs in `doctor`, and OpenClaw already has one. As a backstop, a post-spawn
+stderr matcher for `node:sqlite` maps into `openclaw_runtime_lacks_sqlite` with
+the same resolved-path line attached, since the observed message does contain
 that token even though its prose is about something else.
 
 The preflight is the only place this belongs. `detectLaunchFailure`
@@ -728,12 +756,16 @@ make OpenClaw hostable, so it does not widen it.
 
 ### What phase 1 ships
 
-Board and feed parity for OpenClaw conversations — Expected 1 and 2 — with
-OpenClaw explicitly **not** hostable and every Class-A predicate still
-answering "no".
+Board and feed parity for OpenClaw conversations — Expected 1 and 2 — in a
+single PR, with OpenClaw explicitly **not** hostable and every Class-A
+predicate still answering "no". Scanning, project attribution, turn state,
+effort and structured rendering ship together; there is no interim state in
+which an OpenClaw conversation appears on the board but opens as unstructured
+text.
 
-Work plan, in dependency order. None of these files are owned by another lane
-except where flagged.
+Work plan, in dependency order, against `main` at `e61c1ce4`. One file
+(`src/lib/resources.ts`) is owned by the #1199 lane and is deliberately skipped
+at item 9; everything else here is free.
 
 **1. `src/lib/types.ts`** — `RootKey` gains `"openclaw-sessions"` (`:8-11`);
 `Engine` gains `"openclaw"` (`:13`); `Fmt` gains `"openclaw"` (`:15`).
@@ -768,8 +800,10 @@ codex` cache-key comparisons at `:165`, `:184`, `:212`, `:256`.
 `src/lib/scanner/projectCatalog.ts:136-137`;
 `src/lib/resourceCollector.worker.ts:45`.
 
-**7. `src/components/feed/parse.ts`** — `renderOpenclaw`, and the dispatch at
-`:2127`. **This file is owned by the #1202 lane.** See Conflicts below.
+**7. `src/components/feed/parse.ts`** — add `renderOpenclaw` beside
+`renderClaude` (`:1943`) and extend the dispatch at `:2127` from a two-way
+`fmt` test to a three-way one. The mapping table under *(b) Rendering* is the
+specification; the renderer emits only primitives that already exist.
 
 **8. `src/lib/scanner/effort.ts`** — add `"off"` and `"adaptive"` to `TIERS`
 (`:10`); add an `entry.root === "openclaw-sessions"` arm to `pickEffort`
@@ -783,19 +817,24 @@ adopt it at the Class-A sites. Behaviour-preserving by construction; the value
 is that phase 2 becomes a one-line change with a test instead of a 32-file
 audit.
 
-Exactly three of those 32 files sit in fenced lanes —
-`src/lib/mcp/bindings.ts` and `src/components/LogFeed.tsx` under #1202,
-`src/lib/resources.ts` under #1199. Phase 1 adopts the predicate in the other
-29 and leaves those three copies in place. Since the predicate is
-defined to exclude OpenClaw, the mixed state behaves identically either way,
-and the leftovers are a mechanical follow-up once those lanes merge.
+One of those 32 files is still owned elsewhere: `src/lib/resources.ts`, under
+the #1199 lane. Phase 1 adopts the predicate in the other 31 and leaves that
+copy in place. Since the predicate is defined to exclude OpenClaw, the mixed
+state behaves identically either way, and the leftover is a mechanical
+follow-up once #1199 merges.
 
-**10. Class B, the eight erasure sites** — `parse.ts:1311` and `:1486` are
-inside the fenced feed directory and ride with item 7. The other six take an
-explicit third arm. `src/lib/runtime/liveTurn.ts:374` and
-`RuntimeLiveTurnToolEngine` (`:22`) can wait for phase 2, since nothing
-produces live-turn rows for a non-hosted engine; note it in the phase-2 issue
-rather than widening a hosting type in a viewing PR.
+**10. Class B, the eight erasure sites** — seven take an explicit third arm in
+phase 1: `src/components/feed/parse.ts:1311` and `:1486`,
+`src/components/DraftAgentPane.tsx:396`,
+`src/components/flows/directReviewGroups.ts:134` and `:146`,
+`src/app/api/tasks/[id]/send/route.ts:94`,
+`src/lib/tasks/inboxScanner.ts:144`.
+
+The eighth, `src/lib/runtime/liveTurn.ts:374` with
+`RuntimeLiveTurnToolEngine` (`:22`), waits for phase 2. Nothing produces
+live-turn rows for an engine the Viewer does not host, so widening a hosting
+type inside a viewing PR would add an unreachable branch. Carry it on the
+phase-2 issue.
 
 **Tests**, all against invented fixtures under an isolated
 `HOME`/`XDG_CONFIG_HOME`/`LLV_STATE_DIR`/`TMPDIR`, run **by path**:
@@ -841,38 +880,52 @@ start of phase 2, before anything is built on them.
 
 ---
 
-## Conflicts with live lanes
+## Baseline and lane ownership
 
-Reported rather than worked around, per the assignment's file-ownership fence.
+**Phase 1 is cut against `main` at `e61c1ce4`**, which already contains PR
+#1206 (the #1202 `suggest_replies` lane, merged 2026-08-27). The implementer
+rebases on current `main`. This document's evidence was originally read at
+`ac197031`; both commits are recorded here because the difference is what
+decides whether the file:line citations below still hold.
 
-**`src/components/feed/parse.ts` — owned by the #1202 lane.** Phase 1 needs
-`renderOpenclaw` and the one-line dispatch at `:2127`, and both Class-B sites
-at `:1311` and `:1486` are in the same file. There is no way to add a third
-`Fmt` renderer without touching it; putting `renderOpenclaw` in a new file
-under `src/components/feed/` does not help, because that directory is fenced
-too.
+Every line this document cites was re-read at `e61c1ce4` and is unchanged.
+`src/components/feed/parse.ts` is byte-identical between the two commits, so
+`:1311`, `:1486`, `:1943` and `:2127` all still point at what the text says
+they do; so are `src/lib/types.ts`, all six cited `src/lib/scanner/` files,
+`src/lib/accounts/migration/turnState.ts`,
+`src/lib/resourceCollector.worker.ts`, `src/lib/projects/identity.ts`,
+`src/lib/agent/sessionKey.ts`, `src/lib/status.ts` and the three cited
+`src/lib/runtime/` files. The one cited file #1206 did touch is
+`src/lib/mcp/bindings.ts`, which this document cites only at file level as a
+Class-A site; re-counted at `e61c1ce4`, the Class-A surface is still 32 files.
 
-Recommended sequencing, for the next stage to confirm with the operator:
-land phase-1 items 1–6, 8, 9 and the six non-feed Class-B sites of item 10
-first — all outside both fences, and together they give scanning, attribution,
-turn state and effort — then land the feed renderer plus the two Class-B sites
-inside `parse.ts` as a follow-up PR once #1202 merges. Until then OpenClaw conversations appear on the
-board with correct titles, projects, models and activity, and open in the feed
-through the `"plain"` fallback rather than a structured render. That is a
-visible gap and should be stated in the phase-1 PR rather than hidden.
+**Fences lifted.** `src/components/feed/**` (including `parse.ts`),
+`src/components/LogFeed.tsx`, `src/lib/mcp/**` and
+`src/lib/orchestrator/prompt.ts` have no other owner. Phase 1 takes the feed
+renderer directly, so there is no `"plain"` fallback state and no split
+delivery: scanning, attribution, turn state and structured rendering ship
+together in one PR.
 
-**Not in conflict, and deliberately so:** `src/lib/scanner/process.ts`,
-`src/lib/resources.ts`, `src/lib/runtime/structuredDeliveryController.ts`,
-`src/components/ResourcesFooter.tsx` (#1199) and `src/lib/mcp/**`,
-`src/lib/orchestrator/prompt.ts`, `src/components/LogFeed.tsx` (#1202) are all
-untouched by phase 1. Three of them hold Class-A narrowing predicates
-(`src/lib/resources.ts:793`, `src/lib/mcp/bindings.ts`,
-`src/components/LogFeed.tsx`) and `src/components/ResourcesFooter.tsx:474`
-holds a Class-C label expression. All four degrade safely under a widened
-union: the predicates keep answering "no" for OpenClaw, which is the phase-1
-answer anyway, and the footer renders `?` for an unknown engine, which is
-honest. None of them needs an edit to ship phase 1; they are the leftovers item
-9 deliberately skips.
+**Still owned — the #1199 lane, in final review.** `src/lib/resources.ts`,
+`src/lib/scanner/process.ts`, `src/lib/runtime/structuredHostControl.ts`,
+`src/lib/runtime/structuredDeliveryController.ts` and
+`src/components/ResourcesFooter.tsx`. Phase 1 touches none of them, and needs
+none of them:
+
+- `src/lib/scanner/process.ts` holds `AgentEngine` (`:13`) and `argvEngine`
+  (`:122`). Phase 1 deliberately does not make OpenClaw hostable and does not
+  do process attribution, so neither needs to change. The phase boundary was
+  drawn partly for this reason and it still holds.
+- `src/lib/resources.ts:793` is a Class-A narrowing predicate. It keeps
+  answering "no" for OpenClaw, which is the phase-1 answer anyway. It is the
+  single Class-A copy item 9 skips.
+- `src/components/ResourcesFooter.tsx:474` is a Class-C label expression that
+  renders `?` for an unrecognised engine — honest, and correct until someone
+  gives OpenClaw a label.
+
+Phase 2 will need `src/lib/scanner/process.ts` and
+`src/lib/runtime/structuredDeliveryController.ts`, so it should not start until
+#1199 has merged.
 
 ---
 
@@ -927,9 +980,10 @@ without a second project-id namespace. See (c).
 
 Read back against the quote at the top.
 
-*"the Viewer scans and renders OpenClaw conversations"* — phase 1, items 1–8.
-Scanning is complete on merge of items 1–6; rendering is complete on merge of
-item 7, which is gated on the #1202 lane and flagged above rather than assumed.
+*"the Viewer scans and renders OpenClaw conversations"* — phase 1, items 1–10,
+in one PR. Both halves of the clause land together: scanning and attribution
+from items 1–6, structured rendering from item 7. No fallback state, no partial
+delivery.
 
 *"the Viewer can host an OpenClaw agent as a structured host (spawn, deliver a
 message, stream the turn, resume, kill)"* — phase 2, over the ACP bridge, with
