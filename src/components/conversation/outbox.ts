@@ -21,7 +21,7 @@
 
 import { useSyncExternalStore } from "react";
 
-import type { ReceiptStatus } from "@/components/runtime/runtimeModel";
+import { receiptIsAdmitted, receiptIsTerminal, type ReceiptStatus } from "@/components/runtime/runtimeModel";
 
 export type OutboxState = "queued" | "delivering" | "delivered" | "failed";
 
@@ -167,6 +167,39 @@ export function outboxStateForReceiptStatus(status: ReceiptStatus): OutboxState 
       // delivered, applied, answered, steered, turn-started, interrupted
       return "delivered";
   }
+}
+
+/**
+ * The bubble patch a durable receipt implies for an entry, or `null` when it
+ * implies nothing.
+ *
+ * The state alone cannot decide this (issue #1213): `pending`, `queued`,
+ * `delivering`, `applying` and `uncertain` all project to ONE `delivering`
+ * bubble, so a send being parked at a turn boundary — and a parked send being
+ * taken off the park and put on the wire — are invisible to a state comparison,
+ * and those are precisely the two transitions whose WORDING has to change. The
+ * turn-boundary flag is therefore part of the comparison, not just the patch.
+ *
+ * A failed bubble still only advances on PROVEN admission: never on another
+ * failure, and never to `delivering` off an unproven receipt.
+ */
+export function outboxReceiptPatch(
+  entry: Pick<OutboxEntry, "state" | "awaitingTurn">,
+  status: ReceiptStatus,
+): { state: OutboxState; awaitingTurn?: true } | null {
+  /* Only a receipt that PROVES admission or settlement says anything about a
+     bubble. `pending`, `applying` and `uncertain` are the request path still
+     working, or an admission nobody confirmed: the bubble already reads
+     `delivering`, and letting them move a `failed` one would claim exactly the
+     admission that was never established. */
+  if (!receiptIsAdmitted(status) && !receiptIsTerminal(status)) return null;
+  const state = outboxStateForReceiptStatus(status);
+  const awaitingTurn = outboxAwaitsTurnBoundary(status);
+  if (state === entry.state && awaitingTurn === entry.awaitingTurn) return null;
+  /* A failed bubble is never re-churned by another failure; it only advances on
+     the proven admission or delivery above. */
+  if (entry.state === "failed" && state === "failed") return null;
+  return { state, awaitingTurn };
 }
 
 /** Bounded per conversation: the queue is working state plus recent history for

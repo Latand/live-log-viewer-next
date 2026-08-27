@@ -31,7 +31,13 @@ Object.assign(globalThis, {
 });
 
 const { OutboxBubblesView } = await import("@/components/conversation/OutboxBubbles");
+const { outboxReceiptPatch } = await import("@/components/conversation/outbox");
+type ReceiptStatus = Parameters<typeof outboxReceiptPatch>[1];
 const { DELIVERY_UNCERTAIN_MS } = await import("@/components/runtime/deliveryWait");
+/** One label-unit past the bound. Derived from the bound so raising the bound
+    cannot leave a stale minute count asserted next to it. */
+const PAST_BOUND_MS = DELIVERY_UNCERTAIN_MS + 60_000;
+const PAST_BOUND_MIN = Math.round(PAST_BOUND_MS / 60_000);
 type Entry = Parameters<typeof OutboxBubblesView>[0]["entries"][number];
 type Session = NonNullable<Parameters<typeof OutboxBubblesView>[0]["session"]>;
 
@@ -103,12 +109,68 @@ test("#1213 a message parked at a turn boundary says which wait it is in, and it
 
 test("#1213 past the bound the bubble says it was not delivered, and how long it waited", async () => {
   for (const locale of ["en", "uk"] as const) {
-    const host = await bubble({ awaitingTurn: true }, SUBMITTED_AT + DELIVERY_UNCERTAIN_MS + 60_000, locale);
+    const host = await bubble({ awaitingTurn: true }, SUBMITTED_AT + PAST_BOUND_MS, locale);
     expect(phase(host)).toBe("uncertain");
     expect(chip(host)).toBe(translate(locale, "runtime.receipt.unconfirmed", {
-      waited: translate(locale, "runtime.receipt.waitedMin", { n: 21 }),
+      waited: translate(locale, "runtime.receipt.waitedMin", { n: PAST_BOUND_MIN }),
     }));
     expect(host.querySelector(".animate-spin")).toBeNull();
+  }
+});
+
+/**
+ * Replay the composer's own receipt→bubble projection over a receipt sequence
+ * and render what the operator is looking at after each one.
+ *
+ * The projection is the real one ({@link outboxReceiptPatch}); only the store
+ * and the effect that calls it are stood in for here, so the wording asserted
+ * below is the wording the composer produces.
+ */
+async function drive(statuses: readonly ReceiptStatus[], nowMs: number) {
+  let projected: Partial<Entry> = {};
+  const seen: { chip: string; phase: string | null | undefined }[] = [];
+  for (const status of statuses) {
+    const patch = outboxReceiptPatch(entry(projected), status);
+    if (patch) projected = { ...projected, ...patch };
+    const host = await bubble(projected, nowMs);
+    seen.push({ chip: chip(host), phase: phase(host) });
+  }
+  return seen;
+}
+
+test("#1213 a send parked at a turn boundary stops reading as an attempt on the wire", async () => {
+  /* The defect the operator photographed, at its root: `pending`, `queued`,
+     `delivering` and `applying` all project to ONE `delivering` bubble state, so
+     a reconciliation guard that compares state alone never sees the delivery
+     queue park this send behind a turn — and the bubble keeps the spinner and
+     the bare word «Delivering» for as long as the turn runs. */
+  const nowMs = SUBMITTED_AT + 4 * 60_000;
+  const [onWire, parked] = await drive(["delivering", "queued"], nowMs);
+  expect(onWire!.phase).toBe("handing-over");
+  expect(onWire!.chip).toBe(translate("en", "outbox.delivering"));
+  expect(parked!.phase).toBe("awaiting-turn");
+  expect(parked!.chip).toBe(translate("en", "runtime.receipt.awaitingTurnFor", {
+    waited: translate("en", "runtime.receipt.waitedMin", { n: 4 }),
+  }));
+});
+
+test("#1213 a send taken off the park and put on the wire stops claiming a turn boundary", async () => {
+  /* The same guard in the other direction: the queue reaches the turn boundary
+     and moves the send `queued`→`delivering`, and the bubble would go on saying
+     the agent is mid-turn while the message is genuinely being handed over. */
+  const nowMs = SUBMITTED_AT + 4 * 60_000;
+  const [, handingOver] = await drive(["queued", "delivering"], nowMs);
+  expect(handingOver!.phase).toBe("handing-over");
+  expect(handingOver!.chip).toBe(translate("en", "outbox.delivering"));
+});
+
+test("#1213 an admission the request path never confirmed leaves the bubble alone", async () => {
+  /* `pending`, `applying` and `uncertain` prove nothing about a hand-over, so
+     none of them may write a turn boundary onto the bubble — that flag is a
+     claim about where the message IS. */
+  for (const status of ["pending", "applying", "uncertain"] as const) {
+    expect(outboxReceiptPatch({ state: "delivering" }, status)).toBeNull();
+    expect(outboxReceiptPatch({ state: "delivering", awaitingTurn: true }, status)).toBeNull();
   }
 });
 
@@ -116,7 +178,7 @@ test("#1213 no admitted bubble offers a control that cannot act on the message",
   /* Both of these would be lies: `retryOutbox` ignores a `delivering` entry,
      and `cancelOutbox` drops the bubble while the server still holds the send
      — the operator would believe a message was withdrawn that later arrives. */
-  for (const nowMs of [SUBMITTED_AT + 4_000, SUBMITTED_AT + DELIVERY_UNCERTAIN_MS + 60_000]) {
+  for (const nowMs of [SUBMITTED_AT + 4_000, SUBMITTED_AT + PAST_BOUND_MS]) {
     const host = await bubble({ awaitingTurn: true }, nowMs);
     expect(host.querySelector("[data-outbox-retry]")).toBeNull();
     expect(host.querySelector("[data-outbox-cancel]")).toBeNull();

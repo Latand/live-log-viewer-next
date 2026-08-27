@@ -36,6 +36,10 @@ Object.assign(globalThis, {
 
 const { RuntimeComposerReceipts } = await import("@/components/TmuxComposer");
 const { DELIVERY_UNCERTAIN_MS } = await import("./deliveryWait");
+/** One label-unit past the bound. Derived from the bound so raising the bound
+    cannot leave a stale minute count asserted next to it. */
+const PAST_BOUND_MS = DELIVERY_UNCERTAIN_MS + 60_000;
+const PAST_BOUND_MIN = Math.round(PAST_BOUND_MS / 60_000);
 
 const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
 
@@ -119,11 +123,11 @@ test("#1213 a hand-over still running past the bound names itself", () => {
   /* The delivery queue writes `delivering` BEFORE `host.send`, so this message
      may be in front of the agent already and the queue owes it an outcome.
      Calling it undelivered would be false; going on spinning silently for
-     twenty-one minutes is what the operator complained about. */
+     twenty minutes and more is what the operator complained about. */
   const view = mount(
     <RuntimeComposerReceipts
       receipts={[receipt({ status: "delivering" })]}
-      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      nowMs={at(PAST_BOUND_MS)}
       onRetry={noop}
       onEdit={noop}
     />,
@@ -132,7 +136,7 @@ test("#1213 a hand-over still running past the bound names itself", () => {
   const chip = details.querySelector("[data-receipt-status]")!;
   expect(chip.getAttribute("data-receipt-wait")).toBe("handing-over");
   expect(chip.textContent).toContain(t("runtime.receipt.handingOverFor", {
-    waited: t("runtime.receipt.waitedMin", { n: 21 }),
+    waited: t("runtime.receipt.waitedMin", { n: PAST_BOUND_MIN }),
   }));
   view.cleanup();
 });
@@ -144,7 +148,7 @@ test("#1213 the composer's own unconfirmed row says so, and never claims a turn 
   const view = mount(
     <RuntimeComposerReceipts
       receipts={[receipt({ operationId: "composer-unconfirmed:msg-1213", status: "uncertain" })]}
-      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      nowMs={at(PAST_BOUND_MS)}
       onRetry={noop}
       onEdit={noop}
     />,
@@ -153,10 +157,10 @@ test("#1213 the composer's own unconfirmed row says so, and never claims a turn 
   const chip = details.querySelector("[data-receipt-status]")!;
   expect(chip.getAttribute("data-receipt-wait")).toBe("unconfirmed-admission");
   expect(chip.textContent).toContain(t("runtime.receipt.admissionUnconfirmed", {
-    waited: t("runtime.receipt.waitedMin", { n: 21 }),
+    waited: t("runtime.receipt.waitedMin", { n: PAST_BOUND_MIN }),
   }));
   expect(chip.textContent).not.toContain(t("runtime.receipt.awaitingTurnFor", {
-    waited: t("runtime.receipt.waitedMin", { n: 21 }),
+    waited: t("runtime.receipt.waitedMin", { n: PAST_BOUND_MIN }),
   }));
   expect(details.querySelector(".animate-pulse")).toBeNull();
   view.cleanup();
@@ -191,7 +195,7 @@ test("#1213 a delivery unconfirmed past the bound is terminal and explains itsel
   const view = mount(
     <RuntimeComposerReceipts
       receipts={[receipt({ status: "queued" })]}
-      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      nowMs={at(PAST_BOUND_MS)}
       session={BUSY}
       onRetry={noop}
       onEdit={noop}
@@ -203,7 +207,7 @@ test("#1213 a delivery unconfirmed past the bound is terminal and explains itsel
   expect(chip.getAttribute("data-receipt-wait")).toBe("uncertain");
   /* Says it was not delivered, and how long it waited. */
   expect(chip.textContent).toContain(t("runtime.receipt.unconfirmed", {
-    waited: t("runtime.receipt.waitedMin", { n: 21 }),
+    waited: t("runtime.receipt.waitedMin", { n: PAST_BOUND_MIN }),
   }));
   /* Says why, and that sending it again is the only thing that moves it. */
   expect(details.querySelector("[data-receipt-uncertain-why]")?.textContent)
@@ -225,7 +229,7 @@ test("#1213 the collapsed summary already reads differently for a delivery that 
   const view = mount(
     <RuntimeComposerReceipts
       receipts={[receipt({ status: "queued" })]}
-      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      nowMs={at(PAST_BOUND_MS)}
       session={BUSY}
       onRetry={noop}
       onEdit={noop}
@@ -258,7 +262,7 @@ test("#1213 a delivery that never had a host says the window is gone in its term
   const view = mount(
     <RuntimeComposerReceipts
       receipts={[receipt({ status: "queued" })]}
-      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      nowMs={at(PAST_BOUND_MS)}
       session={{ host: "dead", turn: "unknown" }}
       onRetry={noop}
       onEdit={noop}
@@ -277,13 +281,14 @@ test("#1213 a delivery that lands late supersedes its own uncertain rendering", 
   const view = mount(
     <RuntimeComposerReceipts
       receipts={[receipt({ status: "delivered", revision: 2 })]}
-      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      nowMs={at(PAST_BOUND_MS)}
       onRetry={noop}
       onEdit={noop}
     />,
   );
   /* A resolved delivery renders no chrome at all — the feed bubble is the
-     receipt. The 21-minute success must not leave an "unconfirmed" row behind. */
+     receipt. A success that arrives past the bound must not leave an
+     "unconfirmed" row behind it. */
   expect(view.host.querySelector("[data-runtime-receipt-stack]")).toBeNull();
   view.cleanup();
 });
@@ -349,7 +354,7 @@ test("#1213 the row measures the wait from the admission stamp the queue never r
   const view = mount(
     <RuntimeComposerReceipts
       receipts={[bounced]}
-      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      nowMs={at(PAST_BOUND_MS)}
       session={BUSY}
       onRetry={noop}
       onEdit={noop}
@@ -359,7 +364,7 @@ test("#1213 the row measures the wait from the admission stamp the queue never r
   const chip = details.querySelector("[data-receipt-status]")!;
   expect(chip.getAttribute("data-receipt-wait")).toBe("uncertain");
   expect(chip.textContent).toContain(t("runtime.receipt.unconfirmed", {
-    waited: t("runtime.receipt.waitedMin", { n: 21 }),
+    waited: t("runtime.receipt.waitedMin", { n: PAST_BOUND_MIN }),
   }));
   view.cleanup();
 });
@@ -395,7 +400,7 @@ test("#1213 an unexplained wait carries an unexplained cause into its terminal r
   const view = mount(
     <RuntimeComposerReceipts
       receipts={[receipt({ status: "queued" })]}
-      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      nowMs={at(PAST_BOUND_MS)}
       onRetry={noop}
       onEdit={noop}
     />,

@@ -79,7 +79,6 @@ function stateChip(
       /* The enqueue stamp: written once when the operator pressed send and
          never rewritten, which is what the wait has to be measured from. */
       admittedAt: new Date(entry.at).toISOString(),
-      attempts: 1,
       nowMs,
     });
     const waitLabel = wait ? deliveryWaitText(t, wait) : null;

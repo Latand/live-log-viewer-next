@@ -62,19 +62,21 @@ export type DeliveryWaitCause = "turn" | "host" | "unknown";
 
 /**
  * How long a delivery may stay unconfirmed before the composer stops calling it
- * in flight. Set above the longest observed successful wait (21 min is the
- * outlier in #1213, and it arrived) so an honest late delivery is not written
- * off early — but bounded, because the state below this line is exactly the one
- * nothing else owns.
+ * in flight.
+ *
+ * Strictly above the longest observed SUCCESSFUL wait — 21 min is the outlier in
+ * #1213's own table, and it arrived — because the terminal row tells the
+ * operator nothing will retry this and to send it again themselves. Crossing the
+ * bound while the operation is still parked and still drainable would turn that
+ * sentence into an instruction to double-deliver by hand. Bounded all the same,
+ * because past this line is exactly the state nothing else owns.
  */
-export const DELIVERY_UNCERTAIN_MS = 20 * 60_000;
+export const DELIVERY_UNCERTAIN_MS = 30 * 60_000;
 
 export interface DeliveryWait {
   phase: DeliveryWaitPhase;
   /** Milliseconds since this message was admitted. */
   waitedMs: number;
-  /** Attempts made so far; never below one. */
-  attempts: number;
   cause: DeliveryWaitCause;
 }
 
@@ -92,7 +94,6 @@ export interface DeliveryWaitInput {
       bounces a parked send `delivering`→`queued`, so reading `at` restarts the
       wait and the bound below is never crossed. */
   admittedAt: string;
-  attempts: number;
   nowMs: number;
 }
 
@@ -110,21 +111,31 @@ function parked(status: ReceiptStatus): boolean {
 }
 
 /**
+ * Whether a receipt can still be in a wait at all.
+ *
+ * False once it settled: terminal OR resolved — `turn-started`/`steered` are not
+ * terminal receipts, but they prove the message is inside the agent's turn, so
+ * there is no wait left to describe. A surface reads this to decide whether the
+ * clock is worth watching; {@link deliveryWaitFor} reads the same predicate, so
+ * a composer can never keep ticking for rows this model has stopped speaking
+ * about.
+ */
+export function deliveryWaitPossible(status: ReceiptStatus): boolean {
+  return !receiptIsTerminal(status) && !deliveryResolved(status);
+}
+
+/**
  * The wait a still-unsettled delivery is in, or `null` when the receipt has
  * settled and the existing terminal rendering owns it.
  */
 export function deliveryWaitFor(input: DeliveryWaitInput): DeliveryWait | null {
-  /* Terminal OR resolved: `turn-started`/`steered` are not terminal receipts,
-     but they prove the message is inside the agent's turn — there is no wait
-     left to describe. */
-  if (receiptIsTerminal(input.status) || deliveryResolved(input.status)) return null;
+  if (!deliveryWaitPossible(input.status)) return null;
   const startedAt = Date.parse(input.admittedAt);
   /* An unreadable or future stamp reports no wait rather than a negative or
      NaN one: the phase is still true, only the duration is unknown. */
   const waitedMs = Number.isFinite(startedAt) ? Math.max(0, input.nowMs - startedAt) : 0;
-  const attempts = Number.isFinite(input.attempts) ? Math.max(1, Math.trunc(input.attempts)) : 1;
   const cause = waitCause(input);
-  const wait = (phase: DeliveryWaitPhase): DeliveryWait => ({ phase, waitedMs, attempts, cause });
+  const wait = (phase: DeliveryWaitPhase): DeliveryWait => ({ phase, waitedMs, cause });
   /* The composer's local row for a send it could not confirm was admitted.
      Calling it "waiting for a turn" would assert an admission that is exactly
      what could not be confirmed. */

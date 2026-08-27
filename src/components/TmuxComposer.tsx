@@ -33,6 +33,7 @@ import {
   markOutboxResponded,
   outboxHistory,
   outboxAwaitsTurnBoundary,
+  outboxReceiptPatch,
   outboxStateForReceiptStatus,
   rebindOutboxEchoText,
   releaseHeldOutbox,
@@ -58,6 +59,7 @@ import {
   DELIVERY_WAIT_TICK_MS,
   deliveryUncertainWhy,
   deliveryWaitFor,
+  deliveryWaitPossible,
   deliveryWaitText,
   type DeliveryWait,
 } from "./runtime/deliveryWait";
@@ -285,17 +287,26 @@ export function RuntimeComposerReceipts({
   const { t } = useLocale();
   const statusId = useId();
   const [detailsOpen, setDetailsOpen] = useState(false);
+  /* Visibility and grouping live in the delivery-state model (issue #264):
+     resolved successes render nothing (the feed bubble is the receipt), a
+     group superseded by a successful resend of the same text goes quiet, and
+     dismissed settled problems stay dismissed. */
+  const attemptGroups = deliveryAttemptGroups(receipts, dismissed);
+  const visibleAttempts = attemptGroups.flatMap((group) => group.attempts);
   /* A wait only becomes news by getting older, and nothing else re-renders this
      row while a message is parked at a turn boundary. One local interval, no
      store and no bus: the elapsed label advances and the uncertain bound is
-     crossed on its own. */
+     crossed on its own. It runs only while some attempt is still in a wait —
+     a composer whose stack is empty or wholly settled has no label to advance,
+     and re-rendering it every 15 s buys nothing. */
   const [tick, setTick] = useState(() => nowMs ?? Date.now());
   const pinnedNow = nowMs !== undefined;
+  const unsettled = visibleAttempts.some((receipt) => deliveryWaitPossible(receipt.status));
   useEffect(() => {
-    if (pinnedNow) return;
+    if (pinnedNow || !unsettled) return;
     const timer = setInterval(() => setTick(Date.now()), DELIVERY_WAIT_TICK_MS);
     return () => clearInterval(timer);
-  }, [pinnedNow]);
+  }, [pinnedNow, unsettled]);
   const now = nowMs ?? tick;
   const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
   const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
@@ -303,12 +314,6 @@ export function RuntimeComposerReceipts({
     && typeof receipt.text === "string"
     && receipt.text.length > 0
     && receipt.text.length < 240;
-  /* Visibility and grouping live in the delivery-state model (issue #264):
-     resolved successes render nothing (the feed bubble is the receipt), a
-     group superseded by a successful resend of the same text goes quiet, and
-     dismissed settled problems stay dismissed. */
-  const attemptGroups = deliveryAttemptGroups(receipts, dismissed);
-  const visibleAttempts = attemptGroups.flatMap((group) => group.attempts);
   /* Measured from the receipt's own IMMUTABLE admission stamp, never from
      `at`: the queue bounces a parked send `delivering`→`queued` on every
      auto-retry and `at` moves with it, which both under-reports the wait and
@@ -321,7 +326,6 @@ export function RuntimeComposerReceipts({
     host: session?.host ?? null,
     turn: session?.turn ?? null,
     admittedAt: group.current.admittedAt ?? group.current.at,
-    attempts: group.attempts.length,
     nowMs: now,
   });
   const supersededStatusLabels = (attempts: RuntimeReceipt[]): string[] => {
@@ -1601,16 +1605,9 @@ export function TmuxComposerCore({
         candidate.idempotencyKey === entry.id
         && (receiptIsAdmitted(candidate.status) || receiptIsTerminal(candidate.status)));
       if (!receipt) continue;
-      const next = outboxStateForReceiptStatus(receipt.status);
-      if (next === entry.state) continue;
-      /* A failed bubble only advances on PROVEN admission — never on another
-         failure, and never to "delivering" off an unproven receipt. */
-      if (entry.state === "failed" && !(next === "delivered" || (next === "delivering" && receiptIsAdmitted(receipt.status)))) continue;
-      updateOutbox(cardId, entry.id, {
-        state: next,
-        settledAt: nowMs(),
-        awaitingTurn: outboxAwaitsTurnBoundary(receipt.status),
-      });
+      const patch = outboxReceiptPatch(entry, receipt.status);
+      if (!patch) continue;
+      updateOutbox(cardId, entry.id, { ...patch, settledAt: nowMs() });
     }
   }, [displayedRuntimeReceipts, outbox, cardId]);
 
