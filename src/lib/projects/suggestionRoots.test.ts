@@ -7,7 +7,7 @@ import { afterAll, beforeEach, expect, test } from "bun:test";
 import { resetProjectDirectoryCacheForTests } from "@/lib/scanner/projectDirectories";
 
 import { createManualProject, resetProjectCurationForTests } from "./curation";
-import { anchorForProjectRoot, suggestionRoots } from "./suggestionRoots";
+import { anchorForProjectRoot, SUGGESTION_ROOT_LIMIT, suggestionRoots } from "./suggestionRoots";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-suggestion-roots-"));
 const STATE = path.join(SANDBOX, "state");
@@ -84,4 +84,31 @@ test("with nothing known yet the home directory is still a root, so the picker i
   /* And it is the running viewer's home: a runtime under an isolated $HOME
      suggests from that one, never from the machine's real home. */
   expect(suggestionRoots()).toEqual([HOME]);
+});
+
+test("the list is capped here, once, and the home fallback survives the cap", () => {
+  /* The cap used to live on the suggestion side alone, so creation was handed
+     a longer list than the browse: directories nobody could be offered were
+     creatable, and — the other way round on a crowded machine — the home
+     fallback fell off the browse while creation still took it (issue #1223).
+     Bounding the one list is what keeps the two answers the same. */
+  const files: Record<string, { cwd: string; projectRoot: string }> = {};
+  for (let index = 0; index < SUGGESTION_ROOT_LIMIT + 4; index += 1) {
+    const checkout = path.join(SANDBOX, `anchor-${index}`, "checkout");
+    fs.mkdirSync(checkout, { recursive: true });
+    files[`fixture-${index}`] = { cwd: checkout, projectRoot: checkout };
+  }
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(path.join(STATE, "project-catalog.json"), JSON.stringify({
+    version: 2,
+    resolutionVersion: 4,
+    files,
+  }));
+  resetProjectDirectoryCacheForTests();
+
+  const roots = suggestionRoots();
+  expect(roots).toHaveLength(SUGGESTION_ROOT_LIMIT);
+  expect(roots).toContain(path.join(SANDBOX, "anchor-0"));
+  expect(roots).not.toContain(path.join(SANDBOX, `anchor-${SUGGESTION_ROOT_LIMIT + 3}`));
+  expect(roots[roots.length - 1]).toBe(HOME);
 });

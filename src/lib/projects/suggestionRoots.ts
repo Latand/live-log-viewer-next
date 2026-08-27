@@ -8,6 +8,11 @@ import { knownProjectRoots } from "@/lib/scanner/projectDirectories";
 /** How many known project roots are folded into anchors; well past the number
     of distinct places one machine keeps its checkouts. */
 const ANCHOR_SCAN_LIMIT = 60;
+/** Roots the answer is bound to. The cap lives here, on the one list, because
+    suggestion and creation both take it: bounding only the browse would offer
+    rows out of roots creation then refused, and bounding only creation would
+    refuse rows the browse had offered (issue #1223). */
+export const SUGGESTION_ROOT_LIMIT = 8;
 
 /**
  * Where a project root's siblings live — the parent directory, which is where
@@ -32,17 +37,21 @@ function homeRoot(): string {
 /**
  * The directories create-project may suggest from and create into (#1223).
  *
- * "The roots the viewer already knows", stated once so suggestion and creation
- * cannot drift apart: the parents of every project root the scanner and the
- * curation store carry, plus the home directory as the standing fallback — the
- * same one `/api/spawn` falls back to when it knows no working directory at
+ * "The roots the viewer already knows", computed once and handed to both sides
+ * so they cannot drift apart: the parents of every project root the scanner and
+ * the curation store carry, plus the home directory as the standing fallback —
+ * the same one `/api/spawn` falls back to when it knows no working directory at
  * all. Anchors lead so a browse opens on the places projects actually live;
- * home trails as the answer for a machine with no projects yet.
+ * home trails as the answer for a machine with no projects yet, and keeps its
+ * place past the cap, which would otherwise drop it exactly on the machine that
+ * has the most anchors and the least room.
  */
 export function suggestionRoots(): string[] {
-  const candidates: string[] = [];
-  for (const root of knownProjectRoots(ANCHOR_SCAN_LIMIT)) candidates.push(anchorForProjectRoot(root));
-  for (const entry of projectCurationSnapshot().manualProjects) candidates.push(anchorForProjectRoot(entry.root));
-  candidates.push(homeRoot());
-  return normalizeSuggestionRoots(candidates);
+  const anchors: string[] = [];
+  for (const root of knownProjectRoots(ANCHOR_SCAN_LIMIT)) anchors.push(anchorForProjectRoot(root));
+  for (const entry of projectCurationSnapshot().manualProjects) anchors.push(anchorForProjectRoot(entry.root));
+  return normalizeSuggestionRoots([
+    ...normalizeSuggestionRoots(anchors).slice(0, SUGGESTION_ROOT_LIMIT - 1),
+    homeRoot(),
+  ]);
 }

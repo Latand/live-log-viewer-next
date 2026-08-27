@@ -194,6 +194,19 @@ test("with roots bound, creation refuses outside them and never mkdirs there", (
     .toMatchObject({ ok: false, code: "OUTSIDE_ROOTS" });
   expect(fs.existsSync(path.join(beyond, "made-through-a-link"))).toBe(false);
 
+  /* The same link with a `..` behind it, which is the shape a lexical check
+     cannot see (issue #1223): `path.normalize`/`path.resolve` collapse the
+     segment against the *spelling* and read this as `<anchor>/escaped`, well
+     inside the bound, while the kernel walks the link first and lands two
+     levels away. Checking the normalized string and then handing the raw one
+     to mkdir created this directory outside the roots. */
+  const behindTheLink = escape + "/../escaped-behind-a-link";
+  expect(path.normalize(behindTheLink)).toBe(path.join(anchor, "escaped-behind-a-link"));
+  expect(createManualProject("Behind", behindTheLink, new Set(), { allowedRoots, createMissingRoot: true }))
+    .toMatchObject({ ok: false, code: "OUTSIDE_ROOTS" });
+  expect(fs.existsSync(path.join(path.dirname(beyond), "escaped-behind-a-link"))).toBe(false);
+  expect(fs.existsSync(path.join(anchor, "escaped-behind-a-link"))).toBe(false);
+
   /* A missing directory inside the bound is still creatable through it. */
   const fresh = path.join(anchor, "fresh-nested", "project");
   const grown = createManualProject("Fresh Nested", fresh, new Set(), { allowedRoots, createMissingRoot: true });

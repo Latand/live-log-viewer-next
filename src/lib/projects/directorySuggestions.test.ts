@@ -7,7 +7,6 @@ import { afterAll, expect, test } from "bun:test";
 import {
   normalizeSuggestionRoots,
   SUGGESTION_LIMIT,
-  SUGGESTION_ROOT_SCAN_LIMIT,
   suggestDirectories,
   withinSuggestionRoots,
 } from "./directorySuggestions";
@@ -110,17 +109,9 @@ test("hidden directories and plain files stay out of the browse list, and a dot 
   expect(suggestDirectories(PROJECTS + "/.", ROOTS)).toEqual([path.join(PROJECTS, ".hidden-cache")]);
 });
 
-test("the scan is bounded: too many roots and too many children never become an unbounded walk", () => {
-  const wide = path.join(SANDBOX, "wide");
-  const roots: string[] = [];
-  for (let index = 0; index < SUGGESTION_ROOT_SCAN_LIMIT + 2; index += 1) {
-    const root = path.join(wide, `root-${index}`);
-    makeDirs(path.join(root, `child-${index}`));
-    roots.push(root);
-  }
-  const beyond = path.join(wide, `root-${SUGGESTION_ROOT_SCAN_LIMIT + 1}`, `child-${SUGGESTION_ROOT_SCAN_LIMIT + 1}`);
-  expect(suggestDirectories("", roots)).not.toContain(beyond);
-
+test("one directory read is bounded, however many children it holds", () => {
+  /* How many roots there are is bounded once, on the root list itself
+     (`suggestionRoots`), so suggestion and creation take the same one. */
   const crowded = path.join(SANDBOX, "crowded");
   for (let index = 0; index < SUGGESTION_LIMIT + 10; index += 1) {
     makeDirs(path.join(crowded, `child-${String(index).padStart(3, "0")}`));

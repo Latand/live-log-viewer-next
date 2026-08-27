@@ -133,6 +133,16 @@ test("/api/projects/create refuses a root outside the suggested roots and create
   expect(relative.status).toBe(400);
   expect(relative.payload.error).toBe("RELATIVE_ROOT");
 
+  /* Through the link the browse already refuses, with a `..` behind it so the
+     spelling reads as `<ANCHOR>/…` while the kernel lands outside (issue
+     #1223). The bound is measured on where mkdir would actually land. */
+  const behindTheLink = LINK + "/../slipped-past";
+  const slipped = await create({ name: "Slipped", root: behindTheLink, createRoot: true });
+  expect(slipped.status).toBe(400);
+  expect(slipped.payload.error).toBe("OUTSIDE_ROOTS");
+  expect(fs.existsSync(path.join(SANDBOX, "slipped-past"))).toBe(false);
+  expect(fs.existsSync(path.join(ANCHOR, "slipped-past"))).toBe(false);
+
   const accepted = await create({ name: "Sibling Idea", root: SIBLING });
   expect(accepted.status).toBe(200);
   expect(accepted.payload.root).toBe(SIBLING);

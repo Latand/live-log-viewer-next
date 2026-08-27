@@ -12,17 +12,18 @@ import path from "node:path";
  * safe to hand to a browser.
  *
  * The bound is the anchor set: the directories where the viewer's projects
- * already live (see `suggestionRoots`). Everything here is expressed against
- * that set — a browse lists one level below each root, a typed path completes
- * inside the roots one directory read at a time, and nothing outside them is
- * ever read or returned, symlinks followed (see `SuggestionBound`). There is
- * no recursive walk anywhere in this module.
+ * already live (see `suggestionRoots`), already capped there so suggestion and
+ * creation are handed the same list. Everything here is expressed against that
+ * set — a browse lists one level below each root, a typed path completes inside
+ * the roots one directory read at a time, and nothing outside them is ever read
+ * or returned, symlinks followed. There is no recursive walk anywhere here.
+ *
+ * Creation reads the same bound through `boundedTarget`, so a directory that
+ * cannot be created is never offered.
  */
 
 /** Most suggestions one answer carries; the picker is a list to read, not a listing. */
 export const SUGGESTION_LIMIT = 40;
-/** Roots a single browse reads. Beyond this the answer is already long enough. */
-export const SUGGESTION_ROOT_SCAN_LIMIT = 8;
 /** Names kept from one directory read, so a pathological directory cannot
     turn a browse into an unbounded response. */
 export const SUGGESTION_ENTRY_SCAN_LIMIT = 200;
@@ -61,18 +62,14 @@ export function withinSuggestionRoots(target: string, roots: readonly string[]):
 }
 
 /**
- * The bound as both halves of the check need it: the roots **as written**,
- * which a query is measured against before anything is read, and the roots
- * **as the filesystem sees them**, which every directory that will be read or
- * offered is measured against once its symlinks are followed.
+ * The bound in the two spellings a check needs: the roots **as written**, which
+ * a query is measured against before anything is read, and the roots **as the
+ * filesystem sees them**, which every path that will be read, offered or
+ * created is measured against once its symlinks are followed.
  *
- * The written comparison alone is not enough. A link inside an anchor
- * (`<anchor>/linked-projects` → somewhere else entirely) is spelled like a
- * path inside the bound while it lands outside it, so completion would offer
- * directories that `createManualProject` — which resolves the same link before
- * it accepts a root — then refuses as OUTSIDE_ROOTS: a refusal aimed at a row
- * the operator picked out of the list this module produced. Both sides resolve,
- * so what is suggested is what creation's bound takes.
+ * The written spelling alone is not enough — a link inside an anchor is spelled
+ * inside the bound while it lands outside it — and the resolved spelling alone
+ * would readdir a traversal before judging it.
  */
 interface SuggestionBound {
   written: string[];
@@ -87,12 +84,43 @@ function realDirectory(directory: string): string | null {
   }
 }
 
-function boundedRoots(roots: readonly string[]): SuggestionBound {
-  const written = normalizeSuggestionRoots(roots).slice(0, SUGGESTION_ROOT_SCAN_LIMIT);
+function suggestionBound(roots: readonly string[]): SuggestionBound {
+  const written = normalizeSuggestionRoots(roots);
   /* A root whose realpath fails keeps its written spelling: dropping it would
      narrow the bound away from a directory the operator can still read, while
      anything under it that resolves elsewhere is refused all the same. */
   return { written, resolved: normalizeSuggestionRoots(written.map((root) => realDirectory(root) ?? root)) };
+}
+
+/**
+ * The directory a create request will actually touch: `requested` resolved the
+ * way the kernel resolves it — segment by segment, following every link, so a
+ * `..` after one lands where the link points rather than where the string
+ * suggests. Null when that lands outside `roots`, or when there is nothing to
+ * resolve from: only an absolute path names a place on its own.
+ *
+ * This is the whole of creation's bound, and it is one definition on purpose
+ * (issue #1223). Comparing a lexically normalized string (`path.normalize`,
+ * `path.resolve`) and then handing the raw one to `fs.mkdirSync` checked a path
+ * the kernel never visits: `<anchor>/link-out/../escaped` reads as
+ * `<anchor>/escaped` and is created wherever the link leads. What is returned
+ * here is what the caller creates, so the two cannot diverge.
+ */
+export function boundedTarget(requested: string, roots?: readonly string[]): string | null {
+  if (!path.isAbsolute(requested)) return null;
+  const parsed = path.parse(requested);
+  let target = parsed.root;
+  for (const segment of requested.slice(parsed.root.length).split(path.sep)) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      target = path.dirname(target);
+      continue;
+    }
+    const next = path.join(target, segment);
+    target = realDirectory(next) ?? next;
+  }
+  if (!roots) return target;
+  return withinSuggestionRoots(target, suggestionBound(roots).resolved) ? target : null;
 }
 
 /** Whether a directory may be read at all: inside the bound as written, so a
@@ -105,8 +133,8 @@ function readableDirectory(directory: string, bound: SuggestionBound): boolean {
 
 /** A symlinked project directory is a directory to the operator, so it is one
     here too — as long as it lands inside the bound. A real subdirectory of a
-    directory already proven inside cannot leave it, so the resolve runs for
-    the rare link entry alone. */
+    directory already proven inside cannot leave it, so the resolve runs for the
+    rare link entry alone. */
 function entryIsOfferableDirectory(target: string, entry: fs.Dirent, bound: SuggestionBound): boolean {
   if (entry.isDirectory()) return true;
   if (!entry.isSymbolicLink()) return false;
@@ -209,7 +237,7 @@ function matchesTokens(directory: string, query: string): boolean {
  * else is a filter word, and filters the anchors' children.
  */
 export function suggestDirectories(query: string, roots: readonly string[], limit = SUGGESTION_LIMIT): string[] {
-  const bound = boundedRoots(roots);
+  const bound = suggestionBound(roots);
   const trimmed = query.trim();
   if (path.isAbsolute(trimmed)) {
     /* Split on the raw query, not a normalized one: a trailing "." is a prefix

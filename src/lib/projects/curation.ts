@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
-import { withinSuggestionRoots } from "@/lib/projects/directorySuggestions";
+import { boundedTarget } from "@/lib/projects/directorySuggestions";
 import {
   projectIdentityFromDirectory,
   projectIdentityFromRepositoryRoot,
@@ -51,9 +51,10 @@ export interface CreateProjectOptions {
   /** Create the missing root directory (recursive mkdir) instead of refusing
       with MISSING_DIRECTORY. Relative paths and file paths still refuse. */
   createMissingRoot?: boolean;
-  /** Bound the creation to these directories — the roots create-project
-      suggests from. Omitted, the root is unbounded; the route always passes
-      them, so what can be created matches what can be offered (issue #1223). */
+  /** Bound the creation to these directories — the one root list the
+      suggestions come from (`suggestionRoots`). Omitted, the root is unbounded;
+      the route always passes them, so what can be created is exactly what can
+      be offered (issue #1223). */
   allowedRoots?: readonly string[];
 }
 
@@ -170,31 +171,6 @@ export function setProjectCrown(project: string, crowned: boolean): boolean {
   return writeSnapshot({ crowned: next, manualProjects: current.manualProjects });
 }
 
-function resolvedPath(directory: string): string {
-  try {
-    return fs.realpathSync.native(directory);
-  } catch {
-    return directory;
-  }
-}
-
-/** The deepest part of a path that exists, read through its symlinks. A bound
-    is checked against this rather than against the requested path alone: it is
-    where a missing directory would be created, so a link inside the bound that
-    leads out of it is caught before anything is written. */
-function resolvedExistingAncestor(directory: string): string {
-  let current = path.resolve(directory);
-  for (;;) {
-    try {
-      return fs.realpathSync.native(current);
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return current;
-      current = parent;
-    }
-  }
-}
-
 /**
  * Register an operator-named project rooted at a directory. The identity is
  * minted exactly the way the scanner mints it for sessions running in that
@@ -220,35 +196,30 @@ export function createManualProject(
   if (!path.isAbsolute(requested)) {
     return { ok: false, code: "RELATIVE_ROOT", message: "root must be an absolute directory path" };
   }
-  /* The bound is read twice on purpose: on the path as typed, so a traversal
-     never reaches the filesystem, and on the deepest directory that actually
-     exists along it, so neither a symlink out of the bound nor a mkdir under
-     one can leave it. Both happen before anything is created. The roots are
-     resolved for the second comparison — a root reached through a link (a
-     `/tmp` that is really `/private/tmp`) still bounds its own contents. */
-  const bound = options.allowedRoots;
-  if (bound && !(withinSuggestionRoots(requested, bound)
-    && withinSuggestionRoots(resolvedExistingAncestor(requested), bound.map(resolvedPath)))) {
+  /* One resolution, before anything is created, and it is what gets created:
+     `boundedTarget` follows the path's links the way the kernel will and
+     answers null when what it lands on is outside the roots. Everything below
+     works on that answer, so no lexically normalized string is ever checked in
+     place of the path `mkdirSync` receives (issue #1223). */
+  const resolved = boundedTarget(requested, options.allowedRoots);
+  if (!resolved) {
     return { ok: false, code: "OUTSIDE_ROOTS", message: "root is outside the known project directories" };
   }
-  let resolved: string;
+  let stats: fs.Stats | null = null;
   try {
-    resolved = fs.realpathSync.native(requested);
+    stats = fs.statSync(resolved);
   } catch {
     if (!options.createMissingRoot) {
       return { ok: false, code: "MISSING_DIRECTORY", message: "directory does not exist" };
     }
     try {
-      fs.mkdirSync(requested, { recursive: true });
-      resolved = fs.realpathSync.native(requested);
+      fs.mkdirSync(resolved, { recursive: true });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       return { ok: false, code: "MKDIR_FAILED", message: detail };
     }
   }
-  try {
-    if (!fs.statSync(resolved).isDirectory()) throw new Error("not a directory");
-  } catch {
+  if (stats && !stats.isDirectory()) {
     return { ok: false, code: "INVALID_ROOT", message: "path does not point at a directory" };
   }
   const repositoryRoot = repositoryRootForPath(resolved);
