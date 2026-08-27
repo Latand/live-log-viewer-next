@@ -434,6 +434,20 @@ export function describeMcpCall(
     };
   }
 
+  if (toolName === "suggest_replies") {
+    /* The operator sees this row directly above the pills it produced, so it
+       names the drafts by their labels rather than restating the tool. */
+    const replies = Array.isArray(args.replies) ? args.replies : [];
+    const labels = replies.map((reply) => string(record(reply).label)).filter(Boolean);
+    return {
+      icon: "message",
+      verb: "Offering",
+      title: `Offering ${labels.length || replies.length} reply draft${(labels.length || replies.length) === 1 ? "" : "s"}`,
+      subtitle: replaySubtitle(result, compact(labels.join(" · "))),
+      links: conversationLink({ conversationId: string(args.conversationId) || string(result.conversationId) }),
+    };
+  }
+
   return {
     icon: "tool",
     verb: "Running",

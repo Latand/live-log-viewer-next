@@ -281,6 +281,29 @@ async function render(browser, config, shot, capturePng) {
       }
     }, sections);
   }
+  if (shot.id === "orchestrator-dock") {
+    // The dock's open state is a per-project preference, and every capture page
+    // starts with storage cleared — so the shot opens it the way an operator
+    // does, from the header toggle, instead of seeding the flag behind the UI.
+    await page.waitForSelector("[data-orchestrator-toggle]", { timeout: 30_000 });
+    await page.evaluate(() => {
+      const toggle = document.querySelector("[data-orchestrator-toggle]");
+      if (!(toggle instanceof HTMLElement)) throw new Error("missing orchestrator toggle");
+      if (toggle.getAttribute("aria-pressed") !== "true") toggle.click();
+    });
+    await page.waitForSelector("[data-orchestrator-conversation]", { timeout: 30_000 });
+    // Frame the whole project beside the dock, so the board shows what the
+    // orchestrator has running instead of centering one card of it.
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll("button")).some((button) => ((button.getAttribute("title") || "")).startsWith("Fit all content")),
+      { timeout: 30_000 },
+    );
+    await page.evaluate(() => {
+      const fit = Array.from(document.querySelectorAll("button")).find((button) => ((button.getAttribute("title") || "")).startsWith("Fit all content"));
+      if (!(fit instanceof HTMLElement)) throw new Error("missing fit-all control");
+      fit.click();
+    });
+  }
   if (shot.id === "chat-feed") {
     // The compact scheme card renders the same transcript in miniature, so the
     // command group must be toggled inside the expanded dialog specifically.

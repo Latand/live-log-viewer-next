@@ -4,6 +4,8 @@ import path from "node:path";
 import {
   DEMO_FIXED_ISO,
   DEMO_TOKEN,
+  FIXTURE_HOLDER_SOURCE,
+  ORCHESTRATOR_SEAT_FILE,
   PUPPETEER_IMAGE,
   SEED_SOURCES,
   SHOTS,
@@ -93,6 +95,7 @@ describe("demo capture contract", () => {
       "codex-session.png",
       "overview-board.png",
       "first-run-empty.png",
+      "orchestrator-dock.png",
       "pending-question.png",
       "review-group-expanded.png",
       "review-group-collapsed.png",
@@ -151,6 +154,77 @@ describe("demo capture contract", () => {
     expect(shot.frame.pixels.minColorCount).toBeLessThan(100);
     expect(shot.frame.pixels.minColorCount).toBeGreaterThan(0);
     expect(SHOTS.filter((candidate) => (candidate.frame.pixels.minColorCount < 100)).map((candidate) => candidate.id)).toEqual(["first-run-empty"]);
+  });
+
+  test("the orchestrator-dock still renders the seated project the docs walk through", async () => {
+    const fs = await import("node:fs");
+    const shot = SHOTS.find((candidate) => candidate.id === "orchestrator-dock")!;
+    expect(shot.seed ?? "demo").toBe("demo");
+    expect(shot.project).toBe("kanban");
+    /* The dock is opened from the project header, so the shot lands on the
+       project rather than on one transcript. */
+    expect(shot.file).toBeNull();
+
+    /* WHO holds the seat, what the dock says it is doing, and the seat's own
+       conversation — each is a gated element, so a panel that renders as a
+       create draft, a spinner or a bare chat column fails the capture. */
+    expect(shot.frame.visible.map((expected) => [expected.selector, expected.text])).toEqual([
+      ["[data-orchestrator-panel]", "Orchestrator"],
+      ["[data-orchestrator-incumbent]", "opus"],
+      ["[data-orchestrator-badge]", "live"],
+      ["[data-orchestrator-conversation]", "One lane per issue"],
+    ]);
+    expect(shot.frame.absentText).toContain("Create this project's orchestrator");
+    /* The greeting a fresh seat opens with is the point of the shot. */
+    expect(shot.stableText).toContain("Ready in kanban");
+    expect(shot.stableText).toContain("Nothing starts until you ask");
+
+    /* One transcript, named by the manifest, the seat file, the registry and
+       the disk. A path that agrees in three places and not the fourth renders
+       an empty dock, which no assertion above could tell from a slow one. */
+    const fixtureRoot = path.join(import.meta.dir, "..", SEED_SOURCES.demo);
+    const seatFixture = ORCHESTRATOR_SEAT_FILE.replace(DEMO_TOKEN, fixtureRoot);
+    expect(fs.existsSync(seatFixture)).toBeTrue();
+    const transcript = fs.readFileSync(seatFixture, "utf8");
+    expect(transcript).toContain("Ready in kanban");
+    expect(transcript).toContain("One lane per issue");
+
+    const stateRoot = path.join(fixtureRoot, ".config/agent-log-viewer/state");
+    const seats = JSON.parse(fs.readFileSync(path.join(stateRoot, "orchestrator-seats.json"), "utf8")) as {
+      seats: Record<string, { conversationId: string; path: string; state: string }>;
+    };
+    const seat = seats.seats.kanban!;
+    expect(seat.state).toBe("active");
+    expect(seat.path).toBe(ORCHESTRATOR_SEAT_FILE);
+    /* The dock binds the seat's conversation by that recorded path, and the
+       incumbent row names the model the transcript itself reports. */
+    expect(transcript).toContain('"model":"opus"');
+    /* The card's title is the operator's own, filed against the same path. */
+    const titles = JSON.parse(fs.readFileSync(path.join(stateRoot, "session-titles.json"), "utf8")) as {
+      titles: Array<{ key: string; title: string }>;
+    };
+    expect(titles.titles.map((record) => record.key)).toContain(`path:${ORCHESTRATOR_SEAT_FILE}`);
+
+    /* The context reading the shot pins is transcript bytes / 4 (the estimate
+       the incumbent read falls back to with no provider-reported usage). It is
+       a stable-text needle, so the fixture and the manifest have to agree on
+       the number — deriving it here is what keeps them agreeing. */
+    const estimate = Math.round(fs.statSync(seatFixture).size / 4);
+    expect(shot.stableText).toContain(`~${estimate}`);
+  });
+
+  test("the capture opens the dock and hosts the seat conversation", async () => {
+    /* Two mechanisms the shot cannot render without, and neither of them lives
+       in the manifest: the seat transcript is held open by a fixture process
+       (else the dock reports a finished run over the greeting), and the dock
+       itself is opened from its header toggle (else a cleared localStorage
+       leaves the panel closed). */
+    expect(FIXTURE_HOLDER_SOURCE).toContain("openSync(process.argv[2]");
+    const runner = await Bun.file(path.join(import.meta.dir, "demo-capture.ts")).text();
+    expect(runner).toContain("startOrchestratorSeatPane(root, renderFixtureTemplate(ORCHESTRATOR_SEAT_FILE, env.HOME!), env)");
+    const browser = await Bun.file(path.join(import.meta.dir, "demo-capture-browser.cjs")).text();
+    expect(browser).toContain('shot.id === "orchestrator-dock"');
+    expect(browser).toContain("[data-orchestrator-toggle]");
   });
 
   test("shots are captured one boot per fixture home, in manifest order", () => {

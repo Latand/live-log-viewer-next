@@ -83,6 +83,8 @@ import {
 import { readSession, type SessionReadResult } from "@/lib/session/reader";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
+import { recordReplySuggestions } from "@/lib/suggestions/store";
+import { ReplySuggestionValidationError } from "@/lib/suggestions/types";
 import { applyAssignmentPatches, createTask, patchTask, type CreateTaskInput, type PatchTaskInput } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
 import { loadTasks, mutateTasks, mutateTasksFile } from "@/lib/tasks/store";
@@ -101,7 +103,7 @@ import {
   selectedConversationTail,
   type SelectedContextTargetDependencies,
 } from "./selectedContextTarget";
-import { mcpCallerIdentity, mcpToolPolicy, permitAttentionHandoff, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
+import { mcpCallerIdentity, mcpToolPolicy, permitAttentionHandoff, permitReplySuggestions, type ManagerTarget, type McpToolPolicy } from "./toolAllowlist";
 
 const PIPELINE_CONTROLLER_ACTIONS = new Set<PipelineAction>(["start", "resume", "retry-stage", "skip-stage"]);
 
@@ -2789,6 +2791,77 @@ async function requestAttention(
 }
 
 /**
+ * Reply drafts for the operator (#1202) — the manager handing them the
+ * sentences its own turn expects, instead of a question they have to type an
+ * answer to from scratch.
+ *
+ * Everything durable about a set is decided here rather than by the caller:
+ * WHO offered it (server attribution, the same chain the attention record and
+ * the bridge log's origin trust), WHICH conversation it belongs under (the
+ * caller's own — a named one has to BE the caller's own), and WHETHER it may
+ * be offered at all. The set replaces the conversation's previous one; the
+ * operator's next message is what clears it.
+ */
+function suggestReplies(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpToolPayload {
+  /* The authority gate, BEFORE anything is written or even resolved: this puts
+     words in front of the operator inside the surface they answer in, so only
+     their own session and a validated designated seat may do it. A refused
+     caller writes nothing and learns nothing. */
+  const authority = dependencies.attentionAuthority();
+  const seats = dependencies.authorizedSeats?.() ?? authorizedManagerSeats(productionManagerAuthoritySources());
+  const canonical = dependencies.canonicalSeatConversationId ?? productionCanonicalSeatConversationId;
+  /* Identity AND target in one verdict: drafts are offered under the caller's
+     OWN message, so naming another conversation is refused here — for a seat
+     and for the root session alike, because a set written into somebody else's
+     pane answers a question its own surface never asked. */
+  const named = text(args.conversationId);
+  const admission = permitReplySuggestions(authority, seats, named || null, canonical);
+  if (!admission.allowed) {
+    throw new McpToolRefusal(admission.error, { code: "SUGGEST_REPLIES_NOT_PERMITTED", refusedAs: admission.refusedAs });
+  }
+
+  /* The gate above already resolved the validated seats, which is exactly the
+     evidence the manager label needs — so the origin folds them in rather than
+     resolving designation a second time. */
+  const origin = dependencies.callerAttribution?.()
+    ?? callerAttributionFrom(authority, (conversationId) => seats.some((seat) => seat.conversationId === conversationId));
+  const target = named || origin.conversationId || "";
+  if (!target) {
+    throw new Error("conversationId is required: this caller has no conversation of its own to offer drafts in");
+  }
+  /* Keyed by what the registry calls this conversation NOW: the pane reads its
+     drafts under the canonical id, so a set filed under a pre-migration alias
+     would be written where nothing looks for it. */
+  const conversationId = canonical(target);
+
+  try {
+    const recorded = recordReplySuggestions({
+      conversationId,
+      replies: args.replies,
+      origin: { kind: origin.kind, conversationId: origin.conversationId, role: origin.role },
+      /* Derived from the call, so an interrupted run re-offering the same set
+         converges on the same record instead of minting a twin. */
+      operationKey: mcpOperationId("suggest_replies", requestId(args)),
+    });
+    return {
+      recorded: true,
+      conversationId,
+      setId: recorded.set.setId,
+      at: recorded.set.at,
+      replies: recorded.set.replies.length,
+      replaced: recorded.replaced,
+    };
+  } catch (error) {
+    /* A refused set names the rule it broke and leaves the previous one
+       standing — the caller can fix the draft and offer again. */
+    if (error instanceof ReplySuggestionValidationError) {
+      throw new McpToolRefusal(error.message, { code: error.code });
+    }
+    throw error;
+  }
+}
+
+/**
  * #691 §6 — the live per-identity fence.
  *
  * Built from the same evidence `request_attention` already trusts: this process's
@@ -2875,6 +2948,7 @@ export function viewerMcpBindings(
     agent_activity: (args, context) => agentActivity(args, domainDependencies, context),
     lifecycle_events: (args) => lifecycleEvents(args, controlDependencies, domainDependencies),
     request_attention: (args, context) => requestAttention(args, domainDependencies, context),
+    suggest_replies: (args) => Promise.resolve(suggestReplies(args, domainDependencies)),
     bridge_report: (args) => Promise.resolve(bridgeReport(args, domainDependencies)),
     bridge_directive: (args) => bridgeDirective(args, controlDependencies, domainDependencies),
     get_orchestrator: (args) => getOrchestrator(args, domainDependencies),

@@ -345,6 +345,8 @@ export const en = {
   "composer.admissionTimedOut": "Delivery confirmation timed out. Checking the durable receipt; your message remains preserved.",
   "composer.deliveryUnconfirmed": "Delivery couldn't be confirmed. Your message is preserved — send again to retry safely; the same message key is reused.",
   "composer.runtimePill": "Model and reasoning — applies to your next message",
+  // Reply drafts the manager offers under its own message (#1202)
+  "composer.suggestedReplies": "Suggested replies — tap one to put it in the composer",
   "composer.reasoningGroup": "Reasoning",
   "composer.modelGroup": "Model",
   "composer.speedGroup": "Speed",

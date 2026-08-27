@@ -12,7 +12,8 @@ bun run demo:capture
 
 Renders every PNG in the `scripts/demo-capture.ts` shot manifest (`chat-feed.png`,
 `session-tree.png`, `codex-session.png`, `overview-board.png`,
-`pending-question.png`, the `review-group-*.png` trio, `readiness-kanban.png`,
+`first-run-empty.png`, `orchestrator-dock.png`, `pending-question.png`, the
+`review-group-*.png` trio, `readiness-kanban.png`,
 `readiness-kanban-mobile.png`, `review-loop.png`). The runner:
 
 1. materializes a disposable home under `fixtures/demo-home/.capture/`,
@@ -20,6 +21,15 @@ Renders every PNG in the `scripts/demo-capture.ts` shot manifest (`chat-feed.png
    `DEMO_CAPTURE_PORT`),
 3. renders every shot twice inside the pinned `mcp/puppeteer` Docker image and
    publishes it only when both passes agree and the element + pixel gates pass.
+
+Two shots need more of the fixture than a URL. `pending-question.png` is
+answered end to end against an interactive fixture pane, and
+`orchestrator-dock.png` renders the seat declared in
+`fixtures/demo-home/home/.config/agent-log-viewer/state/orchestrator-seats.json`:
+the bootstrap holds that seat's transcript open in a second fixture window so
+the conversation reads as hosted, and the browser step opens the dock from its
+own header toggle. `scripts/demo-capture.test.ts` keeps the manifest, the seat
+record, the registry generation and the transcript pointing at one path.
 
 Set `DEMO_CAPTURE_DEBUG=1` to dump a `debug-<shot>.png` frame when an element
 assertion fails.

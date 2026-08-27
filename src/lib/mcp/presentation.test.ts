@@ -57,6 +57,7 @@ describe("describeMcpCall", () => {
       ["lifecycle_events", { mode: "digest", subscriberId: "conversation_a" }, "pipeline", "Polling lifecycle digest"],
       ["request_attention", { target: { kind: "conversation", path: "/tmp/a.jsonl" }, reason: "The reviewer finished." }, "conversation", "Asking to show a conversation"],
       ["request_attention", { target: { kind: "task", taskId: "task-a" }, intent: "open", reason: "This is blocked." }, "conversation", "Asking to open a task"],
+      ["suggest_replies", { replies: [{ label: "yes, do it", text: "Yes." }, { label: "hold", text: "Hold." }] }, "message", "Offering 2 reply drafts"],
     ] as const;
 
     for (const [tool, args, icon, prefix] of cases) {
