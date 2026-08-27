@@ -56,6 +56,19 @@ export type ActiveTelegramReportRun = {
   windowEnd: string;
   conversationId: string | null;
   promptVersion: string;
+  /** Whether this run IS the one bounded re-queue a connector-unavailable
+      failure armed (#1133). It is what keeps the retry single: a re-queued run
+      that fails the same way arms nothing. */
+  retry?: boolean;
+};
+
+/** A run that failed purely because the shared connector was not up yet,
+    waiting for it to reach `connected` so the report the operator asked for is
+    re-queued ONCE instead of being silently lost (#1133). */
+export type TelegramReportRetry = {
+  runId: string;
+  trigger: TelegramReportRow["trigger"];
+  armedAt: string;
 };
 
 /** What is actually stored: the payload's settings minus the flag the payload
@@ -70,6 +83,8 @@ export type TelegramReportsFile = {
   ["prompt"]: string | null;
   cursor: ReportScheduleCursor;
   active: ActiveTelegramReportRun | null;
+  /** The one owed re-queue, or `null` when none is (#1133). */
+  retry: TelegramReportRetry | null;
   history: TelegramReportRow[];
 };
 
@@ -110,6 +125,7 @@ const EMPTY: TelegramReportsFile = {
   ["prompt"]: null,
   cursor: { lastSuccessfulWindowEndAt: null, unreportedSinceAt: null, lastScheduledDay: null },
   active: null,
+  retry: null,
   history: [],
 };
 
@@ -196,7 +212,18 @@ function sanitizeActive(value: unknown): ActiveTelegramReportRun | null {
     windowEnd: text(row.windowEnd) ?? startedAt,
     conversationId: text(row.conversationId),
     promptVersion: text(row.promptVersion) ?? "unknown",
+    ...(row.retry === true ? { retry: true as const } : {}),
   };
+}
+
+/** A marker with no run to re-queue and no instant to expire from is no
+    marker: it would either fire forever or fire for nothing (#1133). */
+function sanitizeRetry(value: unknown): TelegramReportRetry | null {
+  const row = (value && typeof value === "object" ? value : {}) as Partial<TelegramReportRetry>;
+  const runId = text(row.runId);
+  const armedAt = text(row.armedAt);
+  if (!runId || !armedAt || !Number.isFinite(Date.parse(armedAt))) return null;
+  return { runId, trigger: row.trigger === "manual" ? "manual" : "scheduled", armedAt };
 }
 
 export function readTelegramReports(): TelegramReportsFile {
@@ -206,10 +233,10 @@ export function readTelegramReports(): TelegramReportsFile {
   } catch {
     /* A tampered or unreadable reports file is not a credential: the feature
        falls back to defaults rather than taking the whole panel down. */
-    return { ...EMPTY, settings: { ...EMPTY.settings }, cursor: { ...EMPTY.cursor }, history: [] };
+    return { ...EMPTY, settings: { ...EMPTY.settings }, cursor: { ...EMPTY.cursor }, retry: null, history: [] };
   }
   if (!parsed || typeof parsed !== "object") {
-    return { ...EMPTY, settings: { ...EMPTY.settings }, cursor: { ...EMPTY.cursor }, history: [] };
+    return { ...EMPTY, settings: { ...EMPTY.settings }, cursor: { ...EMPTY.cursor }, retry: null, history: [] };
   }
   const row = parsed as Partial<TelegramReportsFile>;
   const cursor = (row.cursor && typeof row.cursor === "object" ? row.cursor : {}) as Partial<ReportScheduleCursor>;
@@ -225,6 +252,7 @@ export function readTelegramReports(): TelegramReportsFile {
       lastScheduledDay: text(cursor.lastScheduledDay),
     },
     active: sanitizeActive(row.active),
+    retry: sanitizeRetry(row.retry),
     history: Array.isArray(row.history)
       ? row.history.map(sanitizeRow).filter((item): item is TelegramReportRow => item !== null)
       : [],

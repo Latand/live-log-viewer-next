@@ -34,6 +34,7 @@ const ports: ReportRunnerPorts = {
   now: () => NOW,
   connection: () => CONNECTED,
   beginReadPhase: async () => () => {},
+  connectorReady: async () => ({ ready: true as const }),
   readPort: () => ({
     async getMe() { return CONNECTED.identity; },
     async feedDialogs() { return { dialogs: [], coveredSinceMs: Date.parse("2026-08-18T00:00:00.000Z") }; },

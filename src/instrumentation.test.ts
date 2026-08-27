@@ -496,6 +496,52 @@ test("the Telegram report scheduler starts with the release that owns traffic", 
   expect(started).toEqual(["pipelines", "telegram-report"]);
 });
 
+test("the release that owns traffic re-provisions the Telegram connector without holding startup", async () => {
+  /* #1133: the connector dies with the viewer container it is a child of, and
+     used to stay dead until a consumer tripped over it — which for the Daily
+     Report was the run itself, failing the day's report. Startup must not WAIT
+     for it either: verifying a connector takes tens of seconds and the release
+     cannot hold its ready marker behind that. */
+  const started: string[] = [];
+  let provisioned = false;
+  await startCurrentReleaseControllers(
+    { LLV_ACCOUNT_CONTROLLER_DISABLED: "1" },
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { started.push("pipelines"); } }),
+      loadAccountMigrationController: async () => ({ startAccountMigrationController: async () => { started.push("account"); } }),
+      loadTelegramReportScheduler: async () => ({ ensureTelegramReportScheduler: () => { started.push("telegram-report"); } }),
+      loadTelegramConnectorBoot: async () => ({
+        provisionTelegramConnectorAtStartup: async () => {
+          started.push("telegram-connector");
+          await new Promise<void>((resolve) => { setTimeout(resolve, 50); });
+          provisioned = true;
+          return "provisioned" as const;
+        },
+      }),
+    },
+  );
+
+  expect(started).toEqual(["pipelines", "telegram-connector", "telegram-report"]);
+  /* Started, not awaited: the scheduler and the release went on ahead of it. */
+  expect(provisioned).toBe(false);
+});
+
+test("a Telegram connector that cannot be provisioned does not take the other controllers down", async () => {
+  const started: string[] = [];
+  await startCurrentReleaseControllers(
+    { LLV_ACCOUNT_CONTROLLER_DISABLED: "1" },
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { started.push("pipelines"); } }),
+      loadAccountMigrationController: async () => ({ startAccountMigrationController: async () => { started.push("account"); } }),
+      loadTelegramReportScheduler: async () => ({ ensureTelegramReportScheduler: () => { started.push("telegram-report"); } }),
+      loadTelegramConnectorBoot: async () => { throw new Error("telegram state unavailable"); },
+    },
+  );
+  await Promise.resolve();
+
+  expect(started).toEqual(["pipelines", "telegram-report"]);
+});
+
 test("a Telegram scheduler that cannot start does not take the other controllers down", async () => {
   const started: string[] = [];
   await startCurrentReleaseControllers(

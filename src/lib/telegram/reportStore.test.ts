@@ -156,3 +156,23 @@ test("the analyst prompt is stored, survives a restart, and resets to the shippe
   expect(sanitizeReportPrompt(undefined)).toBeUndefined();
   expect(sanitizeReportPrompt(42)).toBeUndefined();
 });
+
+test("the owed re-queue survives a restart, and a marker naming nothing is dropped", () => {
+  /* #1133: the marker is what makes a "Run now" that lost its connector
+     re-queue once — so it has to outlive the viewer restart that killed the
+     connector in the first place. */
+  updateTelegramReports((state) => {
+    state.retry = { runId: "report-fixture-0100", trigger: "manual", armedAt: "2026-08-21T07:00:00.000Z" };
+  });
+  expect(readTelegramReports().retry).toEqual({
+    runId: "report-fixture-0100",
+    trigger: "manual",
+    armedAt: "2026-08-21T07:00:00.000Z",
+  });
+
+  /* A marker with no instant to expire from would fire forever. */
+  updateTelegramReports((state) => {
+    state.retry = { runId: "report-fixture-0101", trigger: "manual", armedAt: "whenever" };
+  });
+  expect(readTelegramReports().retry).toBeNull();
+});
