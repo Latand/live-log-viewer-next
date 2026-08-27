@@ -237,6 +237,71 @@ test("#1213 a retry loses the race to a delivery that landed first, and never se
   expect(retries).toBe(0);
 });
 
+test("#1213 a hand-over already under way is never abandoned, and never duplicated", async () => {
+  /* The race the operator cannot see: the delivery queue writes `delivering`
+     BEFORE `host.send`, so a message can be in front of the agent while its
+     receipt still looks unsettled. Failing it here would retire the effect
+     mid-flight — the agent keeps the message, the real delivery can no longer
+     record itself, and a replacement delivers the same text a second time. */
+  const world = scenario("handover");
+  const admitted = world.admit("status please", "msg-handover");
+  world.journal.transitionOperation(admitted.operationId, "delivering", { turnId: "turn-1" });
+
+  const deps = {
+    enabled: () => true,
+    client: () => world.client,
+    kick: () => {},
+    registry: () => world.registry,
+    recover: async () => { throw new Error("a hand-over in flight reached host recovery"); },
+  };
+
+  const discarded = await handleRuntimeAbandon(del(admitted.operationId), admitted.operationId, deps);
+  expect(discarded.status).toBe(409);
+  expect(await discarded.json()).toMatchObject({ handover: true, receipt: { status: "delivering" } });
+
+  const retried = await handleRuntimeRetry(
+    post(admitted.operationId, { abandonUnconfirmed: true }),
+    admitted.operationId,
+    deps,
+  );
+  expect(retried.status).toBe(409);
+  expect(await retried.json()).toMatchObject({ handover: true });
+
+  /* Exactly one deliverable send, still the original, and its receipt is
+     untouched — so the hand-over the queue is running can still record its own
+     outcome. */
+  expect(world.pendingSendOperationIds()).toEqual([admitted.operationId]);
+  expect(world.journal.operationResult(admitted.operationId)?.receipt.status).toBe("delivering");
+  expect(world.journal.transitionOperation(admitted.operationId, "delivered", { turnId: "turn-1" }).receipt.status)
+    .toBe("delivered");
+});
+
+test("#1213 a transition that faults is never reported as a delivery that landed", async () => {
+  /* "The message arrived" is the one answer that stops the operator acting. It
+     may only be given when a terminal receipt proves it — a journal fault over
+     a receipt still sitting `queued` proves nothing, and answering 200 there
+     would leave the message undelivered and the operator told otherwise. */
+  const world = scenario("fault");
+  const admitted = world.admit("status please", "msg-fault");
+
+  const response = await handleRuntimeAbandon(del(admitted.operationId), admitted.operationId, {
+    enabled: () => true,
+    client: () => ({
+      ...world.client,
+      transitionOperation: async () => { throw new Error("database is locked"); },
+    }) as RuntimeHostClient,
+    kick: () => {},
+    registry: () => world.registry,
+  });
+
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ error: "database is locked" });
+  expect(world.pendingSendOperationIds()).toEqual([admitted.operationId]);
+  expect(world.registry.pendingDeliveries(world.conversation.id)).toMatchObject([
+    { state: "delivery-uncertain", deliveredAt: null },
+  ]);
+});
+
 test("#1213 an in-flight operation still refuses a retry that did not ask to abandon it", async () => {
   const world = scenario("guard");
   const admitted = world.admit("status please", "msg-guard");

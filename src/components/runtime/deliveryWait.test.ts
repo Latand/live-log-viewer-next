@@ -1,5 +1,5 @@
 /**
- * Issue #1213 — the three composer delivery phases, told apart.
+ * Issue #1213 — the composer delivery phases, told apart.
  *
  * The operator's evidence: four deliveries into one busy structured host took
  * 2 min, 12 s, 21 min and 4 min; the fifth never arrived. All five rendered the
@@ -12,16 +12,50 @@ import {
   DELIVERY_UNCERTAIN_MS,
   DELIVERY_WAIT_ATTENTION_MS,
   deliveryWaitFor,
+  deliveryWaitText,
 } from "./deliveryWait";
+import { translate } from "@/lib/i18n";
+
+const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
 
 const AT = "2026-08-27T10:00:00.000Z";
 const at = (offsetMs: number) => Date.parse(AT) + offsetMs;
 
-test("an attempt on the wire is transmitting, and says how long it has been", () => {
+test("an attempt on the request path is transmitting, and says how long it has been", () => {
   expect(deliveryWaitFor({ status: "pending", firstAttemptAt: AT, attempts: 1, nowMs: at(1_500) }))
-    .toEqual({ phase: "transmitting", waitedMs: 1_500, attempts: 1 });
+    .toEqual({ phase: "transmitting", waitedMs: 1_500, attempts: 1, hostGone: false });
+});
+
+test("an attempt the queue is handing over is its own phase, and cannot be abandoned", () => {
+  /* The delivery queue writes `delivering` BEFORE it calls `host.send`, so this
+     is a message already on its way to the agent. It must never reach the
+     `uncertain` terminal, whose whole contract is that failing the operation
+     retires the effect: doing that mid-hand-over delivers the message AND a
+     replacement. The server refuses it for the same reason. */
   expect(deliveryWaitFor({ status: "delivering", firstAttemptAt: AT, attempts: 2, nowMs: at(4_000) }))
-    .toEqual({ phase: "transmitting", waitedMs: 4_000, attempts: 2 });
+    .toEqual({ phase: "handing-over", waitedMs: 4_000, attempts: 2, hostGone: false });
+  expect(deliveryWaitFor({
+    status: "delivering",
+    firstAttemptAt: AT,
+    attempts: 2,
+    nowMs: at(DELIVERY_UNCERTAIN_MS + 60_000),
+  })?.phase).toBe("handing-over");
+  expect(deliveryWaitFor({ status: "applying", firstAttemptAt: AT, attempts: 1, nowMs: at(1_000) })?.phase)
+    .toBe("handing-over");
+});
+
+test("a hand-over is silent while it is momentary and names itself once it is not", () => {
+  const brief = deliveryWaitFor({ status: "delivering", firstAttemptAt: AT, attempts: 1, nowMs: at(4_000) })!;
+  expect(deliveryWaitText(t, brief)).toBeNull();
+  const long = deliveryWaitFor({
+    status: "delivering",
+    firstAttemptAt: AT,
+    attempts: 1,
+    nowMs: at(DELIVERY_UNCERTAIN_MS + 60_000),
+  })!;
+  expect(deliveryWaitText(t, long)).toBe(t("runtime.receipt.handingOverFor", {
+    waited: t("runtime.receipt.waitedMin", { n: 21 }),
+  }));
 });
 
 test("an admitted-but-undelivered message is waiting for a turn boundary, not transmitting", () => {
@@ -29,9 +63,28 @@ test("an admitted-but-undelivered message is waiting for a turn boundary, not tr
      in while the host is inside a turn: it never transitions to `delivering`
      until `health.status === "idle"`. Saying "delivering" here is the lie. */
   expect(deliveryWaitFor({ status: "queued", firstAttemptAt: AT, attempts: 1, nowMs: at(12_000) }))
-    .toEqual({ phase: "awaiting-turn", waitedMs: 12_000, attempts: 1 });
-  expect(deliveryWaitFor({ status: "uncertain", firstAttemptAt: AT, attempts: 2, nowMs: at(60_000) }))
-    .toEqual({ phase: "awaiting-turn", waitedMs: 60_000, attempts: 2 });
+    .toEqual({ phase: "awaiting-turn", waitedMs: 12_000, attempts: 1, hostGone: false });
+});
+
+test("a send whose admission was never confirmed says that, and never claims a turn boundary", () => {
+  /* The composer's own local row (`composer-unconfirmed:<key>`): the journal
+     writes `uncertain` only for compact, so the only send receipt carrying it
+     is the one the composer mints when it could not confirm admission at all.
+     "Waiting for the agent to finish its turn" would assert the admission that
+     is precisely what is unknown. */
+  const wait = deliveryWaitFor({ status: "uncertain", firstAttemptAt: AT, attempts: 2, nowMs: at(60_000) })!;
+  expect(wait).toEqual({ phase: "unconfirmed-admission", waitedMs: 60_000, attempts: 2, hostGone: false });
+  expect(deliveryWaitText(t, wait)).toBe(t("runtime.receipt.admissionUnconfirmed", {
+    waited: t("runtime.receipt.waitedMin", { n: 1 }),
+  }));
+  /* And it stays its own phase past the bound: the operator's exit there is the
+     composer's own draft, not a journal operation that may not exist. */
+  expect(deliveryWaitFor({
+    status: "uncertain",
+    firstAttemptAt: AT,
+    attempts: 2,
+    nowMs: at(DELIVERY_UNCERTAIN_MS + 60_000),
+  })?.phase).toBe("unconfirmed-admission");
 });
 
 test("the 21-minute delivery is still legitimately waiting at 20 minutes minus a tick", () => {
@@ -44,10 +97,10 @@ test("the 21-minute delivery is still legitimately waiting at 20 minutes minus a
   expect(wait?.phase).toBe("awaiting-turn");
 });
 
-test("a delivery unconfirmed past the bound is uncertain, whatever it was doing before", () => {
-  for (const status of ["pending", "delivering", "queued", "uncertain", "applying"] as const) {
+test("an abandonable delivery unconfirmed past the bound is uncertain", () => {
+  for (const status of ["pending", "queued"] as const) {
     expect(deliveryWaitFor({ status, firstAttemptAt: AT, attempts: 2, nowMs: at(DELIVERY_UNCERTAIN_MS) }))
-      .toEqual({ phase: "uncertain", waitedMs: DELIVERY_UNCERTAIN_MS, attempts: 2 });
+      .toEqual({ phase: "uncertain", waitedMs: DELIVERY_UNCERTAIN_MS, attempts: 2, hostGone: false });
   }
 });
 
@@ -57,11 +110,20 @@ test("a settled receipt has no wait to report — the existing terminal renderin
   }
 });
 
+test("a message already inside the agent's turn has no wait either", () => {
+  /* `turn-started`/`steered` are not terminal receipts, but they PROVE the
+     message reached the agent. Offering an exit from them would abandon a
+     delivery that already happened. */
+  for (const status of ["turn-started", "steered"] as const) {
+    expect(deliveryWaitFor({ status, firstAttemptAt: AT, attempts: 1, nowMs: at(DELIVERY_UNCERTAIN_MS) })).toBeNull();
+  }
+});
+
 test("an unparseable or future first attempt never manufactures a wait", () => {
   expect(deliveryWaitFor({ status: "queued", firstAttemptAt: "not a date", attempts: 1, nowMs: at(0) }))
-    .toEqual({ phase: "awaiting-turn", waitedMs: 0, attempts: 1 });
+    .toEqual({ phase: "awaiting-turn", waitedMs: 0, attempts: 1, hostGone: false });
   expect(deliveryWaitFor({ status: "queued", firstAttemptAt: AT, attempts: 1, nowMs: at(-5_000) }))
-    .toEqual({ phase: "awaiting-turn", waitedMs: 0, attempts: 1 });
+    .toEqual({ phase: "awaiting-turn", waitedMs: 0, attempts: 1, hostGone: false });
 });
 
 test("the attention threshold sits below the uncertain bound and above ordinary latency", () => {
@@ -83,18 +145,21 @@ test("a delivery stranded by a host that went away does not claim to wait on a t
      would be false in exactly the incident this state is most common in. */
   for (const reason of ["dead-host", "host-dead", "no-host", "unhosted", "host-unavailable"]) {
     expect(deliveryWaitFor({ status: "queued", reason, firstAttemptAt: AT, attempts: 2, nowMs: at(90_000) }))
-      .toEqual({ phase: "awaiting-host", waitedMs: 90_000, attempts: 2 });
+      .toEqual({ phase: "awaiting-host", waitedMs: 90_000, attempts: 2, hostGone: true });
   }
 });
 
-test("a host that never comes back reaches the same uncertain terminal as a turn that never ends", () => {
+test("a host that never comes back reaches the uncertain terminal carrying its own cause", () => {
+  /* The cause survives the phase change, because the uncertain row is the ONE
+     place the operator is told why the message never arrived — and "the agent
+     stayed inside a turn" is false when nothing was hosting it at all. */
   expect(deliveryWaitFor({
     status: "queued",
     reason: "dead-host",
     firstAttemptAt: AT,
     attempts: 2,
     nowMs: at(DELIVERY_UNCERTAIN_MS),
-  })).toEqual({ phase: "uncertain", waitedMs: DELIVERY_UNCERTAIN_MS, attempts: 2 });
+  })).toEqual({ phase: "uncertain", waitedMs: DELIVERY_UNCERTAIN_MS, attempts: 2, hostGone: true });
 });
 
 test("an ordinary turn-boundary reason is still a turn-boundary wait", () => {

@@ -74,11 +74,15 @@ function stateChip(
         wait: wait!.phase,
       };
     }
+    /* A hand-over genuinely in progress keeps the wording it always had: it is
+       momentary, and a ticking duration beside it would be noise. The phase is
+       still published, so the row says which wait it is in even when the words
+       do not change. */
     return {
       label: t("outbox.delivering"),
       icon: <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" aria-hidden />,
       className: "text-warning",
-      wait: "transmitting",
+      wait: wait?.phase ?? "transmitting",
     };
   }
   switch (entry.state) {
@@ -150,8 +154,14 @@ export function OutboxBubblesView({
                 <span data-outbox-status className="min-w-0 truncate">{chip.label}</span>
                 {/* A failed message that carried its payload can be retried in
                     place: the entry re-queues under its ORIGINAL idempotency key,
-                    so the dispatcher replays it idempotently (round-1 P1#4). */}
-                {(entry.state === "failed" || chip.wait === "uncertain") && !entry.needsReattach ? (
+                    so the dispatcher replays it idempotently (round-1 P1#4).
+                    An ADMITTED message is not retryable here and never was:
+                    `retryOutbox` refuses anything but `failed`, and re-queueing
+                    it locally would not touch the journaled send the server is
+                    still holding. Its exit is the composer's receipt row, which
+                    owns the operation and abandons it before it resends
+                    (issue #1213). */}
+                {entry.state === "failed" && !entry.needsReattach ? (
                   <button
                     type="button"
                     data-outbox-retry={entry.id}
@@ -164,8 +174,10 @@ export function OutboxBubblesView({
                   </button>
                 ) : null}
                 {/* Only a message that has not left for the wire can be taken
-                    back — cancelling a delivering send would be a lie. */}
-                {entry.state === "queued" || entry.state === "failed" || chip.wait === "uncertain" ? (
+                    back — cancelling a delivering send would be a lie, and
+                    dropping the bubble would leave the server still holding a
+                    message the operator believes is gone (issue #1213). */}
+                {entry.state === "queued" || entry.state === "failed" ? (
                   <button
                     type="button"
                     data-outbox-cancel={entry.id}

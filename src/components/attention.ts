@@ -91,6 +91,20 @@ export function blockingStuckDelivery(file: FileEntry, now: number): number | nu
   return now - since >= DELIVERY_WAIT_ATTENTION_MS / 1000 ? since : null;
 }
 
+/**
+ * The stalled signal exactly as `attentionId` counts it.
+ *
+ * The stalled tier needs a live process behind the transcript: an open turn
+ * whose agent already exited is an abandoned session, not a pending permission
+ * prompt — only someone still at the terminal can wait on you. Exported because
+ * the line every surface prints (`attention/decision.ts`) walks this same
+ * precedence, and a second copy of the predicate is how one signal ends up with
+ * two descriptions.
+ */
+export function stalledAttention(file: FileEntry, now: number): boolean {
+  return file.activity === "stalled" && file.proc === "running" && now - file.mtime <= STALLED_ATTENTION_TTL;
+}
+
 export function openBridgeAsk(file: FileEntry, now: number): BridgeAsk | null {
   const ask = file.bridgeAsk;
   if (!ask) return null;
@@ -144,12 +158,7 @@ export function attentionId(file: FileEntry, now: number = Date.now() / 1000): s
     return `${file.path}:rate-limited:${file.rateLimit.resetAt ?? "unknown"}`;
   }
   if (file.waitingInput) return `${file.path}:waiting:${Math.floor(file.waitingInput.since)}`;
-  /* The stalled tier needs a live process behind the transcript: an open turn
-     whose agent already exited is an abandoned session, not a pending
-     permission prompt — only someone still at the terminal can wait on you. */
-  if (file.activity === "stalled" && file.proc === "running" && now - file.mtime <= STALLED_ATTENTION_TTL) {
-    return `${file.path}:stalled:${Math.floor(file.mtime)}`;
-  }
+  if (stalledAttention(file, now)) return `${file.path}:stalled:${Math.floor(file.mtime)}`;
   /* Last in precedence on purpose (issue #1213): every historical signal keeps
      the exact identity it had, so the toast and push dedupe sets survive. A
      conversation whose ONLY problem is an undelivered message reaches here. */
@@ -175,9 +184,12 @@ export function buildAttentionQueue(
     const id = attentionId(file, now);
     if (id === null) continue;
     const ask = openBridgeAsk(file, now);
-    const stuckDelivery = blockingStuckDelivery(file, now);
+    /* Only when nothing above it in `attentionId` claimed the row: a stalled
+       agent that also owes a delivery keeps the stalled identity, and must keep
+       the stalled tier and sort key with it. */
+    const stuckDelivery = stalledAttention(file, now) ? null : blockingStuckDelivery(file, now);
     const tier: AttentionTier = ask || file.pendingQuestion || file.rateLimit || file.waitingInput
-      || (stuckDelivery !== null && file.activity !== "stalled")
+      || stuckDelivery !== null
       ? "blocked"
       : "stalled";
     /* `openBridgeAsk` already refused an unparseable time, so an ask always
@@ -191,9 +203,7 @@ export function buildAttentionQueue(
           ? file.mtime
           : file.waitingInput
             ? file.waitingInput.since
-            : stuckDelivery !== null && file.activity !== "stalled"
-              ? stuckDelivery
-              : file.mtime;
+            : stuckDelivery ?? file.mtime;
     items.push({ id, file, project: projectKey(file), tier, since });
   }
   return items.sort(

@@ -2007,6 +2007,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "attention.decisionQuestion": "питання",
   "attention.decisionPlan": "затвердження плану",
   "attention.decisionPermission": "запит дозволу",
+  "attention.decisionDelivery": "ваше повідомлення не дійшло до агента",
 
   "mobile.noConvos": "Розмов поки нема",
   "mobile.map": "Карта",
@@ -2160,14 +2161,16 @@ export const uk: Record<keyof typeof en, Message> = {
   "runtime.receipt.rejected": "відхилено: {reason}",
   "runtime.receipt.failed": "збій: {reason}",
   "runtime.receipt.uncertain": "невизначено — відновлення",
-  /* #1213 — три різні очікування доставки. */
-  "runtime.receipt.awaitingTurn": "чекає, поки агент завершить хід",
+  /* #1213 — різні очікування доставки, названі окремо. */
   "runtime.receipt.awaitingTurnFor": "чекає, поки агент завершить хід · {waited}",
   "runtime.receipt.awaitingTurnPos": "чекає, поки агент завершить хід · #{position} · {waited}",
-  "runtime.receipt.awaitingHost": "чекає на повернення вікна агента",
   "runtime.receipt.awaitingHostFor": "чекає на повернення вікна агента · {waited}",
+  "runtime.receipt.handingOverFor": "усе ще передає це агентові · {waited}",
+  "runtime.receipt.handoverBusy": "Це повідомлення саме зараз передають агентові — повторити чи прибрати його можна буде лише після цього.",
+  "runtime.receipt.admissionUnconfirmed": "надсилання не підтверджено · {waited}",
   "runtime.receipt.unconfirmed": "не доставлено — підтвердження немає вже {waited}",
   "runtime.receipt.unconfirmedWhy": "Агент не виходив із ходу, тому це повідомлення так і не передали. Ніхто більше не повторить спробу — надішліть ще раз або приберіть.",
+  "runtime.receipt.unconfirmedWhyHost": "Вікно агента зникло до того, як повідомлення передали, і розмову ніхто не перебрав. Ніхто більше не повторить спробу — надішліть ще раз або приберіть.",
   "runtime.receipt.discard": "Прибрати це повідомлення",
   "runtime.receipt.waitedSec": "{n} с",
   "runtime.receipt.waitedMin": "{n} хв",

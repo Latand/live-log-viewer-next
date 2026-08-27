@@ -92,6 +92,40 @@ function receiptIsTerminal(status: RuntimeReceiptStatus): boolean {
 }
 
 /**
+ * Statuses in which the hand-over to the agent has already begun (issue #1213).
+ *
+ * The delivery queue writes `delivering` BEFORE it calls `host.send`, and only
+ * writes `delivered` after the engine answers. Failing the operation inside
+ * that window would retire the durable effect while the message is already on
+ * its way: the agent receives it, the real delivery can no longer record itself
+ * because its operation is settled, and a replacement send delivers the same
+ * message a second time. Nothing on this side of the wire can un-send it, so
+ * abandon refuses here and says so. The window is owned — the queue always
+ * writes an outcome — so refusing strands nothing.
+ */
+const HANDOVER_RECEIPT_STATUSES: ReadonlySet<RuntimeReceiptStatus> = new Set(["delivering", "applying"]);
+
+function receiptIsHandingOver(status: RuntimeReceiptStatus): boolean {
+  return HANDOVER_RECEIPT_STATUSES.has(status);
+}
+
+/** What an abandon attempt did. `handing-over` and `settled` both mean nothing
+    was written and the caller must NOT mint a replacement. */
+type AbandonOutcome =
+  | { outcome: "abandoned"; receipt: RuntimeOperationReceipt }
+  | { outcome: "settled"; receipt: RuntimeOperationReceipt }
+  | { outcome: "handing-over"; receipt: RuntimeOperationReceipt };
+
+function handoverResponse(operationId: string, receipt: RuntimeOperationReceipt): NextResponse {
+  return NextResponse.json({
+    error: "runtime delivery is being handed over to the agent",
+    handover: true,
+    operationId,
+    receipt: runtimePresentationReceipt(receipt),
+  }, { status: 409 });
+}
+
+/**
  * Terminalizes an unconfirmed send/steer so it can never be handed over later.
  *
  * `transitionOperation(…, "failed")` marks the operation's outbox row completed
@@ -101,19 +135,29 @@ function receiptIsTerminal(status: RuntimeReceiptStatus): boolean {
  * transition once the operation has settled, so a delivery that landed while
  * the operator was reading the screen wins the race: this returns the settled
  * receipt untouched and the caller must not retry.
+ *
+ * A hand-over already under way is refused outright — see
+ * {@link HANDOVER_RECEIPT_STATUSES}.
  */
 async function abandonUnconfirmedOperation(
   client: RuntimeHostClient,
   operationId: string,
   registry: (() => AgentRegistry) | undefined,
-): Promise<{ receipt: RuntimeOperationReceipt; abandoned: boolean }> {
+  current: RuntimeOperationReceipt,
+): Promise<AbandonOutcome> {
+  if (receiptIsHandingOver(current.status)) return { outcome: "handing-over", receipt: current };
   let result;
   try {
     result = await client.transitionOperation(operationId, "failed", { reason: DELIVERY_UNCONFIRMED_REASON });
   } catch (error) {
+    /* A transition can fail because the operation settled first — the race the
+       operator is allowed to lose — or because the journal itself faulted. Only
+       a receipt that is genuinely terminal proves the former; anything else is
+       an error, and reporting it as "the delivery landed" would tell the
+       operator their message arrived when nobody knows that. */
     const settled = await client.operationStatus(operationId, { currentRetryLeaf: true });
-    if (!settled) throw error;
-    return { receipt: settled.receipt, abandoned: false };
+    if (!settled || !receiptIsTerminal(settled.receipt.status)) throw error;
+    return { outcome: "settled", receipt: settled.receipt };
   }
   const conversationId = result.receipt.conversationId;
   if (conversationId.startsWith("conversation_")) {
@@ -131,7 +175,7 @@ async function abandonUnconfirmedOperation(
       console.error("[runtime abandon] held delivery did not settle with its receipt", { operationId, error });
     }
   }
-  return { receipt: result.receipt, abandoned: true };
+  return { outcome: "abandoned", receipt: result.receipt };
 }
 
 /**
@@ -166,10 +210,16 @@ export async function handleRuntimeAbandon(
         receipt: runtimePresentationReceipt(previous.receipt),
       });
     }
-    const { receipt } = await abandonUnconfirmedOperation(client, previous.operationId, dependencies.registry);
+    const abandoned = await abandonUnconfirmedOperation(
+      client,
+      previous.operationId,
+      dependencies.registry,
+      previous.receipt,
+    );
+    if (abandoned.outcome === "handing-over") return handoverResponse(previous.operationId, abandoned.receipt);
     return NextResponse.json({
       operationId: previous.operationId,
-      receipt: runtimePresentationReceipt(receipt),
+      receipt: runtimePresentationReceipt(abandoned.receipt),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "runtime operation discard failed";
@@ -361,8 +411,18 @@ export async function handleRuntimeRetry(
           receipt: runtimePresentationReceipt(previous.receipt),
         });
       }
-      const outcome = await abandonUnconfirmedOperation(client, previous.operationId, dependencies.registry);
-      if (!outcome.abandoned) {
+      const outcome = await abandonUnconfirmedOperation(
+        client,
+        previous.operationId,
+        dependencies.registry,
+        previous.receipt,
+      );
+      /* Nothing was written in either of these: a message already on its way to
+         the agent cannot be un-sent, and one that landed while the operator was
+         reading the screen is the answer to what they asked. Minting a
+         replacement in either case is how the same message arrives twice. */
+      if (outcome.outcome === "handing-over") return handoverResponse(previous.operationId, outcome.receipt);
+      if (outcome.outcome === "settled") {
         return NextResponse.json({
           operationId: previous.operationId,
           receipt: runtimePresentationReceipt(outcome.receipt),

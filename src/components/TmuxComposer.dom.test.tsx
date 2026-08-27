@@ -658,14 +658,16 @@ test("expanded active attempts retain localized lifecycle status and aggregate c
     const details = host.querySelector("[data-runtime-receipt-details]")!;
     expect(details.querySelector('[data-receipt-status="pending"]')?.textContent)
       .toBe(translate(locale, "runtime.receipt.pending"));
-    /* #1213: `queued` and `uncertain` are both "admitted, waiting for the turn
-       to end" — they name that wait and its age instead of a bare lifecycle
-       word. `pending`/`delivering` are momentary and keep their own wording. */
+    /* #1213: `queued` is "admitted, parked until the turn ends" and names that
+       wait and its age instead of a bare lifecycle word; `uncertain` is the
+       opposite fact — the composer's own row for a send it never saw admitted —
+       and says exactly that. `pending`/`delivering` are momentary and keep
+       their own wording. */
     const waited = (seconds: number) => translate(locale, "runtime.receipt.waitedSec", { n: seconds });
     expect(details.querySelector('[data-receipt-status="queued"]')?.textContent)
       .toBe(translate(locale, "runtime.receipt.awaitingTurnPos", { position: 3, waited: waited(4) }));
     expect(details.querySelector('[data-receipt-status="uncertain"]')?.textContent)
-      .toBe(translate(locale, "runtime.receipt.awaitingTurnFor", { waited: waited(3) }));
+      .toBe(translate(locale, "runtime.receipt.admissionUnconfirmed", { waited: waited(3) }));
     expect(details.querySelector('[data-receipt-status="delivering"]')?.textContent)
       .toBe(translate(locale, "runtime.receipt.delivering"));
     expect(details.querySelector('[data-receipt-status="failed"]')?.textContent)

@@ -10,7 +10,12 @@ import { expect, test } from "bun:test";
 
 import type { FileEntry, StuckDelivery } from "@/lib/types";
 
+import { translate } from "@/lib/i18n";
+
 import { attentionExpiries, attentionId, buildAttentionQueue } from "./attention";
+import { decisionLine } from "./attention/decision";
+
+const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
 
 const NOW = 1_800_000_000;
 const WAITING_SINCE = new Date((NOW - 9 * 60) * 1000).toISOString();
@@ -89,4 +94,50 @@ test("#1213 the queue re-derives itself when a waiting delivery crosses the thre
     stuckDelivery: stuck({ since: new Date((NOW - 60) * 1000).toISOString() }),
   });
   expect(attentionExpiries([file])).toContain(NOW - 60 + 5 * 60);
+});
+
+test("#1213 the line every surface prints names the delivery, not a wait the agent is in", () => {
+  /* One signal, one description (#1167). The agent here is fine — live and
+     mid-turn — and announcing «interrupted or awaiting permission» over it
+     sends the operator to look at the wrong thing entirely. */
+  const file = entry({ path: "/words.jsonl", stuckDelivery: stuck() });
+  expect(decisionLine(t, "en", file, NOW)).toBe(t("attention.decisionDelivery"));
+  expect(decisionLine(t, "en", file, NOW)).not.toBe(t("status.stalled"));
+});
+
+test("#1213 a stalled agent that also owes a delivery keeps its stalled words and tier", () => {
+  /* `attentionId` ranks stalled above delivery, so the row IS the stalled one
+     and every surface must say so — including its tier and its sort key. */
+  const file = entry({
+    path: "/stalled.jsonl",
+    activity: "stalled",
+    proc: "running",
+    stuckDelivery: stuck(),
+  });
+  expect(attentionId(file, NOW)).toBe(`/stalled.jsonl:stalled:${NOW - 60}`);
+  expect(decisionLine(t, "en", file, NOW)).toBe(t("status.stalled"));
+  const [item] = buildAttentionQueue([file], NOW);
+  expect(item?.tier).toBe("stalled");
+  expect(item?.since).toBe(NOW - 60);
+});
+
+test("#1213 an abandoned session that owes a delivery is a delivery row, in the blocked tier", () => {
+  /* The stalled signal needs a live process; without one the row exists ONLY
+     because a message is owed, and its tier, its age and its words all have to
+     come from that. */
+  const file = entry({
+    path: "/abandoned.jsonl",
+    activity: "stalled",
+    proc: "done",
+    stuckDelivery: stuck(),
+  });
+  expect(attentionId(file, NOW)).toBe("/abandoned.jsonl:delivery:1799999460");
+  expect(decisionLine(t, "en", file, NOW)).toBe(t("attention.decisionDelivery"));
+  const [item] = buildAttentionQueue([file], NOW);
+  expect(item?.tier).toBe("blocked");
+  expect(item?.since).toBe(NOW - 9 * 60);
+});
+
+test("#1213 a conversation with nothing owed still says nothing at all", () => {
+  expect(decisionLine(t, "en", entry({ path: "/quiet.jsonl" }), NOW)).toBeNull();
 });

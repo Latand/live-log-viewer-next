@@ -56,6 +56,7 @@ import { savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runt
 import { type PendingImage } from "./imageAttachments";
 import {
   DELIVERY_WAIT_TICK_MS,
+  deliveryUncertainWhy,
   deliveryWaitFor,
   deliveryWaitText,
   type DeliveryWait,
@@ -252,6 +253,46 @@ export function mergeRuntimeReceipts(
 
 const NO_DISMISSED: ReadonlySet<string> = new Set();
 
+/** What the retry/discard endpoints answer with. `handover` is the one refusal
+    the operator can do nothing about yet: the message is being put in front of
+    the agent as they read the screen (issue #1213). */
+interface RuntimeOperationActionBody {
+  receipt?: RuntimeReceipt;
+  error?: string;
+  handover?: boolean;
+}
+
+export type RuntimeOperationActionResult =
+  | { kind: "applied"; receipt: RuntimeReceipt }
+  | { kind: "handover"; receipt?: RuntimeReceipt }
+  | { kind: "error"; receipt?: RuntimeReceipt; error?: string };
+
+/**
+ * How one retry/discard answer reads (issue #1213).
+ *
+ * `handover` is a refusal with a receipt: the server will not abandon a message
+ * it is handing to the agent right now, because failing it there cannot un-send
+ * it and would let a replacement deliver the same message twice. The row still
+ * adopts the receipt — the operator sees the hand-over rather than an
+ * unexplained non-event — but the wording is the refusal's, never a generic
+ * failure, and never silence.
+ */
+export function runtimeOperationActionResult(
+  body: RuntimeOperationActionBody,
+  ok: boolean,
+): RuntimeOperationActionResult {
+  if (body.handover) return { kind: "handover", ...(body.receipt ? { receipt: body.receipt } : {}) };
+  if (!ok || !body.receipt) {
+    return { kind: "error", ...(body.receipt ? { receipt: body.receipt } : {}), ...(body.error ? { error: body.error } : {}) };
+  }
+  return { kind: "applied", receipt: body.receipt };
+}
+
+/** Operation-id prefix of {@link unconfirmedReceipt} — the composer's own
+    local row for a send whose admission was never confirmed. It names no
+    journal operation, which is why no server-backed control is offered on it. */
+const UNCONFIRMED_RECEIPT_PREFIX = "composer-unconfirmed:";
+
 export function RuntimeComposerReceipts({
   receipts,
   actionsDisabled = false,
@@ -322,8 +363,20 @@ export function RuntimeComposerReceipts({
     return [...counts].map(([label, count]) => (count > 1 ? `${label} ×${count}` : label));
   };
   const standaloneReceipts = visibleStandaloneReceipts(receipts, dismissed);
-  const pendingReceipts = visibleAttempts.filter((receipt) => !receiptIsTerminal(receipt.status));
-  const problemReceipts = visibleAttempts.filter((receipt) => deliveryProblem(receipt.status));
+  /* Collapsed is the default state, and it is what the operator photographed:
+     a warning badge counting an attempt that was never coming. A row that went
+     terminally uncertain counts as a PROBLEM here, so the summary reads
+     differently for "still arriving" and for "never arrived" (issue #1213). */
+  const uncertainCurrent = attemptGroups
+    .filter((group) => waitFor(group)?.phase === "uncertain")
+    .map((group) => group.current);
+  const uncertainOperationIds = new Set(uncertainCurrent.map((receipt) => receipt.operationId));
+  const pendingReceipts = visibleAttempts.filter((receipt) =>
+    !receiptIsTerminal(receipt.status) && !uncertainOperationIds.has(receipt.operationId));
+  const problemReceipts = [
+    ...visibleAttempts.filter((receipt) => deliveryProblem(receipt.status)),
+    ...uncertainCurrent,
+  ];
   const busyRetry = pendingReceipts.some((receipt) => typeof receipt.reason === "string" && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason));
   const receiptSummaryLabel = t("runtime.receipt.summary", { count: visibleAttempts.length });
   const disclosureLabel = t(detailsOpen ? "runtime.receipt.hideDetails" : "runtime.receipt.showDetails");
@@ -400,6 +453,11 @@ export function RuntimeComposerReceipts({
                 const pending = !receiptIsTerminal(receipt.status);
                 const wait = waitFor(group);
                 const uncertain = wait?.phase === "uncertain";
+                /* Retry and Discard act on a journal operation. The composer's
+                   own unconfirmed row is local — it has no operation to act on
+                   — so it never carries them (issue #1213). */
+                const serverBacked = !receipt.operationId.startsWith(UNCONFIRMED_RECEIPT_PREFIX);
+                const exitable = uncertain && serverBacked;
                 const retryingBusy = pending
                   && !uncertain
                   && typeof receipt.reason === "string"
@@ -440,9 +498,9 @@ export function RuntimeComposerReceipts({
                         receipt={receipt}
                         wait={wait}
                         actionsDisabled={actionsDisabled}
-                        onRetry={failed || uncertain ? () => onRetry(receipt) : undefined}
+                        onRetry={failed || exitable ? () => onRetry(receipt) : undefined}
                         onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
-                        onDiscard={uncertain && onDiscard ? () => onDiscard(receipt) : undefined}
+                        onDiscard={exitable && onDiscard ? () => onDiscard(receipt) : undefined}
                       />
                       {/* A settled problem is dismissible (issue #264 rule 3):
                           the dismissal records every settled attempt of the
@@ -490,12 +548,12 @@ export function RuntimeComposerReceipts({
                     {/* Why it is not coming, in one sentence, next to the exit
                         (issue #1213). Wraps rather than truncates: this is the
                         only place the operator learns the message was parked. */}
-                    {uncertain ? (
+                    {exitable ? (
                       <span
                         className="min-w-0 max-w-full text-right text-caption text-muted"
                         data-receipt-uncertain-why
                       >
-                        {t("runtime.receipt.unconfirmedWhy")}
+                        {deliveryUncertainWhy(t, wait!)}
                       </span>
                     ) : null}
                     {history.length ? (
@@ -839,7 +897,6 @@ export function settlePendingDeliveries(
     supersedes it through mergeRuntimeReceipts tier two, keeping one visible row
     per message. The row records an unconfirmed state and leaves draft settlement
     to an authoritative receipt. */
-const UNCONFIRMED_RECEIPT_PREFIX = "composer-unconfirmed:";
 function unconfirmedReceiptOperationId(clientMessageId: string): string {
   return UNCONFIRMED_RECEIPT_PREFIX + clientMessageId;
 }
@@ -2217,6 +2274,27 @@ export function TmuxComposerCore({
     void send(entry.text, { clientMessageId: entry.id }, entry.id);
   };
 
+  /* Applies one retry/discard answer, read by {@link runtimeOperationActionResult}. */
+  const applyRuntimeOperationAction = (body: RuntimeOperationActionBody, ok: boolean): boolean => {
+    const result = runtimeOperationActionResult(body, ok);
+    if (result.receipt) {
+      const settled = result.receipt;
+      setImmediateRuntimeReceipts((current) => [
+        settled,
+        ...current.filter((candidate) => candidate.operationId !== settled.operationId),
+      ].slice(0, 8));
+    }
+    if (result.kind === "handover") {
+      setStatus({ kind: "err", text: t("runtime.receipt.handoverBusy") });
+      return false;
+    }
+    if (result.kind === "error") {
+      setStatus({ kind: "err", text: result.error ?? t("common.failedSend") });
+      return false;
+    }
+    return true;
+  };
+
   const retryRuntimeReceipt = async (receipt: RuntimeReceipt) => {
     if (busy || voiceSending) return;
     setBusy(true);
@@ -2226,15 +2304,8 @@ export function TmuxComposerCore({
         `/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`,
         runtimeRetryRequestInit(receipt),
       );
-      const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
-      if (!response.ok || !body.receipt) {
-        setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
-        return;
-      }
-      setImmediateRuntimeReceipts((current) => [
-        body.receipt!,
-        ...current.filter((candidate) => candidate.operationId !== body.receipt!.operationId),
-      ].slice(0, 8));
+      const body = (await response.json().catch(() => ({}))) as RuntimeOperationActionBody;
+      if (!applyRuntimeOperationAction(body, response.ok)) return;
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {
@@ -2251,15 +2322,8 @@ export function TmuxComposerCore({
     setStatus(null);
     try {
       const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, { method: "DELETE" });
-      const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
-      if (!response.ok || !body.receipt) {
-        setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
-        return;
-      }
-      setImmediateRuntimeReceipts((current) => [
-        body.receipt!,
-        ...current.filter((candidate) => candidate.operationId !== body.receipt!.operationId),
-      ].slice(0, 8));
+      const body = (await response.json().catch(() => ({}))) as RuntimeOperationActionBody;
+      if (!applyRuntimeOperationAction(body, response.ok)) return;
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {

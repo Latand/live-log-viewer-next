@@ -68,20 +68,26 @@ export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onR
      though the receipt is not — the composer stops claiming it is moving, and
      an operator control takes over from a spinner that had no exit. */
   const uncertain = wait?.phase === "uncertain";
+  /* Nothing is moving in these three: the message is parked, its window is
+     gone, or the viewer never got told it was accepted. */
+  const parked = uncertain
+    || wait?.phase === "awaiting-turn"
+    || wait?.phase === "awaiting-host"
+    || wait?.phase === "unconfirmed-admission";
   const waitText = wait ? deliveryWaitText(t, wait, receipt.queuePosition) : null;
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5 text-[11px] font-semibold" data-operation={receipt.operationId}>
       <Badge
         tone={uncertain || wait?.phase === "awaiting-host"
           ? "danger"
-          : wait?.phase === "awaiting-turn" ? "warning" : tone(receipt.status)}
+          : wait?.phase === "awaiting-turn" || wait?.phase === "unconfirmed-admission"
+            ? "warning"
+            : tone(receipt.status)}
         data-receipt-status={receipt.status}
         {...(wait ? { "data-receipt-wait": wait.phase } : {})}
         {...(failed || uncertain ? { role: "status", "aria-live": "polite" as const } : {})}
       >
-        {wait?.phase === "awaiting-turn" || wait?.phase === "awaiting-host" ? (
-          <Clock3 className="mr-1 h-3 w-3" aria-hidden />
-        ) : null}
+        {parked ? <Clock3 className="mr-1 h-3 w-3" aria-hidden /> : null}
         {waitText ?? runtimeReceiptStatusText(t, receipt)}
       </Badge>
       {/* The exit the operator never had. Retry abandons the parked attempt
@@ -132,10 +138,11 @@ export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onR
         </button>
       ) : null}
       {/* The live pulse means "moving right now". A message parked at a turn
-          boundary is not moving, and one nothing will confirm never was. */}
+          boundary is not moving, and one nothing will confirm never was. A
+          hand-over genuinely IS moving, and keeps it. */}
       {!receiptIsTerminal(receipt.status)
         && receipt.status !== "pending"
-        && (!wait || wait.phase === "transmitting") ? (
+        && (!wait || wait.phase === "transmitting" || wait.phase === "handing-over") ? (
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted motion-reduce:animate-none" aria-hidden />
       ) : null}
     </span>

@@ -1,9 +1,9 @@
 /**
- * Issue #1213 — the composer says which of the three waits this is.
+ * Issue #1213 — the composer says which wait this is.
  *
  * The operator saw one spinner for a delivery that took two seconds, one that
- * took twenty-one minutes and one that never arrived. These tests pin all three
- * renderings and the exit the uncertain one now carries.
+ * took twenty-one minutes and one that never arrived. These tests pin every
+ * rendering and the exit the uncertain one now carries.
  *
  * Self-contained: the receipt stack is rendered directly, so nothing here mocks
  * a module, touches the runtime bus, or reads any state directory.
@@ -34,7 +34,7 @@ Object.assign(globalThis, {
   sessionStorage: dom.sessionStorage,
 });
 
-const { RuntimeComposerReceipts, runtimeRetryRequestInit } = await import("@/components/TmuxComposer");
+const { RuntimeComposerReceipts, runtimeOperationActionResult, runtimeRetryRequestInit } = await import("@/components/TmuxComposer");
 const { DELIVERY_UNCERTAIN_MS } = await import("./deliveryWait");
 
 const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
@@ -99,8 +99,64 @@ test("#1213 an attempt on the wire reads as transmitting and keeps its live puls
   const details = open(view.host);
   const chip = details.querySelector("[data-receipt-status]")!;
   expect(chip.getAttribute("data-receipt-status")).toBe("delivering");
+  expect(chip.getAttribute("data-receipt-wait")).toBe("handing-over");
   expect(chip.textContent).toContain(t("runtime.receipt.delivering"));
+  expect(details.querySelector(".animate-pulse")).not.toBeNull();
   expect(details.querySelector("[data-receipt-discard]")).toBeNull();
+  view.cleanup();
+});
+
+test("#1213 a hand-over still running past the bound explains itself and offers no exit", () => {
+  /* The duplicate-delivery fence, on the rendering side: the delivery queue
+     writes `delivering` BEFORE `host.send`, so this message may be in front of
+     the agent already. Failing it here would retire its effect mid-flight and
+     let a replacement deliver the same message twice, which is why the server
+     refuses — and why the row must not advertise a control that would be. */
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ status: "delivering" })]}
+      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      onRetry={noop}
+      onEdit={noop}
+      onDiscard={noop}
+    />,
+  );
+  const details = open(view.host);
+  const chip = details.querySelector("[data-receipt-status]")!;
+  expect(chip.getAttribute("data-receipt-wait")).toBe("handing-over");
+  expect(chip.textContent).toContain(t("runtime.receipt.handingOverFor", {
+    waited: t("runtime.receipt.waitedMin", { n: 21 }),
+  }));
+  expect(details.querySelector("[data-receipt-uncertain-retry]")).toBeNull();
+  expect(details.querySelector("[data-receipt-discard]")).toBeNull();
+  view.cleanup();
+});
+
+test("#1213 the composer's own unconfirmed row says so, and carries no server control", () => {
+  /* `composer-unconfirmed:<key>` names no journal operation. Retry and Discard
+     would 400 on the colon alone, and there may be nothing on the server to
+     abandon — the composer already released the draft for a same-key resend. */
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ operationId: "composer-unconfirmed:msg-1213", status: "uncertain" })]}
+      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      onRetry={noop}
+      onEdit={noop}
+      onDiscard={noop}
+    />,
+  );
+  const details = open(view.host);
+  const chip = details.querySelector("[data-receipt-status]")!;
+  expect(chip.getAttribute("data-receipt-wait")).toBe("unconfirmed-admission");
+  expect(chip.textContent).toContain(t("runtime.receipt.admissionUnconfirmed", {
+    waited: t("runtime.receipt.waitedMin", { n: 21 }),
+  }));
+  expect(chip.textContent).not.toContain(t("runtime.receipt.awaitingTurnFor", {
+    waited: t("runtime.receipt.waitedMin", { n: 21 }),
+  }));
+  expect(details.querySelector("[data-receipt-uncertain-retry]")).toBeNull();
+  expect(details.querySelector("[data-receipt-discard]")).toBeNull();
+  expect(details.querySelector(".animate-pulse")).toBeNull();
   view.cleanup();
 });
 
@@ -116,12 +172,15 @@ test("#1213 an admitted message waiting for a turn boundary says so, with the el
   const details = open(view.host);
   const chip = details.querySelector("[data-receipt-status]")!;
   expect(chip.getAttribute("data-receipt-wait")).toBe("awaiting-turn");
-  expect(chip.textContent).toContain(t("runtime.receipt.awaitingTurn"));
-  expect(chip.textContent).toContain(t("runtime.receipt.waitedMin", { n: 4 }));
+  expect(chip.textContent).toBe(t("runtime.receipt.awaitingTurnFor", {
+    waited: t("runtime.receipt.waitedMin", { n: 4 }),
+  }));
   /* The old rendering claimed transmission was under way. It is not: the
      message is journaled and parked until the agent's turn ends. */
   expect(chip.textContent).not.toContain(t("runtime.receipt.delivering"));
-  expect(view.status()).toContain(t("runtime.receipt.awaitingTurn"));
+  expect(view.status()).toContain(t("runtime.receipt.awaitingTurnFor", {
+    waited: t("runtime.receipt.waitedMin", { n: 4 }),
+  }));
   view.cleanup();
 });
 
@@ -159,6 +218,62 @@ test("#1213 a delivery unconfirmed past the bound is terminal, explains itself, 
   act(() => { discard.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event); });
   expect(retried).toEqual(["op-1213"]);
   expect(discarded).toEqual(["op-1213"]);
+  view.cleanup();
+});
+
+test("#1213 the collapsed summary already reads differently for a delivery that is not coming", () => {
+  /* Collapsed is the default, and it is the surface the operator photographed:
+     the same warning badge and the same spinner for a message arriving in two
+     seconds and for one that never arrives. */
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ status: "queued", reason: "busy-turn" })]}
+      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      onRetry={noop}
+      onEdit={noop}
+      onDiscard={noop}
+    />,
+  );
+  const summary = view.host.querySelector("summary")!;
+  expect(summary.querySelector("[data-receipt-problem-count]")).not.toBeNull();
+  expect(summary.querySelector("[data-receipt-pending-count]")).toBeNull();
+  expect(summary.textContent).toContain(t("runtime.receipt.problemCount", { count: 1 }));
+  expect(view.host.querySelector(".animate-spin")).toBeNull();
+
+  /* Inside the bound the same receipt is ordinary latency and reads as it did. */
+  const healthy = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ status: "queued", reason: "busy-turn" })]}
+      nowMs={at(2 * 60_000)}
+      onRetry={noop}
+      onEdit={noop}
+      onDiscard={noop}
+    />,
+  );
+  const healthySummary = healthy.host.querySelector("summary")!;
+  expect(healthySummary.querySelector("[data-receipt-pending-count]")).not.toBeNull();
+  expect(healthySummary.querySelector("[data-receipt-problem-count]")).toBeNull();
+  healthy.cleanup();
+  view.cleanup();
+});
+
+test("#1213 a delivery that never had a host says the window is gone in its terminal row too", () => {
+  const view = mount(
+    <RuntimeComposerReceipts
+      receipts={[receipt({ status: "queued", reason: "dead-host" })]}
+      nowMs={at(DELIVERY_UNCERTAIN_MS + 60_000)}
+      onRetry={noop}
+      onEdit={noop}
+      onDiscard={noop}
+    />,
+  );
+  const details = open(view.host);
+  /* The cause survives into the terminal row: telling the operator the agent
+     "stayed inside a turn" when nothing was hosting the conversation at all
+     sends them to look at the wrong thing. */
+  expect(details.querySelector("[data-receipt-uncertain-why]")?.textContent)
+    .toBe(t("runtime.receipt.unconfirmedWhyHost"));
+  expect(details.querySelector("[data-receipt-discard]")).not.toBeNull();
   view.cleanup();
 });
 
@@ -209,6 +324,21 @@ test("#1213 retrying an unconfirmed delivery asks the server to abandon it first
   expect(failed.body).toBeUndefined();
 });
 
+test("#1213 a refusal to abandon a hand-over is read as itself, not as a failure or a success", () => {
+  /* The server answers 409 with the live receipt when the message is already
+     being put in front of the agent. Reading that as an ordinary failure would
+     print «could not send» over a message that is arriving; reading it as a
+     success would tell the operator it was discarded when nothing was. */
+  const live = { operationId: "op-1213", status: "delivering" } as unknown as RuntimeReceipt;
+  expect(runtimeOperationActionResult({ handover: true, receipt: live, error: "handed over" }, false))
+    .toEqual({ kind: "handover", receipt: live });
+
+  /* And the two ordinary answers keep reading as they did. */
+  expect(runtimeOperationActionResult({ receipt: live }, true)).toEqual({ kind: "applied", receipt: live });
+  expect(runtimeOperationActionResult({ error: "operation not found" }, false))
+    .toEqual({ kind: "error", error: "operation not found" });
+});
+
 test("#1213 a delivery stranded by a dead host says the window is gone, not that a turn is running", () => {
   /* The deployment-rollback population: every structured host is terminated at
      once and each in-flight send is left `queued` with a `dead-host` reason. */
@@ -224,8 +354,9 @@ test("#1213 a delivery stranded by a dead host says the window is gone, not that
   const details = open(view.host);
   const chip = details.querySelector("[data-receipt-status]")!;
   expect(chip.getAttribute("data-receipt-wait")).toBe("awaiting-host");
-  expect(chip.textContent).toContain(t("runtime.receipt.awaitingHost"));
-  expect(chip.textContent).not.toContain(t("runtime.receipt.awaitingTurn"));
+  expect(chip.textContent).toBe(t("runtime.receipt.awaitingHostFor", {
+    waited: t("runtime.receipt.waitedMin", { n: 3 }),
+  }));
   /* And the reason itself, in human words, beside it. */
   expect(details.querySelector("[data-receipt-host-gone]")?.textContent)
     .toBe(t("receipt.human.deadHost"));

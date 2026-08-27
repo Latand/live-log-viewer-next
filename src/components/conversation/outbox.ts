@@ -141,9 +141,14 @@ function reconciledLaunchState(
  * Whether a receipt status means "admitted and parked at a turn boundary"
  * rather than "on the wire" (issue #1213). Both map to the same
  * {@link OutboxState}; only the bubble's wording differs.
+ *
+ * `queued` and nothing else: it is the state the delivery queue parks a send in
+ * while the host is inside a turn. `uncertain` is the opposite fact — the
+ * admission itself was never confirmed — and claiming a turn boundary for it
+ * would assert the very thing that could not be established.
  */
 export function outboxAwaitsTurnBoundary(status: ReceiptStatus): true | undefined {
-  return status === "queued" || status === "uncertain" ? true : undefined;
+  return status === "queued" ? true : undefined;
 }
 
 export function outboxStateForReceiptStatus(status: ReceiptStatus): OutboxState {
