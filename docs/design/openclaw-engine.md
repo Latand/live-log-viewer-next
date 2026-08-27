@@ -147,7 +147,7 @@ The root-specific viewing work is bounded:
 | Concern | Current gate at `dbfa3753` | Phase-1 change |
 |---|---|---|
 | Discovery | `src/lib/scanner/roots.ts:33-47`; `discover.ts:347` | Add the root and an explicit third branch. |
-| Metadata and search text | `describe.ts:883,889-999` | Parse OpenClaw cwd, start time, title, and first prompt. |
+| Metadata and search text | `describe.ts:883,889-999` | Parse OpenClaw cwd, start time, and first prompt, which is also the title. |
 | Project overlay | `describe.ts:1001-1035` | Route OpenClaw cwd through `projectInfoFromCwd`. |
 | Turn state | `turnState.ts:92`; `activity.ts:156-194,428` | Replace the `codex: boolean` parameter and cache key with an engine discriminator. |
 | Model | `scanner/model.ts:25-45` | Admit the root and read the latest real assistant model. |
@@ -216,13 +216,26 @@ Inner `message` objects, on the assistant records:
   must not assume the key set is invariant across OpenClaw versions.
 - `stopReason` ∈ `{toolUse, stop, error, aborted}`.
 
-`stopReason` is the turn-state signal. The last assistant record ending in
-`stop` is a completed turn. `toolUse` keeps the turn busy, and `error` or
-`aborted` ends it.
+`stopReason` is the turn-state signal, read off the newest assistant record
+whose provider is a real provider — any value other than the synthetic
+`openclaw`. `stop` is a completed turn, `toolUse` keeps the turn busy, and
+`error` or `aborted` end it.
 
-Two measured records use the synthetic provider value `openclaw`. Real model
-outputs name an external provider. Synthetic records do not count as model
-usage and cannot set the displayed model.
+Why the qualifier: re-measured over the same install (55 transcripts; one
+session was written after the counts above), 55 assistant records in 14 of
+those files carry the synthetic provider value `openclaw`, under three distinct
+synthetic model labels. All 55 have `stopReason: "stop"`; 7 sit directly after
+a real assistant record that stopped on `toolUse`, and 3 files end with one as
+their trailing assistant record. Taking the tail record unconditionally would
+report a session sitting inside a tool call as finished, drop it out of busy
+grading at `src/lib/scanner/activity.ts:428`, and land a mid-turn conversation
+in the waiting bucket and the attention counter through
+`src/hooks/useSwitchboardData.ts:72`.
+
+One predicate keyed on the provider value serves model display and turn state
+alike; the synthetic model labels vary, and these records are frequent enough
+to reach ordinary sessions. A record whose provider is `openclaw` is excluded
+from model usage and cannot end a turn.
 
 `model_change` and `thinking_level_change` records carry `{modelId, provider}`
 and `{thinkingLevel}` respectively, which is where mid-conversation model and
@@ -390,10 +403,15 @@ function projectInfoFromOpenclawWorkspace(cwd: string): ProjectInfo | null
 
 It fires only when the normalized cwd equals `<stateDir>/workspace` for the
 default state directory, `OPENCLAW_STATE_DIR`, or a
-`~/.openclaw-<profile>/workspace` path. It returns the existing directory
-identity computed from `path.resolve(workspace)`, with display name
-`OpenClaw`. It never calls `realpathSync`, so the identity is identical before
-and after deletion.
+`~/.openclaw-<profile>/workspace` path. It mints the existing directory
+identity shape — `dir-` plus the `sha256("dir:" + p)` digest
+`projectIdentityFromDirectory` uses at `src/lib/projects/identity.ts:39-48` —
+over `p = path.resolve(workspace)`, with display name `OpenClaw`. It cannot
+delegate to that helper: the helper resolves through `fs.realpathSync.native`
+and reaches `path.resolve` only once the path is gone, which is the
+before/after-deletion split this recognizer exists to remove. Computing the
+digest directly keeps `realpathSync` out of the path, so the identity is
+identical before and after deletion.
 
 Three properties this buys, each of which the alternatives lose:
 
@@ -543,8 +561,10 @@ files before ranking. Add explicit OpenClaw engine, format, and title fallbacks
 at the resource-scope mapping around `:342-378`.
 
 **3. Metadata, search, and attribution.** In
-`src/lib/scanner/describe.ts`, parse cwd, timestamp, the first user prompt, and
-the OpenClaw title. Generalize the search helper at
+`src/lib/scanner/describe.ts`, parse cwd, timestamp, and the first user prompt.
+No OpenClaw record carries a title — there is no `summary` or `ai-title`
+analogue on disk — so the title is the first prompt through the existing
+`goodTitle` path. Generalize the search helper at
 `:883-886` to an engine discriminator. Add the exact-workspace recognizer after
 `:539` and the OpenClaw project overlay after `:1030`.
 
@@ -552,7 +572,10 @@ the OpenClaw title. Generalize the search helper at
 `src/lib/accounts/migration/turnState.ts` and
 `src/lib/scanner/activity.ts`. Add explicit OpenClaw arms in
 `src/lib/scanner/index.ts:300`, `src/lib/scanner/observe.ts:76`, and the
-persisted-evidence path in `src/lib/scanner/scanCache.ts:173`.
+persisted-evidence path in `src/lib/scanner/scanCache.ts:173`. The OpenClaw arm
+reads `stopReason` from the newest assistant record whose provider is real —
+the same predicate item 5 applies to the model — so a synthetic record appended
+mid-turn cannot end the turn.
 
 **5. Model and effort display.** In `src/lib/scanner/model.ts`, admit the root
 and read the newest assistant record whose provider is a real provider. A
@@ -591,7 +614,8 @@ describes a spawn and phase 1 creates none.
 `HOME`/`XDG_CONFIG_HOME`/`LLV_STATE_DIR`/`TMPDIR`, run by path:
 
 - `src/lib/scanner/describe.test.ts` covers title/search text, the same
-  workspace identity before and after deletion, the workspace's
+  workspace identity before and after deletion through a symlinked fixture path
+  so a `realpathSync` regression fails the case, the workspace's
   remote-less `.git`, the OpenClaw overlay, and a genuine nested checkout that
   retains repository attribution.
 - `src/lib/scanner/discover.test.ts`: a fixture agent tree yields one entry
@@ -599,10 +623,12 @@ describes a spawn and phase 1 creates none.
   `.acp-stream.jsonl`, `.trajectory-path.json`, `sessions.json` and `.bak`
   siblings.
 - `src/lib/accounts/migration/turnState.test.ts`: `stopReason` of `stop`
-  reads terminal, `toolUse` reads busy, `error`/`aborted` read terminal.
+  reads terminal, `toolUse` reads busy, `error`/`aborted` read terminal, and a
+  synthetic-provider `stop` record appended after a real `toolUse` record
+  leaves the state busy.
 - `src/lib/scanner/model.test.ts` and `effort.test.ts` cover real model display,
-  synthetic-provider exclusion, model changes, `off`, `adaptive`, and an
-  unknown effort.
+  exclusion of a synthetic-provider record that is the newest assistant record
+  in the file, model changes, `off`, `adaptive`, and an unknown effort.
 - `src/lib/scanner/conversationCatalog.test.ts` proves complete list and search
   inclusion, including first-prompt search.
 - `src/app/api/files/scanCache.real.test.ts` and
