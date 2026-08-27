@@ -352,14 +352,27 @@ function visibleMarkdownText(text: string): string {
   return visible;
 }
 
-function normalizedSensitiveText(text: string): { compact: string; error: boolean; searchable: string } {
+/**
+ * The views of a text the gate reads: the decoded source, and the same text
+ * with the markdown that can hide a character from a reader taken out. Both
+ * are scanned whole. Nothing is ever subtracted from them for being
+ * uninteresting — a caller that exempts something exempts an occurrence
+ * detection already reported, never a span of text before detection runs.
+ */
+function sensitiveTextViews(text: string): { error: boolean; views: [string, string] } {
   const canonical = canonicalSensitiveText(text);
-  const decoded = canonical.text;
+  const decoded = canonical.text.replaceAll("\0", "\n");
   const withoutMarkup = visibleMarkdownText(decoded).replaceAll(/<[^>]*>/g, "").replaceAll(/[\[\]*_`~]/g, "");
+  return { error: canonical.error, views: [decoded, withoutMarkup] };
+}
+
+function normalizedSensitiveText(text: string): { compact: string; error: boolean; searchable: string } {
+  const { error, views } = sensitiveTextViews(text);
+  const [decoded, withoutMarkup] = views;
   return {
     compact: `${compactSensitiveText(decoded)}\0${compactSensitiveText(withoutMarkup)}`,
-    error: canonical.error,
-    searchable: `${decoded}\n${withoutMarkup}`.replaceAll("\0", "\n"),
+    error,
+    searchable: `${decoded}\n${withoutMarkup}`,
   };
 }
 
@@ -543,6 +556,46 @@ function inspectRasterMetadata(path: string, kind: MediaKind | undefined): Set<F
   }
 }
 
+type EmailOccurrence = {
+  address: string;
+  domain: string;
+  index: number;
+  localPart: string;
+};
+
+/* A mailbox the way RFC 5322 spells one. The local part is a dot-atom or a
+   quoted string, and the quoted form may carry spaces, dots and a second `@`
+   inside the quotes — it reaches a person exactly like the plain form, so
+   detection reads both rather than only the shape that is easy to match. */
+const quotedLocalPart = /"(?:[^"\\\r\n]|\\.)*"/;
+const dotAtomLocalPart = /\b[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+/;
+const emailDomain = /([A-Z0-9.-]+\.[A-Z]{2,})\b/;
+const emailAddressSource =
+  `(${quotedLocalPart.source}|${dotAtomLocalPart.source})@${emailDomain.source}`;
+
+/* RFC 6761 reserves `.test` for exactly this and guarantees it can never
+   resolve to anyone — the same reason `.invalid` is already skipped here.
+   Flagging it made fixture addresses in test files indistinguishable from a
+   real one, which teaches everybody to wave the gate through. */
+function domainNamesNobody(domain: string): boolean {
+  const lowered = domain.toLowerCase();
+  return lowered === "example.com" || lowered === "example.net" || lowered === "example.org"
+    || lowered.endsWith(".invalid") || lowered === "test" || lowered.endsWith(".test");
+}
+
+/** Every mailbox in the text that reaches a person, in the order they appear. */
+function* emailOccurrences(text: string): Generator<EmailOccurrence> {
+  const pattern = new RegExp(emailAddressSource, "gi");
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+    if (domainNamesNobody(match[2])) continue;
+    yield { address: match[0], domain: match[2], index: match.index, localPart: match[1] };
+  }
+}
+
+function hasEmailAddress(text: string): boolean {
+  return emailOccurrences(text).next().done !== true;
+}
+
 export function sensitiveClasses(text: string): Set<FindingClass> {
   const findings = new Set<FindingClass>();
   const { compact, error, searchable: searchableText } = normalizedSensitiveText(text);
@@ -563,18 +616,7 @@ export function sensitiveClasses(text: string): Set<FindingClass> {
     findings.add("home_path");
     break;
   }
-  const emailPattern = /\b[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@([A-Z0-9.-]+\.[A-Z]{2,})\b/gi;
-  for (let match = emailPattern.exec(searchableText); match; match = emailPattern.exec(searchableText)) {
-    const domain = match[1].toLowerCase();
-    /* RFC 6761 reserves `.test` for exactly this and guarantees it can never
-       resolve to anyone — the same reason `.invalid` is already skipped here.
-       Flagging it made fixture addresses in test files indistinguishable from a
-       real one, which teaches everybody to wave the gate through. */
-    if (domain === "example.com" || domain === "example.net" || domain === "example.org"
-      || domain.endsWith(".invalid") || domain === "test" || domain.endsWith(".test")) continue;
-    findings.add("email_address");
-    break;
-  }
+  if (hasEmailAddress(searchableText)) findings.add("email_address");
   const credentialAssignmentPattern = /(?:api[_-]?(?:key|token)|access[_-]?token|authorization|password|secret)\s*[:=]\s*(?:"[^"\r\n]{12,}"|'[^'\r\n]{12,}'|[^\s"'`]{12,})/i;
   if (credentialAssignmentPattern.test(searchableText)) {
     findings.add("credential");
@@ -1205,49 +1247,89 @@ const commitMessageFindingClasses = new Set<FindingClass>([
  * `support` local part on its own `github.com` domain. Other local parts remain
  * attributable, including `<id>+<handle>@users.noreply.github.com`, which is
  * an account handle with a number in front of it.
+ *
+ * The exemption names an address the scan already found, never a span of text
+ * to skip: three rounds of narrowing what to remove before scanning each left
+ * another shape that survived the removal. So an address is dropped from the
+ * result only when it is one of these role mailboxes AND it sits on a
+ * machine-attribution trailer inside the trailer block. Everything else on
+ * that line — a second address, a home path, a credential — was read anyway.
  */
-const FORGE_ROLE_ADDRESS_PATTERN = ["support", String.raw`github\.com`].join(
-  "@",
-);
-const MACHINE_ATTRIBUTION_TRAILER = new RegExp(
-  String.raw`^([ \t]*(?:co-authored-by|signed-off-by)\s*:\s*[^<>\r\n]*<)(?:(?:noreply|no-reply)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|${FORGE_ROLE_ADDRESS_PATTERN})(>[ \t]*)$`,
-  "i",
-);
-const COMMIT_TRAILER_LINE = /^[A-Za-z0-9][A-Za-z0-9-]*\s*:\s*.+$/;
+const MACHINE_ATTRIBUTION_TRAILER = /^(?:co-authored-by|signed-off-by)[ \t]*:/i;
+const FORGE_ROLE_LOCAL_PART = "support";
+const FORGE_DOMAIN = "github.com";
 
-/** The message with exact machine-attribution mailboxes set aside. */
-export function commitMessageWithoutMachineAttributionAddresses(
-  message: string,
-): string {
-  const lines = message.split(/\r?\n/);
-  let trailerEnd = lines.length;
-  while (trailerEnd > 0 && lines[trailerEnd - 1].trim() === "") {
-    trailerEnd -= 1;
-  }
+function isMachineAttributionAddress(occurrence: EmailOccurrence): boolean {
+  /* No vendor signs off with a quoted local part, and treating one as the same
+     mailbox as the plain form would mean unquoting RFC 5322 inside a gate that
+     has to fail closed, so a quoted role name stays attributable. */
+  if (occurrence.localPart.startsWith('"')) return false;
+  const localPart = occurrence.localPart.toLowerCase();
+  if (localPart === "noreply" || localPart === "no-reply") return true;
+  return localPart === FORGE_ROLE_LOCAL_PART && occurrence.domain.toLowerCase() === FORGE_DOMAIN;
+}
 
-  let trailerStart = trailerEnd;
-  while (trailerStart > 0 && lines[trailerStart - 1].trim() !== "") {
-    trailerStart -= 1;
-  }
-  const hasSeparatedTrailerBlock = trailerStart > 0;
-  const trailerLines = lines.slice(trailerStart, trailerEnd);
-  if (
-    !hasSeparatedTrailerBlock ||
-    trailerLines.length === 0 ||
-    !trailerLines.every((line) => COMMIT_TRAILER_LINE.test(line.trim()))
-  ) {
-    return message;
-  }
+/* Git reads a trailer block as the message's last paragraph: a run of
+   `Token: value` lines that a blank line separates from everything before it,
+   each token starting the line. A line anywhere else with the same shape is
+   body prose, and prose is where people quote other people's addresses. */
+const COMMIT_TRAILER_LINE = /^[A-Za-z0-9][A-Za-z0-9-]*[ \t]*:[ \t]*\S/;
 
-  return lines
-    .map((line, index) => {
-      if (index < trailerStart || index >= trailerEnd) return line;
-      return line.replace(
-        MACHINE_ATTRIBUTION_TRAILER,
-        "$1machine-attribution$2",
-      );
-    })
-    .join("\n");
+function trailerBlockRange(lines: string[]): { end: number; start: number } | undefined {
+  let end = lines.length;
+  while (end > 0 && lines[end - 1].trim() === "") end -= 1;
+  let start = end;
+  while (start > 0 && lines[start - 1].trim() !== "") start -= 1;
+  if (start === 0 || start === end) return undefined;
+  if (!lines.slice(start, end).every((line) => COMMIT_TRAILER_LINE.test(line))) return undefined;
+  return { end, start };
+}
+
+/* Occurrences arrive in ascending order, so one cursor walks the line starts
+   alongside them; counting newlines per occurrence would be quadratic in the
+   size of a commit message, and a commit message is written by whoever opens
+   the pull request. */
+function* addressLines(
+  view: string,
+  lines: string[],
+): Generator<{ line: number; occurrence: EmailOccurrence }> {
+  let line = 0;
+  let nextLineStart = lines[0].length + 1;
+  for (const occurrence of emailOccurrences(view)) {
+    while (line + 1 < lines.length && occurrence.index >= nextLineStart) {
+      line += 1;
+      nextLineStart += lines[line].length + 1;
+    }
+    yield { line, occurrence };
+  }
+}
+
+export type CommitAddressReview = { attributable: string[]; exempt: string[] };
+
+/**
+ * Every address detected in a commit message, split by the one exemption.
+ *
+ * Detection reads the whole message, in the same views of it the gate reads
+ * for any other publication surface, and the split happens afterwards on what
+ * detection reported. An address the exemption does not name stays
+ * attributable wherever it sits, including on the same line as an exempt one.
+ */
+export function commitMessageAddressReview(message: string): CommitAddressReview {
+  const attributable = new Set<string>();
+  const exempt = new Set<string>();
+  for (const view of sensitiveTextViews(message).views) {
+    const lines = view.split("\n");
+    const trailer = trailerBlockRange(lines);
+    for (const { line, occurrence } of addressLines(view, lines)) {
+      const attributed = trailer === undefined
+        || line < trailer.start
+        || line >= trailer.end
+        || !MACHINE_ATTRIBUTION_TRAILER.test(lines[line])
+        || !isMachineAttributionAddress(occurrence);
+      (attributed ? attributable : exempt).add(occurrence.address);
+    }
+  }
+  return { attributable: [...attributable], exempt: [...exempt] };
 }
 
 export function commitMessageFindings(repository: string, base: string): Map<FindingClass, number> {
@@ -1264,9 +1346,12 @@ export function commitMessageFindings(repository: string, base: string): Map<Fin
   }
   const messages = result.stdout.toString().split("\0").filter(Boolean);
   for (const message of messages) {
-    for (const finding of sensitiveClasses(
-      commitMessageWithoutMachineAttributionAddresses(message),
-    )) {
+    const messageFindings = sensitiveClasses(message);
+    if (messageFindings.has("email_address")) {
+      const { attributable, exempt } = commitMessageAddressReview(message);
+      if (exempt.length > 0 && attributable.length === 0) messageFindings.delete("email_address");
+    }
+    for (const finding of messageFindings) {
       if (commitMessageFindingClasses.has(finding)) addFinding(findings, finding);
     }
   }
