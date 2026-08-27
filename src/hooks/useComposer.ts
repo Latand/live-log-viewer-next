@@ -66,6 +66,11 @@ export interface UseComposerOptions {
       `fieldsDisabled` and `canSend` exactly like the in-flight flags. */
   disabled?: boolean;
   imageCapability?: RuntimeImageCapability | null;
+  /** Whether this composer can deliver a non-image attachment (issue #1224):
+      the pane composer writes it to the conversation's inbox and names its path
+      in the message, so it takes any file. A composer without that road refuses
+      one by name instead of dropping it. */
+  acceptFiles?: boolean;
   /** Whether an in-flight delivery locks the text field. Queue-first composers
       (issue #561) pass `false`: a submitted message is already in the durable
       queue, so the input must stay typable while it is delivered — there is no
@@ -81,7 +86,7 @@ export interface UseComposerOptions {
  * own delivery (`submit`) and its own surrounding chrome; everything below the
  * text lives in `ComposerBar`.
  */
-export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, holdInputWhileBusy = true }: UseComposerOptions) {
+export function useComposer({ initialText, persistText, submit, disabled = false, imageCapability = null, acceptFiles = false, holdInputWhileBusy = true }: UseComposerOptions) {
   /* A remount mid-typing (column reshuffles, draft handovers) restores the
      draft from storage; the ref always holds the latest text so async
      dictation callbacks append to what the user typed meanwhile instead of
@@ -165,6 +170,7 @@ export function useComposer({ initialText, persistText, submit, disabled = false
     onError: (message) => setStatus({ kind: "err", text: message }),
     onAdded: () => setStatus(null),
     imageCapability,
+    acceptFiles,
   });
 
   const insertSpoken = (spoken: string) => {
@@ -231,7 +237,8 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      the composer waits for every slot to settle (or be removed/retried). */
   const attachmentsBlocked = attachments.hasReading || attachments.hasError;
   const canSend =
-    !fieldsDisabled && !dictationBusy && !attachmentsBlocked && (dictationRecording || Boolean(text.trim()) || attachments.images.length > 0);
+    !fieldsDisabled && !dictationBusy && !attachmentsBlocked
+    && (dictationRecording || Boolean(text.trim()) || attachments.images.length > 0 || attachments.files.length > 0);
 
   return {
     text,

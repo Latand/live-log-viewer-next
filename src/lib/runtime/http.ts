@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { attachmentsAreOrphaned, structuredAttachmentOutcome, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
 import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { retireReplySuggestionsOnOperatorMessage } from "@/lib/suggestions/store";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -69,10 +70,25 @@ function terminalRetryIdempotencyKey(operationId: string): string {
   return `retry_${createHash("sha256").update(operationId).digest("hex")}`;
 }
 
-export async function handleRuntimeCommand(
+/**
+ * One send's general (non-image) attachments and the fate of the delivery they
+ * rode with, threaded through the dispatch so the wrapper below can release
+ * them on a TERMINAL refusal and only then (#1224). Kept as a handle rather
+ * than a return value because every failure exit is a plain response, and the
+ * response's status cannot tell a refusal apart from an uncertain delivery.
+ */
+interface CommandAttachments {
+  filePaths: string[];
+  /** Starts `refused`: every exit above the delivery attempt is terminal —
+      nothing was ever handed over, so nothing can be reading these paths. */
+  outcome: AttachmentDeliveryOutcome;
+}
+
+async function dispatchRuntimeCommand(
   request: NextRequest,
   kind: RuntimeOperationKind,
-  dependencies: RuntimeHttpDependencies = DEFAULT_DEPENDENCIES,
+  dependencies: RuntimeHttpDependencies,
+  attachments: CommandAttachments,
 ): Promise<NextResponse> {
   const rejection = rejectCrossOrigin(request);
   if (rejection) return rejection;
@@ -105,6 +121,36 @@ export async function handleRuntimeCommand(
           };
         });
         parseValue = { ...body, images: admissionRefs };
+      }
+      /* #1224: general attachments take the by-path road instead of the
+         base64-into-the-turn one — the bytes land in the viewer inbox and their
+         paths are folded into the text the agent receives, so a document needs
+         no engine image capability at all. Folded BEFORE the command is parsed,
+         because an attachment-only send has no text of its own to validate. */
+      if (body.files !== undefined && body.files !== null) {
+        const { admitInboxFilePayload, buildFilePayload, inboxFileBatchToken } = await import("@/lib/inboxFiles");
+        const admittedFiles = admitInboxFilePayload({ files: body.files });
+        if (admittedFiles.error) {
+          return NextResponse.json({ error: admittedFiles.error.error }, { status: admittedFiles.error.status });
+        }
+        /* The uploaded bytes never reach `parseRuntimeCommand`. Its 256 KiB
+           ceiling bounds the COMMAND — and by this point the attachment is on
+           disk and represented by a path, so leaving the base64 on the object
+           would refuse every document past ~190 KB with an error naming neither
+           the file nor the real limit. The images branch above reduces its own
+           payload to refs for exactly this reason. */
+        const parsed: Record<string, unknown> = { ...(parseValue as Record<string, unknown>) };
+        delete parsed.files;
+        if (admittedFiles.files.length) {
+          const bundle = buildFilePayload(
+            typeof parsed.text === "string" ? parsed.text : "",
+            admittedFiles.files,
+            inboxFileBatchToken(typeof body.idempotencyKey === "string" ? body.idempotencyKey : null),
+          );
+          attachments.filePaths = bundle.filePaths;
+          parsed.text = bundle.payload;
+        }
+        parseValue = parsed;
       }
     }
     command = parseRuntimeCommand(kind, parseValue);
@@ -143,6 +189,9 @@ export async function handleRuntimeCommand(
       );
     }
     if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
+      /* In flight ⇒ the Viewer cannot say. Set BEFORE the call so an enqueue
+         that throws mid-delivery keeps the attachments too (#1224). */
+      attachments.outcome = "uncertain";
       const admitted = await dependencies.enqueue({
         path: "",
         conversationId: command.conversationId,
@@ -165,6 +214,7 @@ export async function handleRuntimeCommand(
         kick: dependencies.kick ?? kickStructuredDeliveryQueue,
       });
       if (admitted) {
+        attachments.outcome = structuredAttachmentOutcome(admitted);
         if (!admitted.ok) {
           return NextResponse.json({
             error: admitted.error,
@@ -176,9 +226,20 @@ export async function handleRuntimeCommand(
         const status = admitted.receipt.status === "pending" || admitted.receipt.status === "queued" ? 202 : 200;
         return NextResponse.json({ operationId: admitted.operationId, receipt: admitted.receipt }, { status });
       }
+      /* No structured ownership: nothing was delivered here, and the direct
+         command below owns the fate from now on. */
+      attachments.outcome = "refused";
     }
     if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
+    /* Same fence as the queue above: the command is on the wire, so its fate is
+       unknown until it answers. A transport failure or an idempotency conflict
+       lands in the catch below with the attachments intact — a conflict in
+       particular means an earlier attempt under this key already holds them. */
+    attachments.outcome = "uncertain";
     const result = await client.command(command);
+    /* The host answered, so the command was handed over: the receipt's own
+       status is the composer's business, not the inbox's. Bytes stay. */
+    attachments.outcome = "accepted";
     if (result.receipt.status === "pending" || result.receipt.status === "queued") {
       dependencies.kick?.();
     }
@@ -188,6 +249,26 @@ export async function handleRuntimeCommand(
     const status = error instanceof RuntimeHostUnavailableError && error.code === "idempotency-conflict" ? 409 : 503;
     return NextResponse.json({ error: error instanceof Error ? error.message : "runtime command failed" }, { status });
   }
+}
+
+/**
+ * A runtime send/steer, with its attachments' retention attached to its fate:
+ * a command TERMINALLY refused leaves no bytes in the inbox, and one that was
+ * admitted — or one whose delivery could not be established — keeps them,
+ * because the agent still has to open the path it was handed (#1224; see
+ * `attachmentRetention.ts` for why "not ok" is the wrong key).
+ */
+export async function handleRuntimeCommand(
+  request: NextRequest,
+  kind: RuntimeOperationKind,
+  dependencies: RuntimeHttpDependencies = DEFAULT_DEPENDENCIES,
+): Promise<NextResponse> {
+  const attachments: CommandAttachments = { filePaths: [], outcome: "refused" };
+  const response = await dispatchRuntimeCommand(request, kind, dependencies, attachments);
+  if (attachments.filePaths.length && attachmentsAreOrphaned(attachments.outcome)) {
+    (await import("@/lib/inboxFiles")).deleteInboxFiles(attachments.filePaths);
+  }
+  return response;
 }
 
 export async function handleRuntimeRetry(

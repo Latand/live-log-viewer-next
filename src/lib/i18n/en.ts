@@ -330,6 +330,7 @@ export const en = {
 
   // TmuxComposer
   "composer.imagesCount": { one: "{count} image", other: "{count} images" },
+  "composer.attachmentsCount": { one: "{count} attachment", other: "{count} attachments" },
   "composer.spawned": "launched agent in tmux {target}",
   "composer.sentPaths": "sent {count} path(s)",
   "composer.failedInterrupt": "couldn't interrupt",
@@ -405,6 +406,7 @@ export const en = {
   "composer.compactObserved": "context compacted",
   "composer.failedCompact": "couldn't start compaction",
   "composer.addImages": "Add images",
+  "composer.addAttachments": "Add files or images",
   "composer.moreTools": "More actions",
   "composer.stopAndSend": "Stop recording and send",
   "composer.launchAgent": "Launch the agent",
@@ -513,7 +515,7 @@ export const en = {
   "outbox.failed": "Not delivered",
   "outbox.cancel": "Cancel this message",
   "outbox.retry": "Retry sending this message",
-  "outbox.reattach": "Not sent — re-attach the images and send again",
+  "outbox.reattach": "Not sent — attach the files again and send",
 
   "draft.readPrompt": "Read the agent conversation in file {src} and continue from there: ",
   "draft.needDir": "specify a working directory",
@@ -912,12 +914,29 @@ export const en = {
   "rename.conflict": "Name changed elsewhere — adopted the latest and retried",
   "rename.failed": "Couldn't save the name",
 
+  // Attachments that are not images (#1224)
+  "attach.file": "file",
+  "attach.error": "attachment error",
+  /* One refusal, one line: `{names}: {reason}`. Every reason below is written
+     to follow that colon, so several files refused for the same reason are
+     named together in ONE status instead of overwriting one another. */
+  "attach.refused": "{names}: {reason}",
+  "attach.imagesOnlyHere": "this composer takes PNG, JPEG, GIF or WebP images only",
+  "attach.empty": "empty — there is nothing to attach",
+  "attach.tooLarge": "too large ({max} MB limit)",
+  "attach.tooMany": "up to {max} files can be attached at once",
+  "attach.notRestored": "not restored — attach it again to send it",
+  "attach.aggregateTooLarge": "over the {max} MB request limit",
+  "attach.readingAria": "loading {name}",
+  "attach.removeAria": "Remove {name}",
+  "attach.retryAria": "Retry {name}",
+  "attach.clearAllAria": "Remove all attachments",
+  "attach.blockedReading": "Waiting for the attachment to finish loading…",
+  "attach.blockedFailed": "Remove or retry the failed attachment to send",
+
   // imageAttachments
   "img.readFailed": "couldn't read the image",
   "img.readAborted": "image reading aborted",
-  "img.unsupported": "unsupported image format: {name}",
-  "img.unknownFile": "unknown file",
-  "img.tooLarge": "{name}: too large (10 MB limit)",
   "img.structuredTooLarge": "Image exceeds this host's {max} MB limit",
   "img.tooManyStructured": "Up to {max} images can be sent at once",
   "img.structuredAggregateTooLarge": "Images exceed this host's {max} MB request limit",

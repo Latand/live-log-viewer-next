@@ -46,8 +46,8 @@ afterEach(() => {
   mobile = false;
 });
 
-function Harness({ onImageFiles, sendDisabledReason, onSendBlockedRecover, leftSlot = <span data-testid="left-marker">runtime</span> }: {
-  onImageFiles?: (files: File[]) => void;
+function Harness({ onAttachFiles, sendDisabledReason, onSendBlockedRecover, leftSlot = <span data-testid="left-marker">runtime</span> }: {
+  onAttachFiles?: (files: File[]) => void;
   sendDisabledReason?: string;
   onSendBlockedRecover?: () => void;
   leftSlot?: React.ReactNode;
@@ -63,7 +63,7 @@ function Harness({ onImageFiles, sendDisabledReason, onSendBlockedRecover, leftS
       sendLabelIdle="Send"
       sendLabelRecording="Stop"
       sendIdleClassName="bg-accent"
-      onImageFiles={onImageFiles}
+      onAttachFiles={onAttachFiles}
       sendDisabledReason={sendDisabledReason}
       onSendBlockedRecover={onSendBlockedRecover}
     />
@@ -174,7 +174,7 @@ test("a blocked Send explains itself inline and offers the recovery action", () 
 test("mobile paste keeps delivering attachments while the second row is collapsed", () => {
   mobile = true;
   const delivered: File[][] = [];
-  const { host, root } = mount(<Harness onImageFiles={(files) => delivered.push(files)} />);
+  const { host, root } = mount(<Harness onAttachFiles={(files) => delivered.push(files)} />);
   /* Collapsed — no picker on screen, but the textarea still owns paste/drop. */
   expect(host.querySelector('button[aria-label="Add images"]')).toBeNull();
   const textarea = host.querySelector("textarea")!;

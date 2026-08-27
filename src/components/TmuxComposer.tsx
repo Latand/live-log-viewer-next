@@ -54,7 +54,7 @@ import {
 } from "./composerAdmissionDeadline";
 import { RuntimePill } from "./RuntimePill";
 import { savedResumeProfile, sendRuntimeFrom, type RuntimeProfile } from "./runtimeProfile";
-import { type PendingImage } from "./imageAttachments";
+import { type PendingAttachment, type PendingFile, type PendingImage, type RestoredFile } from "./imageAttachments";
 import {
   DELIVERY_WAIT_TICK_MS,
   deliveryUncertainWhy,
@@ -145,6 +145,8 @@ interface ComposerSendResult {
   /** HTTP status of the response, absent when the response was lost. */
   status?: number;
   imagePaths?: string[];
+  /** Inbox paths the send's non-image attachments landed on (#1224). */
+  filePaths?: string[];
   target?: string;
   spawned?: boolean;
   outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "delivering" | "delivered" | "recovering" | "failed";
@@ -605,6 +607,11 @@ export interface PendingDelivery {
       admission removes exactly these from the composer, so images attached
       after the send stay put. */
   images: readonly PendingImage[];
+  /** The non-image attachments this attempt carried (#1224). Memory-only:
+      a document's bytes are far too large for synchronous browser storage, so a
+      generation holding one persists as `payloadComplete: false` and is fenced
+      from replay after a refresh rather than replayed without its files. */
+  files?: readonly PendingFile[];
   /** Runtime selection frozen with the first request under this key. */
   runtime?: RuntimeProfile;
   /** The Viewer card selected when this attempt was dispatched (#844). Frozen
@@ -634,6 +641,10 @@ const SETTLED_SEND_KEY_LIMIT = 32;
     is memory-only — previews don't survive a refresh either). */
 const pendingSendKey = (id: string) => "llvPendingSend:" + id;
 const draftImagesKey = (id: string) => "llvDraftImages:" + id;
+/** Names only, never bytes (#1224): a staged document is far too big for
+    synchronous session storage, so what survives a card switch or a phone tab
+    restore is enough to say WHICH file has to be attached again. */
+const draftFilesKey = (id: string) => "llvDraftFiles:" + id;
 
 interface PersistedPendingDelivery {
   key?: unknown;
@@ -671,6 +682,44 @@ function persistedImages(value: unknown): PendingImage[] | null {
     });
   }
   return images;
+}
+
+function persistedFiles(value: unknown): RestoredFile[] | null {
+  if (!Array.isArray(value)) return null;
+  const files: RestoredFile[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+    const raw = candidate as Record<string, unknown>;
+    if (typeof raw.name !== "string" || !raw.name) return null;
+    files.push({
+      ...(typeof raw.id === "string" ? { id: raw.id } : {}),
+      name: raw.name,
+      ...(typeof raw.mime === "string" ? { mime: raw.mime } : {}),
+    });
+  }
+  return files;
+}
+
+function readDraftFiles(id: string): RestoredFile[] {
+  try {
+    const raw = sessionStorage.getItem(draftFilesKey(id));
+    return (raw === null ? null : persistedFiles(JSON.parse(raw))) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Persists the NAMES of every staged non-image slot, whatever its status: a
+    slot that came back un-restored is still a file the operator has to attach
+    again, so its marker has to survive the next switch too. */
+function writeDraftFiles(id: string, slots: readonly PendingAttachment[]): void {
+  try {
+    const files = slots
+      .filter((slot) => slot.kind === "file")
+      .map((slot) => ({ id: slot.id, name: slot.name, mime: slot.mime }));
+    if (!files.length) sessionStorage.removeItem(draftFilesKey(id));
+    else sessionStorage.setItem(draftFilesKey(id), JSON.stringify(files));
+  } catch { /* The visible in-memory tray remains authoritative. */ }
 }
 
 function readDraftImages(id: string): PendingImage[] | null {
@@ -727,7 +776,7 @@ export function readPendingDeliveries(id: string): PendingDelivery[] {
 export function writePendingDeliveries(id: string, pending: readonly PendingDelivery[]): void {
   try {
     if (pending.length) {
-      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, images, runtime, runtimeCaptured, reconciling, payloadComplete, operationId }) => ({
+      sessionStorage.setItem(pendingSendKey(id), JSON.stringify(pending.map(({ key, text, images, files, runtime, runtimeCaptured, reconciling, payloadComplete, operationId }) => ({
         key,
         text,
         images: images.map(({ id: imageId, base64, mime }) => ({
@@ -738,7 +787,9 @@ export function writePendingDeliveries(id: string, pending: readonly PendingDeli
         ...(runtime ? { runtime } : {}),
         ...(runtimeCaptured ? { runtimeCaptured: true } : {}),
         ...(reconciling ? { reconciling: true } : {}),
-        ...(payloadComplete === false ? { payloadComplete: false } : {}),
+        /* A generation whose files live only in memory is observable for late
+           settlement but never lends its key to a replay (#1224). */
+        ...(payloadComplete === false || files?.length ? { payloadComplete: false } : {}),
         ...(operationId ? { operationId } : {}),
       }))));
     } else {
@@ -915,7 +966,7 @@ export function adoptComposerState(path: string, cardId: string): void {
     const previousOwner = sessionStorage.getItem(composerOwnerKey(path));
     for (const from of [previousOwner, path]) {
       if (!from || from === cardId) continue;
-      for (const keyOf of [draftKey, draftImagesKey, pendingSendKey, sentKey, dismissedReceiptsKey]) {
+      for (const keyOf of [draftKey, draftImagesKey, draftFilesKey, pendingSendKey, sentKey, dismissedReceiptsKey]) {
         const legacy = sessionStorage.getItem(keyOf(from));
         if (legacy === null) continue;
         if (sessionStorage.getItem(keyOf(cardId)) === null) sessionStorage.setItem(keyOf(cardId), legacy);
@@ -1216,6 +1267,9 @@ export function TmuxComposerCore({
     },
     submit: (overrideText) => queueSubmit(overrideText),
     imageCapability: structuredSession ? structuredImageCapability ?? null : null,
+    /* #1224: this composer delivers a general file by writing it to the
+       conversation's inbox and naming its path, so it takes any file. */
+    acceptFiles: true,
     /* Queue-first (issue #561): a submitted message lives in the durable
        outbox, so the field never locks behind an in-flight delivery. */
     holdInputWhileBusy: false,
@@ -1243,6 +1297,9 @@ export function TmuxComposerCore({
      image-bearing entry as needing re-attachment rather than silently sending
      a text-only message. */
   const outboxImages = useRef<Map<string, PendingImage[]>>(new Map());
+  /* The same, for non-image attachments (#1224). Memory-only for the same
+     reason, and cleared with the entry the moment it delivers. */
+  const outboxFiles = useRef<Map<string, PendingFile[]>>(new Map());
   /* Idempotency keys the outbox owns. Their settlement clears the QUEUE, never
      the editable draft — that draft was already cleared at submit time and
      anything in it now belongs to the next message. */
@@ -1496,7 +1553,8 @@ export function TmuxComposerCore({
     const draftImages = readDraftImages(cardId);
     attachmentDraftHydrated.current = false;
     const trayImages = draftImages ?? (resumable?.text === draftNow ? resumable.images : []);
-    const restoredImages = attachments.replace(trayImages.map((image) => ({ ...image })));
+    const draftFiles = readDraftFiles(cardId);
+    const restoredImages = attachments.replace(trayImages.map((image) => ({ ...image })), draftFiles);
     queueMicrotask(() => { attachmentDraftHydrated.current = true; });
     if (resumable && restoredImages && resumable.runtimeCaptured) {
       runtimeSendSnapshots.current.set(resumable.key, resumable.runtime);
@@ -1505,6 +1563,17 @@ export function TmuxComposerCore({
     const hasIncompletePayload = restoredPending.some((entry) => entry.payloadComplete === false);
     setReconcilingSend(reconcilingKeys.length > 0 || hasIncompletePayload);
     if (reconcilingKeys.length || hasIncompletePayload) setStatus({ kind: "err", text: t("composer.admissionTimedOut") });
+    /* A staged document cannot be persisted, only named (#1224): the restored
+       slots block Send, and the status says which files have to be attached
+       again — a card switch or a phone tab restore never empties them out in
+       silence. Yields to the admission message, which is about a send already
+       in flight. */
+    else if (draftFiles.length) {
+      setStatus({
+        kind: "err",
+        text: t("attach.refused", { names: draftFiles.map((entry) => entry.name).join(", "), reason: t("attach.notRestored") }),
+      });
+    }
     for (const key of reconcilingKeys) startReceiptReconciliation(key);
     settledSendKeys.current = new Set();
     /* Keyed by identity alone: a path migration under a stable id must not
@@ -1518,6 +1587,13 @@ export function TmuxComposerCore({
     if (!attachmentDraftHydrated.current) return;
     writeDraftImages(cardId, attachments.images, pendingDeliveries.current.length > 0);
   }, [attachments.images, cardId]);
+
+  /* The marker for every staged document, written from the full intake list so
+     an un-restored slot keeps its name across the next switch too (#1224). */
+  useEffect(() => {
+    if (!attachmentDraftHydrated.current) return;
+    writeDraftFiles(cardId, attachments.attachments);
+  }, [attachments.attachments, cardId]);
 
   /* Settle submitted generations against the receipt stream: a durably
      admitted receipt (queued or beyond) for a remembered key means the server
@@ -1581,7 +1657,7 @@ export function TmuxComposerCore({
         const next = draftAfterDelivery(textRef.current, settlement.text);
         if (next !== textRef.current) setText(next);
       }
-      attachments.settleDelivered(settlement.entry.images);
+      attachments.settleDelivered(settlement.entry.images, settlement.entry.files ?? []);
       /* The admitted attempt consumed its key: minting a fresh one keeps the
          next message from being replay-deduped into silence server-side. */
       if (settlement.entry.key === idempotencyKey.current) idempotencyKey.current = mintIdempotencyKey();
@@ -1732,8 +1808,9 @@ export function TmuxComposerCore({
     const preserveDraft = options?.preserveDraft ?? false;
     const requestedText = overrideText ?? textRef.current;
     const requestedImages: PendingImage[] = preserveDraft ? [] : attachments.imagesRef.current.map((image) => ({ ...image }));
+    const requestedFiles: PendingFile[] = preserveDraft ? [] : attachments.filesRef.current.map((file) => ({ ...file }));
     if (voiceSending || reconcilingSend) return;
-    if (!requestedText.trim() && !requestedImages.length) return;
+    if (!requestedText.trim() && !requestedImages.length && !requestedFiles.length) return;
     if (deadHost && !structuredSession) {
       setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
       return;
@@ -1754,11 +1831,17 @@ export function TmuxComposerCore({
        such a key would stamp a NEW message as a replay of stale bytes. */
     const clientMessageId = mintIdempotencyKey();
     outboxImages.current.set(clientMessageId, requestedImages);
+    if (requestedFiles.length) outboxFiles.current.set(clientMessageId, requestedFiles);
     outboxKeys.current.add(clientMessageId);
     enqueueOutbox(cardId, {
       id: clientMessageId,
       text: requestedText,
       images: requestedImages.length,
+      /* #1224: recorded on the durable entry so the refresh fence holds a
+         document-bearing submission back exactly as it holds an image-bearing
+         one — `outboxFiles` is memory-only, so a replay after a reload would
+         deliver the text without the file and say nothing. */
+      ...(requestedFiles.length ? { files: requestedFiles.length } : {}),
       at: nowMs(),
       /* Submission watermark (finding 2): the echoes of this exact text that
          already exist, so a pre-existing identical message never retires this
@@ -1781,6 +1864,8 @@ export function TmuxComposerCore({
        the attachments frozen at submit time instead — the tray has moved on. */
     const requestedImages: PendingImage[] = (outboxId ? outboxImages.current.get(outboxId) ?? [] : attachments.imagesRef.current)
       .map((image) => ({ ...image }));
+    const requestedFiles: PendingFile[] = (outboxId ? outboxFiles.current.get(outboxId) ?? [] : attachments.filesRef.current)
+      .map((file) => ({ ...file }));
     /** Records a queued submission's fate on the queue itself. A no-op for a
         direct (non-queued) send, which reports through the status line. The
         bubble takes the state the receipt PROVES: a bare admission stays
@@ -1797,7 +1882,10 @@ export function TmuxComposerCore({
         ...(error ? { error } : {}),
         ...(held ? { heldForSwitch: true as const } : {}),
       });
-      if (state === "delivered") outboxImages.current.delete(outboxId);
+      if (state === "delivered") {
+        outboxImages.current.delete(outboxId);
+        outboxFiles.current.delete(outboxId);
+      }
     };
       const settleOutboxFromReceipt = (receipt: RuntimeReceipt) => {
       /* The late admission: a send that answered `pending` and settled on the receipt
@@ -1851,7 +1939,10 @@ export function TmuxComposerCore({
     const sentImages: PendingImage[] = replayGeneration
       ? replayGeneration.images.map((image) => ({ ...image }))
       : requestedImages;
-    if (!payloadText.trim() && !sentImages.length) {
+    const sentFiles: PendingFile[] = replayGeneration
+      ? (replayGeneration.files ?? []).map((file) => ({ ...file }))
+      : requestedFiles;
+    if (!payloadText.trim() && !sentImages.length && !sentFiles.length) {
       /* Nothing to deliver — a queued entry that lost its payload must leave
          the queue rather than block the drain forever. */
       if (outboxId) cancelOutbox(cardId, outboxId);
@@ -1936,6 +2027,7 @@ export function TmuxComposerCore({
           key: clientMessageId,
           text: payloadText,
           images: sentImages,
+          ...(sentFiles.length ? { files: sentFiles } : {}),
           ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
           selectedContext,
           ...(capturesRuntime ? { runtimeCaptured: true as const } : {}),
@@ -1947,13 +2039,13 @@ export function TmuxComposerCore({
        (later typing survives) and its attachment snapshot leaves the tray
        (later images survive). At most once per key — a replayed receipt for an
        already-settled generation must not touch what the user typed since. */
-    const settleGeneration = (clearedText: string, snapshot: readonly PendingImage[]) => {
+    const settleGeneration = (clearedText: string, snapshot: readonly PendingImage[], fileSnapshot: readonly PendingFile[] = []) => {
       if (settledSendKeys.current.has(clientMessageId)) return;
       markSettled(clientMessageId);
       /* A queued generation left the composer when it was submitted; clearing
          the draft here would eat text prepared for the next message. */
       if (!outboxId) setText(draftAfterDelivery(textRef.current, clearedText));
-      attachments.settleDelivered(snapshot);
+      attachments.settleDelivered(snapshot, fileSnapshot);
     };
     const settleLegacySuccess = (result: ComposerSendResult) => {
       if (settledSendKeys.current.has(clientMessageId)) return;
@@ -1962,7 +2054,9 @@ export function TmuxComposerCore({
       const at = nowMs();
       const entry: SentEntry = {
         id: at,
-        text: payloadText.trim() || (imgCount ? t("composer.imagesCount", { count: imgCount }) : ""),
+        text: payloadText.trim()
+          || (sentFiles.length ? t("composer.attachmentsCount", { count: sentFiles.length + imgCount }) : "")
+          || (imgCount ? t("composer.imagesCount", { count: imgCount }) : ""),
         at,
         via: result.outcome === "resumed" || result.spawned ? "spawn" : "pane",
         state: held ? (result.outcome as DeliveryReceiptState) : "sent",
@@ -1985,7 +2079,7 @@ export function TmuxComposerCore({
         candidate.idempotencyKey !== clientMessageId
         && candidate.operationId !== unconfirmedReceiptOperationId(clientMessageId)));
       if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
-      settleGeneration(payloadText, attempt?.images ?? sentImages);
+      settleGeneration(payloadText, attempt?.images ?? sentImages, attempt?.files ?? sentFiles);
       /* A legacy pane send that reached the pane is delivered; a migration
          hold/queue is still in flight to the successor (round-1 P1#4). */
       settleOutbox(held ? "delivering" : "delivered", undefined, held);
@@ -2010,8 +2104,8 @@ export function TmuxComposerCore({
                 : t("composer.deliveryHeldUnnamed")
             : result.outcome === "resumed" || result.spawned
               ? t("composer.spawned", { target: result.target ?? "" })
-              : result.imagePaths?.length
-                ? t("composer.sentPaths", { count: result.imagePaths.length })
+              : (result.imagePaths?.length ?? 0) + (result.filePaths?.length ?? 0)
+                ? t("composer.sentPaths", { count: (result.imagePaths?.length ?? 0) + (result.filePaths?.length ?? 0) })
                 : t("common.sent"),
         });
       }
@@ -2029,6 +2123,11 @@ export function TmuxComposerCore({
               conversationId: structuredSession.session.conversationId,
               text: payloadText.trim(),
               images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
+              /* #1224: the bytes ride the request and the SERVER writes them to
+                 the conversation's inbox, then names the path in the delivered
+                 message — nothing has to reach the agent's machine separately,
+                 because it is the same machine. */
+              ...(sentFiles.length ? { files: sentFiles.map((file) => ({ name: file.name, base64: file.base64 })) } : {}),
               idempotencyKey: clientMessageId,
               policy: "interrupt-active",
               ...(runtimeOverride ? { runtime: runtimeOverride } : {}),
@@ -2053,6 +2152,7 @@ export function TmuxComposerCore({
               idempotencyKey: clientMessageId,
               clientMessageId,
               images: sentImages.map((image) => ({ base64: image.base64, mime: image.mime })),
+              ...(sentFiles.length ? { files: sentFiles.map((file) => ({ name: file.name, base64: file.base64 })) } : {}),
               /* #1117: the composer is the operator's own surface; the
                  structured branch above is stamped server-side by /api/runtime/send. */
               origin: { kind: "operator" },
@@ -2103,7 +2203,7 @@ export function TmuxComposerCore({
             const admitted = receipt.status === "delivered" && typeof json.receipt.text === "string" && json.receipt.text
               ? json.receipt.text
               : attempt?.text ?? payloadText;
-            settleGeneration(admitted, attempt?.images ?? sentImages);
+            settleGeneration(admitted, attempt?.images ?? sentImages, attempt?.files ?? sentFiles);
             settleOutboxFromReceipt(receipt);
             if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
             if (receipt.status === "delivered") setStatus({ kind: "ok", text: t("common.sent") });
@@ -2149,7 +2249,7 @@ export function TmuxComposerCore({
         const attempt = pendingDeliveries.current.find((entry) => entry.key === clientMessageId);
         persistPendingDeliveries(pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId));
         if (idempotencyKey.current === clientMessageId) idempotencyKey.current = mintIdempotencyKey();
-        settleGeneration(payloadText, attempt?.images ?? sentImages);
+        settleGeneration(payloadText, attempt?.images ?? sentImages, attempt?.files ?? sentFiles);
         settleOutboxFromReceipt(json.receipt);
         if (!outboxId) inputRef.current?.focus();
         return;
@@ -2281,7 +2381,7 @@ export function TmuxComposerCore({
             ? t("composer.placeholderSpawn")
             : t("composer.placeholderSend"))}
       textareaAriaLabel={t("composer.textAria")}
-      imageAriaLabel={t("composer.addImages")}
+      imageAriaLabel={t("composer.addAttachments")}
       sendLabelIdle={spawnMode ? t("composer.launchAgent") : t("composer.sendToAgent")}
       sendLabelRecording={t("composer.stopAndSend")}
       sendTitleRecording={t("composer.stopAndSendTitle")}
