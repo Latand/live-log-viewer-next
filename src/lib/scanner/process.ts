@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { ROOTS } from "./roots";
 
@@ -126,6 +127,58 @@ export function argvEngine(argv: string[]): AgentEngine | null {
     if (base === "codex" || base === "codex.exe") return "codex";
   }
   return null;
+}
+
+/**
+ * The environment stamp the viewer puts on every structured host it spawns.
+ *
+ * Argv shape alone proves nothing about who started a process: `codex
+ * app-server` and a `claude` stream-json run are public command lines that
+ * other tools on the machine use too (a Codex desktop client, another agent
+ * harness). Only a stamp the viewer itself wrote can say "this host is mine",
+ * and the value is the viewer's own state dir, so two installations sharing a
+ * machine never claim — or kill — each other's hosts.
+ */
+export const STRUCTURED_HOST_STAMP_ENV = "LLV_STRUCTURED_HOST";
+
+/** The stamp this viewer writes, and the only value it accepts back. */
+export function structuredHostStamp(): string {
+  return statePath();
+}
+
+/** The stamp `pid` carries, or null when it carries none (and on backends
+    that cannot read another process's environment at all). */
+export function readStructuredHostStamp(pid: number): string | null {
+  return procBackend.readEnvVar(pid, STRUCTURED_HOST_STAMP_ENV);
+}
+
+/**
+ * Engine of a structured host process — the pane-less shape the runtime spawns
+ * and speaks to over stdio — or null for anything else wearing the same
+ * binary. Both signatures are ones no human types: the Claude broker is the
+ * only `claude` run that reads `stream-json` off stdin, and `app-server` is the
+ * only Codex subcommand the viewer ever starts. Shape is a necessary condition,
+ * never a sufficient one: callers that grant kill authority on a scan alone
+ * must also see this viewer's stamp on the process (`readStructuredHostStamp`).
+ */
+export function structuredHostEngine(argv: string[]): AgentEngine | null {
+  const engine = argvEngine(argv);
+  if (engine === null || isHelperArgv(argv)) return null;
+  if (engine === "codex") return argv.includes("app-server") ? "codex" : null;
+  const printMode = argv.includes("-p") || argv.includes("--print");
+  const streamInput = argv.some((token, index) => token === "--input-format" && argv[index + 1] === "stream-json");
+  return printMode && streamInput ? "claude" : null;
+}
+
+/**
+ * An account-migration successor: the one structured-shaped Claude run the
+ * viewer starts that is NOT an addressable host but a migration worker forking
+ * a conversation onto another account. It carries `--fork-session`, and the
+ * resources list leaves it out entirely so no bulk kill can interrupt a
+ * migration mid-flight.
+ */
+export function accountMigrationHostArgv(argv: string[]): boolean {
+  return argv.includes("--fork-session");
 }
 
 // Claude Code internal workers: the session daemon plus its pty host/spare

@@ -8,6 +8,7 @@ import type { ResourceSession, ResourcesPayload } from "@/lib/types";
 
 import { X } from "./icons";
 import { AttachControls } from "./resources/AttachControls";
+import { bulkKillTargets, idleKillTargets, isStructuredHost, resourceCounts } from "./resources/hostSelection";
 import { activityDot, engineTintOf, fmtAge } from "./utils";
 
 const POLL_MS = 30_000;
@@ -231,25 +232,46 @@ export function ResourcesFooter() {
   );
 }
 
-/** Kills one session through the kill-target action; every row — transcript-
-    backed and orphan alike — takes this path. The server resolves the target
-    to the stable pane id recorded in the resources snapshot and verifies the
-    pane pid before killing, so the kill survives window renumbering mid-bulk
-    (a transcript-path kill re-resolves display coordinates at kill time and
-    can name a different pane after earlier kills shifted window indexes).
+/** Kills one row, on whichever transport owns it, for one named gesture.
+    A structured host goes to /api/runtime/hosts, which ends it through the
+    runtime when it still holds it and by process group otherwise, then retires
+    the registry row. A tmux pane keeps the kill-target action: the server
+    resolves the stable pane id recorded in the snapshot and verifies the pane
+    pid before killing, so the kill survives window renumbering mid-bulk.
+    Both sides refuse a target the last snapshot did not list.
     Returns the error text, if any. */
-async function killSession(session: ResourceSession): Promise<string | null> {
-  const res = await fetch("/api/tmux", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action: "kill-target", target: session.target }),
-  });
+async function killSession(
+  session: ResourceSession,
+  gesture: { intent: "row" | "idle" | "all"; includeSeat: boolean; idleHours?: number },
+): Promise<string | null> {
+  const res = isStructuredHost(session)
+    ? await fetch("/api/runtime/hosts", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "kill",
+          target: session.target,
+          /* The gesture travels with the request: the server re-reads the
+             promises it makes (settled turn, quiet transcript, untouched
+             orchestrator seat) instead of trusting the polled snapshot. */
+          intent: gesture.intent,
+          includeSeat: gesture.includeSeat,
+          ...(gesture.intent === "idle" ? { idleHours: gesture.idleHours } : {}),
+        }),
+      })
+    : await fetch("/api/tmux", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "kill-target", target: session.target }),
+      });
   if (res.ok) return null;
   const json = (await res.json().catch(() => ({}))) as { error?: string };
   return json.error ?? String(res.status);
 }
 
-function CleanupPanel({
+/** The "Agent sessions" dialog. Exported for the DOM test, which drives the
+    rows and the bulk buttons without waiting on the rail's poll. */
+export function CleanupPanel({
   sessions,
   now,
   onRefresh,
@@ -267,10 +289,13 @@ function CleanupPanel({
   const [error, setError] = useState<string | null>(null);
   const [bulkHours, setBulkHours] = useState<(typeof BULK_HOURS)[number]>(2);
   const [bulkBusy, setBulkBusy] = useState(false);
-  /* The nuke: a two-step arm before it force-kills every agent pane, live ones
+  /* The nuke: a two-step arm before it force-kills every agent host, live ones
      included. Any other kill action disarms it, so a stray tap can't fire it. */
   const [killAllArmed, setKillAllArmed] = useState(false);
   const [killAllBusy, setKillAllBusy] = useState(false);
+  /* Orchestrator seats the operator ticked into the bulk kills. The server asks
+     for the same opt-in per kill, so an untouched seat survives either way. */
+  const [tickedSeats, setTickedSeats] = useState<Set<string>>(new Set());
 
   const markBusy = (target: string, on: boolean) =>
     setBusy((prev) => {
@@ -285,7 +310,8 @@ function CleanupPanel({
     setKillAllArmed(false);
     markBusy(session.target, true);
     try {
-      const failure = await killSession(session);
+      /* A per-row kill is the explicit gesture the seat rule asks for. */
+      const failure = await killSession(session, { intent: "row", includeSeat: true });
       if (failure) setError(failure);
       await onRefresh();
     } finally {
@@ -294,50 +320,46 @@ function CleanupPanel({
     }
   };
 
-  /* Bulk never touches live rows; orphans (no lastActiveAt) are skipped too —
-     with no idle age to compare, "idle longer than N hours" is unprovable. */
-  const bulkTargets = (hours: number): ResourceSession[] => {
-    const cutoff = (now - hours * 3_600) * 1000;
-    return sessions.filter(
-      (session) => session.activity !== "live" && session.lastActiveAt !== null && Date.parse(session.lastActiveAt) < cutoff,
-    );
+  const killEach = async (targets: ResourceSession[], intent: "idle" | "all", idleHours?: number) => {
+    for (const session of targets) {
+      markBusy(session.target, true);
+      const failure = await killSession(session, {
+        intent,
+        includeSeat: tickedSeats.has(session.target),
+        ...(idleHours === undefined ? {} : { idleHours }),
+      });
+      if (failure) setError(failure);
+    }
+    await onRefresh();
   };
 
   const killBulk = async () => {
-    const targets = bulkTargets(bulkHours);
+    const targets = idleKillTargets(sessions, bulkHours, now, tickedSeats);
     if (targets.length === 0 || bulkBusy) return;
     setError(null);
     setKillAllArmed(false);
     setBulkBusy(true);
     try {
-      for (const session of targets) {
-        markBusy(session.target, true);
-        const failure = await killSession(session);
-        if (failure) setError(failure);
-      }
-      await onRefresh();
+      await killEach(targets, "idle", bulkHours);
     } finally {
       setBusy(new Set());
       setBulkBusy(false);
     }
   };
 
-  /* Force-kills every tracked agent session, live included — the clean-slate
-     nuke. Sequential, like killBulk, so window renumbering between kills never
-     misaddresses a pane (each kill re-verifies the recorded pane pid server-
-     side). Only the viewer's own claude/codex panes are in this list, so work
-     shells and the viewer processes are never touched. */
+  /* Force-kills every listed host, live included — the clean-slate nuke.
+     Sequential, like killBulk, so window renumbering between kills never
+     misaddresses a pane (each kill re-verifies the recorded pane pid or host
+     identity server-side). Only the viewer's own hosts are in this list, so
+     work shells, the viewer, the runtime host and the account-migration
+     workers are never in reach; a live orchestrator seat needs its tick. */
   const killAll = async () => {
-    if (sessions.length === 0 || killAllBusy) return;
+    const targets = bulkKillTargets(sessions, tickedSeats);
+    if (targets.length === 0 || killAllBusy) return;
     setError(null);
     setKillAllBusy(true);
     try {
-      for (const session of sessions) {
-        markBusy(session.target, true);
-        const failure = await killSession(session);
-        if (failure) setError(failure);
-      }
-      await onRefresh();
+      await killEach(targets, "all");
     } finally {
       setBusy(new Set());
       setKillAllBusy(false);
@@ -345,15 +367,30 @@ function CleanupPanel({
     }
   };
 
-  const totalBytes = sessions.reduce((sum, session) => sum + session.rssBytes + session.swapBytes, 0);
-  const bulkCount = bulkTargets(bulkHours).length;
+  const toggleSeat = (target: string) =>
+    setTickedSeats((prev) => {
+      const next = new Set(prev);
+      if (next.has(target)) next.delete(target);
+      else next.add(target);
+      return next;
+    });
+
+  const counts = resourceCounts(sessions, bulkHours, now);
+  const bulkCount = idleKillTargets(sessions, bulkHours, now, tickedSeats).length;
+  const killAllCount = bulkKillTargets(sessions, tickedSeats).length;
 
   return (
     <div className="fixed bottom-3 left-1/2 z-50 flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-2 sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0">
       <header className="flex items-center gap-2 border-b border-border px-3 py-2">
         <span className="text-[12.5px] font-bold">{t("resources.title")}</span>
         {sessions.length ? (
-          <span className="text-[11px] tabular-nums text-muted">{t("resources.total", { amount: fmtBytes(totalBytes) })}</span>
+          <span className="text-[11px] tabular-nums text-muted" data-testid="resources-counts">
+            {t("resources.hostsN", { count: counts.hosts })}
+            {" · "}
+            {t("resources.idleN", { n: counts.idle })}
+            {" · "}
+            {t("resources.total", { amount: fmtBytes(counts.bytes) })}
+          </span>
         ) : null}
         <button
           type="button"
@@ -374,6 +411,8 @@ function CleanupPanel({
               session={session}
               busy={busy.has(session.target)}
               armed={armed === session.target}
+              seatTicked={tickedSeats.has(session.target)}
+              onToggleSeat={() => toggleSeat(session.target)}
               onArm={() => setArmed(session.target)}
               onKill={() => void killOne(session)}
               onRefresh={onRefresh}
@@ -414,8 +453,8 @@ function CleanupPanel({
         </span>
         <button
           type="button"
-          disabled={killAllBusy || sessions.length === 0}
-          title={sessions.length === 0 ? t("resources.killAllNone") : t("resources.killAllHint")}
+          disabled={killAllBusy || killAllCount === 0}
+          title={killAllCount === 0 ? t("resources.killAllNone") : t("resources.killAllHint")}
           onClick={() => (killAllArmed ? void killAll() : setKillAllArmed(true))}
           className={[
             "inline-flex min-h-[44px] shrink-0 items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40 disabled:cursor-not-allowed disabled:opacity-45 sm:min-h-0",
@@ -423,8 +462,8 @@ function CleanupPanel({
           ].join(" ")}
         >
           {killAllArmed
-            ? t("resources.killAllConfirm", { n: sessions.length })
-            : t("resources.killAll") + (sessions.length ? ` (${sessions.length})` : "")}
+            ? t("resources.killAllConfirm", { n: killAllCount })
+            : t("resources.killAll") + (killAllCount ? ` (${killAllCount})` : "")}
         </button>
       </div>
       {error ? <div className="border-t border-border px-3 py-1.5 text-[11px] font-semibold text-danger">{error}</div> : null}
@@ -438,10 +477,19 @@ function tailPath(dir: string): string {
   return parts.slice(-2).join("/") || dir;
 }
 
+/** Badge copy for the ownership the payload reported. */
+const OWNERSHIP_COPY = {
+  owned: { label: "resources.hostOwned", hint: "resources.hostOwnedHint", tone: "border-border text-muted" },
+  released: { label: "resources.hostReleased", hint: "resources.hostReleasedHint", tone: "border-warning/50 text-warning" },
+  orphaned: { label: "resources.hostOrphaned", hint: "resources.hostOrphanedHint", tone: "border-danger/50 text-danger" },
+} as const;
+
 function SessionRow({
   session,
   busy,
   armed,
+  seatTicked,
+  onToggleSeat,
   onArm,
   onKill,
   onRefresh,
@@ -449,6 +497,8 @@ function SessionRow({
   session: ResourceSession;
   busy: boolean;
   armed: boolean;
+  seatTicked: boolean;
+  onToggleSeat: () => void;
   onArm: () => void;
   onKill: () => void;
   /** Re-poll the snapshot — the attach control's stale-pane recovery. */
@@ -456,15 +506,25 @@ function SessionRow({
 }) {
   const { t } = useLocale();
   const tint = engineTintOf(session.engine ?? "");
-  const live = session.activity === "live";
+  const structured = isStructuredHost(session);
+  const live = session.activity === "live" || session.turnBusy === true;
   const hostConflict = session.hostConflict === true;
   const lastActive = session.lastActiveAt !== null ? Date.parse(session.lastActiveAt) / 1000 : null;
+  const ownership = session.ownership ? OWNERSHIP_COPY[session.ownership] : null;
+  /* Role, stage and model are what tell two lanes of the same pipeline apart;
+     the project and the idle age follow, as they did for panes. */
+  const detail = [
+    session.role,
+    session.stage,
+    session.model,
+    session.project,
+  ].filter((value): value is string => Boolean(value));
   /* Live rows keep the kill button locked; the first click only arms it and a
      second, now-red click actually kills — a guard against taking down an
      agent mid-turn with one stray tap. */
   const needsArm = live && !armed;
   return (
-    <div className="px-3 py-1.5 hover:bg-canvas">
+    <div className="px-3 py-1.5 hover:bg-canvas" data-testid={structured ? "resource-host-row" : "resource-pane-row"} data-target={session.target}>
       <div className="flex items-center gap-2">
         <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(session.activity ?? "idle")}`} />
         <span
@@ -478,13 +538,47 @@ function SessionRow({
           title={[session.cwd, session.target, t("resources.procs", { count: session.procCount })].filter(Boolean).join(" · ")}
         >
           <span className="block truncate text-[12px] font-semibold">
-            {hostConflict ? t("resources.hostConflict") : session.title ?? (session.cwd ? tailPath(session.cwd) : t("resources.orphan"))}
+            {hostConflict
+              ? t("resources.hostConflict")
+              : session.title ?? (session.cwd ? tailPath(session.cwd) : t(structured ? "resources.hostUntitled" : "resources.orphan"))}
           </span>
           <span className="block truncate text-[10.5px] text-muted">
-            {hostConflict ? t("resources.hostConflictHint") + " · " : session.title === null ? t("resources.orphan") + " · " : session.project ? session.project + " · " : ""}
+            {hostConflict
+              ? t("resources.hostConflictHint") + " · "
+              : structured
+                ? (detail.length ? detail.join(" · ") + " · " : "")
+                : session.title === null ? t("resources.orphan") + " · " : session.project ? session.project + " · " : ""}
             {lastActive !== null ? fmtAge(lastActive) : session.target}
+            {session.turnBusy === true ? " · " + t("resources.hostBusy") : ""}
           </span>
         </span>
+        {ownership ? (
+          <span
+            className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9.5px] font-semibold ${ownership.tone}`}
+            title={t(ownership.hint)}
+          >
+            {t(ownership.label)}
+          </span>
+        ) : null}
+        {session.seat === true ? (
+          <label className="flex shrink-0 items-center gap-1 text-[9.5px] font-semibold text-muted" title={t("resources.hostSeatTick")}>
+            <input
+              type="checkbox"
+              checked={seatTicked}
+              onChange={onToggleSeat}
+              aria-label={t("resources.hostSeatTick")}
+              className="h-3 w-3 accent-[var(--color-danger)]"
+            />
+            {t("resources.hostSeat")}
+          </label>
+        ) : structured && (session.seat === null || session.seat === undefined) ? (
+          <span
+            className="shrink-0 rounded-full border border-warning/50 px-1.5 py-0.5 text-[9.5px] font-semibold text-warning"
+            title={t("resources.hostSeatUnknownHint")}
+          >
+            {t("resources.hostSeatUnknown")}
+          </span>
+        ) : null}
         <span className="shrink-0 text-right">
           <span className="block text-[11.5px] font-bold tabular-nums">{fmtBytes(session.rssBytes)}</span>
           {session.swapBytes > 0 ? (
@@ -497,7 +591,7 @@ function SessionRow({
           type="button"
           disabled={busy}
           aria-disabled={needsArm || busy}
-          title={live ? t("resources.killLiveHint") : t("resources.killHint")}
+          title={live ? t("resources.killLiveHint") : t(structured ? "resources.killHostHint" : "resources.killHint")}
           onClick={() => (needsArm ? onArm() : onKill())}
           className={[
             "inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-[8px] border px-2 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40 sm:min-h-0 sm:min-w-0",
@@ -512,7 +606,8 @@ function SessionRow({
           {armed ? t("resources.confirm") : t("resources.kill")}
         </button>
       </div>
-      <AttachControls target={session.target} onRefresh={() => void onRefresh()} />
+      {/* Attaching means attaching to a tmux pane; a structured host has none. */}
+      {structured ? null : <AttachControls target={session.target} onRefresh={() => void onRefresh()} />}
     </div>
   );
 }

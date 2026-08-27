@@ -428,7 +428,7 @@ describe("resource observation", () => {
         const child = Bun.spawn(["/usr/bin/node", path.join(directory, bundleName)], {
           cwd: process.cwd(),
           env,
-          stdin: new Blob(["{\"type\":\"collect\",\"fresh\":false,\"files\":[]}\n"]),
+          stdin: new Blob(["{\"type\":\"collect\",\"fresh\":false,\"files\":[],\"hosts\":[]}\n"]),
           stdout: "pipe",
           stderr: "pipe",
         });
@@ -472,7 +472,7 @@ describe("resource observation", () => {
     const child = Bun.spawn([process.execPath, path.join(process.cwd(), "src/lib/resourceCollector.worker.ts")], {
       cwd: process.cwd(),
       env,
-      stdin: new Blob(["{\"type\":\"collect\",\"fresh\":false,\"files\":[]}\n"]),
+      stdin: new Blob(["{\"type\":\"collect\",\"fresh\":false,\"files\":[],\"hosts\":[]}\n"]),
       stdout: "pipe",
       stderr: "pipe",
     });

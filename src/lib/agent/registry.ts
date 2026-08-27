@@ -4860,11 +4860,18 @@ export class AgentRegistry {
     });
   }
 
-  terminateStructuredHost(key: SessionKey): boolean {
+  /** Clears a structured row after its host was ended. `expected` binds the
+      clearing to the process the caller actually terminated: a row that names
+      a different live process belongs to a replacement host and is left
+      alone, inside the same mutation that would otherwise clear it (#1199). */
+  terminateStructuredHost(key: SessionKey, expected?: Readonly<ProcessIdentity>): boolean {
     return this.mutate((file) => {
       const keyId = sessionKeyId(key);
       const entry = file.entries[keyId];
       if (!entry) return false;
+      const current = entry.structuredHost?.process ?? null;
+      if (expected && current
+        && (current.pid !== expected.pid || current.startIdentity !== expected.startIdentity)) return false;
       const replacement = {
         ...entry,
         host: null,
