@@ -68,12 +68,18 @@ export interface DailyReportPromptInput {
   instructions: string;
 }
 
+/** The semantic conversation title shared by spawn admission and the prompt's
+    first line, with a window that distinguishes one scheduled run from another. */
+export function reportConversationTitle(input: Pick<DailyReportPromptInput, "windowStart" | "windowEnd">): string {
+  return `Telegram daily report — window ${input.windowStart} → ${input.windowEnd} (UTC).`;
+}
+
 /** The half the operator cannot edit: everything a run must do to be correct,
     safe for the connector, and readable by the Viewer afterwards. */
 export function reportPromptPreamble(input: Omit<DailyReportPromptInput, "instructions">): string {
   /* The first line is the board card's title (#1086: the run is visible on the
      board), so it names the run rather than opening with instructions. */
-  return `Telegram daily report — window ${input.windowStart} → ${input.windowEnd} (UTC).
+  return `${reportConversationTitle(input)}
 
 You have the read-only \`telegram\` MCP connector for the operator's own account. Work through it only; do not install anything and do not write to Telegram — the connector exposes no write tools. The Viewer has already verified with \`get_me\` that the connector holds the account this report belongs to.
 
