@@ -113,7 +113,7 @@ function StagedAttachments({ draft }: { draft: UseTaskDraftReturn }) {
 /**
  * The one composer every rich task-creation entry point renders: the shared
  * `ComposerBar` (text, voice, images) plus a deadline chip. Images are routed
- * to the draft's durable, upload-on-add store (`onImageFiles`) so staged refs
+ * to the draft's durable, upload-on-add store (`onAttachFiles`) so staged refs
  * survive reload. State lives in `useTaskDraft`; the caller owns the commit
  * (`submit` on the draft) and the left-slot chrome (target count, a label, …).
  */
@@ -140,7 +140,7 @@ export function TaskComposer({
         sendLabelIdle={createLabel}
         sendLabelRecording={t("composer.stopAndSend")}
         sendIdleClassName="border-accent bg-accent hover:opacity-90"
-        onImageFiles={(files) => void draft.addFiles(files)}
+        onAttachFiles={(files) => void draft.addFiles(files)}
         leftSlot={
           <span className="flex min-w-0 items-center gap-1">
             <DueChip draft={draft} />

@@ -262,9 +262,12 @@ test("dead structured image-only input stays removable and avoids failing recove
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  const imagePicker = host.querySelector(`button[aria-label="${translate("en", "composer.addImages")}"]`) as HTMLButtonElement;
+  const picker = host.querySelector(`button[aria-label="${translate("en", "composer.addAttachments")}"]`) as HTMLButtonElement;
   const send = host.querySelector('button[type="submit"]') as HTMLButtonElement;
-  expect(imagePicker.disabled).toBe(true);
+  /* #1224: the control stays open because a document is still deliverable
+     without any image capability — it is the SEND that the staged images
+     block, with the standing reason beneath it. */
+  expect(picker.disabled).toBe(false);
   expect(send.disabled).toBe(true);
   expect(host.textContent).toContain(translate("en", "composer.imagesBlockedDuringRecovery"));
 

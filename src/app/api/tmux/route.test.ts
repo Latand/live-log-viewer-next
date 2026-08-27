@@ -10,12 +10,23 @@ const realResources = { ...(await import("@/lib/resources")) };
 const previousCodexHome = process.env.LLV_CODEX_HOME;
 const routeCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tmux-route-codex-"));
 const previousStateDir = process.env.LLV_STATE_DIR;
+/* The inbox this route writes attachments to is derived from the config root,
+   so the suite owns its own HOME/XDG root — a test must never write into (or
+   migrate) the operator's live inbox (AGENTS.md). */
+const previousHome = process.env.HOME;
+const previousXdgConfig = process.env.XDG_CONFIG_HOME;
 const PATHNAME = path.join(routeCodexHome, "sessions", "rollout-019f4906-3f67-\x37b72-9fbc-9ec3b5ad1326.jsonl");
 fs.mkdirSync(path.dirname(PATHNAME), { recursive: true });
 fs.writeFileSync(PATHNAME, "{}\n");
 process.env.LLV_CODEX_HOME = routeCodexHome;
 process.env.LLV_STATE_DIR = path.join(routeCodexHome, "state");
+process.env.HOME = routeCodexHome;
+process.env.XDG_CONFIG_HOME = path.join(routeCodexHome, "config");
 afterAll(() => {
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+  if (previousXdgConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = previousXdgConfig;
   if (previousCodexHome === undefined) delete process.env.LLV_CODEX_HOME;
   else process.env.LLV_CODEX_HOME = previousCodexHome;
   if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
@@ -804,4 +815,145 @@ test("/api/tmux POST kill never reports success with an empty target", async () 
   expect(response.status).toBe(409);
   expect(await response.json()).toEqual({ ok: false, outcome: "failed", error: "kill resolved no registered pane" });
   killOutcome = { ok: true, target: "agents:4.0" };
+});
+
+/* Issue #1224: the composer accepts any file, not only images. A general
+   attachment takes the road images already take — the bytes land in the viewer
+   inbox and the delivered message names them by path — and every refusal is
+   answered out loud, because the defect being fixed is a silent discard. */
+
+const attachment = (name: string, body: string) => ({ name, base64: Buffer.from(body, "utf8").toString("base64") });
+
+test("/api/tmux writes a non-image attachment to the inbox and delivers its path", async () => {
+  const delivered: Record<string, unknown>[] = [];
+  delivery = async (message: unknown) => {
+    delivered.push(message as Record<string, unknown>);
+    return { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
+  };
+  const response = await POST(post({
+    path: PATHNAME,
+    text: "read the attached notes",
+    clientMessageId: "attachment-message-one",
+    files: [attachment("quarterly-notes.pdf", "invented pdf bytes")],
+  }));
+
+  expect(response.status).toBe(200);
+  const body = await response.json() as { filePaths?: string[] };
+  expect(body.filePaths).toHaveLength(1);
+  const written = body.filePaths![0]!;
+  /* The operator's own filename survives — the agent is told what it is. */
+  expect(path.basename(written)).toBe("quarterly-notes.pdf");
+  expect(fs.readFileSync(written, "utf8")).toBe("invented pdf bytes");
+  expect(delivered[0]!.text).toBe(`read the attached notes\n${written}`);
+  fs.rmSync(path.dirname(written), { recursive: true, force: true });
+});
+
+test("/api/tmux delivers an attachment-only message instead of calling it empty", async () => {
+  const delivered: Record<string, unknown>[] = [];
+  delivery = async (message: unknown) => {
+    delivered.push(message as Record<string, unknown>);
+    return { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
+  };
+  const response = await POST(post({
+    path: PATHNAME,
+    text: "",
+    clientMessageId: "attachment-message-textless",
+    files: [attachment("trace.log", "invented log line")],
+  }));
+
+  expect(response.status).toBe(200);
+  const body = await response.json() as { filePaths?: string[] };
+  expect(delivered[0]!.text).toBe(body.filePaths![0]);
+  fs.rmSync(path.dirname(body.filePaths![0]!), { recursive: true, force: true });
+});
+
+test("/api/tmux refuses an oversized attachment out loud and writes nothing", async () => {
+  const { MAX_INBOX_FILE_BYTES } = await import("@/lib/filePolicy");
+  const INBOX_FILES_DIR = (await import("@/lib/inboxFiles")).inboxFilesDir();
+  const delivered: unknown[] = [];
+  delivery = async (message: unknown) => {
+    delivered.push(message);
+    return { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
+  };
+  const response = await POST(post({
+    path: PATHNAME,
+    text: "too big",
+    clientMessageId: "attachment-message-oversize",
+    files: [{ name: "huge.bin", base64: Buffer.alloc(MAX_INBOX_FILE_BYTES + 1, 5).toString("base64") }],
+  }));
+
+  expect(response.status).toBe(413);
+  const body = await response.json() as { error: string };
+  /* The refusal names the file and the reason — never a quiet drop. */
+  expect(body.error).toContain("huge.bin");
+  expect(body.error).toContain("too large");
+  expect(delivered).toEqual([]);
+  expect(fs.existsSync(INBOX_FILES_DIR) ? fs.readdirSync(INBOX_FILES_DIR) : []).toEqual([]);
+});
+
+test("/api/tmux leaves no attachment bytes behind when the delivery fails", async () => {
+  const INBOX_FILES_DIR = (await import("@/lib/inboxFiles")).inboxFilesDir();
+  delivery = async () => ({ ok: false, outcome: "failed", error: "process is not in a tmux session", status: 409 });
+  const response = await POST(post({
+    path: PATHNAME,
+    text: "this will not land",
+    clientMessageId: "attachment-message-failed",
+    files: [attachment("orphan.txt", "invented bytes")],
+  }));
+
+  expect(response.status).toBe(409);
+  expect(fs.existsSync(INBOX_FILES_DIR) ? fs.readdirSync(INBOX_FILES_DIR) : []).toEqual([]);
+  delivery = async () => ({ ok: true, outcome: "delivered-to-live", target: "agents:4.0" });
+});
+
+test("/api/tmux folds attachment paths into the structured send and cleans up a refused one", async () => {
+  const previous = process.env.LLV_STRUCTURED_HOSTS;
+  const INBOX_FILES_DIR = (await import("@/lib/inboxFiles")).inboxFilesDir();
+  structuredMessageRequest = null;
+  structuredMessageResult = {
+    ok: true,
+    structured: true,
+    target: "conversation_files",
+    outcome: "queued",
+    operationId: "op_files",
+    receipt: { operationId: "op_files", status: "queued" },
+  };
+  try {
+    process.env.LLV_STRUCTURED_HOSTS = "1";
+    const accepted = await POST(post({
+      path: PATHNAME,
+      conversationId: "conversation_files",
+      text: "look at this",
+      clientMessageId: "attachment-structured-one",
+      files: [attachment("design.md", "# invented")],
+    }));
+    expect(accepted.status).toBe(200);
+    const body = await accepted.json() as { filePaths?: string[] };
+    const written = body.filePaths![0]!;
+    expect((structuredMessageRequest as unknown as { text: string }).text).toBe(`look at this\n${written}`);
+    expect(fs.existsSync(written)).toBe(true);
+    fs.rmSync(path.dirname(written), { recursive: true, force: true });
+
+    structuredMessageResult = {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: "structured host ownership is unavailable",
+      status: 409,
+    };
+    const refused = await POST(post({
+      path: PATHNAME,
+      conversationId: "conversation_files",
+      text: "look at this",
+      clientMessageId: "attachment-structured-two",
+      files: [attachment("design.md", "# invented")],
+    }));
+    expect(refused.status).toBe(409);
+    expect(fs.existsSync(INBOX_FILES_DIR) ? fs.readdirSync(INBOX_FILES_DIR) : []).toEqual([]);
+  } finally {
+    structuredMessageResult = null;
+    structuredMessageRequest = null;
+    if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous;
+  }
 });

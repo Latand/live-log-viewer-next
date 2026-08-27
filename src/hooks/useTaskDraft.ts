@@ -4,8 +4,8 @@ import { useRef, useState } from "react";
 
 import { newClientRequestId, uploadTaskAttachment } from "@/components/tasks/taskApi";
 import { useComposer } from "@/hooks/useComposer";
+import { attachmentDisplayName, refusalStatusText, screenAttachments, type AttachmentRefusal } from "@/lib/attachmentIntake";
 import { getLocale, translate } from "@/lib/i18n";
-import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { isTaskAttachment } from "@/lib/tasks/attachmentModel";
 import type { TaskAttachment } from "@/lib/tasks/types";
 
@@ -117,27 +117,25 @@ export function useTaskDraft(project: string, submit: (overrideText?: string) =>
     persist(composer.textRef.current);
   };
 
-  /** Validate against the shared image policy, upload each accepted file to the
-      content-addressed store, and stage the durable ref (persisted at once so it
-      survives reload). A failed upload is surfaced on the composer status line;
-      nothing is silently dropped. */
+  /** Screen the gesture through the ONE shared intake contract every composer
+      consumes (#1224), upload each accepted file to the content-addressed store,
+      and stage the durable ref (persisted at once so it survives reload).
+      This composer has no by-path road for a document — the task's prompt is
+      composed and receipted long before anything could be written — so
+      `acceptFiles: false` refuses one BY NAME rather than dropping it.
+
+      Every refusal in the gesture, screening and upload alike, is written to
+      the status as ONE message. A `setStatus` per file overwrote the previous
+      one, so all but the last refused file vanished unnamed: the silent discard
+      this issue exists to remove, in the second composer instead of the first.
+      That is why the contract lives in one module now and not in each. */
   const addFiles = async (files: File[]) => {
-    const accepted: File[] = [];
-    for (const file of files) {
-      if (inboxImageExt(file.type) === null) {
-        composer.setStatus({ kind: "err", text: translate(getLocale(), "img.unsupported", { name: file.name || file.type || translate(getLocale(), "img.unknownFile") }) });
-        continue;
-      }
-      if (file.size > MAX_INBOX_IMAGE_BYTES) {
-        composer.setStatus({ kind: "err", text: translate(getLocale(), "img.tooLarge", { name: file.name || translate(getLocale(), "img.image") }) });
-        continue;
-      }
-      accepted.push(file);
-    }
-    for (const file of accepted) {
+    const { accepted, refusals } = screenAttachments(files, { acceptFiles: false });
+    const refused: AttachmentRefusal[] = [...refusals];
+    for (const { file, kind } of accepted) {
       const res = await uploadTaskAttachment(file);
       if ("error" in res) {
-        composer.setStatus({ kind: "err", text: res.error });
+        refused.push({ name: attachmentDisplayName(file, kind), reason: res.error });
         continue;
       }
       const ref = res.attachment;
@@ -145,6 +143,7 @@ export function useTaskDraft(project: string, submit: (overrideText?: string) =>
       setAttachments(stateRef.current.attachments);
       persist(composer.textRef.current);
     }
+    if (refused.length) composer.setStatus({ kind: "err", text: refusalStatusText(refused) });
   };
 
   const removeAttachment = (id: string) => {

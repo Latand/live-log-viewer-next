@@ -46,11 +46,17 @@ export interface ComposerBarProps {
   /** The phone composer moves the image picker behind the leftSlot toggle;
       this hides the inline one so the picker exists only once. */
   showImage?: boolean;
-  /** Overrides both the inline picker and the paste target — the task composer
-      routes images to its durable, upload-on-add store instead of the in-memory
-      `useImageAttachments`. When set, the in-memory preview strip is suppressed
-      (the caller renders its own from staged refs). */
-  onImageFiles?: (files: File[]) => void;
+  /** Overrides both the inline picker and the paste/drop target — the task
+      composer routes attachments to its durable, upload-on-add store instead of
+      the in-memory `useImageAttachments`. When set, the in-memory preview strip
+      is suppressed (the caller renders its own from staged refs).
+
+      It receives EVERY file the operator hands over, images or not, so whatever
+      is on the other end owes each one an answer: staged, or refused by name.
+      The name says `files` for that reason — it was `onImageFiles`, and the
+      task composer behind it went on screening for images alone and losing the
+      rest (#1224). Both sides now screen through `@/lib/attachmentIntake`. */
+  onAttachFiles?: (files: File[]) => void;
   imageDisabled?: boolean;
   imageDisabledReason?: string;
   /** When set, Send is disabled with this tooltip and no submit is attempted
@@ -153,7 +159,7 @@ export function ComposerBar({
   sendMenuLabel,
   sendMenuActions = [],
   showImage = true,
-  onImageFiles,
+  onAttachFiles,
   imageDisabled = false,
   imageDisabledReason,
   sendDisabledReason,
@@ -210,9 +216,9 @@ export function ComposerBar({
   /* An attachment still decoding (or one that failed to read) blocks Send with a
      visible reason, so no image is silently dropped mid-read (issue #419). */
   const attachmentBlockedReason = attachments.hasReading
-    ? t("img.blockedReading")
+    ? t(attachments.hasFiles ? "attach.blockedReading" : "img.blockedReading")
     : attachments.hasError
-      ? t("img.blockedFailed")
+      ? t(attachments.hasFiles ? "attach.blockedFailed" : "img.blockedFailed")
       : undefined;
   const sendBlocked = Boolean(sendDisabledReason);
   const effectiveCanSend = canSend || (sendPayloadAvailable && !fieldsDisabled && !dictationBusy && !attachmentsBlocked);
@@ -305,7 +311,7 @@ export function ComposerBar({
       {voicePanel}
       {/* On phones, staged images are the composer's first bounded row. The
           desktop tray keeps its established position below the controls. */}
-      {isMobile && !onImageFiles ? (
+      {isMobile && !onAttachFiles ? (
         <ImagePreviewStrip
           attachments={attachments.attachments}
           onRemove={attachments.remove}
@@ -338,40 +344,36 @@ export function ComposerBar({
              token here hides its round-trip from the eventual mic press. */
           onFocus={prewarmLiveToken}
           onPaste={(event) => {
+            /* EVERY pasted file, not only images (#1224). `kind` separates a
+               file from the plain text of an ordinary paste, which must keep
+               its default behaviour. */
             const picks = Array.from(event.clipboardData.items)
-              .filter((entry) => entry.type.startsWith("image/"))
+              .filter((entry) => entry.kind !== "string")
               .map((entry) => entry.getAsFile())
               .filter((entry): entry is File => entry !== null);
-            if (imageDisabled && picks.length) {
-              event.preventDefault();
-              return;
-            }
-            if (onImageFiles) {
-              if (picks.length) {
-                event.preventDefault();
-                onImageFiles(picks);
-              }
-              return;
-            }
-            attachments.handlePaste(event);
+            if (!picks.length) return;
+            event.preventDefault();
+            (onAttachFiles ?? attachments.addFiles)(picks);
           }}
           onDragOver={(event) => {
             /* A file drop only fires when its dragover was cancelled — without
-               this the browser navigates to the dropped image instead of
-               attaching it. Image drags are claimed whether the picker is
-               enabled (copy) or disabled (none, keeping the rejection); other
-               drag payloads keep their default behavior. */
-            if (Array.from(event.dataTransfer.items).some((item) => item.type.startsWith("image/"))) {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = imageDisabled ? "none" : "copy";
-            }
+               this the browser navigates to the dropped file instead of
+               attaching it, which is what a dragged PDF used to do. ANY file
+               drag is claimed, with no per-type exception: the tray is what
+               decides what it can hold, and it decides identically for a paste,
+               a drop and the picker (#1224). A drag waved away here would be a
+               file lost with only a cursor to explain it. */
+            const items = Array.from(event.dataTransfer.items).filter((item) => item.kind === "file");
+            if (!items.length) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
           }}
           onDrop={(event) => {
-            const files = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith("image/"));
+            const files = Array.from(event.dataTransfer.files);
             if (!files.length) return;
             event.preventDefault();
             event.stopPropagation();
-            if (!imageDisabled) (onImageFiles ?? attachments.addFiles)(files);
+            (onAttachFiles ?? attachments.addFiles)(files);
           }}
           onKeyDown={(event) => {
             /* ArrowUp/ArrowDown recall previously queued and sent messages
@@ -442,10 +444,14 @@ export function ComposerBar({
           {showImage ? (
             <Hint label={imageAriaLabel}>
               <ImagePickerButton
+                acceptFiles={attachments.acceptsFiles}
                 ariaLabel={imageAriaLabel}
                 className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
-                onFiles={onImageFiles ?? attachments.addFiles}
-                disabled={imageDisabled}
+                onFiles={onAttachFiles ?? attachments.addFiles}
+                /* An unavailable image capability no longer closes the picker
+                   outright where files are deliverable (#1224) — a document
+                   needs no such capability; a picked image is refused by name. */
+                disabled={imageDisabled && !attachments.acceptsFiles}
                 disabledReason={imageDisabledReason}
               />
             </Hint>
@@ -454,7 +460,7 @@ export function ComposerBar({
       ) : null}
       {/* The task composer renders its own durable-ref strip; the in-memory one
           stays for the pane/draft composers that still upload at send time. */}
-      {!isMobile && !onImageFiles ? (
+      {!isMobile && !onAttachFiles ? (
         <ImagePreviewStrip
           attachments={attachments.attachments}
           onRemove={attachments.remove}
@@ -487,14 +493,23 @@ export function ComposerBar({
       {/* A decoding/failed attachment blocks Send — say why, and never silently
           drop the image (issue #419). Suppressed while a host-death reason
           already occupies the send tooltip. */}
-      {!onImageFiles && !sendBlocked && attachmentBlockedReason ? (
+      {!onAttachFiles && !sendBlocked && attachmentBlockedReason ? (
         <span role="status" aria-live="polite" className="text-caption font-semibold text-warning">{attachmentBlockedReason}</span>
       ) : null}
+      {/* The status is the refusal surface (#1224), so it holds MORE than one
+          line: a refusal names every file it rejected, one reason per line, and
+          `truncate` on a single line hid all but the first few characters —
+          the mechanism that exists to stop a silent discard, silenced. Lines
+          break where the message puts them (`whitespace-pre-line`), long
+          filenames wrap instead of overflowing, and the whole thing is capped
+          and scrollable so a big batch can never grow the composer off the
+          screen. */}
       {status ? (
         <span
+          data-testid="composer-status"
           role="status"
           aria-live={status.kind === "err" ? "assertive" : "polite"}
-          className={`truncate text-caption font-semibold ${status.kind === "ok" ? "text-success" : status.kind === "info" ? "text-warning" : "text-danger"}`}
+          className={`block max-h-24 overflow-y-auto whitespace-pre-line break-words text-caption font-semibold ${status.kind === "ok" ? "text-success" : status.kind === "info" ? "text-warning" : "text-danger"}`}
         >
           {status.text}
         </span>
