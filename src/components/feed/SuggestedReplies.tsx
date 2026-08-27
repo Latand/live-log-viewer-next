@@ -148,7 +148,8 @@ function suggestionsUrl(conversationId: string): string {
  * goes quiet and the conversation is marked unread, which lets the next change
  * — or the next surface to mount — try again.
  */
-function unreadable(conversationId: string): null {
+function unreadable(conversationId: string, revision: string): ReplySuggestionSetV1 | null {
+  if (readRevisions.get(conversationId) !== revision) return cache.get(conversationId) ?? null;
   cache.set(conversationId, null);
   readRevisions.delete(conversationId);
   return null;
@@ -164,15 +165,16 @@ async function readSet(conversationId: string, revision: string): Promise<ReplyS
   const request = (async () => {
     try {
       const response = await fetch(suggestionsUrl(conversationId));
-      if (!response.ok) return unreadable(conversationId);
+      if (!response.ok) return unreadable(conversationId, revision);
       const body = await response.json() as { set?: unknown };
       const parsed = parseReplySuggestionSet(body.set);
+      if (readRevisions.get(conversationId) !== revision) return cache.get(conversationId) ?? null;
       cache.set(conversationId, parsed);
       return parsed;
     } catch {
       /* Quiet: a failed read renders exactly like a conversation with no
          drafts, which is the ordinary case. */
-      return unreadable(conversationId);
+      return unreadable(conversationId, revision);
     } finally {
       inFlight.delete(key);
     }

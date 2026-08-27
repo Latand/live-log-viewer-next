@@ -2081,8 +2081,6 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
       .describe("Durable conversation whose composer these drafts belong under. Defaults to the calling conversation, and must BE it \u2014 another conversation is refused."),
     replies: z.array(replyDraftSchema).min(MIN_REPLY_SUGGESTIONS).max(MAX_REPLY_SUGGESTIONS)
       .describe(`${MIN_REPLY_SUGGESTIONS}\u2013${MAX_REPLY_SUGGESTIONS} drafts, ordered as the operator should read them. Two to four distinct ones is the usual shape.`),
-    replaces: z.literal(true).optional()
-      .describe("Declares that this set supersedes the conversation's previous one. Replacement is unconditional either way \u2014 a conversation only ever holds the newest set."),
   }).passthrough(),
   bridge_report: z.object({
     clientRequestId: clientRequestIdSchema,

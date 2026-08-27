@@ -1613,6 +1613,8 @@ describe("MCP tool service", () => {
       expect(spawnSchema?.properties).toHaveProperty("mcpServers");
       const createOrchestratorSchema = listed.tools.find((tool) => tool.name === "create_orchestrator")?.inputSchema;
       expect(createOrchestratorSchema?.properties).toHaveProperty("conversationId");
+      const suggestRepliesSchema = listed.tools.find((tool) => tool.name === "suggest_replies")?.inputSchema;
+      expect(suggestRepliesSchema?.properties).not.toHaveProperty("replaces");
       /* #878: rotation must reach effort parity with create, or a successor
          silently boots at the default reasoning level. */
       const rotateOrchestratorSchema = listed.tools.find((tool) => tool.name === "rotate_orchestrator")?.inputSchema;

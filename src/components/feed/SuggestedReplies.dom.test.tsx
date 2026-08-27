@@ -65,11 +65,16 @@ let served: { set: unknown } = { set: { conversationId: CONVERSATION, setId: "rs
 /* When the record cannot be read at all — the viewer restarting mid-turn, a
    dropped request. */
 let readFails = false;
+let deferSuggestionReads = false;
+const deferredSuggestionReads: Array<(response: Response) => void> = [];
 const requests: { url: string; method: string }[] = [];
 globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
   const url = String(input);
   requests.push({ url, method: init?.method ?? "GET" });
   if (url.startsWith("/api/log/suggestions")) {
+    if (deferSuggestionReads) {
+      return new Promise<Response>((resolve) => { deferredSuggestionReads.push(resolve); });
+    }
     if (readFails) return { ok: false, status: 503, json: async () => ({ error: "unavailable" }) } as Response;
     return { ok: true, json: async () => served } as Response;
   }
@@ -84,6 +89,8 @@ afterEach(() => {
   sessionStorage.clear();
   requests.length = 0;
   readFails = false;
+  deferSuggestionReads = false;
+  deferredSuggestionReads.length = 0;
   setLocale("en");
 });
 
@@ -128,6 +135,13 @@ function mount(node: React.ReactElement): HTMLElement {
 async function settle(host: HTMLElement, selector: string, count: number, timeoutMs = 200): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline && host.querySelectorAll(selector).length !== count) {
+    await new Promise((resolve) => setTimeout(resolve, 3));
+  }
+}
+
+async function settleUntil(condition: () => boolean, timeoutMs = 200): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && !condition()) {
     await new Promise((resolve) => setTimeout(resolve, 3));
   }
 }
@@ -259,6 +273,30 @@ test("a set that cannot be re-read under a newer turn goes quiet instead of stan
   rerender(<SuggestedReplies file={file(conversation)} revision="rev-c" />);
   await settle(host, "[data-reply-suggestion]", drafts.length, 4_000);
   expect(host.querySelectorAll("[data-reply-suggestion]")).toHaveLength(drafts.length);
+});
+
+test("an older in-flight revision cannot overwrite the newer set", async () => {
+  const conversation = "conversation_revision_race";
+  const older = { conversationId: conversation, setId: "rsg_old", at: SET_AT, origin: { kind: "manager", conversationId: conversation, role: "orchestrator" }, replies: drafts.slice(0, 1) };
+  const newer = { conversationId: conversation, setId: "rsg_new", at: SET_AT, origin: { kind: "manager", conversationId: conversation, role: "orchestrator" }, replies: drafts.slice(1, 3) };
+  deferSuggestionReads = true;
+
+  const { host, rerender } = mountRoot(<SuggestedReplies file={file(conversation)} revision="rev-old" />);
+  await settleUntil(() => deferredSuggestionReads.length === 1);
+  rerender(<SuggestedReplies file={file(conversation)} revision="rev-new" />);
+  await settleUntil(() => deferredSuggestionReads.length === 2, 4_000);
+
+  deferredSuggestionReads[1]!({ ok: true, json: async () => ({ set: newer }) } as Response);
+  await settle(host, "[data-reply-suggestion]", newer.replies.length);
+  deferredSuggestionReads[0]!({ ok: true, json: async () => ({ set: older }) } as Response);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  /* A second surface at the current revision reads the shared cache. If the
+     older response won the race, this mount would resurrect its one stale
+     pill even though the first surface already rendered the newer pair. */
+  const remounted = mount(<SuggestedReplies file={file(conversation)} revision="rev-new" />);
+  expect([...remounted.querySelectorAll("[data-reply-suggestion]")].map((pill) => pill.textContent))
+    .toEqual(newer.replies.map((reply) => reply.label));
 });
 
 test("a conversation with no set renders nothing at all", async () => {

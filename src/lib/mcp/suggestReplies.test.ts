@@ -81,7 +81,7 @@ test("the tool is on the published surface with the shape the mandate promises",
   expect(MCP_TOOL_NAMES).toContain("suggest_replies");
   const schema = TOOL_INPUT_SCHEMAS.suggest_replies;
   expect(schema.safeParse(call()).success).toBe(true);
-  expect(schema.safeParse(call({ conversationId: "conversation_other", replaces: true })).success).toBe(true);
+  expect(schema.safeParse(call({ conversationId: "conversation_other" })).success).toBe(true);
   /* Bounds live in the schema, so a malformed set is refused at the protocol
      door rather than reaching the record. */
   expect(schema.safeParse(call({ replies: [] })).success).toBe(false);
@@ -113,7 +113,6 @@ test("the newest set replaces the previous one and says which set it replaced", 
   const first = await service.callTool("suggest_replies", call()) as McpToolResult & { setId?: string };
   const second = await service.callTool("suggest_replies", call({
     clientRequestId: "suggest-2",
-    replaces: true,
     replies: [{ label: "ship it", text: "Ship it." }],
   })) as McpToolResult & { replaced?: string | null };
 
