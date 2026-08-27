@@ -462,6 +462,10 @@ export interface ViewerMcpRuntimePublicationEvidence extends ViewerMcpRuntimeIde
   action: "activate" | "restore";
   publishedAt: string;
   durable: true;
+  /** What the SQLite hot-state hand-over did during an activate promote: the
+      incumbent's release outcome and how long activation took (#1216). Absent
+      on releases that never ran one. */
+  hotStateHandOver?: string;
 }
 
 export interface ViewerDeploymentMcpRuntimeStatus {
