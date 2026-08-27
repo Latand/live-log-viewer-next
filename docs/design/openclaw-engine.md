@@ -544,7 +544,9 @@ that remain unproven, so it is a separate design gated on section (d).
 Phase 1 delivers Expected 1 and 2 in one PR. An OpenClaw card enters the full
 catalog, receives stable project attribution, displays its real model and
 effort, reports turn state, and opens through `renderOpenclaw`. The PR has no
-plain-text fallback.
+plain-text fallback. Catalog search matches its title and first prompt; search
+inside message bodies waits on the transcript index's own schema migration
+(**Deferred — not currently justified**).
 
 Work plan against `origin/main` at `a3f9c2e2`:
 
@@ -610,6 +612,12 @@ engine; `SnapshotConversation["engine"]` at
 `launch.engine` at `src/lib/view/types.ts:103` stays two-membered, because it
 describes a spawn and phase 1 creates none.
 
+**9. Project timeline.** `fileEvents` in `src/lib/timeline.ts` dispatches on
+`fmt` and returns no events for anything it does not recognize, so the
+Switchboard's recent-actions list would stay empty for an OpenClaw project.
+A third arm reads the prompts and assistant prose out of the `message`
+envelope, the same pair the Codex arm contributes.
+
 **Tests**, all against invented fixtures under an isolated
 `HOME`/`XDG_CONFIG_HOME`/`LLV_STATE_DIR`/`TMPDIR`, run by path:
 
@@ -645,6 +653,8 @@ describes a spawn and phase 1 creates none.
 - `src/lib/view/view.test.ts`: a selected OpenClaw path appears in the snapshot
   as `engine: "openclaw"` rather than being omitted or reported as Claude, and
   a path with no scan entry is still omitted.
+- `src/lib/timeline.test.ts`: an OpenClaw transcript contributes its prompt and
+  its assistant prose to the project timeline, newest first.
 
 **Gates:** `bunx tsc --noEmit --incremental false`; the touched test files by
 path; `bun scripts/privacy-publication-gate.ts --base <merge-base>
@@ -704,6 +714,17 @@ the join would be machinery heavier than the problem.
 
 **`sessions.json` as a metadata source.** Indexes only recent sessions (21 of
 54 on the machine inspected); using it would silently hide the rest.
+
+**Full-text body search over OpenClaw transcripts.** The transcript index
+(`src/lib/search/transcriptSearch.ts`) parses per-engine record shapes and
+constrains its `engine` column to `('claude','codex')` in SQL, so feeding it an
+OpenClaw source would fail the insert rather than index anything. Phase 1
+excludes OpenClaw entries from the index feed instead. OpenClaw conversations
+stay reachable in the complete list and in list search, which match on the
+title and the first prompt the catalog already carries; only matches inside
+message bodies are unavailable. Closing the gap is a schema migration of that
+index — a new engine value, a record parser, and a reindex of existing rows —
+which is its own change.
 
 **Process-based liveness for OpenClaw.** One Gateway process writes every
 session; pid attribution would map every conversation to the same pid.

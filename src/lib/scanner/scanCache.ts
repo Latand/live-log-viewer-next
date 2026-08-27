@@ -72,6 +72,10 @@ const FILE_SCAN_PIN_CACHE_MAX = 8;
 // and must be recomputed.
 // Bumped to 9 for issue #339: engine-native subagent titles/lineage and the
 // `spawnOrigin` provenance marker must not replay from a pre-#339 snapshot.
+// Bumped to 10 for issue #1207: entries carry the `openclaw-sessions` root and
+// the `openclaw` engine/format, which a pre-#1207 validator rejects — and a
+// pre-#1207 snapshot has no OpenClaw rows at all, so it must be rescanned
+// rather than served as a complete inventory.
 const FILE_SCAN_CACHE_SCHEMA_VERSION = 10 as const;
 const FILE_SCAN_SNAPSHOT_VERSION = 1 as const;
 const FILE_SCAN_SNAPSHOT_FILE = "files-scan-snapshot.json";

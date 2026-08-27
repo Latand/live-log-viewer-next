@@ -1,7 +1,6 @@
 import { effortMeter as meterOf } from "@/lib/agent/efforts";
 import { getLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
-import { cleanTitle } from "@/lib/title";
 
 export { cleanTitle, shortTitle } from "@/lib/title";
 
@@ -191,42 +190,4 @@ export function engineBadgeFor(engine: string) {
 
 export function engineBadge(file: FileEntry) {
   return engineBadgeFor(file.engine);
-}
-
-const OPENCLAW_TRANSCRIPT_PATH = /\/\.openclaw[^/]*\/agents\/[^/]+\/sessions\//;
-
-export function syntheticFile(pathname: string): FileEntry {
-  const root = pathname.includes("/.claude/projects/")
-    ? "claude-projects"
-    : /\/tmp\/claude-\d+\//.test(pathname)
-      ? "claude-tasks"
-      : OPENCLAW_TRANSCRIPT_PATH.test(pathname)
-        ? "openclaw-sessions"
-        : "codex-sessions";
-  const fmt = pathname.endsWith(".jsonl")
-    ? (root === "claude-projects" ? "claude" : root === "openclaw-sessions" ? "openclaw" : "codex")
-    : "plain";
-  const engine = root === "codex-sessions"
-    ? "codex"
-    : root === "claude-tasks" ? "shell" : root === "openclaw-sessions" ? "openclaw" : "claude";
-  return {
-    path: pathname,
-    root,
-    fmt,
-    engine,
-    kind: "",
-    title: cleanTitle(pathname.split("/").pop() || pathname, 120),
-    project: "",
-    worktree: undefined,
-    mtime: Date.now() / 1000,
-    size: 0,
-    activity: "idle",
-    proc: null,
-    pid: null,
-    model: null,
-    pendingQuestion: null,
-    waitingInput: null,
-    parent: null,
-    name: pathname,
-  };
 }

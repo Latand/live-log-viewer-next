@@ -1,5 +1,5 @@
 import { snapshotSpawnsFromRegistry, type RegistryFile, type SnapshotSpawnProjection } from "@/lib/agent/registry";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, TranscriptEngine } from "@/lib/types";
 
 import { compactText } from "./compactText";
 import { freshness, listPresence, sessionSummary } from "./presenceStore";
@@ -53,14 +53,25 @@ function validateExplicitMembership(session: StoredViewSession, explicit: readon
   if (explicit.some((pathname) => !currentView.has(pathname))) throw new SnapshotError("PATH_OUTSIDE_CURRENT_VIEW", 422, "path is outside current view");
 }
 
-function transcriptEntry(byPath: ReadonlyMap<string, FileEntry>, pathname: string): FileEntry | undefined {
-  const entry = byPath.get(pathname);
-  return entry?.engine === "claude" || entry?.engine === "codex" || entry?.engine === "openclaw" ? entry : undefined;
+/** The scan entry behind a path, when that path names a transcript the snapshot
+    reports. The return type carries the narrowing so the engine reaches
+    `SnapshotConversation` without a cast: a widened filter over a cast field is
+    exactly how an OpenClaw entry would have been published as Claude. */
+function isTranscriptEntry(entry: FileEntry | undefined): entry is FileEntry & { engine: TranscriptEngine } {
+  return entry?.engine === "claude" || entry?.engine === "codex" || entry?.engine === "openclaw";
 }
 
-function conversation(entry: FileEntry): SnapshotConversation {
+function transcriptEntry(
+  byPath: ReadonlyMap<string, FileEntry>,
+  pathname: string,
+): (FileEntry & { engine: TranscriptEngine }) | undefined {
+  const entry = byPath.get(pathname);
+  return isTranscriptEntry(entry) ? entry : undefined;
+}
+
+function conversation(entry: FileEntry & { engine: TranscriptEngine }): SnapshotConversation {
   const attention = entry.pendingQuestion ? { state: "question" as const, since: entry.pendingQuestion.askedAt } : entry.waitingInput ? { state: "terminal" as const, since: new Date(entry.waitingInput.since * 1000).toISOString() } : entry.activity === "stalled" ? { state: "stalled" as const, since: new Date(entry.mtime * 1000).toISOString() } : null;
-  return { path: entry.path, project: entry.project, title: entry.title, engine: entry.engine as SnapshotConversation["engine"], model: entry.model, activity: entry.activity, proc: entry.proc, attention };
+  return { path: entry.path, project: entry.project, title: entry.title, engine: entry.engine, model: entry.model, activity: entry.activity, proc: entry.proc, attention };
 }
 
 export async function composeSnapshot(input: { request: SnapshotRequestV1; files: FileEntry[]; scannerDurationMs: number; scannerScannedAt?: number; siblings: ViewerSnapshotV1["siblings"]; registry?: RegistryFile; snapshotSpawns?: (launchIds: readonly string[]) => SnapshotSpawnProjection; now?: number }): Promise<ViewerSnapshotV1> {
@@ -84,7 +95,7 @@ export async function composeSnapshot(input: { request: SnapshotRequestV1; files
       ? snapshotSpawnsFromRegistry(input.registry, launchIds)
       : input.snapshotSpawns?.(launchIds) ?? {};
   const stubs: SnapshotSpawnStub[] = [];
-  const resolvedEntries: Array<{ entry: FileEntry; resolvedFrom?: string }> = [];
+  const resolvedEntries: Array<{ entry: FileEntry & { engine: TranscriptEngine }; resolvedFrom?: string }> = [];
   const seenPaths = new Set<string>();
   for (const pathname of scope.all) {
     if (resolvedEntries.length + stubs.length >= MAX_SCOPE_PATHS) break;

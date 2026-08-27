@@ -1,5 +1,6 @@
 import { tailRecordsResult } from "./scanner/activity";
 import { globalCache } from "./scanner/caches";
+import { openclawMessage } from "./scanner/openclawNative";
 import type { ActionEvent, FileEntry } from "./types";
 import { cleanTitle } from "./title";
 
@@ -108,6 +109,37 @@ function codexEvents(entry: FileEntry, actor: string, records: Record<string, un
   return out;
 }
 
+/* OpenClaw wraps every role — the operator's included — in a top-level
+   `message` envelope, so neither engine arm above fires on one of its records
+   and an OpenClaw conversation would contribute nothing to its project's
+   recent actions. Assistant records OpenClaw synthesised itself are kept: the
+   feed renders them as prose too, and they are content the conversation
+   really carries. */
+function openclawEvents(entry: FileEntry, actor: string, records: Record<string, unknown>[]): ActionEvent[] {
+  const out: ActionEvent[] = [];
+  for (const obj of records) {
+    const ts = toTs(obj.timestamp);
+    if (ts === null) continue;
+    const message = openclawMessage(obj);
+    if (!message) continue;
+    const content = message.content;
+    if (message.role === "user") {
+      const text = typeof content === "string"
+        ? content.trim()
+        : recs(content).filter((part) => part.type === "text").map((part) => str(part.text)).join(" ").trim();
+      if (text) out.push({ ts, file: entry.path, actor, kind: "user", label: label(text) });
+      continue;
+    }
+    if (message.role !== "assistant") continue;
+    for (const part of recs(content)) {
+      if (part.type === "text" && str(part.text).trim()) {
+        out.push({ ts, file: entry.path, actor, kind: "turn", label: label(str(part.text)) });
+      }
+    }
+  }
+  return out;
+}
+
 function fileEvents(entry: FileEntry): ActionEvent[] {
   const mtimeMs = entry.mtime * 1000;
   const cached = eventCache.get(entry.path);
@@ -118,7 +150,9 @@ function fileEvents(entry: FileEntry): ActionEvent[] {
     ? claudeEvents(entry, actor, tail.records)
     : entry.fmt === "codex"
       ? codexEvents(entry, actor, tail.records)
-      : [];
+      : entry.fmt === "openclaw"
+        ? openclawEvents(entry, actor, tail.records)
+        : [];
   if (tail.complete) eventCache.set(entry.path, [entry.size, mtimeMs, events]);
   return events;
 }
