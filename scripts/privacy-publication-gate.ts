@@ -1210,13 +1210,15 @@ const FORGE_ROLE_ADDRESS_PATTERN = ["support", String.raw`github\.com`].join(
   "@",
 );
 const MACHINE_ATTRIBUTION_TRAILER = new RegExp(
-  String.raw`^(?:co-authored-by|signed-off-by)\s*:\s*[^<>\r\n]*<(?:(?:noreply|no-reply)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|${FORGE_ROLE_ADDRESS_PATTERN})>\s*$`,
+  String.raw`^([ \t]*(?:co-authored-by|signed-off-by)\s*:\s*[^<>\r\n]*<)(?:(?:noreply|no-reply)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|${FORGE_ROLE_ADDRESS_PATTERN})(>[ \t]*)$`,
   "i",
 );
 const COMMIT_TRAILER_LINE = /^[A-Za-z0-9][A-Za-z0-9-]*\s*:\s*.+$/;
 
-/** The message as it reads once machine attribution is set aside. */
-export function commitMessageWithoutMachineTrailers(message: string): string {
+/** The message with exact machine-attribution mailboxes set aside. */
+export function commitMessageWithoutMachineAttributionAddresses(
+  message: string,
+): string {
   const lines = message.split(/\r?\n/);
   let trailerEnd = lines.length;
   while (trailerEnd > 0 && lines[trailerEnd - 1].trim() === "") {
@@ -1238,12 +1240,13 @@ export function commitMessageWithoutMachineTrailers(message: string): string {
   }
 
   return lines
-    .filter(
-      (line, index) =>
-        index < trailerStart ||
-        index >= trailerEnd ||
-        !MACHINE_ATTRIBUTION_TRAILER.test(line.trim()),
-    )
+    .map((line, index) => {
+      if (index < trailerStart || index >= trailerEnd) return line;
+      return line.replace(
+        MACHINE_ATTRIBUTION_TRAILER,
+        "$1machine-attribution$2",
+      );
+    })
     .join("\n");
 }
 
@@ -1261,7 +1264,9 @@ export function commitMessageFindings(repository: string, base: string): Map<Fin
   }
   const messages = result.stdout.toString().split("\0").filter(Boolean);
   for (const message of messages) {
-    for (const finding of sensitiveClasses(commitMessageWithoutMachineTrailers(message))) {
+    for (const finding of sensitiveClasses(
+      commitMessageWithoutMachineAttributionAddresses(message),
+    )) {
       if (commitMessageFindingClasses.has(finding)) addFinding(findings, finding);
     }
   }

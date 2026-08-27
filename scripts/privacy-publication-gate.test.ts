@@ -2851,6 +2851,34 @@ describe("commitMessageFindings", () => {
     expect(findings.has("email_address")).toBe(false);
   });
 
+  test("the forge role exemption preserves another address on the trailer line", () => {
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    const otherAddress = ["someone", "personal.example"].join("@");
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: ${otherAddress} Dependency Tool <${forgeRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("email_address")).toBe(true);
+  });
+
+  test("the forge role exemption preserves other private trailer content", () => {
+    const repo = gitRepo();
+    const forgeRole = ["support", "github.com"].join("@");
+    const syntheticHome = ["", "home", "fixture-person", "records"].join("/");
+    const syntheticCredential =
+      ["api", "token"].join("_") + "=synthetic-test-value-1234567890";
+    commit(
+      repo,
+      `chore: refresh dependencies\n\nSigned-Off-By: ${syntheticHome} ${syntheticCredential} Dependency Tool <${forgeRole}>`,
+    );
+    const findings = commitMessageFindings(repo, "main");
+    expect(findings.has("credential")).toBe(true);
+    expect(findings.has("home_path")).toBe(true);
+    expect(findings.has("email_address")).toBe(false);
+  });
+
   test("the forge support role address remains flagged in the commit body", () => {
     const repo = gitRepo();
     const forgeRole = ["support", "github.com"].join("@");
