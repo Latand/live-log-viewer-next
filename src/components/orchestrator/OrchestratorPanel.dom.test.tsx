@@ -93,7 +93,7 @@ mock.module("@/hooks/useLogTail", () => ({
   }),
 }));
 
-const { OrchestratorPanel } = await import("./OrchestratorPanel");
+const { OrchestratorPanel, UNBOUND_STATUS_RETRY_MS } = await import("./OrchestratorPanel");
 const { SEAT_BIND_TIMEOUT_MS } = await import("./seatState");
 const { resetMessageProvenanceCacheForTests } = await import("../feed/messageProvenance");
 const { SEAT_POLL_MS, resetOrchestratorSeatCacheForTests } = await import("./useOrchestratorSeat");
@@ -741,6 +741,49 @@ test("a re-hosted seat binds to its successor transcript through the status read
   /* Nothing was rotated to get here. */
   expect(rotatePosts).toHaveLength(0);
 });
+
+test("a restart-time status read that fails is retried, and the dock binds itself inside the bound (#1189)", async () => {
+  seatStatus = { seat: activeSeat(), pending: null, exists: true };
+  /* The re-host replaced the transcript the seat recorded: only the successor
+     is in the catalog, under its own native id, so the status read's
+     `transcriptPath` is the only thing that can bind the two (#1182). */
+  incumbentStatus = incumbent({ transcriptPath: "/transcripts/orch.successor.jsonl", liveness: { lifecycle: "running", hostState: "alive", silentForMs: 0 } });
+  const successor = { ...orchestratorFile, path: "/transcripts/orch.successor.jsonl", name: "orch.successor.jsonl", conversationId: "conversation_orch_successor" } as FileEntry;
+  /* And the viewer has not finished coming back, so that read FAILS. */
+  incumbentReadDown = true;
+
+  const opened = Date.now();
+  const host = mount([successor]);
+  await settle();
+  flushSync(() => undefined);
+
+  /* Nothing is bound and nothing can be: with no answer there is no live-host
+     evidence, so the panel is not even offering the Re-bind that would let the
+     operator do this by hand. */
+  expect(panelState(host)).toBe("live");
+  expect(host.textContent).toContain("Opening the conversation");
+  expect(bindReason(host)).toBeNull();
+  expect(host.querySelector("[data-orchestrator-rebind]")).toBeNull();
+  const failed = incumbentReads;
+  expect(failed).toBeGreaterThan(0);
+
+  /* The endpoint recovers — and no one touches the panel. */
+  incumbentReadDown = false;
+  await new Promise((resolve) => setTimeout(resolve, UNBOUND_STATUS_RETRY_MS + 500));
+  await settle();
+  flushSync(() => undefined);
+
+  /* The panel asked again on its own and bound to the successor, well inside
+     the bound «opening…» is held to. */
+  expect(incumbentReads).toBeGreaterThan(failed);
+  expect(host.querySelector('[data-orchestrator-conversation="conversation_orch_successor"]')).not.toBeNull();
+  expect(host.textContent).not.toContain("Opening the conversation");
+  expect(Date.now() - opened).toBeLessThan(SEAT_BIND_TIMEOUT_MS);
+  /* Resolution is all it was: no rotation, no second designation, no spawn. */
+  expect(rotatePosts).toHaveLength(0);
+  expect(seatPosts).toHaveLength(0);
+  expect(spawnPosts).toBe(0);
+}, SEAT_BIND_TIMEOUT_MS + 20_000);
 
 test("a bind that never lands stops spinning: the panel names the reason and Re-bind CLEARS it (#1182)", async () => {
   seatStatus = { seat: activeSeat(), pending: null, exists: true };
