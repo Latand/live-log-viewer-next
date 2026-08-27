@@ -68,6 +68,8 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   candidateHealth = healthy("http://127.0.0.1/candidate");
   promotedHealth = healthy("http://127.0.0.1:8898");
   stageHostFailure: Error | null = null;
+  promoteFailure: Error | null = null;
+  hotStateHandOver: string | null = null;
   calls: string[] = [];
 
   async reconcile(): Promise<void> { this.calls.push("reconcile"); }
@@ -125,6 +127,7 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   }
   async promote(candidate: ViewerReleaseIdentity): Promise<ViewerMcpRuntimePublicationEvidence> {
     this.calls.push(`promote:${candidate.container}`);
+    if (this.promoteFailure) throw this.promoteFailure;
     this.current = candidate;
     this.currentMcp = candidate.mcpRuntime!;
     return {
@@ -132,6 +135,7 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
       ...candidate.mcpRuntime!,
       publishedAt: "2026-07-23T08:00:01.000Z",
       durable: true,
+      ...(this.hotStateHandOver ? { hotStateHandOver: this.hotStateHandOver } : {}),
     };
   }
   async verifyPromoted(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence> { this.calls.push(`verify-promoted:${candidate.container}`); return this.promotedHealth; }
@@ -448,6 +452,94 @@ test("issue 518: a succeeded exact-SHA deployment stages the candidate image as 
      Viewer processes keep running through the runtime-host replacement. */
   expect(adapter.calls.filter((call) => call.startsWith("rollback:"))).toEqual([]);
   expect(adapter.calls.filter((call) => call.startsWith("retire:"))).toEqual([]);
+  store.close();
+});
+
+/* #1216 reopened. The promote fix could not be delivered by the mechanism it
+   fixes, and this is the ordering that makes that true: runtime-host
+   succession lives in the `host-handoff` phase, which is downstream of
+   `promoting`. A promote that times out rolls back and never reaches it, so
+   the runtime host keeps executing the old promote path on the next attempt,
+   and the next, and the next. `scripts/bootstrap-runtime-host.ts` exists
+   because of this test. */
+test("issue 1216: a promote that times out never reaches runtime-host successor staging", async () => {
+  const store = journal("promote-timeout-host");
+  const adapter = new FakeDeploymentAdapter();
+  adapter.promoteFailure = new Error("deployment adapter promote timed out while waiting for hot-state activation");
+  const handoffs: string[] = [];
+  const lines: string[] = [];
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
+    onHostHandoff: (context) => { handoffs.push(context.deploymentId); },
+    log: (line) => { lines.push(line); },
+  });
+
+  const receipt = await coordinator.requestViewerDeployment({ idempotencyKey: "promote-timeout", revision: "b".repeat(40) });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  await coordinator.waitForDeployment(receipt.deploymentId);
+
+  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({
+    phase: "rolled-back",
+    terminal: true,
+    error: "deployment adapter promote timed out while waiting for hot-state activation",
+  });
+  /* The runtime host is left on whatever generation it was already running:
+     the deployment that carried the promote repair never staged a successor
+     that could execute it. */
+  expect(adapter.calls.filter((call) => call.startsWith("stage-host-successor:"))).toEqual([]);
+  expect(handoffs).toEqual([]);
+  expect(lines.some((line) => line.includes("host-handoff"))).toBe(false);
+  store.close();
+});
+
+/* Three deployments in a row left an operator unable to answer "did this even
+   try to replace the runtime host?" from the log. The step now says what it
+   decided and why. */
+test("issue 1216: the host-handoff step narrates the decision it made", async () => {
+  const store = journal("host-handoff-log");
+  const adapter = new FakeDeploymentAdapter();
+  adapter.hotStateHandOver = "incumbent released hot state after 4s; activation published after 12s";
+  const lines: string[] = [];
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
+    log: (line) => { lines.push(line); },
+  });
+
+  const receipt = await coordinator.requestViewerDeployment({ idempotencyKey: "host-handoff-log", revision: "b".repeat(40) });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  await coordinator.waitForDeployment(receipt.deploymentId);
+
+  const image = store.viewerDeployment(receipt.deploymentId)?.candidate?.image;
+  expect(lines).toEqual([
+    `[viewer deployment] ${receipt.deploymentId} promote hot-state hand-over: incumbent released hot state after 4s; activation published after 12s`,
+    `[viewer deployment] ${receipt.deploymentId} host-handoff staging a successor for ${"b".repeat(40)}; the running generation is untracked`,
+    `[viewer deployment] ${receipt.deploymentId} host-handoff staged; the successor waits for the singleton fence while this generation hands off ${"b".repeat(40)}`,
+  ]);
+  expect(image).toBe(`viewer:${"b".repeat(40)}`);
+  store.close();
+});
+
+/* A staging failure parks the deployment in a retryable `host-handoff` phase
+   and returns normally, so nothing printed it: the host stayed on the old
+   generation with no line in the log to say so. */
+test("issue 1216: a failed successor staging is printed, not only journalled", async () => {
+  const store = journal("host-handoff-failure-log");
+  const adapter = new FakeDeploymentAdapter();
+  adapter.stageHostFailure = new Error("runtime-host predecessor container is unavailable for successor staging");
+  const lines: string[] = [];
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" }, {
+    hostGeneration: () => ({ image: "agent-log-viewer:node22", revision: null }),
+    log: (line) => { lines.push(line); },
+  });
+
+  const receipt = await coordinator.requestViewerDeployment({ idempotencyKey: "host-handoff-failure", revision: "b".repeat(40) });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  await coordinator.waitForDeployment(receipt.deploymentId);
+
+  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({ phase: "host-handoff", terminal: false });
+  expect(lines).toContain(
+    `[viewer deployment] ${receipt.deploymentId} host-handoff failed and stays retryable: runtime-host predecessor container is unavailable for successor staging`,
+  );
   store.close();
 });
 

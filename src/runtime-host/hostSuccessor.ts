@@ -49,6 +49,10 @@ export interface RuntimeHostSuccessorPorts {
   fenceOwnerPid(): number | null;
   now?(): string;
   wait?(milliseconds: number): Promise<void>;
+  /** #1216: the staging step is the one a deployment reaches last and the one
+      an operator can least observe. Every ordered step below names itself here,
+      so the host phase logger prints progress instead of a bare action name. */
+  reportPhase?(phase: string): void;
 }
 
 export interface RuntimeHostHandoffCleanupPorts {
@@ -65,6 +69,12 @@ export interface RuntimeHostGenerationIdentity {
 
 export interface RuntimeHostSuccessorOptions {
   registryBackendMode?: AgentRegistryBackendMode;
+}
+
+export interface RuntimeHostPredecessorIdentity {
+  id: string;
+  name: string;
+  image: string;
 }
 
 export function runtimeHostSuccessorName(revision: string, image: string): string {
@@ -101,6 +111,8 @@ export async function completeRuntimeHostHandoff(
 
 interface PredecessorTopology {
   id: string;
+  name: string;
+  image: string;
   env: string[];
   cmd: string[];
   containerUser: string;
@@ -127,8 +139,11 @@ function parseTopology(id: string, raw: string): PredecessorTopology {
   const hostConfig = (container.HostConfig ?? {}) as Record<string, unknown>;
   const cmd = stringArray(config.Cmd);
   if (cmd.length === 0) throw new Error("predecessor runtime-host command is unavailable");
+  const name = typeof container.Name === "string" ? container.Name.replace(/^\//, "") : "";
   return {
     id,
+    name: name || id,
+    image: typeof config.Image === "string" ? config.Image : "",
     /* PR #521: keep unsupported credentials and predecessor-owned generation
        markers outside the cloned environment. The successor appends one
        authoritative value for every reserved generation key below. */
@@ -145,7 +160,9 @@ function parseTopology(id: string, raw: string): PredecessorTopology {
   };
 }
 
-async function findPredecessor(ports: RuntimeHostSuccessorPorts): Promise<PredecessorTopology | null> {
+type PredecessorDiscoveryPorts = Pick<RuntimeHostSuccessorPorts, "docker" | "fenceOwnerPid">;
+
+async function findPredecessor(ports: PredecessorDiscoveryPorts): Promise<PredecessorTopology | null> {
   const ownerPid = ports.fenceOwnerPid();
   if (!ownerPid) return null;
   const listed = await ports.docker(["container", "ls", "--format", "{{.ID}}"]);
@@ -156,6 +173,18 @@ async function findPredecessor(ports: RuntimeHostSuccessorPorts): Promise<Predec
     if (state.Pid === ownerPid) return parseTopology(id, raw);
   }
   return null;
+}
+
+/** The runtime-host generation that currently owns the singleton fence, named
+    so a bootstrap can state exactly which container it is about to stop
+    (#1216). `null` means no running generation holds the fence. */
+export async function findRuntimeHostPredecessor(
+  ports: PredecessorDiscoveryPorts,
+): Promise<RuntimeHostPredecessorIdentity | null> {
+  const predecessor = await findPredecessor(ports);
+  return predecessor === null
+    ? null
+    : { id: predecessor.id, name: predecessor.name, image: predecessor.image };
 }
 
 function successorRunArgs(
@@ -265,6 +294,35 @@ function successorIsReady(
     && state.Restarting !== true;
 }
 
+/** What the stability gate actually saw, appended to every gate failure so a
+    successor that never settles is diagnosable from the message alone (#1216).
+    A bare "failed its gate" named neither the state nor the mismatch. */
+export function runtimeHostSuccessorObservation(
+  raw: string,
+  name: string,
+  candidate: ViewerReleaseIdentity,
+  options: RuntimeHostSuccessorOptions = {},
+): string {
+  let container: Record<string, unknown>;
+  try {
+    container = ((JSON.parse(raw) as Array<Record<string, unknown>>)[0] ?? {}) as Record<string, unknown>;
+  } catch {
+    return "container inspection is unreadable";
+  }
+  const state = (container.State ?? {}) as Record<string, unknown>;
+  const status = typeof state.Status === "string" ? state.Status : "unknown";
+  let generation: string;
+  try {
+    generation = successorMatchesGeneration(raw, name, candidate, options) ? "generation matches" : "generation differs";
+  } catch {
+    generation = "generation is unreadable";
+  }
+  const restarting = state.Restarting === true ? ", restarting" : "";
+  const restarts = typeof container.RestartCount === "number" ? `, ${container.RestartCount} restarts` : "";
+  const exitCode = typeof state.ExitCode === "number" && status !== "running" ? `, exit ${state.ExitCode}` : "";
+  return `${generation}, status ${status}${restarting}${restarts}${exitCode}`;
+}
+
 /** Two identity-aware observations: both must report the ready running state,
     and the successor's start identity must stay unchanged beyond Docker's
     10-second restart-policy activation threshold. The additional second is a
@@ -278,17 +336,18 @@ async function observeStableSuccessor(
 ): Promise<void> {
   const firstEvidence = await ports.docker(["container", "inspect", name]);
   if (!successorIsReady(firstEvidence, name, candidate, options)) {
-    throw new Error("runtime-host successor container failed its identity or running-state gate");
+    throw new Error(`runtime-host successor container failed its identity or running-state gate - ${runtimeHostSuccessorObservation(firstEvidence, name, candidate, options)}`);
   }
+  ports.reportPhase?.(`observing runtime-host successor stability for ${Math.round(DOCKER_RESTART_POLICY_STABILITY_MS / 1_000)}s`);
   await (ports.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(DOCKER_RESTART_POLICY_STABILITY_MS);
   const stableEvidence = await ports.docker(["container", "inspect", name]);
   if (!successorIsReady(stableEvidence, name, candidate, options)) {
-    throw new Error("runtime-host successor container did not remain stably ready");
+    throw new Error(`runtime-host successor container did not remain stably ready - ${runtimeHostSuccessorObservation(stableEvidence, name, candidate, options)}`);
   }
   const first = successorStartIdentity(firstEvidence);
   const stable = successorStartIdentity(stableEvidence);
   if (first.id !== stable.id || first.restartCount !== stable.restartCount || first.startedAt !== stable.startedAt) {
-    throw new Error("runtime-host successor container restarted between readiness probes");
+    throw new Error(`runtime-host successor container restarted between readiness probes - ${runtimeHostSuccessorObservation(stableEvidence, name, candidate, options)}`);
   }
 }
 
@@ -354,6 +413,7 @@ export async function stageRuntimeHostSuccessorContainer(
   options: RuntimeHostSuccessorOptions = {},
 ): Promise<{ successorContainer: string }> {
   const name = runtimeHostSuccessorName(candidate.revision, candidate.image);
+  const phase = ports.reportPhase ?? (() => {});
   const intent = ports.readHandoffIntent();
   const exactIntent = intent
     && intent.revision === candidate.revision
@@ -362,6 +422,7 @@ export async function stageRuntimeHostSuccessorContainer(
   if (intent && !exactIntent) {
     throw new Error("runtime-host handoff intent is owned by another generation");
   }
+  phase("tagging the runtime-host successor image");
   await ports.docker(["image", "inspect", candidate.image]);
   await ports.docker(["tag", candidate.image, runtimeHostImageTag]);
   if (exactIntent) {
@@ -370,16 +431,21 @@ export async function stageRuntimeHostSuccessorContainer(
        successor may already own the singleton fence, so fence-owner
        predecessor discovery is forbidden here — it would select, disable,
        and exit the successor itself. Both identities come from the intent. */
+    phase("resuming the recorded runtime-host successor container");
     await ports.docker(["container", "start", name]);
     await observeStableSuccessor(name, candidate, ports, options);
+    phase("disabling the runtime-host predecessor restart policy");
     await disablePredecessorRestart(intent.predecessorId, ports);
+    phase("publishing the runtime-host release record");
     publishReleaseOnce(name, candidate, ports);
     return { successorContainer: name };
   }
+  phase("locating the runtime-host predecessor container");
   const predecessor = await findPredecessor(ports);
   if (!predecessor) throw new Error("runtime-host predecessor container is unavailable for successor staging");
   let predecessorId = predecessor.id;
   try {
+    phase("creating the runtime-host successor container");
     await ports.docker(successorRunArgs(name, candidate, predecessor, options));
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
@@ -397,6 +463,7 @@ export async function stageRuntimeHostSuccessorContainer(
     await ports.docker(["container", "start", name]);
   }
   await observeStableSuccessor(name, candidate, ports, options);
+  phase("recording the runtime-host handoff intent");
   ports.writeHandoffIntent({
     revision: candidate.revision,
     image: candidate.image,
@@ -404,7 +471,9 @@ export async function stageRuntimeHostSuccessorContainer(
     predecessorId,
     recordedAt: (ports.now ?? (() => new Date().toISOString()))(),
   });
+  phase("disabling the runtime-host predecessor restart policy");
   await disablePredecessorRestart(predecessorId, ports);
+  phase("publishing the runtime-host release record");
   publishReleaseOnce(name, candidate, ports);
   return { successorContainer: name };
 }

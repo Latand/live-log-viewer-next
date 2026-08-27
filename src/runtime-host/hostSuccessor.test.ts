@@ -12,10 +12,12 @@ import {
 } from "./hostRelease";
 import {
   completeRuntimeHostHandoff,
+  findRuntimeHostPredecessor,
   RUNTIME_HOST_FENCE_WAIT_ENV,
   RUNTIME_HOST_PREDECESSOR_LABEL,
   RUNTIME_HOST_SUCCESSOR_LABEL,
   runtimeHostSuccessorName,
+  runtimeHostSuccessorObservation,
   stageRuntimeHostSuccessorContainer,
   type RuntimeHostSuccessorPorts,
 } from "./hostSuccessor";
@@ -103,8 +105,10 @@ test("issue 521 review: successor cleanup converges when the predecessor is alre
 const wakatimePlaceholderValue = "waka-credential-value-placeholder";
 
 const predecessorInspect = JSON.stringify([{
+  Name: "/llv-runtime-host-704ff4636294-0123456789ab",
   State: { Pid: 3970 },
   Config: {
+    Image: "agent-log-viewer:deploy-704ff4636294",
     Env: [
       "LLV_RUNTIME_EVENTS=1",
       "HOME=/home/user",
@@ -129,6 +133,7 @@ interface Harness {
   ports: RuntimeHostSuccessorPorts;
   calls: string[][];
   events: string[];
+  phases: string[];
   records: RuntimeHostReleaseRecord[];
   intents: RuntimeHostHandoffIntent[];
   storedIntent: () => RuntimeHostHandoffIntent | null;
@@ -151,6 +156,7 @@ function harness(overrides: {
 } = {}): Harness {
   const calls: string[][] = [];
   const events: string[] = [];
+  const phases: string[] = [];
   const records: RuntimeHostReleaseRecord[] = [];
   const intents: RuntimeHostHandoffIntent[] = [];
   let storedIntent: RuntimeHostHandoffIntent | null = overrides.handoffIntent ?? null;
@@ -229,8 +235,9 @@ function harness(overrides: {
     fenceOwnerPid: () => overrides.fenceOwnerPid === undefined ? 3970 : overrides.fenceOwnerPid,
     now: () => "2026-07-21T09:00:00.000Z",
     wait: overrides.wait ?? (async () => undefined),
+    reportPhase: (phase) => { phases.push(phase); },
   };
-  return { ports, calls, events, records, intents, storedIntent: () => storedIntent };
+  return { ports, calls, events, phases, records, intents, storedIntent: () => storedIntent };
 }
 
 /* A stateful Docker world that survives across staging attempts, for
@@ -859,4 +866,64 @@ test("issue 521: the predecessor's unsupported credential never reaches Docker c
   expect(JSON.stringify(intents)).not.toContain(wakatimePlaceholderValue);
   /* Supported predecessor environment entries still clone. */
   expect(calls.find((argv) => argv[0] === "run")?.join(" ")).toContain("-e LLV_RUNTIME_EVENTS=1");
+});
+
+/* #1216. The staging action runs under a sixty-second host budget with an
+   eleven-second stability wait inside it, and it used to report nothing at
+   all: a promote that never staged and a staging that wedged were the same
+   silence to an operator. */
+test("issue 1216: staging reports each ordered step in the host phase alphabet", async () => {
+  const harnessed = harness();
+
+  await stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", harnessed.ports);
+
+  expect(harnessed.phases).toEqual([
+    "tagging the runtime-host successor image",
+    "locating the runtime-host predecessor container",
+    "creating the runtime-host successor container",
+    "observing runtime-host successor stability for 11s",
+    "recording the runtime-host handoff intent",
+    "disabling the runtime-host predecessor restart policy",
+    "publishing the runtime-host release record",
+  ]);
+  /* The host reads phases back through `/^[A-Za-z0-9 -]{1,160}$/` and drops
+     anything else, so a phase outside that alphabet is a phase nobody sees. */
+  for (const phase of harnessed.phases) expect(phase).toMatch(/^[A-Za-z0-9 -]{1,160}$/);
+});
+
+test("issue 1216: a successor that never settles names what the gate saw", async () => {
+  const harnessed = harness({ successorState: "restarting" });
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", harnessed.ports))
+    .rejects.toThrow("runtime-host successor container failed its identity or running-state gate - generation matches, status restarting, restarting, 0 restarts");
+});
+
+test("issue 1216: a successor that crash-loops past the stability probe names its restarts", async () => {
+  const harnessed = harness({ stableRestartCount: 3 });
+
+  await expect(stageRuntimeHostSuccessorContainer(candidate, "agent-log-viewer:node22", harnessed.ports))
+    .rejects.toThrow("runtime-host successor container restarted between readiness probes - generation matches, status running, 3 restarts");
+});
+
+test("issue 1216: an unreadable inspection is named rather than thrown as a parse error", () => {
+  expect(runtimeHostSuccessorObservation("not json", "llv-runtime-host-aaaaaaaaaaaa-000000000000", candidate))
+    .toBe("container inspection is unreadable");
+});
+
+/* The bootstrap path states which container it will stop before it stops it,
+   and this is where that name comes from. */
+test("issue 1216: the fence owner is resolvable as a named predecessor container", async () => {
+  const harnessed = harness();
+
+  expect(await findRuntimeHostPredecessor(harnessed.ports)).toEqual({
+    id: "abc123",
+    name: "llv-runtime-host-704ff4636294-0123456789ab",
+    image: "agent-log-viewer:deploy-704ff4636294",
+  });
+});
+
+test("issue 1216: an unheld fence names no predecessor at all", async () => {
+  const harnessed = harness({ fenceOwnerPid: null });
+
+  expect(await findRuntimeHostPredecessor(harnessed.ports)).toBeNull();
 });

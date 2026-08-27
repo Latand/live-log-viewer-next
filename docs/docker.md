@@ -68,6 +68,55 @@ serializes the request, verifies the candidate, and switches its listener
 target. Inspect the owner with
 `docker compose --profile runtime-host logs -f runtime-host`.
 
+### Bootstrap the runtime host onto a new revision (#1216)
+
+`scripts/rebuild.sh` replaces the runtime-host generation only in the
+`host-handoff` phase, which is downstream of `promoting`. A defect in the
+promote path therefore pins the runtime host to the revision that carries the
+defect: every later deployment runs the old promote code, fails in the same
+place, rolls back, and never reaches the staging that would have installed the
+fix. `scripts/bootstrap-runtime-host.ts` is the way out. It stages the same
+#518 successor from a chosen revision without a deployment, so no promote has
+to have succeeded first.
+
+Run it on the host, from a checkout, with `bun`. The default mode renders the
+plan and changes nothing:
+
+```bash
+bun scripts/bootstrap-runtime-host.ts            # plan only
+bun scripts/bootstrap-runtime-host.ts <sha>      # plan a pinned revision
+```
+
+The plan names the target revision and image, the successor container it will
+create, the predecessor container it is replacing, and — for a hand-over — the
+one container it will stop. It also states what it never stops: Viewer release
+containers, the structured and engine hosts inside them, and every live agent
+session, pipeline, and orchestrator they own.
+
+Read the plan, then choose how far to go:
+
+```bash
+bun scripts/bootstrap-runtime-host.ts --stage      # build and stage; stop nothing
+bun scripts/bootstrap-runtime-host.ts --hand-over  # also stop the predecessor
+```
+
+`--stage` builds the image from a clean canonical worktree and creates the
+successor container. The successor waits on the singleton fence, the
+predecessor keeps serving, and the durable release record is repointed. Nothing
+is stopped, so this is safe to run ahead of the moment you want the switch.
+
+`--hand-over` performs the staging and then stops the predecessor runtime-host
+container so the successor acquires the fence. `127.0.0.1:8898` is unserved for
+the length of that exit; the run waits for the fence and names what it saw if
+it never arrives. The successor removes the stopped predecessor once it owns
+the fence.
+
+After a host-only bootstrap the runtime host runs a newer revision than the
+published Viewer release, so its boot-time MCP reconcile logs
+`runtime-host MCP revision differs from the active Viewer release` and leaves
+the published runtime unchanged. That is expected; the next successful
+`scripts/rebuild.sh` brings the Viewer release up to the same revision.
+
 The Compose `viewer` service exists only for the one-time listener migration. Its
 `legacy-viewer-migration` profile and `LLV_ALLOW_LEGACY_VIEWER=1` launch grant
 must both be present.
