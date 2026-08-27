@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { directoryChoices, directoryRows, elideDirectoryHead, looksLikeDirectoryPath, matchesDirectoryQuery, splitDirectoryPath } from "./DirectoryPicker";
+import { directoryChoices, directoryRows, elideDirectoryHead, isDirectoryPath, matchesDirectoryQuery, splitDirectoryPath } from "./DirectoryPicker";
 
 test("the last segment is what a path is split on, so it is never the part that shortens", () => {
   expect(splitDirectoryPath("/repos/viewer/.worktrees/fix-887")).toEqual({ head: "/repos/viewer/.worktrees/", tail: "fix-887" });
@@ -42,11 +42,15 @@ test("every filter token must appear somewhere in the path", () => {
   expect(matchesDirectoryQuery("/repos/anything", "   ")).toBe(true);
 });
 
-test("only a path shape is offered as a directory of its own", () => {
-  expect(looksLikeDirectoryPath("/mnt/scratch")).toBe(true);
-  expect(looksLikeDirectoryPath("~/Projects/atlas")).toBe(true);
-  expect(looksLikeDirectoryPath("atlas/.worktrees/fix")).toBe(true);
-  expect(looksLikeDirectoryPath("887 follow")).toBe(false);
+test("only a path naming a place from a fixed root is offered as a directory", () => {
+  expect(isDirectoryPath("/mnt/scratch")).toBe(true);
+  expect(isDirectoryPath("~")).toBe(true);
+  expect(isDirectoryPath("~/Projects/atlas")).toBe(true);
+  /* A fragment with a slash in it is still a filter (issue #1223): only the
+     side that resolves it has a working directory, and it is never the one the
+     operator meant. */
+  expect(isDirectoryPath("atlas/.worktrees/fix")).toBe(false);
+  expect(isDirectoryPath("887 follow")).toBe(false);
 });
 
 test("the chosen directory heads the list exactly once", () => {

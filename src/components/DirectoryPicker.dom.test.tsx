@@ -169,6 +169,25 @@ test("a path that is not in the list is committed exactly as typed", () => {
   expect(picks).toEqual(["/mnt/scratch/one-off checkout"]);
 });
 
+/* Issue #1223: every path is a substring of its own longer siblings, so the
+   typed row has to lead — otherwise Enter answers a spelled-out path with a
+   lookalike, and create-project registers a project where nobody named. */
+test("a typed path that is a prefix of a known one still commits what was typed", () => {
+  const picks: string[] = [];
+  render(REPO, (next) => picks.push(next));
+  click(trigger());
+  type(`${REPO}/.worktrees/fix-88`);
+  /* Both rows are offered — the known sibling is one arrow key away — but the
+     path being spelled out is the one under the highlight. */
+  expect(optionValues()).toEqual([`${REPO}/.worktrees/fix-88`, `${REPO}/.worktrees/fix-887`]);
+  expect(activeValue()).toBe(`${REPO}/.worktrees/fix-88`);
+  press(search(), "ArrowDown");
+  expect(activeValue()).toBe(`${REPO}/.worktrees/fix-887`);
+  press(search(), "ArrowUp");
+  press(search(), "Enter");
+  expect(picks).toEqual([`${REPO}/.worktrees/fix-88`]);
+});
+
 test("Tab commits the highlighted row instead of dropping what was typed", () => {
   const picks: string[] = [];
   render(REPO, (next) => picks.push(next));
@@ -200,6 +219,55 @@ test("a filter word that matched nothing is never committed as a directory", () 
   expect(picks).toEqual([]);
   expect(trigger().getAttribute("data-directory-value")).toBe(REPO);
   expect(trigger().getAttribute("aria-expanded")).toBe("false");
+
+  /* A fragment with a slash in it is a filter too (issue #1223). Counting a
+     slash as a path shape offered it as a row and led the highlight with it, so
+     Enter committed a name only the server's own working directory could
+     resolve — and create-project sent it on to be refused. */
+  click(trigger());
+  type(".worktrees/fix");
+  expect(optionValues()).not.toContain(".worktrees/fix");
+  expect(optionValues()).toContain(`${REPO}/.worktrees/fix-887`);
+  type("scanner/nothing-here");
+  expect(optionValues()).toEqual([]);
+  press(search(), "Enter");
+  expect(picks).toEqual([]);
+  expect(trigger().getAttribute("data-directory-value")).toBe(REPO);
+});
+
+/* Issue #1223: the filter field is where a path gets spelled out, and for
+   create-project it is the only place the root can be typed at all. Leaving the
+   popup to reach a control it covers must not throw that path away. */
+test("a path typed into the filter survives leaving the popup; a filter word and Escape do not commit", () => {
+  const picks: string[] = [];
+  render(REPO, (next) => picks.push(next));
+
+  /* Closing with the trigger — the way to reach whatever the popup covers. */
+  click(trigger());
+  type("/mnt/scratch/dismissed");
+  click(trigger());
+  expect(picks).toEqual(["/mnt/scratch/dismissed"]);
+  expect(search()).toBeNull();
+
+  /* Pressing outside the control commits it too. */
+  click(trigger());
+  type("/mnt/scratch/pressed-away");
+  flushSync(() => dom.document.body.dispatchEvent(new dom.Event("pointerdown", { bubbles: true })));
+  expect(picks).toEqual(["/mnt/scratch/dismissed", "/mnt/scratch/pressed-away"]);
+  expect(search()).toBeNull();
+
+  /* A bare word is a failed filter, not a directory, so leaving on one still
+     commits nothing — the same line Enter and Tab already hold. */
+  click(trigger());
+  type("nothing-here");
+  click(trigger());
+  expect(picks).toEqual(["/mnt/scratch/dismissed", "/mnt/scratch/pressed-away"]);
+
+  /* Escape reverts even a path: that is what Escape is for. */
+  click(trigger());
+  type("/mnt/scratch/escaped");
+  press(search(), "Escape");
+  expect(picks).toEqual(["/mnt/scratch/dismissed", "/mnt/scratch/pressed-away"]);
 });
 
 test("a launch freezes the control and cannot leave a popup open over it", () => {
@@ -222,4 +290,63 @@ test("an empty directory reads as empty rather than as a blank control", () => {
     <DirectoryPicker id="pick" value="" dirs={DIRS} ariaLabel="Робоча директорія агента" onChange={() => {}} />,
   ));
   expect(trigger().textContent).toContain("директорію не вибрано");
+});
+
+/* Issue #1223: create-project's suggestions come from the filesystem, so the
+   caller has to hear where the operator is pointing and be able to open the
+   list itself when it refuses what was typed. */
+test("the filter text is reported as it changes, so a caller can widen the list", () => {
+  const queries: Array<[string, boolean]> = [];
+  host = dom.document.createElement("div");
+  dom.document.body.appendChild(host);
+  root = createRoot(host as unknown as Element);
+  flushSync(() => root!.render(
+    <DirectoryPicker
+      id="pick"
+      value={REPO}
+      dirs={DIRS}
+      ariaLabel="Root directory"
+      onQueryChange={(query, typed) => queries.push([query, typed])}
+      onChange={() => {}}
+    />,
+  ));
+  click(trigger());
+  /* Opening reports the current value, marked as not typed: a caller reading
+     the two alike would answer "open the list" with the one path already
+     chosen instead of listing what is around it. */
+  expect(queries).toEqual([[REPO, false]]);
+  type("/home/user/Projects/n");
+  expect(queries).toEqual([[REPO, false], ["/home/user/Projects/n", true]]);
+});
+
+test("an open signal from the caller opens the list on the value already held", () => {
+  const renderWith = (openSignal: number, disabled = false) => flushSync(() => root!.render(
+    <DirectoryPicker
+      id="pick"
+      value={REPO}
+      dirs={DIRS}
+      disabled={disabled}
+      ariaLabel="Root directory"
+      openSignal={openSignal}
+      onChange={() => {}}
+    />,
+  ));
+  host = dom.document.createElement("div");
+  dom.document.body.appendChild(host);
+  root = createRoot(host as unknown as Element);
+  renderWith(0);
+  expect(search()).toBeNull();
+
+  renderWith(1);
+  expect(search()).not.toBeNull();
+  expect(optionValues()).toEqual(DIRS);
+
+  /* A signal that has not moved leaves an operator-closed popup closed. */
+  press(search(), "Escape");
+  renderWith(1);
+  expect(search()).toBeNull();
+
+  /* A frozen control still refuses to open. */
+  renderWith(2, true);
+  expect(search()).toBeNull();
 });

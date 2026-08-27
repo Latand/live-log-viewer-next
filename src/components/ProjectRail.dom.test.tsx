@@ -4,7 +4,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { CreateProjectOutcome } from "@/hooks/useProjectCuration";
-import { setLocale } from "@/lib/i18n";
+import { getLocale, setLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { ProjectRail } from "./ProjectRail";
@@ -43,15 +43,27 @@ Object.assign(globalThis, {
   HTMLInputElement: dom.HTMLInputElement,
   Event: dom.Event,
   MouseEvent: dom.MouseEvent,
+  KeyboardEvent: dom.KeyboardEvent,
   sessionStorage: dom.sessionStorage,
   localStorage: dom.localStorage,
   matchMedia: matchMediaStub,
 });
 
 /* The rail's footers (resources, limits) and header controls poll APIs on
-   mount; both tolerate a failed response and stay in their empty states. */
+   mount; both tolerate a failed response and stay in their empty states. The
+   create form's directory suggestions are the one answered request — they are
+   what the root picker lists (issue #1223). */
 const realFetch = globalThis.fetch;
-globalThis.fetch = (async () => ({ ok: false, status: 503, json: async () => ({}) })) as unknown as typeof fetch;
+let suggestedDirs: string[] = [];
+let suggestionQueries: string[] = [];
+globalThis.fetch = (async (input: unknown) => {
+  const url = String(input);
+  if (url.startsWith("/api/projects/directories")) {
+    suggestionQueries.push(new URL(url, "http://localhost").searchParams.get("q") ?? "");
+    return { ok: true, status: 200, json: async () => ({ dirs: suggestedDirs }) };
+  }
+  return { ok: false, status: 503, json: async () => ({}) };
+}) as unknown as typeof fetch;
 
 function fileEntry(overrides: Partial<FileEntry>): FileEntry {
   return {
@@ -92,6 +104,8 @@ afterEach(() => {
   dom.document.body.replaceChildren();
   setLocale("en");
   viewportWidth = 1280;
+  suggestedDirs = [];
+  suggestionQueries = [];
 });
 
 function renderRail(
@@ -205,118 +219,345 @@ test("crowned projects pin to the top section with a crown marker and a working 
   ]);
 });
 
-test("create-project flow: submit, duplicate refusal message, then success selects the project", async () => {
-  const selections: string[] = [];
-  const creations: Array<[string, string]> = [];
-  let outcome: CreateProjectOutcome = { ok: false, code: "DUPLICATE_PROJECT" };
-  const container = renderRail((project) => selections.push(project), {
-    onCreateProject: async (name, root) => {
-      creations.push([name, root]);
-      return outcome;
+/* Create-project shares one shape across the tests below: a rail with the
+   suggestion source answering, the form open, and the picker driven the way an
+   operator drives it — open the list, click a row, or type a path into the
+   filter field. */
+const settle = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+};
+const type = (input: HTMLInputElement, value: string) => {
+  const propsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+  (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[propsKey]!
+    .onChange({ target: { value } });
+};
+const press = (element: Element | null, key: string) =>
+  flushSync(() => element?.dispatchEvent(new dom.KeyboardEvent("keydown", { key, bubbles: true }) as unknown as Event));
+
+function createForm(container: HTMLElement) {
+  const query = <T extends Element>(selector: string) => container.querySelector(selector) as unknown as T | null;
+  const trigger = () => query<HTMLElement>("[data-directory-trigger]")!;
+  const filter = () => query<HTMLInputElement>('input[role="combobox"]');
+  return {
+    form: () => query<HTMLFormElement>("form")!,
+    formPresent: () => query<HTMLFormElement>("form") !== null,
+    nameInput: () => ([...container.querySelectorAll("form input")] as unknown as HTMLInputElement[])[0]!,
+    trigger,
+    filter,
+    chosenRoot: () => trigger().getAttribute("data-directory-value"),
+    pickerOpen: () => query<HTMLElement>('[data-directory-picker="open"]') !== null,
+    /* The popup is absolutely positioned out of the trigger and covers what
+       follows it, so a refusal is only readable while it precedes the picker
+       among the form's own rows (issue #1223). */
+    messagePrecedesPicker: () => {
+      const rows = [...query<HTMLFormElement>("form")!.children] as unknown as HTMLElement[];
+      const message = rows.findIndex((row) => /text-(danger|warning)/.test(row.className));
+      const picker = rows.findIndex((row) => row.hasAttribute("data-directory-picker"));
+      return message > -1 && picker > -1 && message < picker;
     },
-  });
-  const open = container.querySelector('button[aria-label="Create project"]');
-  expect(open).not.toBeNull();
-  flushSync(() => open!.dispatchEvent(click()));
-  const form = container.querySelector("form")!;
-  const inputs = [...form.querySelectorAll("input")] as HTMLInputElement[];
-  expect(inputs).toHaveLength(2);
-  const type = (input: HTMLInputElement, value: string) => {
-    const propsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
-    (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[propsKey]!
-      .onChange({ target: { value } });
+    optionValues: () => ([...container.querySelectorAll("[data-directory-option]")] as unknown as HTMLElement[])
+      .map((option) => option.getAttribute("data-directory-option")),
+    openPicker: () => flushSync(() => trigger().dispatchEvent(click())),
+    /* The trigger toggles: pressed while the list is open it is how the
+       operator reaches the Create button the list covers. */
+    closePicker: () => flushSync(() => trigger().dispatchEvent(click())),
+    pick: (dir: string) => flushSync(() =>
+      (container.querySelector(`[data-directory-option="${dir}"]`) as unknown as HTMLElement).dispatchEvent(click())),
+    typeQuery: (value: string) => flushSync(() => type(filter()!, value)),
+    typePath: (value: string) => {
+      flushSync(() => type(filter()!, value));
+      press(filter(), "Enter");
+    },
+    submit: () => flushSync(() =>
+      query<HTMLFormElement>("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event)),
+    offerButton: () => ([...container.querySelectorAll("button")] as unknown as HTMLElement[])
+      .find((button) => button.textContent === "Create directory and project"),
   };
-  flushSync(() => {
-    type(inputs[0]!, "Fresh Project");
-    type(inputs[1]!, "/data/projects/fresh");
+}
+
+async function openCreateForm(
+  onCreateProject: (name: string, root: string, options?: { createRoot?: boolean }) => Promise<CreateProjectOutcome>,
+  onSelect: (project: string) => void = () => {},
+): Promise<ReturnType<typeof createForm>> {
+  const container = renderRail(onSelect, { onCreateProject });
+  const open = container.querySelector(`button[aria-label="${translate(getLocale(), "rail.createProject")}"]`)!;
+  flushSync(() => open.dispatchEvent(click()));
+  await settle();
+  return createForm(container);
+}
+
+/* Issue #1223: the root field was a bare text input demanding a typed absolute
+   path. It is a picker over real directory suggestions, and choosing one names
+   the project — so the usual path is pick, then confirm. */
+test("create-project: the root is picked from real suggestions, and the chosen directory names the project", async () => {
+  suggestedDirs = ["/data/projects/fresh-idea", "/data/projects/older-idea"];
+  const creations: Array<[string, string]> = [];
+  const ui = await openCreateForm(async (name, root) => {
+    creations.push([name, root]);
+    return { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
   });
-  const submit = () =>
-    form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
 
-  flushSync(submit);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  expect(creations).toEqual([["Fresh Project", "/data/projects/fresh"]]);
-  expect(container.textContent).toContain("This project already exists");
-  expect(selections).toEqual([]);
+  /* One text field remains — the name. The root is the picker. */
+  expect(ui.form().querySelectorAll("input")).toHaveLength(1);
+  expect(ui.trigger()).not.toBeNull();
+  expect(suggestionQueries).toEqual([""]);
 
-  outcome = { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
-  flushSync(submit);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  expect(selections).toEqual(["dir-0123456789abcdef0123456789abcdef"]);
-  /* Success closes the form; only the filter input remains. */
-  expect(container.querySelector("form")).toBeNull();
+  ui.openPicker();
+  expect(ui.optionValues()).toEqual(suggestedDirs);
+  ui.pick("/data/projects/fresh-idea");
+  expect(ui.chosenRoot()).toBe("/data/projects/fresh-idea");
+  /* The name arrives with it, still editable. */
+  expect(ui.nameInput().value).toBe("fresh-idea");
+
+  ui.submit();
+  await settle();
+  expect(creations).toEqual([["fresh-idea", "/data/projects/fresh-idea"]]);
 });
 
-/* Issue #1122: for a missing directory the rail swaps the dead-end error for
-   a "create directory and project" action that resubmits with the mkdir
-   opt-in, and a failed mkdir reads back its cause. */
-test("create-project flow: missing directory offers mkdir-and-create instead of dead-ending", async () => {
+test("create-project: a typed name of their own survives choosing a directory", async () => {
+  suggestedDirs = ["/data/projects/fresh-idea"];
+  const creations: Array<[string, string]> = [];
+  const ui = await openCreateForm(async (name, root) => {
+    creations.push([name, root]);
+    return { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
+  });
+  flushSync(() => type(ui.nameInput(), "Operator's own name"));
+  ui.openPicker();
+  ui.pick("/data/projects/fresh-idea");
+  expect(ui.nameInput().value).toBe("Operator's own name");
+  ui.submit();
+  await settle();
+  expect(creations).toEqual([["Operator's own name", "/data/projects/fresh-idea"]]);
+});
+
+test("create-project: typing a path stays possible, and points the suggestions at that directory", async () => {
+  suggestedDirs = ["/data/projects/fresh-idea"];
+  const ui = await openCreateForm(async () => ({ ok: true, project: "dir-0123456789abcdef0123456789abcdef" }));
+  ui.openPicker();
+  ui.typePath("/data/elsewhere/hand-typed");
+  expect(ui.chosenRoot()).toBe("/data/elsewhere/hand-typed");
+  /* Suggestions follow what is being spelled out, verbatim: the picker filters
+     the rows it holds, and the directory create-project is after is exactly the
+     one no list of rows carries. */
+  expect(suggestionQueries).toEqual(["", "/data/elsewhere/hand-typed"]);
+  /* Reopening on a chosen path asks about the directory it sits in — that is a
+     request to browse, not a prefix to match against the one path in hand. */
+  ui.openPicker();
+  expect(suggestionQueries).toEqual(["", "/data/elsewhere/hand-typed", "/data/elsewhere/"]);
+});
+
+/* Issue #1223: the picker can only filter the rows it was handed, and one
+   bounded answer cannot hold every anchor's contents — a machine that keeps its
+   checkouts in one container fills the whole answer from that container alone.
+   So a filter word has to reach the server, which can see the rest. */
+test("create-project: a filter word is asked of the server, not just of the rows already held", async () => {
+  suggestedDirs = ["/data/projects/crowded-01", "/data/projects/crowded-02"];
+  const ui = await openCreateForm(async () => ({ ok: true, project: "dir-0123456789abcdef0123456789abcdef" }));
+  ui.openPicker();
+  expect(ui.optionValues()).toEqual(suggestedDirs);
+
+  suggestedDirs = ["/work/quiet-anchor/starved-idea"];
+  ui.typeQuery("starved");
+  expect(suggestionQueries).toEqual(["", "starved"]);
+  await settle();
+  /* The row from the anchor the browse never reached is now listed, and a bare
+     word is still not offered as a directory of its own. */
+  expect(ui.optionValues()).toEqual(["/work/quiet-anchor/starved-idea"]);
+  ui.pick("/work/quiet-anchor/starved-idea");
+  expect(ui.chosenRoot()).toBe("/work/quiet-anchor/starved-idea");
+});
+
+/* The list covers the Create button, so reaching Create means leaving the list
+   first — which used to discard the typed root and answer "Choose a directory",
+   a step that worked before the root became a picker (issue #1223). */
+test("create-project: a path typed into the list survives closing it, and Create carries it", async () => {
+  suggestedDirs = ["/data/projects/fresh-idea"];
+  const creations: Array<[string, string]> = [];
+  const ui = await openCreateForm(async (name, root) => {
+    creations.push([name, root]);
+    return { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
+  });
+  ui.openPicker();
+  ui.typeQuery("/data/projects/typed-then-closed");
+  ui.closePicker();
+  expect(ui.pickerOpen()).toBe(false);
+  expect(ui.chosenRoot()).toBe("/data/projects/typed-then-closed");
+  /* And the name it implies arrives with it, as with any other way of choosing. */
+  expect(ui.nameInput().value).toBe("typed-then-closed");
+  ui.submit();
+  await settle();
+  expect(creations).toEqual([["typed-then-closed", "/data/projects/typed-then-closed"]]);
+});
+
+test("create-project: a typed path that a suggestion begins with is not swapped for it", async () => {
+  /* The directory create-project is for does not exist yet, so it is routinely
+     a prefix of one that does (`api` beside `api-old`). Committing the
+     suggestion instead would name the project from the wrong basename and
+     register it where nobody typed (issue #1223). */
+  suggestedDirs = ["/data/projects/api-old"];
+  const creations: Array<[string, string]> = [];
+  const ui = await openCreateForm(async (name, root) => {
+    creations.push([name, root]);
+    return { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
+  });
+  ui.openPicker();
+  ui.typePath("/data/projects/api");
+  expect(ui.chosenRoot()).toBe("/data/projects/api");
+  expect(ui.nameInput().value).toBe("api");
+  ui.submit();
+  await settle();
+  expect(creations).toEqual([["api", "/data/projects/api"]]);
+});
+
+/* The three outcomes, told apart. First: a path that was never made absolute
+   says exactly that and answers with the completion. `~/…` is the shape that
+   reaches this refusal from the UI — it names a place, so the picker commits
+   it, and only the server knows it is not a full path (issue #1223). */
+async function refuseRelativeRoot(expectedMessage: string) {
+  suggestedDirs = ["/data/projects/fresh-idea"];
+  const creations: string[] = [];
+  const ui = await openCreateForm(async (_name, root) => {
+    creations.push(root);
+    return { ok: false, code: "RELATIVE_ROOT" };
+  });
+  ui.openPicker();
+  ui.typePath("~/relative-idea");
+  expect(ui.chosenRoot()).toBe("~/relative-idea");
+  ui.submit();
+  await settle();
+
+  expect(creations).toEqual(["~/relative-idea"]);
+  expect(ui.form().textContent).toContain(expectedMessage);
+  /* The completion is offered rather than the rejection: the list is open on
+     the suggestions and leads with one, one click from a real path. The
+     rejected text is gone from the field — the picker puts the value it holds
+     at the head of its list, highlighted and badged "current", so leaving it
+     there would open the completion on the very input it exists to replace. */
+  expect(ui.pickerOpen()).toBe(true);
+  expect(ui.chosenRoot()).toBe("");
+  expect(ui.optionValues()).toEqual(["/data/projects/fresh-idea"]);
+  expect(ui.offerButton()).toBeUndefined();
+  /* And it is readable while that list is open: the popup drops out of the
+     trigger over everything below it, so the words explaining the refusal have
+     to sit above the control the same commit opened. */
+  expect(ui.messagePrecedesPicker()).toBe(true);
+}
+
+/* The other half of one path definition: a fragment is not a path, so it never
+   becomes a root to submit in the first place (issue #1223). */
+test("create-project: a relative fragment is never committed as a root", async () => {
+  suggestedDirs = ["/data/projects/fresh-idea"];
+  const creations: string[] = [];
+  const ui = await openCreateForm(async (_name, root) => {
+    creations.push(root);
+    return { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
+  });
+  flushSync(() => type(ui.nameInput(), "Relative Idea"));
+  ui.openPicker();
+  ui.typePath("notes/relative-idea");
+  expect(ui.chosenRoot()).toBe("");
+  ui.submit();
+  await settle();
+  expect(creations).toEqual([]);
+  expect(ui.form().textContent).toContain("Choose a directory");
+});
+
+test("create-project: a root that is not a full path says so and opens the completion", async () => {
+  await refuseRelativeRoot("A full path is required");
+});
+
+test("create-project: the same refusal reads in Ukrainian", async () => {
+  setLocale("uk");
+  await refuseRelativeRoot("Потрібен повний шлях");
+});
+
+/* Second outcome (issue #1122, reworded by #1223): an absolute path that is
+   absent is recoverable, named in the message, and offers to be created — the
+   same position the pipeline preflight already takes. */
+test("create-project: a missing directory names the path and offers mkdir-and-create", async () => {
+  suggestedDirs = ["/data/projects/fresh-idea"];
   const selections: string[] = [];
   const creations: Array<[string, string, boolean]> = [];
   let outcome: CreateProjectOutcome = { ok: false, code: "MISSING_DIRECTORY" };
-  const container = renderRail((project) => selections.push(project), {
-    onCreateProject: async (name, root, options) => {
-      creations.push([name, root, options?.createRoot === true]);
-      return outcome;
-    },
-  });
-  flushSync(() => container.querySelector('button[aria-label="Create project"]')!.dispatchEvent(click()));
-  const form = container.querySelector("form")!;
-  const inputs = [...form.querySelectorAll("input")] as HTMLInputElement[];
-  const type = (input: HTMLInputElement, value: string) => {
-    const propsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
-    (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[propsKey]!
-      .onChange({ target: { value } });
-  };
-  flushSync(() => {
-    type(inputs[0]!, "Fresh Project");
-    type(inputs[1]!, "/data/projects/fresh");
-  });
-  const submit = () =>
-    form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
-  const settle = async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  };
-  const offerButton = () =>
-    ([...container.querySelectorAll("button")] as HTMLElement[])
-      .find((button) => button.textContent === "Create directory and project");
-
-  flushSync(submit);
+  const ui = await openCreateForm(async (name, root, options) => {
+    creations.push([name, root, options?.createRoot === true]);
+    return outcome;
+  }, (project) => selections.push(project));
+  ui.openPicker();
+  ui.typePath("/data/projects/not-there-yet");
+  ui.submit();
   await settle();
-  expect(creations).toEqual([["Fresh Project", "/data/projects/fresh", false]]);
-  expect(container.textContent).toContain("This directory doesn't exist yet");
-  expect(offerButton()).toBeDefined();
+  expect(creations).toEqual([["not-there-yet", "/data/projects/not-there-yet", false]]);
+  expect(ui.form().textContent).toContain("The directory does not exist: /data/projects/not-there-yet");
+  expect(ui.offerButton()).toBeDefined();
 
-  /* Editing the root retracts the offer — it was made for the typed path. */
-  flushSync(() => type(inputs[1]!, "/data/projects/fresher"));
-  expect(offerButton()).toBeUndefined();
-  flushSync(submit);
+  /* Choosing another root retracts the offer — it was made for that path. */
+  ui.openPicker();
+  ui.pick("/data/projects/fresh-idea");
+  expect(ui.offerButton()).toBeUndefined();
+  ui.submit();
   await settle();
-  expect(offerButton()).toBeDefined();
+  expect(ui.offerButton()).toBeDefined();
 
   /* The offered action resubmits with the mkdir opt-in; a failed mkdir reads
      back its cause and retracts the offer. */
-  outcome = { ok: false, code: "MKDIR_FAILED", message: "EACCES: permission denied, mkdir '/data/projects/fresher'" };
-  flushSync(() => offerButton()!.dispatchEvent(click()));
+  outcome = { ok: false, code: "MKDIR_FAILED", message: "EACCES: permission denied, mkdir '/data/projects/fresh-idea'" };
+  flushSync(() => ui.offerButton()!.dispatchEvent(click()));
   await settle();
-  expect(creations[creations.length - 1]).toEqual(["Fresh Project", "/data/projects/fresher", true]);
-  expect(container.textContent).toContain("Couldn't create the directory");
-  expect(container.textContent).toContain("EACCES");
-  expect(offerButton()).toBeUndefined();
+  expect(creations[creations.length - 1]).toEqual(["fresh-idea", "/data/projects/fresh-idea", true]);
+  expect(ui.form().textContent).toContain("Couldn't create the directory");
+  expect(ui.form().textContent).toContain("EACCES");
+  expect(ui.offerButton()).toBeUndefined();
   expect(selections).toEqual([]);
 
   /* Success through the offer selects the project and closes the form. */
   outcome = { ok: false, code: "MISSING_DIRECTORY" };
-  flushSync(submit);
+  ui.submit();
   await settle();
   outcome = { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
-  flushSync(() => offerButton()!.dispatchEvent(click()));
+  flushSync(() => ui.offerButton()!.dispatchEvent(click()));
   await settle();
   expect(selections).toEqual(["dir-0123456789abcdef0123456789abcdef"]);
-  expect(container.querySelector("form")).toBeNull();
+  expect(ui.formPresent()).toBe(false);
+});
+
+/* Third outcome: an absolute directory that already carries a project keeps
+   the duplicate message, and a success closes the form onto the new project. */
+test("create-project: a duplicate keeps its own message, then a success selects the project", async () => {
+  suggestedDirs = ["/data/projects/fresh-idea"];
+  const selections: string[] = [];
+  const creations: Array<[string, string]> = [];
+  let outcome: CreateProjectOutcome = { ok: false, code: "DUPLICATE_PROJECT" };
+  const ui = await openCreateForm(async (name, root) => {
+    creations.push([name, root]);
+    return outcome;
+  }, (project) => selections.push(project));
+  ui.openPicker();
+  ui.pick("/data/projects/fresh-idea");
+  ui.submit();
+  await settle();
+  expect(creations).toEqual([["fresh-idea", "/data/projects/fresh-idea"]]);
+  expect(ui.form().textContent).toContain("This project already exists");
+  expect(ui.form().textContent).not.toContain("Directory not found");
+  expect(selections).toEqual([]);
+
+  outcome = { ok: true, project: "dir-0123456789abcdef0123456789abcdef" };
+  ui.submit();
+  await settle();
+  expect(selections).toEqual(["dir-0123456789abcdef0123456789abcdef"]);
+});
+
+/* A root outside the directories the viewer knows is refused in its own words
+   (issue #1223) — the bound the suggestions honour is the bound creation has. */
+test("create-project: a root outside the known areas is refused in its own words", async () => {
+  suggestedDirs = ["/data/projects/fresh-idea"];
+  const ui = await openCreateForm(async () => ({ ok: false, code: "OUTSIDE_ROOTS" }));
+  ui.openPicker();
+  ui.typePath("/somewhere/else/entirely");
+  ui.submit();
+  await settle();
+  expect(ui.form().textContent).toContain("outside the known project directories");
 });
 
 /* Restore the real fetch for any later test file sharing this process. */
