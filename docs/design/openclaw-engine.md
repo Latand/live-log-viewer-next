@@ -10,15 +10,15 @@ Verbatim, from the operator's request line in GitHub issue #1207 (opened
 > Viewer can host an OpenClaw agent as a structured host (spawn, deliver a
 > message, stream the turn, resume, kill).
 
-Everything below is validated against that sentence. Scope that the sentence
-does not demand is preserved in **Deferred — not currently justified**.
+Everything below is validated against that sentence. Scope beyond the sentence
+is preserved in **Deferred — not currently justified**.
 
 ## Evidence discipline
 
 Two sources: this repository, and read-only inspection of the OpenClaw
-2026.6.10 install on the development machine. Source evidence was first read at
-`ac197031` and re-verified against `main` at `e61c1ce4`, which is the baseline
-phase 1 is cut from — see *Baseline and lane ownership*. No OpenClaw state was
+2026.6.10 install on the development machine. Source evidence was re-verified
+against `origin/main` at `dbfa3753` on 2026-08-27. That commit includes the
+structured-host inventory and kill work from #1203. No OpenClaw state was
 written, and the operator's running Gateway was not started, stopped or
 reconfigured.
 
@@ -36,18 +36,17 @@ and cites what was measured instead.
 
 | # | Question | Decision |
 |---|----------|----------|
-| a | Engine surface | A third union member on `Engine`/`Fmt`, in preference to an engine-descriptor registry. The seam is `Fmt` for rendering plus a named `hostable` predicate for lifecycle. |
+| a | Engine surface | Add `openclaw` to `Engine` and `Fmt`. Use explicit third arms at the viewing call sites. Defer the repository-wide hostability predicate and root-descriptor abstraction. |
 | b | Viewing | The session file alone is authoritative for the message chain **and** for model/provider. The trajectory supplies only `sessionKey`. Checkpoints are excluded from discovery. |
-| c | Project attribution | A pure path recognizer for the OpenClaw workspace, minting one stable directory identity, inserted ahead of every disk-dependent resolver. |
-| d | Hosting transport | The ACP bridge (`openclaw acp`), spawned through an explicit real-Node interpreter, behind a four-check preflight whose every message names the interpreter it resolved. |
-| e | Phasing | Viewing (phase 1) / hosting (phase 2). Phase 1 is one PR — scanning, attribution, turn state and structured rendering together — cut against `main` at `e61c1ce4`. |
+| c | Project attribution | Add an exact-workspace pure path recognizer before disk-dependent resolution, and call the existing overlay for OpenClaw roots. Descendant repositories retain normal repository attribution. |
+| d | Hosting transport | Keep ACP as the leading candidate. Do not select it for implementation until an isolated Gateway proves cancellation and kill parity. The installed bridge lacks status and model methods and hides `chat.abort` failures. |
+| e | Phasing | Phase 1 ships viewing in one PR: discovery, stable attribution, list/search, model and effort display, turn state, and structured feed rendering. Hosting remains phase 2 after its transport gates pass. |
 
 ---
 
 ## Corrections to the issue's starting facts
 
-The issue asked for these to be re-verified rather than assumed. Four of them
-did not survive.
+Verification changed four of the issue's starting facts.
 
 **1. Model and provider do not come from the trajectory file.** The issue says
 "The trajectory file supplies model/provider/run metadata; the session file
@@ -68,13 +67,11 @@ without the `-topic-<n>` suffix. Header ids are bare v4-shaped ids in 52 of 54
 cases and are unique across all files and across both agent ids. The header is
 the identity; the filename is not.
 
-**4. Checkpoints are not fragments to merge.** The one checkpoint file present
-is a *complete* transcript in its own right — its own `"session"` header, then
-its own `parentId`-chained message records — and the session file it is named
-after does not exist. A checkpoint is an alternative branch of a conversation,
-not a continuation of one. Merging it into the base conversation would
-duplicate the whole history. Phase 1 excludes `*.checkpoint.*.jsonl` from
-discovery.
+**4. Each checkpoint is a self-contained transcript.** The one checkpoint file
+present has its own `"session"` header and `parentId`-chained message records.
+The session file named by that checkpoint does not exist. Merging the checkpoint
+would duplicate its complete history. Phase 1 excludes
+`*.checkpoint.*.jsonl` from discovery.
 
 The `-topic-<n>` naming and the checkpoint-as-fork shape are inferences from
 file structure; OpenClaw's own semantics for them were not read out of its
@@ -88,209 +85,85 @@ exclusion.
 
 ### What is actually there
 
-There are already **three** engine unions with three different memberships:
+There are already **four** engine unions with three different memberships:
 
-- `src/lib/types.ts:13` — `export type Engine = "codex" | "claude" | "shell"`
-- `src/lib/types.ts:15` — `export type Fmt = "codex" | "claude" | "plain"`
-- `src/lib/scanner/process.ts:13` — `export type AgentEngine = "claude" | "codex"`
+- `src/lib/types.ts:13`: `export type Engine = "codex" | "claude" | "shell"`
+- `src/lib/types.ts:15`: `export type Fmt = "codex" | "claude" | "plain"`
+- `src/lib/agent/cli.ts:29`: `export type AgentEngine = "claude" | "codex"`
+- `src/lib/scanner/process.ts:14`: a second `AgentEngine` with the same members
 
-plus 38 inline `"claude" | "codex"` type literals spread over 18 non-test
-component files — the "~15 component files" the issue counted — and more in
-`src/lib`: `src/components/AccountBadge.tsx:31`,
-`src/components/draftSpawn.ts:17`, `src/components/DraftAgentPane.tsx:54`,
-`src/components/RuntimePill.tsx:548`, `src/lib/events.ts:65` and `:88`,
-`src/lib/limits.ts:38`, `src/lib/limitsHistoryStore.ts:21`,
-`src/lib/types.ts:680`, `src/lib/lifecycle/inventorySelection.ts:43`.
+Inline two-engine unions also appear across components, launch controls,
+accounts, limits, registry, and runtime code. Most describe hostable engines or
+engine-specific products. Phase 1 widens only the viewing types identified
+below.
 
-`Engine` already carries a third member. `"shell"` — background tasks under the
-`claude-tasks` root — is referenced in 18 non-test files and the codebase
-handles it without incident. **That is the empirical answer to "how much does a
-third member cost": the widening itself is nearly free, and it has been paid
-once already.**
+`Engine` already carries a third member. `"shell"` represents background tasks
+under the `claude-tasks` root and appears in 18 non-test files. The existing
+member shows that union widening has low direct cost; engine-specific behavior
+creates the work.
 
 ### The branches, classified
 
-308 engine comparisons across 124 non-test files
-(`engine === "codex"`, `=== "claude"`, and their negations). They fall into
-four classes, and only two of them matter.
+At `origin/main` `dbfa3753`, the repeated
+`engine === "claude" || engine === "codex"` idiom appears in 33 non-test
+files. A repository-wide replacement would dominate phase 1 while preserving
+its current behavior. Phase 1 changes only the viewing call sites that must
+accept OpenClaw:
 
-**Class A — narrowing predicates, in 32 non-test files. Safe. Do not touch in
-phase 1.**
+- `src/lib/scanner/index.ts:300` and `src/lib/scanner/observe.ts:76` decide
+  whether to derive authoritative turn state.
+- `src/lib/scanner/scanCache.ts:173` primes persisted turn evidence.
+- `src/lib/scanner/projectCatalog.ts:582` decides whether a transcript enters
+  the complete list/search catalog.
 
-The idiom `entry.engine === "claude" || entry.engine === "codex"` is the single
-most repeated engine expression in the codebase. Representative sites:
-`src/lib/scanner/index.ts:300`, `src/lib/scanner/observe.ts:76`,
-`src/lib/scanner/scanCache.ts:173`,
-`src/lib/lifecycle/inventorySelection.ts:98`,
-`src/lib/lifecycle/liveness.ts:532` and `:681`,
-`src/lib/session/titleTarget.ts:68`, `src/lib/session/titleStore.ts:163`,
-`src/lib/accounts/migration/coordinator.ts:87`,
-`src/lib/workflows/store.ts:218`, `src/lib/wakatime/operatorActivity.ts:84`,
-`src/app/api/tasks/[id]/send/route.ts:80`,
-`src/app/api/tasks/[id]/spawn/route.ts:221`, `src/lib/agent/registry.ts`
-(2), `src/lib/runtime/commands.ts` (2), `src/lib/mcp/bindings.ts` (4),
-`src/lib/tasks/store.ts`, `src/lib/pipelines/store.ts`,
-`src/lib/view/snapshot.ts`, `src/hooks/useSwitchboardData.ts`. Reproduce the
-full list with (add `-l` for the file list, which is the unit that matters —
-several lines carry two matches, so an occurrence count lands anywhere between
-35 and 39 depending on how you count):
+The other narrowing predicates govern host lifecycle, launch, account
+migration, tasks, workflows, and runtime controls. They keep excluding
+OpenClaw during phase 1.
 
-```
-grep -rnE 'engine === "(claude|codex)" \|\| [^)]*engine === "(codex|claude)"' \
-  src/ --include='*.ts' --include='*.tsx' | grep -v '\.test\.'
-```
+Eight erasure coercions use `engine === "codex" ? "codex" : "claude"`.
+Phase 1 fixes the two feed coercions at
+`src/components/feed/parse.ts:1311,1486`, because OpenClaw prose and tool rows
+reach them. The launch, review-flow, task-send, inbox, and live-turn coercions
+remain unreachable for a view-only engine and move to phase 2.
 
-Every one of them is asking *"is this an engine I can host, rename, hydrate or
-spawn?"* — and under a widened union each one keeps answering **no** for
-OpenClaw, which is exactly right for phase 1. The codebase already has a safe
-default for a third engine, and it spread the definition across 32 files
-without naming it. That spread is the argument for naming it before phase 2.
+The root-specific viewing work is bounded:
 
-**This count was wrong in an earlier draft of this document, and the correction
-is worth keeping visible: the first pass found 15 files, and the real figure is
-32.** Two reasons, both of which will bite anyone who re-derives this with a
-quick grep. The idiom appears in *both operand orders* — `claude || codex` and
-`codex || claude` — and a pattern anchored on one order silently halves the
-result. And it turns up in files with nothing else engine-shaped in them
-(`src/lib/view/snapshot.ts`, `src/hooks/useSwitchboardData.ts`,
-`src/lib/pipelines/store.ts`), so a search scoped to the files that *look*
-engine-related misses them too. Anyone sizing item 9 from a single-order grep
-will plan half the work.
-
-**Class B — erasure coercions (8 sites). Actively wrong. Must be fixed.**
-
-`src/components/DraftAgentPane.tsx:396`,
-`src/components/flows/directReviewGroups.ts:134` and `:146`,
-`src/components/feed/parse.ts:1311` and `:1486`,
-`src/app/api/tasks/[id]/send/route.ts:94`,
-`src/lib/runtime/liveTurn.ts:374`,
-`src/lib/tasks/inboxScanner.ts:144`.
-
-These read `engine === "codex" ? "codex" : "claude"` and *relabel* anything
-that is not Codex as Claude. TypeScript approves: the expression is total over
-any union. An OpenClaw conversation flowing through
-`src/lib/tasks/inboxScanner.ts:144` becomes a Claude conversation in the task
-inbox, and nothing anywhere reports it.
-
-**Class C — presentation ternaries (~99 sites). Cosmetic. Long tail.**
-
-Colours, labels, avatars: `src/components/utils.ts:95`,
-`src/components/feed/FeedItem.tsx:106-107`,
-`src/components/scheme/offscreenClusters.ts:384`. A third engine renders in
-Claude's colour with Claude's icon. Wrong, visible, harmless, and fixable
-incrementally.
-
-**Class D — genuinely engine-specific machinery. This is the real work.**
-
-Eight places, all of them keyed on the transcript **root** rather than on a
-free-floating engine string:
-
-| Concern | Site | Shape |
+| Concern | Current gate at `dbfa3753` | Phase-1 change |
 |---|---|---|
-| Root inventory | `src/lib/scanner/roots.ts:33-47` | `Record<RootKey, string>` + `scanRootEntries()` |
-| Root → engine | `src/lib/scanner/discover.ts:347` | `rootName === "codex-sessions" ? "codex" : "claude"` |
-| Metadata derivation | `src/lib/scanner/describe.ts:918-983` | `if (rootName === …) else if … else if …` |
-| Turn state | `src/lib/scanner/activity.ts:428` → `src/lib/accounts/migration/turnState.ts:92` | a **boolean** `codex: boolean` |
-| Effort extraction | `src/lib/scanner/effort.ts:19-30` | `entry.root === "codex-sessions"` / `"claude-projects"` |
-| Feed rendering | `src/components/feed/parse.ts:2127` | `cfg.fmt === "claude" ? renderClaude : renderCodex` |
-| Host construction | `src/lib/runtime/structuredSpawn.ts:1312`, `:1372` | `engine === "codex" ? … : …` |
-| Persisted-cache validators | `src/lib/scanner/scanCache.ts:105,109,111`; `src/lib/scanner/projectCatalog.ts:136-137`; `src/lib/resourceCollector.worker.ts:45` | literal enum echoes |
+| Discovery | `src/lib/scanner/roots.ts:33-47`; `discover.ts:347` | Add the root and an explicit third branch. |
+| Metadata and search text | `describe.ts:883,889-999` | Parse OpenClaw cwd, start time, title, and first prompt. |
+| Project overlay | `describe.ts:1001-1035` | Route OpenClaw cwd through `projectInfoFromCwd`. |
+| Turn state | `turnState.ts:92`; `activity.ts:156-194,428` | Replace the `codex: boolean` parameter and cache key with an engine discriminator. |
+| Model | `scanner/model.ts:25-45` | Admit the root and read the latest real assistant model. |
+| Effort | `scanner/effort.ts:10,17-30,62-64` | Admit the root and read `thinking_level_change`. |
+| Complete catalog | `conversationCatalog.ts:15`; `projectCatalog.ts:582` | Add OpenClaw to the catalog type and filter. |
+| Feed | `feed/parse.ts:226,1374,2127`; `feed/tools.ts:184-188` | Add a structured renderer and carry the engine through prose and tool rows. |
+| Persisted shapes | `scanCache.ts:105,109,111`; `projectCatalog.ts:124,136-137`; `resourceCollector.worker.ts:53` | Widen validators together and bump the scan schema from 9 to 10. |
 
-Of these, only two are structurally hostile.
-
-`turnStateFromRecords(records, codex: boolean, authoritative)` at
-`src/lib/accounts/migration/turnState.ts:92` cannot express a third engine at
-all — the parameter is a boolean, fed from `root.startsWith("codex")` at
-`src/lib/scanner/activity.ts:428`. A new root falls into the `false` arm and
-gets Claude's parser, which keys on `record.type === "assistant"` and
-`message.stop_reason` (`turnState.ts:166-173`). No OpenClaw record has
-`type: "assistant"` — they are all `type: "message"` — so every branch misses
-and the function returns `{ state: "unknown", source: "empty" }` forever. The
-failure is quiet and degrades to mtime-only activity rather than lying, but the
-boolean must become a discriminator before OpenClaw can report turn state.
-
-The three persisted-cache validators echo the enums as literals. Widen one and
-not the others and entries are silently dropped:
-`src/lib/resourceCollector.worker.ts:45` discards the whole entry;
-`src/lib/scanner/projectCatalog.ts:136-137` blanks `engine` and `fmt` to
-`undefined`. **They move together, in the same commit, with
-`FILE_SCAN_CACHE_SCHEMA_VERSION` (`src/lib/scanner/scanCache.ts:75`) bumped from
-9 to 10** so an older build rejects a newer snapshot wholesale and rescans
-instead of reading it through a narrower enum.
-
-### Registry of engine descriptors, or a third union member?
-
-**A third union member.** A descriptor registry is over-built here, and the
-evidence for that is specific rather than aesthetic:
-
-1. The widening is already proven cheap — `"shell"` did it.
-2. A descriptor cannot help Class B or Class C at all. Those 107 ternaries are
-   binary expressions that are *total* over any union; no amount of descriptor
-   indirection makes `x === "codex" ? a : b` stop compiling. They have to be
-   read and fixed by hand either way.
-3. The facts that genuinely vary are few, they all live in the scanner, and
-   they are already keyed on `RootKey` — which is a descriptor key in all but
-   name.
-
-What is worth building is far smaller than a registry: **one root descriptor**,
-declared next to `ROOTS`, carrying exactly the five facts the scanner branches
-on.
-
-```ts
-interface TranscriptRootDescriptor {
-  root: RootKey;
-  engine: Engine;          // discover.ts:347 reads this instead of branching
-  fmt: Fmt;                // selects the feed renderer
-  dir: () => string[];     // account homes / profile dirs
-  isTranscript(basename: string): boolean;  // excludes .trajectory/.checkpoint/.bak
-}
-```
-
-That is the whole descriptor. It does **not** carry launch arguments, model
-catalogues, account shapes or UI labels — those either do not exist for
-OpenClaw in phase 1 or are better expressed as the capability predicate below.
-Proposing a descriptor that carries them would be building the abstraction for
-a fourth engine that nobody has asked for.
+`turnStateFromRecords(records, codex: boolean, authoritative)` cannot express
+OpenClaw. The false arm expects Claude records whose top-level type is
+`assistant`; OpenClaw wraps assistant messages in a top-level `message` record.
+The replacement parameter is `engine: "codex" | "claude" | "openclaw"`.
+`activity.ts`, `scanner/index.ts`, `scanner/observe.ts`, and the persisted cache
+pass that value without another boolean conversion.
 
 ### The seam
 
-Three named things, and they are what keep the third engine off 300 call sites.
+Phase 1 uses the seams already present:
 
-1. **`Fmt` is the rendering seam.** `src/components/feed/parse.ts:2127`
-   dispatches on `cfg.fmt`, and `renderClaude`
-   (`src/components/feed/parse.ts:1943`) is a pure record→primitive emitter: it
-   calls `addUserText`, `addProse`, `push({kind:"think"})`,
-   `registerCall(newToolEvent(…))`, `addOutput`, `addCompact`, `pushImage`, and
-   returns. A third renderer calling the same primitives is the entire feed
-   change. No card, no tool summariser, no timeline consumer learns a third
-   engine.
+1. `Fmt` selects `renderOpenclaw` beside the existing renderers in
+   `src/components/feed/parse.ts`.
+2. `RootKey` selects the explicit scanner branch in discovery, metadata, model,
+   effort, and turn-state code.
+3. `EngineHost` remains the phase-2 host boundary at
+   `src/lib/runtime/engineHost.ts:100-108`.
 
-2. **A named capability predicate is the lifecycle seam.** The 32 Class-A
-   files already implement it; give it a name and a single definition —
-
-   ```ts
-   /** Engines the Viewer can host, resume, rename and hydrate. */
-   export function isHostableEngine(engine: Engine | null | undefined): engine is AgentEngine
-   ```
-
-   — and adopt it at those sites. This is the precedent
-   the codebase already set for capability probing:
-   `hostSupportsCompact(host)` at `src/lib/runtime/engineHost.ts:126`. Phase 1
-   defines it to exclude OpenClaw; phase 2 changes it in one place and every
-   call site follows. Without the name, phase 2 is a 32-file audit that a
-   reviewer cannot check.
-
-3. **`EngineHost` is the hosting seam** (`src/lib/runtime/engineHost.ts:100`).
-   Six methods. `src/lib/runtime/structuredSpawn.ts:1312` and `:1372` are the
-   only two construction sites, and both are `if/else` — turning them into a
-   three-way switch is a phase-2 edit of two functions.
-
-**What the seam does not protect.** Class B's eight erasure sites and Class C's
-ninety-nine presentation ternaries sit outside all three seams, and no seam can
-pull them in, because they are expressions over the union rather than
-dispatches through it. TypeScript will not flag a single one. They must be
-enumerated by grep and fixed by reading. This document's Class B list is that
-enumeration for the eight that produce wrong data.
+A root descriptor adds an abstraction around three transcript roots and does
+not reduce the phase-1 edits above. A global `isHostableEngine` migration adds
+changes across 33 files before OpenClaw is hostable. Both move to
+**Deferred — not currently justified**. Phase 2 can introduce one narrow
+hostability helper after its transport is proven and its real call sites are
+known.
 
 ---
 
@@ -309,7 +182,7 @@ Measured shape, over 54 files:
 - Record types thereafter: `"message"` (2 940), `"custom"` (33),
   `"model_change"` (23), `"thinking_level_change"` (23).
 - Every `"message"` record has exactly `{id, parentId, timestamp, type,
-  message}` — a `parentId` chain, structurally the same idea as Claude's
+  message}`, a `parentId` chain with the same structural role as Claude's
   `uuid`/`parentUuid`.
 - `message.role` is one of `"user"` (205), `"assistant"` (1 452) or
   `"toolResult"` (1 283).
@@ -325,15 +198,13 @@ Inner `message` objects, on the assistant records:
   must not assume the key set is invariant across OpenClaw versions.
 - `stopReason` ∈ `{toolUse, stop, error, aborted}`.
 
-`stopReason` is the turn-state signal, and it is cleaner than either engine's
-current one: the last assistant record ending in `stop` is a completed turn;
-`toolUse` is a turn still running; `error`/`aborted` are terminal. That is the
-third branch of `turnStateFromRecords` in about five lines.
+`stopReason` is the turn-state signal. The last assistant record ending in
+`stop` is a completed turn. `toolUse` keeps the turn busy, and `error` or
+`aborted` ends it.
 
-Two provider values are synthetic — records OpenClaw injected rather than
-model output, distinguishable because `provider` is `openclaw` rather than a
-real provider name. They must not be counted as model usage and must not set
-the conversation's displayed model.
+Two measured records use the synthetic provider value `openclaw`. Real model
+outputs name an external provider. Synthetic records do not count as model
+usage and cannot set the displayed model.
 
 `model_change` and `thinking_level_change` records carry `{modelId, provider}`
 and `{thinkingLevel}` respectively, which is where mid-conversation model and
@@ -349,10 +220,9 @@ modelId, modelApi, data}`. Event types: `session.started`, `context.compiled`,
 `session.ended`, `trace.metadata`, `trace.artifacts`, `turn.client_closed`.
 
 Everything there except `sessionKey` duplicates the session file. `sessionKey`
-does not appear in the session file at all, and it is what phase 2 needs to
-resume a session (`openclaw acp --session <key>`). Phase 1 reads it — from the
-first `session.started` event, whose `data.sessionFile` is also the reliable
-back-pointer to the transcript — and stores it, doing nothing else with it.
+does not appear in the session file and is needed only for hosting. Phase 1
+excludes trajectories. Phase 2 reads the first `session.started` event and uses
+its `data.sessionFile` back-pointer to join the key to the transcript.
 
 "session" in the trajectory names a *run*. There were 143
 `session.started` events across 58 files, one per submitted prompt.
@@ -361,7 +231,7 @@ back-pointer to the transcript — and stores it, doing nothing else with it.
 
 Two independent signals, and one of them does not work here.
 
-**Signal 1 — mtime and turn state. Works.** `resourceActivity` at
+**Signal 1: mtime and turn state.** `resourceActivity` at
 `src/lib/scanner/discover.ts:337-340` grades by transcript age (`< 20 s` live,
 `< 900 s` recent, else idle) and is engine-agnostic. Layered on it,
 `src/lib/scanner/activity.ts:428` reads the transcript tail for turn state.
@@ -369,19 +239,17 @@ Once the OpenClaw branch of `turnStateFromRecords` exists, a trailing assistant
 record with `stopReason: "toolUse"` reads as busy and one with `"stop"` reads
 as done, matching the fidelity Claude and Codex have.
 
-**Signal 2 — process attribution. Does not work, and phase 1 must not pretend
-it does.** `argvEngine` at `src/lib/scanner/process.ts:122` maps a live process
+**Signal 2: process attribution is unavailable.** `argvEngine` at
+`src/lib/scanner/process.ts:122` maps a live process
 to an engine by binary basename, and `agentProcesses()` at `:155` pairs one pid
 to one transcript by cwd. OpenClaw has no per-session process. One long-lived
-Gateway process writes every session file for every agent id and every channel
-— observed on this machine as a single `node … openclaw/dist/index.js gateway
---port <port>`. Mapping it to a conversation would attribute every OpenClaw
+Gateway process writes every session file for every agent id and every channel.
+It was observed as one `node … openclaw/dist/index.js gateway --port <port>`
+process. Mapping it to a conversation would attribute every OpenClaw
 session to the same pid.
 
-Phase 1 therefore leaves `pid`/`proc` null for OpenClaw entries. This costs
-nothing that matters: `argvEngine` returns `AgentEngine`, which phase 1 does
-not widen, so `src/lib/scanner/process.ts` — a file the #1199 lane owns — is
-not touched at all.
+Phase 1 leaves `pid` and `proc` null for OpenClaw entries. `AgentEngine` stays
+two-membered, so `src/lib/scanner/process.ts` remains unchanged.
 
 ### How the scanner discovers sessions across agent ids
 
@@ -402,7 +270,7 @@ The sessions directory is not clean, and the filter is the load-bearing part.
 Beside real transcripts it holds `.trajectory.jsonl`, `.trajectory-path.json`,
 `.codex-app-server.json`, `.acp-stream.jsonl`, `.checkpoint.<id>.jsonl`,
 `sessions.json`, and dated `.bak` / `.deleted.<timestamp>` files from past
-repairs — in the agent inspected, 58 trajectories, 58 `trajectory-path`
+repairs. In the agent inspected, 58 trajectories, 58 `trajectory-path`
 sidecars and 36 app-server sidecars against 54 transcripts, plus a long tail of
 backups. `isTranscript(basename)`
 admits `*.jsonl` and rejects any basename containing `.trajectory.`,
@@ -413,7 +281,7 @@ count with sidecars and dead backups.
 `sessions.json` deserves a note because it looks tempting and should not be
 used. It is a live index keyed by session key carrying `sessionFile`,
 `sessionId`, `label`, `model`, `modelProvider`, token counts, `chatType`,
-`lastInteractionAt` and `sessionStartedAt` — a ready-made metadata source. It
+`lastInteractionAt` and `sessionStartedAt` (a ready-made metadata source). It
 covered 21 entries against the 54 transcripts on disk, so it indexes only
 recent sessions and would silently hide the rest. Phase 1 reads the transcripts.
 
@@ -430,14 +298,11 @@ recent sessions and would silently hide the rest. Phase 1 reads the transcripts.
 | `role: "toolResult"` record (`{toolCallId, toolName, isError, content}`) | `addOutput(toolCallId, text, isError)` |
 | `custom` / `model_change` / `thinking_level_change` | `addSvc` |
 
-The one shape difference worth calling out is why this is a third renderer
-rather than a record-shape adapter. In Claude's format a tool result is a
+This needs a third renderer because Claude stores a tool result as a
 `tool_result` content block inside a `"user"` record; in OpenClaw it is a
 top-level record with its own role. Translating OpenClaw into Claude's shape
-would mean synthesising fake `"user"` records to carry results the operator
-never sent — inventing records to satisfy a parser. The third renderer calls
-`addOutput` directly and invents nothing. Roughly 80 lines against a translator
-that would be shorter to write and permanently harder to reason about.
+would synthesize `"user"` records that the operator never sent. The third
+renderer calls `addOutput` directly.
 
 Content-block key sets to code against: `toolCall` is `{type, id, name,
 arguments}` and sometimes carries `partialJson` or `input`; `thinking` is
@@ -455,16 +320,16 @@ arguments}` and sometimes carries `partialJson` or `input`; `thinking` is
 52 of 54 session headers carry the same `cwd`: the OpenClaw workspace,
 `<stateDir>/workspace`. All 1 507 trajectory events carry the same
 `workspaceDir`. The remaining two sessions' cwd is the home directory. Session keys
-are channel-bound — `agent:<id>:<channel>:<kind>:<peer>…`, `agent:<id>:cron:…`,
-`agent:<id>:main` — and name no repository.
+are channel-bound (`agent:<id>:<channel>:<kind>:<peer>…`,
+`agent:<id>:cron:…`, `agent:<id>:main`) and name no repository.
 
-So the question is not "which of many projects" but "what is the one project
-these all belong to, and does that answer survive the workspace being gone".
+The attribution decision must assign this shared workspace one stable project
+that survives workspace deletion.
 
 ### Why the default answer fails the AGENTS.md invariant
 
-The OpenClaw workspace **is itself a git repository** — it has a real `.git`
-directory — with no `origin` remote. Trace it through
+The OpenClaw workspace **is itself a git repository**. It has a real `.git`
+directory and no `origin` remote. Trace it through
 `projectInfoFromCwd` (`src/lib/scanner/describe.ts:530`):
 
 *While the directory exists:* no path recognizer matches, `hasGitMarker(cwd)`
@@ -478,7 +343,7 @@ no remote and falls to `canonical = "local:" + realpath(root)`, minting
 `src/lib/projects/identity.ts:154` does `fs.lstatSync` on a path that is gone
 and returns `null`. `repositoryRootForPath` returns `null`. `hasGitMarker` is
 now false, so `:549` reaches `worktreeFromMemory` and then `persistedProjects`
-— which is populated from `flows`/`workflows` rows in `state.sqlite`
+which is populated from `flows` and `workflows` rows in `state.sqlite`
 (`src/lib/scanner/describe.ts:492`), so a channel-bound session that never
 joined a flow has no entry. Execution falls to `directoryProjectInfo()` at
 `:562`, minting `dir-<digest>`.
@@ -490,28 +355,26 @@ worktree's grouping must survive the checkout being deleted… Any mapping that
 finds the parent repo only by reading on-disk git metadata silently fails
 afterward."*
 
-It is worth being honest that this hazard is not OpenClaw's. Any transcript
-whose cwd is a remote-less git repository has it today. OpenClaw makes it
-systemic by putting 52 of 54 sessions in one such directory.
+Any transcript whose cwd is a remote-less git repository has this hazard.
+OpenClaw makes it systemic by putting 52 of 54 sessions in one such directory.
 
 ### The decision
 
-**Add a pure path recognizer for the OpenClaw workspace, and place it in the
-pure-path group so it precedes every disk-dependent resolver.** This is exactly
-the instruction AGENTS.md gives for a new agent layout: *"prefer a pure path
-recognizer beside #1–#4 and wire it into `projectInfoFromCwd`."*
+**Add a pure path recognizer for the exact OpenClaw workspace directory, and
+place it before every disk-dependent resolver.** AGENTS.md requires a path
+recognizer when the path itself identifies the parent project.
 
 ```ts
-/** Recognizer 1.5, immediately after the scratchpad early-return at
-    describe.ts:539 — ahead of every resolver that reads the disk. */
+/** Immediately after the scratchpad early-return at describe.ts:539. */
 function projectInfoFromOpenclawWorkspace(cwd: string): ProjectInfo | null
 ```
 
-It fires when `cwd` is, or is under, `<stateDir>/workspace` for the default
-state dir, `OPENCLAW_STATE_DIR`, or any `~/.openclaw-<profile>` sibling. It
-returns a `DirectoryProjectIdentity` computed from `path.resolve(workspace)`
-— never `fs.realpathSync` — so the identity is byte-identical whether or not
-the directory exists.
+It fires only when the normalized cwd equals `<stateDir>/workspace` for the
+default state directory, `OPENCLAW_STATE_DIR`, or a
+`~/.openclaw-<profile>/workspace` path. It returns the existing directory
+identity computed from `path.resolve(workspace)`, with display name
+`OpenClaw`. It never calls `realpathSync`, so the identity is identical before
+and after deletion.
 
 Three properties this buys, each of which the alternatives lose:
 
@@ -520,29 +383,26 @@ Three properties this buys, each of which the alternatives lose:
   mints a competing `repo-` identity.
 - **Inside the existing id namespace** (`dir-<32 hex>`, which
   `isCanonicalProjectId` at `src/lib/projects/identity.ts:22` already accepts),
-  so no second naming scheme is invented — the other thing AGENTS.md warns
-  against.
+  so the implementation keeps the naming scheme required by AGENTS.md.
 
-The display name is set explicitly rather than taken from the basename:
-`projectIdentityFromDirectory` would name this project **workspace**, which
-reads like a repository and would collide in the sidebar with any real
-checkout of that name.
+The exact-match boundary preserves a repository nested under the workspace.
+That descendant falls through to `worktreeFromGitFile` and repository
+resolution while it exists, then to the existing persisted worktree map after
+deletion. The one measured home-directory session keeps the existing home
+directory identity.
 
-Sessions whose cwd is a genuine git checkout are untouched — the recognizer is
-scoped to the workspace subtree and everything else falls through to the
-existing chain. The one home-directory session resolves to the existing
-`home-<user>` directory identity, as it would today.
+`resolveProjectOverlay` at `src/lib/scanner/describe.ts:1001-1035` also needs an
+`openclaw-sessions` branch. It uses `projectInfoFromCwd(cwd, stateKey)` first
+and `projectInfoFromTranscript(pathname, stateKey)` as the persisted fallback.
+The recognizer alone would never run for an OpenClaw root because the current
+overlay calls `projectInfoFromCwd` only from the Codex and Claude branches.
 
 ### One project for the whole workspace
 
-Rejected: a project per OpenClaw agent id. It would need the transcript path
-rather than the cwd (`projectInfoFromCwd` only receives a cwd), which means
-hooking `resolveProjectOverlay` (`src/lib/scanner/describe.ts:1001`) and
-minting ids from a source other than a directory — a second naming scheme, for
-a distinction that is presentational. The agent id is already in the transcript
-path and can drive a card title or a subtitle without touching project
-identity. If the operator later wants per-agent lanes, that is a sidebar
-grouping change that leaves identity alone, and this decision does not block it.
+Rejected: a project per OpenClaw agent id. `projectInfoFromCwd` receives no
+agent id, so this option would mint project ids from transcript paths and add a
+second identity scheme. The transcript path already carries the agent id for a
+future card subtitle or sidebar grouping.
 
 ---
 
@@ -550,176 +410,119 @@ grouping change that leaves identity alone, and this decision does not block it.
 
 ### What the transport has to do
 
-From `EngineHost` (`src/lib/runtime/engineHost.ts:100-107`) and what
-`CodexAppServerHost` needs to satisfy it:
+`EngineHost` at `src/lib/runtime/engineHost.ts:100-108` has six methods. Current
+`origin/main` adds lifecycle requirements around that interface:
 
-| Requirement | `EngineHost` member |
+| Requirement | Current contract |
 |---|---|
-| Deliver a message | `send(entry): Promise<DeliveryReceipt>` — and the receipt must discriminate `steered` / `turn-started` / `queued-next-turn` / `rejected` |
+| Deliver a message | `send(entry): Promise<DeliveryReceipt>` with a truthful delivery outcome |
 | Stream a turn | `attach(afterSeq): AsyncIterable<RuntimeEvent>` |
-| Observe turn state | `health(): Promise<HostState>` with `status`, `activeTurnRef`, `eventCursor` |
-| Resume | construction via `adopt(id, options)` (`codexAppServerHost.ts:750`) |
-| Kill | `release()` |
-| Survive a viewer restart | `HostState.pid` + `processStartIdentity`, re-adoption, and a durable event store |
+| Observe turn state | `health()` with status, active turn, event cursor, pid, and process start identity |
+| Resume | Reconstruct a host for the same session and replay durable events |
+| Interrupt | `interrupt(turnRef)` must fail when the engine does not confirm the abort |
+| Release and resource kill | `release()` plus identity-bound `releaseIfOwned` in the concrete host |
+| Inventory | The registry row must pass `structuredHostControl.ts:23-67` and the structured resource types at `resources.ts:163-207` |
+| Process safety | `structuredHostControl.ts:268-451` fences termination by pid and start identity and verifies that the process tree is gone |
 
 ### The three candidates
 
-**1. ACP bridge — `openclaw acp`.** JSON-RPC over stdio, structurally identical
-to `codex app-server`, which `CodexAppServerHost` already drives over the same
-substrate (`spawn(…, {stdio: ["pipe","pipe","pipe"], detached: true})` at
-`codexAppServerHost.ts:757` and `:773`). The installed bundle contains
-`initialize`, `session/new`, `session/prompt`, `session/cancel`,
-`session/update`, `session/resume`, `session/status`, `session/list`,
-`session/set_model`, `session/set_mode`, `session/set_config_option`, plus
-client-side `fs/*` and `terminal/*` callbacks. The CLI exposes `--session <key>`,
-`--session-label`, `--require-existing`, `--reset-session`, `--provenance`, and
-gateway `--url/--token/--token-file`.
+**1. ACP bridge, `openclaw acp`.** This is the closest transport shape to the
+existing Codex stdio host. Read-only inspection of OpenClaw 2026.6.10 found
+handlers for initialization, session create/load/list/resume/close,
+prompt/cancel, mode, and config-option changes. It emits `session/update` and
+calls the client for permission decisions.
 
-Maps to all six members: `session/prompt` → `send`, `session/update`
-notifications → `attach`, `session/cancel` → `interrupt`,
-`session/request_permission` → `answer`, `session/status` → `health`,
-child termination → `release`, `--session <key> --require-existing` → resume.
+The installed server has no `session/status` handler and advertises no status
+capability. It also has no `session/set_model` handler or model capability.
+Its config options cover thinking level and several session behaviors; model
+selection is absent. Generic methods found in the bundled ACP client and SDK
+are not evidence that this bridge server implements them.
 
-**2. Gateway WebSocket.** No child process to own, so `release()` has no
-meaning — you cannot kill a shared service. Requires speaking OpenClaw's
-internal Gateway RPC, which is not a published stable protocol, plus token or
-password auth. Decisively: it is the operator's live Gateway, carrying their
-personal messaging channels, and a Viewer defect on that socket is a defect in
-the operator's messaging. Rejected.
+Health can be derived locally without a status RPC: child exit means dead,
+release means unhosted, a pending prompt means active, a permission callback
+means attention, and prompt completion means idle. The host must test this
+state machine against protocol fixtures.
 
-**3. `openclaw agent --json` per turn.** One process per turn. `--json` emits a
-single terminal result with no streaming, so `attach` degrades to "nothing until the turn ends";
-there is no `interrupt`, no attention channel, and turn state is a process exit
-code. Four of six members unsatisfied. Rejected for hosting; it remains a
-reasonable fallback for a fire-and-forget send, and is noted as such under
-Deferred.
+Cancellation remains a blocker. The bridge's cancel handler sends
+`chat.abort`, catches and logs any failure, clears its local pending prompt,
+and resolves it as cancelled. A failed Gateway abort therefore looks
+successful to an ACP client. Killing the bridge process only closes the client;
+the Gateway may continue the run.
 
-**Choice: the ACP bridge.**
+**2. Gateway WebSocket.** A direct client could call `chat.abort` and preserve
+its result, which gives it a possible route to real interruption. The cost is a
+private Gateway protocol and a direct connection to the operator's messaging
+service. This option stays behind the same isolated proof gate and needs a
+separate security review before selection.
 
-### What the ACP bridge cannot do
+**3. `openclaw agent --json` per turn.** The command returns one terminal JSON
+result. It provides no streamed deltas, permission channel, or proven remote
+abort. It cannot meet the structured-host requirement.
 
-The bridge is a *client* of the Gateway — `openclaw acp --help` describes it as
-"Run an ACP bridge backed by the Gateway", and it takes a gateway URL and
-token. The Gateway owns the agent; the bridge does not. Four consequences, and
-they are not small:
+### Transport decision gate
 
-1. **`release()` detaches; it does not stop the agent.** A turn in flight keeps
-   running inside the Gateway and keeps writing the session file after the
-   Viewer's host is gone. "Kill" means "stop watching". For Codex, killing the
-   app-server child stops the work; here it does not. The Viewer must not
-   display this as a kill.
-2. **No hosting without the Gateway, and the Viewer must not manage it.** The
-   Gateway is the operator's own long-running service. If it is down, hosting
-   is unavailable and must say so; starting it is out of bounds.
-3. **No exclusive claim on a session.** The operator's Telegram channel, a cron
-   job and the Viewer can all drive the same session key concurrently. The
-   `expectedTurnId` fence on `QueueEntry` (`engineHost.ts:22`) rejects a stale
-   Viewer-side write, but nothing prevents an operator message arriving
-   mid-turn from another channel. Codex's single-owner assumption does not
-   hold, and the registry's claim model should treat an OpenClaw host as
-   advisory rather than exclusive.
-4. **Cancellation is likely advisory.** `session/cancel` exists, but the
-   trajectory records `turn.client_closed` events (3 observed) that sit
-   alongside `session.ended`, which reads as "the client went away" being
-   logged rather than aborting the run. **Uncertain** — the bridge was not
-   exercised, because doing so would have opened a session against the
-   operator's live Gateway. Phase 2 must measure this before claiming
-   interrupt works.
+ACP is the leading candidate because it already provides session lifecycle,
+stream updates, and permission callbacks over stdio. Implementation is blocked
+until an isolated Gateway test proves all of these properties:
 
-One thing the bridge does *better* than Codex: because the Gateway holds the
-session, surviving a Viewer restart needs no process adoption. Re-attaching is
-launching a new bridge with `--session <key> --require-existing`. But the
-`RuntimeEvent` `seq` cursor is per-bridge-process, so `attach(afterSeq)` cannot
-be served by a fresh bridge. Replay stays a Viewer-side responsibility through
-the existing `FileRuntimeEventStore`
-(`codexAppServerHost.ts:709`: `options.eventStore ?? new FileRuntimeEventStore()`),
-with the session file as canonical transcript — the same division Codex
-already uses.
+1. Start a synthetic session and a deliberately long turn.
+2. Send `session/cancel` and verify the Gateway run terminates, transcript
+   growth stops, and the client receives a failure when `chat.abort` fails.
+3. Release the host during an active turn and verify the same termination
+   outcome through the runtime and resource kill surfaces.
+4. Resume the session through a fresh bridge and prove replay plus new streamed
+   events without duplication.
+
+The test uses an isolated `HOME`, `XDG_CONFIG_HOME`, `OPENCLAW_STATE_DIR`,
+`LLV_STATE_DIR`, and `TMPDIR`. It must never connect to the operator's Gateway.
+If stock ACP fails step 2, phase 2 must either add an upstream bridge fix that
+propagates abort failure or select the direct Gateway transport after its own
+proof. A detach-only release cannot ship under a control labelled kill.
+
+Expected 5 has a separate gate. Effort maps to `session/set_mode` or the
+advertised thought-level config option. Model control has no route in this ACP
+server. Phase 2 must demonstrate a supported model method before enabling the
+Viewer's model selector. Until then, OpenClaw model selection stays disabled
+with an explicit unsupported reason.
+
+Once the transport passes, replay remains Viewer-owned through a durable event
+store. The session transcript is canonical across bridge restarts, while each
+bridge process has its own runtime event cursor.
 
 ### The `node:sqlite` obstacle: root cause, fix, diagnosis
 
-**The cause is `PATH`.** OpenClaw is fine and Bun is fine; the resolution of
-the name `node` is what breaks.
+The observed failure comes from resolving `node` through a Bun child-process
+shim. `openclaw` uses `#!/usr/bin/env node`, and the Viewer forwards `PATH`
+through `CHILD_ENV_ALLOWLIST` and `subscriptionEnv` at
+`src/lib/runtime/codexAppServerHost.ts:226,396-400`.
 
-Reproduced on this machine:
+Bun 1.3.3 exposes a sharper trap: `require("node:sqlite")` can exit zero without
+returning `DatabaseSync`. An ESM named import fails under that shim. The earlier
+CommonJS exit-code probe therefore accepted the broken runtime.
 
-- `openclaw` is a shim whose first line is `#!/usr/bin/env node`.
-- `which node` resolves to `/tmp/bun-node-<hash>/node` — a shim directory Bun
-  prepends to `PATH` for its child processes. `node --version` there answers
-  with a Bun error in place of a version.
-- `bun -e 'require("node:sqlite")'` on Bun 1.3.3 fails: *No such built-in
-  module: node:sqlite*.
-- `openclaw --help` under that `node` terminates with
-  `error: Registry URL must be http:// or https:// Received: "node:sqlite"`.
-- The same command run as `/usr/bin/node <openclaw-dist-entry> --help` exits
-  clean, with no error. `/usr/bin/node` (v26) imports `node:sqlite`
-  successfully; so does a v22 runtime.
-
-And the mechanism by which the Viewer would inherit this: `PATH` is the first
-entry of `CHILD_ENV_ALLOWLIST` at `src/lib/runtime/codexAppServerHost.ts:226`,
-and `subscriptionEnv` (`:396-400`) forwards every allowlisted variable
-verbatim. A Viewer running under Bun hands its Bun-shimmed `PATH` to any child
-it spawns. An `openclaw` child would resolve `node` to Bun and die at startup,
-every time.
-
-Note also that the operator's own running Gateway is launched with an explicit
-absolute path to a bundled Node runtime rather than through the shim — the same
-workaround, arrived at independently.
-
-**The fix.** Never spawn the `openclaw` shim and never depend on inherited
-`PATH`. Spawn the interpreter directly on OpenClaw's entry script:
+The host resolves a Node interpreter and the OpenClaw entry script explicitly,
+then spawns:
 
 ```
 <node> <openclaw-dist-entry> acp --session <key> [--require-existing] ...
 ```
 
-resolved from `LLV_OPENCLAW_NODE` and `LLV_OPENCLAW_ENTRY`, mirroring the
-`options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex"` precedent at
-`src/lib/runtime/codexAppServerHost.ts:771`. The child's `PATH` is rebuilt with
-any `/tmp/bun-node-*` segment removed, so a nested `node` lookup inside
-OpenClaw cannot fall back into the shim.
+`LLV_OPENCLAW_NODE` and `LLV_OPENCLAW_ENTRY` provide explicit overrides. The
+default resolver must reject Bun shim directories and include the selected
+interpreter in any launch diagnostic.
 
-**The named diagnosis.** `stderrExitDiagnostic`
-(`src/lib/runtime/codexAppServerHost.ts:378`) relays the last four stderr lines
-verbatim — useful, but what it produces is prose, and the observed
-failure string talks about a registry URL. Scraping it is the wrong primary
-mechanism. The host runs a **preflight before spawn**, each check with its own
-code, and a launch failure surfaces as that code rather than as a dead host:
+The preflight stays small:
 
 | Code | Check | Message must name |
 |---|---|---|
-| `openclaw_runtime_missing` | configured interpreter is absent or not executable | the path that was resolved, and where it came from (`LLV_OPENCLAW_NODE`, or `PATH` lookup) |
-| `openclaw_runtime_lacks_sqlite` | `<node> -e 'require("node:sqlite")'` exits non-zero | the resolved interpreter path and its `--version` output |
+| `openclaw_runtime_missing` | configured interpreter is absent or not executable | the resolved path and configuration source |
+| `openclaw_runtime_lacks_sqlite` | `<node> --input-type=module -e 'import { DatabaseSync } from "node:sqlite"; if (typeof DatabaseSync !== "function") process.exit(1)'` fails | the resolved interpreter and its version |
 | `openclaw_entry_missing` | entry script is absent | the path that was probed |
-| `openclaw_gateway_unreachable` | no Gateway backing the bridge | the gateway URL that was tried |
 
-**Every message names the interpreter it resolved.** This is the whole value of
-the diagnosis, because the underlying fault is a name resolving to the wrong
-binary. "SQLite support is unavailable in this Node runtime" sends the operator
-to install a Node they already have. The same failure reported as —
-
-```
-openclaw_runtime_lacks_sqlite: resolved node -> /tmp/bun-node-<hash>/node
-  (from PATH); that runtime has no node:sqlite. Set LLV_OPENCLAW_NODE to a
-  real Node 22+ binary.
-```
-
-— shows a `/tmp/bun-node-*` path, and the operator is done reading. A
-diagnosis that reports only the symptom hides the one fact that identifies the
-cause.
-
-Keep it at these four checks. The preflight costs two `statSync` calls, one
-short subprocess and one gateway reachability probe, cached per host launch,
-and it earns that by turning a dead host into a sentence. Anything more
-belongs in `doctor`, and OpenClaw already has one. As a backstop, a post-spawn
-stderr matcher for `node:sqlite` maps into `openclaw_runtime_lacks_sqlite` with
-the same resolved-path line attached, since the observed message does contain
-that token even though its prose is about something else.
-
-The preflight is the only place this belongs. `detectLaunchFailure`
-(`src/lib/status.ts:261`) is the other named-failure surface in the codebase,
-but it reads a tmux screen, and the tmux transport is being removed (#1161).
-Adding an OpenClaw case there would be building on a floor that is coming out.
+Gateway reachability is part of ACP initialization and should surface the
+bridge's own failure. A separate probe would duplicate the connection and auth
+path. Tests prove that the Bun shim produces
+`openclaw_runtime_lacks_sqlite`, while supported Node 22 and 26 runtimes pass.
 
 ---
 
@@ -727,132 +530,94 @@ Adding an OpenClaw case there would be building on a floor that is coming out.
 
 ### The boundary
 
-**Phase 1: viewing. Phase 2: hosting.** The issue expected this split; three
-things confirm it, and the third is the one that actually decides it.
+**Phase 1: viewing. Phase 2: hosting.** Viewing depends only on transcript
+files and existing feed primitives. Hosting depends on a Gateway, a real Node
+runtime, and remote-run termination semantics that remain unproven.
 
-1. Viewing is additive and root-keyed. Every phase-1 edit is a new branch in an
-   existing `rootName` switch, a new member on a union that already has three,
-   or a new file. Nothing changes behaviour for Claude or Codex.
-2. Viewing has no external dependency. Hosting depends on a service the Viewer
-   does not own (the Gateway), a runtime it does not run (real Node), and a
-   claim model that does not exist (no exclusive session ownership). Two of
-   those three still carry open uncertainties — see (d). Bundling them with
-   viewing would hold a shippable increment hostage to them.
-3. **Hosting's data model rides on viewing's.** `SessionKey`
-   (`src/lib/agent/sessionKey.ts:7`) is `{engine, sessionId}`, and
-   `normalizeSessionId` (`:14`) requires the whole value to be a bare
-   v4-shaped id. OpenClaw header ids satisfy that — but the *filename* does
-   not, for the 17 of 54 files named `-topic-<n>`. Phase 1 is what establishes
-   that the registry's `sessionId` comes from the header rather than the
-   filename, and proves the registry↔transcript join with fixtures. Phase 2
-   adopts and resumes against that join. Doing them together means designing
-   the join and the host lifecycle at once, against a shape that phase 1's own
-   evidence only just corrected.
-
-There is a fourth reason, opportunistic but real: the boundary drawn here keeps
-phase 1 out of `src/lib/scanner/process.ts`, which the #1199 lane owns.
-`AgentEngine` is the *hostable*-engine union, and phase 1 deliberately does not
-make OpenClaw hostable, so it does not widen it.
+Phase 2 must build `SessionKey` from the transcript header id and the trajectory
+session key. `src/lib/agent/sessionKey.ts:7-19` accepts a bare v4-shaped id;
+OpenClaw topic filenames carry a suffix and cannot supply that value.
 
 ### What phase 1 ships
 
-Board and feed parity for OpenClaw conversations — Expected 1 and 2 — in a
-single PR, with OpenClaw explicitly **not** hostable and every Class-A
-predicate still answering "no". Scanning, project attribution, turn state,
-effort and structured rendering ship together; there is no interim state in
-which an OpenClaw conversation appears on the board but opens as unstructured
-text.
+Phase 1 delivers Expected 1 and 2 in one PR. An OpenClaw card enters the full
+catalog, receives stable project attribution, displays its real model and
+effort, reports turn state, and opens through `renderOpenclaw`. The PR has no
+plain-text fallback.
 
-Work plan, in dependency order, against `main` at `e61c1ce4`. One file
-(`src/lib/resources.ts`) is owned by the #1199 lane and is deliberately skipped
-at item 9; everything else here is free.
+Work plan against `origin/main` at `dbfa3753`:
 
-**1. `src/lib/types.ts`** — `RootKey` gains `"openclaw-sessions"` (`:8-11`);
-`Engine` gains `"openclaw"` (`:13`); `Fmt` gains `"openclaw"` (`:15`).
-Compile and read every error: they are the exhaustive-position call sites, and
-they are the only ones the compiler will ever hand you.
+**1. Core unions.** In `src/lib/types.ts`, add `openclaw-sessions` to
+`RootKey` and `openclaw` to `Engine` and `Fmt`. Keep both `AgentEngine` unions,
+`StructuredHostRecord`, and `StructuredHostKillRef` two-membered because phase
+1 creates no host.
 
-**2. `src/lib/scanner/roots.ts`** — add the OpenClaw root to `ROOTS` (`:33`)
-resolved from `OPENCLAW_STATE_DIR` with `~/.openclaw` default; extend
-`scanRootEntries()` (`:39`) to fan out one entry per `<stateDir>/agents/*/
-sessions` directory. Add `openclawSessionRootFor(candidate)` beside
-`codexSessionRootFor` (`:83`) so `/api/log` path allowlisting covers the new
-root. Declare the `TranscriptRootDescriptor` here.
+**2. Discovery.** In `src/lib/scanner/roots.ts`, resolve
+`OPENCLAW_STATE_DIR` with a `~/.openclaw` default and return one scan root per
+`agents/<agentId>/sessions` directory. In `src/lib/scanner/discover.ts`, exclude
+trajectory, checkpoint, ACP stream, sidecar, index, backup, and zero-length
+files before ranking. Add explicit OpenClaw engine, format, and title fallbacks
+at the resource-scope mapping around `:342-378`.
 
-**3. `src/lib/scanner/discover.ts:347`** — replace the two-way root ternary
-with a descriptor lookup, and fix the title fallback at `:365` alongside it.
+**3. Metadata, search, and attribution.** In
+`src/lib/scanner/describe.ts`, parse cwd, timestamp, the first user prompt, and
+the OpenClaw title. Generalize the search helper at
+`:883-886` to an engine discriminator. Add the exact-workspace recognizer after
+`:539` and the OpenClaw project overlay after `:1030`.
 
-**4. `src/lib/scanner/describe.ts`** — add an `else if (rootName ===
-"openclaw-sessions")` branch to `deriveTranscriptMetadata` (after `:983`)
-setting `engine`/`fmt`/`kind`, reading `cwd` and `sessionStartedAt` from the
-header record, and taking the title from the first `"user"` message. Add the
-`projectInfoFromOpenclawWorkspace` early-return after `:539`.
+**4. Turn state.** Replace the boolean discriminator and cache field in
+`src/lib/accounts/migration/turnState.ts` and
+`src/lib/scanner/activity.ts`. Add explicit OpenClaw arms in
+`src/lib/scanner/index.ts:300`, `src/lib/scanner/observe.ts:76`, and the
+persisted-evidence path in `src/lib/scanner/scanCache.ts:173`.
 
-**5. `src/lib/accounts/migration/turnState.ts:92`** — change the `codex:
-boolean` parameter to a discriminator, add the OpenClaw arm keyed on the last
-assistant record's `stopReason`, and update the two call sites
-(`src/lib/scanner/activity.ts:175` and `:428`) plus the `cached.codex ===
-codex` cache-key comparisons at `:165`, `:184`, `:212`, `:256`.
+**5. Model and effort display.** In `src/lib/scanner/model.ts`, admit the root
+and read the newest assistant record whose provider is a real provider. A
+record with provider `openclaw` cannot replace the displayed model. In
+`src/lib/scanner/effort.ts`, admit the root and read the latest
+`thinking_level_change`; add `off` and `adaptive` to the accepted scale.
 
-**6. The three persisted-cache validators, in one commit** —
-`src/lib/scanner/scanCache.ts:105,109,111` plus bumping
-`FILE_SCAN_CACHE_SCHEMA_VERSION` at `:75` from 9 to 10;
-`src/lib/scanner/projectCatalog.ts:136-137`;
-`src/lib/resourceCollector.worker.ts:45`.
+**6. Catalog and persisted shapes.** Add OpenClaw to
+`src/lib/scanner/conversationCatalog.ts:15`, the catalog inclusion at
+`src/lib/scanner/projectCatalog.ts:582`, and the validators in
+`projectCatalog.ts:124,136-137`, `scanCache.ts:105,109,111`, and
+`resourceCollector.worker.ts:53`. Bump `FILE_SCAN_CACHE_SCHEMA_VERSION` from 9
+to 10 in the same change.
 
-**7. `src/components/feed/parse.ts`** — add `renderOpenclaw` beside
-`renderClaude` (`:1943`) and extend the dispatch at `:2127` from a two-way
-`fmt` test to a three-way one. The mapping table under *(b) Rendering* is the
-specification; the renderer emits only primitives that already exist.
-
-**8. `src/lib/scanner/effort.ts`** — add `"off"` and `"adaptive"` to `TIERS`
-(`:10`); add an `entry.root === "openclaw-sessions"` arm to `pickEffort`
-(`:18`) reading `thinkingLevel` from `thinking_level_change` records. Do
-**not** touch `argvEffort` (`:34`) — there is no per-session process to read
-argv from.
-
-**9. The capability predicate** — define `isHostableEngine` (suggested home:
-`src/lib/agentCapabilities.ts` or beside `Engine` in `src/lib/types.ts`) and
-adopt it at the Class-A sites. Behaviour-preserving by construction; the value
-is that phase 2 becomes a one-line change with a test instead of a 32-file
-audit.
-
-One of those 32 files is still owned elsewhere: `src/lib/resources.ts`, under
-the #1199 lane. Phase 1 adopts the predicate in the other 31 and leaves that
-copy in place. Since the predicate is defined to exclude OpenClaw, the mixed
-state behaves identically either way, and the leftover is a mechanical
-follow-up once #1199 merges.
-
-**10. Class B, the eight erasure sites** — seven take an explicit third arm in
-phase 1: `src/components/feed/parse.ts:1311` and `:1486`,
-`src/components/DraftAgentPane.tsx:396`,
-`src/components/flows/directReviewGroups.ts:134` and `:146`,
-`src/app/api/tasks/[id]/send/route.ts:94`,
-`src/lib/tasks/inboxScanner.ts:144`.
-
-The eighth, `src/lib/runtime/liveTurn.ts:374` with
-`RuntimeLiveTurnToolEngine` (`:22`), waits for phase 2. Nothing produces
-live-turn rows for an engine the Viewer does not host, so widening a hosting
-type inside a viewing PR would add an unreachable branch. Carry it on the
-phase-2 issue.
+**7. Structured feed.** Add `renderOpenclaw` and a three-way `Fmt` dispatch in
+`src/components/feed/parse.ts`. Widen its prose and tool-summary engine types,
+plus `src/components/feed/tools.ts`, to carry `openclaw`. Emit one service row
+when the real provider/model changes. Update `FeedItem.tsx`, `utils.ts`, and
+`scheme/offscreenClusters.ts` so OpenClaw uses its own label, icon, and color on
+the board and in the feed. The mapping table in section (b) defines the record
+behavior.
 
 **Tests**, all against invented fixtures under an isolated
-`HOME`/`XDG_CONFIG_HOME`/`LLV_STATE_DIR`/`TMPDIR`, run **by path**:
+`HOME`/`XDG_CONFIG_HOME`/`LLV_STATE_DIR`/`TMPDIR`, run by path:
 
-- `src/lib/scanner/describe.test.ts` — the case AGENTS.md requires: an OpenClaw
-  workspace cwd resolves to the same project whether or not the directory
-  exists, and a workspace carrying a remote-less `.git` still resolves to the
-  directory identity rather than a `repo-` identity.
-- `src/lib/scanner/discover.test.ts` — a fixture agent tree yields one entry
+- `src/lib/scanner/describe.test.ts` covers title/search text, the same
+  workspace identity before and after deletion, the workspace's
+  remote-less `.git`, the OpenClaw overlay, and a genuine nested checkout that
+  retains repository attribution.
+- `src/lib/scanner/discover.test.ts`: a fixture agent tree yields one entry
   per transcript, and zero for `.trajectory.jsonl`, `.checkpoint.<id>.jsonl`,
   `.acp-stream.jsonl`, `.trajectory-path.json`, `sessions.json` and `.bak`
   siblings.
-- `src/lib/accounts/migration/turnState.test.ts` — `stopReason` of `stop`
+- `src/lib/accounts/migration/turnState.test.ts`: `stopReason` of `stop`
   reads terminal, `toolUse` reads busy, `error`/`aborted` read terminal.
-- a new `src/components/feed/openclaw.test.ts` — the six-row mapping table
-  above, plus a synthetic-provider record not setting the displayed model.
-- `src/lib/scanner/effort.test.ts` — `off` and `adaptive` normalise; an
-  unknown tier still returns null.
+- `src/lib/scanner/model.test.ts` and `effort.test.ts` cover real model display,
+  synthetic-provider exclusion, model changes, `off`, `adaptive`, and an
+  unknown effort.
+- `src/lib/scanner/conversationCatalog.test.ts` proves complete list and search
+  inclusion, including first-prompt search.
+- `src/app/api/files/scanCache.real.test.ts` and
+  `src/lib/resourceCollector.test.ts` prove persisted OpenClaw entries survive
+  validation.
+- a new `src/components/feed/openclaw.parse.test.ts` covers the six-row mapping,
+  provider/model service rows, tool-result attachment, and OpenClaw prose
+  identity.
+- `src/components/scheme/offscreenClusters.test.ts` covers the OpenClaw board
+  color.
 
 **Gates:** `bunx tsc --noEmit --incremental false`; the touched test files by
 path; `bun scripts/privacy-publication-gate.ts --base <merge-base>
@@ -860,72 +625,55 @@ path; `bun scripts/privacy-publication-gate.ts --base <merge-base>
 
 ### What phase 1 explicitly does not ship
 
-`AgentEngine` stays two-membered. `isHostableEngine` returns false for
-OpenClaw. `SessionKey` cannot name an OpenClaw session. No spawn path, no
-registry entry, no delivery controller. Model and effort **controls** — Expected
-5 — are phase 2, because they configure a launch and phase 1 does not launch
-anything; phase 1 gets read-only model/provider display for free from the
-assistant records.
+`AgentEngine` and `SessionKey` stay two-engine. Phase 1 adds no process
+recognition, spawn path, registry entry, delivery controller, model selector,
+or effort selector. It displays recorded model, provider, and effort values.
+The repository-wide hostability predicate also stays out of phase 1.
 
 ### Phase 2, sketched
 
-`AgentEngine` widening; `isHostableEngine` flipped; an `OpenclawAcpHost`
-implementing `EngineHost`; the preflight and its four diagnosis codes; third
-arms at `structuredSpawn.ts:1312` and `:1372`; the advisory-claim change to the
-registry; `--model` and `--thinking` wired to the existing model/effort
-controls. Its own PR, its own tests, its own issue. The open uncertainties from
-(d) — whether `session/cancel` aborts a run, and whether
-`session/request_permission` reaches the attention queue — get measured at the
-start of phase 2, before anything is built on them.
+Phase 2 starts with the isolated transport proof in section (d). After that
+gate passes, its implementation map follows current `origin/main`:
+
+1. Parse the bare session id from the transcript header, join the trajectory
+   session key through `data.sessionFile`, widen `AgentEngine` in
+   `src/lib/agent/cli.ts` and `SessionKey`, then add the two structured-spawn
+   construction arms.
+2. Implement the selected host with all six `EngineHost` methods,
+   identity-bound `releaseIfOwned`, process start identity in `health()`, and a
+   writer fence. `releaseIfOwned` must abort and verify the Gateway run before
+   it reaps the bridge child.
+3. Publish the host through `structuredDeliveryController.ts`, including state
+   projection, generation rebind, owned termination, and registry retirement.
+4. Extend `structuredHostControl.ts:23-67`, `resources.ts:163-207`, the resource
+   validators, and the runtime-host API so OpenClaw appears in inventory and
+   the resource kill path carries the same pid/start-identity fence. An orphan
+   bridge cannot report kill success unless a fresh control path verifies the
+   Gateway run ended.
+5. Extend `scanner/process.ts` so the bridge process carries the structured-host
+   stamp and is attributable without matching the shared Gateway process.
+6. Wire effort control through the proven ACP mode/config method. Enable model
+   control only after the transport proof demonstrates a supported model
+   method.
+
+This is a separate PR and issue. It includes protocol fixtures plus isolated
+Gateway tests for prompt streaming, attention, resume, runtime kill, resource
+kill, abort failure, process-identity mismatch, controller rebind, and replay.
 
 ---
 
-## Baseline and lane ownership
+## Baseline and file ownership
 
-**Phase 1 is cut against `main` at `e61c1ce4`**, which already contains PR
-#1206 (the #1202 `suggest_replies` lane, merged 2026-08-27). The implementer
-rebases on current `main`. This document's evidence was originally read at
-`ac197031`; both commits are recorded here because the difference is what
-decides whether the file:line citations below still hold.
+The evidence and line references in this revision use `origin/main` at
+`dbfa3753` (2026-08-27). That baseline includes the merged structured-host
+inventory, process-stamp, identity-fenced release, and resource-kill work from
+#1203, plus the feed and orchestration work named in the task.
 
-Every line this document cites was re-read at `e61c1ce4` and is unchanged.
-`src/components/feed/parse.ts` is byte-identical between the two commits, so
-`:1311`, `:1486`, `:1943` and `:2127` all still point at what the text says
-they do; so are `src/lib/types.ts`, all six cited `src/lib/scanner/` files,
-`src/lib/accounts/migration/turnState.ts`,
-`src/lib/resourceCollector.worker.ts`, `src/lib/projects/identity.ts`,
-`src/lib/agent/sessionKey.ts`, `src/lib/status.ts` and the three cited
-`src/lib/runtime/` files. The one cited file #1206 did touch is
-`src/lib/mcp/bindings.ts`, which this document cites only at file level as a
-Class-A site; re-counted at `e61c1ce4`, the Class-A surface is still 32 files.
-
-**Fences lifted.** `src/components/feed/**` (including `parse.ts`),
-`src/components/LogFeed.tsx`, `src/lib/mcp/**` and
-`src/lib/orchestrator/prompt.ts` have no other owner. Phase 1 takes the feed
-renderer directly, so there is no `"plain"` fallback state and no split
-delivery: scanning, attribution, turn state and structured rendering ship
-together in one PR.
-
-**Still owned — the #1199 lane, in final review.** `src/lib/resources.ts`,
-`src/lib/scanner/process.ts`, `src/lib/runtime/structuredHostControl.ts`,
-`src/lib/runtime/structuredDeliveryController.ts` and
-`src/components/ResourcesFooter.tsx`. Phase 1 touches none of them, and needs
-none of them:
-
-- `src/lib/scanner/process.ts` holds `AgentEngine` (`:13`) and `argvEngine`
-  (`:122`). Phase 1 deliberately does not make OpenClaw hostable and does not
-  do process attribution, so neither needs to change. The phase boundary was
-  drawn partly for this reason and it still holds.
-- `src/lib/resources.ts:793` is a Class-A narrowing predicate. It keeps
-  answering "no" for OpenClaw, which is the phase-1 answer anyway. It is the
-  single Class-A copy item 9 skips.
-- `src/components/ResourcesFooter.tsx:474` is a Class-C label expression that
-  renders `?` for an unrecognised engine — honest, and correct until someone
-  gives OpenClaw a label.
-
-Phase 2 will need `src/lib/scanner/process.ts` and
-`src/lib/runtime/structuredDeliveryController.ts`, so it should not start until
-#1199 has merged.
+No file fence remains. The implementer rebases this branch on current main
+before editing, records the new merge base, and rechecks every cited branch
+whose line moved. Phase 1 may edit the feed renderer directly and ships its
+scanner, catalog, attribution, model, effort, cache, and presentation changes
+in the same PR.
 
 ---
 
@@ -936,6 +684,19 @@ Cut from this design, with the reason. None of it is discarded.
 **An engine-descriptor registry spanning the UI.** Would not fix the 107 binary
 ternaries, which are the actual cost, and would abstract for a fourth engine
 nobody has asked for. Revisit if a fourth engine appears. See (a).
+
+**A transcript-root descriptor in phase 1.** Three transcript roots do not need
+a registry around their existing switches. Explicit OpenClaw branches are
+shorter and keep each parser beside the shape it understands.
+
+**The 33-file hostability-predicate migration.** Most of those predicates
+guard launch, lifecycle, tasks, workflows, or account behavior. OpenClaw cannot
+reach them during phase 1. Phase 2 may introduce a helper for the smaller set
+its proven transport actually needs.
+
+**Host-only erasure coercions.** Draft launch, direct reviews, task send, inbox,
+and live-turn rows have no OpenClaw producer in phase 1. They move with the
+hosting work so each third arm has a real behavior and test.
 
 **Merging trajectory and checkpoint files into the conversation.** The issue's
 Expected 1 assumes a three-file join. The evidence says the session file is
@@ -953,23 +714,23 @@ Reconsider only if OpenClaw grows per-session processes.
 **Model registry entries for OpenClaw's models.** `MODEL_REGISTRY`
 (`src/lib/scanner/modelRegistry.ts:13`) is an Anthropic context-window
 snapshot. OpenClaw runs OpenAI-family models through an OpenAI response API, so
-`normalizeModelKey` finds no entry and `registryWindow` returns null — an
-unknown context window, which is the correct answer here. Adding OpenAI
-model windows is a separate decision with its own maintenance burden and is not
-required by the requirement.
+`normalizeModelKey` finds no entry and `registryWindow` returns null. An unknown
+context window is accurate. Adding OpenAI model windows creates a separate
+maintenance surface.
+
+**OpenClaw model control.** The installed ACP server exposes no model method or
+model config option. Keep the selector disabled until the phase-2 transport
+proof identifies a supported route.
 
 **Account and limits integration.** `LimitsCache`
 (`src/lib/limits.ts:38,50`) is `Record<EngineName, …>` behind `version: 2`;
-adding a third key is a persisted-shape migration. But OpenClaw does not have
-its own subscription — it routes to an OpenAI provider whose quota is already
-accounted elsewhere — so a third limits engine would report a window that does
-not exist. Out of scope until OpenClaw's account model is understood.
+adding a third key is a persisted-shape migration. OpenClaw has no Viewer-owned
+subscription window to display. This stays out of scope until OpenClaw's
+account model is understood.
 
-**`openclaw agent --json` as a fallback transport.** Genuinely unsuitable for
-hosting, but it is the simplest possible "send one message and read the reply".
-If phase 2's ACP work stalls on the Gateway dependency, it is a viable reduced
-mode — send only, no streaming, no interrupt — and should be reconsidered then
-rather than built now.
+**`openclaw agent --json` as a reduced send mode.** It can send one message and
+return one terminal result. Streaming, attention, resume, and verified abort
+remain unavailable, so it cannot satisfy the originating host requirement.
 
 **Per-agent-id project grouping.** Presentational; can ride on card titles
 without a second project-id namespace. See (c).
@@ -980,26 +741,18 @@ without a second project-id namespace. See (c).
 
 Read back against the quote at the top.
 
-*"the Viewer scans and renders OpenClaw conversations"* — phase 1, items 1–10,
-in one PR. Both halves of the clause land together: scanning and attribution
-from items 1–6, structured rendering from item 7. No fallback state, no partial
-delivery.
+*"the Viewer scans and renders OpenClaw conversations"* is phase 1, items 1-7,
+in one PR. Discovery, complete catalog/search, attribution, turn state,
+model/provider/effort display, and the structured renderer ship together.
 
 *"the Viewer can host an OpenClaw agent as a structured host (spawn, deliver a
-message, stream the turn, resume, kill)"* — phase 2, over the ACP bridge, with
-one honest deviation the operator should see now rather than at delivery:
-**"kill" cannot mean what it means for Claude and Codex.** The Gateway owns the
-agent, so releasing the host stops the Viewer watching while the agent keeps working.
-Every other verb in the sentence maps cleanly.
+message, stream the turn, resume, kill)"* remains phase 2. ACP is eligible only
+after the isolated proof shows real run termination and propagated abort
+failure. A transport that only detaches the Viewer fails this requirement and
+does not ship.
 
-*"at the same level Claude and Codex already are"* — reached for scanning,
-rendering, project attribution, turn state and model display. Not reached, and
-not proposed, for accounts, limits and process-level liveness — because for
-those three OpenClaw has no equivalent to be at the same level as. Claiming
-parity there would mean inventing a subscription and a per-session process that
-do not exist.
-
-Nothing in this design exists because it was interesting. The one place the
-design deliberately spends more than the minimum is the named capability
-predicate, which is behaviour-preserving in phase 1 and buys a checkable
-one-line change in phase 2 instead of a 32-file audit.
+*"at the same level Claude and Codex already are"* is met for the phase-1
+viewing surface. Hosting reaches that bar only after runtime and resource kill,
+resume, delivery, streaming, attention, inventory, and process identity pass
+the phase-2 gates. Accounts, subscription limits, and shared-Gateway process
+liveness have no equivalent OpenClaw concept and remain outside the request.
