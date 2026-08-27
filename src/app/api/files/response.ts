@@ -400,9 +400,14 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const owedDeliveries = new Map<string, StuckDelivery>();
   for (const delivery of Object.values(registrySnapshot.heldDeliveries)) {
     if (delivery.state === "delivered" || delivery.state === "failed") continue;
-    const current = owedDeliveries.get(delivery.conversationId);
+    /* Keyed canonically, like every other conversation join in this file: a
+       reservation written before an account migration rekeyed the conversation
+       still names the old id, and the card it belongs to is read by the new
+       one. Keying raw loses exactly the messages a migration left owed. */
+    const conversationId = conversationLookup.canonicalConversationId(delivery.conversationId);
+    const current = owedDeliveries.get(conversationId);
     if (current && current.since <= delivery.createdAt) continue;
-    owedDeliveries.set(delivery.conversationId, {
+    owedDeliveries.set(conversationId, {
       since: delivery.createdAt,
       attempts: delivery.attempts,
       state: delivery.state,

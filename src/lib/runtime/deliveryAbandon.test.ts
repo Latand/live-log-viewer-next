@@ -110,7 +110,31 @@ function scenario(label: string) {
   const pendingSendOperationIds = () =>
     journal.effectBatch(100, ["runtime.send"], 0).map((effect) => String(effect.payload.operationId));
 
-  return { conversation, registry, journal, client, admit, pendingSendOperationIds };
+  /**
+   * A client whose status read is one step stale, exactly like the real one.
+   *
+   * `operationStatus` answers with the receipt as it was, then lets the delivery
+   * queue move it — reproducing the gap between the read the handler decides on
+   * and the write it then issues.
+   */
+  const clientRacedBy = (advance: () => void): RuntimeHostClient => {
+    let raced = false;
+    return {
+      ...client,
+      operationStatus: async (operationId: string, options?: { currentRetryLeaf?: boolean }) => {
+        const result = options?.currentRetryLeaf
+          ? journal.currentRetryResult(operationId)
+          : journal.operationResult(operationId);
+        if (!raced) {
+          raced = true;
+          advance();
+        }
+        return result;
+      },
+    } as RuntimeHostClient;
+  };
+
+  return { conversation, registry, journal, client, clientRacedBy, admit, pendingSendOperationIds };
 }
 
 const post = (operationId: string, body?: unknown) => new NextRequest(
@@ -184,6 +208,67 @@ test("#1213 discarding an already-delivered message changes nothing and reports 
   expect(world.registry.pendingDeliveries(world.conversation.id)).toEqual([]);
 });
 
+test("#1213 a hand-over that starts between the status read and the transition is refused, not overwritten", async () => {
+  /* The duplicate-delivery race at the receipt. The handler decides from a
+     receipt it read one RPC ago, and the delivery queue writes `delivering`
+     BEFORE it calls `host.send`: a receipt read as `queued` can be a message in
+     front of the agent by the time the abandon lands. Retiring its effect there
+     delivers the message AND its replacement. The journal re-checks the
+     observed statuses inside the transaction that writes, so the row that moved
+     refuses instead. */
+  const world = scenario("fence");
+  const admitted = world.admit("status please", "msg-fence");
+  const racedClient = world.clientRacedBy(() => {
+    world.journal.transitionOperation(admitted.operationId, "delivering", { turnId: "turn-1" });
+  });
+
+  const deps = {
+    enabled: () => true,
+    client: () => racedClient,
+    kick: () => {},
+    registry: () => world.registry,
+    recover: async () => { throw new Error("a hand-over in flight reached host recovery"); },
+  };
+
+  const discarded = await handleRuntimeAbandon(del(admitted.operationId), admitted.operationId, deps);
+  expect(discarded.status).toBe(409);
+  expect(await discarded.json()).toMatchObject({ handover: true, receipt: { status: "delivering" } });
+
+  const retried = await handleRuntimeRetry(
+    post(admitted.operationId, { abandonUnconfirmed: true }),
+    admitted.operationId,
+    deps,
+  );
+  expect(retried.status).toBe(409);
+  expect(await retried.json()).toMatchObject({ handover: true });
+
+  /* Exactly one deliverable send, still the original and still handing over, so
+     the queue's own outcome is the only one that will ever be recorded. */
+  expect(world.pendingSendOperationIds()).toEqual([admitted.operationId]);
+  expect(world.journal.operationResult(admitted.operationId)?.receipt.status).toBe("delivering");
+  expect(world.registry.pendingDeliveries(world.conversation.id)).toMatchObject([
+    { state: "delivery-uncertain", deliveredAt: null },
+  ]);
+});
+
+test("#1213 a message admitted once carries one admission stamp through every transition", () => {
+  /* What the composer measures the wait from. The receipt's `at` is rewritten
+     by every transition and the queue bounces a parked send
+     `delivering`→`queued` on each auto-retry, so reading `at` restarts the
+     clock and the uncertain bound is never crossed. */
+  const world = scenario("stamp");
+  const admitted = world.admit("status please", "msg-stamp");
+  const admittedAt = admitted.receipt.admittedAt;
+  expect(admittedAt).toBeString();
+
+  const delivering = world.journal.transitionOperation(admitted.operationId, "delivering", { turnId: "turn-1" });
+  const bounced = world.journal.transitionOperation(admitted.operationId, "queued", { reason: "delivery-auto-retry" });
+  expect(delivering.receipt.admittedAt).toBe(admittedAt!);
+  expect(bounced.receipt.admittedAt).toBe(admittedAt!);
+  /* And it is a different question from `at`, which moved with the row. */
+  expect(bounced.receipt.at).not.toBe(admittedAt);
+});
+
 test("#1213 retrying an unconfirmed delivery abandons it first, so exactly one send stays deliverable", async () => {
   const world = scenario("retry");
   const admitted = world.admit("status please", "msg-retry");
@@ -209,6 +294,18 @@ test("#1213 retrying an unconfirmed delivery abandons it first, so exactly one s
      a retry cannot put the same message into the agent's turn twice. */
   expect(world.pendingSendOperationIds()).toEqual([body.operationId]);
   expect(world.journal.operationResult(admitted.operationId)?.receipt.status).toBe("failed");
+  /* And the message is still OWED. The retry abandons an attempt, not the
+     operator's intent: the reservation stays unsettled so the attention queue
+     keeps saying they are blocked on it, and the replacement inherits the same
+     presentation identity, so whatever outcome it reaches still settles this
+     same reservation. */
+  expect(world.registry.pendingDeliveries(world.conversation.id)).toMatchObject([
+    { state: "delivery-uncertain", deliveredAt: null },
+  ]);
+  const replacement = world.journal.operationResult(body.operationId)!.receipt;
+  expect(replacement.presentationOperationId ?? replacement.operationId).toBe(admitted.operationId);
+  world.registry.recordDeliveryOutcomeForOperation(world.conversation.id, admitted.operationId, "delivered");
+  expect(world.registry.pendingDeliveries(world.conversation.id)).toEqual([]);
 });
 
 test("#1213 a retry loses the race to a delivery that landed first, and never sends again", async () => {

@@ -840,7 +840,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                 const switchHold = migrationHoldsDelivery(cardMigrationState(liveMigration))
                   ? { label: migrationTargetName(liveMigration) }
                   : null;
-                return <OutboxBubbles key="outbox" cardId={memoryKey!} entries={pendingOutbox} switchHold={switchHold} />;
+                /* #1213: the bubble may only name a turn when the host says a
+                   turn is running, so it reads the same axes the composer's
+                   receipt rows do. */
+                return (
+                  <OutboxBubbles
+                    key="outbox"
+                    cardId={memoryKey!}
+                    entries={pendingOutbox}
+                    switchHold={switchHold}
+                    session={runtimeSession ? { host: runtimeSession.host, turn: runtimeSession.turn } : null}
+                  />
+                );
               }
               return <LiveTurnRows key="delta" items={visibleLiveTurnItems} />;
             })}

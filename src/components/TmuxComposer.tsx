@@ -74,7 +74,7 @@ import {
   withDismissedReceipts,
   writeDismissedReceipts,
 } from "./runtime/deliveryState";
-import { mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal } from "./runtime/runtimeModel";
+import { humanReceiptReasonKey, mintIdempotencyKey, receiptIsAdmitted, receiptIsTerminal, type HostAxis, type TurnAxis } from "./runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { VoiceConversationButton } from "./VoiceConversation";
 import { commitBridgeTurn, useBridgeTurnStartDrain } from "@/hooks/useBridgeReportRelay";
@@ -298,6 +298,7 @@ export function RuntimeComposerReceipts({
   actionsDisabled = false,
   dismissed = NO_DISMISSED,
   nowMs,
+  session = null,
   onRetry,
   onEdit,
   onDismiss,
@@ -311,6 +312,12 @@ export function RuntimeComposerReceipts({
   /** Clock the delivery waits are measured against (issue #1213). Production
       omits it and the row ticks itself; a test pins the instant. */
   nowMs?: number;
+  /** The conversation's own host and turn axes, when a structured session is
+      behind this composer (issue #1213). The authority for whether a parked
+      message waits on a running turn or on a window that is gone — a receipt's
+      reason cannot answer that, and guessing puts a false explanation next to
+      the operator's only exit. */
+  session?: { host: HostAxis; turn: TurnAxis } | null;
   onRetry: (receipt: RuntimeReceipt) => void;
   onEdit: (receipt: RuntimeReceipt) => void;
   /** Persists a dismissal — receives every settled operation id of the row. */
@@ -345,12 +352,19 @@ export function RuntimeComposerReceipts({
      dismissed settled problems stay dismissed. */
   const attemptGroups = deliveryAttemptGroups(receipts, dismissed);
   const visibleAttempts = attemptGroups.flatMap((group) => group.attempts);
-  /* The wait belongs to the logical message, so it is measured from its OLDEST
-     visible attempt — "how long it waited" survives an auto-retry. */
+  /* Measured from the receipt's own IMMUTABLE admission stamp, never from
+     `at`: the queue bounces a parked send `delivering`→`queued` on every
+     auto-retry and `at` moves with it, which both under-reports the wait and
+     keeps it from ever crossing the uncertain bound. An auto-retry is a
+     transition of the same operation, so one stamp still covers the whole wait;
+     a retry the OPERATOR pressed mints a new operation and starts a new one,
+     which is what they asked for. */
   const waitFor = (group: DeliveryAttemptGroup): DeliveryWait | null => deliveryWaitFor({
     status: group.current.status,
     reason: group.current.reason,
-    firstAttemptAt: group.attempts.at(-1)!.at,
+    host: session?.host ?? null,
+    turn: session?.turn ?? null,
+    admittedAt: group.current.admittedAt ?? group.current.at,
     attempts: group.attempts.length,
     nowMs: now,
   });
@@ -464,8 +478,13 @@ export function RuntimeComposerReceipts({
                   && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason);
                 /* A host that is gone gets its own line: the phase sentence
                    says the message is parked, this says the window died and
-                   nothing has taken the conversation back (#1213). */
-                const hostGone = wait?.phase === "awaiting-host";
+                   nothing has taken the conversation back (#1213). Only when
+                   the receipt CARRIES a reason this model recognizes — the host
+                   axis can prove the window is gone while the receipt never
+                   recorded why, and `humanReason` would fill that silence with
+                   «the message failed», which is a different claim. */
+                const hostGone = wait?.phase === "awaiting-host"
+                  && humanReceiptReasonKey(receipt.reason) !== null;
                 return (
                   <div
                     key={receipt.operationId}
@@ -2456,6 +2475,9 @@ export function TmuxComposerCore({
               receipts={displayedRuntimeReceipts}
               actionsDisabled={busy || voiceSending || deadHostBlocksSend}
               dismissed={dismissedReceipts}
+              session={structuredSession
+                ? { host: structuredSession.session.host, turn: structuredSession.session.turn }
+                : null}
               onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
               onEdit={editRuntimeReceipt}
               onDismiss={dismissReceipts}

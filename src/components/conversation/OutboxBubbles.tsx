@@ -7,9 +7,24 @@ import { Loader2, X } from "@/components/icons";
 import { mdBlocks } from "@/components/feed/markdown";
 
 import { DELIVERY_WAIT_TICK_MS, deliveryWaitFor, deliveryWaitText } from "@/components/runtime/deliveryWait";
+import type { HostAxis, TurnAxis } from "@/components/runtime/runtimeModel";
 import { type TFunction, useLocale } from "@/lib/i18n";
 
 import { cancelOutbox, retryOutbox, type OutboxEntry } from "./outbox";
+
+/**
+ * The conversation's own host and turn axes (issue #1213).
+ *
+ * The bubble may only say a message waits for a turn when the host says a turn
+ * is running: the receipt's own reason cannot establish that, and a message
+ * stranded by a window that died would otherwise be announced as waiting on an
+ * agent that is not there. `null` when nothing structured is behind this feed,
+ * and the bubble then says the wait without naming its cause.
+ */
+export interface OutboxSessionAxes {
+  host: HostAxis;
+  turn: TurnAxis;
+}
 
 /**
  * Optimistic user bubbles for the conversation outbox (issue #561).
@@ -35,6 +50,7 @@ function stateChip(
   entry: OutboxEntry,
   switchHold: SwitchHold | null,
   nowMs: number,
+  session: OutboxSessionAxes | null,
 ): { label: string; icon: React.ReactNode; className: string; wait?: string } {
   /* An unsettled message on a switching card is held for the successor, and its
      bubble is the ONE place that says so. A bare "Delivering" left the operator
@@ -58,7 +74,11 @@ function stateChip(
   if (entry.state === "delivering") {
     const wait = deliveryWaitFor({
       status: entry.awaitingTurn ? "queued" : "delivering",
-      firstAttemptAt: new Date(entry.at).toISOString(),
+      host: session?.host ?? null,
+      turn: session?.turn ?? null,
+      /* The enqueue stamp: written once when the operator pressed send and
+         never rewritten, which is what the wait has to be measured from. */
+      admittedAt: new Date(entry.at).toISOString(),
       attempts: 1,
       nowMs,
     });
@@ -106,6 +126,7 @@ export function OutboxBubblesView({
   onCancel,
   onRetry,
   switchHold = null,
+  session = null,
 }: {
   entries: readonly OutboxEntry[];
   t: TFunction;
@@ -116,6 +137,8 @@ export function OutboxBubblesView({
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
   switchHold?: SwitchHold | null;
+  /** The conversation's live host/turn axes — see {@link OutboxSessionAxes}. */
+  session?: OutboxSessionAxes | null;
 }) {
   if (!entries.length) return null;
   return (
@@ -128,7 +151,7 @@ export function OutboxBubblesView({
       aria-live="polite"
     >
       {entries.map((entry) => {
-        const chip = stateChip(t, entry, switchHold, nowMs);
+        const chip = stateChip(t, entry, switchHold, nowMs, session);
         return (
           <div
             key={entry.id}
@@ -202,10 +225,12 @@ export function OutboxBubbles({
   cardId,
   entries,
   switchHold = null,
+  session = null,
 }: {
   cardId: string;
   entries: readonly OutboxEntry[];
   switchHold?: SwitchHold | null;
+  session?: OutboxSessionAxes | null;
 }) {
   const { t } = useLocale();
   /* A wait only becomes news by getting older, and nothing else re-renders the
@@ -223,6 +248,7 @@ export function OutboxBubbles({
       onCancel={(id) => cancelOutbox(cardId, id)}
       onRetry={(id) => retryOutbox(cardId, id)}
       switchHold={switchHold}
+      session={session}
     />
   );
 }

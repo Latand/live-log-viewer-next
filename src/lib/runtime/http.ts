@@ -109,6 +109,18 @@ function receiptIsHandingOver(status: RuntimeReceiptStatus): boolean {
   return HANDOVER_RECEIPT_STATUSES.has(status);
 }
 
+/**
+ * The only statuses an abandon may act on, stated to the journal as a fence.
+ *
+ * The status read below is one RPC old, and the queue can move the receipt into
+ * a hand-over in that gap — which is precisely the window that duplicates a
+ * message. The journal re-checks this list inside the transaction that writes,
+ * so the receipt the decision was made on and the receipt that is overwritten
+ * are the same row. The pre-read stays as a fast path that can answer with the
+ * live receipt; the fence is the authority.
+ */
+const ABANDONABLE_RECEIPT_STATUSES: readonly RuntimeReceiptStatus[] = ["pending", "queued"];
+
 /** What an abandon attempt did. `handing-over` and `settled` both mean nothing
     was written and the caller must NOT mint a replacement. */
 type AbandonOutcome =
@@ -137,33 +149,58 @@ function handoverResponse(operationId: string, receipt: RuntimeOperationReceipt)
  * receipt untouched and the caller must not retry.
  *
  * A hand-over already under way is refused outright — see
- * {@link HANDOVER_RECEIPT_STATUSES}.
+ * {@link HANDOVER_RECEIPT_STATUSES} — and the refusal is enforced by the
+ * journal's own fence ({@link ABANDONABLE_RECEIPT_STATUSES}), not by the read
+ * above it, so a receipt that starts handing over between the two is refused
+ * rather than retired mid-flight.
+ *
+ * `settleReservation` says whether the held-delivery reservation dies with the
+ * receipt: true for Discard, false for the abandon a Retry does on its way to
+ * minting a replacement.
  */
 async function abandonUnconfirmedOperation(
   client: RuntimeHostClient,
   operationId: string,
   registry: (() => AgentRegistry) | undefined,
   current: RuntimeOperationReceipt,
+  { settleReservation }: { settleReservation: boolean },
 ): Promise<AbandonOutcome> {
   if (receiptIsHandingOver(current.status)) return { outcome: "handing-over", receipt: current };
   let result;
   try {
-    result = await client.transitionOperation(operationId, "failed", { reason: DELIVERY_UNCONFIRMED_REASON });
+    result = await client.transitionOperation(
+      operationId,
+      "failed",
+      { reason: DELIVERY_UNCONFIRMED_REASON },
+      { fromStatuses: ABANDONABLE_RECEIPT_STATUSES },
+    );
   } catch (error) {
-    /* A transition can fail because the operation settled first — the race the
-       operator is allowed to lose — or because the journal itself faulted. Only
-       a receipt that is genuinely terminal proves the former; anything else is
-       an error, and reporting it as "the delivery landed" would tell the
-       operator their message arrived when nobody knows that. */
-    const settled = await client.operationStatus(operationId, { currentRetryLeaf: true });
-    if (!settled || !receiptIsTerminal(settled.receipt.status)) throw error;
-    return { outcome: "settled", receipt: settled.receipt };
+    /* A transition can fail because the row moved under the read — the fence
+       refusing, which is the race the operator is allowed to lose — or because
+       the journal itself faulted. Only a receipt that is genuinely terminal or
+       genuinely handing over proves the former; anything else is an error, and
+       reporting it as "the delivery landed" would tell the operator their
+       message arrived when nobody knows that. */
+    const moved = await client.operationStatus(operationId, { currentRetryLeaf: true });
+    if (moved && receiptIsHandingOver(moved.receipt.status)) {
+      return { outcome: "handing-over", receipt: moved.receipt };
+    }
+    if (!moved || !receiptIsTerminal(moved.receipt.status)) throw error;
+    return { outcome: "settled", receipt: moved.receipt };
   }
   const conversationId = result.receipt.conversationId;
-  if (conversationId.startsWith("conversation_")) {
-    /* The reservation the composer is rendering settles with the receipt. The
-       delivery controller's own transition wrapper is not in this path, so the
-       registry write belongs here. */
+  /* Discard settles the reservation with the receipt: the operator gave the
+     message up, and nothing is owed any more. Retry deliberately does NOT —
+     the message is still owed, the replacement inherits the same presentation
+     identity, and every later outcome still names this reservation. Settling it
+     here would drop the message out of the attention queue on the way to the
+     retry that was supposed to deliver it (issue #1213). A retry that then
+     fails to mint anything leaves no orphan either: the controller's terminal
+     reconciliation reads the retry LEAF, finds this failed receipt with no
+     child, and settles the reservation from it. */
+  if (settleReservation && conversationId.startsWith("conversation_")) {
+    /* The delivery controller's own transition wrapper is not in this path, so
+       the registry write belongs here. */
     try {
       (registry ?? agentRegistry)().recordDeliveryOutcomeForOperation(
         conversationId as `conversation_${string}`,
@@ -215,6 +252,7 @@ export async function handleRuntimeAbandon(
       previous.operationId,
       dependencies.registry,
       previous.receipt,
+      { settleReservation: true },
     );
     if (abandoned.outcome === "handing-over") return handoverResponse(previous.operationId, abandoned.receipt);
     return NextResponse.json({
@@ -416,6 +454,7 @@ export async function handleRuntimeRetry(
         previous.operationId,
         dependencies.registry,
         previous.receipt,
+        { settleReservation: false },
       );
       /* Nothing was written in either of these: a message already on its way to
          the agent cannot be un-sent, and one that landed while the operator was

@@ -68,11 +68,13 @@ export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onR
      though the receipt is not — the composer stops claiming it is moving, and
      an operator control takes over from a spinner that had no exit. */
   const uncertain = wait?.phase === "uncertain";
-  /* Nothing is moving in these three: the message is parked, its window is
-     gone, or the viewer never got told it was accepted. */
+  /* Nothing is moving in any of these: the message is parked behind a turn,
+     parked with nothing to hand it to, parked for a reason this surface cannot
+     name, or never confirmed as accepted at all. */
   const parked = uncertain
     || wait?.phase === "awaiting-turn"
     || wait?.phase === "awaiting-host"
+    || wait?.phase === "awaiting-handover"
     || wait?.phase === "unconfirmed-admission";
   const waitText = wait ? deliveryWaitText(t, wait, receipt.queuePosition) : null;
   return (
@@ -80,7 +82,7 @@ export function ReceiptChip({ receipt, wait = null, actionsDisabled = false, onR
       <Badge
         tone={uncertain || wait?.phase === "awaiting-host"
           ? "danger"
-          : wait?.phase === "awaiting-turn" || wait?.phase === "unconfirmed-admission"
+          : parked
             ? "warning"
             : tone(receipt.status)}
         data-receipt-status={receipt.status}

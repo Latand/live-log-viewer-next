@@ -1,6 +1,6 @@
 import net from "node:net";
 
-import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimePendingEffect, RuntimeReceiptStatus, RuntimeReplay, RuntimeRetryOptions, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
+import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimePendingEffect, RuntimeReceiptStatus, RuntimeReplay, RuntimeRetryOptions, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, RuntimeTransitionOptions, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
 import { runtimeHostSocket } from "./flags";
 
 // The snapshot frame carries every hosted session, and a hosted session keeps
@@ -52,6 +52,7 @@ export interface RuntimeHostClient {
     operationId: string,
     status: Exclude<RuntimeReceiptStatus, "pending">,
     details?: { turnId?: string | null; queuePosition?: number | null; reason?: string | null },
+    options?: RuntimeTransitionOptions,
   ): Promise<RuntimeOperationResult>;
   requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt>;
   readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null>;
@@ -99,8 +100,14 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
     operationId: string,
     status: Exclude<RuntimeReceiptStatus, "pending">,
     details?: { turnId?: string | null; queuePosition?: number | null; reason?: string | null },
+    options: RuntimeTransitionOptions = {},
   ): Promise<RuntimeOperationResult> {
-    return this.call("operation-transition", { operationId, status, ...(details ? { details } : {}) }) as Promise<RuntimeOperationResult>;
+    return this.call("operation-transition", {
+      operationId,
+      status,
+      ...(details ? { details } : {}),
+      ...(options.fromStatuses ? { fromStatuses: [...options.fromStatuses] } : {}),
+    }) as Promise<RuntimeOperationResult>;
   }
   requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> { return this.call("viewer-deployment-request", request as unknown as Record<string, unknown>, this.deploymentTimeoutMs) as Promise<ViewerDeploymentReceipt>; }
   readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null> { return this.call("viewer-deployment-read", { deploymentId }) as Promise<ViewerDeploymentStatus | null>; }

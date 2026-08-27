@@ -28,6 +28,8 @@ import {
   type RuntimeRetryOptions,
   type RuntimeSession,
   type RuntimeSnapshot,
+  RuntimeTransitionFenceError,
+  type RuntimeTransitionOptions,
   type ViewerDeploymentOwner,
   type ViewerDeploymentReceipt,
   type ViewerDeploymentStatus,
@@ -488,6 +490,7 @@ export class RuntimeJournal {
     operationId: string,
     status: Exclude<RuntimeReceiptStatus, "pending">,
     details: Partial<Pick<RuntimeOperationReceipt, "turnId" | "queuePosition" | "reason">> = {},
+    options: RuntimeTransitionOptions = {},
   ): RuntimeOperationResult {
     this.assertHealthy();
     this.db.exec("BEGIN IMMEDIATE");
@@ -495,6 +498,14 @@ export class RuntimeJournal {
       const row = this.db.query<{ request_json: string; receipt_json: string }, [string]>("SELECT request_json, receipt_json FROM operations WHERE operation_id = ?").get(operationId);
       if (!row) throw new Error("runtime operation is unknown");
       const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      /* The caller's read-then-write gap, closed (issue #1213): a caller that
+         chose this transition from a receipt it read one RPC ago states the
+         statuses it decided against, and the decision is re-checked HERE, under
+         the same lock that writes. A row that moved refuses rather than
+         overwriting a state the caller never saw. */
+      if (options.fromStatuses && !options.fromStatuses.includes(previous.status)) {
+        throw new RuntimeTransitionFenceError("runtime operation moved before its transition");
+      }
       if (previous.status === status) {
         this.db.exec("COMMIT");
         return { operationId, receipt: previous, replayed: true };
@@ -1464,6 +1475,7 @@ export class RuntimeJournal {
       status = "queued";
     }
     const revision = Number(this.db.query<{ revision: number }, [string]>("SELECT revision FROM scope_revisions WHERE scope = ?").get(`operation:${operationId}`)?.revision ?? 0) + 1;
+    const admittedAt = new Date(this.now()).toISOString();
     return {
       operationId,
       ...(retryOfOperationId ? { retryOfOperationId } : {}),
@@ -1481,7 +1493,12 @@ export class RuntimeJournal {
       text: command.kind === "send" || command.kind === "steer" ? command.text.slice(0, 240) : null,
       ...(command.kind === "send" || command.kind === "steer" ? { imageCount: command.images?.length ?? 0 } : {}),
       ...((command.kind === "send" || command.kind === "steer") && command.runtime ? { runtime: command.runtime } : {}),
-      at: new Date(this.now()).toISOString(),
+      at: admittedAt,
+      /* Immutable admission stamp (issue #1213). Every transition rewrites
+         `at`, so only this can say how long the operator has been waiting on a
+         message the queue keeps parking. A retry mints a NEW operation and
+         therefore a new stamp: the operator restarted the wait deliberately. */
+      admittedAt,
       revision,
     };
   }

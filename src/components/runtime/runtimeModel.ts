@@ -218,6 +218,11 @@ export interface RuntimeReceipt {
   /** Message text for inline display (bounded summary). */
   text?: string | null;
   at: string;
+  /** When the journal admitted this operation, stamped once (issue #1213).
+      `at` moves with every transition; this is the only stamp that can answer
+      how long a parked message has been waiting. Absent on receipts written
+      before the field existed — readers fall back to `at`. */
+  admittedAt?: string;
   revision: number;
 }
 

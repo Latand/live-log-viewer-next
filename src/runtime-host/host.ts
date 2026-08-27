@@ -1,4 +1,4 @@
-import { RuntimeIdempotencyConflictError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeReceiptStatus, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
+import { RUNTIME_RECEIPT_STATUSES, RuntimeIdempotencyConflictError, RuntimeTransitionFenceError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeReceiptStatus, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { consumeRuntimeEvent, type RuntimeConsumerPorts } from "@/lib/runtime/consumers";
 
@@ -164,10 +164,22 @@ export class RuntimeHost {
           throw new Error("runtime operation transition status is invalid");
         }
         const details = request.params?.details;
+        /* #1213: the caller's observed statuses, re-checked under the journal's
+           own write lock. Anything that is not a list of valid statuses is a
+           malformed fence, and silently dropping it would reopen the very race
+           the caller asked to be protected from. */
+        const fromStatuses = request.params?.fromStatuses;
+        if (fromStatuses !== undefined
+          && (!Array.isArray(fromStatuses)
+            || fromStatuses.length === 0
+            || !fromStatuses.every((candidate) => typeof candidate === "string" && RUNTIME_RECEIPT_STATUSES.has(candidate)))) {
+          throw new Error("runtime operation transition fence is invalid");
+        }
         result = this.journal.transitionOperation(
           String(request.params?.operationId ?? ""),
           status as Exclude<RuntimeReceiptStatus, "pending">,
           details && typeof details === "object" ? details as { turnId?: string | null; queuePosition?: number | null; reason?: string | null } : {},
+          fromStatuses ? { fromStatuses: fromStatuses as RuntimeReceiptStatus[] } : {},
         );
       } else if (request.method === "viewer-deployment-request") {
         if (!this.deployments) throw new Error("viewer deployments are disabled");
@@ -188,7 +200,9 @@ export class RuntimeHost {
         id: request.id,
         ok: false,
         error: error instanceof Error ? error.message : "runtime request failed",
-        ...(error instanceof RuntimeIdempotencyConflictError ? { code: error.code } : {}),
+        ...(error instanceof RuntimeIdempotencyConflictError || error instanceof RuntimeTransitionFenceError
+          ? { code: error.code }
+          : {}),
       };
     }
   }

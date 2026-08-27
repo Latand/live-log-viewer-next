@@ -33,6 +33,11 @@ Object.assign(globalThis, {
 const { OutboxBubblesView } = await import("@/components/conversation/OutboxBubbles");
 const { DELIVERY_UNCERTAIN_MS } = await import("@/components/runtime/deliveryWait");
 type Entry = Parameters<typeof OutboxBubblesView>[0]["entries"][number];
+type Session = NonNullable<Parameters<typeof OutboxBubblesView>[0]["session"]>;
+
+/** The host the operator was talking to: alive, and inside a turn. The bubble
+    may only name a turn boundary on the host's own evidence. */
+const BUSY: Session = { host: "hosted", turn: "running" };
 
 const SUBMITTED_AT = 1_772_000_000_000;
 
@@ -57,7 +62,12 @@ async function render(node: React.ReactElement): Promise<HTMLElement> {
 const chip = (host: HTMLElement) => host.querySelector("[data-outbox-status]")?.textContent ?? "";
 const phase = (host: HTMLElement) => host.querySelector("[data-outbox-entry]")?.getAttribute("data-outbox-wait");
 
-async function bubble(overrides: Partial<Entry>, nowMs: number, locale: "en" | "uk" = "en") {
+async function bubble(
+  overrides: Partial<Entry>,
+  nowMs: number,
+  locale: "en" | "uk" = "en",
+  session: Session | null = BUSY,
+) {
   document.body.replaceChildren();
   return render(
     <OutboxBubblesView
@@ -66,6 +76,7 @@ async function bubble(overrides: Partial<Entry>, nowMs: number, locale: "en" | "
       nowMs={nowMs}
       onCancel={() => {}}
       onRetry={() => {}}
+      session={session}
     />,
   );
 }
@@ -124,11 +135,32 @@ test("#1213 a queued or failed bubble keeps the controls it has always had", asy
 });
 
 test("#1213 a delivery stranded by a host that went away is not called a turn boundary", async () => {
-  /* Reachable only through a receipt, so the bubble's own flag cannot express
-     it — which is precisely why the bubble must not claim a turn is running
-     when a rollback has taken every host away. */
-  const host = await bubble({}, SUBMITTED_AT + 4_000);
+  /* The rollback population: a deployment terminates every structured host and
+     each parked message stays exactly where it was. The bubble reads the same
+     host axis the composer does, so it says the window is gone instead of
+     naming a turn on an agent that is not there. */
+  const host = await bubble(
+    { awaitingTurn: true },
+    SUBMITTED_AT + 3 * 60_000,
+    "en",
+    { host: "dead", turn: "running" },
+  );
+  expect(phase(host)).toBe("awaiting-host");
+  expect(chip(host)).toBe(translate("en", "runtime.receipt.awaitingHostFor", {
+    waited: translate("en", "runtime.receipt.waitedMin", { n: 3 }),
+  }));
   expect(chip(host)).not.toContain(translate("en", "runtime.receipt.awaitingTurnFor", {
-    waited: translate("en", "runtime.receipt.waitedSec", { n: 4 }),
+    waited: translate("en", "runtime.receipt.waitedMin", { n: 3 }),
+  }));
+});
+
+test("#1213 with no host behind the feed the bubble says it is waiting without naming a turn", async () => {
+  /* A legacy surface with nothing structured behind it knows only that the
+     message was admitted. Claiming a turn there is an invention, and the same
+     invention would become the explanation on the terminal row. */
+  const host = await bubble({ awaitingTurn: true }, SUBMITTED_AT + 3 * 60_000, "en", null);
+  expect(phase(host)).toBe("awaiting-handover");
+  expect(chip(host)).toBe(translate("en", "runtime.receipt.awaitingHandoverFor", {
+    waited: translate("en", "runtime.receipt.waitedMin", { n: 3 }),
   }));
 });

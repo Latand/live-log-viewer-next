@@ -43,11 +43,22 @@ Object.assign(globalThis, {
  * an admitted message that has waited past the uncertain bound stops reading as
  * in flight. These fixtures assert status wording, not staleness, so they are
  * read at the instant their newest receipt was written.
+ *
+ * They also describe a live agent mid-turn — that is what a parked send is
+ * waiting on here — so the host axes say so. The composer names a turn boundary
+ * only on the host's own evidence; without it the row says it is waiting
+ * without claiming to know why.
  */
 function Receipts(props: React.ComponentProps<typeof RuntimeComposerReceipts>) {
   const stamps = props.receipts.map((receipt) => Date.parse(receipt.at)).filter(Number.isFinite);
   const newest = stamps.length ? Math.max(...stamps) : 0;
-  return <RuntimeComposerReceipts {...props} nowMs={props.nowMs ?? newest + 1_000} />;
+  return (
+    <RuntimeComposerReceipts
+      {...props}
+      nowMs={props.nowMs ?? newest + 1_000}
+      session={props.session ?? { host: "hosted", turn: "running" }}
+    />
+  );
 }
 
 const realFetch = globalThis.fetch;
