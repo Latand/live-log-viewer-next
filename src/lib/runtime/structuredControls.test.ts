@@ -156,30 +156,38 @@ test("a compact transport failure answers from the durable receipt instead of re
   });
 });
 
-test("a structured claude conversation answers compact with a typed capability error", async () => {
+test("a structured claude conversation enters the same durable command channel (#1214)", async () => {
   const fixture = structuredConversation({ engine: "claude" });
   const commands: unknown[] = [];
   const client = {
     command: async (command: unknown) => {
       commands.push(command);
-      throw new Error("an unsupported compact reached the runtime host");
+      return { operationId: "compact-claude", receipt: { operationId: "compact-claude", status: "pending" }, replayed: false };
     },
   } as unknown as RuntimeHostClient;
 
   const result = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "compact" }, {
     registry: fixture.registry,
     client,
+    operationId: () => "compact-claude",
     enabled: () => true,
   });
 
-  expect(commands).toEqual([]);
-  expect(result).toMatchObject({
-    status: 409,
-    body: {
-      code: "unsupported-capability",
-      capability: { control: "compact", engine: "claude", supported: false },
+  /* The dispatcher no longer refuses the Claude path. The command it sends is
+     the same control every engine gets — a generation fence and nothing else;
+     the `/compact` text is the host's own, and never travels from here. */
+  expect(result).toMatchObject({ status: 202, body: { operationId: "compact-claude", receipt: { status: "pending" } } });
+  expect(commands).toEqual([{
+    kind: "compact",
+    operationId: "compact-claude",
+    idempotencyKey: "compact-claude",
+    conversationId: fixture.conversationId,
+    sessionKey: {
+      engine: "claude",
+      sessionId: fixture.registry.conversation(fixture.conversationId as `conversation_${string}`)!.generations.at(-1)!.id,
     },
-  });
+  }]);
+  expect(commands[0]).not.toHaveProperty("text");
 });
 
 test("structured reconfigure validates and enters the runtime command channel", async () => {

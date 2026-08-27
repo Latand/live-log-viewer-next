@@ -15,8 +15,22 @@ import { signalDetachedProcessGroup, type ProcessSignal } from "@/lib/processGro
 import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/process";
 import { hardenedRedact } from "@/lib/view/compactText";
 
-import type { DeliveryReceipt, EngineHost, HostState, NormalizedQueueEntry, QueueEntry, RuntimeEvent } from "./engineHost";
-import { normalizeQueueEntry, RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
+import type {
+  DeliveryReceipt,
+  EngineHost,
+  HostState,
+  NormalizedQueueEntry,
+  QueueEntry,
+  RuntimeCompactOutcome,
+  RuntimeCompactRequest,
+  RuntimeEvent,
+} from "./engineHost";
+import {
+  normalizeQueueEntry,
+  RuntimeReplayGapError,
+  StructuredCompactError,
+  StructuredHostAdoptionCleanupError,
+} from "./engineHost";
 import {
   FileRuntimeEventStore,
   nextRuntimeEventSequence,
@@ -54,6 +68,14 @@ type PendingAnswer = {
   resolve(): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
+};
+type PendingCompaction = {
+  promise: Promise<RuntimeCompactOutcome>;
+  resolve(outcome: RuntimeCompactOutcome): void;
+  reject(error: StructuredCompactError): void;
+  settled: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+  poll: ReturnType<typeof setInterval> | null;
 };
 
 export interface ClaudeDeliveryState {
@@ -203,6 +225,11 @@ export interface ClaudeStreamBrokerHostOptions {
   processIdentity?: (pid: number) => string | null;
   readAuthStatus?: () => ClaudeAuthStatus | Promise<ClaudeAuthStatus>;
   readTranscript?: (cwd: string, sessionId: string) => ClaudeTranscriptUser[];
+  /** Where a compaction can be witnessed (#1214); defaults to the session
+      transcript. */
+  compactionEvidence?: ClaudeCompactionEvidenceSource;
+  compactEvidenceTimeoutMs?: number;
+  compactEvidencePollMs?: number;
   eventStore?: RuntimeEventStore;
   deliveryLedger?: ClaudeDeliveryLedger;
   readImage?: (ref: StructuredImageRef) => Buffer;
@@ -216,6 +243,96 @@ export interface ClaudeTranscriptUser {
   timestamp: string | null;
 }
 
+/** One compaction boundary the session transcript recorded. `uuid` names the
+    record when it carries one, so the durable receipt can say which compaction
+    closed the operation. */
+export interface ClaudeCompactionBoundary {
+  uuid: string | null;
+  trigger: string | null;
+}
+
+export interface ClaudeCompactionEvidence {
+  boundaries: ClaudeCompactionBoundary[];
+  /** Byte offset the next read resumes from; only complete records are ever
+      consumed, so a half-written line is re-read rather than missed. */
+  cursor: number;
+}
+
+export interface ClaudeCompactionEvidenceInput {
+  cwd: string;
+  sessionId: string;
+  projectsRoot?: string;
+}
+
+/**
+ * Where a Claude compaction can be *witnessed*. The stream-json transport has
+ * no compact control and reports no compaction outcome, so the only durable
+ * evidence is the `compact_boundary` record the CLI writes into the session
+ * transcript. The seam is injectable for the same reason `readTranscript` is:
+ * a test must never depend on the operator's `~/.claude` tree.
+ */
+export interface ClaudeCompactionEvidenceSource {
+  /** The fence a compaction's evidence must appear after — the transcript's
+      current end. Boundaries already in the file belong to earlier
+      compactions and can never close this operation. */
+  cursor(input: ClaudeCompactionEvidenceInput): number;
+  /** Boundary records appended since `fromByte`. */
+  read(input: ClaudeCompactionEvidenceInput & { fromByte: number }): ClaudeCompactionEvidence;
+}
+
+/** Marker every boundary record carries, cheap enough to test every line on. */
+const COMPACT_BOUNDARY_MARKER = '"compact_boundary"';
+/** Upper bound on one evidence pass. Polls read only what was appended since
+    the previous pass, so this only caps a transcript that grew explosively
+    between two reads — the next pass picks up where this one stopped. */
+const MAX_COMPACT_EVIDENCE_READ_BYTES = 4 * 1024 * 1024;
+
+function transcriptSize(filename: string): number {
+  try { return fs.statSync(filename).size; } catch { return 0; }
+}
+
+/** The session transcript read as a compaction evidence channel. */
+export const fileClaudeCompactionEvidence: ClaudeCompactionEvidenceSource = {
+  cursor: (input) => transcriptSize(claudeTranscriptPath(input.cwd, input.sessionId, input.projectsRoot)),
+  read: (input) => {
+    const filename = claudeTranscriptPath(input.cwd, input.sessionId, input.projectsRoot);
+    const size = transcriptSize(filename);
+    /* A transcript that shrank was rotated or rewritten under us; the old
+       offset names nothing, so evidence is read from the new head. */
+    const from = size < input.fromByte ? 0 : input.fromByte;
+    if (size <= from) return { boundaries: [], cursor: from };
+    let text: string;
+    try {
+      const fd = fs.openSync(filename, "r");
+      try {
+        const length = Math.min(size - from, MAX_COMPACT_EVIDENCE_READ_BYTES);
+        const buffer = Buffer.alloc(length);
+        const read = fs.readSync(fd, buffer, 0, length, from);
+        text = buffer.toString("utf8", 0, read);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return { boundaries: [], cursor: input.fromByte };
+    }
+    const lastNewline = text.lastIndexOf("\n");
+    if (lastNewline < 0) return { boundaries: [], cursor: from };
+    const complete = text.slice(0, lastNewline);
+    const boundaries: ClaudeCompactionBoundary[] = [];
+    for (const line of complete.split("\n")) {
+      if (!line.includes(COMPACT_BOUNDARY_MARKER)) continue;
+      let value: JsonObject | null = null;
+      try { value = record(JSON.parse(line)); } catch { continue; }
+      if (value?.type !== "system" || value.subtype !== "compact_boundary") continue;
+      boundaries.push({
+        uuid: stringField(value, "uuid"),
+        trigger: stringField(record(value.compactMetadata), "trigger"),
+      });
+    }
+    return { boundaries, cursor: from + Buffer.byteLength(complete) + 1 };
+  },
+};
+
 const CHILD_ENV_ALLOWLIST = [
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG",
   "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "NO_COLOR", "XDG_CONFIG_HOME",
@@ -225,6 +342,25 @@ const CHILD_ENV_ALLOWLIST = [
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
+
+/** The command this control types into the conversation (#1214). */
+export const CLAUDE_COMPACT_COMMAND = "/compact";
+
+/**
+ * The durable receipt reason for a compaction that was sent and never
+ * witnessed. It is a machine token like every other receipt reason
+ * (`busy-turn`, `stale-generation`, …) so the strip can say it in both
+ * languages: "sent — completion could not be confirmed". It is an outcome, not
+ * a failure to act: the operator asked for the command and the command went.
+ */
+export const CLAUDE_COMPACT_UNOBSERVED_REASON = "compact-sent-unobserved";
+
+/** How long a compaction may run before its outcome counts as unobservable.
+    Compaction re-reads the whole thread through the model — a manual one
+    observed locally took ~2.5 minutes — so the budget is generous. */
+const DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS = 5 * 60_000;
+/** How often the transcript is re-read for a boundary while one is pending. */
+const DEFAULT_COMPACT_EVIDENCE_POLL_MS = 1_000;
 
 /** Durable launch evidence: hosts that launched with the native multi-agent
     denial advertise the effective denied-tool set so registry snapshots and
@@ -501,6 +637,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly eventStore: RuntimeEventStore;
   private readonly deliveryLedger: ClaudeDeliveryLedger;
   private readonly readImage: (ref: StructuredImageRef) => Buffer;
+  private readonly cwd: string;
+  private readonly projectsRoot: string | undefined;
+  private readonly compactionEvidence: ClaudeCompactionEvidenceSource;
+  private readonly compactEvidenceTimeoutMs: number;
+  private readonly compactEvidencePollMs: number;
   private readonly requestTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
@@ -514,6 +655,10 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly attentions = new Map<string, JsonObject>();
   private readonly pendingControls = new Map<string, PendingControl>();
   private readonly pendingAnswers = new Map<string, PendingAnswer>();
+  /** Compactions this host issued, keyed by durable operation and kept after
+      they settle: a retry replays the outcome instead of typing `/compact` a
+      second time into the conversation (#1214). */
+  private readonly compactions = new Map<string, PendingCompaction>();
   private readonly interruptedTurns = new Set<string>();
   private readonly partialTurns = new Set<string>();
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
@@ -552,6 +697,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.deliveryLedger = options.deliveryLedger ?? new FileClaudeDeliveryLedger();
     this.readImage = options.readImage ?? ((ref) => runtimeImageStore().read(ref));
+    this.cwd = options.cwd;
+    this.projectsRoot = options.claudeProjectsDir;
+    this.compactionEvidence = options.compactionEvidence ?? fileClaudeCompactionEvidence;
+    this.compactEvidenceTimeoutMs = options.compactEvidenceTimeoutMs ?? DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS;
+    this.compactEvidencePollMs = options.compactEvidencePollMs ?? DEFAULT_COMPACT_EVIDENCE_POLL_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
@@ -810,6 +960,142 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     });
   }
 
+  /**
+   * Manual context compaction (#1214). The stream-json transport exposes
+   * `interrupt` and `can_use_tool` as its whole client-originated control
+   * channel — there is no compact subtype to send — so this control reaches
+   * compaction the one way the transport allows: it types `/compact` into the
+   * conversation, exactly as the operator would in the terminal.
+   *
+   * That mechanism buys no knowledge of the outcome, so none is claimed. The
+   * promise settles only on a *witnessed* compaction: a `compact_boundary`
+   * record appended to the session transcript after the command went (or the
+   * same boundary announced on the stream). Nothing arriving inside the
+   * evidence budget terminalizes `unverified` with
+   * `CLAUDE_COMPACT_UNOBSERVED_REASON` — "sent, completion not observable" —
+   * which is the honest verdict and an acceptable outcome. It is never
+   * reported as success, and it never spins forever.
+   *
+   * The compaction is deliberately left out of the turn plane: it is not a
+   * delivery, so it takes no ledger row and no turn slot, and the `result` the
+   * CLI answers with lands on an empty turn queue and is ignored. The delivery
+   * queue holds messages behind an unfinished compaction, so the turn queue is
+   * empty for the duration.
+   */
+  async compact(request: RuntimeCompactRequest): Promise<RuntimeCompactOutcome> {
+    /* One durable operation, one `/compact`. A caller that timed out and
+       retried — or a queue pass that re-read the same effect — joins the
+       in-flight control or replays the settled outcome; it never types the
+       command into the conversation a second time. */
+    const existing = this.compactions.get(request.operationId);
+    if (existing) return existing.promise;
+    if (this.unavailable()) throw new StructuredCompactError("Claude stream host is unavailable", "refused");
+    if (request.threadId && request.threadId !== this.identity.sessionId) {
+      throw new StructuredCompactError("compact target session is not the session this host owns", "refused");
+    }
+    /* Admission fenced the durable turn axis, but a turn can start in between,
+       and a `/compact` typed underneath a running turn is queued behind it
+       instead of compacting anything the operator is looking at. */
+    if (this.activeTurnId) {
+      throw new StructuredCompactError("a turn is active; compaction would race it", "refused");
+    }
+    if ([...this.compactions.values()].some((compaction) => !compaction.settled)) {
+      throw new StructuredCompactError("a compaction is already running on this conversation", "refused");
+    }
+
+    let resolveOutcome!: PendingCompaction["resolve"];
+    let rejectOutcome!: PendingCompaction["reject"];
+    const promise = new Promise<RuntimeCompactOutcome>((resolve, reject) => {
+      resolveOutcome = resolve;
+      rejectOutcome = reject;
+    });
+    const compaction: PendingCompaction = {
+      promise,
+      resolve: (outcome) => resolveOutcome(outcome),
+      reject: (error) => rejectOutcome(error),
+      settled: false,
+      timer: null,
+      poll: null,
+    };
+    /* A retry that arrives while the command is being written finds the entry
+       here, so the registration happens before the frame. */
+    this.compactions.set(request.operationId, compaction);
+    void promise.catch(() => undefined);
+    /* Only boundaries appended after this offset can belong to this request;
+       the ones already in the transcript closed earlier compactions. */
+    let cursor = this.readCompactionCursor();
+    this.write({
+      type: "user",
+      session_id: this.identity.sessionId,
+      message: { role: "user", content: [{ type: "text", text: CLAUDE_COMPACT_COMMAND }] },
+    });
+    compaction.poll = setInterval(() => {
+      const evidence = this.readCompactionEvidence(cursor);
+      cursor = evidence.cursor;
+      const boundary = evidence.boundaries.at(-1);
+      if (boundary) this.settleCompaction(compaction, { compactionId: boundary.uuid });
+    }, this.compactEvidencePollMs);
+    compaction.timer = setTimeout(() => {
+      this.settleCompaction(
+        compaction,
+        new StructuredCompactError(CLAUDE_COMPACT_UNOBSERVED_REASON, "unverified"),
+      );
+    }, this.compactEvidenceTimeoutMs);
+    return promise;
+  }
+
+  private readCompactionCursor(): number {
+    try {
+      return this.compactionEvidence.cursor({
+        cwd: this.cwd,
+        sessionId: this.identity.sessionId,
+        ...(this.projectsRoot ? { projectsRoot: this.projectsRoot } : {}),
+      });
+    } catch {
+      /* An unreadable transcript is not evidence of anything: start at the
+         head and let the boundary check decide. */
+      return 0;
+    }
+  }
+
+  private readCompactionEvidence(fromByte: number): ClaudeCompactionEvidence {
+    try {
+      return this.compactionEvidence.read({
+        cwd: this.cwd,
+        sessionId: this.identity.sessionId,
+        ...(this.projectsRoot ? { projectsRoot: this.projectsRoot } : {}),
+        fromByte,
+      });
+    } catch {
+      return { boundaries: [], cursor: fromByte };
+    }
+  }
+
+  /** Settles one compaction exactly once and stops watching for its evidence.
+      The entry stays in the map so a later retry replays this outcome. */
+  private settleCompaction(
+    compaction: PendingCompaction,
+    outcome: RuntimeCompactOutcome | StructuredCompactError,
+  ): void {
+    if (compaction.settled) return;
+    compaction.settled = true;
+    if (compaction.poll) clearInterval(compaction.poll);
+    if (compaction.timer) clearTimeout(compaction.timer);
+    compaction.poll = null;
+    compaction.timer = null;
+    if (outcome instanceof StructuredCompactError) compaction.reject(outcome);
+    else compaction.resolve(outcome);
+  }
+
+  /** Every compaction still awaiting evidence, settled with one verdict. A
+      host that dies or is released mid-compaction leaves the engine outcome
+      unknown, which is `unverified`, never a failure to have acted. */
+  private settlePendingCompactions(outcome: RuntimeCompactOutcome | StructuredCompactError): void {
+    for (const compaction of this.compactions.values()) {
+      if (!compaction.settled) this.settleCompaction(compaction, outcome);
+    }
+  }
+
   async answer(attentionRef: string, value: unknown): Promise<void> {
     if (this.unavailable()) throw new Error("Claude stream host is unavailable");
     if (!this.attentions.has(attentionRef)) throw new Error("attention request is missing or already answered");
@@ -1018,6 +1304,13 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (sessionId && sessionId !== this.identity.sessionId) return this.fail(new Error("Claude emitted a different session id"));
     if (type === "system" && message.subtype === "init") {
       if (message.apiKeySource !== "none") return this.fail(new Error("Claude stream process did not use subscription OAuth"));
+      return;
+    }
+    /* The second compaction evidence channel (#1214). The transcript is the
+       durable one; a boundary announced on the stream says the same thing
+       sooner, so whichever arrives first settles the control. */
+    if (type === "system" && message.subtype === "compact_boundary") {
+      this.settlePendingCompactions({ compactionId: stringField(message, "uuid") });
       return;
     }
     if (type === "user") {
@@ -1294,6 +1587,12 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       pending.reject(new Error(safeError(error)));
     }
     this.pendingAnswers.clear();
+    /* A `/compact` that was already typed into the conversation cannot be
+       taken back, and a host that goes away mid-compaction proves nothing
+       about what became of it — which is exactly the unobserved outcome. */
+    this.settlePendingCompactions(
+      new StructuredCompactError(CLAUDE_COMPACT_UNOBSERVED_REASON, "unverified"),
+    );
   }
 
   private closeSubscribers(): void {

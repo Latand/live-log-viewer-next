@@ -62,16 +62,24 @@ test("a compact command without an owned session key is refused", () => {
   })).toThrow("sessionKey is invalid");
 });
 
-test("compact capability is engine-specific and truthful", () => {
+test("compact capability is supported on both engines and truthful about confirmation", () => {
+  /* Codex reports completion on its own channel, so the receipt terminalizes
+     on the engine's evidence. */
   expect(runtimeCompactCapability("codex")).toEqual({
     control: "compact",
     engine: "codex",
     supported: true,
+    confirmation: "observed",
   });
-  const claude = runtimeCompactCapability("claude");
-  expect(claude.supported).toBe(false);
-  expect(claude.engine).toBe("claude");
-  expect(claude.reason).toContain("compact");
+  /* Claude has no compact subtype in its transport, so its host types
+     `/compact` into the conversation (#1214). The control is supported; what
+     is qualified is the confirmation, never the engine's ability. */
+  expect(runtimeCompactCapability("claude")).toEqual({
+    control: "compact",
+    engine: "claude",
+    supported: true,
+    confirmation: "best-effort",
+  });
 });
 
 test("a host without a compact control is detected structurally", () => {

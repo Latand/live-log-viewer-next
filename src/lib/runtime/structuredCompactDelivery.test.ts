@@ -9,6 +9,7 @@ import {
   type QueueEntry,
   type RuntimeEvent,
 } from "./engineHost";
+import { CLAUDE_COMPACT_UNOBSERVED_REASON } from "./claudeStreamBrokerHost";
 import {
   StructuredDeliveryQueue,
   type StructuredDeliveryEffect,
@@ -438,6 +439,28 @@ test("a rejected compact request terminalizes as failed and an unverified one as
     "uncertain",
     "Codex app-server host was lost",
   ]);
+});
+
+test("a Claude compaction nobody witnessed terminalizes uncertain with its own reason (#1214)", async () => {
+  const sent: QueueEntry[] = [];
+  const host: CompactCapableHost = Object.assign(baseHost(sent), {
+    compact: async () => {
+      throw new StructuredCompactError(CLAUDE_COMPACT_UNOBSERVED_REASON, "unverified");
+    },
+  });
+  const { port, transitions, settled } = recorder([
+    compactEffect({ sessionKey: { engine: "claude", sessionId: "thread-one" } }),
+  ]);
+
+  await new StructuredDeliveryQueue(port, () => host).drain();
+  await settled;
+
+  /* The durable receipt says what happened — the command went and nothing
+     witnessed the compaction — instead of claiming success or spinning. */
+  expect(transitions.at(-1)).toEqual(["op-one", "uncertain", CLAUDE_COMPACT_UNOBSERVED_REASON]);
+  /* Even on the path whose mechanism IS a message, the queue never turns the
+     control into a delivery: the `/compact` belongs to the host. */
+  expect(sent).toEqual([]);
 });
 
 test("a recovered host lets a queued compaction reach the engine on the next pass", async () => {

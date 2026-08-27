@@ -145,29 +145,37 @@ const structuredImages = (imageInput: RuntimeImageCapability | null | undefined)
   imageInput?.supported ? ENABLED : disabled("composer.structuredImagesProtocol");
 
 /**
- * Compact on a pane-less structured host (#862). Three facts decide the cell,
- * and they are exactly the three the server gates on, so a click can only be
- * refused for a reason that arrived after the render:
+ * Compact on a pane-less structured host (#862, reopened by #1214). Both
+ * structured host kinds can compact; what differs is what the Viewer can
+ * promise afterwards, and the cell says which:
  *
- * - the engine: codex-app-server exposes `thread/compact/start` and reports
- *   completion through the `contextCompaction` item, while the Claude
- *   stream-json protocol has no client-originated compact control at all;
- * - the host kind, which `dispatchStructuredControl` and journal admission both
- *   require to be codex-app-server (a session view missing `sessionKey`
- *   defaults its engine to codex, so the engine alone is not enough);
- * - the turn, because admission rejects a compaction that would race a live one
- *   — an enabled button there promises something the journal refuses. Both
- *   halves of that rejection are read: the turn axis AND a non-null
- *   `activeTurnId`, which a session can project while its axis still says idle.
+ * - codex-app-server sends `thread/compact/start` and reports completion
+ *   through the `contextCompaction` item, so the control is plainly enabled;
+ * - claude-broker has no compact subtype in its transport, so its host types
+ *   `/compact` into the conversation and can only witness the outcome if a
+ *   compaction boundary appears. The cell is enabled with a note saying that —
+ *   a caveat about what the Viewer can confirm, never about what Claude can do.
+ *
+ * The other two facts are exactly the ones the server gates on, so a click can
+ * only be refused for a reason that arrived after the render: the host kind,
+ * which `dispatchStructuredControl` and journal admission both require to be
+ * one of those two, and the turn, because admission rejects a compaction that
+ * would race a live one. Both halves of that rejection are read: the turn axis
+ * AND a non-null `activeTurnId`, which a session can project while its axis
+ * still says idle.
  */
 const structuredCompact = (session: RuntimeSessionView["session"] | undefined): Capability => {
-  if (session?.hostKind !== "codex-app-server" || session.sessionKey?.engine !== "codex") {
-    return disabled("strip.compactEngineUnsupported");
-  }
-  if (session.turn === "running" || session.turn === "interrupt_requested" || session.activeTurnId) {
+  /* A session view whose `sessionKey` payload never arrived defaults its engine
+     to codex, so the host kind decides the mechanism and the engine only has to
+     not contradict it. */
+  const mechanism = session?.hostKind === "codex-app-server" && session.sessionKey?.engine === "codex" ? "control"
+    : session?.hostKind === "claude-broker" && session.sessionKey?.engine !== "codex" ? "message"
+    : null;
+  if (!mechanism) return disabled("strip.compactHostUnsupported");
+  if (session!.turn === "running" || session!.turn === "interrupt_requested" || session!.activeTurnId) {
     return disabled("strip.compactBusyTurn");
   }
-  return ENABLED;
+  return mechanism === "message" ? enabledWithNote("strip.compactClaudeMessage") : ENABLED;
 };
 
 /** A structured (pane-less) host that is currently alive. Gated by the
@@ -311,8 +319,8 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
         surface,
         controls: {
           stop: ENABLED,
-          // Compact is a real durable control on a Codex structured host and a
-          // genuine protocol gap on a Claude one (#862).
+          // Compact is a durable control on both structured host kinds; the
+          // cell's note says what the Viewer can confirm (#862, #1214).
           compact: structuredCompact(rv?.session),
           // The composer runtime pill owns selection here (issue #390): the cell
           // is enabled, and per-turn honesty comes from the session's negotiated
