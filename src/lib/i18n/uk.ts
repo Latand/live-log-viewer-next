@@ -909,9 +909,6 @@ export const uk: Record<keyof typeof en, Message> = {
 
   "img.readFailed": "не вдалося прочитати картинку",
   "img.readAborted": "читання картинки перервано",
-  "img.unsupported": "непідтримуваний формат картинки: {name}",
-  "img.unknownFile": "невідомий файл",
-  "img.tooLarge": "{name}: завелика (ліміт 10 МБ)",
   "img.structuredTooLarge": "Картинка перевищує ліміт цього хоста — {max} МБ",
   "img.tooManyStructured": "За один раз можна надіслати до {max} картинок",
   "img.structuredAggregateTooLarge": "Картинки перевищують ліміт запиту цього хоста — {max} МБ",

@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { attachmentsAreOrphaned, structuredAttachmentOutcome, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
 import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { retireReplySuggestionsOnOperatorMessage } from "@/lib/suggestions/store";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -70,12 +71,17 @@ function terminalRetryIdempotencyKey(operationId: string): string {
 }
 
 /**
- * One send's general (non-image) attachments, threaded through the dispatch so
- * the wrapper below can clean them up on any refusal (#1224). Kept as a handle
- * rather than a return value because every failure exit is a plain response.
+ * One send's general (non-image) attachments and the fate of the delivery they
+ * rode with, threaded through the dispatch so the wrapper below can release
+ * them on a TERMINAL refusal and only then (#1224). Kept as a handle rather
+ * than a return value because every failure exit is a plain response, and the
+ * response's status cannot tell a refusal apart from an uncertain delivery.
  */
 interface CommandAttachments {
   filePaths: string[];
+  /** Starts `refused`: every exit above the delivery attempt is terminal —
+      nothing was ever handed over, so nothing can be reading these paths. */
+  outcome: AttachmentDeliveryOutcome;
 }
 
 async function dispatchRuntimeCommand(
@@ -183,6 +189,9 @@ async function dispatchRuntimeCommand(
       );
     }
     if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
+      /* In flight ⇒ the Viewer cannot say. Set BEFORE the call so an enqueue
+         that throws mid-delivery keeps the attachments too (#1224). */
+      attachments.outcome = "uncertain";
       const admitted = await dependencies.enqueue({
         path: "",
         conversationId: command.conversationId,
@@ -205,6 +214,7 @@ async function dispatchRuntimeCommand(
         kick: dependencies.kick ?? kickStructuredDeliveryQueue,
       });
       if (admitted) {
+        attachments.outcome = structuredAttachmentOutcome(admitted);
         if (!admitted.ok) {
           return NextResponse.json({
             error: admitted.error,
@@ -216,9 +226,20 @@ async function dispatchRuntimeCommand(
         const status = admitted.receipt.status === "pending" || admitted.receipt.status === "queued" ? 202 : 200;
         return NextResponse.json({ operationId: admitted.operationId, receipt: admitted.receipt }, { status });
       }
+      /* No structured ownership: nothing was delivered here, and the direct
+         command below owns the fate from now on. */
+      attachments.outcome = "refused";
     }
     if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
+    /* Same fence as the queue above: the command is on the wire, so its fate is
+       unknown until it answers. A transport failure or an idempotency conflict
+       lands in the catch below with the attachments intact — a conflict in
+       particular means an earlier attempt under this key already holds them. */
+    attachments.outcome = "uncertain";
     const result = await client.command(command);
+    /* The host answered, so the command was handed over: the receipt's own
+       status is the composer's business, not the inbox's. Bytes stay. */
+    attachments.outcome = "accepted";
     if (result.receipt.status === "pending" || result.receipt.status === "queued") {
       dependencies.kick?.();
     }
@@ -231,19 +252,20 @@ async function dispatchRuntimeCommand(
 }
 
 /**
- * A runtime send/steer, with its attachments' retention attached to its fate: a
- * command that was refused leaves no bytes in the inbox, and one that was
- * admitted keeps them, because the agent still has to open the path it was
- * handed (#1224 — the same rule `deleteInboxImages` follows for images).
+ * A runtime send/steer, with its attachments' retention attached to its fate:
+ * a command TERMINALLY refused leaves no bytes in the inbox, and one that was
+ * admitted — or one whose delivery could not be established — keeps them,
+ * because the agent still has to open the path it was handed (#1224; see
+ * `attachmentRetention.ts` for why "not ok" is the wrong key).
  */
 export async function handleRuntimeCommand(
   request: NextRequest,
   kind: RuntimeOperationKind,
   dependencies: RuntimeHttpDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<NextResponse> {
-  const attachments: CommandAttachments = { filePaths: [] };
+  const attachments: CommandAttachments = { filePaths: [], outcome: "refused" };
   const response = await dispatchRuntimeCommand(request, kind, dependencies, attachments);
-  if (attachments.filePaths.length && !response.ok) {
+  if (attachments.filePaths.length && attachmentsAreOrphaned(attachments.outcome)) {
     (await import("@/lib/inboxFiles")).deleteInboxFiles(attachments.filePaths);
   }
   return response;

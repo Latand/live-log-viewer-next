@@ -225,7 +225,7 @@ test("an enabled image dragover is claimed so the drop delivers the files exactl
         sendLabelIdle="Send"
         sendLabelRecording="Stop"
         sendIdleClassName="bg-accent"
-        onImageFiles={(files) => { delivered.push(files); }}
+        onAttachFiles={(files) => { delivered.push(files); }}
       />;
     }
     return <EnabledHarness />;

@@ -134,6 +134,82 @@ test("a refused structured send leaves no attachment bytes behind", async () => 
   expect(inboxEntries()).toEqual([]);
 });
 
+test("round-3 finding 1: an uncertain delivery keeps the attachment it may already be carrying", async () => {
+  const admitted: Record<string, unknown>[] = [];
+  const response = await handleRuntimeCommand(request({
+    conversationId: "conversation_attach",
+    text: "the host connection dropped mid-command",
+    idempotencyKey: "send-uncertain-transport",
+    files: [attachment("incident.log", "invented incident line")],
+  }), "send", dependencies(async (input) => {
+    admitted.push(input as unknown as Record<string, unknown>);
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: "runtime host socket closed",
+      status: 503,
+      /* The transport failed; what the host did with the command is unknown. */
+      transportUncertain: true,
+    } as Awaited<ReturnType<NonNullable<NonNullable<Dependencies>["enqueue"]>>>;
+  }));
+
+  expect(response.status).toBe(503);
+  /* The bytes are the ONLY copy — the browser uploaded them and let them go.
+     A send that may still land was handed this exact path, so deleting on "not
+     ok" hands the agent a path to a file the viewer just removed (#1224). */
+  const written = String(admitted[0]!.text).split("\n").at(-1)!;
+  expect(fs.existsSync(written)).toBe(true);
+  expect(fs.readFileSync(written, "utf8")).toBe("invented incident line");
+  fs.rmSync(path.dirname(written), { recursive: true, force: true });
+});
+
+test("round-3 finding 1: a host that answers `uncertain` keeps them too, and a rejection still releases them", async () => {
+  const admitted: Record<string, unknown>[] = [];
+  const uncertain = await handleRuntimeCommand(request({
+    conversationId: "conversation_attach",
+    text: "the host itself cannot say",
+    idempotencyKey: "send-uncertain-receipt",
+    files: [attachment("uncertain.txt", "invented bytes")],
+  }), "send", dependencies(async (input) => {
+    admitted.push(input as unknown as Record<string, unknown>);
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: "structured host delivery failed",
+      status: 409,
+      operationId: "op_uncertain",
+      receipt: { operationId: "op_uncertain", status: "uncertain" },
+    } as Awaited<ReturnType<NonNullable<NonNullable<Dependencies>["enqueue"]>>>;
+  }));
+
+  expect(uncertain.status).toBe(409);
+  const written = String(admitted[0]!.text).split("\n").at(-1)!;
+  expect(fs.existsSync(written)).toBe(true);
+  fs.rmSync(path.dirname(written), { recursive: true, force: true });
+
+  /* The other half of the same rule: a TERMINAL refusal is still swept, so
+     retention did not simply become "keep everything". */
+  const rejected = await handleRuntimeCommand(request({
+    conversationId: "conversation_attach",
+    text: "terminally refused",
+    idempotencyKey: "send-rejected-receipt",
+    files: [attachment("orphan.txt", "invented bytes")],
+  }), "send", dependencies(async () => ({
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: "structured host delivery failed",
+    status: 409,
+    operationId: "op_rejected",
+    receipt: { operationId: "op_rejected", status: "rejected" },
+  } as Awaited<ReturnType<NonNullable<NonNullable<Dependencies>["enqueue"]>>>)));
+
+  expect(rejected.status).toBe(409);
+  expect(inboxEntries()).toEqual([]);
+});
+
 test("an oversized attachment is refused with its reason and never written", async () => {
   const enqueued: unknown[] = [];
   const response = await handleRuntimeCommand(request({

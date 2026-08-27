@@ -344,6 +344,37 @@ test("round-2 finding 1: two different reasons in one gesture both survive, and 
   expect(status.split(sharedReason)).toHaveLength(2);
 });
 
+test("round-3 finding 3: several refusals stay readable — the status holds more than one line", async () => {
+  const host = mount();
+  flushSync(() => textareaProps(host).onDrop({
+    dataTransfer: {
+      files: [
+        fileOf("empty.log", "text/plain", 0),
+        fileOf("first-archive.zip", "application/zip", MAX_INBOX_FILE_BYTES + 1),
+        fileOf("second-archive.zip", "application/zip", MAX_INBOX_FILE_BYTES + 1),
+      ],
+    },
+    preventDefault() {},
+    stopPropagation() {},
+  }));
+  await tick();
+
+  const status = host.querySelector('[data-testid="composer-status"]')!;
+  const text = status.textContent ?? "";
+  /* Two reasons, two lines. Concatenated onto ONE line and truncated, a message
+     naming three rejected files shows the first few characters of the first
+     one and hides the rest — the mechanism that exists to stop a silent
+     discard, silenced by its own surface. */
+  const lines = text.split("\n").filter((line) => line.trim());
+  expect(lines).toHaveLength(2);
+  expect(lines[0]).toContain("empty.log");
+  expect(lines[1]).toContain("first-archive.zip, second-archive.zip");
+  /* `truncate` is `overflow: hidden` + `text-overflow: ellipsis` + `nowrap`:
+     it would clip both lines to one and swallow every name past the first. */
+  expect(status.className).not.toContain("truncate");
+  expect(status.className).toContain("whitespace-pre-line");
+});
+
 test("round-2 finding 3: a mixed drop with images unavailable keeps both files and lets the send-time gate speak", async () => {
   const host = mount(true, true);
   flushSync(() => textareaProps(host).onDrop({

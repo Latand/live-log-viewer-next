@@ -28,6 +28,7 @@ import {
   resolveTmuxAttach,
   tmuxEndpointDescriptor,
 } from "@/lib/tmux";
+import { attachmentsAreOrphaned, structuredAttachmentOutcome, type AttachmentDeliveryOutcome } from "@/lib/attachmentRetention";
 import type { InboxFileAdmissionResult } from "@/lib/inboxFiles";
 import type { ApiError, FileEntry } from "@/lib/types";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
@@ -398,11 +399,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       }, { status: 500 });
     }
   }
-  /* A delivery that failed leaves no bytes behind (#1224). A delivery that was
-     accepted — including one held for a switch — keeps them: the agent still
-     has to open the path it was handed. */
-  const discardAttachments = async (): Promise<void> => {
-    if (!filePaths.length) return;
+  /* A TERMINALLY refused delivery leaves no bytes behind (#1224). A delivery
+     that was accepted — including one held for a switch — keeps them, because
+     the agent still has to open the path it was handed, and so does one whose
+     fate could not be established: see `attachmentRetention.ts` for why "not
+     ok" is the wrong key to hang a deletion on. */
+  const releaseAttachments = async (outcome: AttachmentDeliveryOutcome): Promise<void> => {
+    if (!filePaths.length || !attachmentsAreOrphaned(outcome)) return;
     (await import("@/lib/inboxFiles")).deleteInboxFiles(filePaths);
     filePaths = [];
   };
@@ -419,7 +422,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       ...(origin ? { origin } : {}),
     });
     if (structured) {
-      if (!structured.ok) await discardAttachments();
+      await releaseAttachments(structuredAttachmentOutcome(structured));
       const { status, ...response } = structured.ok ? { ...structured, status: 200 } : structured;
       return NextResponse.json({ ...response, ...attachmentField() }, { status });
     }
@@ -441,7 +444,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   });
   /* `started` actuation is the uncertain case the image path also keeps: the
      agent may already hold the message, so its attachments stay readable. */
-  if (!outcome.ok && outcome.actuation !== "started") await discardAttachments();
+  await releaseAttachments(outcome.ok
+    ? "accepted"
+    : outcome.actuation === "started" ? "uncertain" : "refused");
   if (!outcome.ok) return respond(outcome);
   return NextResponse.json({ ...outcome, ...attachmentField() });
 }

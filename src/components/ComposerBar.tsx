@@ -46,11 +46,17 @@ export interface ComposerBarProps {
   /** The phone composer moves the image picker behind the leftSlot toggle;
       this hides the inline one so the picker exists only once. */
   showImage?: boolean;
-  /** Overrides both the inline picker and the paste target — the task composer
-      routes images to its durable, upload-on-add store instead of the in-memory
-      `useImageAttachments`. When set, the in-memory preview strip is suppressed
-      (the caller renders its own from staged refs). */
-  onImageFiles?: (files: File[]) => void;
+  /** Overrides both the inline picker and the paste/drop target — the task
+      composer routes attachments to its durable, upload-on-add store instead of
+      the in-memory `useImageAttachments`. When set, the in-memory preview strip
+      is suppressed (the caller renders its own from staged refs).
+
+      It receives EVERY file the operator hands over, images or not, so whatever
+      is on the other end owes each one an answer: staged, or refused by name.
+      The name says `files` for that reason — it was `onImageFiles`, and the
+      task composer behind it went on screening for images alone and losing the
+      rest (#1224). Both sides now screen through `@/lib/attachmentIntake`. */
+  onAttachFiles?: (files: File[]) => void;
   imageDisabled?: boolean;
   imageDisabledReason?: string;
   /** When set, Send is disabled with this tooltip and no submit is attempted
@@ -153,7 +159,7 @@ export function ComposerBar({
   sendMenuLabel,
   sendMenuActions = [],
   showImage = true,
-  onImageFiles,
+  onAttachFiles,
   imageDisabled = false,
   imageDisabledReason,
   sendDisabledReason,
@@ -305,7 +311,7 @@ export function ComposerBar({
       {voicePanel}
       {/* On phones, staged images are the composer's first bounded row. The
           desktop tray keeps its established position below the controls. */}
-      {isMobile && !onImageFiles ? (
+      {isMobile && !onAttachFiles ? (
         <ImagePreviewStrip
           attachments={attachments.attachments}
           onRemove={attachments.remove}
@@ -347,7 +353,7 @@ export function ComposerBar({
               .filter((entry): entry is File => entry !== null);
             if (!picks.length) return;
             event.preventDefault();
-            (onImageFiles ?? attachments.addFiles)(picks);
+            (onAttachFiles ?? attachments.addFiles)(picks);
           }}
           onDragOver={(event) => {
             /* A file drop only fires when its dragover was cancelled — without
@@ -367,7 +373,7 @@ export function ComposerBar({
             if (!files.length) return;
             event.preventDefault();
             event.stopPropagation();
-            (onImageFiles ?? attachments.addFiles)(files);
+            (onAttachFiles ?? attachments.addFiles)(files);
           }}
           onKeyDown={(event) => {
             /* ArrowUp/ArrowDown recall previously queued and sent messages
@@ -441,7 +447,7 @@ export function ComposerBar({
                 acceptFiles={attachments.acceptsFiles}
                 ariaLabel={imageAriaLabel}
                 className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
-                onFiles={onImageFiles ?? attachments.addFiles}
+                onFiles={onAttachFiles ?? attachments.addFiles}
                 /* An unavailable image capability no longer closes the picker
                    outright where files are deliverable (#1224) — a document
                    needs no such capability; a picked image is refused by name. */
@@ -454,7 +460,7 @@ export function ComposerBar({
       ) : null}
       {/* The task composer renders its own durable-ref strip; the in-memory one
           stays for the pane/draft composers that still upload at send time. */}
-      {!isMobile && !onImageFiles ? (
+      {!isMobile && !onAttachFiles ? (
         <ImagePreviewStrip
           attachments={attachments.attachments}
           onRemove={attachments.remove}
@@ -487,14 +493,23 @@ export function ComposerBar({
       {/* A decoding/failed attachment blocks Send — say why, and never silently
           drop the image (issue #419). Suppressed while a host-death reason
           already occupies the send tooltip. */}
-      {!onImageFiles && !sendBlocked && attachmentBlockedReason ? (
+      {!onAttachFiles && !sendBlocked && attachmentBlockedReason ? (
         <span role="status" aria-live="polite" className="text-caption font-semibold text-warning">{attachmentBlockedReason}</span>
       ) : null}
+      {/* The status is the refusal surface (#1224), so it holds MORE than one
+          line: a refusal names every file it rejected, one reason per line, and
+          `truncate` on a single line hid all but the first few characters —
+          the mechanism that exists to stop a silent discard, silenced. Lines
+          break where the message puts them (`whitespace-pre-line`), long
+          filenames wrap instead of overflowing, and the whole thing is capped
+          and scrollable so a big batch can never grow the composer off the
+          screen. */}
       {status ? (
         <span
+          data-testid="composer-status"
           role="status"
           aria-live={status.kind === "err" ? "assertive" : "polite"}
-          className={`truncate text-caption font-semibold ${status.kind === "ok" ? "text-success" : status.kind === "info" ? "text-warning" : "text-danger"}`}
+          className={`block max-h-24 overflow-y-auto whitespace-pre-line break-words text-caption font-semibold ${status.kind === "ok" ? "text-success" : status.kind === "info" ? "text-warning" : "text-danger"}`}
         >
           {status.text}
         </span>

@@ -935,9 +935,6 @@ export const en = {
   // imageAttachments
   "img.readFailed": "couldn't read the image",
   "img.readAborted": "image reading aborted",
-  "img.unsupported": "unsupported image format: {name}",
-  "img.unknownFile": "unknown file",
-  "img.tooLarge": "{name}: too large (10 MB limit)",
   "img.structuredTooLarge": "Image exceeds this host's {max} MB limit",
   "img.tooManyStructured": "Up to {max} images can be sent at once",
   "img.structuredAggregateTooLarge": "Images exceed this host's {max} MB request limit",
