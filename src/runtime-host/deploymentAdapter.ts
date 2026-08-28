@@ -15,6 +15,8 @@ import type {
   ViewerMcpRuntimePublicationEvidence,
   ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
+  ViewerRuntimeHostHealthEvidence,
+  ViewerRuntimeHostProbeEvidence,
 } from "@/lib/runtime/contracts";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
@@ -36,7 +38,10 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "current-release": 90_000,
   "current-mcp-runtime": 90_000,
   "reconcile-mcp-runtime": 10 * 60_000,
-  "verify-candidate": 90_000,
+  /* #1254: the candidate's runtime host is rehearsed inside a container from
+     its own image — one succession plus a bounded hold — on top of the Viewer
+     and MCP probes this action already ran. */
+  "verify-candidate": 240_000,
   /* #1216: strictly larger than the adapter-side hand-over budgets it
      contains, so the adapter reports its own named reason instead of being
      killed mid-wait and leaving the operator a bare phase string. */
@@ -304,6 +309,7 @@ function evidence(value: unknown): ViewerHealthEvidence {
     ...(item.readiness === undefined ? {} : { readiness: readinessRecord(item.readiness) }),
     ...(item.containerLog === undefined ? {} : { containerLog: item.containerLog as string[] }),
     ...(item.mcpRuntime === undefined ? {} : { mcpRuntime: mcpHealthEvidence(item.mcpRuntime) }),
+    ...(item.runtimeHost === undefined ? {} : { runtimeHost: runtimeHostEvidence(item.runtimeHost) }),
     ok: item.ok,
     ...(typeof item.detail === "string" ? { detail: item.detail } : {}),
   };
@@ -361,6 +367,55 @@ function mcpCallFailures(value: unknown): ViewerMcpRuntimeCallFailure[] {
       error: failure.error,
     };
   });
+}
+
+/** How one endpoint answered while it was held. Counts are the whole substance
+    of the rehearsal, so a set that arrives half-read is refused. */
+function runtimeHostProbeCounts(value: unknown): ViewerRuntimeHostProbeEvidence {
+  const item = object(value);
+  if (typeof item.polls !== "number"
+    || typeof item.answered !== "number"
+    || typeof item.abandoned !== "number") {
+    throw new Error("deployment adapter returned invalid runtime-host health evidence");
+  }
+  return { polls: item.polls, answered: item.answered, abandoned: item.abandoned };
+}
+
+/** The host's half of a candidate verification, carried into the durable record
+    (#1254). A Bun pin reached production because everything that ran before
+    promotion exercised the Viewer; the rehearsal exercises the host as well,
+    and evidence dropped at this boundary leaves the record unable to say which
+    runtime the host was started under, whether the succession completed, or how
+    the handed-over endpoints answered — which reads exactly like the check that
+    was never run. */
+function runtimeHostEvidence(value: unknown): ViewerRuntimeHostHealthEvidence {
+  const item = object(value);
+  const succession = object(item.succession);
+  const listener = object(item.listener);
+  if (typeof item.checkedAt !== "string"
+    || typeof item.runtime !== "string"
+    || typeof succession.predecessorReadyMs !== "number"
+    || typeof succession.successorTookOverMs !== "number"
+    || typeof succession.completed !== "boolean"
+    || typeof listener.windowMs !== "number"
+    || typeof item.ok !== "boolean"
+    || (item.log !== undefined && (!Array.isArray(item.log) || item.log.some((line) => typeof line !== "string")))) {
+    throw new Error("deployment adapter returned invalid runtime-host health evidence");
+  }
+  return {
+    checkedAt: item.checkedAt,
+    runtime: item.runtime,
+    succession: {
+      predecessorReadyMs: succession.predecessorReadyMs,
+      successorTookOverMs: succession.successorTookOverMs,
+      completed: succession.completed,
+    },
+    listener: { windowMs: listener.windowMs, ...runtimeHostProbeCounts(item.listener) },
+    socket: runtimeHostProbeCounts(item.socket),
+    ok: item.ok,
+    ...(typeof item.detail === "string" ? { detail: item.detail } : {}),
+    ...(item.log === undefined ? {} : { log: item.log as string[] }),
+  };
 }
 
 /** `null` is the adapter's "the published runtime already matches" answer. */

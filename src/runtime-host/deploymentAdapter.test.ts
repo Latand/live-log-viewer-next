@@ -253,6 +253,108 @@ test("health evidence with an unusable observation is refused rather than record
   expect(adapter.verifyCandidate(candidate)).rejects.toThrow("deployment adapter returned invalid health evidence");
 });
 
+/* #1254 exists because a runtime reached production after a verification that
+   only covered the Viewer. The rehearsal now covers the host too, and the proof
+   is worth nothing if it stops here: a record with no runtime-host evidence
+   cannot be told apart from one where the host was never exercised. */
+test("the candidate runtime-host rehearsal reaches the record with the runtime it exercised", async () => {
+  const verified: ViewerHealthEvidence = {
+    checkedAt: "2026-08-28T18:04:11.000Z",
+    endpoint: "http://127.0.0.1:19310",
+    processReady: true,
+    rootStatus: 200,
+    authenticatedStatus: 200,
+    unauthorizedStatus: 403,
+    assets: [],
+    runtimeHost: {
+      checkedAt: "2026-08-28T18:05:02.000Z",
+      runtime: "bun 1.4.0",
+      succession: { predecessorReadyMs: 1_480, successorTookOverMs: 2_140, completed: true },
+      listener: { windowMs: 15_000, polls: 30, answered: 30, abandoned: 15 },
+      socket: { polls: 30, answered: 30, abandoned: 15 },
+      ok: true,
+    },
+    ok: true,
+  };
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:19310",
+    revision: "a".repeat(40),
+  };
+  const adapter = new HostCommandViewerDeploymentAdapter(async (action) => (
+    action === "verify-candidate" ? verified : {}
+  ));
+
+  expect(await adapter.verifyCandidate(candidate)).toEqual(verified);
+});
+
+/* The generation that died is gone by the time anyone reads the deployment, so
+   its reason and its own last words only exist if they cross here (#1254). */
+test("a refused runtime-host rehearsal carries its reason and the failing generation's output", async () => {
+  const failing: ViewerHealthEvidence = {
+    checkedAt: "2026-08-28T18:11:40.000Z",
+    endpoint: "http://127.0.0.1:19311",
+    processReady: true,
+    rootStatus: 200,
+    authenticatedStatus: 200,
+    unauthorizedStatus: 403,
+    assets: [],
+    runtimeHost: {
+      checkedAt: "2026-08-28T18:12:31.000Z",
+      runtime: "bun 1.4.0",
+      succession: { predecessorReadyMs: 1_390, successorTookOverMs: 0, completed: false },
+      listener: { windowMs: 15_000, polls: 24, answered: 12, abandoned: 12 },
+      socket: { polls: 0, answered: 0, abandoned: 0 },
+      ok: false,
+      detail: "the stable listener stopped answering 6.0s into the hold window",
+      log: ["error: write EPIPE", "      at failWrite (node:net)"],
+    },
+    ok: false,
+    detail: "the stable listener stopped answering 6.0s into the hold window",
+  };
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:19311",
+    revision: "a".repeat(40),
+  };
+  const adapter = new HostCommandViewerDeploymentAdapter(async (action) => (
+    action === "verify-candidate" ? failing : {}
+  ));
+
+  expect(await adapter.verifyCandidate(candidate)).toEqual(failing);
+});
+
+test("runtime-host evidence missing its poll counts is refused rather than recorded half-read", async () => {
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:19312",
+    revision: "a".repeat(40),
+  };
+  const adapter = new HostCommandViewerDeploymentAdapter(async () => ({
+    checkedAt: "2026-08-28T18:20:00.000Z",
+    endpoint: "http://127.0.0.1:19312",
+    processReady: true,
+    rootStatus: 200,
+    authenticatedStatus: 200,
+    unauthorizedStatus: 403,
+    assets: [],
+    runtimeHost: {
+      checkedAt: "2026-08-28T18:20:51.000Z",
+      runtime: "bun 1.4.0",
+      succession: { predecessorReadyMs: 1_480, successorTookOverMs: 2_140, completed: true },
+      listener: { windowMs: 15_000, polls: 30, answered: 30 },
+      socket: { polls: 30, answered: 30, abandoned: 15 },
+      ok: true,
+    },
+    ok: true,
+  }));
+
+  expect(adapter.verifyCandidate(candidate)).rejects.toThrow("invalid runtime-host health evidence");
+});
+
 test("the host injects and revokes health authority only around probe-bearing adapter actions", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-adapter-health-authority-"));
   sandboxes.push(directory);

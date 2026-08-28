@@ -11,6 +11,7 @@ import type {
   ViewerMcpRuntimePublicationEvidence,
   ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
+  ViewerRuntimeHostHealthEvidence,
 } from "../src/lib/runtime/contracts";
 import { admittedMcpHealthProbe } from "../src/lib/mcp/healthProbeAdmission";
 import {
@@ -37,6 +38,10 @@ import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandi
 import { withBootstrapMcpHealthProbeAdmission } from "../src/runtime-host/bootstrapMcpHealthProbeAdmission";
 import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
+import {
+  parseRuntimeHostRehearsalReport,
+  runtimeHostRehearsalDockerArgs,
+} from "../src/runtime-host/hostRehearsal";
 import { McpHealthProbeAdmissions } from "../src/runtime-host/mcpHealthProbeAdmission";
 import type { McpHealthProbeAdmissionConsumer } from "../src/runtime-host/mcpHealthProbeAdmissionChannel";
 import { probeControlUrl, probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
@@ -131,7 +136,7 @@ function reportAdapterPhase(action: string, phase: string): void {
   writeDurableJson(adapterPhaseFile, { action, phase, updatedAt: new Date().toISOString() });
 }
 
-async function command(argv: string[], options: { cwd?: string } = {}): Promise<string> {
+async function commandResult(argv: string[], options: { cwd?: string } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   const child = Bun.spawn(["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", ...argv], {
     cwd: options.cwd,
     stdout: "pipe",
@@ -139,8 +144,13 @@ async function command(argv: string[], options: { cwd?: string } = {}): Promise<
     env: withoutWakatimeCredential(process.env),
   });
   const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-  if (code !== 0) throw new Error((stderr.trim() || `${argv[0]} failed`).slice(0, 1000));
-  return stdout.trim();
+  return { code, stdout: stdout.trim(), stderr: stderr.trim() };
+}
+
+async function command(argv: string[], options: { cwd?: string } = {}): Promise<string> {
+  const { code, stdout, stderr } = await commandResult(argv, options);
+  if (code !== 0) throw new Error((stderr || `${argv[0]} failed`).slice(0, 1000));
+  return stdout;
 }
 
 async function ensureMirror(): Promise<void> {
@@ -562,6 +572,40 @@ export function mcpProbeEnvironment(
   };
 }
 
+/**
+ * #1254: the candidate image's runtime host, exercised before promotion.
+ *
+ * The runtime host runs under the same Bun as the Viewer, owns the stable
+ * listener, and performs the release succession. Verifying only the Viewer is
+ * what let a runtime the host could not survive reach production. The
+ * rehearsal runs inside a throwaway container from the candidate image, so it
+ * exercises exactly the interpreter that would be promoted and can reach
+ * neither the live state directory nor the live listener.
+ *
+ * A rehearsal that cannot run at all is a failed gate, not a skipped one.
+ */
+async function rehearseCandidateRuntimeHost(
+  candidate: ViewerReleaseIdentity,
+  reportPhase?: (phase: string) => void,
+): Promise<ViewerRuntimeHostHealthEvidence> {
+  reportPhase?.("rehearsing the candidate runtime host");
+  const { stdout, stderr } = await commandResult(runtimeHostRehearsalDockerArgs(candidate.image));
+  try {
+    return parseRuntimeHostRehearsalReport(`${stdout}\n${stderr}`);
+  } catch (error) {
+    return {
+      checkedAt: new Date().toISOString(),
+      runtime: "unknown",
+      succession: { predecessorReadyMs: 0, successorTookOverMs: 0, completed: false },
+      listener: { windowMs: 0, polls: 0, answered: 0, abandoned: 0 },
+      socket: { polls: 0, answered: 0, abandoned: 0 },
+      ok: false,
+      detail: `the candidate runtime-host rehearsal did not report: ${error instanceof Error ? error.message : String(error)}`,
+      log: stderr.split("\n").filter(Boolean).slice(-20),
+    };
+  }
+}
+
 async function verify(
   candidate: ViewerReleaseIdentity,
   endpoint: string,
@@ -597,11 +641,19 @@ async function verify(
     const state = fs.openSync(stateDir, "r");
     try { fs.fsyncSync(state); } finally { fs.closeSync(state); }
   }
+  if (!mcpRuntime.ok) {
+    return { ...viewer, mcpRuntime, ok: false, detail: mcpRuntime.detail ?? "MCP runtime health gate failed" };
+  }
+  /* The promoted check reads the release that is already serving; the host
+     rehearsal belongs to the candidate, before anything is switched. */
+  if (promoted) return { ...viewer, mcpRuntime, ok: true };
+  const runtimeHost = await rehearseCandidateRuntimeHost(candidate, options.reportPhase);
   return {
     ...viewer,
     mcpRuntime,
-    ok: mcpRuntime.ok,
-    ...(mcpRuntime.ok ? {} : { detail: mcpRuntime.detail ?? "MCP runtime health gate failed" }),
+    runtimeHost,
+    ok: runtimeHost.ok,
+    ...(runtimeHost.ok ? {} : { detail: runtimeHost.detail ?? "candidate runtime-host gate failed" }),
   };
 }
 
@@ -1179,6 +1231,7 @@ async function main(): Promise<unknown> {
     const candidate = release(input.candidate);
     const healthProbe = await delegatedHealthProbeAdmission(healthProbeCapability);
     return verify(candidate, candidate.endpoint, {
+      reportPhase: (phase) => reportAdapterPhase(action, phase),
       ...(healthProbe ?? {}),
     });
   }

@@ -69,3 +69,31 @@ test("deployment proxy forwards an immediate request through a real TCP connecti
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test("a failed write on the stable listener ends the connection, not the runtime host", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "llv-deployment-proxy-"));
+  // No release target: the connection is answered with a raw 503 write, the
+  // path that carried no error handling at all before #1254.
+  const proxy = serveViewerDeploymentProxy(path.join(directory, "viewer-release.json"), 0);
+  await once(proxy, "listening");
+  const address = proxy.address();
+  if (!address || typeof address === "string") throw new Error("proxy did not bind a TCP port");
+
+  try {
+    const accepted = once(proxy, "connection") as Promise<[net.Socket]>;
+    const client = net.createConnection(address.port, "127.0.0.1");
+    client.on("error", () => undefined);
+    const [downstream] = await accepted;
+
+    const epipe = Object.assign(new Error("write EPIPE"), { errno: -32, code: "EPIPE", syscall: "write" });
+    expect(() => downstream.emit("error", epipe)).not.toThrow();
+    expect(downstream.destroyed).toBe(true);
+    // A socket can fail more than once; the second report must stay handled.
+    expect(() => downstream.emit("error", epipe)).not.toThrow();
+
+    client.destroy();
+  } finally {
+    await close(proxy);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});

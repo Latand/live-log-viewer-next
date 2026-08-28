@@ -538,6 +538,45 @@ export interface ViewerMcpRuntimeReconciliation {
   health: ViewerMcpRuntimeHealthEvidence;
 }
 
+/** What one runtime-host rehearsal saw (#1254). The Viewer and the runtime
+    host run under the same Bun, and only the Viewer was ever verified before a
+    runtime change was promoted; this is the host's half of that answer. */
+export interface ViewerRuntimeHostSuccessionEvidence {
+  /** How long the first generation took to hold the stable listener. */
+  predecessorReadyMs: number;
+  /** How long the successor took to hold it after the predecessor exited. */
+  successorTookOverMs: number;
+  completed: boolean;
+}
+
+/** How one endpoint answered while it was held under observation. */
+export interface ViewerRuntimeHostProbeEvidence {
+  polls: number;
+  answered: number;
+  /** Polls whose caller vanished mid-answer, the write that took #1254 down. */
+  abandoned: number;
+}
+
+/** The bounded observation window the handed-over endpoints were held under. */
+export interface ViewerRuntimeHostListenerEvidence extends ViewerRuntimeHostProbeEvidence {
+  windowMs: number;
+}
+
+export interface ViewerRuntimeHostHealthEvidence {
+  checkedAt: string;
+  /** The interpreter that was exercised, as it reported itself. */
+  runtime: string;
+  succession: ViewerRuntimeHostSuccessionEvidence;
+  /** The stable endpoint the succession handed over. */
+  listener: ViewerRuntimeHostListenerEvidence;
+  /** The runtime socket, whose answers are the large ones. */
+  socket: ViewerRuntimeHostProbeEvidence;
+  ok: boolean;
+  detail?: string;
+  /** Bounded tail of the failing generation's own output. */
+  log?: string[];
+}
+
 export type ViewerHealthProbeName = "root" | "authenticated" | "unauthorized" | "capability";
 
 /** One readiness request, kept with what the gate asked for. A failed candidate
@@ -582,6 +621,8 @@ export interface ViewerHealthEvidence {
   /** Bounded tail of the candidate's own output, read before it is retired. */
   containerLog?: string[];
   mcpRuntime?: ViewerMcpRuntimeHealthEvidence;
+  /** The candidate image's runtime host, rehearsed before promotion (#1254). */
+  runtimeHost?: ViewerRuntimeHostHealthEvidence;
   ok: boolean;
   detail?: string;
 }
