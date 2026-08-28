@@ -105,9 +105,8 @@ test("expands a flow stack and opens a folded reviewer round", () => {
   const stacks: WorkerStack[] = [{ key: "wstack::flow::f1", kind: "flow", id: "f1", items: [reviewer] }];
 
   const opened: FileEntry[] = [];
-  const windows: Array<number | null> = [];
   const { host } = mount(
-    <WorkerStacks stacks={stacks} files={[impl, reviewer]} flows={flows} idleCollapseMinutes={120} onIdleCollapseMinutesChange={(minutes) => windows.push(minutes)} onSelect={(file) => opened.push(file)} />,
+    <WorkerStacks stacks={stacks} files={[impl, reviewer]} flows={flows} onSelect={(file) => opened.push(file)} />,
   );
 
   /* The strip header carries the total count and starts collapsed. */
@@ -115,11 +114,10 @@ test("expands a flow stack and opens a folded reviewer round", () => {
   expect(header).toBeTruthy();
   expect(header.getAttribute("aria-expanded")).toBe("false");
   expect(header.textContent).toContain("1 idle");
-  const windowSelect = host.querySelector('[data-testid="idle-collapse-window"]') as HTMLSelectElement;
-  expect(windowSelect.value).toBe("120");
-  windowSelect.value = "never";
-  flushSync(() => windowSelect.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event));
-  expect(windows).toEqual([null]);
+  /* The idle-window select is gone (#1244). Collapse is keyed to completion, so
+     the strip offers no duration control that would look the same at every
+     setting. */
+  expect(host.querySelector('[data-testid="idle-collapse-window"]')).toBeNull();
 
   /* Open the strip; the flow stack row shows the implementer title as its label. */
   click(header);

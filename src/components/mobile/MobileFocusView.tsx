@@ -110,6 +110,11 @@ interface Props {
   onClose: (path: string) => void;
   onDraftClose: (id: string) => void;
   onDraftSpawned: (id: string, file: FileEntry) => void;
+  /** The operator opened this conversation full-pane, the same signal
+      `SchemeBoard` reports from a desktop expand. On the phone the gesture is a
+      chip tap, a map pick, or the pinned seat row — the deliberate act the board
+      counts as having SEEN a finished lane's outcome (#1244). */
+  onConversationOpened?: (path: string) => void;
   /** Reports the focused conversation's file (or null) so the project shell can
       dock a single handoff control in the footer shelf row (issue #177 item 5),
       keeping the handoff, collapsed-worker, and quiet strips on one row. */
@@ -135,7 +140,7 @@ export function pipelinesToDock(pipelines: readonly Pipeline[], memberfulGroupId
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, projectName, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0, trayApi }: Props) {
+export function MobileFocusView({ project, projectName, groups, manual, files, flows, reviewGroups = [], pipelines, surfacePipelines = [], workerStacks = [], tasks, sheetTasks, drafts, favorites, isolatedManualPaths = EMPTY_PATHS, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onConversationOpened, onActiveChange, taskSheetNonce = 0, trayApi }: Props) {
   const { t } = useLocale();
   /* The project-scoped board store, read here for the ONE canonical selection
      (#771). Same store the desktop board and the dashboard bind — stores are
@@ -405,6 +410,30 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     },
   };
 
+  /* Pin a pane the layout already holds, as the phone's OPEN gesture (#1244).
+     A chip tap, a map pick and the pinned seat row are the same deliberate act
+     as clicking a card on the desktop board, so each one stamps the durable
+     acknowledgement that releases a held finished outcome — otherwise a lane
+     that finished could never be read on a phone at all.
+
+     What deliberately does NOT stamp: the header swipe in `step`, the snap
+     scroll that keeps the active chip in view, the attention fallback inside
+     `resolvedKey`, and the `onActiveChange` report. Passing a card, or having it
+     surface on its own, is not reading it — that distinction is the whole point
+     of the hold. Routes through `onSelect` need no stamp of their own: the
+     board's open already carries one.
+
+     Keyed by the entry's file so decks and drafts, which are not conversations,
+     stamp nothing. */
+  const openEntry = useCallback(
+    (key: string) => {
+      setFocusPath(key);
+      const file = byKey.get(key)?.file;
+      if (file) onConversationOpened?.(file.path);
+    },
+    [byKey, onConversationOpened],
+  );
+
   /* The orchestrator seat's own conversation, opened from the pinned row (PRD
      #976 slice C): a laid-out pane pins directly, and a seat whose conversation
      is not on the board yet takes the same round trip a map pick does — it
@@ -413,12 +442,12 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
     (file: FileEntry) => {
       setMapOpen(false);
       if (byKey.has(file.path)) {
-        setFocusPath(file.path);
+        openEntry(file.path);
         return;
       }
       onSelect(file);
     },
-    [byKey, onSelect],
+    [byKey, openEntry, onSelect],
   );
 
   /* A map tap on a scheme node pins it; a quiet branch or deck round is not a
@@ -433,13 +462,13 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
         return;
       }
       if (byKey.has(key)) {
-        setFocusPath(key);
+        openEntry(key);
         return;
       }
       const file = files.find((entry) => entry.path === key);
       if (file) onSelect(file);
     },
-    [byKey, files, onSelect],
+    [byKey, openEntry, files, onSelect],
   );
 
   return (
@@ -494,7 +523,7 @@ export function MobileFocusView({ project, projectName, groups, manual, files, f
                       entry={entry}
                       active={entry.key === resolvedKey}
                       chipRef={entry.key === resolvedKey ? activeChipRef : undefined}
-                      onClick={() => setFocusPath(entry.key)}
+                      onClick={() => openEntry(entry.key)}
                     />
                   ))
                 : null}

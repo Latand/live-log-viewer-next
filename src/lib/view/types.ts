@@ -158,8 +158,12 @@ export interface BoardProjectStateV1 {
        key and merged by maximum, so it needs no causal fence: there is no "off"
        value a stale writer could restore. Bounded, freshest first. */
     seenAt?: Record<string, number>;
-    /** Minutes before an unsettled idle conversation folds. Null disables the
-        age-only rule; terminal evidence continues to fold immediately. */
+    /** Legacy idle window, retained only so board files written before #1244
+        keep validating and round-tripping unchanged. Nothing folds a card by
+        age any more — collapse is keyed to completion — and no surface offers
+        this as a setting, so no stored value here changes what the operator
+        sees. The direct-review projection's failed-round horizon, the last
+        reader of a duration, uses its own env-tuned constant. */
     idleCollapseMinutes?: number | null;
     viewMode: "scheme" | "list" | null;
     taskPanelOpen: boolean;

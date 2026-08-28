@@ -11,7 +11,6 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useNowSeconds } from "@/hooks/useNowSeconds";
 import { selectionInOrder, viewBus } from "@/hooks/viewPresenceBus";
 import { useRuntimeSelector } from "@/hooks/useRuntime";
-import { DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES } from "@/lib/board/types";
 import { projectDisplayName } from "@/lib/displayNames";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
@@ -490,9 +489,6 @@ function ProjectDashboardView({
      freshest generation so a resumed conversation lists once under its current
      file. Sorted freshest-first for the panel. */
   const favoriteRows = useMemo(() => resolveFavoriteRows(files, favoriteIds), [files, favoriteIds]);
-  const idleCollapseMinutes = board.prefs.idleCollapseMinutes === undefined
-    ? DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES
-    : board.prefs.idleCollapseMinutes;
   /* Conversation auto-collapse (#112/#1158): genuine user placements, manual
      expansions, and favorites pin a card against collapse. */
   const pinnedPaths = useMemo(
@@ -700,14 +696,16 @@ function ProjectDashboardView({
       tasks,
       conversationAliases,
       nowMs,
-      idleMs: idleCollapseMinutes === null ? null : idleCollapseMinutes * 60_000,
+      /* No `idleMs`: the failed-round horizon is the projection's own env-tuned
+         constant (#1244). It stopped being operator-tunable when the pref it
+         used to read stopped changing anything the operator could see. */
       pipelines: pipelinesError ? undefined : pipelines,
       pinnedPaths,
       protectedPaths: protectedCollapsePaths,
       activeDeliveryConversationIds,
       seenAt,
     }),
-    [files, flows, tasks, conversationAliases, nowMs, idleCollapseMinutes, pipelines, pipelinesError, pinnedPaths, protectedCollapsePaths, activeDeliveryConversationIds, seenAt],
+    [files, flows, tasks, conversationAliases, nowMs, pipelines, pipelinesError, pinnedPaths, protectedCollapsePaths, activeDeliveryConversationIds, seenAt],
   );
   const deckFlows = useMemo(
     () => (directReviewGroups.length ? [...flows, ...directReviewGroups] : flows),
@@ -2028,6 +2026,7 @@ function ProjectDashboardView({
               onClose={closeNode}
               onDraftClose={removeDraft}
               onDraftSpawned={draftSpawned}
+              onConversationOpened={markPathSeen}
               onActiveChange={setMobileActiveFile}
               taskSheetNonce={taskSheetNonce}
               trayApi={trayApi}
@@ -2214,8 +2213,6 @@ function ProjectDashboardView({
               files={files}
               flows={deckFlows}
               pipelines={pipelines}
-              idleCollapseMinutes={idleCollapseMinutes}
-              onIdleCollapseMinutesChange={board.setIdleCollapseMinutes}
               onSelect={closeShelfThen(openSwitchboardFile)}
               onExpandGroup={closeShelfThen(expandReviewGroup)}
             />

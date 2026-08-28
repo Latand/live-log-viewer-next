@@ -1024,7 +1024,6 @@ export interface BoardState extends BoardSnapshot {
   restore(path: string, placement: "auto" | "manual" | "expanded"): void;
   setViewMode(viewMode: BoardViewMode): void;
   setTaskPanelOpen(open: boolean): void;
-  setIdleCollapseMinutes(minutes: number | null): void;
   /* The canonical selection's writers (#771) — the same three every view uses.
      Live even while the durable board is unavailable: the selection is session
      state and owes nothing to the server. */
@@ -1102,9 +1101,6 @@ export function useBoardState(project: string | null): BoardState {
     },
     setTaskPanelOpen(open) {
       storeRef.current?.mutate([{ kind: "set-presentation", taskPanelOpen: open }]);
-    },
-    setIdleCollapseMinutes(minutes) {
-      storeRef.current?.mutate([{ kind: "set-presentation", idleCollapseMinutes: minutes }]);
     },
     setFavorite(id, favorite) {
       storeRef.current?.mutate([{ kind: "set-favorite", id, favorite }]);
