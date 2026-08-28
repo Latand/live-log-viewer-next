@@ -43,6 +43,24 @@ video stream. Frame-count sampling keeps that coverage when duration metadata
 is unavailable. Missing duration and frame count, malformed stream inventories,
 and excessive stream counts produce `inspection_error`.
 
+## Commit surface and merge boundary
+
+`--check-commits` reads the branch commit messages, which publish the moment
+the branch is pushed, and the identities git recorded on those commits. The
+second is what a squash merge publishes: the forge writes a new message for the
+commit that lands on the default branch and lifts every branch author and
+committer into a `Co-authored-by:` trailer of its own, so an address on no
+message at all can reach the public history. The check runs on the pull request,
+before the merge composes that commit.
+
+An identity publishes nobody when it is the account the repository belongs to on
+the forge — read from the origin remote of the checkout under inspection, never
+written down — or one of the machine-attribution mailboxes the trailer rule
+already exempts. Every other identity is a person and produces `email_address`,
+exactly as an address in a file does, with a `merge_boundary:` line naming the
+commit, the field and the trailer. The address stays suppressed there like every
+other matched value: `git show -s <commit>` names it to whoever is fixing it.
+
 ## Known-value fingerprints
 
 CI reads the committed
