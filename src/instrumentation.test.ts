@@ -515,6 +515,38 @@ test("automatic host retirement starts with the release that owns traffic, not w
   expect(started).toEqual(["pipelines", "host-retirement"]);
 });
 
+test("the seat tick starts with the release that owns traffic — one clock, one process", async () => {
+  /* #1245: the thing that drove orchestrator sessions was a prompt an agent
+     scheduled for itself, so it died with the session and every rotation
+     dropped it silently. Starting the clock here is what makes "exactly one
+     active ticker per seat" true without a cross-process lock: exactly one
+     process owns traffic, and that process is the only one that starts it. */
+  const started: string[] = [];
+  await startCurrentReleaseControllers(
+    { LLV_ACCOUNT_CONTROLLER_DISABLED: "1" },
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { started.push("pipelines"); } }),
+      loadAccountMigrationController: async () => ({ startAccountMigrationController: async () => { started.push("account"); } }),
+      loadSeatTick: async () => ({ startSeatTick: () => { started.push("seat-tick"); return true; } }),
+    },
+  );
+  expect(started).toEqual(["pipelines", "seat-tick"]);
+});
+
+test("a seat tick that cannot start does not take the other controllers down", async () => {
+  const started: string[] = [];
+  await startCurrentReleaseControllers(
+    { LLV_ACCOUNT_CONTROLLER_DISABLED: "1" },
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { started.push("pipelines"); } }),
+      loadAccountMigrationController: async () => ({ startAccountMigrationController: async () => { started.push("account"); } }),
+      loadStructuredHostRetirement: async () => ({ startStructuredHostRetirement: () => { started.push("host-retirement"); } }),
+      loadSeatTick: async () => { throw new Error("seat state unavailable"); },
+    },
+  );
+  expect(started).toEqual(["pipelines", "host-retirement"]);
+});
+
 test("a host retirement sweep that cannot start does not take the other controllers down", async () => {
   const started: string[] = [];
   await startCurrentReleaseControllers(

@@ -29,7 +29,9 @@ export interface GithubEvidenceOptions {
   timeoutMs?: number;
 }
 
-function defaultRunner(cwd: string, timeoutMs: number): GithubRunner {
+/** The one `gh` seam. Shared with the seat tick's proposal source (#1245), so
+    there is a single place a command, a timeout or a buffer bound is chosen. */
+export function githubRunner(cwd: string, timeoutMs: number): GithubRunner {
   return async (args) => {
     const { stdout } = await execFileAsync("gh", args, { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
     return stdout;
@@ -63,7 +65,7 @@ function parseRows(raw: string, kind: GithubEvidenceRow["kind"]): GithubEvidence
 /** A `github` dependency for the run: open and recently closed work, both kinds. */
 export function githubEvidenceSource(options: GithubEvidenceOptions): () => Promise<GithubEvidenceRow[]> {
   const limit = String(options.limit ?? 60);
-  const run = options.run ?? defaultRunner(options.cwd, options.timeoutMs ?? 20_000);
+  const run = options.run ?? githubRunner(options.cwd, options.timeoutMs ?? 20_000);
   const fields = "number,title,state,updatedAt";
   return async () => {
     const [prs, issues] = await Promise.all([
@@ -72,4 +74,67 @@ export function githubEvidenceSource(options: GithubEvidenceOptions): () => Prom
     ]);
     return [...parseRows(prs, "pull-request"), ...parseRows(issues, "issue")];
   };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Open issues as proposal material for the seat tick's proactive slot (#1245).
+ *
+ * The same `gh` seam above, asked a different question: correlation evidence
+ * wants everything recently touched, a proposal wants what is still open and
+ * what it is labelled. Strictly read-only, and degradable — a `gh` that is
+ * missing, unauthenticated or rate-limited returns nothing and the seat ranks
+ * from the board alone, because a proposal slot that failed outright would be a
+ * wake that said nothing.
+ *
+ * Nothing here ever creates an issue.
+ * ------------------------------------------------------------------------- */
+
+export interface ProposalIssue {
+  number: number;
+  title: string;
+  labels: string[];
+  updatedAt: string | null;
+}
+
+const PROPOSAL_TITLE_LIMIT = 200;
+
+function parseProposalIssues(raw: string): ProposalIssue[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const issues: ProposalIssue[] = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const row = entry as { number?: unknown; title?: unknown; labels?: unknown; updatedAt?: unknown };
+    if (typeof row.number !== "number" || !Number.isSafeInteger(row.number)) continue;
+    issues.push({
+      number: row.number,
+      title: typeof row.title === "string" ? row.title.slice(0, PROPOSAL_TITLE_LIMIT) : "",
+      labels: (Array.isArray(row.labels) ? row.labels : []).flatMap((label) => {
+        const name = (label as { name?: unknown } | null)?.name;
+        return typeof name === "string" ? [name.slice(0, 60)] : [];
+      }),
+      updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : null,
+    });
+  }
+  return issues;
+}
+
+export async function openIssuesForProposal(options: {
+  cwd: string;
+  limit?: number;
+  run?: GithubRunner;
+  timeoutMs?: number;
+}): Promise<ProposalIssue[]> {
+  const run = options.run ?? githubRunner(options.cwd, options.timeoutMs ?? 20_000);
+  try {
+    const raw = await run(["issue", "list", "--state", "open", "--limit", String(options.limit ?? 40), "--json", "number,title,labels,updatedAt"]);
+    return parseProposalIssues(raw);
+  } catch {
+    return [];
+  }
 }

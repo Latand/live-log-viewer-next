@@ -11,7 +11,7 @@ process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
 process.env.TMPDIR = path.join(SANDBOX, "tmp");
 fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
-const { classifyRequest, matchEvidence } = await import("./classify");
+const { classifyRequest, evidenceStallReason, matchEvidence } = await import("./classify");
 const { requestFingerprint } = await import("./requests");
 import type { EvidenceItem, OperatorRequest } from "./types";
 
@@ -217,5 +217,30 @@ describe("request classification", () => {
     );
     expect(result.state).toBe("untracked");
     expect(result.match).toBeNull();
+  });
+});
+
+/**
+ * The one stall rule, and its two callers (#1245). Request classification asks
+ * it with a movement threshold; the seat tick asks it with none, because it
+ * holds the registry's own activity verdict for the turn and a second answer
+ * derived by subtracting attempt timestamps from the clock would contradict it.
+ */
+describe("the shared stall rule", () => {
+  const lane = { kind: "pipeline" as const, id: "pipeline_a1", state: "active" as const, updatedAt: new Date(NOW.getTime() - 60 * 60 * 1000).toISOString() };
+
+  test("parked is stalled outright, whichever caller asks", () => {
+    expect(evidenceStallReason({ ...lane, state: "inert" }, { now: NOW, stallAfterMs: 40 * 60_000 })).toContain("is parked");
+    expect(evidenceStallReason({ ...lane, state: "inert" }, { now: NOW, stallAfterMs: null })).toContain("is parked");
+  });
+
+  test("a movement threshold stalls an item that stopped moving; no threshold never does", () => {
+    expect(evidenceStallReason(lane, { now: NOW, stallAfterMs: 40 * 60_000 })).toContain("no movement past the stall threshold");
+    expect(evidenceStallReason(lane, { now: NOW, stallAfterMs: null })).toBeNull();
+  });
+
+  test("terminal work and an item with no movement instant are never stalled", () => {
+    expect(evidenceStallReason({ ...lane, state: "terminal" }, { now: NOW, stallAfterMs: 40 * 60_000 })).toBeNull();
+    expect(evidenceStallReason({ ...lane, updatedAt: null }, { now: NOW, stallAfterMs: 40 * 60_000 })).toBeNull();
   });
 });
