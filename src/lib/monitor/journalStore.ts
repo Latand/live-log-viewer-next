@@ -118,49 +118,65 @@ export function sanitizeRunRecord(value: unknown): MonitorRunRecord | null {
   };
 }
 
-export function appendRunRecord(record: MonitorRunRecord, filePath = monitorJournalPath()): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+/**
+ * The append half of an audit journal, for any record type.
+ *
+ * Generalized for the seat tick (#1245), which keeps its own journal of one
+ * line per check under the same two guarantees this file exists to give: the
+ * append is serialized against the retention rewrite, and every run leaves a
+ * line so "no line" means "no run".
+ */
+export function appendJournalRecord(record: unknown, options: { filePath: string; retention: number; busyMessage: string }): void {
+  fs.mkdirSync(path.dirname(options.filePath), { recursive: true, mode: 0o700 });
   /* Serialized, so a concurrent append cannot interleave with the retention
      rewrite below and lose a line. */
-  withFileTransactionSync(filePath, "the monitor journal is busy", () => {
-    fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
-    trim(filePath);
+  withFileTransactionSync(options.filePath, options.busyMessage, () => {
+    fs.appendFileSync(options.filePath, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+    trim(options.filePath, options.retention);
   });
 }
 
-function trim(filePath: string): void {
-  let lines: string[];
-  try {
-    lines = fs.readFileSync(filePath, "utf8").split("\n").filter((line) => line.trim());
-  } catch {
-    return;
-  }
-  if (lines.length <= MONITOR_RUN_HISTORY) return;
-  const temp = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  fs.writeFileSync(temp, `${lines.slice(-MONITOR_RUN_HISTORY).join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
-  fs.renameSync(temp, filePath);
-}
-
-/** The newest `limit` runs, oldest first. A malformed line is skipped rather
+/** The newest `limit` records, oldest first. A malformed line is skipped rather
     than allowed to hide the runs recorded around it. */
-export function readRunRecords(limit: number, filePath = monitorJournalPath()): MonitorRunRecord[] {
+export function readJournalRecords<T>(limit: number, options: { filePath: string; sanitize: (value: unknown) => T | null }): T[] {
   let raw: string;
   try {
-    raw = fs.readFileSync(filePath, "utf8");
+    raw = fs.readFileSync(options.filePath, "utf8");
   } catch {
     return [];
   }
-  const records: MonitorRunRecord[] = [];
+  const records: T[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
-      const record = sanitizeRunRecord(JSON.parse(line) as unknown);
+      const record = options.sanitize(JSON.parse(line) as unknown);
       if (record) records.push(record);
     } catch {
       continue;
     }
   }
   return records.slice(-Math.max(0, limit));
+}
+
+export function appendRunRecord(record: MonitorRunRecord, filePath = monitorJournalPath()): void {
+  appendJournalRecord(record, { filePath, retention: MONITOR_RUN_HISTORY, busyMessage: "the monitor journal is busy" });
+}
+
+function trim(filePath: string, retention: number): void {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(filePath, "utf8").split("\n").filter((line) => line.trim());
+  } catch {
+    return;
+  }
+  if (lines.length <= retention) return;
+  const temp = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temp, `${lines.slice(-retention).join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(temp, filePath);
+}
+
+export function readRunRecords(limit: number, filePath = monitorJournalPath()): MonitorRunRecord[] {
+  return readJournalRecords(limit, { filePath, sanitize: sanitizeRunRecord });
 }
 
 export type MonitorLockClaim =
