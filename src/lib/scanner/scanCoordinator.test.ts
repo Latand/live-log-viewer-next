@@ -1,9 +1,18 @@
 import { beforeEach, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import type { FileEntry } from "@/lib/types";
 
 import type { FileCatalogScan } from "./index";
-import { coordinatedFileScan, fileScanCoordinatorStatus, resetFileScanCoordinatorForTests, type CoordinatedScanRunner } from "./scanCoordinator";
+import {
+  coordinatedFileScan,
+  fileScanCoordinatorStatus,
+  resetFileScanCoordinatorForTests,
+  runFileCatalogScan,
+  type CoordinatedScanRunner,
+} from "./scanCoordinator";
 
 beforeEach(() => {
   resetFileScanCoordinatorForTests();
@@ -251,4 +260,51 @@ test("aborting every subscriber stops the shared refresh and releases its genera
 
   expect(underlyingAborts).toBe(1);
   expect(fileScanCoordinatorStatus()).toEqual({ inFlight: false, queued: 0, subscribers: 0 });
+});
+
+
+/* #790: the MCP runtime sidecar runs from the published release root, which
+   carries no worker artifact of either kind. Every corpus read it served died
+   with `Module not found` on the worker the launcher named anyway, so the
+   deployment gate's `board_snapshot` failed on a candidate whose whole HTTP
+   surface was healthy. The scan still has to happen - here, in this process. */
+test("a process root with no worker artifact scans in-process rather than spawning one it lacks", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-scan-release-root-"));
+  const corpus = fs.mkdtempSync(path.join(os.tmpdir(), "llv-scan-corpus-"));
+  const previous = {
+    cwd: process.cwd(),
+    nodeEnv: process.env.NODE_ENV,
+    claudeHome: process.env.LLV_CLAUDE_HOME,
+    codexHome: process.env.LLV_CODEX_HOME,
+  };
+  fs.mkdirSync(path.join(root, "dist"));
+  fs.mkdirSync(path.join(corpus, "claude"));
+  fs.mkdirSync(path.join(corpus, "codex"));
+  try {
+    /* NODE_ENV is assigned the way the test preload assigns it: the worker
+       boundary is only live outside the test runtime, and this is the branch it
+       takes there. */
+    Object.assign(process.env, {
+      LLV_CLAUDE_HOME: path.join(corpus, "claude"),
+      LLV_CODEX_HOME: path.join(corpus, "codex"),
+      NODE_ENV: "production",
+    });
+    process.chdir(root);
+
+    const snapshot = await runFileCatalogScan({ persist: false, fresh: false });
+
+    expect(snapshot.complete).toBe(true);
+  } finally {
+    process.chdir(previous.cwd);
+    for (const [key, value] of Object.entries({
+      NODE_ENV: previous.nodeEnv,
+      LLV_CLAUDE_HOME: previous.claudeHome,
+      LLV_CODEX_HOME: previous.codexHome,
+    })) {
+      if (value === undefined) Reflect.deleteProperty(process.env, key);
+      else Object.assign(process.env, { [key]: value });
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(corpus, { recursive: true, force: true });
+  }
 });

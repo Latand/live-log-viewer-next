@@ -1,6 +1,6 @@
 import { listFilesWithProjectCatalog, type FileCatalogScan, type FileScanOptions } from "@/lib/scanner";
 
-import { collectFileScanInWorker, fileScanWorkerEnabled } from "./fileScanWorker";
+import { collectFileScanInWorker, fileScanWorkerEnabled, fileScanWorkerLaunch } from "./fileScanWorker";
 
 /**
  * Process-wide filesystem scan coordination (#287).
@@ -98,12 +98,19 @@ export function runFileCatalogScan(
     ...(intent.fresh ? { fresh: true } : {}),
   };
   if (signal.aborted) return Promise.reject(abortError(signal.reason));
-  if (!fileScanWorkerEnabled()) {
-    return listFilesWithProjectCatalog(undefined, { ...scanOptions, signal }).then((snapshot) => {
+  const inProcess = (): Promise<FileCatalogScan> =>
+    listFilesWithProjectCatalog(undefined, { ...scanOptions, signal }).then((snapshot) => {
       if (signal.aborted) throw abortError(signal.reason);
       return snapshot;
     });
-  }
+  if (!fileScanWorkerEnabled()) return inProcess();
+  /* A process whose root carries no worker artifact scans here instead. The
+     published MCP runtime release is one such root, and the sidecar running
+     from it still has to be able to read the corpus: spawning the absent
+     artifact failed every read it served, which is what took the deployment
+     gate's `board_snapshot` down with it (#790). Slower than the child, and
+     the whole difference between a read that answers and one that cannot. */
+  if (fileScanWorkerLaunch() === null) return inProcess();
   const { onResourceSnapshot, ...serializable } = scanOptions;
   return collectFileScanInWorker(serializable, onResourceSnapshot, { signal });
 }

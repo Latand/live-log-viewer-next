@@ -7,7 +7,7 @@ import { scheduleTranscriptIndex, waitForTranscriptIndexIdleForTests } from "@/l
 import { searchTranscripts } from "@/lib/search/transcriptSearch";
 
 import { conversationCatalogSnapshot, replaceConversationCatalog } from "./conversationCatalog";
-import { collectFileScanInWorker, fileScanWorkerEnabled } from "./fileScanWorker";
+import { collectFileScanInWorker, fileScanWorkerEnabled, fileScanWorkerLaunch } from "./fileScanWorker";
 
 const directories: string[] = [];
 
@@ -369,4 +369,43 @@ test("aborting a worker scan kills the child and releases its timer and listener
   expect(() => process.kill(pid, 0)).toThrow();
   expect(timers).toBe(0);
   expect(listeners).toBe(0);
+});
+
+
+/* #790: the published MCP runtime release root is `dist/`, `node_modules/` and
+   a manifest. The launcher used to answer with the source path it had just
+   found missing, so every corpus read in that process died on a module that was
+   never there - and took the deployment gate's `board_snapshot` with it. */
+test("a root with no worker artifact reports none instead of naming one that is not there", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-file-scan-root-"));
+  directories.push(root);
+  fs.mkdirSync(path.join(root, "dist"));
+  fs.mkdirSync(path.join(root, "node_modules"));
+
+  expect(fileScanWorkerLaunch(root)).toBeNull();
+
+  fs.mkdirSync(path.join(root, ".next", "server"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".next", "server", "file-scanner-worker.js"), "");
+  expect(fileScanWorkerLaunch(root)).toMatchObject({
+    workerPath: path.join(root, ".next", "server", "file-scanner-worker.js"),
+  });
+});
+
+test("a checkout root still launches its source worker", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-file-scan-checkout-"));
+  directories.push(root);
+  fs.mkdirSync(path.join(root, "src", "lib"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src", "lib", "fileScanner.worker.ts"), "");
+
+  expect(fileScanWorkerLaunch(root)).toMatchObject({
+    workerPath: path.join(root, "src", "lib", "fileScanner.worker.ts"),
+  });
+});
+
+test("a worker scan asked for from a root without one is refused, never spawned", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-file-scan-empty-"));
+  directories.push(root);
+
+  await expect(collectFileScanInWorker({ persist: false, persistIndex: false }, undefined, { cwd: root }))
+    .rejects.toThrow("no file scanner worker artifact");
 });
