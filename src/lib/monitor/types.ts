@@ -285,7 +285,10 @@ export interface SeatTickTaskInput {
   owned: boolean;
   /** When the card last moved. An assigned card nobody started is only an
       unstarted TASK while this is recent; past the backlog bound it is
-      backlog, and a wake reason nothing can discharge (#1262). */
+      backlog, and a wake reason nothing can discharge (#1262). Because it
+      decides that, it is also part of the change fingerprint: moving the card
+      is the discharge, and a retry guard that could not see the movement would
+      suppress the reason past the condition that raised it. */
   updatedAt: string | null;
 }
 
@@ -394,7 +397,9 @@ export interface SeatTickProjectState {
       "persisted across two consecutive checks". */
   stalledSeen: string[];
   /** Board and pipeline movement digest at the last delivered wake. Equal
-      fingerprints across two wakes is what "the wake changed nothing" means. */
+      fingerprints across two wakes is what "the wake changed nothing" means,
+      so the digest has to cover every field a wake reason is decided from —
+      otherwise a guard keyed on it outlives its own condition (#1262). */
   lastWakeFingerprint: string | null;
   /**
    * Lifecycle journal seq the seat has actually been TOLD about.

@@ -13,7 +13,7 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
 const { gatherSeatTickInput, repoDirForProject, runtimeWakeState, seatTickProjects, withdrawRuntimeWake } = await import("./seatTickSources");
 import type { SeatTickSources } from "./seatTickSources";
-const { DEFAULT_SEAT_TICK_POLICY } = await import("./seatTick");
+const { DEFAULT_SEAT_TICK_POLICY, seatTickDecision } = await import("./seatTick");
 import type { AgentLivenessRecord } from "@/lib/lifecycle/liveness";
 import type { LifecycleEvent, LifecycleJournalFile } from "@/lib/lifecycle/journal";
 import { emptySeatTickState, type SeatTickProjectState } from "./types";
@@ -56,6 +56,25 @@ function lane(over: Record<string, unknown> = {}): Record<string, unknown> {
     srcConversationId: null,
     createdAt: "2026-08-28T09:00:00.000Z",
     closedAt: null,
+    ...over,
+  };
+}
+
+const DAY_MS = 24 * 60 * 60_000;
+
+/** A board card as the store holds one. `updatedAt` is the field the backlog
+    bound reads and the change fingerprint carries, so every case below sets it
+    deliberately. */
+function boardCard(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "task_b2",
+    project: PROJECT,
+    status: "assigned",
+    text: "wire the chip",
+    placement: "unplaced",
+    assignments: [],
+    createdAt: new Date(NOW - 90 * DAY_MS).toISOString(),
+    updatedAt: new Date(NOW - 30 * 60_000).toISOString(),
     ...over,
   };
 }
@@ -335,6 +354,94 @@ test("a seat that already has a cursor keeps reading from it, never from the pre
   const input = await gather({ events: history }, withCursor(40, { lastWakeAt: "2026-08-28T11:00:00.000Z" }));
   expect(input.events.map((entry) => entry.seq)).toEqual([41, 42]);
   expect(input.state.eventsThrough).toBe(40);
+});
+
+/* ------------------------------------------------------------------------- *
+ * #1262: the wake reason that could never be discharged.
+ *
+ * Driven from the condition that produced it rather than from an empty room:
+ * a journal already holding four days of terminal lane events the seat has
+ * been told about, and a board of assigned cards nobody will ever start. The
+ * reported wake said `9 assigned board task(s) nothing has started` on every
+ * interval for ever, because "assigned and unowned" is permanently true of a
+ * card that is really a status note from two months ago.
+ * ------------------------------------------------------------------------- */
+
+/** Terminal lane events the seat has already been woken for. Every check below
+    reads them and must carry none of them forward: they are history, and the
+    cursor is what says so. */
+const SETTLED_HISTORY = [
+  event(9840, { type: "stage_completed", summary: "the builder finished" }),
+  event(9845, { type: "review_verdict", summary: "the round passed" }),
+  event(9850, { type: "stage_completed", summary: "the reviewer finished" }),
+  event(9853, { type: "review_verdict", summary: "the round passed" }),
+];
+const OVERDUE = { lastWakeAt: new Date(NOW - 61 * 60_000).toISOString() };
+
+/** The reason kinds a verdict carries, and none for a verdict that is not a
+    wake. */
+function reasonsOf(decision: ReturnType<typeof seatTickDecision>): string[] {
+  return decision.verdict.kind === "wake" ? decision.verdict.reasons.map((reason) => reason.kind) : [];
+}
+
+test("under a journal the cursor has already passed, only a card that recently moved wakes the seat", async () => {
+  const board = [
+    boardCard({ id: "task_b2", updatedAt: new Date(NOW - 30 * 60_000).toISOString() }),
+    boardCard({ id: "task_c3", updatedAt: new Date(NOW - 20 * DAY_MS).toISOString() }),
+    boardCard({ id: "task_d4", updatedAt: new Date(NOW - 90 * DAY_MS).toISOString() }),
+  ];
+  const input = await gather({ pipelines: [], tasks: board, events: SETTLED_HISTORY }, withCursor(9853, OVERDUE));
+  /* The journal is full and the check carries none of it, which is the whole
+     point of the fixture: what wakes the seat here can only be the board. */
+  expect(input.events).toEqual([]);
+  expect(input.terminalPending).toBe(false);
+
+  const decision = seatTickDecision(input);
+  expect(reasonsOf(decision)).toEqual(["unstarted-task"]);
+  expect(decision.verdict.kind === "wake" && decision.verdict.reasons[0]!.detail)
+    .toBe("1 assigned board task(s) nothing has started, and 2 older than the backlog bound the wake no longer names");
+  expect(decision.verdict.kind === "wake" && decision.verdict.items.map((item) => item.id)).toEqual(["task_b2"]);
+});
+
+/* The permanently-true reason, gone: a board of nothing but stale assigned
+   cards owes the seat nothing, however much the journal behind it holds. */
+test("a board whose assigned cards are all past the backlog bound wakes nobody", async () => {
+  const board = [
+    boardCard({ id: "task_c3", updatedAt: new Date(NOW - 20 * DAY_MS).toISOString() }),
+    boardCard({ id: "task_d4", updatedAt: new Date(NOW - 90 * DAY_MS).toISOString() }),
+  ];
+  const input = await gather({ pipelines: [], tasks: board, events: SETTLED_HISTORY }, withCursor(9853, OVERDUE));
+  expect(seatTickDecision(input).verdict.kind).toBe("quiet");
+});
+
+/* The guard half of the same defect. `updatedAt` decides whether a card is an
+   unstarted task or backlog, so moving the card IS the discharge — and while
+   that field was missing from the change fingerprint, the guard entry keyed on
+   the fingerprint could not see the movement and went on suppressing the reason
+   past the condition it was guarding. */
+test("moving a stale card moves the fingerprint, so the retry guard cannot outlive the staleness it guarded", async () => {
+  const stale = await gather(
+    { pipelines: [], tasks: [boardCard({ updatedAt: new Date(NOW - 40 * DAY_MS).toISOString() })], events: SETTLED_HISTORY },
+    withCursor(9853, OVERDUE),
+  );
+  const moved = await gather(
+    { pipelines: [], tasks: [boardCard({ updatedAt: new Date(NOW - 2 * 60 * 60_000).toISOString() })], events: SETTLED_HISTORY },
+    withCursor(9853, OVERDUE),
+  );
+  expect(moved.changeFingerprint).not.toBe(stale.changeFingerprint);
+
+  /* A guard that has run out of patience on the state the card was in before
+     the operator touched it. */
+  const spent = { wakesWithoutChange: { "unstarted-task": DEFAULT_SEAT_TICK_POLICY.retryGuard } };
+  const released = seatTickDecision({ ...moved, state: { ...moved.state, ...spent, lastWakeFingerprint: stale.changeFingerprint } });
+  expect(reasonsOf(released)).toEqual(["unstarted-task"]);
+  expect(released.cards).toEqual([]);
+
+  /* And it is the movement that released it, not the guard having lapsed: the
+     same guard against the state this check actually read still holds. */
+  const held = seatTickDecision({ ...moved, state: { ...moved.state, ...spent, lastWakeFingerprint: moved.changeFingerprint } });
+  expect(reasonsOf(held)).toEqual([]);
+  expect(held.cards.map((card) => card.kind)).toEqual(["retry-guard"]);
 });
 
 /* ------------------------------------------------------------------------- *

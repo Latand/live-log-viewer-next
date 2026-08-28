@@ -91,13 +91,31 @@ export function ledgerDeployments(
 }
 
 /**
- * How many deployment rows the newest-first window carries before recency is
- * settled in memory. The SQL ordering below is the ledger's own write clock,
- * which is close enough to recency to bound the read; the record's `createdAt`
- * is what actually decides, so the window only has to be wide enough to contain
- * the newest record under any plausible skew between the two.
+ * Recency, expressed to the store rather than guessed at in memory.
+ *
+ * A deployment's start instant lives in the JSON value, not in a column, so the
+ * ordering has to reach into it — which the ledger's own queries already do
+ * (`json_extract` over `state_json` is how the runtime snapshot separates live
+ * sessions from dead ones). `julianday` turns the ISO-8601 text `createdAt`
+ * carries into a number, and answers NULL for anything it cannot read as a
+ * time; SQLite sorts NULL last under DESC, which is where a record that cannot
+ * say when it started belongs. `updatedAt` stands in only for a record with no
+ * readable start at all, and the row's write clock and then the id break a tie
+ * between two deployments admitted in the same instant.
+ *
+ * Ordering on an expression means no index can serve it, so the store sorts the
+ * deployment rows to answer. That is the whole cost, it is bounded by how many
+ * deployments this host has ever run, and it buys an answer that does not
+ * depend on the newest record happening to fall inside a window.
  */
-const LATEST_DEPLOYMENT_WINDOW = 25;
+const NEWEST_DEPLOYMENT_FIRST = `
+  ORDER BY COALESCE(
+      julianday(json_extract(state_json, '$.createdAt')),
+      julianday(json_extract(state_json, '$.updatedAt'))
+    ) DESC,
+    COALESCE(updated_at, 0) DESC,
+    id DESC
+`;
 
 /**
  * The most recently STARTED deployment, or null when the ledger has none.
@@ -110,10 +128,13 @@ const LATEST_DEPLOYMENT_WINDOW = 25;
  * production had rolled back while the four newest deploys had all succeeded
  * (#1262), which invites a rollback hunt against a healthy production.
  *
- * So recency is asked for explicitly here: newest-first by the row's own write
- * clock, then decided on the record's own `createdAt` (its `updatedAt` when a
- * record carries no readable start), with the SQL order breaking a tie between
- * deployments admitted in the same millisecond.
+ * A window over that ordering would be the same defect with a larger constant:
+ * whichever number it picked, a ledger whose newest record fell outside it
+ * would answer with an older deployment again, and nothing about the store
+ * makes such a number safe. So the store is asked for the newest record and
+ * hands back exactly one — {@link NEWEST_DEPLOYMENT_FIRST} is the ordering it
+ * decides on, and `LIMIT 1` is the whole of the read. Only that record has to
+ * be readable: a corrupt row further down the ledger is not this answer.
  */
 export function latestLedgerDeployment(
   env: NodeJS.ProcessEnv = process.env,
@@ -121,22 +142,12 @@ export function latestLedgerDeployment(
   const db = openLedger(env);
   if (!db) return unreadable();
   try {
-    const rows = db.query<{ id: string; state_json: string }, [string, number]>(
-      "SELECT id, state_json FROM entities WHERE kind = ? ORDER BY COALESCE(updated_at, 0) DESC, id DESC LIMIT ?",
-    ).all("deployment", LATEST_DEPLOYMENT_WINDOW);
-    let latest: ViewerDeploymentStatus | null = null;
-    let latestAt = Number.NEGATIVE_INFINITY;
-    for (const row of rows) {
-      const status = deploymentStatus(row.state_json, row.id);
-      if (!status) return unreadable();
-      const at = Date.parse(status.createdAt);
-      const tie = Date.parse(status.updatedAt);
-      const rank = Number.isFinite(at) ? at : Number.isFinite(tie) ? tie : Number.NEGATIVE_INFINITY;
-      if (latest && rank <= latestAt) continue;
-      latest = status;
-      latestAt = rank;
-    }
-    return { state: "ok", value: latest };
+    const row = db.query<{ id: string; state_json: string }, [string]>(
+      `SELECT id, state_json FROM entities WHERE kind = ?${NEWEST_DEPLOYMENT_FIRST} LIMIT 1`,
+    ).get("deployment");
+    if (!row) return { state: "ok", value: null };
+    const status = deploymentStatus(row.state_json, row.id);
+    return status ? { state: "ok", value: status } : unreadable();
   } catch {
     return unreadable();
   } finally {

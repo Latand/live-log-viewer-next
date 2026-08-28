@@ -107,6 +107,49 @@ test("recency is the record's own start instant, not only the row's write clock"
   expect(latest.state === "ok" && latest.value?.deploymentId).toBe("deploy_a9");
 });
 
+/* The defect one layer in: a read that is right about ordering and still looks
+   at a subset. The row's write clock is close to the start instant but is not
+   it — an amendment moves the clock and leaves `createdAt` where it was — so
+   any window taken over the write clock has a ledger shape that pushes the
+   newest deployment out of it. Here thirty older deployments are amended after
+   the newest one started, which is enough to bury it under a window of
+   twenty-five, and the answer must still be the deployment that ran last. */
+test("the newest deployment is found however far the row's write clock buries it", () => {
+  const newest = { status: status({ id: "deploy_a0", phase: "succeeded", createdAt: `${DAY}T13:40:00.000Z` }), updatedAt: Date.parse(`${DAY}T13:47:00.000Z`) };
+  const amended = Array.from({ length: 30 }, (_, index) => ({
+    status: status({
+      id: `deploy_e${String(index).padStart(2, "0")}`,
+      phase: "rolled-back" as const,
+      createdAt: new Date(Date.parse(`${DAY}T02:00:00.000Z`) + index * 60_000).toISOString(),
+    }),
+    /* Every amendment lands after the newest deployment finished, so the whole
+       of a twenty-five row window by this clock is older deployments. */
+    updatedAt: Date.parse(`${DAY}T18:00:00.000Z`) + index * 60_000,
+  }));
+  const env = ledger("amended", [...amended, newest, ...HISTORY]);
+  const latest = latestLedgerDeployment(env);
+  expect(latest.state === "ok" && latest.value?.deploymentId).toBe("deploy_a0");
+  expect(latest.state === "ok" && latest.value?.phase).toBe("succeeded");
+});
+
+/* Only the record being asked about has to be readable. A ledger accumulates
+   for as long as the host has been deploying, and one corrupt row from months
+   ago is not a reason to refuse to say what happened last. */
+test("a corrupt older record does not make the newest one unreadable, and a corrupt newest one does", () => {
+  const env = ledger("corrupt", [
+    { status: { ...status({ id: "deploy_d3", phase: "succeeded", createdAt: `${DAY}T04:00:00.000Z` }), phase: 7 as never }, updatedAt: Date.parse(`${DAY}T04:09:00.000Z`) },
+    ...HISTORY,
+  ]);
+  const latest = latestLedgerDeployment(env);
+  expect(latest.state === "ok" && latest.value?.deploymentId).toBe("deploy_a2");
+
+  const broken = ledger("corrupt-newest", [
+    ...HISTORY,
+    { status: { ...status({ id: "deploy_a0", phase: "succeeded", createdAt: `${DAY}T16:00:00.000Z` }), revision: 7 as never }, updatedAt: Date.parse(`${DAY}T16:08:00.000Z`) },
+  ]);
+  expect(latestLedgerDeployment(broken).state).toBe("unreadable");
+});
+
 test("an empty ledger answers with no deployment, and a missing one stays unreadable", () => {
   expect(latestLedgerDeployment(ledger("empty", []))).toEqual({ state: "ok", value: null });
   expect(latestLedgerDeployment({ ...process.env, LLV_RUNTIME_JOURNAL: path.join(SANDBOX, "absent.sqlite") }).state).toBe("unreadable");

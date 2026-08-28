@@ -380,12 +380,22 @@ export function repoDirForProject(project: string, sources: SeatTickSources): st
   return named[0]?.repoDir ?? null;
 }
 
-/** A digest of everything a wake could change. Two equal fingerprints across
-    two wakes is exactly what "that wake changed nothing" means. */
+/**
+ * A digest of everything a wake could change. Two equal fingerprints across two
+ * wakes is exactly what "that wake changed nothing" means.
+ *
+ * Every field a wake reason is decided from has to be in here, because this
+ * digest is also what identifies a retry-guard entry: a guard keyed on less
+ * than the condition it guards outlives that condition. A card's `updatedAt` is
+ * the case #1262 produced — it decides whether the card is an unstarted task or
+ * backlog, so moving a stale card is precisely the act that should bring the
+ * reason back, and while it was missing from here the guard held the reason
+ * suppressed with the card's movement invisible to it.
+ */
 function changeFingerprint(pipelines: readonly SeatTickPipelineInput[], tasks: readonly SeatTickTaskInput[]): string {
   const parts = [
     ...pipelines.map((pipeline) => `p:${pipeline.id}:${pipeline.state}:${pipeline.updatedAt ?? ""}`),
-    ...tasks.map((task) => `t:${task.id}:${task.status}:${task.owned}`),
+    ...tasks.map((task) => `t:${task.id}:${task.status}:${task.owned}:${task.updatedAt ?? ""}`),
   ].sort();
   return crypto.createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32);
 }

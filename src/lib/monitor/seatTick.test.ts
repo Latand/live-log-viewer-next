@@ -273,20 +273,15 @@ test("an assigned task nothing has started wakes the seat once the wake interval
   expect(reasonsOf(decision.verdict)).toEqual(["unstarted-task"]);
 });
 
-/* #1262: the reason that could never be discharged. Assigned-with-no-pipeline
-   accumulates — the board that produced the report carried twenty-seven such
-   cards, most of them status notes from two months earlier — so the condition
-   was permanently true and the wake carried the same items every interval for
-   ever. The card's own movement bounds it. */
-test("an assigned card nobody has touched for days is backlog, not an unstarted task", () => {
+/* #1262: the bound itself, at the layer that applies it. What the bound is FOR
+   — a board of stale assigned cards that could never discharge the reason, and
+   a movement that brings one back — is a claim about a real board under a real
+   journal, so its regression is driven from those fixtures in
+   `seatTickSources.test.ts` rather than asserted over an empty room here. */
+test("a card with no readable movement instant is backlog, because staleness cannot be disproved", () => {
   const overdue = { lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() };
-  const ancient = card({ updatedAt: new Date(NOW - 40 * 24 * 60 * MINUTE).toISOString() });
-  expect(seatTickDecision(input({ tasks: [ancient], state: stateWith(overdue) })).verdict.kind).toBe("quiet");
-  /* And it comes back the moment anybody touches it, which is the discharge:
-     no second mechanism for silencing a signal, and no card to edit twenty-six
-     times to stop an alarm. */
-  const moved = card({ updatedAt: new Date(NOW - 2 * 60 * MINUTE).toISOString() });
-  expect(reasonsOf(seatTickDecision(input({ tasks: [moved], state: stateWith(overdue) })).verdict)).toEqual(["unstarted-task"]);
+  expect(seatTickDecision(input({ tasks: [card({ updatedAt: null })], state: stateWith(overdue) })).verdict.kind).toBe("quiet");
+  expect(seatTickDecision(input({ tasks: [card({ updatedAt: "not a time" })], state: stateWith(overdue) })).verdict.kind).toBe("quiet");
 });
 
 /* The seat is told why the number it is given is smaller than the board it can
