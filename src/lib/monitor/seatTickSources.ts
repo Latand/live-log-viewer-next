@@ -47,6 +47,14 @@ const EVENT_PAGE = 200;
 /** Liveness rows one project's check asks for. */
 const LIVENESS_LIMIT = 60;
 
+/** One delivery the runtime is still holding for a conversation, in the only
+    three fields the tick needs to recognize its own and take it back. */
+export interface SeatTickPendingDelivery {
+  id: string;
+  clientMessageId: string | null;
+  state: "held" | "assigned" | "delivered" | "failed" | "delivery-uncertain";
+}
+
 export interface SeatTickSources {
   seatFor: typeof orchestratorSeatFor;
   /** Projects that currently hold an active seat. */
@@ -63,6 +71,12 @@ export interface SeatTickSources {
   lifecycleJournal: typeof readLifecycleJournal;
   deployments: typeof ledgerDeployments;
   retirementReport: () => StructuredHostRetirementReport | null;
+  /** What the runtime is still holding for a conversation. The tick reads this
+      to find the wake it sent that never landed. */
+  pendingDeliveries: (conversationId: string) => SeatTickPendingDelivery[];
+  /** Take a retained wake back before it can land. The reason is stored on the
+      delivery, so the revocation is legible where the delivery is. */
+  revokeDelivery: (id: string, reason: string) => void;
   now: () => number;
 }
 
@@ -91,6 +105,10 @@ export function defaultSeatTickSources(): SeatTickSources {
         return null;
       }
     },
+    pendingDeliveries: (conversationId) => agentRegistry()
+      .pendingDeliveries(conversationId as `conversation_${string}`)
+      .map((delivery) => ({ id: delivery.id, clientMessageId: delivery.clientMessageId, state: delivery.state })),
+    revokeDelivery: (id, reason) => { agentRegistry().terminalizeHeldDelivery(id, reason); },
     now: () => Date.now(),
   };
 }

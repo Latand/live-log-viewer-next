@@ -86,8 +86,8 @@ test("bridge reports survive as the second channel, for the operator away from t
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
    this constant as defaultPromptVersion, so an older seat reads as stale without a diff. */
-test("the default mandate is at version 11", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(11);
+test("the default mandate is at version 10", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(10);
 });
 
 /* #1202 — every ask the manager makes should be answerable with a tap, so the
@@ -219,22 +219,4 @@ test("the prompt forbids any user-facing confirmation step outright", () => {
 
 test("the prompt tells the manager to re-derive board state rather than accumulate it", () => {
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Re-derive board state per turn");
-});
-
-/* #1245 — the monitor that drove orchestrator sessions was a prompt an agent wrote
-   for itself, so a rotation dropped it and a revoked predecessor kept firing. The
-   Viewer owns the clock now, and the mandate has to say so: the refusal of a
-   self-scheduled monitor is half the mechanism for "exactly one ticker per seat". */
-test("the mandate hands the clock to the Viewer and refuses a self-scheduled monitor", () => {
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## The seat tick — the Viewer wakes you, you never schedule yourself");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("ScheduleWakeup, CronCreate");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("refused practice here");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Act on those and nothing else that turn");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("never stop inside a tick to wait for the operator");
-});
-
-test("the mandate names the one stop: a task that cannot be done is blocked with its reason", () => {
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Your default mandate is to carry every task to completion");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("update_task to blocked with the reason in the text");
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("That is the stop, it is the only one");
 });

@@ -4,7 +4,13 @@ import { statePath } from "@/lib/configDir";
 import { writeJsonDurably } from "@/lib/state/durableJson";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
-import { emptySeatTickState, SEAT_TICK_WAKE_REASON_KINDS, type SeatTickProjectState, type SeatTickWakeReasonKind } from "./types";
+import {
+  emptySeatTickState,
+  SEAT_TICK_WAKE_REASON_KINDS,
+  type SeatTickOutstandingWake,
+  type SeatTickProjectState,
+  type SeatTickWakeReasonKind,
+} from "./types";
 
 /**
  * The seat tick's durable row per project (issue #1245).
@@ -32,6 +38,16 @@ function isoOrNull(value: unknown): string | null {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
 }
 
+function normalizeOutstandingWake(value: unknown): SeatTickOutstandingWake | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const clientMessageId = typeof raw.clientMessageId === "string" ? raw.clientMessageId.slice(0, 300) : "";
+  const conversationId = typeof raw.conversationId === "string" ? raw.conversationId.slice(0, 200) : "";
+  const seatEpoch = raw.seatEpoch;
+  if (!clientMessageId || !conversationId || typeof seatEpoch !== "number" || !Number.isSafeInteger(seatEpoch)) return null;
+  return { clientMessageId, conversationId, seatEpoch };
+}
+
 function normalizeRow(value: unknown): SeatTickProjectState {
   const empty = emptySeatTickState();
   if (!value || typeof value !== "object" || Array.isArray(value)) return empty;
@@ -57,6 +73,7 @@ function normalizeRow(value: unknown): SeatTickProjectState {
       .slice(0, 200),
     lastWakeFingerprint: typeof raw.lastWakeFingerprint === "string" ? raw.lastWakeFingerprint.slice(0, 200) : null,
     eventsThrough: typeof raw.eventsThrough === "number" && Number.isInteger(raw.eventsThrough) && raw.eventsThrough >= 0 ? raw.eventsThrough : 0,
+    outstandingWake: normalizeOutstandingWake(raw.outstandingWake),
   };
 }
 
@@ -78,19 +95,35 @@ function readFile(filePath: string): SeatTickStateFile {
  * The row a check should start from.
  *
  * A seat epoch that moved means a rotation happened: the successor inherits the
- * clock but none of the predecessor's bookkeeping, so its stall memory, its
- * retry-guard counters and its wake stamps start empty. That is the whole
- * handover — the incoming seat is ticking without anyone configuring it, and it
- * is not carrying a record of wakes it never received.
+ * clock but none of the predecessor's JUDGEMENT, so its stall memory, its
+ * retry-guard counters and the reasons it was last woken for start empty. That
+ * is the whole handover — the incoming seat is ticking without anyone
+ * configuring it, and it is not carrying a record of wakes it never received.
  *
- * The event cursor is the one thing that survives, because it is a fact about
- * the journal rather than about the seat: re-relaying a predecessor's whole
- * history to a fresh successor would bury the events that arrived after it sat
- * down.
+ * Three things are not the seat's, and survive:
+ *
+ * - The event cursor, which is a fact about the journal: re-relaying a
+ *   predecessor's whole history to a fresh successor would bury the events that
+ *   arrived after it sat down.
+ * - The wake and proposal stamps, which are the project's bounds. A rotation
+ *   that cleared them would let a successor be woken minutes after its
+ *   predecessor was — a bypass of the hourly bound, and one an operator
+ *   rotating a seat by hand could trip repeatedly.
+ * - The outstanding wake, which is a payload the runtime is still holding for
+ *   the PREDECESSOR. It survives so the successor's first check is what takes
+ *   it back; dropping it here would leave it addressed to a seat nothing is
+ *   watching any more.
  */
 export function seatTickStateForEpoch(row: SeatTickProjectState, seatEpoch: number | null): SeatTickProjectState {
   if (row.seatEpoch === seatEpoch) return row;
-  return { ...emptySeatTickState(), seatEpoch, eventsThrough: row.eventsThrough };
+  return {
+    ...emptySeatTickState(),
+    seatEpoch,
+    eventsThrough: row.eventsThrough,
+    lastWakeAt: row.lastWakeAt,
+    lastProposalAt: row.lastProposalAt,
+    outstandingWake: row.outstandingWake,
+  };
 }
 
 export function readSeatTickState(project: string, filePath = seatTickStatePath()): SeatTickProjectState {

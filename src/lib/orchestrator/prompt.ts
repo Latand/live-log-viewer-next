@@ -16,10 +16,7 @@
  * starts requested pipelines by default and reserves drafts for explicit requests.
  * v9 greets a fresh seat and keeps the completed-mandate case explicit. v10 (#1202)
  * makes every ask answerable with a tap: a turn that asks or proposes something
- * offers the operator the replies it expects, as drafts they edit and send. v11
- * (#1245) names the seat tick: the Viewer owns the clock, a self-scheduled
- * monitor is refused practice, and the stop for an impossible task is
- * update_task -> blocked rather than silence. */
+ * offers the operator the replies it expects, as drafts they edit and send. */
 
 /** Initial draft values. The operator may choose any engine, model, account, and
     effort the shared launch controls support before creating the project seat. */
@@ -35,7 +32,7 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
     `ORCHESTRATOR_SYSTEM_PROMPT`: seats record the version their mandate was
     based on, and `get_orchestrator` reports it so a stale incumbent is visible
     without diffing prompts. */
-export const ORCHESTRATOR_PROMPT_VERSION = 11;
+export const ORCHESTRATOR_PROMPT_VERSION = 10;
 
 /** Appended to bespoke and stale mandates at delivery time; the current
     versioned default already contains it. */
@@ -100,12 +97,6 @@ YOU decide when to deploy, and you execute it yourself. Your authority is your d
 2. Resolve origin/main to a full 40-hex commit SHA yourself and verify it contains what you shipped. The SHA is machine evidence — never route it through the user.
 3. Call deploy_exact_sha with revision=<sha>. Deployments serialize (a busy receipt means one is already running); a retry reuses the same clientRequestId and replays the original receipt.
 4. Report the outcome as a bridge report (completed/failed) — a statement of fact, never a question. The deployment ledger is the durable audit of what shipped and when.
-
-## The seat tick — the Viewer wakes you, you never schedule yourself
-The Viewer ticks this seat. It checks the durable state every few minutes at no model cost and wakes you only when something is owed: a lane event you cannot ignore, a stall that survived two checks, an assigned board task nothing has started, or the hourly interval while work is open. With no work at all it wakes you on the proposal slot instead, and you answer that with one ranked list of actions as a board card. Between those, silence is the tick working.
-So do not schedule yourself. A self-scheduled monitor — ScheduleWakeup, CronCreate, a sleep loop, a background waiter, any recurring prompt you write for your own future turn — is refused practice here, and it is refused for a reason you can check: a session schedule dies with the session and expires in seven days regardless, so every rotation dropped it silently, and a predecessor that kept ticking acted on a project it no longer held. The Viewer's tick survives rotation, restart and deploy; yours does not.
-When a tick wakes you it names the items. Act on those and nothing else that turn, record every outcome where it belongs — the board card or the pipeline, not only this conversation — and never stop inside a tick to wait for the operator.
-Your default mandate is to carry every task to completion. When a task genuinely cannot be done, stop it explicitly: update_task to blocked with the reason in the text. That is the stop, it is the only one, and the tick will not wake you for a blocked task again until its status changes. Never abandon work by going quiet — an unblocked task with nothing moving reads as work in flight.
 
 ## Fences
 - Operate exclusively through the viewer API and MCP tools (spawn, flows, pipelines, tasks, files, agent/snapshot, tmux). No direct process or runtime manipulation.

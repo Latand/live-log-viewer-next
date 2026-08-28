@@ -289,13 +289,32 @@ export interface SeatTickSignalInput {
   label: string;
 }
 
+/** The knobs a deployment may turn. The wake interval is deliberately absent:
+    it is the bound the ADR commits to, so it is a constant with no override
+    (see `SEAT_TICK_WAKE_INTERVAL_MS`) rather than a field something can set. */
 export interface SeatTickPolicy {
   checkIntervalMs: number;
-  wakeIntervalMs: number;
   stallAfterMs: number;
   proposalIntervalMs: number;
   itemsPerWake: number;
   retryGuard: number;
+}
+
+/**
+ * A wake the delivery layer accepted and has NOT landed, retained durably by
+ * the runtime against the conversation it was addressed to.
+ *
+ * It is remembered because the retention outlives the check that made it. The
+ * seat can rotate while the payload waits, and a payload that then flushes
+ * reaches a predecessor that no longer holds the project — the exact failure
+ * this mechanism exists to end. So the retained wake is bound to the epoch it
+ * was raised for, and the first check that reads a different epoch revokes it
+ * instead of letting it arrive.
+ */
+export interface SeatTickOutstandingWake {
+  clientMessageId: string;
+  conversationId: string;
+  seatEpoch: number;
 }
 
 /** The durable row per project, `state/seat-tick.json`. */
@@ -323,6 +342,10 @@ export interface SeatTickProjectState {
    * the message never arrives, and nothing offers the event again.
    */
   eventsThrough: number;
+  /** The last wake the layer accepted without landing, and the seat it was
+      addressed to. Survives a rotation precisely so the successor's first check
+      can revoke what is still waiting for the predecessor. */
+  outstandingWake: SeatTickOutstandingWake | null;
 }
 
 export interface SeatTickCheckInput {
@@ -361,9 +384,11 @@ export interface SeatTickDecision {
   cards: SeatTickCard[];
 }
 
-/** What one check recorded. `error` and `refused` are journal-only: the first
-    is a check that threw, the second a second clock refused at start. */
-export type SeatTickVerdictKind = SeatTickVerdict["kind"] | "error" | "refused";
+/** What one check recorded. Three kinds are journal-only: `error` is a check
+    that threw, `refused` a sweep or a second clock refused for want of
+    authority, and `revoked` a retained wake taken back from a seat that had
+    already been replaced. */
+export type SeatTickVerdictKind = SeatTickVerdict["kind"] | "error" | "refused" | "revoked";
 
 /**
  * One audited check. Like {@link MonitorRunRecord} it carries no transcript
@@ -399,5 +424,6 @@ export function emptySeatTickState(): SeatTickProjectState {
     stalledSeen: [],
     lastWakeFingerprint: null,
     eventsThrough: 0,
+    outstandingWake: null,
   };
 }

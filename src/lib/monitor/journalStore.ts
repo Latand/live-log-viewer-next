@@ -196,8 +196,9 @@ export function readRunRecords(limit: number, filePath = monitorJournalPath()): 
  * missing one, and the operator could not tell how often the predecessor had
  * been ticking — the successor that finally found a predecessor's schedule
  * guessed both numbers from its transcript. Every check leaves a line here,
- * including a check that threw and a second clock refused at start, so "no
- * line" means "no check" and the cadence is a readable fact.
+ * including a check that threw, a sweep refused for want of traffic authority
+ * and a wake taken back from a replaced seat, so "no line" means "no check" and
+ * the cadence is a readable fact.
  * ------------------------------------------------------------------------- */
 
 /** Checks retained before the oldest are dropped. At a five-minute cadence this
@@ -205,7 +206,7 @@ export function readRunRecords(limit: number, filePath = monitorJournalPath()): 
     diagnosing a tick actually looks at. */
 export const SEAT_TICK_RUN_HISTORY = 500;
 
-const SEAT_TICK_VERDICTS: SeatTickVerdictKind[] = ["quiet", "wake", "proactive", "no-seat", "skipped", "error", "refused"];
+const SEAT_TICK_VERDICTS: SeatTickVerdictKind[] = ["quiet", "wake", "proactive", "no-seat", "skipped", "error", "refused", "revoked"];
 
 export function seatTickJournalPath(): string {
   return process.env.LLV_SEAT_TICK_AUDIT_FILE?.trim() || statePath(path.join("seat-tick", "runs.ndjson"));
@@ -224,9 +225,9 @@ export function sanitizeSeatTickRecord(value: unknown): SeatTickRunRecord | null
   const project = text(raw.project, 200) ?? "";
   const verdict = SEAT_TICK_VERDICTS.find((candidate) => candidate === raw.verdict);
   if (raw.schemaVersion !== 1 || !verdict) return null;
-  /* Every line names the project it decided about — except the refusal of a
-     second clock, which is about the process and no project in particular. A
-     nameless line of any other kind is a line nothing can be read out of. */
+  /* Every line names the project it decided about — except a refusal, which is
+     about the process and no project in particular. A nameless line of any
+     other kind is a line nothing can be read out of. */
   if (!project && verdict !== "refused") return null;
 
   const delivery = (raw.delivery ?? null) as Record<string, unknown> | null;

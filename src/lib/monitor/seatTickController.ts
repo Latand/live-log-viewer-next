@@ -22,7 +22,13 @@ import {
   seatTickProjects,
   type SeatTickSources,
 } from "./seatTickSources";
-import type { SeatTickCard, SeatTickPolicy, SeatTickRunRecord, SeatTickVerdict } from "./types";
+import type {
+  SeatTickCard,
+  SeatTickPolicy,
+  SeatTickProjectState,
+  SeatTickRunRecord,
+  SeatTickVerdict,
+} from "./types";
 
 /**
  * The seat tick controller (issue #1245).
@@ -30,9 +36,16 @@ import type { SeatTickCard, SeatTickPolicy, SeatTickRunRecord, SeatTickVerdict }
  * One in-process clock, started by the release that owns traffic beside the
  * flow pipeline controller, the Telegram scheduler and the host retirement
  * sweep. There is no scheduler service, no cron entry, no timer unit, no
- * external process and no cross-process lock: the mechanism for "exactly one
- * active ticker per seat" is that there is one clock, in one process, and a
- * second start is refused out loud rather than silently ignored.
+ * external process and no cross-process lock. "Exactly one active ticker per
+ * seat" rests on two refusals instead, because one process is not one process
+ * for ever — a deploy promotes a successor beside the incumbent:
+ *
+ * - A second start inside THIS process is refused out loud rather than
+ *   silently ignored.
+ * - Every sweep re-asks whether this release still owns traffic, and a release
+ *   that has been replaced refuses the sweep, says so in the journal and stops
+ *   its own clock. Authority is durable and re-readable, so it answers across
+ *   processes what a process-local flag cannot answer at all.
  *
  * What the thing this replaces got wrong, and what this does instead:
  *
@@ -42,7 +55,10 @@ import type { SeatTickCard, SeatTickPolicy, SeatTickRunRecord, SeatTickVerdict }
  * - It could act under a seat that had been revoked minutes earlier. Here the
  *   seat epoch is re-read immediately before the send, and a seat that moved in
  *   between is refused — the wake is journaled as refused, and nothing about it
- *   is recorded as a wake the successor received.
+ *   is recorded as a wake the successor received. A send the layer accepted but
+ *   kept (held behind a migration, queued with a runtime) is remembered as
+ *   outstanding and revoked the moment the epoch under it moves, because a
+ *   retained payload outlives the check that made it.
  * - It queued its fires and then double-fired into a finished turn. Here a seat
  *   whose turn is genuinely progressing is skipped and the tick is dropped;
  *   nothing is ever held.
@@ -59,6 +75,8 @@ export interface SeatTickControllerDependencies {
   deliver?: typeof deliverConversationMessage;
   ensureCard?: (project: string, card: SeatTickCard, at: string) => void;
   proposalIssues?: (project: string, sources: SeatTickSources) => Promise<ProposalIssue[]>;
+  /** Whether this release still owns viewer traffic, re-asked per sweep. */
+  ownsTraffic?: () => boolean | Promise<boolean>;
 }
 
 function cardText(project: string, card: SeatTickCard, at: string): string {
@@ -151,6 +169,85 @@ function wakeClientMessageId(
 }
 
 /**
+ * Whether the layer accepted the wake and kept it.
+ *
+ * The complement of {@link wakeReached} over an accepted send: the payload is
+ * durably retained against the conversation it was addressed to, and it will
+ * be delivered when whatever is blocking it clears — which may be after this
+ * seat has been replaced.
+ */
+function wakeRetained(outcome: DeliveryOutcome): boolean {
+  return outcome.ok && !wakeReached(outcome);
+}
+
+const REVOKED_WAKE_REASON = "the seat tick revoked a wake raised for a seat that has since been replaced";
+
+/**
+ * Bind a retained wake to the epoch it was raised for.
+ *
+ * This is the half of the epoch check the re-read before the send cannot do. A
+ * send is refused when the seat moved BEFORE it; this covers the seat moving
+ * after it, while the payload is still waiting somewhere — the layer keeps a
+ * `held` or `queued` message durably, so "the send was refused at the epoch"
+ * stops being true the moment the epoch moves under a message already in the
+ * runtime's hands. A predecessor woken that way is precisely the failure this
+ * issue was filed about, so the wake is taken back rather than allowed to land.
+ *
+ * The seat that is still the same seat keeps its outstanding wake: that one is
+ * the replay the next check re-raises under the same `clientMessageId`.
+ */
+function revokeOutstandingWake(context: {
+  project: string;
+  state: SeatTickProjectState;
+  /** The seat as it stands NOW. A seat row with no conversation id is nobody
+      the wake could have been addressed to, so it reads as a replacement. */
+  seat: { conversationId: string | null; seatEpoch: number } | null;
+  sources: SeatTickSources;
+  appendRecord: typeof appendSeatTickRecord;
+  at: string;
+}): SeatTickProjectState {
+  const outstanding = context.state.outstandingWake;
+  if (!outstanding) return context.state;
+  if (context.seat
+    && context.seat.conversationId === outstanding.conversationId
+    && context.seat.seatEpoch === outstanding.seatEpoch) return context.state;
+
+  let revoked = 0;
+  let detail = "";
+  try {
+    for (const delivery of context.sources.pendingDeliveries(outstanding.conversationId)) {
+      if (delivery.clientMessageId !== outstanding.clientMessageId) continue;
+      if (delivery.state === "delivered" || delivery.state === "failed") continue;
+      context.sources.revokeDelivery(delivery.id, REVOKED_WAKE_REASON);
+      revoked += 1;
+    }
+    detail = revoked > 0
+      ? `a wake the delivery layer had accepted but not landed was revoked before it could reach the replaced seat (${revoked} retained payload(s))`
+      : "the wake raised for the replaced seat was already settled; nothing was left to revoke";
+  } catch (error) {
+    /* A registry that cannot answer must not take the check down with it: the
+       wake stamp did not move for this send either, so the worst case is the
+       predecessor receiving one message the successor will not be told about. */
+    detail = `the wake raised for the replaced seat could not be revoked: ${redactMonitorText(error instanceof Error ? error.message : "unknown error")}`;
+  }
+
+  context.appendRecord({
+    schemaVersion: 1,
+    at: context.at,
+    project: context.project,
+    seatEpoch: outstanding.seatEpoch,
+    verdict: "revoked",
+    reasons: [],
+    items: 0,
+    deferred: 0,
+    eventsThrough: context.state.eventsThrough,
+    delivery: { clientMessageId: outstanding.clientMessageId, outcome: revoked > 0 ? "revoked" : "already-settled" },
+    detail,
+  });
+  return { ...context.state, outstandingWake: null };
+}
+
+/**
  * One check of one project: read, decide, maybe wake, journal.
  *
  * Returns the journal line it wrote, so a caller — a test, or a future status
@@ -206,9 +303,20 @@ async function check(
   const ensureCard = dependencies.ensureCard ?? ensureSeatTickCard;
 
   const gathered = await gatherSeatTickInput(canonical, readState(canonical), policy, sources);
-  const input = { ...gathered, state: seatTickStateForEpoch(gathered.state, gathered.seat?.seatEpoch ?? null) };
+  const at = new Date(gathered.now).toISOString();
+  /* Before anything is decided: a wake this project left outstanding under a
+     seat that has since been replaced is taken back. The row carried it across
+     the rotation for exactly this moment. */
+  const reconciled = revokeOutstandingWake({
+    project: gathered.project,
+    state: seatTickStateForEpoch(gathered.state, gathered.seat?.seatEpoch ?? null),
+    seat: gathered.seat,
+    sources,
+    appendRecord,
+    at,
+  });
+  const input = { ...gathered, state: reconciled };
   const decision = seatTickDecision(input);
-  const at = new Date(input.now).toISOString();
 
   for (const card of decision.cards) {
     try {
@@ -277,6 +385,25 @@ async function check(
       if (wakeReached(outcome)) {
         const eventsThrough = input.events.at(-1)?.seq ?? state.eventsThrough;
         state = seatTickWakeCommit(state, verdict, { fingerprint: input.changeFingerprint, eventsThrough, now: input.now });
+      } else if (wakeRetained(outcome)) {
+        /* Accepted and kept. The payload now outlives this check, so it is
+           written down against the epoch it was raised for — and re-checked at
+           once, because the rotation that matters most is the one that landed
+           while the send was in flight. */
+        state = {
+          ...state,
+          /* The seat the rotation check just proved `current` still is, in the
+             one form that is typed as an addressable conversation. */
+          outstandingWake: { clientMessageId, conversationId: input.seat.conversationId, seatEpoch: input.seat.seatEpoch },
+        };
+        state = revokeOutstandingWake({
+          project: input.project,
+          state,
+          seat: sources.seatFor(input.project).active ?? null,
+          sources,
+          appendRecord,
+          at,
+        });
       }
     }
   }
@@ -304,12 +431,69 @@ async function defaultProposalIssues(project: string, sources: SeatTickSources):
   return cwd ? openIssuesForProposal({ cwd }) : [];
 }
 
-/** Every project the tick has an opinion about, checked once. One project's
-    failure never stops the others: this is a sweep, not a transaction — and
-    each project's own failure is a journal line of its own, written by
-    {@link runSeatTickCheck}. */
+/**
+ * Whether this release still owns viewer traffic.
+ *
+ * Imported lazily: the module that answers this is the Viewer's node-side
+ * startup runtime, and pulling its dependency graph into the tick's static
+ * imports would put node: builtins on a path that has no business carrying
+ * them. An answer that cannot be read at all is read as "yes", the same way the
+ * authority check itself treats a missing target — a tick that silently stopped
+ * because an import hiccuped is a worse failure than the one being guarded.
+ */
+async function releaseOwnsTraffic(): Promise<boolean> {
+  try {
+    const { viewerReleaseOwnsTraffic } = await import("@/lib/viewerInstrumentation");
+    return viewerReleaseOwnsTraffic();
+  } catch (error) {
+    console.error("[seat tick] traffic authority is unreadable", error instanceof Error ? error.name : "unknown");
+    return true;
+  }
+}
+
+/**
+ * Every project the tick has an opinion about, checked once.
+ *
+ * The sweep opens by re-asking whether this release still owns traffic, and
+ * that question is the duplicate refusal that survives process replacement. The
+ * process-local flag behind {@link startSeatTick} cannot see a promoted
+ * successor at all: a deploy leaves the predecessor running with its timer
+ * armed, and both would sweep the same seats. The durable authority target is
+ * the one fact both processes can read, so the replaced release refuses, says
+ * so where the refusal outlives it, and stops its own clock — no lock, and no
+ * second answer to "who owns this seat".
+ *
+ * After that, one project's failure never stops the others: this is a sweep,
+ * not a transaction — and each project's own failure is a journal line of its
+ * own, written by {@link runSeatTickCheck}.
+ */
 export async function reconcileSeatTick(dependencies: SeatTickControllerDependencies = {}): Promise<SeatTickRunRecord[]> {
   const sources = dependencies.sources ?? defaultSeatTickSources();
+  const appendRecord = dependencies.appendRecord ?? appendSeatTickRecord;
+  if (!await (dependencies.ownsTraffic ?? releaseOwnsTraffic)()) {
+    const refusal = "this release no longer owns viewer traffic, so the seats belong to the promoted one";
+    console.error(`[seat tick] refused: ${refusal}`);
+    try {
+      appendRecord({
+        schemaVersion: 1,
+        at: new Date().toISOString(),
+        project: "",
+        seatEpoch: null,
+        verdict: "refused",
+        reasons: [],
+        items: 0,
+        deferred: 0,
+        eventsThrough: 0,
+        delivery: null,
+        detail: `the seat tick sweep was refused and this process's clock stopped: ${refusal}`,
+      });
+    } catch {
+      /* The log line above already carries the refusal; an unwritable journal
+         must not turn a refusal into a crash. */
+    }
+    stopSeatTick();
+    return [];
+  }
   const records: SeatTickRunRecord[] = [];
   for (const project of seatTickProjects(sources)) {
     try {
@@ -339,10 +523,13 @@ const tickHost = globalThis as typeof globalThis & {
  * journal being the artifact that outlives both processes, which is the whole
  * reason it exists.
  *
- * There is deliberately no cross-process lock behind this. Exactly one process
- * owns traffic (`viewerReleaseOwnsTraffic`), a deployment candidate does not
- * start controllers at all, and adding a lock would put a second, weaker answer
- * beside that one.
+ * This refusal only covers a second start inside one process. The one that
+ * covers a second PROCESS is in {@link reconcileSeatTick}, which re-reads the
+ * durable traffic authority every sweep — a deployment candidate never starts
+ * controllers, and a release that has been promoted past stops sweeping the
+ * moment it notices. There is deliberately no cross-process lock behind either:
+ * a lock would be a second, weaker answer beside the authority both processes
+ * already read.
  */
 export function startSeatTick(ports: {
   scheduleInterval?: (callback: () => void, delayMs: number) => ReturnType<typeof setInterval>;

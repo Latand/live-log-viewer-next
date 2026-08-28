@@ -40,10 +40,11 @@ import {
  *   plane cannot answer for at all — is not a turn the tick may wait behind
  *   forever, because the seat's own dead host is exactly the condition a wake
  *   exists to clear.
- * - **A standing condition waits out the wake interval; a terminal lane event
- *   does not.** "Roughly hourly" is a floor on wakes the tick raises by itself.
- *   An event the seat cannot make its next decision without — a parked stage, a
- *   verdict, a deploy outcome — reaches it at the very next check.
+ * - **Every wake waits out the wake interval.** One project-scoped hour, with
+ *   no exception and no override: a terminal lane event is the FIRST thing the
+ *   next wake carries, never a reason to raise one early. The bound is what the
+ *   ADR's cost argument rests on — one resume per project per interval — so a
+ *   reason allowed to jump it would make the ADR describe a different system.
  * - **Nothing here creates, wakes or acknowledges anything.** The decision names
  *   what is owed; the controller sends it, re-reads the seat epoch before it
  *   does, and only a delivered send advances a stamp or a cursor.
@@ -51,9 +52,22 @@ import {
 
 const MINUTE_MS = 60_000;
 
+/**
+ * The bound, and the only one that is not a policy field.
+ *
+ * A project is woken at most once an hour while work is open. That is the
+ * commitment in `docs/adr/0001-seat-tick-wake-resumes-a-dead-seat-host.md`,
+ * and the whole cost argument for reversing #741's delivery rule rests on it:
+ * a wake may resume a host the retirement sweep reclaimed, so "how often can
+ * the two trade a host" is answered by this number and nothing else. An
+ * environment override, an exempt reason kind or a stamp a rotation cleared
+ * would each turn that answer into "it depends", so there is no override, no
+ * exemption, and the stamp belongs to the project rather than to the seat.
+ */
+export const SEAT_TICK_WAKE_INTERVAL_MS = 60 * MINUTE_MS;
+
 export const DEFAULT_SEAT_TICK_POLICY: SeatTickPolicy = {
   checkIntervalMs: 5 * MINUTE_MS,
-  wakeIntervalMs: 60 * MINUTE_MS,
   stallAfterMs: 40 * MINUTE_MS,
   proposalIntervalMs: 24 * 60 * MINUTE_MS,
   itemsPerWake: 5,
@@ -71,6 +85,9 @@ function positive(raw: string | undefined, fallback: number, scale: number): num
  * cadence UI and no per-project opt-in — the requirement is that the tick works
  * from the start with no configuration by the operator.
  *
+ * The wake interval is NOT among these. It is the bound the ADR commits to, so
+ * it is {@link SEAT_TICK_WAKE_INTERVAL_MS} and nothing can set it.
+ *
  * Null is the off switch, spelled the way retirement spells its own:
  * `LLV_SEAT_TICK_CHECK_MINUTES=0` means no checks at all.
  */
@@ -79,7 +96,6 @@ export function seatTickPolicy(env: Readonly<Record<string, string | undefined>>
   if (checkRaw && Number(checkRaw) === 0) return null;
   return {
     checkIntervalMs: positive(checkRaw, DEFAULT_SEAT_TICK_POLICY.checkIntervalMs, MINUTE_MS),
-    wakeIntervalMs: positive(env.LLV_SEAT_TICK_WAKE_MINUTES, DEFAULT_SEAT_TICK_POLICY.wakeIntervalMs, MINUTE_MS),
     stallAfterMs: positive(env.LLV_SEAT_TICK_STALL_MINUTES, DEFAULT_SEAT_TICK_POLICY.stallAfterMs, MINUTE_MS),
     proposalIntervalMs: positive(env.LLV_SEAT_TICK_PROPOSAL_HOURS, DEFAULT_SEAT_TICK_POLICY.proposalIntervalMs, 60 * MINUTE_MS),
     itemsPerWake: Math.floor(positive(env.LLV_SEAT_TICK_ITEMS, DEFAULT_SEAT_TICK_POLICY.itemsPerWake, 1)),
@@ -200,42 +216,49 @@ export function seatTickDecision(input: SeatTickCheckInput): SeatTickDecision {
   const persistedStalls = stalled.filter((entry) => input.state.stalledSeen.includes(entry.pipeline.id));
   const unstarted = input.tasks.filter(isUnstarted);
   const openWork = hasOpenWork(input);
-  const wakeDue = elapsed(input.state.lastWakeAt, input.now, input.policy.wakeIntervalMs);
+  /* The one gate every wake passes. It reads `lastWakeAt`, which the project
+     keeps across a rotation, so an incoming seat inherits the bound rather than
+     a clean slate the predecessor's wake is missing from. */
+  const wakeDue = elapsed(input.state.lastWakeAt, input.now, SEAT_TICK_WAKE_INTERVAL_MS);
 
   const state: SeatTickProjectState = { ...base, stalledSeen: stalledNow };
 
   const laneEvents = input.events.filter((event) => isTerminalHighSignalEvent(event.type));
   const candidates: SeatTickWakeReason[] = [];
-  /* Terminal events are counted over the WHOLE pending range, not just the page
-     this check carries: a verdict sitting behind a backlog is as
-     decision-blocking as one at the front, and a page-sized answer is how it
-     gets buried. Routine progress never wakes on its own. */
-  if (input.terminalPending) {
-    const first = laneEvents[0];
-    const more = laneEvents.length > 1 ? ` and ${laneEvents.length - 1} more` : "";
-    candidates.push({
-      kind: "lane-event",
-      detail: first
-        ? `${first.type} since the last delivered wake${more}`
-        : "a terminal lane event is waiting further down the journal than this check reads",
-    });
-  }
-  if (wakeDue && persistedStalls.length > 0) {
-    candidates.push({ kind: "stalled", detail: persistedStalls[0]!.reason });
-  }
-  if (wakeDue && unstarted.length > 0) {
-    candidates.push({ kind: "unstarted-task", detail: `${unstarted.length} assigned board task(s) nothing has started` });
-  }
-  /* The interval is a floor on wakes, never a licence to speak with nothing to
-     say. Reaching here with no candidate means no lane event, no persisted
-     stall and no unstarted task, so an interval wake would carry exactly the
-     open lanes and the signals. A board whose only open work is an inbox card —
-     open work, but work the seat is told not to touch, because the operator's
-     move to assigned is what starts it — leaves that agenda empty, and an
-     hourly wake with an empty agenda is the burnt-quota tick this replaces. */
-  const intervalAgenda = input.pipelines.some(isOpenLane) || input.signals.length > 0;
-  if (wakeDue && openWork && intervalAgenda && candidates.length === 0) {
-    candidates.push({ kind: "interval", detail: "the wake interval elapsed while work is open" });
+  if (wakeDue) {
+    /* Terminal events are counted over the WHOLE pending range, not just the
+       page this check carries: a verdict sitting behind a backlog is as
+       decision-blocking as one at the front, and a page-sized answer is how it
+       gets buried. It leads the wake for that reason — and it waits for the
+       wake like everything else. Routine progress never wakes on its own. */
+    if (input.terminalPending) {
+      const first = laneEvents[0];
+      const more = laneEvents.length > 1 ? ` and ${laneEvents.length - 1} more` : "";
+      candidates.push({
+        kind: "lane-event",
+        detail: first
+          ? `${first.type} since the last delivered wake${more}`
+          : "a terminal lane event is waiting further down the journal than this check reads",
+      });
+    }
+    if (persistedStalls.length > 0) {
+      candidates.push({ kind: "stalled", detail: persistedStalls[0]!.reason });
+    }
+    if (unstarted.length > 0) {
+      candidates.push({ kind: "unstarted-task", detail: `${unstarted.length} assigned board task(s) nothing has started` });
+    }
+    /* The interval is a floor on wakes, never a licence to speak with nothing
+       to say. Reaching here with no candidate means no lane event, no persisted
+       stall and no unstarted task, so an interval wake would carry exactly the
+       open lanes and the signals. A board whose only open work is an inbox card
+       — open work, but work the seat is told not to touch, because the
+       operator's move to assigned is what starts it — leaves that agenda empty,
+       and an hourly wake with an empty agenda is the burnt-quota tick this
+       replaces. */
+    const intervalAgenda = input.pipelines.some(isOpenLane) || input.signals.length > 0;
+    if (openWork && intervalAgenda && candidates.length === 0) {
+      candidates.push({ kind: "interval", detail: "the wake interval elapsed while work is open" });
+    }
   }
 
   const cards: SeatTickCard[] = [];
@@ -272,7 +295,9 @@ export function seatTickDecision(input: SeatTickCheckInput): SeatTickDecision {
 
   if (!openWork) {
     const idle = { ...quiet(state, at), idleSince: input.state.idleSince ?? at };
-    if (elapsed(input.state.lastProposalAt, input.now, input.policy.proposalIntervalMs)) {
+    /* The proposal is a wake too — it resumes a host and spends a turn — so it
+       waits out the same hour on top of its own 24-hour slot. */
+    if (wakeDue && elapsed(input.state.lastProposalAt, input.now, input.policy.proposalIntervalMs)) {
       return {
         verdict: { kind: "proactive", detail: "no open lane, no unblocked task, and the proposal slot is due" },
         state: idle,
@@ -330,6 +355,10 @@ function wakeItems(context: {
  * is never offered again, so acking one before it landed is how a rotation
  * loses the lane event its successor needed. Only the controller, holding the
  * delivery outcome, may apply this.
+ *
+ * Landing is also what settles the outstanding wake: a message the seat has is
+ * no longer a payload waiting somewhere for a seat that may be replaced before
+ * it arrives.
  */
 export function seatTickWakeCommit(
   state: SeatTickProjectState,
@@ -347,6 +376,7 @@ export function seatTickWakeCommit(
       lastWakeFingerprint: context.fingerprint,
       quietSince: null,
       eventsThrough,
+      outstandingWake: null,
     };
   }
   if (verdict.kind !== "wake") return state;
@@ -367,5 +397,6 @@ export function seatTickWakeCommit(
     quietSince: null,
     idleSince: null,
     eventsThrough,
+    outstandingWake: null,
   };
 }

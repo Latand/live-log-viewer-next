@@ -30,7 +30,7 @@ through `deliverConversationMessage` by durable conversation id — the same
 engine-agnostic path `POST /api/tmux` and `send_message_to_orchestrator` use —
 and its recovery of a dead structured conversation is a success, not a failure.
 
-Three limits travel with the decision and are not separable from it:
+Four limits travel with the decision and are not separable from it:
 
 1. **Never a creation.** A wake resumes a host for a seat that already exists. A
    project with no active seat gets the `no-seat` verdict: a journal line and one
@@ -38,15 +38,29 @@ Three limits travel with the decision and are not separable from it:
 2. **Never a stale seat.** The seat epoch is re-read immediately before the send.
    A seat revoked or rotated between the decision and the send is refused, the
    refusal is journaled, and no wake is recorded as having happened.
-3. **Never a wake that did not land.** Resuming a host makes "the send was
-   accepted" and "the seat has the message" two different facts, so only the
-   second counts. A delivery the layer parked behind an account migration
-   (`held`), left with the runtime (`queued`, `delivering`) or has not routed at
-   all (`pending`) does not advance the wake stamp and does not advance the
-   lifecycle event cursor — an acknowledged event is never offered again, so
-   acking one before it landed is how a rotation loses the lane event its
-   successor needed. The next check re-raises the same wake under the same
-   `clientMessageId`, which makes the retry a replay rather than a second copy.
+3. **Never a wake that did not land, and never one that outlives its seat.**
+   Resuming a host makes "the send was accepted" and "the seat has the message"
+   two different facts, so only the second counts. A delivery the layer parked
+   behind an account migration (`held`), left with the runtime (`queued`,
+   `delivering`) or has not routed at all (`pending`) does not advance the wake
+   stamp and does not advance the lifecycle event cursor — an acknowledged event
+   is never offered again, so acking one before it landed is how a rotation
+   loses the lane event its successor needed. The next check re-raises the same
+   wake under the same `clientMessageId`, which makes the retry a replay rather
+   than a second copy.
+
+   A payload the layer kept is also durable, so limit 2 alone would not hold it:
+   the epoch can move while the message waits, and the wake would then arrive at
+   a predecessor. Every retained wake is therefore recorded against the epoch it
+   was raised for and revoked — at once if the rotation landed during the send,
+   otherwise by the next check, which is why the record survives the rotation
+   that clears the rest of the row.
+4. **Never more often than the wake interval, for any reason.** One
+   project-scoped 60-minute bound, with no environment override, no exempt
+   reason kind — a terminal lane event leads the next wake instead of raising an
+   early one — and no reset when the seat rotates. The bound is what makes the
+   cost below a number rather than a hope, so a reason allowed to jump it would
+   be a decision to reopen this ADR, not an implementation detail.
 
 #741's rule stands unchanged for #741's own runs; nothing here edits it.
 
@@ -54,7 +68,7 @@ Three limits travel with the decision and are not separable from it:
 
 The cost is real and bounded. A wake can boot a host that the retirement sweep
 reclaimed minutes earlier, so the two can trade a host back and forth: worst
-case one resume per project per wake interval (default 60 minutes) for as long
+case one resume per project per wake interval (60 minutes, limit 4) for as long
 as work stays open and the seat stays idle between wakes. That is the intended
 loop rather than a leak — retirement reclaims what is not needed, the tick
 brings back what is — and the wake interval is the bound on how often the trade
