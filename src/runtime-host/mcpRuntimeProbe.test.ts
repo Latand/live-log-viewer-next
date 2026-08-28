@@ -8,7 +8,7 @@ import { MCP_TOOL_NAMES } from "@/lib/mcp/server";
 import { RuntimeHost } from "./host";
 import { RuntimeJournal } from "./journal";
 import { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
-import { probeMcpRuntime } from "./mcpRuntimeProbe";
+import { mcpProbeFailureDetail, probeMcpRuntime } from "./mcpRuntimeProbe";
 import { serveRuntimeHost } from "./socket";
 
 test("host-admitted managed MCP probes discover the complete surface, call required reads, and exit", async () => {
@@ -241,3 +241,35 @@ test("the final launcher rejects capability approval from a caller-selected runt
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 }, 20_000);
+
+/* `deploymentStatus: false` and nothing else is what #790 had to work from. */
+test("a refused candidate MCP read names the read, its refusal and the control surface it used", () => {
+  expect(mcpProbeFailureDetail({
+    controlUrl: "http://127.0.0.1:19106",
+    calls: [
+      {
+        name: "deployment_status",
+        ok: false,
+        result: {
+          isError: true,
+          structuredContent: { ok: false, error: "Viewer control request failed with status 405", status: 405 },
+        },
+      },
+      { name: "board_snapshot", ok: true, result: { structuredContent: { ok: true } } },
+    ],
+  })).toBe(
+    "MCP runtime read probes failed against http://127.0.0.1:19106 - "
+    + "deployment_status: Viewer control request failed with status 405",
+  );
+});
+
+test("a read refused without a structured error still reports its text and status", () => {
+  expect(mcpProbeFailureDetail({
+    controlUrl: undefined,
+    calls: [{
+      name: "board_snapshot",
+      ok: false,
+      result: { isError: true, structuredContent: { ok: false, status: 503 }, content: [{ type: "text", text: "runtime host is unavailable" }] },
+    }],
+  })).toBe("MCP runtime read probes failed - board_snapshot: runtime host is unavailable (status 503)");
+});

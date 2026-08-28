@@ -32,6 +32,45 @@ function successfulToolCall(value: unknown): boolean {
   return (result.structuredContent as { ok?: unknown }).ok === true;
 }
 
+/** What the candidate's own MCP said when a read was refused. `deploymentStatus
+    false` with nothing beside it cost a whole deploy cycle to interpret in
+    #790, and the refusal already carries the status and the reason. */
+export function mcpToolCallRefusal(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "no result";
+  const result = value as { structuredContent?: unknown; content?: unknown };
+  const structured = result.structuredContent && typeof result.structuredContent === "object"
+    ? (result.structuredContent as { error?: unknown; status?: unknown })
+    : null;
+  const error = typeof structured?.error === "string" ? structured.error : null;
+  const text = Array.isArray(result.content)
+    ? (result.content as Array<{ type?: unknown; text?: unknown }>)
+      .find((entry) => entry?.type === "text" && typeof entry.text === "string")?.text as string | undefined
+    : undefined;
+  const reason = error ?? text ?? "refused without a reason";
+  /* The refusal usually spells the status out already; a second copy of it
+     reads like two different failures. */
+  const status = typeof structured?.status === "number" && !reason.includes(String(structured.status))
+    ? ` (status ${structured.status})`
+    : "";
+  return `${reason}${status}`;
+}
+
+/** Names the failed read, its refusal and the control surface the probe was
+    pointed at, so a failure can be told apart from a probe aimed at the wrong
+    Viewer without re-reading the adapter (#790). */
+export function mcpProbeFailureDetail(input: {
+  controlUrl: string | undefined;
+  calls: Array<{ name: string; ok: boolean; result: unknown }>;
+}): string {
+  const failures = input.calls
+    .filter((call) => !call.ok)
+    .map((call) => `${call.name}: ${mcpToolCallRefusal(call.result)}`);
+  const target = input.controlUrl ? ` against ${input.controlUrl}` : "";
+  return `MCP runtime read probes failed${target} - ${failures.join("; ") || "no read reported a reason"}`
+    .replace(/[\r\n]+/g, " ")
+    .slice(0, 500);
+}
+
 export async function probeMcpRuntime(options: McpRuntimeProbeOptions): Promise<ViewerMcpRuntimeHealthEvidence> {
   const checkedAt = new Date().toISOString();
   const timeout = Math.max(1, options.timeoutMs ?? 15_000);
@@ -82,7 +121,13 @@ export async function probeMcpRuntime(options: McpRuntimeProbeOptions): Promise<
       ...(ok ? {} : {
         detail: missing.length
           ? `MCP runtime is missing tools: ${missing.join(", ")}`
-          : "MCP runtime read probes failed",
+          : mcpProbeFailureDetail({
+            controlUrl: options.env.LLV_VIEWER_CONTROL_URL,
+            calls: [
+              { name: "deployment_status", ok: deploymentStatus, result: deployment },
+              { name: "board_snapshot", ok: boardSnapshot, result: board },
+            ],
+          }),
       }),
     };
   } catch (error) {

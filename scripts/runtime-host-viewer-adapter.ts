@@ -544,6 +544,12 @@ export function mcpProbeEnvironment(
   deployTarget: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
+  /* An empty endpoint would leave the probe's control reads on the binding's
+     fixed-port fallback, which addresses the deployed Viewer rather than the
+     candidate. That is a named refusal, never a silent retarget (#790). */
+  if (!/^https?:\/\/[^\s]+$/.test(endpoint.trim())) {
+    throw new Error("candidate MCP probe requires the candidate's own control endpoint");
+  }
   return {
     ...Object.fromEntries(Object.entries(withoutWakatimeCredential(env))
       .filter((entry): entry is [string, string] => typeof entry[1] === "string")),

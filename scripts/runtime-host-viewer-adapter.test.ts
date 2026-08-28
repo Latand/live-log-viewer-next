@@ -52,6 +52,13 @@ test("candidate MCP probes read through the candidate Viewer endpoint", () => {
   expect(environment.LLV_VIEWER_CONTROL_URL).toBe("http://candidate.invalid");
   expect(environment.LLV_VIEWER_DEPLOY_TARGET).toBe("/state/candidate-target.json");
 });
+
+test("a candidate MCP probe without a candidate endpoint refuses instead of reading the deployed Viewer", () => {
+  expect(() => mcpProbeEnvironment("", "/state/candidate-target.json", {
+    NODE_ENV: "test",
+    LLV_VIEWER_CONTROL_URL: "http://stable.invalid",
+  })).toThrow("candidate MCP probe requires the candidate's own control endpoint");
+});
 const release = {
   container: "viewer-current",
   endpoint: "http://127.0.0.1:19892",
