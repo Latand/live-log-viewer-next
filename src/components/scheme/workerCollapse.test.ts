@@ -526,6 +526,38 @@ describe("finished work is held until its outcome has been seen (#1244 follow-up
     expect([...finishedLaneOutcomePaths(pipelines, [])]).toEqual(["/research"]);
   });
 
+  /* `runs` is positionally aligned with the DECLARED stages, and the graph
+     contract deliberately gives that array order no meaning: a pipeline
+     completes at whichever stage has a null pass edge, reached along pass and
+     fail edges. Execution order therefore has to come from the attempts' own
+     recorded timestamps. */
+  test("the completing stage is found by when its attempt RAN, not by declaration order", () => {
+    const pipelines = completedPipeline({
+      runs: [
+        { stageId: "build", attempts: [{ agentPath: "/build", startedAt: "2026-08-27T10:00:00Z" }] },
+        /* Declared last, executed in the middle: `build` passes to `research`,
+           whose pass edge routes back to `verify`, and `verify` ends the lane. */
+        { stageId: "verify", attempts: [{ agentPath: "/verify", startedAt: "2026-08-27T12:00:00Z" }] },
+        { stageId: "research", attempts: [{ agentPath: "/research", startedAt: "2026-08-27T11:00:00Z" }] },
+      ],
+    });
+    expect([...finishedLaneOutcomePaths(pipelines, [])]).toEqual(["/verify"]);
+  });
+
+  test("a completed lane whose last DECLARED stage never ran still holds its outcome", () => {
+    /* A fail edge ended the run before the trailing declared stage was ever
+       activated, so its run carries no attempt. Picking by position holds
+       nothing at all and the result leaves the board on completion — the exact
+       defect this hold exists to prevent. */
+    const pipelines = completedPipeline({
+      runs: [
+        { stageId: "research", attempts: [{ agentPath: "/research", startedAt: "2026-08-27T10:00:00Z" }] },
+        { stageId: "publish", attempts: [] },
+      ],
+    });
+    expect([...finishedLaneOutcomePaths(pipelines, [])]).toEqual(["/research"]);
+  });
+
   test("a lane the operator closed or hid holds nothing — closing IS the dismissal", () => {
     expect([...finishedLaneOutcomePaths(completedPipeline({ hiddenAt: "2026-08-27T00:00:00Z" }), [])]).toEqual([]);
     expect([...finishedLaneOutcomePaths(completedPipeline({ state: "closed" }), [])]).toEqual([]);

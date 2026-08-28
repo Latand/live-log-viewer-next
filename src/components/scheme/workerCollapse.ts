@@ -1,5 +1,5 @@
 import type { Flow, Round } from "@/lib/flows/types";
-import type { Pipeline } from "@/lib/pipelines/types";
+import type { Pipeline, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 import { DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES } from "@/lib/board/types";
 
@@ -357,6 +357,45 @@ export function pipelineCursorStagePaths(
 }
 
 /**
+ * The stage attempt a pipeline ran LAST, by the timestamps the attempts
+ * themselves record.
+ *
+ * Position cannot answer this. `runs` is built one per DECLARED stage and stays
+ * positionally aligned with `stages`, while a pipeline completes at whichever
+ * stage has a null pass edge — reached along pass and fail edges that the graph
+ * contract deliberately does not tie to array order. So `runs.at(-1)` names the
+ * last stage someone happened to declare: for a lane that ended elsewhere it
+ * holds the wrong card, and when that trailing stage never ran it holds nothing
+ * at all and the result leaves the board on completion.
+ *
+ * Historical attempts are lineage-adopted evidence and never ran here. A missing
+ * `startedAt` (pre-v3 attempts) sorts oldest, so it wins only when nothing
+ * better exists; `completedAt` breaks ties between attempts started together.
+ */
+export function lastExecutedAttempt(pipeline: Pipeline): PipelineStageAttempt | null {
+  let best: PipelineStageAttempt | null = null;
+  let bestRank: [number, number] = [-1, -1];
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      if (attempt.historical || !attempt.agentPath) continue;
+      const rank: [number, number] = [stamp(attempt.startedAt), stamp(attempt.completedAt)];
+      if (best === null || rank[0] > bestRank[0] || (rank[0] === bestRank[0] && rank[1] >= bestRank[1])) {
+        best = attempt;
+        bestRank = rank;
+      }
+    }
+  }
+  return best;
+}
+
+/** Epoch ms of a recorded ISO stamp; absent or unparseable sorts oldest. */
+function stamp(value: string | null | undefined): number {
+  if (!value) return 0;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+/**
  * The one transcript per FINISHED lane that carries its outcome (#1244).
  *
  * Completion is the moment the result becomes worth reading, so the card holding
@@ -367,10 +406,9 @@ export function pipelineCursorStagePaths(
  *
  * A lane the operator CLOSED or hid is already dismissed and holds nothing:
  * closing a lane is the explicit act, and it takes effect at once rather than
- * after any window. For a pipeline the outcome card is the last stage attempt it
- * actually ran (runs are appended in execution order, and a superseded retry is
- * marked historical); for a flow it is the implementer the loop approved or
- * commented on.
+ * after any window. For a pipeline the outcome card is the stage attempt that
+ * ran LAST (see {@link lastExecutedAttempt}); for a flow it is the implementer
+ * the loop approved or commented on.
  */
 export function finishedLaneOutcomePaths(
   pipelines: readonly Pipeline[],
@@ -381,7 +419,7 @@ export function finishedLaneOutcomePaths(
   const paths = new Set<string>();
   for (const pipeline of pipelines) {
     if (pipeline.state !== "completed" || pipeline.hiddenAt) continue;
-    const attempt = pipeline.runs.at(-1)?.attempts.filter((candidate) => !candidate.historical).at(-1);
+    const attempt = lastExecutedAttempt(pipeline);
     if (attempt?.agentPath) paths.add(resolve(attempt.agentPath));
   }
   for (const flow of flows) {
