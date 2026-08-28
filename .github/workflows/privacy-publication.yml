@@ -63,7 +63,13 @@ jobs:
       # Commit messages are published the moment the branch is pushed, and the
       # gate is the only thing that reads them before that happens. Scanning
       # only the files left the one surface nobody re-reads unguarded.
-      - name: Scan changed publication surfaces and commit messages
+      #
+      # The commit that lands is not one of them: a squash merge composes a new
+      # message and lifts the identities git recorded on the branch commits into
+      # `Co-authored-by:` trailers. So the same step reads the merge boundary,
+      # here, on the pull request, while the composed commit can still be
+      # prevented rather than found afterwards in the public history.
+      - name: Scan changed publication surfaces, commit messages and the merge boundary
         env:
           LLV_PRIVACY_KNOWN_VALUE_FINGERPRINTS_FILE: ${{ github.workspace }}/trusted/scripts/privacy-known-value-fingerprints.json
           LLV_PRIVACY_OCR_LANGUAGES: eng+ukr

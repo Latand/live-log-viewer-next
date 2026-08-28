@@ -21,6 +21,7 @@ import {
   commitMessageAddressReview,
   commitMessageFindings,
   formatPrivacyReport,
+  mergeBoundaryReview,
   TRUSTED_TELEGRAM_VENDOR_EXEMPT_FINDING_CLASSES,
   TRUSTED_TELEGRAM_VENDOR_ROOT_DIGEST,
   trustedVendorRootDigest,
@@ -3151,5 +3152,167 @@ describe("commitMessageFindings", () => {
     commit(repo, `fix: handle ${uuid} correctly`);
     const findings = commitMessageFindings(repo, "main");
     expect(findings.has("resource_identifier")).toBe(false);
+  });
+});
+
+describe("mergeBoundaryReview", () => {
+  /* Every address here is invented. The change is about an address that
+     reached the public history, and a fixture that quotes a real one would
+     publish it again. */
+  const forgeAccountDomain = ["users.noreply", "github.com"].join(".");
+  const owner = "privacy-gate-fixture-owner";
+  const canonicalIdentity = { email: [`4242+${owner}`, forgeAccountDomain].join("@"), name: "Fixture Maintainer" };
+  let fixtureFile = 0;
+
+  function gitRepo(remote = `https://github.com/${owner}/fixture-repository.git`): string {
+    const repo = mkdtempSync(join(tmpdir(), "llv-privacy-merge-"));
+    temporaryDirectories.push(repo);
+    runGit(repo, ["init", "--quiet", "-b", "main", "."]);
+    if (remote) runGit(repo, ["remote", "add", "origin", remote]);
+    commit(repo, "chore: baseline", canonicalIdentity);
+    runGit(repo, ["checkout", "--quiet", "-b", "feature"]);
+    return repo;
+  }
+
+  function commit(repo: string, message: string, identity: { email: string; name: string }): void {
+    fixtureFile += 1;
+    writeFileSync(join(repo, `fixture-${fixtureFile}.txt`), "x");
+    runGit(repo, ["add", "."]);
+    runGit(repo, [
+      "-c", `user.name=${identity.name}`,
+      "-c", `user.email=${identity.email}`,
+      "commit", "--quiet", "-m", message,
+    ]);
+  }
+
+  function head(repo: string): string {
+    const result = Bun.spawnSync({ cmd: ["git", "-C", repo, "rev-parse", "HEAD"], stderr: "pipe", stdout: "pipe" });
+    return result.stdout.toString().trim();
+  }
+
+  test("a non-canonical author becomes an attributable trailer at the merge boundary", () => {
+    /* Nothing in the message carries this address — git recorded it as the
+       author, and the squash merge is what turns it into a trailer. */
+    const repo = gitRepo();
+    const personal = ["someone", "personal.dev"].join("@");
+    commit(repo, "feat: something", { email: personal, name: "Someone" });
+    const review = mergeBoundaryReview(repo, "main");
+
+    expect(commitMessageFindings(repo, "main").size).toBe(0);
+    expect(review.findings.get("email_address")).toBe(1);
+    expect(review.notices).toHaveLength(1);
+    expect(review.notices[0]).toContain(head(repo).slice(0, 12));
+    expect(review.notices[0]).toContain("author");
+    expect(review.notices[0]).toContain("Co-authored-by");
+    expect(review.notices[0]).not.toContain(personal);
+  });
+
+  test("a canonically authored branch composes nothing attributable", () => {
+    const repo = gitRepo();
+    commit(repo, "feat: something", canonicalIdentity);
+    commit(repo, "fix: something else", canonicalIdentity);
+    const review = mergeBoundaryReview(repo, "main");
+
+    expect(review.findings.size).toBe(0);
+    expect(review.notices).toEqual([]);
+  });
+
+  test("another account's forge address is not the repository's identity", () => {
+    const repo = gitRepo();
+    const stranger = ["77+privacy-gate-fixture-stranger", forgeAccountDomain].join("@");
+    commit(repo, "feat: something", { email: stranger, name: "Someone Else" });
+    const review = mergeBoundaryReview(repo, "main");
+
+    expect(review.findings.get("email_address")).toBe(1);
+  });
+
+  test("a vendor no-reply identity stays machine attribution", () => {
+    const repo = gitRepo();
+    const vendor = ["noreply", "vendor.example.com"].join("@");
+    commit(repo, "feat: something", { email: vendor, name: "Some Model" });
+    const review = mergeBoundaryReview(repo, "main");
+
+    expect(review.findings.size).toBe(0);
+  });
+
+  test("a forge role account identity stays exempt", () => {
+    /* The forge merges its own automation's branches — a dependency bump, a
+       lockfile refresh — and those commits are authored by an app account on
+       the forge's own domain. Flagging one would freeze those merges. */
+    const repo = gitRepo();
+    const roleAccount = ["4242+fixture-tool[bot]", forgeAccountDomain].join("@");
+    commit(repo, "chore: refresh", { email: roleAccount, name: "fixture-tool[bot]" });
+    const review = mergeBoundaryReview(repo, "main");
+
+    expect(review.findings.size).toBe(0);
+  });
+
+  test("an identity is attributable when no repository account can be resolved", () => {
+    const repo = gitRepo("");
+    commit(repo, "feat: something", canonicalIdentity);
+    const review = mergeBoundaryReview(repo, "main");
+
+    expect(review.findings.get("email_address")).toBe(1);
+  });
+
+  test("the committer identity publishes too", () => {
+    /* A rebase or an amend rewrites the committer and leaves the author
+       alone, so the two fields can name different people on one commit. */
+    const repo = gitRepo();
+    const personal = ["someone", "personal.dev"].join("@");
+    commit(repo, "feat: something", canonicalIdentity);
+    runGit(repo, [
+      "-c", "user.name=Someone",
+      "-c", `user.email=${personal}`,
+      "commit", "--quiet", "--amend", "--no-edit",
+    ]);
+    const review = mergeBoundaryReview(repo, "main");
+
+    expect(review.findings.get("email_address")).toBe(1);
+    expect(review.notices).toHaveLength(1);
+    expect(review.notices[0]).toContain("committer");
+  });
+
+  test("reports one finding for a commit whose author and committer are the same person", () => {
+    const repo = gitRepo();
+    const personal = ["someone", "personal.dev"].join("@");
+    commit(repo, "feat: something", { email: personal, name: "Someone" });
+    const review = mergeBoundaryReview(repo, "main");
+
+    expect(review.findings.get("email_address")).toBe(1);
+  });
+
+  test("reports an unreadable range rather than passing it", () => {
+    const repo = gitRepo();
+    const review = mergeBoundaryReview(repo, "no-such-base");
+
+    expect(review.findings.get("inspection_error")).toBe(1);
+  });
+
+  test("the gate reads the merge boundary under --check-commits and withholds the address", () => {
+    const repo = gitRepo();
+    const personal = ["someone", "personal.dev"].join("@");
+    commit(repo, "feat: something", { email: personal, name: "Someone" });
+
+    const result = runGateArguments(["--base", "main", "--check-commits"], {}, repo);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toContain("PRIVACY GATE: FAIL\nemail_address: 1\n");
+    expect(output).toContain("merge_boundary: ");
+    expect(output).toContain(head(repo).slice(0, 12));
+    expect(output).not.toContain(personal);
+  });
+
+  test("an address in the commit body is still flagged, and named as a message finding", () => {
+    const repo = gitRepo();
+    const personal = ["someone", "personal.dev"].join("@");
+    commit(repo, `feat: write to ${personal} about it`, canonicalIdentity);
+
+    const result = runGateArguments(["--base", "main", "--check-commits"], {}, repo);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe("PRIVACY GATE: FAIL\nemail_address: 1\n");
   });
 });
