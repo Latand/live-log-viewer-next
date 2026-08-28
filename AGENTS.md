@@ -124,12 +124,16 @@ bun scripts/verify-runtime-host.ts --runtime <the bun binary being pinned>
 It starts two runtime-host generations under that interpreter, drives one
 singleton-fence succession, and holds both endpoints the succession handed
 over while peers come and go — in a private state directory on an ephemeral
-port, never the stable one. The same rehearsal runs inside a container built
-from the candidate image during `verify-candidate`, so a candidate whose host
-cannot boot, cannot take the fence, or cannot hold what it took is refused
-before promotion rather than after.
+port, never the stable one. Half the callers walk away mid-answer without
+reading a byte of a snapshot-sized reply, which is the write that took
+production down: run against the host as it was, the rehearsal kills it
+within a second under 1.4.0 and passes under 1.3.3, exactly as the incident
+did. The same rehearsal runs inside a container built from the candidate image
+during `verify-candidate`, so a candidate whose host cannot boot, cannot take
+the fence, or cannot hold what it took is refused before promotion rather than
+after.
 
-Two consequences worth keeping:
+Three consequences worth keeping:
 
 - **A failing socket write is a connection event, never a process event.**
   Every long-lived listener in the runtime host attaches its `error` handler
@@ -142,4 +146,10 @@ Two consequences worth keeping:
 - **Verification has to name the process it exercised.** "Loaded every built
   server module and requested real routes" is a statement about the Viewer. Say
   which process, or the gap comes back.
+- **Inside the image, the interpreter is `bun-container`.** `bun` there is an
+  nsenter shim onto the operator's own bun, for the agent CLIs; in a container
+  without the host PID namespace it cannot run at all, and it is never the
+  interpreter being promoted. Anything that starts a first-party process inside
+  the image names `bun-container`, and the rehearsal passes that name down to
+  the generations it starts.
 <!-- END:runtime-host-verification -->

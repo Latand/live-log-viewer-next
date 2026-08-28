@@ -55,8 +55,8 @@ export interface RuntimeHostRehearsalPorts {
       predecessor still owns the fence, exactly as a staged one does. */
   start(role: "predecessor" | "successor"): Promise<RuntimeHostRehearsalGeneration>;
   /**
-   * Put enough in the journal that one replay is a large answer rather than a
-   * single small write, so an abandoning peer has something to leave behind.
+   * Put enough in the journal that one answer is a large one rather than a
+   * single small write, so an abandoning peer leaves bytes still pending.
    */
   seed(): Promise<void>;
   /**
@@ -199,6 +199,17 @@ export async function rehearseRuntimeHost(
 }
 
 /**
+ * The interpreter the rehearsal must exercise inside the image, named in full.
+ *
+ * `bun` in the image is an nsenter shim that redirects to the operator's bun
+ * on the host — it is for the agent CLIs, it needs the host PID namespace this
+ * container deliberately does not have, and it is not the interpreter being
+ * promoted. `bun-container` is the real in-container Bun the runtime host runs
+ * under in production, which is the whole point of the rehearsal.
+ */
+export const RUNTIME_HOST_REHEARSAL_IMAGE_BIN = "/usr/local/bin/bun-container";
+
+/**
  * Rehearse the runtime host of a candidate image, inside a container built
  * from that image. `--rm` and no mounts: the rehearsal writes only inside a
  * container that is discarded, so it can reach neither the live state
@@ -211,7 +222,11 @@ export function runtimeHostRehearsalDockerArgs(image: string, stateDir = "/tmp/l
     "--network", "none",
     "--label", "dev.live-log-viewer.runtime-host-rehearsal=1",
     "-e", `LLV_RUNTIME_HOST_REHEARSAL_STATE_DIR=${stateDir}`,
-    "--entrypoint", "bun-container",
+    // Both the rehearsal itself and the generations it starts run under the
+    // image's own Bun. Without the second one the generations inherit `bun`,
+    // the shim, and every candidate fails a gate that never reached a host.
+    "-e", `LLV_RUNTIME_HOST_REHEARSAL_BIN=${RUNTIME_HOST_REHEARSAL_IMAGE_BIN}`,
+    "--entrypoint", RUNTIME_HOST_REHEARSAL_IMAGE_BIN,
     image,
     "run", "src/runtime-host/hostRehearsalRun.ts",
   ];

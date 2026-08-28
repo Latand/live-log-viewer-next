@@ -4,6 +4,7 @@ import {
   parseRuntimeHostRehearsalReport,
   rehearseRuntimeHost,
   runtimeHostRehearsalDockerArgs,
+  RUNTIME_HOST_REHEARSAL_IMAGE_BIN,
   RUNTIME_HOST_REHEARSAL_REPORT_PREFIX,
   type RuntimeHostRehearsalGeneration,
   type RuntimeHostRehearsalPorts,
@@ -154,6 +155,19 @@ test("the image rehearsal runs in a throwaway container that cannot reach live s
   // No bind mount can carry the operator's state directory into the rehearsal.
   expect(args).not.toContain("-v");
   expect(args).not.toContain("--volume");
+});
+
+test("the image rehearsal names the image's own interpreter for every generation it starts", () => {
+  const args = runtimeHostRehearsalDockerArgs("agent-log-viewer:candidate-abc");
+
+  /* `bun` in the image is an nsenter shim to the operator's bun on the host:
+     it is not the interpreter being promoted, and inside a container without
+     the host PID namespace it cannot run at all. The rehearsal itself and the
+     generations it starts must both be the image's real Bun, or the gate fails
+     every candidate without ever having reached a runtime host. */
+  expect(args[args.indexOf("--entrypoint") + 1]).toBe(RUNTIME_HOST_REHEARSAL_IMAGE_BIN);
+  expect(args).toContain(`LLV_RUNTIME_HOST_REHEARSAL_BIN=${RUNTIME_HOST_REHEARSAL_IMAGE_BIN}`);
+  expect(RUNTIME_HOST_REHEARSAL_IMAGE_BIN.endsWith("/bun")).toBe(false);
 });
 
 test("the rehearsal report is read back out of a stream of host output", () => {

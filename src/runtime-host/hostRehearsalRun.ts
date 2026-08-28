@@ -33,15 +33,23 @@ const REHEARSAL_FENCE_WAIT_MS = 120_000;
 /** A probe that waits longer than this against a local endpoint is a failure,
     not a slow answer. */
 const PROBE_TIMEOUT_MS = 5_000;
-/* The seed. `replay` returns at most 128 events and the journal caps a payload
-   at 16 KiB, so this asks the host for the largest answer a rehearsal can make
-   it produce — roughly a quarter of a megabyte, several socket writes wide.
-   A production snapshot is larger still; this is the biggest stand-in a fresh
-   journal can offer, and it is what the abandoning peers below leave behind. */
-const SEED_EVENTS = 128;
-const SEED_EVENT_BYTES = 15_000;
+/* The seed, sized by what actually makes a write fail. A write only fails once
+   the peer has gone while bytes are still pending in the host: an answer the
+   kernel swallows whole is written before anyone can leave. Measured under Bun
+   1.4.0 on a Unix socket, an answer of ~400 KB leaves nothing pending and one
+   of ~600 KB does, so the seed builds a snapshot several times past that.
+   The journal caps an event payload at 16 KiB, and a session's live turn is
+   kept per session, so the size comes from the number of sessions. Sixty-four
+   of them project to roughly two megabytes — the shape of a real snapshot,
+   which is what `PreserializedJson` exists for. */
+const SEED_SESSIONS = 64;
+const SEED_LIVE_TURN_BYTES = 15_000;
 /** A frame beyond this is a runaway answer, not a large one. */
 const MAX_PROBE_FRAME_BYTES = 64 * 1024 * 1024;
+/** How long an abandoning caller lets the answer accumulate unread before it
+    vanishes. Long enough for the host to fill the socket buffer and still be
+    writing; short enough that a hold window is made of real polls. */
+const ABANDON_DELAY_MS = 150;
 
 export interface RuntimeHostRehearsalRunOptions {
   /** The interpreter under test; `bun-container` inside the image. */
@@ -144,11 +152,12 @@ export function probeStableListener(port: number, options: { abandon: boolean })
 }
 
 /**
- * One request on the runtime socket. `abandon` reads the first bytes of the
- * answer and then vanishes, leaving the host writing the rest of a multi-
- * megabyte frame into a socket whose peer is gone. That is the production
- * write: Bun 1.3.3 dropped its failure, 1.4.0 reports it, and a host without a
- * handler on that connection dies of it.
+ * One request on the runtime socket. `abandon` never reads a byte and then
+ * vanishes, leaving the host with the rest of a multi-megabyte frame still
+ * pending for a peer that is gone. That is the production write: Bun 1.3.3
+ * dropped its failure, 1.4.0 reports it, and a host without a handler on that
+ * connection dies of it — which this rehearsal, run against the host as it
+ * was, reproduces.
  */
 export function probeRuntimeSocket(socketPath: string, request: unknown, options: { abandon: boolean }): Promise<boolean> {
   return new Promise((resolve) => {
@@ -157,30 +166,52 @@ export function probeRuntimeSocket(socketPath: string, request: unknown, options
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(abandonment);
       socket.destroy();
       resolve(answered);
     };
     const timer = setTimeout(() => finish(false), PROBE_TIMEOUT_MS);
+    let abandonment: ReturnType<typeof setTimeout> | undefined;
     const socket = net.createConnection(socketPath);
     let frame = "";
-    socket.on("error", () => finish(false));
-    socket.on("close", () => finish(false));
-    socket.on("data", (chunk) => {
-      if (options.abandon) return finish(true);
-      // Reading to the frame delimiter is what a complete answer means here.
-      frame += String(chunk);
-      const newline = frame.indexOf("\n");
-      if (newline >= 0) finish(frame.slice(0, newline).includes('"ok":true'));
-      else if (frame.length > MAX_PROBE_FRAME_BYTES) finish(false);
+    /* What an abandoning caller asks of the endpoint is that it take the
+       request; the answer is what it deliberately walks away from. Once the
+       request is on the wire the poll is answered however the connection then
+       ends — under 1.3.3 the host drops the failing write and closes it
+       itself, and that is the runtime behaving as it always did, not a
+       listener that stopped answering. A host that is actually gone fails the
+       next poll, which reads its answer in full. */
+    let requested = false;
+    socket.on("error", () => finish(requested));
+    socket.on("close", () => finish(requested));
+    if (!options.abandon) {
+      socket.on("data", (chunk) => {
+        // Reading to the frame delimiter is what a complete answer means here.
+        frame += String(chunk);
+        const newline = frame.indexOf("\n");
+        if (newline >= 0) finish(frame.slice(0, newline).includes('"ok":true'));
+        else if (frame.length > MAX_PROBE_FRAME_BYTES) finish(false);
+      });
+    }
+    socket.once("connect", () => {
+      socket.write(JSON.stringify(request) + "\n");
+      if (!options.abandon) return;
+      requested = true;
+      /* An abandoning caller never reads a byte: with no `data` listener the
+         socket stays paused, so the answer fills the socket buffer and the
+         rest of it is still pending in the host when this caller vanishes.
+         That pending remainder is the production write, and leaving one
+         behind is why the seed above is sized the way it is. */
+      abandonment = setTimeout(() => finish(true), ABANDON_DELAY_MS);
     });
-    socket.once("connect", () => socket.write(JSON.stringify(request) + "\n"));
   });
 }
 
-/** Fill the journal so one `events` replay is a multi-megabyte answer. */
+/** Fill the journal so one snapshot is a multi-megabyte answer. */
 async function seedJournal(socketPath: string): Promise<void> {
-  const filler = "x".repeat(SEED_EVENT_BYTES);
-  for (let index = 0; index < SEED_EVENTS; index += 1) {
+  const text = "x".repeat(SEED_LIVE_TURN_BYTES);
+  for (let index = 0; index < SEED_SESSIONS; index += 1) {
+    const turnId = `rehearsal-turn-${index}`;
     const appended = await probeRuntimeSocket(socketPath, {
       id: `rehearsal-seed-${index}`,
       method: "append",
@@ -188,7 +219,8 @@ async function seedJournal(socketPath: string): Promise<void> {
         event: {
           scope: `session:rehearsal-${index}`,
           kind: "session-status",
-          payload: { hostAxis: "hosted", filler },
+          // A running turn is what keeps live text in the snapshot projection.
+          payload: { host: "hosted", turn: "running", activeTurnId: turnId, liveTurn: { turnId, text } },
         },
       },
     }, { abandon: false });
@@ -202,7 +234,9 @@ export function runtimeHostRehearsalPorts(options: RuntimeHostRehearsalRunOption
     start: async (role) => startGeneration(options, role),
     seed: () => seedJournal(socketPath),
     probeListener: (probe) => probeStableListener(options.port, probe),
-    probeSocket: (probe) => probeRuntimeSocket(socketPath, { id: "rehearsal-events", method: "events", params: { after: 0 } }, probe),
+    /* The snapshot, because it is the large answer: a peer that leaves during
+       one of these is the write that took production down. */
+    probeSocket: (probe) => probeRuntimeSocket(socketPath, { id: "rehearsal-snapshot", method: "snapshot", params: {} }, probe),
     now: () => Date.now(),
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   };
