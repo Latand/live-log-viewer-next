@@ -90,9 +90,6 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # The same environment the image's build stage sets. NODE_ENV belongs to
-      # the build and not to the install above, which needs the dev
-      # dependencies the compiler runs on.
       # A check is evidence only if it can go red, and "it goes red, I ran it"
       # is the claim three rounds of #1248 could not attribute to anything.
       # These are the tests that hold the two verdicts: an empty target list is
@@ -126,6 +123,9 @@ jobs:
             exit 1
           fi
 
+      # The same environment the image's build stage sets. NODE_ENV belongs to
+      # the build and not to the install above, which needs the dev
+      # dependencies the compiler runs on.
       - name: Build the Viewer
         env:
           NEXT_TELEMETRY_DISABLED: "1"
