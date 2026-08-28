@@ -151,8 +151,19 @@ export interface BoardProjectStateV1 {
        because legacy board files omit both; the store defaults them to empty. */
     foldedEngineChildIds?: string[];
     expandedEngineTrayParentIds?: string[];
-    /** Minutes before an unsettled idle conversation folds. Null disables the
-        age-only rule; terminal evidence continues to fold immediately. */
+    /* Epoch SECONDS at which the operator last OPENED each conversation, keyed
+       by durable conversation identity like `favorites` (issue #1244). A lane
+       that finished holds its outcome card on the board until a stamp here is
+       at least as new as the last thing that conversation wrote. Monotonic per
+       key and merged by maximum, so it needs no causal fence: there is no "off"
+       value a stale writer could restore. Bounded, freshest first. */
+    seenAt?: Record<string, number>;
+    /** Legacy idle window, retained only so board files written before #1244
+        keep validating and round-tripping unchanged. Nothing folds a card by
+        age any more — collapse is keyed to completion — and no surface offers
+        this as a setting, so no stored value here changes what the operator
+        sees. The direct-review projection's failed-round horizon, the last
+        reader of a duration, uses its own env-tuned constant. */
     idleCollapseMinutes?: number | null;
     viewMode: "scheme" | "list" | null;
     taskPanelOpen: boolean;

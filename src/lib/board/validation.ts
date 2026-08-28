@@ -91,6 +91,14 @@ function mutation(value: unknown, index: number): BoardMutationV1 {
     if (typeof raw.expanded !== "boolean") throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].expanded`);
     return { kind: "set-engine-tray-expanded", parentId: validPath(raw.parentId, `mutations[${index}].parentId`), expanded: raw.expanded };
   }
+  if (raw.kind === "mark-seen") {
+    exact(raw, ["kind", "id", "at"], `mutations[${index}]`);
+    /* Epoch SECONDS from the device that opened the conversation (#1244). A
+       clock that disagrees only ever costs an early or a late release of one
+       held card, so the bound is a sanity check rather than a fence. */
+    if (!Number.isInteger(raw.at) || (raw.at as number) < 0) throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].at`);
+    return { kind: "mark-seen", id: validPath(raw.id, `mutations[${index}].id`), at: raw.at as number };
+  }
   if (raw.kind === "set-presentation") {
     exact(raw, ["kind", "viewMode", "taskPanelOpen", "idleCollapseMinutes"], `mutations[${index}]`);
     if (raw.viewMode === undefined && raw.taskPanelOpen === undefined && raw.idleCollapseMinutes === undefined) throw new ViewValidationError("INVALID_REQUEST", `empty mutations[${index}]`);

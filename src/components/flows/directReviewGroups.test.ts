@@ -491,7 +491,7 @@ describe("directReviewFlows", () => {
     const live = directReviewer("/reviewer-2", { id: "conversation-r2", reviews: "conversation-builder", mtime: 2_000, activity: "live" });
 
     const projected = directReviewFlows({ files: [builder, done, live], flows: [], tasks: [] });
-    const context = { flows: projected, pipelineStagePaths: new Set<string>(), nowMs: 2_000_000, idleMs: 900_000, pinnedPaths: new Set<string>() };
+    const context = { flows: projected, pipelineStagePaths: new Set<string>(), pinnedPaths: new Set<string>() };
 
     expect(classifyWorker(done, context)).toBe("flow-reviewer");
     /* A verdict round folds immediately; the live latest never collapses. */
@@ -523,8 +523,6 @@ describe("splitDirectReviewGroups (terminal review-history stacks)", () => {
     expect(shouldCollapseWorker(terminalReviewer, {
       flows: groups,
       pipelineStagePaths: new Set(),
-      nowMs: Date.parse("2026-07-10T03:00:00.000Z"),
-      idleMs: 15 * 60_000,
       pinnedPaths: new Set(),
     })).toBe(true);
   });

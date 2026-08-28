@@ -1,5 +1,5 @@
 import type { Flow, Round } from "@/lib/flows/types";
-import type { Pipeline } from "@/lib/pipelines/types";
+import type { Pipeline, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 import { DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES } from "@/lib/board/types";
 
@@ -8,30 +8,45 @@ import { activityBand, isChildConversation, projectKey, schemeAgeHorizonSeconds,
 import { IDENTITY_CLAIM_RESOLVER, transcriptClaimResolver, type TranscriptClaimResolver } from "@/components/transcriptClaims";
 
 /*
- * Conversation auto-collapse (issues #112 and #1158).
+ * Conversation auto-collapse (issues #112, #1158 and #1244).
  *
  * The board keeps active, attention-bearing, delivered-to, cursor-stage, open
- * flow, and operator-pinned conversations expanded. Terminal or expired rows
- * fold into compact origin stacks, including owner roots and reviewers.
+ * flow, and operator-pinned conversations expanded. Work that reached a TERMINAL
+ * OUTCOME folds into compact origin stacks, including owner roots and reviewers.
+ *
+ * The decision reads no clock (#1244). Quiet and finished are different states,
+ * and an idle window collapses them together in the one direction that hurts:
+ * a lane parked at a provider limit, a stage in needs_decision, a builder
+ * waiting on a relay, a blocked pipeline, an agent that simply stopped — each
+ * stops writing to its transcript while the work is still owed, and each used to
+ * age out of view. Unfinishedness, never transcript age, is what keeps a card on
+ * the board; age is left to the placement horizon, which only de-emphasizes.
+ *
+ * Finishing is also the moment a result becomes worth reading, so a finished
+ * LANE holds exactly one card — the agent that finished it — until that outcome
+ * has been seen (see {@link finishedLaneOutcomePaths}). Everything else folds
+ * the instant it settles, which is what #1172 shipped for #1158.
  *
  * This module is the pure decision layer: given the scanned files, the flow /
- * pipeline lineage, and the durable pin set, it classifies each conversation
- * and derives the stacks the board renders. It writes nothing — the collapsed
- * placement is a deterministic function of the scan, so it survives reloads and
- * redeploys with no stored "collapsed" flag; the only durable state is the
- * user's pins and idle window, carried by the existing board preference store.
+ * pipeline lineage, the durable pin set and the durable acknowledgement stamps,
+ * it classifies each conversation and derives the stacks the board renders. It
+ * writes nothing — the collapsed placement is a deterministic function of the
+ * scan, so it survives reloads and redeploys with no stored "collapsed" flag.
  */
 
 export type WorkerClass = "flow-reviewer" | "flow-implementer" | "pipeline-stage" | "spawned-worker" | "spawned-descendant";
 
-/** Default board inactivity window. Terminal evidence still collapses
-    immediately; this window applies only to conversations that have not settled. */
+/** Default board inactivity window. It no longer removes anything from the
+    board (#1244) — collapse is completion-keyed. What still reads it is the
+    direct-review projection's failed-round horizon: a reviewer quiet this long
+    without a verdict is recorded as a round that produced none, which is a
+    statement about the ROUND RECORD and not about card visibility. */
 export const DEFAULT_WORKER_COLLAPSE_IDLE_MS = DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES * 60 * 1000;
 
 /**
- * Operator-tunable idle window. `NEXT_PUBLIC_*` is inlined into the client
- * bundle by Next, so the threshold can be retuned without touching this code; a
- * missing or malformed value falls back to the two-hour default.
+ * Operator-tunable window for that horizon. `NEXT_PUBLIC_*` is inlined into the
+ * client bundle by Next, so the threshold can be retuned without touching this
+ * code; a missing or malformed value falls back to the two-hour default.
  */
 export function workerCollapseIdleMs(): number {
   const raw = typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_LLV_WORKER_COLLAPSE_MINUTES : undefined;
@@ -58,11 +73,41 @@ export function pipelineStageAgentPaths(
   return set;
 }
 
+/** Attempt states a stage does not come back from. `needs_decision` is
+    deliberately absent — that attempt is waiting on the operator, and waiting is
+    unfinished work (#1244). */
+const SETTLED_ATTEMPT_STATES: readonly string[] = ["passed", "failed", "skipped"];
+
+/**
+ * Stage attempts the pipeline has finished with. This is the completion evidence
+ * a passed prior stage carries: its transcript goes quiet because the lane moved
+ * on, not because it stalled, and before #1244 only the idle window could tell
+ * the two apart.
+ */
+export function settledPipelineAttemptPaths(
+  pipelines: readonly Pipeline[],
+  resolve: TranscriptClaimResolver = IDENTITY_CLAIM_RESOLVER,
+): Set<string> {
+  const set = new Set<string>();
+  for (const pipeline of pipelines) {
+    for (const run of pipeline.runs) {
+      for (const attempt of run.attempts) {
+        if (attempt.agentPath && SETTLED_ATTEMPT_STATES.includes(attempt.state)) set.add(resolve(attempt.agentPath));
+      }
+    }
+  }
+  return set;
+}
+
 export interface WorkerLineage {
   flows: readonly Flow[];
   pipelines?: readonly Pipeline[];
   /** Output of {@link pipelineStageAgentPaths} — computed once per render. */
   pipelineStagePaths: ReadonlySet<string>;
+  /** Output of {@link settledPipelineAttemptPaths} — computed once per render.
+      Absent means the caller supplies no attempt evidence, and a stage settles
+      only on its own transcript. */
+  settledStagePaths?: ReadonlySet<string>;
   /** Resolves a flow's recorded member paths onto the projected spelling before
       they are matched (#943 follow-up). Built once per render from the file set
       by {@link transcriptClaimResolver}; absent means compare recorded paths raw,
@@ -155,6 +200,11 @@ export function classifyWorker(file: FileEntry, lineage: WorkerLineage): WorkerC
   return file.parent ? "spawned-descendant" : null;
 }
 
+/** Flow states in which the loop produced its result and the implementer is the
+    card carrying it. Distinct from `closed`, which is the operator putting the
+    lane away — a dismissal, so it holds nothing (#1244). */
+const FLOW_FINISHED_STATES: ReadonlySet<Flow["state"]> = new Set(["approved", "done_comment"]);
+
 /** A reviewer round is finished the moment it reaches a verdict or a terminal
     error — the point the issue's owner comment marks for immediate collapse. */
 export function reviewerRoundFinished(round: Round): boolean {
@@ -162,22 +212,50 @@ export function reviewerRoundFinished(round: Round): boolean {
 }
 
 export interface CollapseContext extends WorkerLineage {
-  nowMs: number;
-  /** Null disables age-only collapse. Settled conversations still fold. */
-  idleMs: number | null;
   /** Paths the user manually placed/expanded — a durable pin against collapse. */
   pinnedPaths: ReadonlySet<string>;
-  /** Current cursor-stage transcripts of provisioning/running/needs-decision
-      pipelines. Completed prior stages follow the ordinary settled/idle rule. */
+  /** Current cursor-stage transcripts of pipelines that still owe a result.
+      Completed prior stages follow the ordinary settlement rule. */
   protectedPaths?: ReadonlySet<string>;
   /** Structured sends that are queued, held, or still being delivered. */
   activeDeliveryConversationIds?: ReadonlySet<string>;
+  /** Output of {@link finishedLaneOutcomePaths}: the one card per finished lane
+      that carries its outcome, held until that outcome has been seen (#1244). */
+  outcomePaths?: ReadonlySet<string>;
+  /** Epoch SECONDS at which the operator last OPENED each conversation, keyed by
+      {@link conversationSeenKey}. Durable board state, so an outcome stays unread
+      across reloads and redeploys until someone actually opens it. */
+  seenAt?: ReadonlyMap<string, number>;
+}
+
+/** The identity an acknowledgement is filed under: the durable conversation id
+    when the backend supplies one, else the transcript path. Keyed like favorites
+    so opening a conversation survives a resume that mints a new path. */
+export function conversationSeenKey(file: FileEntry): string {
+  return file.conversationId ?? file.path;
 }
 
 /**
- * Terminal evidence used by the board projection. When the pipeline list loaded,
- * a missing durable pipeline record counts as closed because closed pipelines are
- * intentionally omitted while their transcript membership remains durable.
+ * Has the operator SEEN this conversation's outcome? One definition, and it is
+ * an act rather than an elapsed duration (#1244): they OPENED the conversation
+ * at or after the last thing it wrote. Being on screen while scrolled past is
+ * not opening it, and no amount of waiting turns unread into read.
+ *
+ * Comparing the stamp against `mtime` is what re-arms the hold: a card opened
+ * while its agent was still working, that then produced its result, is unread
+ * again — which is exactly the case the operator reported.
+ */
+export function outcomeSeen(file: FileEntry, context: CollapseContext): boolean {
+  const seenAt = context.seenAt?.get(conversationSeenKey(file));
+  return seenAt !== undefined && seenAt >= file.mtime;
+}
+
+/**
+ * Terminal evidence used by the board projection — the whole vocabulary the
+ * codebase already carries for "this work is finished", and since #1244 the ONLY
+ * thing that folds a card. When the pipeline list loaded, a missing durable
+ * pipeline record counts as closed because closed pipelines are intentionally
+ * omitted while their transcript membership remains durable.
  */
 export function conversationSettled(file: FileEntry, context: WorkerLineage): boolean {
   if (file.proc === "killed" || file.proc === "done") return true;
@@ -185,6 +263,7 @@ export function conversationSettled(file: FileEntry, context: WorkerLineage): bo
   if (file.supersededBy) return true;
   if (file.spawn?.state === "failed" || file.spawn?.state === "recovered") return true;
   if (file.review?.verdict) return true;
+  if (context.settledStagePaths?.has(file.path)) return true;
 
   const pipelineMembership = file.durableLineage?.memberships.find((membership) => membership.kind === "pipeline");
   if (pipelineMembership && context.pipelines !== undefined) {
@@ -193,37 +272,53 @@ export function conversationSettled(file: FileEntry, context: WorkerLineage): bo
   }
 
   const membership = flowMembership(file, context.flows, context.resolveClaimPath);
-  return Boolean(membership?.role === "reviewer" && membership.round && reviewerRoundFinished(membership.round));
+  if (!membership) return false;
+  if (membership.role === "reviewer" && membership.round && reviewerRoundFinished(membership.round)) return true;
+  /* Flow closure is terminal vocabulary too (#1244): an approved, commented or
+     closed flow owes nothing further, so its members settle on the flow record
+     rather than on how long their own transcripts have been quiet. */
+  return membership.flow.state === "closed" || FLOW_FINISHED_STATES.has(membership.flow.state);
+}
+
+/**
+ * Evidence that keeps a card on the board whatever became of its work: live or
+ * running work, an unanswered question, a lane parked at a provider limit, a
+ * held or queued delivery, an unfinished pipeline cursor, and the operator's own
+ * pin. Named separately because a caller can want these protections without the
+ * settlement question behind them (the direct-review projection does).
+ */
+export function collapseExempt(file: FileEntry, context: CollapseContext): boolean {
+  if (file.activity === "live" || file.proc === "running") return true;
+  if (file.pendingQuestion || file.waitingInput) return true;
+  /* Parked at a provider limit: nothing is being written and nothing is
+     finished, which is the exact pair the idle window used to conflate. */
+  if (file.rateLimit) return true;
+  if ((file.migration?.heldDeliveries ?? 0) > 0) return true;
+  if (file.conversationId && context.activeDeliveryConversationIds?.has(file.conversationId)) return true;
+  if (context.protectedPaths?.has(file.path)) return true;
+  return context.pinnedPaths.has(file.path);
 }
 
 /**
  * The board's single expansion decision. Authorship fields belong to reaper
  * safety and deliberately do not participate in this view projection.
+ *
+ * Read it as one sentence: work that is not finished stays, work that is
+ * finished folds — unless it is the card carrying a finished lane's outcome and
+ * nobody has opened it yet. No branch consults the clock (#1244).
  */
 export function keepExpanded(file: FileEntry, context: CollapseContext): boolean {
-  if (file.activity === "live" || file.proc === "running") return true;
-  if (file.pendingQuestion || file.waitingInput) return true;
-  if ((file.migration?.heldDeliveries ?? 0) > 0) return true;
-  if (file.conversationId && context.activeDeliveryConversationIds?.has(file.conversationId)) return true;
-  if (context.protectedPaths?.has(file.path)) return true;
-  if (context.pinnedPaths.has(file.path)) return true;
-  if (conversationSettled(file, context)) return false;
-
-  const membership = flowMembership(file, context.flows, context.resolveClaimPath);
-  if (membership && membership.flow.state !== "closed") {
-    if (membership?.role === "reviewer" && membership.round && !reviewerRoundFinished(membership.round)) return true;
-    if (membership?.role === "implementer"
-      && membership.flow.state !== "approved"
-      && membership.flow.state !== "done_comment") return true;
+  if (collapseExempt(file, context)) return true;
+  if (conversationSettled(file, context)) {
+    return Boolean(context.outcomePaths?.has(file.path)) && !outcomeSeen(file, context);
   }
-
-  if (context.idleMs === null) return true;
-  return context.nowMs - file.mtime * 1000 < context.idleMs;
+  /* UNFINISHED, however long it has been quiet. */
+  return true;
 }
 
 /**
  * Whether a conversation should fold into a stack now. Reviewer rounds collapse
- * on terminal evidence; every unsettled conversation follows the idle window.
+ * on terminal evidence; every unsettled conversation stays (#1244).
  */
 export function shouldCollapseWorker(file: FileEntry, context: CollapseContext): boolean {
   /* Engine-native subagents use this same decision before tray placement. The
@@ -236,7 +331,14 @@ export function shouldCollapseWorker(file: FileEntry, context: CollapseContext):
   return !keepExpanded(file, context);
 }
 
-/** The one pipeline stage path protected by each active execution cursor.
+/** Pipeline states in which the lane still owes a result. `paused` is in the
+    list since #1244: a lane parked at a provider limit or blocked on the
+    operator is paused, its stage stops writing, and losing its card is exactly
+    how unfinished work went missing. A stage whose host died is covered by the
+    same clause — the dead attempt is still the cursor. */
+const PIPELINE_UNFINISHED_STATES: readonly string[] = ["provisioning", "running", "needs_decision", "paused"];
+
+/** The one pipeline stage path protected by each unfinished execution cursor.
     Attempts retain their recorded spelling, so resolve each claim onto the
     scanned corpus before the set is compared with `file.path`. */
 export function pipelineCursorStagePaths(
@@ -246,10 +348,82 @@ export function pipelineCursorStagePaths(
   const resolve = transcriptClaimResolver(files);
   const paths = new Set<string>();
   for (const pipeline of pipelines) {
-    if (!pipeline.cursor || !["provisioning", "running", "needs_decision"].includes(pipeline.state)) continue;
+    if (!pipeline.cursor || !PIPELINE_UNFINISHED_STATES.includes(pipeline.state)) continue;
     const run = pipeline.runs.find((candidate) => candidate.stageId === pipeline.cursor!.stageId);
     const attempt = run?.attempts.filter((candidate) => !candidate.historical).at(-1);
     if (attempt?.agentPath) paths.add(resolve(attempt.agentPath));
+  }
+  return paths;
+}
+
+/**
+ * The stage attempt a pipeline ran LAST, by the timestamps the attempts
+ * themselves record.
+ *
+ * Position cannot answer this. `runs` is built one per DECLARED stage and stays
+ * positionally aligned with `stages`, while a pipeline completes at whichever
+ * stage has a null pass edge — reached along pass and fail edges that the graph
+ * contract deliberately does not tie to array order. So `runs.at(-1)` names the
+ * last stage someone happened to declare: for a lane that ended elsewhere it
+ * holds the wrong card, and when that trailing stage never ran it holds nothing
+ * at all and the result leaves the board on completion.
+ *
+ * Historical attempts are lineage-adopted evidence and never ran here. A missing
+ * `startedAt` (pre-v3 attempts) sorts oldest, so it wins only when nothing
+ * better exists; `completedAt` breaks ties between attempts started together.
+ */
+export function lastExecutedAttempt(pipeline: Pipeline): PipelineStageAttempt | null {
+  let best: PipelineStageAttempt | null = null;
+  let bestRank: [number, number] = [-1, -1];
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      if (attempt.historical || !attempt.agentPath) continue;
+      const rank: [number, number] = [stamp(attempt.startedAt), stamp(attempt.completedAt)];
+      if (best === null || rank[0] > bestRank[0] || (rank[0] === bestRank[0] && rank[1] >= bestRank[1])) {
+        best = attempt;
+        bestRank = rank;
+      }
+    }
+  }
+  return best;
+}
+
+/** Epoch ms of a recorded ISO stamp; absent or unparseable sorts oldest. */
+function stamp(value: string | null | undefined): number {
+  if (!value) return 0;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+/**
+ * The one transcript per FINISHED lane that carries its outcome (#1244).
+ *
+ * Completion is the moment the result becomes worth reading, so the card holding
+ * it stays on the board until the operator has opened it. Exactly one card is
+ * held — the agent that finished the work, which is the representative card the
+ * issue allows — so a finished lane never re-floods the board with its whole
+ * stage history; every other member folds the instant it settles.
+ *
+ * A lane the operator CLOSED or hid is already dismissed and holds nothing:
+ * closing a lane is the explicit act, and it takes effect at once rather than
+ * after any window. For a pipeline the outcome card is the stage attempt that
+ * ran LAST (see {@link lastExecutedAttempt}); for a flow it is the implementer
+ * the loop approved or commented on.
+ */
+export function finishedLaneOutcomePaths(
+  pipelines: readonly Pipeline[],
+  flows: readonly Flow[],
+  files: readonly { path: string }[] = [],
+): Set<string> {
+  const resolve = transcriptClaimResolver(files);
+  const paths = new Set<string>();
+  for (const pipeline of pipelines) {
+    if (pipeline.state !== "completed" || pipeline.hiddenAt) continue;
+    const attempt = lastExecutedAttempt(pipeline);
+    if (attempt?.agentPath) paths.add(resolve(attempt.agentPath));
+  }
+  for (const flow of flows) {
+    if (FLOW_FINISHED_STATES.has(flow.state)) paths.add(resolve(flow.implementerPath));
   }
   return paths;
 }
@@ -460,11 +634,14 @@ export interface CollapseContextInput {
   pipelines?: readonly Pipeline[];
   /** Durable manual placements/expansions — pinned against collapse. */
   pinnedPaths: ReadonlySet<string>;
-  /** Active cursor-stage transcripts protected from collapse. */
+  /** Unfinished cursor-stage transcripts protected from collapse. */
   protectedPaths?: ReadonlySet<string>;
   activeDeliveryConversationIds?: ReadonlySet<string>;
-  nowMs: number;
-  idleMs?: number | null;
+  /** Finished lanes' outcome cards, held until seen. Absent means the caller
+      does not track acknowledgement and every settled card folds at once. */
+  outcomePaths?: ReadonlySet<string>;
+  /** Durable per-conversation "last opened" stamps, in epoch seconds. */
+  seenAt?: ReadonlyMap<string, number>;
 }
 
 export interface CollapsibleInput extends CollapseContextInput {
@@ -472,6 +649,7 @@ export interface CollapsibleInput extends CollapseContextInput {
 }
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
+const EMPTY_SEEN: ReadonlyMap<string, number> = new Map();
 
 export function collapseContext(input: CollapseContextInput): CollapseContext {
   /* One resolver per pass: durable flow/pipeline records are matched against the
@@ -482,11 +660,12 @@ export function collapseContext(input: CollapseContextInput): CollapseContext {
     pipelines: input.pipelines,
     resolveClaimPath,
     pipelineStagePaths: pipelineStageAgentPaths(input.pipelines ?? [], resolveClaimPath),
-    nowMs: input.nowMs,
-    idleMs: input.idleMs === undefined ? workerCollapseIdleMs() : input.idleMs,
+    settledStagePaths: settledPipelineAttemptPaths(input.pipelines ?? [], resolveClaimPath),
     pinnedPaths: input.pinnedPaths,
     protectedPaths: input.protectedPaths ?? EMPTY_PATHS,
     activeDeliveryConversationIds: input.activeDeliveryConversationIds ?? EMPTY_PATHS,
+    outcomePaths: input.outcomePaths ?? EMPTY_PATHS,
+    seenAt: input.seenAt ?? EMPTY_SEEN,
   };
 }
 

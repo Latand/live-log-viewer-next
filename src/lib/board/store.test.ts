@@ -393,7 +393,7 @@ describe("board store", () => {
     expect(forward.older).toBeUndefined();
     expect(forward.newest).toBeUndefined();
     expect(forward.canonical.prefs).toEqual({
-      manual: ["/a"], hidden: [], expanded: ["/base", "/b"], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], viewMode: "list", taskPanelOpen: true,
+      manual: ["/a"], hidden: [], expanded: ["/base", "/b"], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], seenAt: {}, viewMode: "list", taskPanelOpen: true,
     });
     expect(forward.canonical.pathAliases).toEqual({ "/alias": "/new" });
     expect(reverse.canonical.prefs).toEqual(forward.canonical.prefs);
@@ -417,10 +417,16 @@ describe("board store", () => {
       [{ kind: "remap-paths", pairs: [{ from: "/old", to: "/one" }, { from: "/old", to: "/two" }] }],
       [{ kind: "remap-paths", pairs: [{ from: "/old", to: "/new" }, { from: "/new", to: "/old" }] }],
       [{ kind: "remap-paths", pairs: [{ from: "/old", to: "/new" }] }, { kind: "remap-paths", pairs: [{ from: "/new", to: "/old" }] }],
+      [{ kind: "mark-seen", id: "conv-1", at: -1 }],
+      [{ kind: "mark-seen", id: "", at: 1_700 }],
+      [{ kind: "mark-seen", id: "conv-1", at: 1_700.5 }],
     ]) {
       await expect(validateBoardPatchRequest(request({ ...valid, mutations }))).rejects.toMatchObject({ code: "INVALID_REQUEST" });
     }
     const parsed = await validateBoardPatchRequest(request({ ...valid, mutations: [{ kind: "set-presentation", viewMode: "scheme" }] }));
     expect(parsed.mutations).toEqual([{ kind: "set-presentation", viewMode: "scheme" }]);
+    /* An acknowledgement travels as an ordinary mutation (#1244). */
+    const seen = await validateBoardPatchRequest(request({ ...valid, mutations: [{ kind: "mark-seen", id: "conv-1", at: 1_700 }] }));
+    expect(seen.mutations).toEqual([{ kind: "mark-seen", id: "conv-1", at: 1_700 }]);
   });
 });

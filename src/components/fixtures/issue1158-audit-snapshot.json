@@ -1,16 +1,24 @@
 {
   "project": "audit-fixture",
   "nowMs": 2000000000000,
-  "idleMinutes": 120,
-  "closedPipelineIds": ["pipeline-closed-a", "pipeline-closed-b", "pipeline-closed-c"],
+  "closedPipelineIds": [
+    "pipeline-closed-a",
+    "pipeline-closed-b",
+    "pipeline-closed-c"
+  ],
+  "completedPipelineId": "pipeline-completed",
   "settledPipelineChildren": 53,
   "runningChildren": 3,
   "freshIdleChildren": 1,
+  "staleUnfinishedChildren": 2,
+  "unreadFinishedLaneChildren": 1,
   "pinnedSettledChildren": 1,
   "reviewersWithoutVerdict": 1,
   "expected": {
-    "columnsBefore": 60,
-    "columnsAfter": 6,
-    "collapsed": 54
+    "columnsBefore": 63,
+    "columnsAfter": 9,
+    "collapsed": 54,
+    "columnsAfterAcknowledgement": 8,
+    "collapsedAfterAcknowledgement": 55
   }
 }

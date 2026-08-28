@@ -123,8 +123,6 @@ describe("direct review board composition (#289 + #325)", () => {
       project: "demo",
       flows: deckFlows,
       pinnedPaths: new Set(),
-      nowMs: 10_000_000,
-      idleMs: 900_000,
     });
     const stacks = groupWorkerStacks(collapsible, deckFlows, deckReviewerPaths as ReadonlySet<string>);
     expect(stacks).toHaveLength(0);
@@ -148,8 +146,6 @@ describe("direct review board composition (#289 + #325)", () => {
       project: "demo",
       flows: deckFlows,
       pinnedPaths: new Set(),
-      nowMs: 10_000_000,
-      idleMs: 900_000,
     });
     const stacks = groupWorkerStacks(collapsible, deckFlows, deckReviewerPaths as ReadonlySet<string>);
     /* One stack for the WHOLE terminal group — keyed by the durable group id —
@@ -172,8 +168,6 @@ describe("direct review board composition (#289 + #325)", () => {
       project: "demo",
       flows: deckFlows,
       pinnedPaths: new Set(),
-      nowMs: 10_000_000,
-      idleMs: 900_000,
     });
     const stacks = groupWorkerStacks(collapsible, deckFlows, hidden as ReadonlySet<string>);
     const stackPaths = stacks.flatMap((stack) => stack.items.map((file) => file.path));

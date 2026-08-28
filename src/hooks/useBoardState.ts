@@ -60,7 +60,7 @@ export function patchPrefix(outbox: readonly BoardMutationV1[], maxCount = MAX_M
   return prefix;
 }
 
-export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], idleCollapseMinutes: DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES, viewMode: null, taskPanelOpen: false };
+export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], seenAt: {}, idleCollapseMinutes: DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES, viewMode: null, taskPanelOpen: false };
 
 /* Legacy per-browser keys #38 migrates off of. `llvTaskPanel` is global today;
    it seeds every project's per-project panel state and is left intact so a
@@ -1024,7 +1024,6 @@ export interface BoardState extends BoardSnapshot {
   restore(path: string, placement: "auto" | "manual" | "expanded"): void;
   setViewMode(viewMode: BoardViewMode): void;
   setTaskPanelOpen(open: boolean): void;
-  setIdleCollapseMinutes(minutes: number | null): void;
   /* The canonical selection's writers (#771) — the same three every view uses.
      Live even while the durable board is unavailable: the selection is session
      state and owes nothing to the server. */
@@ -1042,6 +1041,11 @@ export interface BoardState extends BoardSnapshot {
   setEngineChildFold(id: string, path: string, folded: boolean): void;
   /** Durably expand / collapse a parent's engine-native subagent tray (#142). */
   setEngineTrayExpanded(parentId: string, expanded: boolean): void;
+  /** Record that the operator OPENED (or explicitly dismissed) a conversation,
+      which is what releases a finished lane's outcome card (#1244). `id` is a
+      durable conversation identity; the stamp is taken from this device's clock
+      in epoch seconds and merged forward. */
+  markSeen(id: string): void;
 }
 
 /**
@@ -1098,9 +1102,6 @@ export function useBoardState(project: string | null): BoardState {
     setTaskPanelOpen(open) {
       storeRef.current?.mutate([{ kind: "set-presentation", taskPanelOpen: open }]);
     },
-    setIdleCollapseMinutes(minutes) {
-      storeRef.current?.mutate([{ kind: "set-presentation", idleCollapseMinutes: minutes }]);
-    },
     setFavorite(id, favorite) {
       storeRef.current?.mutate([{ kind: "set-favorite", id, favorite }]);
     },
@@ -1109,6 +1110,9 @@ export function useBoardState(project: string | null): BoardState {
     },
     setEngineTrayExpanded(parentId, expanded) {
       storeRef.current?.mutate([{ kind: "set-engine-tray-expanded", parentId, expanded }]);
+    },
+    markSeen(id) {
+      storeRef.current?.mutate([{ kind: "mark-seen", id, at: Math.floor(Date.now() / 1000) }]);
     },
     toggleSelection(path) {
       storeRef.current?.toggleSelection(path);

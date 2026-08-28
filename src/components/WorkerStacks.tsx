@@ -18,8 +18,6 @@ import { deckDisclosureTerminal } from "./flows/reviewDeckDisclosure";
 import type { WorkerStack } from "./scheme/workerCollapse";
 import { activityDot, engineBadge, fmtAge } from "./utils";
 
-const IDLE_WINDOW_OPTIONS = [30, 60, 120, 360, 1_440] as const;
-
 /** Verdict state for a folded reviewer, including terminal runs that produced no
     verdict. Durable lineage covers closed flows omitted from the client list. */
 function reviewerOutcome(file: FileEntry, flows: readonly Flow[]): { verdict: string | null; reviewer: boolean } {
@@ -146,8 +144,6 @@ export function WorkerStacks({
   files,
   flows,
   pipelines = [],
-  idleCollapseMinutes = 120,
-  onIdleCollapseMinutesChange = () => {},
   onSelect,
   onExpandGroup,
 }: {
@@ -156,8 +152,6 @@ export function WorkerStacks({
   flows: Flow[];
   /** Pipelines, for naming a per-pipeline origin stack by its task (issue #136). */
   pipelines?: Pipeline[];
-  idleCollapseMinutes?: number | null;
-  onIdleCollapseMinutesChange?: (minutes: number | null) => void;
   onSelect: (file: FileEntry) => void;
   /** Expands a terminal direct review group back onto the board. */
   onExpandGroup?: (flow: Flow) => void;
@@ -207,37 +201,17 @@ export function WorkerStacks({
 
   return (
     <div className="shrink-0 border-t border-border bg-canvas" data-testid="worker-stacks" data-worker-stack-pipeline-ids={foldedPipelineIds}>
-      <div className="flex min-w-0 items-center">
-        <div className="min-w-0 flex-1">
-          <SectionHeader
-            open={open}
-            onToggle={() => setOpen((value) => !value)}
-            label={t("workerStack.idle", { count: total })}
-            ariaLabel={t("workerStack.aria")}
-            mobile={isMobile}
-          />
-        </div>
-        <label className="mr-2 shrink-0">
-          <span className="sr-only">{t("workerStack.window")}</span>
-          <select
-            data-testid="idle-collapse-window"
-            aria-label={t("workerStack.window")}
-            value={idleCollapseMinutes === null ? "never" : String(idleCollapseMinutes)}
-            onChange={(event) => onIdleCollapseMinutesChange(event.target.value === "never" ? null : Number(event.target.value))}
-            className={`rounded-[8px] border border-border bg-card px-2 text-[11px] font-semibold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isMobile ? "h-11" : "h-7"}`}
-          >
-            {idleCollapseMinutes !== null && !IDLE_WINDOW_OPTIONS.includes(idleCollapseMinutes as typeof IDLE_WINDOW_OPTIONS[number]) ? (
-              <option value={idleCollapseMinutes}>{t("workerStack.minutes", { count: idleCollapseMinutes })}</option>
-            ) : null}
-            {IDLE_WINDOW_OPTIONS.map((minutes) => (
-              <option key={minutes} value={minutes}>
-                {minutes < 60 ? t("workerStack.minutes", { count: minutes }) : t("resources.hoursN", { n: minutes / 60 })}
-              </option>
-            ))}
-            <option value="never">{t("workerStack.never")}</option>
-          </select>
-        </label>
-      </div>
+      {/* Header only. The idle-window select that used to sit beside it is gone
+          (#1244): collapse is keyed to completion, so no minute count it could
+          offer changes anything the operator sees on the board, and a control
+          whose every setting looks identical is worse than no control. */}
+      <SectionHeader
+        open={open}
+        onToggle={() => setOpen((value) => !value)}
+        label={t("workerStack.idle", { count: total })}
+        ariaLabel={t("workerStack.aria")}
+        mobile={isMobile}
+      />
       {open ? (
         <div className="flex max-h-52 flex-col gap-0.5 overflow-y-auto px-3 pb-2.5">
           {stacks.map((stack) => (

@@ -28,7 +28,22 @@ export type BoardMutationV1 =
      clears the child's current transcript path from manual/expanded placement in
      the same mutation, so the child actually re-docks into the tray. */
   | { kind: "set-engine-child-fold"; id: string; path: string; folded: boolean }
-  | { kind: "set-engine-tray-expanded"; parentId: string; expanded: boolean };
+  | { kind: "set-engine-tray-expanded"; parentId: string; expanded: boolean }
+  /* The operator opened (or explicitly dismissed) a conversation — issue #1244.
+     `id` is a durable conversation identity, `at` epoch SECONDS. Merged by
+     maximum, so a replayed or out-of-order write can never un-see an outcome,
+     and the board holds a finished lane's card until a stamp lands here. */
+  | { kind: "mark-seen"; id: string; at: number };
+
+/** How many acknowledgements a project keeps, freshest first. Stamps are pure
+    history — a conversation that is gone can never be re-opened — so the map is
+    bounded rather than grown with every transcript ever read. */
+export const MAX_SEEN_STAMPS = 512;
+
+function boundedSeenAt(stamps: Record<string, number>): Record<string, number> {
+  const entries = Object.entries(stamps).sort((left, right) => right[1] - left[1]);
+  return Object.fromEntries(entries.slice(0, MAX_SEEN_STAMPS));
+}
 
 function unique(paths: readonly string[]): string[] {
   return [...new Set(paths)];
@@ -82,6 +97,9 @@ function normalize(board: BoardProjectStateV1, aliases = aliasesOf(board)): Boar
          of the alias/hidden path machinery so a fold survives a resume. */
       foldedEngineChildIds: unique(board.prefs.foldedEngineChildIds ?? []),
       expandedEngineTrayParentIds: unique(board.prefs.expandedEngineTrayParentIds ?? []),
+      /* Identity-keyed like favorites, and bounded: kept out of the alias/hidden
+         machinery so an acknowledgement survives a resume (issue #1244). */
+      seenAt: boundedSeenAt(board.prefs.seenAt ?? {}),
       idleCollapseMinutes: board.prefs.idleCollapseMinutes === undefined
         ? DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES
         : board.prefs.idleCollapseMinutes,
@@ -192,6 +210,12 @@ export function applyBoardMutations(board: BoardProjectStateV1, mutations: reado
         ? unique([...next.prefs.favorites, mutation.id])
         : next.prefs.favorites.filter((item) => item !== mutation.id);
       next = normalize({ ...next, prefs: { ...next.prefs, favorites } });
+      continue;
+    }
+    if (mutation.kind === "mark-seen") {
+      const current = next.prefs.seenAt ?? {};
+      const at = Math.max(current[mutation.id] ?? 0, Math.floor(mutation.at));
+      next = normalize({ ...next, prefs: { ...next.prefs, seenAt: { ...current, [mutation.id]: at } } });
       continue;
     }
     if (mutation.kind === "set-engine-child-fold") {
