@@ -11,8 +11,20 @@ process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
 process.env.TMPDIR = path.join(SANDBOX, "tmp");
 fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
-const { MONITOR_RUN_HISTORY, appendRunRecord, claimMonitorRun, readRunRecords, releaseMonitorRun, sanitizeRunRecord } = await import("./journalStore");
-import type { MonitorOutcome, MonitorRunRecord } from "./types";
+const {
+  MONITOR_RUN_HISTORY,
+  SEAT_TICK_RUN_HISTORY,
+  appendRunRecord,
+  appendSeatTickRecord,
+  claimMonitorRun,
+  readRunRecords,
+  readSeatTickRecords,
+  releaseMonitorRun,
+  sanitizeRunRecord,
+  sanitizeSeatTickRecord,
+  seatTickJournalPath,
+} = await import("./journalStore");
+import type { MonitorOutcome, MonitorRunRecord, SeatTickRunRecord } from "./types";
 
 /* Stand-ins for the two things that must never reach the journal, assembled at
    runtime so this file carries neither a transcript-shaped sentence nor a
@@ -164,4 +176,116 @@ describe("single-flight claim", () => {
     }));
     expect(results.filter((result) => result.claimed === true)).toHaveLength(1);
   }, 30_000);
+});
+
+/**
+ * The seat tick's half of the same journal (#1245). Same append, same retention
+ * rewrite, same boundary — a second record type rather than a second file's
+ * worth of machinery.
+ */
+describe("seat tick check journal", () => {
+  const journal = path.join(SANDBOX, "seat-tick", "runs.ndjson");
+
+  function check(over: Partial<SeatTickRunRecord> = {}): SeatTickRunRecord {
+    return {
+      schemaVersion: 1,
+      at: "2026-08-28T12:00:00.000Z",
+      project: "viewer",
+      seatEpoch: 7,
+      verdict: "quiet",
+      reasons: [],
+      items: 0,
+      deferred: 0,
+      eventsThrough: 12,
+      delivery: null,
+      detail: "nothing owed",
+      ...over,
+    };
+  }
+
+  test("the journal path lives under the viewer state dir and carries no configuration", () => {
+    expect(seatTickJournalPath()).toBe(path.join(SANDBOX, "state", "seat-tick", "runs.ndjson"));
+  });
+
+  test("every check leaves exactly one line, so no line means no check", () => {
+    appendSeatTickRecord(check(), journal);
+    appendSeatTickRecord(check({ at: "2026-08-28T12:05:00.000Z", verdict: "wake", reasons: ["stalled"], items: 2 }), journal);
+    const records = readSeatTickRecords(10, journal);
+    expect(records).toHaveLength(2);
+    expect(records[1]).toMatchObject({ verdict: "wake", reasons: ["stalled"], items: 2 });
+  });
+
+  /* The lines that exist so an absence is never a silence: a wake nobody
+     received, a check that threw, a clock refused for want of authority, and
+     every way a retained wake stops being outstanding. */
+  test("a refused send, a failed check, a refused clock and a settled wake are all on the record", () => {
+    const refusals = path.join(SANDBOX, "seat-tick-refusals.ndjson");
+    appendSeatTickRecord(check({ verdict: "wake", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "seat-rotated" } }), refusals);
+    appendSeatTickRecord(check({ verdict: "error", detail: "the check failed: the delivery layer is unavailable" }), refusals);
+    appendSeatTickRecord(check({ verdict: "refused", project: "", detail: "a second seat tick start was refused" }), refusals);
+    appendSeatTickRecord(check({ verdict: "refused", project: "", detail: "the seat tick sweep was refused and this process's clock stopped" }), refusals);
+    appendSeatTickRecord(check({ verdict: "revoked", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "withdrawn" }, detail: "a wake the delivery layer had accepted but not landed was taken out of its queue" }), refusals);
+    const records = readSeatTickRecords(10, refusals);
+    expect(records.map((entry) => entry.verdict)).toEqual(["wake", "error", "refused", "refused", "revoked"]);
+    expect(records[0]!.delivery).toEqual({ clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "seat-rotated" });
+    expect(records[1]!.detail).toContain("the check failed");
+    /* A refusal is the one kind of line about the process rather than a
+       project, so it is the one kind allowed to name none. */
+    expect(records[2]!.project).toBe("");
+    /* The sweep a promoted successor took over: the refusal outlives the
+       process that wrote it, which is the whole reason it goes here. */
+    expect(records[3]!.detail).toContain("clock stopped");
+    expect(records[4]!.delivery).toEqual({ clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "withdrawn" });
+  });
+
+  /* The two answers only the layer holding a retained wake can give. They are
+     journal lines rather than inferences precisely because the send that raised
+     the wake could not answer them: a structured host accepts every send the
+     same way, so what became of one is a later fact. */
+  test("a wake its holder delivered, and one its holder settled unsent, are both journal lines", () => {
+    const settled = path.join(SANDBOX, "seat-tick-settled.ndjson");
+    appendSeatTickRecord(check({ verdict: "landed", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "landed" }, detail: "a wake the delivery layer had kept reached the seat" }), settled);
+    appendSeatTickRecord(check({ verdict: "dropped", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "dropped" }, detail: "the layer holding the wake settled it without delivering it" }), settled);
+    const records = readSeatTickRecords(10, settled);
+    expect(records.map((entry) => entry.verdict)).toEqual(["landed", "dropped"]);
+    expect(records.map((entry) => entry.delivery?.outcome)).toEqual(["landed", "dropped"]);
+  });
+
+  test("the sanitizer keeps only journal fields — smuggled transcript text and paths lose at the boundary", () => {
+    const kept = sanitizeSeatTickRecord({ ...check(), transcript: SMUGGLED_BODY, agentPath: SMUGGLED_PATH });
+    expect(kept).not.toBeNull();
+    expect(JSON.stringify(kept)).not.toContain(SMUGGLED_BODY);
+    expect(JSON.stringify(kept)).not.toContain(SMUGGLED_PATH);
+  });
+
+  test("an unknown verdict, a missing project or a foreign schema is not a journal line", () => {
+    expect(sanitizeSeatTickRecord({ ...check(), verdict: "deploy" })).toBeNull();
+    expect(sanitizeSeatTickRecord({ ...check(), project: "" })).toBeNull();
+    expect(sanitizeSeatTickRecord({ ...check(), project: "", verdict: "refused" })).not.toBeNull();
+    /* A revoked wake is always about one project's seat, so a nameless one is
+       a line nothing can be read out of. */
+    expect(sanitizeSeatTickRecord({ ...check(), project: "", verdict: "revoked" })).toBeNull();
+    expect(sanitizeSeatTickRecord({ ...check(), schemaVersion: 2 })).toBeNull();
+    expect(sanitizeSeatTickRecord("a line")).toBeNull();
+  });
+
+  test("an unknown reason kind is dropped rather than journaled as fact", () => {
+    expect(sanitizeSeatTickRecord({ ...check(), reasons: ["stalled", "made-up", "interval"] })?.reasons).toEqual(["stalled", "interval"]);
+  });
+
+  test("a malformed line is skipped instead of hiding the checks around it", () => {
+    const partial = path.join(SANDBOX, "seat-tick-partial.ndjson");
+    fs.writeFileSync(partial, `${JSON.stringify(check())}\n{"broken":\n${JSON.stringify(check({ verdict: "no-seat" }))}\n`);
+    expect(readSeatTickRecords(10, partial).map((entry) => entry.verdict)).toEqual(["quiet", "no-seat"]);
+  });
+
+  test("retention drops the oldest lines rather than growing without bound", () => {
+    const rolling = path.join(SANDBOX, "seat-tick-rolling.ndjson");
+    for (let index = 0; index < SEAT_TICK_RUN_HISTORY + 5; index += 1) {
+      appendSeatTickRecord(check({ detail: `check ${index}` }), rolling);
+    }
+    const records = readSeatTickRecords(SEAT_TICK_RUN_HISTORY + 50, rolling);
+    expect(records).toHaveLength(SEAT_TICK_RUN_HISTORY);
+    expect(records[0]!.detail).toBe("check 5");
+  });
 });
