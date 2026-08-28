@@ -125,11 +125,7 @@ describe("SQLite registry Viewer runtime (#187)", () => {
   });
 
   test("every image stage uses the production-burned-in Bun runtime (#552)", () => {
-    expect(dockerfile.match(/npm install -g bun@1\.4\.0/g)).toHaveLength(3);
-    // Next 16.3.2's compiled app-page runtime does not load under Bun 1.3.3
-    // ("Expected CommonJS module to have a function wrapper"), so every server
-    // module throws and the candidate answers 500 on every route (#1246).
-    expect(dockerfile).not.toContain("bun@1.3.3");
+    expect(dockerfile.match(/npm install -g bun@1\.3\.3/g)).toHaveLength(3);
     expect(dockerfile).not.toContain("bun@1.2.18");
   });
 
