@@ -314,7 +314,7 @@ function composeSnapshot(): string {
 }
 
 async function runAction(options: {
-  action: "promote" | "retain-only" | "rollback" | "complete-host-handoff" | "reconcile-mcp-runtime";
+  action: "promote" | "retain-only" | "rollback" | "complete-host-handoff" | "reconcile-mcp-runtime" | "verify-candidate";
   input: unknown;
   dockerScript: string;
   snapshots?: string[];
@@ -1010,6 +1010,62 @@ exit 1
 
   expect(result.code).toBe(0);
   expect(JSON.stringify(result)).not.toContain(credentialPlaceholder);
+});
+
+/* The failed candidate is retired immediately, taking the only account of why it
+   failed with it. Without this read the gate can report nothing but its own name,
+   which is what #790 had to deploy blind against - and it is the one evidence
+   path that leaves the process. */
+test("a candidate that dies before readiness carries its container's own account into the evidence", async () => {
+  const candidate = { ...release, container: "viewer-candidate" };
+  const result = await runAction({
+    action: "verify-candidate",
+    input: { candidate },
+    dockerScript: `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [ "$1 $2" = "container inspect" ]; then exit 0; fi
+if [ "$1" = "inspect" ]; then printf 'exited\n'; exit 0; fi
+if [ "$1" = "logs" ]; then
+  printf 'Error: Cannot find module next/dist/server\n'
+  printf 'viewer exited with code 1\n' >&2
+  exit 0
+fi
+exit 1
+`,
+  });
+
+  expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+  expect(result.dockerCalls).toContain("logs --tail 40 viewer-candidate");
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false,
+    detail: "candidate container exited before readiness",
+    /* stdout first, then stderr: a container that dies mid-boot writes to both,
+       and each half carries a piece of the reason. */
+    containerLog: ["Error: Cannot find module next/dist/server", "viewer exited with code 1"],
+  });
+});
+
+test("a container that will not give up its log leaves the gate's own report intact", async () => {
+  const candidate = { ...release, container: "viewer-candidate" };
+  const result = await runAction({
+    action: "verify-candidate",
+    input: { candidate },
+    dockerScript: `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [ "$1 $2" = "container inspect" ]; then exit 0; fi
+if [ "$1" = "inspect" ]; then printf 'exited\n'; exit 0; fi
+if [ "$1" = "logs" ]; then exit 12; fi
+exit 1
+`,
+  });
+
+  expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+  expect(result.dockerCalls).toContain("logs --tail 40 viewer-candidate");
+  const evidence = JSON.parse(result.stdout) as Record<string, unknown>;
+  expect(evidence.detail).toBe("candidate container exited before readiness");
+  expect(evidence).not.toHaveProperty("containerLog");
 });
 
 test("rollback starts and health-checks the retained release before switching the stable target", async () => {
