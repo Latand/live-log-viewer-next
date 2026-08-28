@@ -125,7 +125,7 @@ describe("SQLite registry Viewer runtime (#187)", () => {
   });
 
   test("every image stage uses the production-burned-in Bun runtime (#552)", () => {
-    expect(dockerfile.match(/npm install -g bun@1\.3\.3/g)).toHaveLength(3);
+    expect(dockerfile.match(/npm install -g bun@1\.4\.0/g)).toHaveLength(3);
     expect(dockerfile).not.toContain("bun@1.2.18");
   });
 
