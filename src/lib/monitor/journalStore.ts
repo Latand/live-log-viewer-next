@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
-import { procBackend } from "@/lib/proc";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
 import {
@@ -18,38 +17,35 @@ import {
 } from "./types";
 
 /**
- * Server side of the monitor's audit journal and single-flight lock (#741).
+ * Server side of the audit journals (#741, #1245).
  *
- * The monitor process itself never touches these files: it reaches them over
- * `/api/monitor/runs` and `/api/monitor/lock`, the same way it reaches board
- * cards and conversations. Everything that opens a file descriptor lives here,
- * inside the viewer, which is what makes "go through the API rather than state
- * files" true of the monitor rather than merely intended.
+ * Everything that opens a file descriptor for these lives here, inside the
+ * Viewer, so a caller records a run by handing over a record rather than by
+ * knowing where the file is or what shape it keeps.
  *
- * Two properties this file exists to guarantee:
+ * The property this file exists to guarantee: **a run always leaves a line.**
+ * The mechanism #741 replaced wrote nothing on success, so an empty log meant
+ * either flawless operation or total failure. Now "no line" means "no run",
+ * and the seat tick inherits the same guarantee for its checks — which is what
+ * makes the absence of a tick a readable fact rather than a silence.
  *
- * 1. **A run always leaves a line.** The mechanism this replaces wrote nothing
- *    on success, so an empty log meant either flawless operation or total
- *    failure. Now "no line" means "no run".
- * 2. **The claim is atomic.** A read-then-write lock lets two runs both observe
- *    "free" and both proceed, and two monitors racing over one board create
- *    duplicate cards. The claim is an `O_EXCL` create serialized through the
- *    shared file transaction, so exactly one contender wins.
+ * It used to guarantee a second thing: an atomic cross-process single-flight
+ * claim, an `O_EXCL` create serialized through the shared file transaction, so
+ * two CLI monitor processes could not both sweep one board. #1245 retired it
+ * along with the CLI. There is one clock now and it lives in the release that
+ * owns traffic, so the contention that lock existed for cannot arise — and a
+ * lock file kept for a contender that no longer exists is a thing to leak, not
+ * a safety net. `MonitorDeps.claim` is where a future driver states how it
+ * serializes itself instead.
  */
 
 /** Runs retained before the oldest are dropped. */
 export const MONITOR_RUN_HISTORY = 200;
-/** A lock whose owner cannot be proven alive is reclaimable after this long. */
-const LOCK_STALE_AFTER_MS = 30 * 60 * 1000;
 const DETAIL_LIMIT = 800;
 const FINGERPRINTS_LIMIT = 500;
 
 export function monitorJournalPath(): string {
   return process.env.LLV_MONITOR_AUDIT_FILE?.trim() || statePath(path.join("conversation-monitor", "runs.ndjson"));
-}
-
-export function monitorLockPath(): string {
-  return `${monitorJournalPath()}.lock`;
 }
 
 const REQUEST_STATES: RequestState[] = ["completed", "in-flight", "stalled", "untracked", "awaiting-confirmation"];
@@ -269,86 +265,4 @@ export function appendSeatTickRecord(record: SeatTickRunRecord, filePath = seatT
 /** The newest `limit` checks, oldest first. */
 export function readSeatTickRecords(limit: number, filePath = seatTickJournalPath()): SeatTickRunRecord[] {
   return readJournalRecords(limit, { filePath, sanitize: sanitizeSeatTickRecord });
-}
-
-export type MonitorLockClaim =
-  | { claimed: true; token: string }
-  | { claimed: false; detail: string };
-
-interface LockOptions {
-  lockPath?: string;
-  pidAlive?: (pid: number) => boolean;
-  now?: () => number;
-  staleAfterMs?: number;
-}
-
-interface LockOwner {
-  pid: number;
-  token: string;
-  at: string;
-}
-
-function readOwner(lockPath: string): LockOwner | null {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(lockPath, "utf8")) as Partial<LockOwner>;
-    if (typeof parsed.pid !== "number" || typeof parsed.token !== "string") return null;
-    return { pid: parsed.pid, token: parsed.token, at: typeof parsed.at === "string" ? parsed.at : "" };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Take the single-flight lock, or report who holds it.
- *
- * The create is `wx` — an atomic "fail if it exists" — and the whole
- * read/steal/create sequence runs inside the shared file transaction, so two
- * contenders cannot both conclude the lock is free. A holder that is provably
- * gone (dead pid) or impossibly old is reclaimed; anything else loses.
- */
-export function claimMonitorRun(options: LockOptions = {}): MonitorLockClaim {
-  const lockPath = options.lockPath ?? monitorLockPath();
-  const pidAlive = options.pidAlive ?? ((pid: number) => procBackend.pidAlive(pid));
-  const now = options.now ?? Date.now;
-  const staleAfterMs = options.staleAfterMs ?? LOCK_STALE_AFTER_MS;
-  fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-
-  return withFileTransactionSync(lockPath, "the monitor lock is busy", (): MonitorLockClaim => {
-    const token = crypto.randomUUID();
-    const write = (): MonitorLockClaim => {
-      const descriptor = fs.openSync(lockPath, "wx", 0o600);
-      try {
-        fs.writeFileSync(descriptor, JSON.stringify({ pid: process.pid, token, at: new Date(now()).toISOString() }), "utf8");
-      } finally {
-        fs.closeSync(descriptor);
-      }
-      return { claimed: true, token };
-    };
-
-    if (!fs.existsSync(lockPath)) return write();
-    const owner = readOwner(lockPath);
-    const at = owner ? Date.parse(owner.at) : NaN;
-    const expired = !Number.isFinite(at) || now() - at > staleAfterMs;
-    if (owner && pidAlive(owner.pid) && !expired) {
-      return { claimed: false, detail: "another monitor run holds the lock" };
-    }
-    /* Provably abandoned: a crashed run, or one so old it cannot still be
-       running. Remove and re-create rather than overwrite, so the create stays
-       the exclusive operation. */
-    fs.rmSync(lockPath, { force: true });
-    return write();
-  });
-}
-
-/** Release the lock, but only for the run that holds it: a late release from a
-    superseded run must never free the lock its successor is holding. */
-export function releaseMonitorRun(token: string, options: LockOptions = {}): boolean {
-  const lockPath = options.lockPath ?? monitorLockPath();
-  if (!fs.existsSync(lockPath)) return false;
-  return withFileTransactionSync(lockPath, "the monitor lock is busy", () => {
-    const owner = readOwner(lockPath);
-    if (!owner || owner.token !== token) return false;
-    fs.rmSync(lockPath, { force: true });
-    return true;
-  });
 }

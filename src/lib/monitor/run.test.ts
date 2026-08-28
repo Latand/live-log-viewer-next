@@ -14,7 +14,6 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 const { ORCHESTRATOR_ALERT_REF, monitorRefIn } = await import("./cards");
 const { MONITOR_MARKER } = await import("./requests");
 const { runConversationMonitor } = await import("./run");
-const { ViewerApiError, httpViewerApi } = await import("./viewerApi");
 import type { MonitorDeps, MonitorOptions } from "./run";
 import type { MonitorRunRecord } from "./types";
 import type { ConversationSummary, PipelineSummary, TaskSummary, ViewerApi } from "./viewerApi";
@@ -76,7 +75,7 @@ function harness(overrides: {
     conversations: async () => conversations,
     session: async () => messages,
     tasks: async () => {
-      if (overrides.failTasks) throw new ViewerApiError("viewer request to api/tasks returned 503", 503);
+      if (overrides.failTasks) throw new Error("viewer request to api/tasks returned 503");
       return tasks.map((task) => ({ ...task }));
     },
     pipelines: async () => overrides.pipelines ?? [],
@@ -95,25 +94,22 @@ function harness(overrides: {
     },
     readRuns: async (limit) => runs.slice(-limit),
     appendRun: async (record) => void runs.push(record),
-    claimRunLock: async () => {
-      if (lockHeld) return { claimed: false, detail: "another monitor run holds the lock" };
-      lockHeld = true;
-      return { claimed: true, token: "token-1" };
-    },
-    releaseRunLock: async (token) => {
-      if (token !== "token-1") return false;
-      lockHeld = false;
-      return true;
-    },
   };
 
   let runCounter = 0;
-  /* No injected journal or lock: the run reaches both through the API, which
-     is the contract under test. */
+  /* The journal still rides the API, which is the contract under test. The
+     single-flight claim does not: #1245 retired the cross-process lock with
+     the CLI that needed it, so a driver states its own, and this harness is
+     the driver. */
   const deps: MonitorDeps = {
     api,
     now: () => NOW,
     runId: () => `run-${(runCounter += 1)}`,
+    claim: async () => {
+      if (lockHeld) return { claimed: false, detail: "another monitor run holds the admission" };
+      lockHeld = true;
+      return { claimed: true, release: async () => { lockHeld = false; } };
+    },
   };
   return { api, deps, runs, delivered, tasks };
 }
@@ -181,57 +177,6 @@ describe("conversation monitor run", () => {
     expect(seeded.delivered[0]!.text).toContain(MONITOR_MARKER);
   });
 
-  test("the HTTP client resolves active, missing and stale seat responses through the run", async () => {
-    const activeSeat = {
-      project: "viewer",
-      seatEpoch: 2,
-      conversationId: "conversation_orch",
-      path: "/transcripts/orch.jsonl",
-      mandate: "own the board",
-      promptVersion: 4,
-      predecessorConversationId: "conversation_old",
-      state: "active",
-      intent: { clientRequestId: "seat-viewer-2", mode: "spawn", launchId: null, error: null },
-      designatedAt: "2026-07-27T10:00:00Z",
-      activatedAt: "2026-07-27T10:01:00Z",
-    };
-    const cases = [
-      { name: "active", payload: { seat: activeSeat, pending: null, exists: true }, resolution: "resolved", outcome: "clean" },
-      { name: "missing", payload: { seat: null, pending: null, exists: false }, resolution: "missing-record", outcome: "failed" },
-      { name: "stale", payload: { seat: activeSeat, pending: null, exists: false }, resolution: "stale-record", outcome: "failed" },
-    ] as const;
-
-    for (const scenario of cases) {
-      const urls: string[] = [];
-      const fetchImpl = (async (input: URL | RequestInfo, init?: RequestInit) => {
-        const url = String(input);
-        urls.push(url);
-        const pathname = new URL(url).pathname;
-        const requestBody = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
-        let payload: unknown = {};
-        if (pathname === "/api/orchestrator/seat") payload = scenario.payload;
-        else if (pathname === "/api/tmux" && (init?.method ?? "GET") === "GET") payload = { target: "%7" };
-        else if (pathname === "/api/conversations") payload = { items: [] };
-        else if (pathname === "/api/tasks" && (init?.method ?? "GET") === "GET") payload = { tasks: [] };
-        else if (pathname === "/api/tasks") payload = { task: { id: `alert-${scenario.name}` } };
-        else if (pathname === "/api/pipelines") payload = { pipelines: [] };
-        else if (pathname === "/api/flows") payload = { flows: [] };
-        else if (pathname === "/api/monitor/lock") payload = requestBody.action === "claim"
-          ? { claimed: true, token: `lock-${scenario.name}` }
-          : { released: true };
-        else if (pathname === "/api/monitor/runs") payload = { ok: true };
-        return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
-      }) as unknown as typeof fetch;
-      const api = httpViewerApi({ baseUrl: "http://127.0.0.1:8898", fetchImpl });
-      const report = await runConversationMonitor({ api, now: () => NOW, runId: () => `run-${scenario.name}` }, OPTIONS);
-
-      expect(report.record.orchestrator.resolution, scenario.name).toBe(scenario.resolution);
-      expect(report.record.outcome, scenario.name).toBe(scenario.outcome);
-      expect(urls, scenario.name).toContain("http://127.0.0.1:8898/api/orchestrator/seat?project=viewer");
-      expect(urls.some((url) => new URL(url).pathname === "/api/orchestrator"), scenario.name).toBe(false);
-    }
-  });
-
   test("an unresolvable orchestrator is reported, not silently succeeded", async () => {
     const seeded = harness({ orchestrator: { record: null, exists: false } });
     const report = await runConversationMonitor(seeded.deps, OPTIONS);
@@ -288,28 +233,19 @@ describe("conversation monitor run", () => {
 
   test("an overlapping run is skipped and says so", async () => {
     const seeded = harness();
-    /* Model the viewer answering "held" to the claim, which is what a second
-       run sees while the first is mid-sweep. */
-    seeded.api.claimRunLock = async () => ({ claimed: false, detail: "another monitor run holds the lock" });
+    /* A refused admission is what a second run sees while the first is
+       mid-sweep. Where that refusal COMES from is the driver's business now:
+       the cross-process lock retired with the CLI (#1245), and the run only
+       requires that something answers. */
+    seeded.deps.claim = async () => ({ claimed: false, detail: "another monitor run holds the admission" });
     const report = await runConversationMonitor(seeded.deps, OPTIONS);
     expect(report.record.outcome).toBe("skipped");
-    expect(report.record.detail).toContain("lock");
+    expect(report.record.detail).toContain("admission");
     expect(seeded.runs).toHaveLength(1);
     expect(seeded.delivered).toHaveLength(0);
   });
 
-  test("a lock the viewer cannot grant skips the run rather than racing", async () => {
-    const seeded = harness();
-    seeded.api.claimRunLock = async () => {
-      throw new ViewerApiError("viewer request to api/monitor/lock returned 500", 500);
-    };
-    const report = await runConversationMonitor(seeded.deps, OPTIONS);
-    expect(report.record.outcome).toBe("skipped");
-    expect(report.record.detail).toContain("could not be claimed");
-    expect(seeded.tasks).toHaveLength(0);
-  });
-
-  test("the lock is released once the run is audited, so the next run proceeds", async () => {
+  test("the admission is released once the run is audited, so the next run proceeds", async () => {
     const seeded = harness();
     await runConversationMonitor(seeded.deps, OPTIONS);
     const second = await runConversationMonitor(seeded.deps, OPTIONS);
@@ -320,7 +256,7 @@ describe("conversation monitor run", () => {
   test("a run whose audit line cannot be written does not report success", async () => {
     const seeded = harness();
     seeded.api.appendRun = async () => {
-      throw new ViewerApiError("viewer request to api/monitor/runs returned 500", 500);
+      throw new Error("viewer request to api/monitor/runs returned 500");
     };
     const report = await runConversationMonitor(seeded.deps, OPTIONS);
     expect(report.audited).toBe(false);
@@ -378,7 +314,7 @@ describe("conversation monitor run", () => {
        audience, and the send itself could resume the session. */
     const seeded = harness({
       hostTarget: () => {
-        throw new ViewerApiError("viewer request to api/tmux returned 409", 409);
+        throw new Error("viewer request to api/tmux returned 409");
       },
     });
     const report = await runConversationMonitor(seeded.deps, OPTIONS);

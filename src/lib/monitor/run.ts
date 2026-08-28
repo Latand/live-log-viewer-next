@@ -47,6 +47,11 @@ export type MonitorClaim =
   | { claimed: true; release(): Promise<void> }
   | { claimed: false; detail: string };
 
+/* Undriven since #1245 §5: the seat tick took over "is the seat awake and is
+   work moving", and this scan answers the different question #741 asked — did
+   an operator request fall through the cracks — which #746 deferred. The code
+   stays in the tree; nothing calls it. */
+
 export interface MonitorDeps {
   api: ViewerApi;
   now(): Date;
@@ -54,8 +59,18 @@ export interface MonitorDeps {
   /** Overrides the API-backed journal; production leaves it unset, so the
       viewer owns the file and the monitor owns none. */
   appendRun?(record: MonitorRunRecord): Promise<void>;
-  /** Overrides the API-backed single-flight claim, same reasoning. */
-  claim?(): Promise<MonitorClaim>;
+  /**
+   * The single-flight admission, and no longer optional.
+   *
+   * It used to default to a cross-process lock the Viewer handed out over
+   * `/api/monitor/lock`, for a CLI driver that ran as its own process. #1245
+   * retired both, so there is no lock left to fall back to — and defaulting to
+   * "claimed" instead would have deleted the guarantee silently rather than
+   * removing it, leaving whoever eventually drives this scan with two runs
+   * creating duplicate cards and no type to warn them. Required, so a driver
+   * has to say how it serializes itself before it can run at all.
+   */
+  claim(): Promise<MonitorClaim>;
   /** Optional pull-request / issue correlation. A source that cannot answer
       throws; the run then continues without it and says so. */
   github?(): Promise<GithubEvidenceRow[]>;
@@ -162,30 +177,6 @@ function conversationsInWindow(
     .slice(0, limit);
 }
 
-/** The production claim: the viewer owns the lock file and hands out a token. */
-async function apiClaim(api: ViewerApi): Promise<MonitorClaim> {
-  let claim: Awaited<ReturnType<ViewerApi["claimRunLock"]>>;
-  try {
-    claim = await api.claimRunLock();
-  } catch (error) {
-    /* A lock that cannot be asked for is not a lock that is free. Skipping is
-       the safe read: two monitors on one board create duplicate cards. */
-    return { claimed: false, detail: `the monitor lock could not be claimed: ${errorText(error)}` };
-  }
-  if (!claim.claimed) return claim;
-  return {
-    claimed: true,
-    release: async () => {
-      try {
-        await api.releaseRunLock(claim.token);
-      } catch {
-        /* The lock expires on its own; a failed release costs the next run a
-           wait, never correctness. */
-      }
-    },
-  };
-}
-
 export async function runConversationMonitor(deps: MonitorDeps, options: MonitorOptions = {}): Promise<MonitorRunReport> {
   const now = deps.now();
   const runId = deps.runId?.() ?? crypto.randomUUID();
@@ -228,7 +219,7 @@ export async function runConversationMonitor(deps: MonitorDeps, options: Monitor
     return { record: auditError ? { ...record, detail: [detail, auditError].filter(Boolean).join("; ") } : record, classified, message, audited };
   };
 
-  const claim = await (deps.claim?.() ?? apiClaim(deps.api));
+  const claim = await deps.claim();
   if (!claim.claimed) return finish("skipped", claim.detail);
 
   try {

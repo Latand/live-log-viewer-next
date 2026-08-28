@@ -646,3 +646,62 @@ export function rekeyOrchestratorSeatPaths(rekeys: readonly IdentityWavePathReke
 export function orchestratorRevocations(): OrchestratorRevocation[] {
   return readOrchestratorSeatFile().revocations;
 }
+
+/**
+ * Conversations whose orchestrator authority has been revoked, or null when the
+ * durable store could not be established.
+ *
+ * The same ABA guard {@link authorizedManagerSeats} denies authority with,
+ * asked the other way round: a conversation is revoked while its newest
+ * revocation stands at or above every epoch a live or pending seat still names
+ * it at, and a deliberate re-designation mints a strictly newer epoch that
+ * lifts it again.
+ *
+ * Automatic host retirement (#1245) is the caller. Rotation is authority-only
+ * by design, so the predecessor keeps its host, its tools and — if it schedules
+ * itself — its clock; the retirement sweep is the thing that ends it, and this
+ * is the fact that tells the sweep a busy-looking host is a seat nobody seated.
+ * Null rather than an empty set for the same reason
+ * {@link activeOrchestratorSeatsOrUnknown} exists: silence here would read as
+ * "revoked by nobody", which is the answer that keeps a rotated-away
+ * orchestrator alive.
+ *
+ * `resolveAlias` is the seam {@link authorizedManagerSeats} takes from its
+ * sources, needed here for the same reason and on both sides of the join: an
+ * identity migration rewrites the id a live host answers to while this file
+ * keeps the id each row was written with, so an unresolved comparison reads a
+ * revoked seat as never revoked — and, from the other direction, a
+ * re-designated one as still revoked. It defaults to identity so the durable
+ * store stays readable with no registry at all.
+ */
+export function revokedOrchestratorSeatConversationsOrUnknown(
+  resolveAlias: (conversationId: string) => string = (conversationId) => conversationId,
+): ReadonlySet<string> | null {
+  const file = readOrchestratorSeatFileOrNull();
+  if (file === null) return null;
+  const seatedAt = new Map<string, number>();
+  const seatedBy = (seat: OrchestratorSeat): void => {
+    if (!seat.conversationId) return;
+    const id = resolveAlias(seat.conversationId);
+    seatedAt.set(id, Math.max(seatedAt.get(id) ?? 0, seat.seatEpoch));
+  };
+  for (const seat of Object.values(file.seats)) seatedBy(seat);
+  for (const seat of Object.values(file.pending)) {
+    /* A pending intent protects its conversation while it is still in flight —
+       retiring the host mid-designation would kill the seat the operator is in
+       the middle of creating. A TERMINAL error ends that protection at the
+       error, not at some later event: the row keeps its pending position until
+       the next `beginOrchestratorSeatIntent` for the project moves it to
+       history, and that call may never come. Reading a designation that failed
+       as one that seats somebody is what leaves a predecessor's revocation
+       masked, and its host running, for as long as nobody designates again. */
+    if (seat.intent.error !== null) continue;
+    seatedBy(seat);
+  }
+  const revoked = new Set<string>();
+  for (const revocation of file.revocations) {
+    const id = resolveAlias(revocation.conversationId);
+    if (revocation.seatEpoch >= (seatedAt.get(id) ?? 0)) revoked.add(id);
+  }
+  return revoked;
+}
