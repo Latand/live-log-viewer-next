@@ -112,22 +112,35 @@ export function matchEvidence(request: OperatorRequest, evidence: readonly Evide
   return best;
 }
 
+export interface EvidenceStallOptions {
+  now: Date;
+  /**
+   * Age of the newest movement instant that counts as a stall.
+   *
+   * `null` asks for the parked clause alone. The seat tick (#1245) passes it
+   * because it holds the registry's own activity verdict for the turn, and
+   * re-deriving a second answer by subtracting attempt timestamps from the
+   * clock would call a long stage stalled while its host is writing.
+   */
+  stallAfterMs?: number | null;
+}
+
 /**
  * Whether tracked work has stopped moving, and the clause that says so — or
  * null when it is still in flight.
  *
  * The one stall rule in the codebase, shared by request classification here and
- * by the seat tick's pre-check (#1245), which asks the same question of a
- * pipeline on a different threshold. Two properties travel with it: parked is
- * stalled outright, and an item with no movement evidence is never called
- * stalled — an unknown instant is not an old one.
+ * by the seat tick, which asks the same question of a pipeline. Two properties
+ * travel with it: parked is stalled outright, and an item with no movement
+ * evidence is never called stalled — an unknown instant is not an old one.
  */
 export function evidenceStallReason(
   item: Pick<EvidenceItem, "kind" | "id" | "state" | "updatedAt">,
-  options: ClassifyOptions,
+  options: EvidenceStallOptions,
 ): string | null {
   if (item.state === "terminal") return null;
   if (item.state === "inert") return `${item.kind} ${item.id} is parked`;
+  if (options.stallAfterMs === null) return null;
   const stallAfterMs = options.stallAfterMs ?? DEFAULT_STALL_AFTER_MS;
   const updatedAt = item.updatedAt ? Date.parse(item.updatedAt) : NaN;
   if (Number.isFinite(updatedAt) && options.now.getTime() - updatedAt > stallAfterMs) {

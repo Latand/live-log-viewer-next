@@ -1,16 +1,18 @@
 import { isTerminalHighSignalEvent } from "@/lib/lifecycle/vocabulary";
-import { ORCHESTRATOR_ALERT_REF } from "@/lib/monitor/cards";
-import { evidenceStallReason } from "@/lib/monitor/classify";
 
+import { seatTickRetryGuardRef, ORCHESTRATOR_ALERT_REF } from "./cards";
+import { evidenceStallReason } from "./classify";
 import {
   SEAT_TICK_WAKE_REASON_KINDS,
   type SeatTickCard,
   type SeatTickCheckInput,
   type SeatTickDecision,
+  type SeatTickEventInput,
   type SeatTickItem,
   type SeatTickPipelineInput,
   type SeatTickPolicy,
   type SeatTickProjectState,
+  type SeatTickSeatInput,
   type SeatTickTaskInput,
   type SeatTickVerdict,
   type SeatTickWakeReason,
@@ -20,25 +22,31 @@ import {
 /**
  * The seat tick's pre-check (issue #1245) — a pure decision over durable state.
  *
- * The whole point of the tick is that the expensive half runs rarely. This
- * function is the cheap half: no model call, no transcript scan, no network. It
- * reads the seat, the open lanes, the board, the lifecycle events since the
- * last check and the Viewer's own signals, and answers one of five things.
+ * The whole point of the tick is that the expensive half runs rarely. This is
+ * the cheap half: no model call, no transcript scan, no network. It reads the
+ * seat, the open lanes, the board, the lifecycle events past the seat's own
+ * cursor and the Viewer's own signals, and answers one of five things.
  *
- * Three rules are load-bearing and easy to lose:
+ * Four rules are load-bearing and easy to lose:
  *
- * - **A stale tick is dropped, never queued.** A seat mid-turn is `skipped`,
- *   and a skipped check remembers nothing: the stall memory and the digest
- *   cursor stay where they were so the next check decides on fresh evidence.
- *   The session-scheduled monitor this replaces queued its fires instead, and
- *   five of its seventy-six ticks were empty turns landing a fraction of a
- *   second behind the tick before them.
+ * - **A stale tick is dropped, never queued.** A seat whose turn is genuinely
+ *   progressing is `skipped`, and a skipped check remembers nothing: the stall
+ *   memory and the event cursor stay where they were so the next check decides
+ *   on fresh evidence. The session-scheduled monitor this replaces queued its
+ *   fires instead, and five of its seventy-six ticks were empty turns landing a
+ *   fraction of a second behind the tick before them.
+ * - **The skip terminates.** Only a verdict that says the turn is moving earns
+ *   one. A turn the registry reports stalled or gone — and a turn the liveness
+ *   plane cannot answer for at all — is not a turn the tick may wait behind
+ *   forever, because the seat's own dead host is exactly the condition a wake
+ *   exists to clear.
  * - **A standing condition waits out the wake interval; a terminal lane event
  *   does not.** "Roughly hourly" is a floor on wakes the tick raises by itself.
  *   An event the seat cannot make its next decision without — a parked stage, a
  *   verdict, a deploy outcome — reaches it at the very next check.
- * - **Nothing here creates or wakes anything.** The decision names what is
- *   owed; the controller sends it, and re-reads the seat epoch before it does.
+ * - **Nothing here creates, wakes or acknowledges anything.** The decision names
+ *   what is owed; the controller sends it, re-reads the seat epoch before it
+ *   does, and only a delivered send advances a stamp or a cursor.
  */
 
 const MINUTE_MS = 60_000;
@@ -79,9 +87,6 @@ export function seatTickPolicy(env: Readonly<Record<string, string | undefined>>
   };
 }
 
-/** The ref of the card raised when a wake reason has stopped producing change. */
-export const seatTickRetryGuardRef = (kind: SeatTickWakeReasonKind): string => `seat-tick-stuck-${kind}`;
-
 function isOpenLane(pipeline: SeatTickPipelineInput): boolean {
   return pipeline.state !== "terminal";
 }
@@ -98,24 +103,52 @@ function hasOpenWork(input: SeatTickCheckInput): boolean {
 }
 
 /**
- * The lanes that are not moving, by the shared stall rule plus the one thing
- * evidence cannot see: a running stage whose transcript stopped growing under
- * an open turn. That is the registry's 180-second `stalled` verdict read at the
- * tick's own threshold.
+ * Whether the seat's turn is genuinely progressing, which is the only thing
+ * that earns a dropped tick.
+ *
+ * The dead-host-over-an-open-turn case is why this is a positive test rather
+ * than `turn === "busy"`. A seat whose host died mid-turn keeps a `busy` turn
+ * on the registry forever, so a plain busy check skipped that seat at every
+ * five-minute check for as long as the record stood — a permanent silence
+ * produced by exactly the condition the wake exists to clear. Here the registry
+ * decides: `running`, `waiting` (idle or a provider retry deadline) and
+ * `starting` (inside the launch grace, which expires into `stalled` or `gone`
+ * on its own) are progress; everything else, absent verdicts included, is not.
+ */
+export function seatTurnProgressing(seat: SeatTickSeatInput): boolean {
+  if (seat.turn !== "busy") return false;
+  const lifecycle = seat.activity?.lifecycle;
+  return lifecycle === "running" || lifecycle === "waiting" || lifecycle === "starting";
+}
+
+/**
+ * The lanes that are not moving, and the clause that says so.
+ *
+ * Two sources, neither of them arithmetic over attempt timestamps. Parked is
+ * the durable pipeline state, read through the monitor's one stall rule
+ * (`evidenceStallReason`). Silence under an open turn is the registry's own
+ * activity verdict for the conversation running the stage — the same answer
+ * `agent_activity` gives, already reconciled with host death. Subtracting the
+ * newest attempt instant from the clock would instead call a long-running stage
+ * stalled while its host was writing to the transcript.
  */
 function stalledLanes(input: SeatTickCheckInput): { pipeline: SeatTickPipelineInput; reason: string }[] {
-  const options = { now: new Date(input.now), stallAfterMs: input.policy.stallAfterMs };
+  const options = { now: new Date(input.now), stallAfterMs: null };
   const found: { pipeline: SeatTickPipelineInput; reason: string }[] = [];
   for (const pipeline of input.pipelines) {
     if (!isOpenLane(pipeline)) continue;
-    const reason = evidenceStallReason({ kind: "pipeline", id: pipeline.id, state: pipeline.state, updatedAt: pipeline.updatedAt }, options);
-    if (reason) {
-      found.push({ pipeline, reason });
+    const parked = evidenceStallReason({ kind: "pipeline", id: pipeline.id, state: pipeline.state, updatedAt: pipeline.updatedAt }, options);
+    if (parked) {
+      found.push({ pipeline, reason: parked });
       continue;
     }
-    if (pipeline.silentForMs !== null && pipeline.silentForMs >= input.policy.stallAfterMs) {
+    const activity = pipeline.stageActivity;
+    if (activity && (activity.lifecycle === "stalled" || activity.lifecycle === "gone")) {
       const stage = pipeline.stageId ? ` stage ${pipeline.stageId}` : "";
-      found.push({ pipeline, reason: `pipeline ${pipeline.id}${stage} holds an open turn whose transcript stopped growing` });
+      found.push({
+        pipeline,
+        reason: `pipeline ${pipeline.id}${stage} runs a turn the registry reports ${activity.lifecycle} (${activity.reason})`,
+      });
     }
   }
   return found;
@@ -141,7 +174,7 @@ export function seatTickDecision(input: SeatTickCheckInput): SeatTickDecision {
   if (!input.seat) {
     return {
       verdict: { kind: "no-seat", detail: "the project has open work and no active orchestrator seat" },
-      state: { ...unchanged, seatEpoch: null, digestThrough: input.digestThrough },
+      state: { ...unchanged, seatEpoch: null },
       cards: [{
         /* The same ref the conversation monitor raises this condition under, so
            the two mechanisms cannot double-card one missing orchestrator. */
@@ -155,28 +188,37 @@ export function seatTickDecision(input: SeatTickCheckInput): SeatTickDecision {
   /* A tick that landed after the current turn would be acting on evidence the
      turn has already superseded. Drop it: no delivery, no cursor advance, no
      stall memory, and the next check re-reads everything. */
-  if (input.seat.turn === "busy") {
+  if (seatTurnProgressing(input.seat)) {
     return { verdict: { kind: "skipped", reason: "seat-busy" }, state: unchanged, cards: [] };
   }
 
-  const base: SeatTickProjectState = { ...unchanged, seatEpoch: input.seat.seatEpoch, digestThrough: input.digestThrough };
+  const base: SeatTickProjectState = { ...unchanged, seatEpoch: input.seat.seatEpoch };
   const stalled = stalledLanes(input);
   const stalledNow = stalled.map((entry) => entry.pipeline.id);
   /* A stall is only reported once it survived a second check, so a lane between
      two attempts is never called stuck. */
   const persistedStalls = stalled.filter((entry) => input.state.stalledSeen.includes(entry.pipeline.id));
-  const laneEvents = input.events.filter((event) => isTerminalHighSignalEvent(event.type));
   const unstarted = input.tasks.filter(isUnstarted);
   const openWork = hasOpenWork(input);
   const wakeDue = elapsed(input.state.lastWakeAt, input.now, input.policy.wakeIntervalMs);
 
   const state: SeatTickProjectState = { ...base, stalledSeen: stalledNow };
 
+  const laneEvents = input.events.filter((event) => isTerminalHighSignalEvent(event.type));
   const candidates: SeatTickWakeReason[] = [];
-  if (laneEvents.length > 0) {
-    const first = laneEvents[0]!;
+  /* Terminal events are counted over the WHOLE pending range, not just the page
+     this check carries: a verdict sitting behind a backlog is as
+     decision-blocking as one at the front, and a page-sized answer is how it
+     gets buried. Routine progress never wakes on its own. */
+  if (input.terminalPending) {
+    const first = laneEvents[0];
     const more = laneEvents.length > 1 ? ` and ${laneEvents.length - 1} more` : "";
-    candidates.push({ kind: "lane-event", detail: `${first.type} since the last check${more}` });
+    candidates.push({
+      kind: "lane-event",
+      detail: first
+        ? `${first.type} since the last delivered wake${more}`
+        : "a terminal lane event is waiting further down the journal than this check reads",
+    });
   }
   if (wakeDue && persistedStalls.length > 0) {
     candidates.push({ kind: "stalled", detail: persistedStalls[0]!.reason });
@@ -250,7 +292,7 @@ function quiet(state: SeatTickProjectState, at: string): SeatTickProjectState {
 function wakeItems(context: {
   input: SeatTickCheckInput;
   stalled: { pipeline: SeatTickPipelineInput; reason: string }[];
-  laneEvents: SeatTickCheckInput["events"];
+  laneEvents: readonly SeatTickEventInput[];
   unstarted: SeatTickTaskInput[];
 }): SeatTickItem[] {
   const { input } = context;
@@ -278,27 +320,39 @@ function wakeItems(context: {
 }
 
 /**
- * The half of the state transition that only a delivered wake earns.
+ * The half of the state transition that only a DELIVERED wake earns.
  *
- * Kept apart from {@link seatTickDecision} on purpose: a wake whose seat epoch
- * moved between the decision and the send is refused at the send, and must not
- * leave a record saying the seat was woken. Only the controller, holding the
+ * Kept apart from {@link seatTickDecision} on purpose, and it is the reason the
+ * two halves exist at all. A wake whose seat epoch moved between the decision
+ * and the send is refused at the send; a wake the delivery layer held or queued
+ * is somewhere other than the seat. Neither may leave a record saying the seat
+ * was woken, and neither may advance the event cursor — an acknowledged event
+ * is never offered again, so acking one before it landed is how a rotation
+ * loses the lane event its successor needed. Only the controller, holding the
  * delivery outcome, may apply this.
  */
 export function seatTickWakeCommit(
   state: SeatTickProjectState,
   verdict: SeatTickVerdict,
-  fingerprint: string,
-  now: number,
+  context: { fingerprint: string; eventsThrough: number; now: number },
 ): SeatTickProjectState {
-  const at = new Date(now).toISOString();
+  const at = new Date(context.now).toISOString();
+  const eventsThrough = Math.max(state.eventsThrough, context.eventsThrough);
   if (verdict.kind === "proactive") {
-    return { ...state, lastWakeAt: at, lastProposalAt: at, lastWakeReasons: [], lastWakeFingerprint: fingerprint, quietSince: null };
+    return {
+      ...state,
+      lastWakeAt: at,
+      lastProposalAt: at,
+      lastWakeReasons: [],
+      lastWakeFingerprint: context.fingerprint,
+      quietSince: null,
+      eventsThrough,
+    };
   }
   if (verdict.kind !== "wake") return state;
 
   const carried = verdict.reasons.map((reason) => reason.kind);
-  const fruitless = state.lastWakeFingerprint === fingerprint;
+  const fruitless = state.lastWakeFingerprint === context.fingerprint;
   const wakesWithoutChange: Partial<Record<SeatTickWakeReasonKind, number>> = {};
   for (const kind of SEAT_TICK_WAKE_REASON_KINDS) {
     if (!carried.includes(kind)) continue;
@@ -308,9 +362,10 @@ export function seatTickWakeCommit(
     ...state,
     lastWakeAt: at,
     lastWakeReasons: carried,
-    lastWakeFingerprint: fingerprint,
+    lastWakeFingerprint: context.fingerprint,
     wakesWithoutChange,
     quietSince: null,
     idleSince: null,
+    eventsThrough,
   };
 }

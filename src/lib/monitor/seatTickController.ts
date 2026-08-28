@@ -1,23 +1,28 @@
 import { deliverConversationMessage, type DeliveryOutcome } from "@/lib/delivery";
 import { canonicalOrchestratorProject } from "@/lib/orchestrator/seats";
-import { monitorClientRequestId, monitorRefIn, orchestratorAlertCardText, MONITOR_REF_PREFIX } from "@/lib/monitor/cards";
-import { redactBounded } from "@/lib/monitor/redact";
 import { createTask } from "@/lib/tasks/commands";
 import { mutateTasksFile } from "@/lib/tasks/store";
 
-import { openIssuesForProposal, type ProposalIssue } from "./githubProposal";
-import { appendSeatTickRecord, type SeatTickRunRecord } from "./journal";
-import { seatTickProposalMessage, seatTickWakeMessage } from "./message";
-import { seatTickDecision, seatTickPolicy, seatTickWakeCommit } from "./precheck";
-import { readSeatTickState, seatTickStateForEpoch, writeSeatTickState } from "./state";
+import {
+  monitorClientRequestId,
+  monitorRefIn,
+  orchestratorAlertCardText,
+  seatTickRetryGuardCardText,
+} from "./cards";
+import { openIssuesForProposal, type ProposalIssue } from "./githubEvidence";
+import { appendSeatTickRecord } from "./journalStore";
+import { redactMonitorText } from "./redact";
+import { seatTickProposalMessage, seatTickWakeMessage } from "./report";
+import { seatTickDecision, seatTickPolicy, seatTickWakeCommit } from "./seatTick";
+import { readSeatTickState, seatTickStateForEpoch, writeSeatTickState } from "./seatTickState";
 import {
   defaultSeatTickSources,
   gatherSeatTickInput,
   repoDirForProject,
   seatTickProjects,
   type SeatTickSources,
-} from "./sources";
-import type { SeatTickCard, SeatTickPolicy, SeatTickProjectState } from "./types";
+} from "./seatTickSources";
+import type { SeatTickCard, SeatTickPolicy, SeatTickRunRecord, SeatTickVerdict } from "./types";
 
 /**
  * The seat tick controller (issue #1245).
@@ -38,8 +43,11 @@ import type { SeatTickCard, SeatTickPolicy, SeatTickProjectState } from "./types
  *   seat epoch is re-read immediately before the send, and a seat that moved in
  *   between is refused — the wake is journaled as refused, and nothing about it
  *   is recorded as a wake the successor received.
- * - It queued its fires and then double-fired into a finished turn. Here a busy
- *   seat is skipped and the tick is dropped; nothing is ever held.
+ * - It queued its fires and then double-fired into a finished turn. Here a seat
+ *   whose turn is genuinely progressing is skipped and the tick is dropped;
+ *   nothing is ever held.
+ * - Its empty log was equally consistent with perfect operation and with total
+ *   failure. Here every check leaves a line, including a check that threw.
  */
 
 export interface SeatTickControllerDependencies {
@@ -53,29 +61,10 @@ export interface SeatTickControllerDependencies {
   proposalIssues?: (project: string, sources: SeatTickSources) => Promise<ProposalIssue[]>;
 }
 
-const CARD_TEXT_LIMIT = 5_000;
-
-/** The card raised when a wake reason has stopped producing any change. The
-    tick then stops re-prompting the same failure; the operator has the record. */
-export function retryGuardCardText(project: string, card: SeatTickCard, at: string): string {
-  return redactBounded(
-    [
-      "Seat tick stopped re-sending a wake reason",
-      "",
-      `${card.detail}.`,
-      `Project ${project}. Observed ${at.slice(0, 16).replace("T", " ")} UTC.`,
-      "The tick resumes this reason on its own once the board or a pipeline moves.",
-      "",
-      `${MONITOR_REF_PREFIX} ${card.ref}`,
-    ].join("\n"),
-    CARD_TEXT_LIMIT,
-  );
-}
-
 function cardText(project: string, card: SeatTickCard, at: string): string {
   return card.kind === "no-seat"
     ? orchestratorAlertCardText(card.detail, at)
-    : retryGuardCardText(project, card, at);
+    : seatTickRetryGuardCardText(project, card.detail, card.ref, at);
 }
 
 /**
@@ -101,15 +90,74 @@ function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): vo
   });
 }
 
+/**
+ * Whether the seat actually has the message.
+ *
+ * A send the delivery layer accepted is not the same as a wake the seat
+ * received. `held` parks it behind an account migration, `queued` and
+ * `delivering` leave it with the runtime and not the audience, and `pending`
+ * has not reached a host at all. Recording any of those as a wake starts the
+ * hourly clock on a message nobody read, and — worse — acknowledges the
+ * lifecycle events that produced it, which are then never offered again.
+ */
+export function wakeReached(outcome: DeliveryOutcome): boolean {
+  if (!outcome.ok) return false;
+  switch (outcome.outcome) {
+    case "held":
+    case "queued":
+    case "delivering":
+    case "pending":
+      return false;
+    default:
+      return true;
+  }
+}
+
 function deliveryOutcomeLabel(outcome: DeliveryOutcome): string {
   return outcome.ok ? outcome.outcome ?? "delivered" : "failed";
+}
+
+function verdictDetail(verdict: SeatTickVerdict): string | null {
+  if (verdict.kind === "skipped") return "the seat's turn is progressing; the tick is dropped, never queued";
+  if (verdict.kind === "wake") return verdict.reasons.map((reason) => reason.detail).join("; ");
+  return verdict.detail;
+}
+
+/**
+ * The wake's identity, and with it its idempotency.
+ *
+ * `clientMessageId` is the delivery layer's idempotency key, so this decides
+ * which two sends are the same message. Both halves matter:
+ *
+ * - What the wake SAYS — the seat epoch, the reasons, the state fingerprint
+ *   they were raised against — so a wake that never landed is re-raised at the
+ *   next check under the same key and replays instead of stacking a second
+ *   copy of a message the seat may still receive.
+ * - WHICH wake it is — the stamp of the last delivered one, which only a
+ *   landed send advances. Without it the hourly wake on an unchanged board
+ *   would carry the previous hour's key and be swallowed as a replay: silence
+ *   the seat could not tell from a healthy board.
+ */
+function wakeClientMessageId(
+  project: string,
+  seatEpoch: number,
+  verdict: SeatTickVerdict,
+  context: { fingerprint: string; lastWakeAt: string | null },
+): string {
+  const shape = verdict.kind === "wake"
+    ? verdict.reasons.map((reason) => reason.kind).sort().join(",")
+    : "proposal";
+  return `seat-tick:${project}:${seatEpoch}:${context.lastWakeAt ?? "first"}:${shape}:${context.fingerprint}`;
 }
 
 /**
  * One check of one project: read, decide, maybe wake, journal.
  *
  * Returns the journal line it wrote, so a caller — a test, or a future status
- * surface — reads exactly what was recorded rather than a parallel summary.
+ * surface — reads exactly what was recorded rather than a parallel summary. It
+ * throws only if the journal append itself fails; every other failure becomes
+ * an `error` line, because a check that vanished silently is the ambiguity this
+ * journal exists to remove.
  */
 export async function runSeatTickCheck(
   project: string,
@@ -117,19 +165,47 @@ export async function runSeatTickCheck(
 ): Promise<SeatTickRunRecord | null> {
   const policy = dependencies.policy === undefined ? seatTickPolicy() : dependencies.policy;
   if (!policy) return null;
-  const sources = dependencies.sources ?? defaultSeatTickSources();
-  const readState = dependencies.readState ?? readSeatTickState;
-  const writeState = dependencies.writeState ?? writeSeatTickState;
   const appendRecord = dependencies.appendRecord ?? appendSeatTickRecord;
-  const deliver = dependencies.deliver ?? deliverConversationMessage;
-  const ensureCard = dependencies.ensureCard ?? ensureSeatTickCard;
-
   /* Canonical before the read, because the write below is keyed by the
      canonical name: an alias read against a canonical write would find an empty
      row every check, and an empty row has never been woken, so the tick would
      wake on every check instead of hourly. */
   const canonical = canonicalOrchestratorProject(project);
-  const gathered = gatherSeatTickInput(canonical, readState(canonical), policy, sources);
+
+  try {
+    return await check(canonical, policy, dependencies, appendRecord);
+  } catch (error) {
+    const record: SeatTickRunRecord = {
+      schemaVersion: 1,
+      at: new Date().toISOString(),
+      project: canonical,
+      seatEpoch: null,
+      verdict: "error",
+      reasons: [],
+      items: 0,
+      deferred: 0,
+      eventsThrough: 0,
+      delivery: null,
+      detail: `the check failed: ${redactMonitorText(error instanceof Error ? error.message : "unknown error")}`,
+    };
+    appendRecord(record);
+    return record;
+  }
+}
+
+async function check(
+  canonical: string,
+  policy: SeatTickPolicy,
+  dependencies: SeatTickControllerDependencies,
+  appendRecord: typeof appendSeatTickRecord,
+): Promise<SeatTickRunRecord> {
+  const sources = dependencies.sources ?? defaultSeatTickSources();
+  const readState = dependencies.readState ?? readSeatTickState;
+  const writeState = dependencies.writeState ?? writeSeatTickState;
+  const deliver = dependencies.deliver ?? deliverConversationMessage;
+  const ensureCard = dependencies.ensureCard ?? ensureSeatTickCard;
+
+  const gathered = await gatherSeatTickInput(canonical, readState(canonical), policy, sources);
   const input = { ...gathered, state: seatTickStateForEpoch(gathered.state, gathered.seat?.seatEpoch ?? null) };
   const decision = seatTickDecision(input);
   const at = new Date(input.now).toISOString();
@@ -147,8 +223,10 @@ export async function runSeatTickCheck(
   const verdict = decision.verdict;
 
   if ((verdict.kind === "wake" || verdict.kind === "proactive") && input.seat) {
-    const slot = Math.floor(input.now / policy.checkIntervalMs);
-    const clientMessageId = `seat-tick:${input.project}:${input.seat.seatEpoch}:${slot}`;
+    const clientMessageId = wakeClientMessageId(input.project, input.seat.seatEpoch, verdict, {
+      fingerprint: input.changeFingerprint,
+      lastWakeAt: input.state.lastWakeAt,
+    });
     const text = verdict.kind === "wake"
       ? seatTickWakeMessage({
         project: input.project,
@@ -185,10 +263,15 @@ export async function runSeatTickCheck(
         origin: { kind: "agent", role: "seat-tick" },
       });
       delivery = { clientMessageId, outcome: deliveryOutcomeLabel(outcome) };
-      /* Only a delivered wake is recorded as one: a refused or failed send must
-         not advance the wake stamp, or the next check would wait out an hour
-         for a message the seat never got. */
-      if (outcome.ok) state = seatTickWakeCommit(state, verdict, input.changeFingerprint, input.now);
+      /* Only a wake the seat actually has is recorded as one. A refusal, a
+         failure, a migration hold or a runtime queue leaves the wake stamp and
+         the event cursor exactly where they were, so the next check re-raises
+         the same wake under the same id rather than waiting out an hour for a
+         message nobody read. */
+      if (wakeReached(outcome)) {
+        const eventsThrough = input.events.at(-1)?.seq ?? state.eventsThrough;
+        state = seatTickWakeCommit(state, verdict, { fingerprint: input.changeFingerprint, eventsThrough, now: input.now });
+      }
     }
   }
 
@@ -202,18 +285,12 @@ export async function runSeatTickCheck(
     reasons: verdict.kind === "wake" ? verdict.reasons.map((reason) => reason.kind) : [],
     items: verdict.kind === "wake" ? verdict.items.length : 0,
     deferred: verdict.kind === "wake" ? verdict.deferred : 0,
-    digestThrough: state.digestThrough,
+    eventsThrough: state.eventsThrough,
     delivery,
     detail: verdictDetail(verdict),
   };
   appendRecord(record);
   return record;
-}
-
-function verdictDetail(verdict: ReturnType<typeof seatTickDecision>["verdict"]): string | null {
-  if (verdict.kind === "skipped") return "the seat is mid-turn; the tick is dropped, never queued";
-  if (verdict.kind === "wake") return verdict.reasons.map((reason) => reason.detail).join("; ");
-  return verdict.detail;
 }
 
 async function defaultProposalIssues(project: string, sources: SeatTickSources): Promise<ProposalIssue[]> {
@@ -222,7 +299,9 @@ async function defaultProposalIssues(project: string, sources: SeatTickSources):
 }
 
 /** Every project the tick has an opinion about, checked once. One project's
-    failure never stops the others: this is a sweep, not a transaction. */
+    failure never stops the others: this is a sweep, not a transaction — and
+    each project's own failure is a journal line of its own, written by
+    {@link runSeatTickCheck}. */
 export async function reconcileSeatTick(dependencies: SeatTickControllerDependencies = {}): Promise<SeatTickRunRecord[]> {
   const sources = dependencies.sources ?? defaultSeatTickSources();
   const records: SeatTickRunRecord[] = [];
@@ -231,7 +310,9 @@ export async function reconcileSeatTick(dependencies: SeatTickControllerDependen
       const record = await runSeatTickCheck(project, { ...dependencies, sources });
       if (record) records.push(record);
     } catch (error) {
-      console.error("[seat tick] check failed", error instanceof Error ? error.name : "unknown");
+      /* Only an unwritable journal reaches here; the check itself records its
+         own failures. */
+      console.error("[seat tick] check could not be journaled", error instanceof Error ? error.name : "unknown");
     }
   }
   return records;
@@ -246,19 +327,46 @@ const tickHost = globalThis as typeof globalThis & {
  * Start the clock, or refuse out loud.
  *
  * The refusal is the requirement, not a nicety: two orchestrators ticking one
- * project is a defect to make visible, and a silent early return is how the
+ * project is a defect to make visible, and a silent early return is how a
  * predecessor's schedule went on firing for hours next to its successor with
- * nothing anywhere saying so.
+ * nothing anywhere saying so. So a second start is logged AND journaled — the
+ * journal being the artifact that outlives both processes, which is the whole
+ * reason it exists.
+ *
+ * There is deliberately no cross-process lock behind this. Exactly one process
+ * owns traffic (`viewerReleaseOwnsTraffic`), a deployment candidate does not
+ * start controllers at all, and adding a lock would put a second, weaker answer
+ * beside that one.
  */
 export function startSeatTick(ports: {
   scheduleInterval?: (callback: () => void, delayMs: number) => ReturnType<typeof setInterval>;
   sweep?: () => Promise<unknown>;
   policy?: SeatTickPolicy | null;
   log?: (line: string) => void;
+  appendRecord?: typeof appendSeatTickRecord;
 } = {}): boolean {
   const log = ports.log ?? ((line: string) => console.error(line));
   if (tickHost.__llvSeatTickTimer) {
-    log("[seat tick] refused: this process already holds the seat tick — exactly one ticker per seat");
+    const refusal = "this process already holds the seat tick — exactly one ticker per seat";
+    log(`[seat tick] refused: ${refusal}`);
+    try {
+      (ports.appendRecord ?? appendSeatTickRecord)({
+        schemaVersion: 1,
+        at: new Date().toISOString(),
+        project: "",
+        seatEpoch: null,
+        verdict: "refused",
+        reasons: [],
+        items: 0,
+        deferred: 0,
+        eventsThrough: 0,
+        delivery: null,
+        detail: `a second seat tick start was refused: ${refusal}`,
+      });
+    } catch {
+      /* The log line above already carries the refusal; an unwritable journal
+         must not turn a refusal into a crash. */
+    }
     return false;
   }
   const policy = ports.policy === undefined ? seatTickPolicy() : ports.policy;

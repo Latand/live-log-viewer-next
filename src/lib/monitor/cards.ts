@@ -101,3 +101,42 @@ export function orchestratorAlertCardText(detail: string, at: string): string {
     CARD_TEXT_LIMIT,
   );
 }
+
+/* ------------------------------------------------------------------------- *
+ * The seat tick's cards (#1245), on the same `monitor-ref:` idempotency.
+ *
+ * The tick raises the "no active orchestrator seat" condition under
+ * {@link ORCHESTRATOR_ALERT_REF} — the very ref the conversation monitor above
+ * uses — so the two mechanisms cannot double-card one missing orchestrator.
+ * ------------------------------------------------------------------------- */
+
+/** The ref of the card raised when a wake reason has stopped producing change.
+    One per reason kind, so two stuck reasons are two readable cards. */
+export const seatTickRetryGuardRef = (kind: string): string => `seat-tick-stuck-${kind}`;
+
+/** The `monitor-ref:` value a proposal card carries. Colon-free, because that
+    is what {@link monitorRefIn} will read back. */
+export const seatTickProposalRef = (slot: string): string => `seat-tick-proposal-${slot}`;
+
+/**
+ * The card raised when a wake reason has stopped producing any change.
+ *
+ * The tick then stops re-prompting the same failure and the operator has the
+ * record. The mechanism this replaces had no attempt budget anywhere: it
+ * re-ran one failing deployment four times in a session, and two of those
+ * rollbacks killed every lane on the machine.
+ */
+export function seatTickRetryGuardCardText(project: string, detail: string, ref: string, at: string): string {
+  return redactBounded(
+    [
+      "Seat tick stopped re-sending a wake reason",
+      "",
+      `${detail}.`,
+      `Project ${project}. Observed ${at.slice(0, 16).replace("T", " ")} UTC.`,
+      "The tick resumes this reason on its own once the board or a pipeline moves.",
+      "",
+      `${MONITOR_REF_PREFIX} ${ref}`,
+    ].join("\n"),
+    CARD_TEXT_LIMIT,
+  );
+}

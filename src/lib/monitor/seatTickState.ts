@@ -9,11 +9,12 @@ import { emptySeatTickState, SEAT_TICK_WAKE_REASON_KINDS, type SeatTickProjectSt
 /**
  * The seat tick's durable row per project (issue #1245).
  *
- * A timer that happened to be running is never the source of truth: the state
- * that decides what a check does — when the last check and the last wake were,
- * what was stalled at the previous check, whether the last wake changed
- * anything — lives here, so a Viewer restart, a deploy or a rotation resumes
- * from the stamps rather than from a process's memory.
+ * A timer that happened to be running is never the source of truth. Everything
+ * that decides what a check does — when the last check and the last DELIVERED
+ * wake were, what was stalled at the previous check, which lifecycle events the
+ * seat has actually been told about, whether the last wake changed anything —
+ * lives here, so a Viewer restart, a deploy or a rotation resumes from the
+ * stamps rather than from a process's memory.
  */
 
 const SEAT_TICK_STATE_VERSION = 1;
@@ -55,7 +56,7 @@ function normalizeRow(value: unknown): SeatTickProjectState {
       .filter((entry): entry is string => typeof entry === "string" && entry.length > 0 && entry.length <= 100)
       .slice(0, 200),
     lastWakeFingerprint: typeof raw.lastWakeFingerprint === "string" ? raw.lastWakeFingerprint.slice(0, 200) : null,
-    digestThrough: typeof raw.digestThrough === "number" && Number.isInteger(raw.digestThrough) && raw.digestThrough >= 0 ? raw.digestThrough : 0,
+    eventsThrough: typeof raw.eventsThrough === "number" && Number.isInteger(raw.eventsThrough) && raw.eventsThrough >= 0 ? raw.eventsThrough : 0,
   };
 }
 
@@ -81,10 +82,15 @@ function readFile(filePath: string): SeatTickStateFile {
  * retry-guard counters and its wake stamps start empty. That is the whole
  * handover — the incoming seat is ticking without anyone configuring it, and it
  * is not carrying a record of wakes it never received.
+ *
+ * The event cursor is the one thing that survives, because it is a fact about
+ * the journal rather than about the seat: re-relaying a predecessor's whole
+ * history to a fresh successor would bury the events that arrived after it sat
+ * down.
  */
 export function seatTickStateForEpoch(row: SeatTickProjectState, seatEpoch: number | null): SeatTickProjectState {
   if (row.seatEpoch === seatEpoch) return row;
-  return { ...emptySeatTickState(), seatEpoch, digestThrough: row.digestThrough };
+  return { ...emptySeatTickState(), seatEpoch, eventsThrough: row.eventsThrough };
 }
 
 export function readSeatTickState(project: string, filePath = seatTickStatePath()): SeatTickProjectState {
