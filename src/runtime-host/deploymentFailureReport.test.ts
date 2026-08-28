@@ -102,3 +102,39 @@ test("a deployment that failed before any health check says so instead of render
   ]);
   expect(deploymentFailureReport(null)).toEqual([]);
 });
+
+
+/* Three deploys failed on this gate and the printed report named no cause. */
+test("a refused MCP read is printed with the reason the candidate's own runtime gave", () => {
+  const report = deploymentFailureReport(status([{
+    checkedAt: "2026-08-28T01:31:13.231Z",
+    endpoint: CANDIDATE,
+    processReady: true,
+    rootStatus: 200,
+    authenticatedStatus: 200,
+    unauthorizedStatus: 403,
+    assets: [{ path: "/_next/static/chunks/main.js", status: 200 }],
+    mcpRuntime: {
+      checkedAt: "2026-08-28T01:31:13.238Z",
+      revision: "b".repeat(40),
+      artifactDigest: "c".repeat(64),
+      processReady: true,
+      tools: ["board_snapshot", "deployment_status"],
+      calls: { deploymentStatus: true, boardSnapshot: false },
+      callFailures: [{
+        tool: "board_snapshot",
+        code: "tool_failed",
+        error: "file scanner worker exited before completion (1): Module not found ~/release/fileScanner.worker.ts",
+      }],
+      ok: false,
+      detail: "MCP runtime read probes failed",
+    },
+    ok: false,
+    detail: "MCP runtime read probes failed",
+  }]));
+
+  expect(report).toContain(
+    "  mcp board_snapshot refused (tool_failed): file scanner worker exited before completion (1):"
+    + " Module not found ~/release/fileScanner.worker.ts",
+  );
+});

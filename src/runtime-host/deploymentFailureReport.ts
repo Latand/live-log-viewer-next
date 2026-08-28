@@ -35,6 +35,11 @@ export function deploymentFailureReport(status: unknown): string[] {
   const mcp = last.mcpRuntime;
   if (mcp) {
     lines.push(`  mcp runtime: process ${mcp.processReady ? "ready" : "not ready"}, deployment_status ${mcp.calls.deploymentStatus}, board_snapshot ${mcp.calls.boardSnapshot}${mcp.detail ? ` - ${mcp.detail}` : ""}`);
+    /* One line per refused read, so the tool's own reason is printed even when
+       the composed detail was clamped before reaching it. */
+    for (const failure of mcp.callFailures ?? []) {
+      lines.push(`  mcp ${failure.tool} refused${failure.code ? ` (${failure.code})` : ""}: ${failure.error}`);
+    }
   }
   const log = last.containerLog ?? [];
   if (log.length > 0) {

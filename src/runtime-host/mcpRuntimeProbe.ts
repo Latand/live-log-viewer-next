@@ -4,8 +4,14 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
 import { MCP_HEALTH_PROBE_CAPABILITY_ENV } from "@/lib/mcp/healthProbeAdmission";
 import { MCP_TOOL_NAMES } from "@/lib/mcp/server";
-import type { ViewerMcpRuntimeHealthEvidence, ViewerMcpRuntimeIdentity } from "@/lib/runtime/contracts";
+import { redactMonitorText } from "@/lib/monitor/redact";
+import type {
+  ViewerMcpRuntimeCallFailure,
+  ViewerMcpRuntimeHealthEvidence,
+  ViewerMcpRuntimeIdentity,
+} from "@/lib/runtime/contracts";
 
+import { probeExcerpt } from "./deploymentHealth";
 import { McpProbeStdioTransport } from "./mcpProbeStdioTransport";
 import type { McpHealthProbeAdmissionConsumer } from "./mcpHealthProbeAdmissionChannel";
 
@@ -55,6 +61,46 @@ export function mcpToolCallRefusal(value: unknown): string {
   return `${reason}${status}`;
 }
 
+/** The MCP failure envelope's own code (`tool_failed`, `tool_not_permitted`,
+    `call_interrupted`, …), which classes a refusal without parsing its prose. */
+export function mcpToolCallRefusalCode(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const structured = (value as { structuredContent?: unknown }).structuredContent;
+  if (!structured || typeof structured !== "object") return null;
+  const code = (structured as { code?: unknown }).code;
+  return typeof code === "string" && code.trim() ? code.trim().slice(0, 64) : null;
+}
+
+/* How much of a refusal the durable record keeps. The record outlives the
+   candidate and the operator pastes it into issues, so the text is redacted,
+   collapsed to one printable line and clamped where it is captured, exactly
+   like `containerLog`. Redaction runs before the clamp so a truncation can
+   never leave half of what it removed. */
+const CALL_FAILURE_CHARS = 300;
+
+function recordedRefusal(value: unknown): string {
+  return probeExcerpt(redactMonitorText(mcpToolCallRefusal(value)), CALL_FAILURE_CHARS);
+}
+
+/** The failing reads, each with the tool's own account of why it failed.
+    `calls` already says WHICH read failed, and that boolean was the entire
+    record for three deploys — it can explain none of them (#790). Empty when
+    every read answered. */
+export function mcpProbeCallFailures(
+  calls: Array<{ name: string; ok: boolean; result: unknown }>,
+): ViewerMcpRuntimeCallFailure[] {
+  return calls
+    .filter((call) => !call.ok)
+    .map((call) => {
+      const code = mcpToolCallRefusalCode(call.result);
+      return {
+        tool: call.name,
+        ...(code ? { code } : {}),
+        error: recordedRefusal(call.result),
+      };
+    });
+}
+
 /** Names the failed read, its refusal and the control surface the probe was
     pointed at, so a failure can be told apart from a probe aimed at the wrong
     Viewer without re-reading the adapter (#790). */
@@ -62,9 +108,8 @@ export function mcpProbeFailureDetail(input: {
   controlUrl: string | undefined;
   calls: Array<{ name: string; ok: boolean; result: unknown }>;
 }): string {
-  const failures = input.calls
-    .filter((call) => !call.ok)
-    .map((call) => `${call.name}: ${mcpToolCallRefusal(call.result)}`);
+  const failures = mcpProbeCallFailures(input.calls)
+    .map((failure) => `${failure.tool}: ${failure.error}`);
   const target = input.controlUrl ? ` against ${input.controlUrl}` : "";
   return `MCP runtime read probes failed${target} - ${failures.join("; ") || "no read reported a reason"}`
     .replace(/[\r\n]+/g, " ")
@@ -138,6 +183,14 @@ export async function probeMcpRuntime(options: McpRuntimeProbeOptions): Promise<
     boardSnapshot = successfulToolCall(board);
     const missing = REQUIRED_TOOLS.filter((tool) => !tools.includes(tool));
     const ok = missing.length === 0 && deploymentStatus && boardSnapshot;
+    const reads = [
+      { name: "deployment_status", ok: deploymentStatus, result: deployment },
+      { name: "board_snapshot", ok: boardSnapshot, result: board },
+    ];
+    /* Kept whenever a read was refused, including when a missing tool decides
+       the verdict: the refusal is the only account of the candidate's own
+       runtime that survives, and the candidate is retired seconds later. */
+    const callFailures = mcpProbeCallFailures(reads);
     return {
       checkedAt,
       revision: options.runtime.revision,
@@ -145,17 +198,12 @@ export async function probeMcpRuntime(options: McpRuntimeProbeOptions): Promise<
       processReady,
       tools,
       calls: { deploymentStatus, boardSnapshot },
+      ...(callFailures.length ? { callFailures } : {}),
       ok,
       ...(ok ? {} : {
         detail: missing.length
           ? `MCP runtime is missing tools: ${missing.join(", ")}`
-          : mcpProbeFailureDetail({
-            controlUrl,
-            calls: [
-              { name: "deployment_status", ok: deploymentStatus, result: deployment },
-              { name: "board_snapshot", ok: boardSnapshot, result: board },
-            ],
-          }),
+          : mcpProbeFailureDetail({ controlUrl, calls: reads }),
       }),
     };
   } catch (error) {

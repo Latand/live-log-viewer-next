@@ -158,6 +158,79 @@ test("candidate health evidence carries its probe observations, readiness budget
   expect(await adapter.verifyCandidate(candidate)).toEqual(failing);
 });
 
+/* The boolean pair in `calls` cannot explain a failed read, and the candidate
+   that produced the refusal is retired seconds later (#790). */
+test("the MCP probe's refused reads cross the boundary with the reason each one gave", async () => {
+  const failing: ViewerHealthEvidence = {
+    checkedAt: "2026-08-28T01:31:13.231Z",
+    endpoint: "http://127.0.0.1:19250",
+    processReady: true,
+    rootStatus: 200,
+    authenticatedStatus: 200,
+    unauthorizedStatus: 403,
+    assets: [],
+    mcpRuntime: {
+      checkedAt: "2026-08-28T01:31:13.238Z",
+      revision: "a".repeat(40),
+      artifactDigest: "b".repeat(64),
+      processReady: true,
+      tools: ["board_snapshot", "deployment_status"],
+      calls: { deploymentStatus: true, boardSnapshot: false },
+      callFailures: [{
+        tool: "board_snapshot",
+        code: "tool_failed",
+        error: "file scanner worker exited before completion (1)",
+      }],
+      ok: false,
+      detail: "MCP runtime read probes failed against http://127.0.0.1:19250 - board_snapshot: file scanner worker exited before completion (1)",
+    },
+    ok: false,
+    detail: "MCP runtime read probes failed",
+  };
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:19250",
+    revision: "a".repeat(40),
+  };
+  const adapter = new HostCommandViewerDeploymentAdapter(async (action) => (
+    action === "verify-candidate" ? failing : {}
+  ));
+
+  expect(await adapter.verifyCandidate(candidate)).toEqual(failing);
+});
+
+test("an MCP call failure missing its reason is refused rather than recorded half-read", async () => {
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:19250",
+    revision: "a".repeat(40),
+  };
+  const adapter = new HostCommandViewerDeploymentAdapter(async () => ({
+    checkedAt: "2026-08-28T01:31:13.231Z",
+    endpoint: "http://127.0.0.1:19250",
+    processReady: true,
+    rootStatus: 200,
+    authenticatedStatus: 200,
+    unauthorizedStatus: 403,
+    assets: [],
+    mcpRuntime: {
+      checkedAt: "2026-08-28T01:31:13.238Z",
+      revision: "a".repeat(40),
+      artifactDigest: "b".repeat(64),
+      processReady: true,
+      tools: [],
+      calls: { deploymentStatus: true, boardSnapshot: false },
+      callFailures: [{ tool: "board_snapshot" }],
+      ok: false,
+    },
+    ok: false,
+  }));
+
+  expect(adapter.verifyCandidate(candidate)).rejects.toThrow("invalid MCP runtime call failures");
+});
+
 test("health evidence with an unusable observation is refused rather than recorded half-read", async () => {
   const candidate = {
     image: "viewer:test",

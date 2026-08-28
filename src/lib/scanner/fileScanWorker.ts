@@ -24,7 +24,7 @@ type FileScanWorkerMessage =
   | { type: "complete"; snapshot: FileCatalogScan };
 
 export interface FileScanWorkerRuntime {
-  launch?: { executable: string; workerPath: string };
+  launch?: FileScanWorkerLaunch;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
@@ -57,7 +57,25 @@ function workerMessage(value: unknown): FileScanWorkerMessage | null {
   return value as unknown as FileScanWorkerMessage;
 }
 
-function workerLaunch(cwd = process.cwd()): { executable: string; workerPath: string } {
+export interface FileScanWorkerLaunch {
+  executable: string;
+  workerPath: string;
+}
+
+/**
+ * The worker artifact THIS process can run, or `null` when its root carries
+ * none.
+ *
+ * Both artifacts are resolved against the process root: the container's
+ * checkout, or a built Next server. The published MCP runtime release is
+ * neither — its root holds `dist/`, `node_modules/` and a manifest — and the
+ * final branch used to return the source path it had just found missing and
+ * spawn it anyway. Every corpus read in that process then died with
+ * `Module not found`, which is how a candidate whose whole HTTP surface was
+ * healthy failed its `board_snapshot` gate (#790). Naming the absence lets the
+ * caller scan in-process instead of launching nothing.
+ */
+export function fileScanWorkerLaunch(cwd = process.cwd()): FileScanWorkerLaunch | null {
   const source = path.join(cwd, "src/lib/fileScanner.worker.ts");
   const bundled = path.join(cwd, ".next/server/file-scanner-worker.js");
   if (fs.existsSync(source) && fs.existsSync("/usr/local/bin/bun-container")) {
@@ -67,7 +85,8 @@ function workerLaunch(cwd = process.cwd()): { executable: string; workerPath: st
     const bun = process.versions.bun ? process.execPath : (process.env.LLV_BUN_EXECUTABLE || "bun");
     return { executable: bun, workerPath: bundled };
   }
-  return { executable: process.execPath, workerPath: source };
+  if (fs.existsSync(source)) return { executable: process.execPath, workerPath: source };
+  return null;
 }
 
 export function fileScanWorkerEnabled(
@@ -84,8 +103,11 @@ export function collectFileScanInWorker(
   runtime: FileScanWorkerRuntime = {},
 ): Promise<FileCatalogScan> {
   if (runtime.signal?.aborted) return Promise.reject(abortError());
+  const launch = runtime.launch ?? fileScanWorkerLaunch(runtime.cwd);
+  /* Callers choose the in-process scan when no artifact is present; reaching
+     here without one would spawn a path this process does not have. */
+  if (!launch) return Promise.reject(new Error("this process has no file scanner worker artifact"));
   const catalogScanToken = beginProjectCatalogScan(false);
-  const launch = runtime.launch ?? workerLaunch(runtime.cwd);
   /* Full-corpus scans are background freshness work. Keep the interactive
      Next process ahead of their CPU demand on a busy operator host. Explicit
      test/runtime launch seams retain their exact command. */
