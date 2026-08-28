@@ -71,6 +71,9 @@ while :; do
     if [ "$terminal" = "1" ]; then
       [ "$phase" = "succeeded" ] && exit 0
       echo "deployment ended in $phase: $error" >&2
+      # The failed candidate is retired before anyone can inspect it, so print
+      # what the gate observed while it was alive (#790).
+      printf '%s' "$status_json" | bun "$(dirname "$0")/deployment-failure-report.ts" >&2 || true
       exit 1
     fi
   fi

@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
+import type { ViewerHealthEvidence } from "@/lib/runtime/contracts";
+
 import { HostCommandViewerDeploymentAdapter } from "./deploymentAdapter";
 import { promotedViewerReadinessPhase } from "./deploymentHealth";
 import { PROMOTE_ACTION_TIMEOUT_MS } from "./deploymentHotState";
@@ -113,6 +115,69 @@ test("host adapter exposes fixed actions and carries structured release data", a
   expect(calls[1]?.input).toEqual({ deploymentId: "deploy-1", revision: "a".repeat(40) });
   expect(calls.at(-1)?.input).toEqual({ generation: { image: candidate.image, revision: candidate.revision, container: "runtime-host-successor" } });
   expect(calls.every((call) => !Object.hasOwn(call.input, "command") && !Object.hasOwn(call.input, "args"))).toBe(true);
+});
+
+/* A diagnosis the gate collected is worth nothing if it stops at this boundary
+   on its way to the durable record (#790). */
+test("candidate health evidence carries its probe observations, readiness budget and candidate output", async () => {
+  const failing: ViewerHealthEvidence = {
+    checkedAt: "2026-08-28T00:00:33.000Z",
+    endpoint: "http://127.0.0.1:18001",
+    processReady: true,
+    rootStatus: 500,
+    authenticatedStatus: 500,
+    unauthorizedStatus: 500,
+    assets: [],
+    observations: [
+      { name: "root", url: "http://127.0.0.1:18001/", status: 500, elapsedMs: 6, expected: "200", ok: false, body: "Internal Server Error" },
+      {
+        name: "capability",
+        url: "http://127.0.0.1:18001/api/runtime/deployments/capabilities/v1",
+        status: 0,
+        elapsedMs: 5_001,
+        expected: "200 with capability viewer-deployments version 1",
+        ok: false,
+        error: "no answer within 5000 ms",
+      },
+    ],
+    readiness: { attempts: 30, maxAttempts: 30, delayMs: 1_000, elapsedMs: 33_580, firstDetail: "Viewer candidate did not answer" },
+    containerLog: ["TypeError: a route module failed to load"],
+    ok: false,
+    detail: "candidate readiness timed out after 30 attempts over 33.6s",
+  };
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:18001",
+    revision: "a".repeat(40),
+  };
+  const adapter = new HostCommandViewerDeploymentAdapter(async (action) => (
+    action === "verify-candidate" ? failing : {}
+  ));
+
+  expect(await adapter.verifyCandidate(candidate)).toEqual(failing);
+});
+
+test("health evidence with an unusable observation is refused rather than recorded half-read", async () => {
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:18001",
+    revision: "a".repeat(40),
+  };
+  const adapter = new HostCommandViewerDeploymentAdapter(async () => ({
+    checkedAt: "2026-08-28T00:00:33.000Z",
+    endpoint: "http://127.0.0.1:18001",
+    processReady: true,
+    rootStatus: 500,
+    authenticatedStatus: null,
+    unauthorizedStatus: null,
+    assets: [],
+    observations: [{ name: "root", url: "http://127.0.0.1:18001/", status: "500", elapsedMs: 6, expected: "200", ok: false }],
+    ok: false,
+  }));
+
+  expect(adapter.verifyCandidate(candidate)).rejects.toThrow("deployment adapter returned invalid health evidence");
 });
 
 test("the host injects and revokes health authority only around probe-bearing adapter actions", async () => {
