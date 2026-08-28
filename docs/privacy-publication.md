@@ -53,13 +53,22 @@ committer into a `Co-authored-by:` trailer of its own, so an address on no
 message at all can reach the public history. The check runs on the pull request,
 before the merge composes that commit.
 
-An identity publishes nobody when it is the account the repository belongs to on
-the forge — read from the origin remote of the checkout under inspection, never
-written down — or one of the machine-attribution mailboxes the trailer rule
-already exempts. Every other identity is a person and produces `email_address`,
-exactly as an address in a file does, with a `merge_boundary:` line naming the
-commit, the field and the trailer. The address stays suppressed there like every
-other matched value: `git show -s <commit>` names it to whoever is fixing it.
+An identity publishes nobody when its address sits on the forge's
+`users.noreply.github.com` host, or when it is one of the machine-attribution
+mailboxes the trailer rule already exempts. The forge issues a no-reply address
+so that an account's own address is not what its commits carry, and the handle
+on it is already public on the pull request, so the composed trailer discloses
+nothing the contribution has not. Every other identity is a person and produces
+`email_address`, exactly as an address in a file does, with a `merge_boundary:`
+line naming the commit, the field and the trailer. The address stays suppressed
+there like every other matched value: `git show -s <commit>` names it to whoever
+is fixing it.
+
+That reading of the no-reply host belongs to the identity path alone. An address
+on it written into a commit message — as a trailer by hand, or anywhere in the
+body — is an account handle in text and stays reportable, because the exemption
+for written trailers is the local part being exactly `noreply` or `no-reply`,
+plus the forge's own `support` role mailbox.
 
 ## Known-value fingerprints
 

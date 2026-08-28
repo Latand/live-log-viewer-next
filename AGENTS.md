@@ -91,6 +91,13 @@ address reads as a no-reply address and is an account handle with a number in
 front of it, and the same address written into prose is not attribution, so
 both are still violations.
 
+The identity git records on a commit is read by a separate rule. A squash merge
+composes those identities into a `Co-authored-by:` trailer on the default
+branch, and there an address on the `users.noreply` host of the forge passes:
+the forge issues it so an account's own address is not what its commits carry.
+That reading is the merge boundary only — it changes nothing about what you may
+write into a message, a doc or a fixture, where the paragraph above still holds.
+
 `privacy-publication` on CI enforces this with a fingerprint list the repo does
 not carry, so it fails **after** you have pushed. Scrub before the push:
 `bun scripts/privacy-publication-gate.ts --base <merge-base>` locally catches the
