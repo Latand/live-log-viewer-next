@@ -215,20 +215,27 @@ describe("seat tick check journal", () => {
     expect(records[1]).toMatchObject({ verdict: "wake", reasons: ["stalled"], items: 2 });
   });
 
-  /* The three lines that exist so an absence is never a silence: a wake nobody
-     received, a check that threw, and a second clock refused at start. */
-  test("a refused send, a failed check and a refused second clock are all on the record", () => {
+  /* The lines that exist so an absence is never a silence: a wake nobody
+     received, a check that threw, a clock refused for want of authority, and a
+     wake taken back from a seat that had already been replaced. */
+  test("a refused send, a failed check, a refused clock and a revoked wake are all on the record", () => {
     const refusals = path.join(SANDBOX, "seat-tick-refusals.ndjson");
     appendSeatTickRecord(check({ verdict: "wake", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "seat-rotated" } }), refusals);
     appendSeatTickRecord(check({ verdict: "error", detail: "the check failed: the delivery layer is unavailable" }), refusals);
     appendSeatTickRecord(check({ verdict: "refused", project: "", detail: "a second seat tick start was refused" }), refusals);
+    appendSeatTickRecord(check({ verdict: "refused", project: "", detail: "the seat tick sweep was refused and this process's clock stopped" }), refusals);
+    appendSeatTickRecord(check({ verdict: "revoked", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "revoked" }, detail: "a wake the delivery layer had accepted but not landed was revoked" }), refusals);
     const records = readSeatTickRecords(10, refusals);
-    expect(records.map((entry) => entry.verdict)).toEqual(["wake", "error", "refused"]);
+    expect(records.map((entry) => entry.verdict)).toEqual(["wake", "error", "refused", "refused", "revoked"]);
     expect(records[0]!.delivery).toEqual({ clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "seat-rotated" });
     expect(records[1]!.detail).toContain("the check failed");
-    /* The refusal is the one line about the process rather than a project, so
-       it is the one line allowed to name none. */
+    /* A refusal is the one kind of line about the process rather than a
+       project, so it is the one kind allowed to name none. */
     expect(records[2]!.project).toBe("");
+    /* The sweep a promoted successor took over: the refusal outlives the
+       process that wrote it, which is the whole reason it goes here. */
+    expect(records[3]!.detail).toContain("clock stopped");
+    expect(records[4]!.delivery).toEqual({ clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "revoked" });
   });
 
   test("the sanitizer keeps only journal fields — smuggled transcript text and paths lose at the boundary", () => {
@@ -242,6 +249,9 @@ describe("seat tick check journal", () => {
     expect(sanitizeSeatTickRecord({ ...check(), verdict: "deploy" })).toBeNull();
     expect(sanitizeSeatTickRecord({ ...check(), project: "" })).toBeNull();
     expect(sanitizeSeatTickRecord({ ...check(), project: "", verdict: "refused" })).not.toBeNull();
+    /* A revoked wake is always about one project's seat, so a nameless one is
+       a line nothing can be read out of. */
+    expect(sanitizeSeatTickRecord({ ...check(), project: "", verdict: "revoked" })).toBeNull();
     expect(sanitizeSeatTickRecord({ ...check(), schemaVersion: 2 })).toBeNull();
     expect(sanitizeSeatTickRecord("a line")).toBeNull();
   });

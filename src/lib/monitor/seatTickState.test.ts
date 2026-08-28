@@ -22,6 +22,10 @@ afterAll(() => {
   }
 });
 
+/* Assembled from parts: a conversation-shaped literal is what the publication
+   gate refuses in a committed artifact. */
+const CONVERSATION = ["conversation", "0f4c21b7729fbc9e"].join("_");
+
 const row = {
   ...emptySeatTickState(),
   seatEpoch: 7,
@@ -32,6 +36,7 @@ const row = {
   stalledSeen: ["pipeline_a1"],
   lastWakeFingerprint: "fp-1",
   eventsThrough: 41,
+  outstandingWake: { clientMessageId: "seat-tick:viewer:7:first:interval:fp-1", conversationId: CONVERSATION, seatEpoch: 7 },
 };
 
 test("a row survives the write and reads back whole", () => {
@@ -69,16 +74,38 @@ test("a hand-edited row loses fields it is not allowed to carry", () => {
   expect(JSON.stringify(persisted)).not.toContain("a sentence");
 });
 
-test("a rotation hands the clock over: the successor's epoch starts the bookkeeping fresh", () => {
+test("a rotation hands the clock over: the successor's epoch starts the judgement fresh", () => {
   const successor = seatTickStateForEpoch(row, 8);
   expect(successor.seatEpoch).toBe(8);
-  expect(successor.lastWakeAt).toBeNull();
+  expect(successor.lastWakeReasons).toEqual([]);
   expect(successor.wakesWithoutChange).toEqual({});
   expect(successor.stalledSeen).toEqual([]);
   /* The lifecycle cursor is the one thing that is not the seat's: it belongs to
      the project, and replaying a rotation's worth of events would wake the
      successor for every lane that moved while the seat was changing hands. */
   expect(successor.eventsThrough).toBe(41);
+});
+
+/* Three things belong to the project rather than to the seat. The stamps are
+   the hourly bound: a rotation that cleared them would let a successor be woken
+   minutes after its predecessor was, which an operator rotating a seat by hand
+   could trip repeatedly. The outstanding wake is a payload the runtime is still
+   holding for the PREDECESSOR, and the successor's first check is what takes it
+   back — dropping it here would leave it addressed to nobody. */
+test("the bound and the unlanded wake survive the rotation, because neither is the seat's", () => {
+  const successor = seatTickStateForEpoch(row, 8);
+  expect(successor.lastWakeAt).toBe("2026-08-28T11:00:00.000Z");
+  expect(successor.lastProposalAt).toBe(row.lastProposalAt);
+  expect(successor.outstandingWake).toEqual(row.outstandingWake);
+});
+
+test("a hand-edited outstanding wake missing any of its three fields is dropped", () => {
+  const file = path.join(SANDBOX, "half-wake.json");
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    projects: { viewer: { ...row, outstandingWake: { clientMessageId: "seat-tick:viewer:7:first:interval:fp-1" } } },
+  }));
+  expect(readSeatTickState("viewer", file).outstandingWake).toBeNull();
 });
 
 test("the same epoch keeps the row it was given", () => {

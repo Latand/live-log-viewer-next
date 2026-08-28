@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   DEFAULT_SEAT_TICK_POLICY,
+  SEAT_TICK_WAKE_INTERVAL_MS,
   seatTickDecision,
   seatTickPolicy,
   seatTickWakeCommit,
@@ -191,15 +192,17 @@ test("a lane with no activity verdict at all is never called stalled", () => {
   expect(decision.state.stalledSeen).toEqual([]);
 });
 
-test("a terminal lane event wakes at the very next check, without waiting out the wake interval", () => {
-  const decision = seatTickDecision(input({
-    events: [event()],
-    terminalPending: true,
-    pipelines: [lane()],
-    state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
-  }));
-  expect(reasonsOf(decision.verdict)).toEqual(["lane-event"]);
-  expect(decision.verdict.kind === "wake" && decision.verdict.items[0]).toMatchObject({ kind: "event", id: "pipeline_a1" });
+/* A terminal lane event leads the next wake; it never raises an early one. The
+   hourly bound has no exempt reason kind, because a reason allowed to jump it
+   would make the ADR's cost argument describe a different system. */
+test("a terminal lane event leads the next wake rather than raising one early", () => {
+  const args = { events: [event()], terminalPending: true, pipelines: [lane()] };
+  const early = seatTickDecision(input({ ...args, state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }) }));
+  expect(early.verdict.kind).toBe("quiet");
+
+  const due = seatTickDecision(input({ ...args, state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }) }));
+  expect(reasonsOf(due.verdict)).toEqual(["lane-event"]);
+  expect(due.verdict.kind === "wake" && due.verdict.items[0]).toMatchObject({ kind: "event", id: "pipeline_a1" });
 });
 
 test("routine lane events do not wake on their own", () => {
@@ -220,7 +223,7 @@ test("a terminal event buried past the page still wakes, naming that it is furth
     events: [event({ type: "stage_started", summary: "builder started" })],
     terminalPending: true,
     pipelines: [lane()],
-    state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
   }));
   expect(reasonsOf(decision.verdict)).toEqual(["lane-event"]);
   expect(decision.verdict.kind === "wake" && decision.verdict.reasons[0]!.detail).toContain("further down the journal");
@@ -380,17 +383,27 @@ test("policy defaults are the accepted ones, and each is overridable in the reti
   expect(seatTickPolicy({ LLV_SEAT_TICK_CHECK_MINUTES: "0" })).toBeNull();
   expect(seatTickPolicy({
     LLV_SEAT_TICK_CHECK_MINUTES: "2",
-    LLV_SEAT_TICK_WAKE_MINUTES: "30",
     LLV_SEAT_TICK_STALL_MINUTES: "15",
     LLV_SEAT_TICK_PROPOSAL_HOURS: "6",
     LLV_SEAT_TICK_ITEMS: "3",
     LLV_SEAT_TICK_RETRY_GUARD: "1",
   })).toEqual({
     checkIntervalMs: 2 * MINUTE,
-    wakeIntervalMs: 30 * MINUTE,
     stallAfterMs: 15 * MINUTE,
     proposalIntervalMs: 6 * 60 * MINUTE,
     itemsPerWake: 3,
     retryGuard: 1,
   });
+});
+
+/* The wake interval is the one number the ADR's cost argument rests on — one
+   resume per project per interval — so it is not among the knobs. An
+   environment that tries to set it changes nothing. */
+test("the wake interval is a constant no environment can set", () => {
+  expect(SEAT_TICK_WAKE_INTERVAL_MS).toBe(60 * MINUTE);
+  const policy = seatTickPolicy({ LLV_SEAT_TICK_WAKE_MINUTES: "1" });
+  expect(policy).toEqual(DEFAULT_SEAT_TICK_POLICY);
+  expect(JSON.stringify(policy)).not.toContain("wakeInterval");
+  const almostDue = stateWith({ lastWakeAt: new Date(NOW - 59 * MINUTE).toISOString() });
+  expect(seatTickDecision(input({ pipelines: [lane()], policy: policy!, state: almostDue })).verdict.kind).toBe("quiet");
 });

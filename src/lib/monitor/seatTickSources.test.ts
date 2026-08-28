@@ -133,6 +133,8 @@ function sources(over: {
     lifecycleJournal: () => journal(over.events ?? []),
     deployments: () => ({ state: "unreadable", error: "no ledger" }) as never,
     retirementReport: () => null,
+    pendingDeliveries: () => [],
+    revokeDelivery: () => {},
     now: () => NOW,
   };
 }
