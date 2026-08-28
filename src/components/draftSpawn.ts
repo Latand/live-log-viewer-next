@@ -14,7 +14,7 @@ import { derivedSpawnTitle, durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } f
  * without a DOM. */
 
 /** The engine a draft can launch — the transcript roots differ per engine. */
-export type DraftEngine = "claude" | "codex";
+export type DraftEngine = "claude" | "codex" | "grok";
 
 /** Display phase of a draft card, derived from the durable attempt + timers. */
 export type DraftPhase = "draft" | "launching" | "booting" | "booting-slow" | "confirming" | "confirming-slow" | "attention";

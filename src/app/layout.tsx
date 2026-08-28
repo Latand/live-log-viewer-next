@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Agent Log Viewer",
-  description: "Agent Log Viewer for Codex and Claude agent logs",
+  description: "Agent Log Viewer for Codex, Claude, and Grok agent logs",
 };
 
 /* The on-screen keyboard shrinks the layout instead of covering it, so the

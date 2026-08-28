@@ -73,7 +73,7 @@ async function runObservation(signal?: AbortSignal): Promise<FileEntry[]> {
   await each(entries, (entry) => {
     const verdict = activityVerdict(entry.root, entry.path, entry.mtime, entry.size);
     entry.activity = verdict.state; entry.activityReason = verdict.reason; entry.derivationComplete = verdict.complete;
-    if (entry.path.endsWith(".jsonl") && (entry.engine === "claude" || entry.engine === "codex" || entry.engine === "openclaw")) {
+    if (entry.path.endsWith(".jsonl") && (entry.engine === "claude" || entry.engine === "codex" || entry.engine === "openclaw" || entry.engine === "grok")) {
       const authoritative = transcriptTurnResult(entry.path, entry.size, entry.mtime * 1000, entry.engine);
       entry.derivationComplete &&= authoritative.complete;
       if (authoritative.complete) entry.authoritativeTurn = authoritative.turn;

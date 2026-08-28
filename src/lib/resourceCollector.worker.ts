@@ -50,7 +50,7 @@ function resourceFileObservation(value: unknown): value is ResourceWorkerFileObs
     && typeof value.project === "string"
     && (value.activity === "live" || value.activity === "recent" || value.activity === "stalled" || value.activity === "idle")
     && typeof value.mtime === "number" && Number.isFinite(value.mtime) && value.mtime >= 0
-    && (value.engine === "claude" || value.engine === "codex" || value.engine === "shell" || value.engine === "openclaw")
+    && (value.engine === "claude" || value.engine === "codex" || value.engine === "shell" || value.engine === "openclaw" || value.engine === "grok")
     && (value.pid === null || (Number.isSafeInteger(value.pid) && (value.pid as number) > 0))
     && (value.proc === "running" || value.proc === "done" || value.proc === "killed" || value.proc === null)
     && nullableString(value.conversationId);

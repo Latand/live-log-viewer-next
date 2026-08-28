@@ -33,7 +33,7 @@ import { useLocale } from "@/lib/i18n";
  * its per-draft sessionStorage keys and a transient surface keeps nothing.
  */
 
-export type LaunchEngine = "claude" | "codex";
+export type LaunchEngine = "claude" | "codex" | "grok";
 export type { SpeedChoice };
 
 /** Secret-free slice of one stored account that a launch selector needs. */
@@ -48,6 +48,7 @@ export type LaunchAccountCatalog = Record<LaunchEngine, { active: string; accoun
 const ENGINES: { key: LaunchEngine; label: string }[] = [
   { key: "claude", label: "Claude" },
   { key: "codex", label: "Codex" },
+  { key: "grok", label: "Grok" },
 ];
 
 /** Crash-safe read of one engine section of `/api/accounts`: a malformed body
@@ -68,7 +69,11 @@ export function launchAccountSection(raw: unknown): LaunchAccountCatalog[LaunchE
 /** Both engine sections of one `/api/accounts` body. */
 export function launchAccountCatalogOf(body: unknown): LaunchAccountCatalog {
   const raw = body as { claude?: unknown; codex?: unknown } | null;
-  return { claude: launchAccountSection(raw?.claude), codex: launchAccountSection(raw?.codex) };
+  return {
+    claude: launchAccountSection(raw?.claude),
+    codex: launchAccountSection(raw?.codex),
+    grok: { active: "grok", accounts: [{ id: "grok", label: "Grok", authPresent: true }] },
+  };
 }
 
 /**
@@ -161,7 +166,7 @@ export function useAgentLaunchDraft(options: {
 
   const [engine, setEngineState] = useState<LaunchEngine>(() => {
     const stored = read("engine");
-    if (stored === "codex" || stored === "claude") return stored;
+    if (stored === "codex" || stored === "claude" || stored === "grok") return stored;
     return options.initialEngine ?? "claude";
   });
   const [model, setModelState] = useState(() => read("model") || options.initialModel || defaultModelFor(engine));

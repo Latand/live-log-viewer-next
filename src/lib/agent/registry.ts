@@ -431,7 +431,7 @@ export class SupersedenceConflictError extends Error {
 
 export interface RegistryConversation {
   id: ViewerConversationId;
-  engine: Extract<AgentEngine, "claude" | "codex">;
+  engine: Extract<AgentEngine, "claude" | "codex" | "grok">;
   generations: NativeGeneration[];
   /** Provider-created transcript artifacts that retain this conversation's
       identity while the canonical generation path advances. */
@@ -505,9 +505,9 @@ export interface RegistryFile {
   /** Durable redirects for conversation IDs that escaped before scanner-owned
       provisional identities were adopted by their canonical owner. */
   conversationAliases: Record<string, ViewerConversationId>;
-  conversationRevision: Record<Extract<AgentEngine, "claude" | "codex">, number>;
+  conversationRevision: Record<Extract<AgentEngine, "claude" | "codex" | "grok">, number>;
   migrationIntents: Record<string, MigrationIntent>;
-  engineRouting: Record<Extract<AgentEngine, "claude" | "codex">, { activeAccountId: string | null; revision: number }>;
+  engineRouting: Record<Extract<AgentEngine, "claude" | "codex" | "grok">, { activeAccountId: string | null; revision: number }>;
   autoBalance: Record<Extract<AgentEngine, "claude" | "codex">, AutoBalancePolicy>;
   quotaObservations: Record<Extract<AgentEngine, "claude" | "codex">, Record<string, DurableQuotaObservation>>;
   heldDeliveries: Record<string, HeldDelivery>;
@@ -1079,9 +1079,9 @@ const EMPTY: RegistryFile = {
   legacyResumePanes: { serverPid: null, panes: {} },
   conversations: {},
   conversationAliases: {},
-  conversationRevision: { claude: 0, codex: 0 },
+  conversationRevision: { claude: 0, codex: 0, grok: 0 },
   migrationIntents: {},
-  engineRouting: { claude: { activeAccountId: null, revision: 0 }, codex: { activeAccountId: null, revision: 0 } },
+  engineRouting: { claude: { activeAccountId: null, revision: 0 }, codex: { activeAccountId: null, revision: 0 }, grok: { activeAccountId: null, revision: 0 } },
   autoBalance: { claude: emptyPolicy(), codex: emptyPolicy() },
   quotaObservations: { claude: {}, codex: {} },
   heldDeliveries: {},
@@ -2593,7 +2593,7 @@ function normalizeReceipt(value: SpawnReceipt, policy?: McpGrantPolicy): SpawnRe
     parentSource: value.parentSource === "explicit" || value.parentSource === "inferred-caller" ? value.parentSource : null,
     state,
     artifactLifecycle: value.artifactLifecycle === "materialized" ? "materialized" : "pending",
-    key: value.key && typeof value.key === "object" && (value.key.engine === "claude" || value.key.engine === "codex") && typeof value.key.sessionId === "string" ? value.key : null,
+    key: value.key && typeof value.key === "object" && (value.key.engine === "claude" || value.key.engine === "codex" || value.key.engine === "grok") && typeof value.key.sessionId === "string" ? value.key : null,
     pane,
     verifiedHost: value.verifiedHost && typeof value.verifiedHost === "object" && value.verifiedHost.kind === "tmux" ? value.verifiedHost : null,
     target: pane?.paneId ?? (typeof value.target === "string" && /^%\d+$/.test(value.target) ? value.target : null),
@@ -5120,7 +5120,7 @@ export class AgentRegistry {
 
   /** Allocates one Viewer-owned identity for every native generation. Paths
       remain an interoperability detail and can change on every account move. */
-  ensureConversation(engine: Extract<AgentEngine, "claude" | "codex">, artifactPath: string, accountId: string | null): RegistryConversation {
+  ensureConversation(engine: Extract<AgentEngine, "claude" | "codex" | "grok">, artifactPath: string, accountId: string | null): RegistryConversation {
     return this.mutate((file) => {
       const existing = Object.values(file.conversations).find((conversation) => conversation.engine === engine && conversationOwnsPath(conversation, artifactPath));
       if (existing) return clone(existing);
@@ -5524,7 +5524,7 @@ export class AgentRegistry {
       The generation record is the source of truth for which account owns a
       conversation; deriving the account from the path layout stays in the
       account manager only as recovery for artifacts the registry never saw. */
-  transcriptAccountId(engine: Extract<AgentEngine, "claude" | "codex">, artifactPath: string): string | null {
+  transcriptAccountId(engine: Extract<AgentEngine, "claude" | "codex" | "grok">, artifactPath: string): string | null {
     const snapshot = this.readOnlySnapshot();
     for (const conversation of Object.values(snapshot.conversations)) {
       if (conversation.engine !== engine) continue;
@@ -5646,7 +5646,7 @@ export class AgentRegistry {
     return conversation?.generations.at(-1)?.path ?? artifactPath;
   }
 
-  setEngineRouting(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string): number {
+  setEngineRouting(engine: Extract<AgentEngine, "claude" | "codex" | "grok">, accountId: string): number {
     return withAccountMutationLock(() => this.mutate((file) => {
       const route = file.engineRouting[engine];
       route.activeAccountId = accountId;
@@ -5655,7 +5655,7 @@ export class AgentRegistry {
     }));
   }
 
-  engineRouting(engine: Extract<AgentEngine, "claude" | "codex">): { activeAccountId: string | null; revision: number } {
+  engineRouting(engine: Extract<AgentEngine, "claude" | "codex" | "grok">): { activeAccountId: string | null; revision: number } {
     return clone(this.readOnlySnapshot().engineRouting[engine]);
   }
 

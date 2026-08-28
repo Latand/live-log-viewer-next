@@ -48,6 +48,22 @@ describe("board clusters", () => {
       .toEqual(["var(--color-openclaw)"]);
   });
 
+  test("a Grok card keeps its own identity colour on the board", () => {
+    const live: FileEntry = {
+      path: "/grok/sessions/project/session-alpha/chat_history.jsonl",
+      root: "grok-sessions", name: "chat_history.jsonl", project: "project", title: "Live Grok agent",
+      engine: "grok", kind: "session", fmt: "grok", parent: null, mtime: 1, size: 1, activity: "live",
+      proc: null, pid: null, model: null, pendingQuestion: null, waitingInput: null,
+    };
+    const layout = {
+      groups: [],
+      nodes: [{ x: 0, y: 0, w: 600, h: 780, file: live, isRoot: true }],
+      stacks: [], decks: [], drafts: [], slots: [],
+    } as unknown as SchemeLayout;
+    expect(boardClusters(layout, new Set<string>()).map((cluster) => cluster.color))
+      .toEqual(["var(--color-grok)"]);
+  });
+
   test("keeps title text beyond the resting chip segment for progressive reveal", () => {
     const title = "Repair durable pipeline ownership while preserving every queued reviewer conversation title";
     const live: FileEntry = {

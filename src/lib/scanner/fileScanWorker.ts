@@ -233,7 +233,7 @@ export function collectFileScanInWorker(
             /* Same exclusion as `transcriptIndexFeed`: the full-text index has
                no OpenClaw record parser and its engine column admits two
                values. */
-            sources: completedConversationCatalog.flatMap((entry) => (entry.engine === "openclaw" ? [] : [{
+            sources: completedConversationCatalog.flatMap((entry) => (entry.engine === "openclaw" || entry.engine === "grok" ? [] : [{
               path: entry.path,
               project: entry.project,
               engine: entry.engine,

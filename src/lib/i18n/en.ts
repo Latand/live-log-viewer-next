@@ -712,6 +712,13 @@ export const en = {
   "qr.copy": "Copy link",
   "qr.scanHint": "scan from a phone on the same tailnet",
 
+  // Grok account (single sign-in; no Claude/Codex-style multi-account homes)
+  "grok.title": "Grok",
+  "grok.rowAria": "Grok account",
+  "grok.signedIn": "Signed in",
+  "grok.signedOut": "Signed out",
+  "grok.statusLoading": "Checking sign-in…",
+
   // Telegram connector (#1059)
   "telegram.title": "Telegram",
   "telegram.rowAria": "Telegram connection",
@@ -1856,9 +1863,9 @@ export const en = {
   "overview.moreLive": "{count} more live",
   "overview.quiet": "quiet · last activity {age}",
   "overview.firstRunTitle": "No projects yet",
-  "overview.firstRunBody": "Sessions from ~/.claude/projects and ~/.codex/sessions appear here as they happen",
+  "overview.firstRunBody": "Sessions from ~/.claude/projects, ~/.codex/sessions, and ~/.grok/sessions appear here as they happen",
   "overview.firstRunCreate": "Create a project",
-  "overview.firstRunElsewhere": "…or run any claude / codex session inside a repo.",
+  "overview.firstRunElsewhere": "…or run any claude / codex / grok session inside a repo.",
 
   // Catalog fetch failure (issue #696) — never the idle empty-state copy
   "catalog.unreachable": "catalog unavailable",

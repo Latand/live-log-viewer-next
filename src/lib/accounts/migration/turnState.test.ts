@@ -320,6 +320,62 @@ describe("OpenClaw turn state (#1207)", () => {
     expect(turnStateFromRecords([prompt(1), assistant(2, "toolUse"), toolResult(3, "call-one")], "openclaw"))
       .toEqual({ state: "busy", source: "assistant", terminalAt: null });
   });
+});
+
+describe("Grok turn state", () => {
+  const at = (second: number) => `2026-08-27T09:0${second}:00.000Z`;
+  test("an assistant reply with no tools ends the turn", () => {
+    expect(turnStateFromRecords([
+      { type: "user", content: "Inspect the orchard" },
+      { type: "assistant", content: "Looking.", timestamp: at(2) },
+    ], "grok")).toEqual({ state: "terminal", source: "assistant", terminalAt: at(2) });
+  });
+  test("a tool call stays busy until the assistant finishes", () => {
+    expect(turnStateFromRecords([
+      { type: "user", content: "Inspect the orchard" },
+      { type: "assistant", content: "Looking.", timestamp: at(2), tool_calls: [{ id: "call-1", name: "Bash" }] },
+    ], "grok")).toEqual({ state: "busy", source: "tool", terminalAt: null });
+    expect(turnStateFromRecords([
+      { type: "user", content: "Inspect the orchard" },
+      { type: "assistant", content: "Looking.", timestamp: at(2), tool_calls: [{ id: "call-1", name: "Bash" }] },
+      { type: "tool_result", tool_call_id: "call-1", content: "ok", timestamp: at(3) },
+    ], "grok")).toEqual({ state: "busy", source: "assistant", terminalAt: null });
+    expect(turnStateFromRecords([
+      { type: "user", content: "Inspect the orchard" },
+      { type: "assistant", content: "Looking.", timestamp: at(2), tool_calls: [{ id: "call-1", name: "Bash" }] },
+      { type: "tool_result", tool_call_id: "call-1", content: "ok", timestamp: at(3) },
+      { type: "assistant", content: "Three files.", timestamp: at(4) },
+    ], "grok")).toEqual({ state: "terminal", source: "assistant", terminalAt: at(4) });
+  });
+});
+
+describe("OpenClaw turn state (#1207)", () => {
+  const at = (second: number) => `2026-08-27T09:0${second}:00.000Z`;
+  const assistant = (
+    second: number,
+    stopReason: string,
+    provider = "openai",
+  ): Record<string, unknown> => ({
+    type: "message",
+    id: `oc-assistant-${second}`,
+    parentId: `oc-parent-${second}`,
+    timestamp: at(second),
+    message: { role: "assistant", provider, model: "demo-model", api: "demo-api", stopReason, content: [] },
+  });
+  const prompt = (second: number): Record<string, unknown> => ({
+    type: "message",
+    id: `oc-user-${second}`,
+    parentId: null,
+    timestamp: at(second),
+    message: { role: "user", content: "invented prompt", timestamp: at(second) },
+  });
+  const toolResult = (second: number, callId: string): Record<string, unknown> => ({
+    type: "message",
+    id: `oc-result-${second}`,
+    parentId: `oc-parent-${second}`,
+    timestamp: at(second),
+    message: { role: "toolResult", toolCallId: callId, toolName: "demo_tool", isError: false, content: [] },
+  });
 
   test("error and aborted end the turn", () => {
     expect(turnStateFromRecords([prompt(1), assistant(2, "error")], "openclaw"))

@@ -1,3 +1,6 @@
+import path from "node:path";
+
+import { grokAuthStatus, grokHome } from "./grok";
 import { accountForSpawn, activeCodexAccountId, codexAccountsMutationLocked, codexHomeOwningSessionPath, CorruptCodexAccountsError, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, UnknownAccountError, type CodexAccount } from "./codex";
 import { activeClaudeAccountId, claudeAccountForSpawn, claudeAccountsMutationLocked, claudeHomeOwningTranscript, claudeManagedEnvironment, CorruptClaudeAccountsError, createManagedClaudeAccount, listClaudeAccounts, setActiveClaudeAccount, UnknownClaudeAccountError } from "./claude";
 import { claudeLoginSupervisor, LIVE_CLAUDE_LOGIN_PHASES } from "./claudeLogin";
@@ -11,7 +14,20 @@ import { selectHealthyClaudeAccount } from "./spawnHealth";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 import { classifySpawnAccountAdmission, type SpawnAccountAdmission } from "@/lib/agent/accountLiveness";
 
-function contextForSpawn(engine: "claude" | "codex", requested?: string | null) {
+function grokSpawnContext(): AccountContext {
+  const home = grokHome();
+  return {
+    engine: "grok",
+    accountId: "grok",
+    kind: "legacy",
+    home,
+    transcriptRoot: path.join(home, "sessions"),
+    env: withoutWakatimeCredential(process.env),
+  };
+}
+
+function contextForSpawn(engine: "claude" | "codex" | "grok", requested?: string | null) {
+  if (engine === "grok") return grokSpawnContext();
   if (engine === "claude") { const item = claudeAccountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(item.home) : withoutWakatimeCredential(process.env) }; }
   const item = accountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.sessionsDir, env: { ...withoutWakatimeCredential(process.env), CODEX_HOME: item.home } };
 }
@@ -23,9 +39,13 @@ export type HealthySpawnAccountResolution = AccountContext & {
 };
 
 export async function resolveHealthySpawnAccount(
-  engine: "claude" | "codex",
+  engine: "claude" | "codex" | "grok",
   requested?: string | null,
 ): Promise<HealthySpawnAccountResolution> {
+  if (engine === "grok") {
+    if (!grokAuthStatus().signedIn) throw new AccountAuthenticationRequiredError("grok", "grok");
+    return grokSpawnContext();
+  }
   const active = agentRegistry().engineRouting(engine).activeAccountId ?? undefined;
   const routed = requested ?? active;
   const missingRequested = classifySpawnAccountAdmission({
@@ -70,7 +90,7 @@ function summary(engine: "claude" | "codex", id: string): AccountSummary {
 }
 
 export class AccountAuthenticationRequiredError extends Error {
-  constructor(readonly engine: "claude" | "codex", readonly accountId: string) {
+  constructor(readonly engine: "claude" | "codex" | "grok", readonly accountId: string) {
     super(`${engine} account requires authentication`);
     this.name = "AccountAuthenticationRequiredError";
   }

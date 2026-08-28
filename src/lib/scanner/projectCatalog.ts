@@ -133,8 +133,8 @@ function readState(): ProjectCatalogState {
       ) {
         continue;
       }
-      const engine = file.engine === "codex" || file.engine === "claude" || file.engine === "shell" || file.engine === "openclaw" ? file.engine : undefined;
-      const fmt = file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" || file.fmt === "openclaw" ? file.fmt : undefined;
+      const engine = file.engine === "codex" || file.engine === "claude" || file.engine === "shell" || file.engine === "openclaw" || file.engine === "grok" ? file.engine : undefined;
+      const fmt = file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" || file.fmt === "openclaw" || file.fmt === "grok" ? file.fmt : undefined;
       const cwd = typeof file.cwd === "string" ? file.cwd : file.cwd === null ? null : undefined;
       const sessionStartedAt = typeof file.sessionStartedAt === "string"
         ? file.sessionStartedAt

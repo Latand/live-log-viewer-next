@@ -70,6 +70,7 @@ export const ROOTS: Record<RootKey, string> = {
   /* Every OpenClaw scan root is a descendant of this one; the per-agent roots
      that discovery actually walks come from `openclawSessionRoots()`. */
   "openclaw-sessions": path.join(HOME, ".openclaw/agents"),
+  "grok-sessions": path.join(HOME, ".grok/sessions"),
 };
 
 /** Every scanner root, including all account homes, with real-path dedupe. */
@@ -79,6 +80,7 @@ export function scanRootEntries(): [RootKey, string][] {
     ...claudeProjectRoots().map((root): [RootKey, string] => ["claude-projects", root]),
     ["claude-tasks", ROOTS["claude-tasks"]],
     ...openclawSessionRoots().map((root): [RootKey, string] => ["openclaw-sessions", root]),
+    ["grok-sessions", path.resolve(process.env.LLV_GROK_HOME || path.join(os.homedir(), ".grok"), "sessions")],
   ];
   const seen = new Set<string>();
   return entries.filter(([, root]) => { const real = realpathSafe(root) ?? path.resolve(root); if (seen.has(real)) return false; seen.add(real); return true; });

@@ -102,6 +102,42 @@ export function claudeRecoveryTailRelease(records: RecordLike[]): { terminalAt: 
  * `stopReason: "stop"`, and they land in the middle of real turns. Taking the
  * tail record unconditionally would report a session sitting inside a tool call
  * as finished and drop it out of busy grading. */
+/** Grok Build chat_history.jsonl: user / assistant / tool_result rows, with
+    optional tool_calls on the assistant record. Reasoning and system rows are
+    not turn evidence. */
+function grokTurnState(records: RecordLike[]): TurnState {
+  let state: TurnState = { state: "unknown", source: "empty", terminalAt: null };
+  const openTools = new Set<string>();
+  for (const record of records) {
+    const type = stringValue(record.type);
+    if (type === "system" || type === "reasoning") continue;
+    if (type === "user") {
+      openTools.clear();
+      state = { state: "busy", source: "lifecycle", terminalAt: null };
+      continue;
+    }
+    if (type === "assistant") {
+      openTools.clear();
+      for (const call of recordsValue(record.tool_calls)) {
+        const id = stringValue(call.id);
+        if (id) openTools.add(id);
+      }
+      state = openTools.size > 0
+        ? { state: "busy", source: "tool", terminalAt: null }
+        : { state: "terminal", source: "assistant", terminalAt: timestamp(record) };
+      continue;
+    }
+    if (type === "tool_result") {
+      const id = stringValue(record.tool_call_id);
+      if (id) openTools.delete(id);
+      state = openTools.size > 0
+        ? { state: "busy", source: "tool", terminalAt: null }
+        : { state: "busy", source: "assistant", terminalAt: null };
+    }
+  }
+  return state;
+}
+
 function openclawTurnState(records: RecordLike[]): TurnState {
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index]!;
@@ -123,6 +159,7 @@ function openclawTurnState(records: RecordLike[]): TurnState {
 /** The newest authoritative lifecycle or tool event wins. Assistant prose
     cannot close an active turn because it commonly precedes tool work. */
 export function turnStateFromRecords(records: RecordLike[], engine: TranscriptEngine, authoritative = false): TurnState {
+  if (engine === "grok") return grokTurnState(records);
   if (engine === "openclaw") return openclawTurnState(records);
   if (engine === "codex") {
     let turnOpen = false;

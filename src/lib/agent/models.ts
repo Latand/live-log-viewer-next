@@ -27,7 +27,9 @@ export function codexModelSupportsImages(model: string | null | undefined): bool
   return CODEX_IMAGE_INPUT_MODELS.has(model.trim());
 }
 
-export const ENGINE_MODELS: Record<"claude" | "codex", readonly AgentModelOption[]> = {
+export const GROK_BUILD_MODEL = "grok-4.6";
+
+export const ENGINE_MODELS: Record<"claude" | "codex" | "grok", readonly AgentModelOption[]> = {
   claude: [
     { id: "opus", label: "Opus 5", shortLabel: "Opus 5", use: "review" },
     { id: "fable", label: "Fable", shortLabel: "Fable", use: "general" },
@@ -39,13 +41,17 @@ export const ENGINE_MODELS: Record<"claude" | "codex", readonly AgentModelOption
     { id: CODEX_TERRA_MODEL, label: "GPT-5.6-Terra", shortLabel: "5.6-Terra", use: "implement" },
     { id: CODEX_LUNA_MODEL, label: "GPT-5.6-Luna", shortLabel: "5.6-Luna", use: "general" },
   ],
+  grok: [
+    { id: GROK_BUILD_MODEL, label: "Grok 4.6", shortLabel: "4.6", use: "implement" },
+    { id: "grok-4.5", label: "Grok 4.5", shortLabel: "4.5", use: "general" },
+  ],
 };
 
 export type LaunchModelValidation = { model: string } | { error: string };
 
 /** Validate a fresh-launch model against the catalog rendered by the Viewer.
     Resume and migration paths deliberately do not call this helper. */
-export function validateLaunchModel(engine: "claude" | "codex", model: string): LaunchModelValidation {
+export function validateLaunchModel(engine: "claude" | "codex" | "grok", model: string): LaunchModelValidation {
   const requested = model.trim();
   const validIds = ENGINE_MODELS[engine].map((option) => option.id);
   if (validIds.includes(requested)) return { model: requested };
@@ -55,8 +61,10 @@ export function validateLaunchModel(engine: "claude" | "codex", model: string): 
 }
 
 /** A fresh Codex conversation starts on the architecture/review profile. */
-export function defaultModelFor(engine: "claude" | "codex"): string {
-  return engine === "codex" ? CODEX_SOL_MODEL : "opus";
+export function defaultModelFor(engine: "claude" | "codex" | "grok"): string {
+  if (engine === "codex") return CODEX_SOL_MODEL;
+  if (engine === "grok") return GROK_BUILD_MODEL;
+  return "opus";
 }
 
 const CLAUDE_MODEL_FAMILIES = ["fable", "opus", "sonnet", "haiku"] as const;

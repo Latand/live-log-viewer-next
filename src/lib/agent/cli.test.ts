@@ -14,7 +14,7 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
 process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 
-const { freshSpecFor, resumeSpecFor, withSpawnCapability } = await import("./cli");
+const { freshSpecFor, resumeSpecFor, resumeSpecForSession, resumeEligibility, withSpawnCapability } = await import("./cli");
 const { createManagedCodexAccount } = await import("@/lib/accounts/codex");
 const { createManagedClaudeAccount } = await import("@/lib/accounts/claude");
 const { saveTelegramSession, telegramConnectorTokenPath, telegramSessionPath } = await import("@/lib/telegram/sessionStore");
@@ -35,6 +35,37 @@ function replaceCodexLaunch(command: string, replacement: string): string {
   const suffix = command.slice(start).match(/(?:\s+\))+\s*$/)?.[0] ?? "";
   return command.slice(0, start) + replacement + suffix;
 }
+
+test("fresh Grok commands pin GROK_HOME, a session id, and skip-permissions", () => {
+  const spec = freshSpecFor("grok", SANDBOX, { model: "grok-4.6", effort: "high" });
+  expect(spec.engine).toBe("grok");
+  expect(spec.windowName).toBe("grok-new");
+  expect(spec.command).toContain("GROK_HOME=");
+  expect(spec.command).toContain("'-s'");
+  expect(spec.command).toContain("'--permission-mode' 'bypassPermissions'");
+  expect(spec.command).toContain("'-m' 'grok-4.6'");
+  expect(spec.command).toContain("'--effort' 'high'");
+  expect(spec.transcript).toContain("chat_history.jsonl");
+});
+
+test("Grok resume reopens by session id", () => {
+  const sessionId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const spec = resumeSpecForSession("grok", sessionId, SANDBOX, path.join(SANDBOX, "grok-home"));
+  expect(spec?.engine).toBe("grok");
+  expect(spec?.command).toContain("'-r' '" + sessionId + "'");
+  expect(spec?.transcript).toContain(sessionId);
+});
+
+test("Grok chat_history.jsonl is eligible to resume", () => {
+  const sessionId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const cwd = path.join(SANDBOX, "grok-resume-cwd");
+  fs.mkdirSync(cwd, { recursive: true });
+  const transcript = path.join(SANDBOX, "sessions", encodeURIComponent(cwd), sessionId, "chat_history.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, "{}\n");
+  const eligibility = resumeEligibility("grok-sessions", transcript, { cwd });
+  expect(eligibility).toMatchObject({ ok: true, engine: "grok", sessionId, cwd });
+});
 
 test("fresh Codex commands fix CODEX_HOME in the typed shell command", () => {
   const home = path.join(SANDBOX, "account with space");

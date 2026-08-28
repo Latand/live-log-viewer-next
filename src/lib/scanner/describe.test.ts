@@ -705,3 +705,51 @@ test("a workspace directory outside any OpenClaw state directory is not recogniz
     projectInfoFromCwd(foreign, "openclaw-foreign"));
   expect(info).toMatchObject({ displayName: "workspace" });
 });
+
+function writeGrokSession(cwd: string, sessionId: string, lines: unknown[], summary?: Record<string, unknown>) {
+  const encoded = encodeURIComponent(cwd);
+  const dir = path.join(SANDBOX, "grok-sessions", encoded, sessionId);
+  fs.mkdirSync(dir, { recursive: true });
+  const transcript = path.join(dir, "chat_history.jsonl");
+  fs.writeFileSync(transcript, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+  if (summary) fs.writeFileSync(path.join(dir, "summary.json"), JSON.stringify(summary));
+  return transcript;
+}
+
+test("a Grok chat history is its own engine and takes the generated title from summary.json", () => {
+  useStateDirectory("grok-summary-title");
+  const repo = path.join(SANDBOX, "grok-summary-repository");
+  const identity = createRepository(repo);
+  const transcript = writeGrokSession(repo, "session-alpha", [
+    { type: "user", content: [{ type: "text", text: "<user_query>\nInspect the orchard\n</user_query>" }] },
+  ], {
+    generated_title: "Orchard inspection",
+    created_at: "2026-08-27T09:00:00.000Z",
+    reasoning_effort: "high",
+  });
+  expect(describe("grok-sessions", path.join(SANDBOX, "grok-sessions"), transcript, fs.statSync(transcript))).toMatchObject({
+    engine: "grok",
+    fmt: "grok",
+    kind: "session",
+    title: "Orchard inspection",
+    sessionStartedAt: "2026-08-27T09:00:00.000Z",
+    project: identity.project,
+    projectName: identity.displayName,
+    cwd: repo,
+  });
+});
+
+test("a Grok session without summary.json titles from the operator user_query", () => {
+  useStateDirectory("grok-query-title");
+  const cwd = path.join(SANDBOX, "grok-query-cwd");
+  fs.mkdirSync(cwd, { recursive: true });
+  const transcript = writeGrokSession(cwd, "session-beta", [
+    { type: "user", content: [{ type: "text", text: "<user_info>\nskipped</user_info>" }], synthetic_reason: "system_reminder" },
+    { type: "user", content: [{ type: "text", text: "<user_query>\nPlant the cobalt orchard\n</user_query>" }] },
+  ]);
+  expect(describe("grok-sessions", path.join(SANDBOX, "grok-sessions"), transcript, fs.statSync(transcript))).toMatchObject({
+    engine: "grok",
+    title: "Plant the cobalt orchard",
+    cwd,
+  });
+});

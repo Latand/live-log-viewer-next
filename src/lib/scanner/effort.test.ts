@@ -127,3 +127,14 @@ describe("entryEffort for OpenClaw", () => {
       .toBeNull();
   });
 });
+
+describe("entryEffort for Grok", () => {
+  test("reads reasoning_effort from summary.json", () => {
+    const dir = path.join(SANDBOX, "grok-session");
+    fs.mkdirSync(dir, { recursive: true });
+    const pathname = path.join(dir, "chat_history.jsonl");
+    fs.writeFileSync(pathname, JSON.stringify({ type: "user", content: "hello" }) + "\n");
+    fs.writeFileSync(path.join(dir, "summary.json"), JSON.stringify({ reasoning_effort: "high" }));
+    expect(entryEffort(entry(pathname, { root: "grok-sessions", engine: "grok", fmt: "grok" }))).toBe("high");
+  });
+});

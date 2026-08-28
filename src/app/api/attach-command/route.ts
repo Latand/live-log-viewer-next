@@ -7,6 +7,7 @@ import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { accountIdFromPath } from "@/lib/accounts/badge";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
+import { grokHome } from "@/lib/accounts/grok";
 import { cachedFileScan } from "@/lib/scanner/scanCache";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -22,11 +23,13 @@ function registryFirstAccountIdForPath(pathname: string): string {
   const registry = agentRegistry();
   return registry.transcriptAccountId("claude", pathname)
     ?? registry.transcriptAccountId("codex", pathname)
+    ?? registry.transcriptAccountId("grok", pathname)
     ?? accountIdFromPath(pathname);
 }
 
 /** Best-effort account id → human label; falls back to the id itself. */
 function accountLabelFor(engine: AgentEngine, accountId: string): string {
+  if (engine === "grok") return "Grok";
   try {
     const accounts = engine === "claude" ? listClaudeAccounts() : listCodexAccounts();
     return accounts.find((account) => account.id === accountId)?.label ?? accountId;
@@ -37,6 +40,7 @@ function accountLabelFor(engine: AgentEngine, accountId: string): string {
 
 /** Account id → managed home for composing a launch's resume command. */
 function homeForAccount(engine: AgentEngine, accountId: string): string | null {
+  if (engine === "grok") return grokHome();
   try {
     const accounts = engine === "claude" ? listClaudeAccounts() : listCodexAccounts();
     return accounts.find((account) => account.id === accountId)?.home ?? null;
