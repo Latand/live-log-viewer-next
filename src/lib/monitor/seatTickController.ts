@@ -267,7 +267,13 @@ async function check(
          failure, a migration hold or a runtime queue leaves the wake stamp and
          the event cursor exactly where they were, so the next check re-raises
          the same wake under the same id rather than waiting out an hour for a
-         message nobody read. */
+         message nobody read.
+
+         The cursor then moves past everything this check READ, not only what
+         the message listed: the terminal events are the ones carried, and the
+         routine progress between them is what the seat is deliberately not
+         told about one line at a time. Anything the page bound left behind
+         keeps its place and is offered again. */
       if (wakeReached(outcome)) {
         const eventsThrough = input.events.at(-1)?.seq ?? state.eventsThrough;
         state = seatTickWakeCommit(state, verdict, { fingerprint: input.changeFingerprint, eventsThrough, now: input.now });
