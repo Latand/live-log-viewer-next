@@ -1,0 +1,118 @@
+name: Bun runtime pin
+
+# The pin the image ships is a claim about two processes, and only one of them
+# was ever checked. Moving it to 1.4.0 was verified thoroughly on the Viewer,
+# promoted, and rolled back the same hour: the runtime host runs under the same
+# Bun, owns the stable listener, and died on its first failing socket write.
+#
+# Three review rounds then asked for evidence that a moved pin actually loads
+# this build, serves it, and holds that listener — and the only evidence anyone
+# could offer was a local run nobody else could reproduce. This job is where it
+# runs instead, at the pull request's own commit, under the pin the Dockerfile
+# carries rather than a version written here. It is the same answer #1256 got
+# for macOS, where nobody had the hardware either.
+#
+# The build is a step, not the evidence: `next build` produces the same
+# artifact under either interpreter, and a green build is exactly what shipped
+# the outage. What is under test is the interpreter that loads and serves what
+# the build produced, and the host that succeeds itself under it.
+#
+# Named gap: the container image is not built here. Its runtime stage installs
+# apt packages and a Python whisper environment, sets the setuid bit on
+# nsenter, and its `bun` is an nsenter shim onto the operator's own bun that
+# cannot run without the host PID namespace — a build far heavier than a pull
+# request check, for a rehearsal that already runs inside the candidate image
+# during `verify-candidate` before any promotion. What this job exercises is
+# the same source and the same Bun version, installed from the official release
+# rather than through the image's `npm install -g`.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bun-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          # The pull request's own commit, not the merge commit a pull_request
+          # run checks out by default: evidence a reviewer cannot name a SHA for
+          # is the finding this job exists to answer.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Resolve the Bun pin this commit ships
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The Dockerfile is the pin. Reading it here means a future move is
+          # exercised by this job the moment it is proposed, instead of being
+          # checked against a version frozen into a workflow file. The image
+          # carries the same pin three times and disagreement between them is
+          # itself the defect, so more than one distinct value fails.
+          mapfile -t pins < <(grep -oE 'npm install -g bun@[0-9]+\.[0-9]+\.[0-9]+' Dockerfile | sed 's/.*bun@//' | sort -u)
+          if [[ ${#pins[@]} -ne 1 ]]; then
+            echo "the Dockerfile must carry exactly one Bun version, found: ${pins[*]:-none}" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "${pins[0]}" >> "$GITHUB_OUTPUT"
+          printf 'Bun pin under test: %s at commit %s\n' "${pins[0]}" "$(git rev-parse HEAD)"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ steps.pin.outputs.version }}
+
+      # Everything below runs `bun` off PATH, so a setup step that quietly
+      # installed something else would verify the wrong interpreter and say so
+      # in the report. It is asserted once, here, and named in both reports.
+      - name: Require the pinned interpreter
+        shell: bash
+        env:
+          EXPECTED_BUN: ${{ steps.pin.outputs.version }}
+        run: |
+          set -euo pipefail
+          actual="$(bun --version)"
+          if [[ "$actual" != "$EXPECTED_BUN" ]]; then
+            echo "expected bun $EXPECTED_BUN, got $actual" >&2
+            exit 1
+          fi
+          bun --revision
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The same environment the image's build stage sets. NODE_ENV belongs to
+      # the build and not to the install above, which needs the dev
+      # dependencies the compiler runs on.
+      - name: Build the Viewer
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          NODE_ENV: production
+          NEXT_PUBLIC_RUNTIME_UI: "1"
+        run: bun run build
+
+      # Loads every compiled server runtime — `app-page.runtime.prod.js` among
+      # them, the module whose load failure answered 500 on every route — then
+      # serves the build and requires GET / to answer 200. Exit status is the
+      # verdict, so a module that will not load, or a document that never
+      # arrives, fails this job.
+      - name: Load and serve the build under the pinned Bun
+        run: bun scripts/verify-viewer-runtime.ts
+
+      # The other process. Two runtime-host generations under the same
+      # interpreter, one singleton-fence succession driven to completion, and
+      # both endpoints held through a bounded observation window while half the
+      # callers walk away mid-answer — the write that took production down.
+      # A host that cannot boot, cannot take the fence, or cannot hold what it
+      # took exits non-zero here.
+      - name: Rehearse the runtime host under the pinned Bun
+        run: bun scripts/verify-runtime-host.ts

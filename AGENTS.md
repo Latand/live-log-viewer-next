@@ -133,6 +133,21 @@ during `verify-candidate`, so a candidate whose host cannot boot, cannot take
 the fence, or cannot hold what it took is refused before promotion rather than
 after.
 
+**Both halves now run on CI**, in the `bun-runtime` job, at the pull request's
+own commit. `scripts/verify-viewer-runtime.ts` is the Viewer half: it loads
+every compiled server runtime the build produced — `app-page.runtime.prod.js`
+among them, the module whose load failure answered 500 on every route — and
+then serves the build and requires `GET /` to answer 200. The job reads its Bun
+version out of the `Dockerfile`, so moving the pin is itself what re-runs the
+verification, and a rehearsal or a load that fails ends the job. Run both
+locally to find out early; the job is what a reviewer can point at, which three
+rounds of #1248 spent on a local claim nobody could reproduce. What the job
+deliberately leaves out is the image build — the runtime stage installs apt
+packages and a Python whisper environment and sets the setuid bit on nsenter,
+which is far heavier than a pull request check — so the in-image rehearsal
+under `bun-container` stays where it is, in `verify-candidate`, before any
+promotion.
+
 Three consequences worth keeping:
 
 - **A failing socket write is a connection event, never a process event.**
