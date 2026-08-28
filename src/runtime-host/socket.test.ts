@@ -131,3 +131,25 @@ test("a timed-out socket destroyed by the server produces zero late writes", asy
   expect(socketErrors).toEqual([]);
   client.destroy();
 });
+
+test("a write that fails after the peer vanished ends the connection, not the host", async () => {
+  const socketPath = path.join(SANDBOX, `${crypto.randomUUID().slice(0, 8)}.sock`);
+  const server = serveRuntimeHost(socketPath, stubHost(async (request) => ({ id: request.id, ok: true, result: {} })));
+  servers.push(server);
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+
+  const accepted = new Promise<net.Socket>((resolve) => server.once("connection", resolve));
+  const client = net.createConnection(socketPath);
+  client.on("error", () => undefined);
+  const connection = await accepted;
+
+  /* Bun 1.4.0 reports a write whose peer is gone by destroying the socket with
+     the EPIPE; 1.3.3 dropped it silently. Nothing but a listener on this
+     connection stands between that report and an uncaught exception in the
+     process that owns the stable listener (#1254). */
+  const epipe = Object.assign(new Error("write EPIPE"), { errno: -32, code: "EPIPE", syscall: "write" });
+  expect(() => connection.emit("error", epipe)).not.toThrow();
+  expect(connection.destroyed).toBe(true);
+
+  client.destroy();
+});

@@ -38,6 +38,13 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHostSocketHand
   try { fs.unlinkSync(socketPath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   let activeWaitConnections = 0;
   const server = net.createServer((socket) => {
+    /* #1254: a peer that goes away mid-frame is a connection event, and the
+       write that discovers it must end this connection and nothing else. Bun
+       1.3.3 dropped a failed socket write on the floor; 1.4.0 reports it by
+       destroying the socket with the EPIPE, so an unhandled `error` here is an
+       uncaught exception that kills the process owning the stable listener.
+       This listener is attached before anything can be written. */
+    socket.on("error", () => socket.destroy());
     const abort = new AbortController();
     socket.once("close", () => abort.abort());
     socket.setTimeout(defaultTimeoutMs, () => socket.destroy());

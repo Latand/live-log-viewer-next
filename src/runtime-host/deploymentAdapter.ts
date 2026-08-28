@@ -36,7 +36,10 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "current-release": 90_000,
   "current-mcp-runtime": 90_000,
   "reconcile-mcp-runtime": 10 * 60_000,
-  "verify-candidate": 90_000,
+  /* #1254: the candidate's runtime host is rehearsed inside a container from
+     its own image — one succession plus a bounded hold — on top of the Viewer
+     and MCP probes this action already ran. */
+  "verify-candidate": 240_000,
   /* #1216: strictly larger than the adapter-side hand-over budgets it
      contains, so the adapter reports its own named reason instead of being
      killed mid-wait and leaving the operator a bare phase string. */

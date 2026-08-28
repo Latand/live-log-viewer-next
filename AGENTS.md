@@ -103,3 +103,43 @@ not carry, so it fails **after** you have pushed. Scrub before the push:
 `bun scripts/privacy-publication-gate.ts --base <merge-base>` locally catches the
 generic classes, and re-read every table and quote you lifted out of logs.
 <!-- END:live-state-and-publication -->
+
+<!-- BEGIN:runtime-host-verification -->
+# Two processes run under Bun here, and only one of them was ever checked
+
+The Viewer and the **runtime host** (`src/runtime-host/`) both run under the
+Bun pinned in the `Dockerfile`. The runtime host owns the stable listener and
+performs the release succession, so when it crash-loops, that is an outage no
+Viewer health check can see. Moving the pin to 1.4.0 was verified thoroughly
+and only on the Viewer; the host had never been started under the new runtime
+when it was promoted, and it died on its first failing socket write (#1254).
+
+**A change to a Bun pin is not verified until the runtime host has run under
+it.** Before such a change is proposed for promotion, run:
+
+```
+bun scripts/verify-runtime-host.ts --runtime <the bun binary being pinned>
+```
+
+It starts two runtime-host generations under that interpreter, drives one
+singleton-fence succession, and holds both endpoints the succession handed
+over while peers come and go — in a private state directory on an ephemeral
+port, never the stable one. The same rehearsal runs inside a container built
+from the candidate image during `verify-candidate`, so a candidate whose host
+cannot boot, cannot take the fence, or cannot hold what it took is refused
+before promotion rather than after.
+
+Two consequences worth keeping:
+
+- **A failing socket write is a connection event, never a process event.**
+  Every long-lived listener in the runtime host attaches its `error` handler
+  to a connection before the first byte can be written to it. Bun 1.3.3 dropped
+  failed writes silently, which is why the missing handlers survived so long;
+  1.4.0 reports them, and an unhandled `error` on a connection kills the
+  process that owns 8898. Tests must not paper over this: a test harness that
+  attaches its own listener to each accepted connection hides exactly the
+  defect the production server has.
+- **Verification has to name the process it exercised.** "Loaded every built
+  server module and requested real routes" is a statement about the Viewer. Say
+  which process, or the gap comes back.
+<!-- END:runtime-host-verification -->
