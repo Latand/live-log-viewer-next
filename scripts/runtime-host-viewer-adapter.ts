@@ -39,7 +39,7 @@ import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSn
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
 import { McpHealthProbeAdmissions } from "../src/runtime-host/mcpHealthProbeAdmission";
 import type { McpHealthProbeAdmissionConsumer } from "../src/runtime-host/mcpHealthProbeAdmissionChannel";
-import { probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
+import { probeControlUrl, probeMcpRuntime } from "../src/runtime-host/mcpRuntimeProbe";
 import { McpRuntimeReleaseStore } from "../src/runtime-host/mcpRuntimeRelease";
 import {
   clearRuntimeHostHandoffIntent,
@@ -546,8 +546,10 @@ export function mcpProbeEnvironment(
 ): Record<string, string> {
   /* An empty endpoint would leave the probe's control reads on the binding's
      fixed-port fallback, which addresses the deployed Viewer rather than the
-     candidate. That is a named refusal, never a silent retarget (#790). */
-  if (!/^https?:\/\/[^\s]+$/.test(endpoint.trim())) {
+     candidate. That is a named refusal, never a silent retarget (#790). The
+     probe refuses on the same rule, so both ends read one definition of it. */
+  const controlUrl = probeControlUrl(endpoint);
+  if (!controlUrl) {
     throw new Error("candidate MCP probe requires the candidate's own control endpoint");
   }
   return {
@@ -556,7 +558,7 @@ export function mcpProbeEnvironment(
     LLV_VIEWER_DEPLOY_TARGET: deployTarget,
     // Candidate health must exercise the candidate's web/runtime client. The
     // stable listener still serves the previous generation before promotion.
-    LLV_VIEWER_CONTROL_URL: endpoint,
+    LLV_VIEWER_CONTROL_URL: controlUrl,
   };
 }
 

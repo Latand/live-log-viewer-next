@@ -8,8 +8,23 @@ import { MCP_TOOL_NAMES } from "@/lib/mcp/server";
 import { RuntimeHost } from "./host";
 import { RuntimeJournal } from "./journal";
 import { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
-import { mcpProbeFailureDetail, probeMcpRuntime } from "./mcpRuntimeProbe";
+import { mcpProbeFailureDetail, probeControlUrl, probeMcpRuntime, VIEWER_CONTROL_URL_ENV } from "./mcpRuntimeProbe";
 import { serveRuntimeHost } from "./socket";
+
+/* The probed runtime reads through the control endpoint it is handed. Unset, it
+   resolves to the fixed loopback address, which belongs to whichever Viewer is
+   already serving (#790) - so every probe below is pointed at its own stub. */
+function candidateControl() {
+  return Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      return new URL(request.url).pathname === "/api/runtime/deployments"
+        ? Response.json({ count: 0, deployments: [] })
+        : Response.json({ error: "not found" }, { status: 404 });
+    },
+  });
+}
 
 test("host-admitted managed MCP probes discover the complete surface, call required reads, and exit", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-probe-"));
@@ -33,6 +48,8 @@ test("host-admitted managed MCP probes discover the complete surface, call requi
   environment.LLV_AGENT_REGISTRY_SQLITE = "off";
   environment.LLV_CODEX_HOME = path.join(sandbox, "codex");
   environment.LLV_CLAUDE_HOME = path.join(sandbox, "claude");
+  const control = candidateControl();
+  environment[VIEWER_CONTROL_URL_ENV] = control.url.origin;
 
   try {
     for (const host of ["claude", "codex"]) {
@@ -68,6 +85,7 @@ test("host-admitted managed MCP probes discover the complete surface, call requi
       expect(() => process.kill(processId!, 0)).toThrow();
     }
   } finally {
+    control.stop(true);
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     journal.close();
     fs.rmSync(sandbox, { recursive: true, force: true });
@@ -113,6 +131,8 @@ test("a release target naming a runtime this host never staged falls back to the
   environment.LLV_AGENT_REGISTRY_SQLITE = "off";
   environment.LLV_CODEX_HOME = path.join(sandbox, "codex");
   environment.LLV_CLAUDE_HOME = path.join(sandbox, "claude");
+  const control = candidateControl();
+  environment[VIEWER_CONTROL_URL_ENV] = control.url.origin;
 
   try {
     const evidence = await probeMcpRuntime({
@@ -128,6 +148,7 @@ test("a release target naming a runtime this host never staged falls back to the
     expect(evidence).toMatchObject({ ok: true, processReady: true });
     expect(evidence.tools).toHaveLength(MCP_TOOL_NAMES.length);
   } finally {
+    control.stop(true);
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     journal.close();
     fs.rmSync(sandbox, { recursive: true, force: true });
@@ -157,6 +178,8 @@ test("absent, forged, expired, and replayed health admissions cannot imitate the
   environment.LLV_AGENT_REGISTRY_SQLITE = "off";
   environment.LLV_CODEX_HOME = path.join(sandbox, "codex");
   environment.LLV_CLAUDE_HOME = path.join(sandbox, "claude");
+  const control = candidateControl();
+  environment[VIEWER_CONTROL_URL_ENV] = control.url.origin;
   const runtime = {
     source: "managed" as const,
     revision: "7".repeat(40),
@@ -188,6 +211,7 @@ test("absent, forged, expired, and replayed health admissions cannot imitate the
     expect((await run(legitimate)).calls).toEqual({ deploymentStatus: true, boardSnapshot: true });
     expect((await run(legitimate)).calls).toEqual({ deploymentStatus: false, boardSnapshot: false });
   } finally {
+    control.stop(true);
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     journal.close();
     fs.rmSync(sandbox, { recursive: true, force: true });
@@ -217,6 +241,8 @@ test("the final launcher rejects capability approval from a caller-selected runt
   environment.LLV_AGENT_REGISTRY_SQLITE = "off";
   environment.LLV_CODEX_HOME = path.join(sandbox, "codex");
   environment.LLV_CLAUDE_HOME = path.join(sandbox, "claude");
+  const control = candidateControl();
+  environment[VIEWER_CONTROL_URL_ENV] = control.url.origin;
 
   try {
     const evidence = await probeMcpRuntime({
@@ -237,6 +263,7 @@ test("the final launcher rejects capability approval from a caller-selected runt
     expect(evidence.calls).toEqual({ deploymentStatus: false, boardSnapshot: false });
     expect(evidence.ok).toBe(false);
   } finally {
+    control.stop(true);
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
@@ -272,4 +299,49 @@ test("a read refused without a structured error still reports its text and statu
       result: { isError: true, structuredContent: { ok: false, status: 503 }, content: [{ type: "text", text: "runtime host is unavailable" }] },
     }],
   })).toBe("MCP runtime read probes failed - board_snapshot: runtime host is unavailable (status 503)");
+});
+
+/* #790 is a gate that graded the Viewer already serving: a candidate differing
+   from it can then neither pass nor fail on its own behalf. */
+test("a probe handed no control endpoint refuses by name instead of addressing the serving Viewer", async () => {
+  const runtime = {
+    source: "managed" as const,
+    revision: "7".repeat(40),
+    releaseId: "deploy-untargeted",
+    artifactDigest: "a".repeat(64),
+    stagedAt: "2026-07-23T08:00:00.000Z",
+  };
+  let spawned = false;
+
+  for (const control of [undefined, "", "   ", "127.0.0.1:8898"]) {
+    const evidence = await probeMcpRuntime({
+      /* A command that cannot exist: if the probe reached the spawn, the
+         evidence would name that failure and this test would say so. */
+      command: path.join(os.tmpdir(), "llv-probe-never-executed"),
+      args: [],
+      cwd: process.cwd(),
+      env: control === undefined ? {} : { [VIEWER_CONTROL_URL_ENV]: control },
+      runtime,
+      onProcessReady: () => { spawned = true; },
+    });
+
+    expect(evidence).toMatchObject({
+      ok: false,
+      processReady: false,
+      tools: [],
+      calls: { deploymentStatus: false, boardSnapshot: false },
+      revision: runtime.revision,
+      artifactDigest: runtime.artifactDigest,
+    });
+    expect(evidence.detail).toContain(VIEWER_CONTROL_URL_ENV);
+  }
+
+  expect(spawned).toBe(false);
+});
+
+test("a probe keeps the control endpoint it was handed", () => {
+  expect(probeControlUrl(" http://127.0.0.1:19106 ")).toBe("http://127.0.0.1:19106");
+  expect(probeControlUrl("https://viewer.invalid/base")).toBe("https://viewer.invalid/base");
+  expect(probeControlUrl("ftp://viewer.invalid")).toBeNull();
+  expect(probeControlUrl(undefined)).toBeNull();
 });

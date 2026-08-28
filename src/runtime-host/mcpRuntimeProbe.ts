@@ -71,9 +71,37 @@ export function mcpProbeFailureDetail(input: {
     .slice(0, 500);
 }
 
+export const VIEWER_CONTROL_URL_ENV = "LLV_VIEWER_CONTROL_URL";
+
+/** The control endpoint the probed runtime must read through. Absent or blank,
+    the MCP server falls back to the fixed loopback address, which belongs to the
+    Viewer that is already serving — so the probe would grade the running
+    generation and pass or fail it on behalf of the runtime under test (#790).
+    Callers get the trimmed endpoint back, or `null` to refuse on. */
+export function probeControlUrl(value: string | undefined): string | null {
+  const url = value?.trim() ?? "";
+  return /^https?:\/\/[^\s]+$/.test(url) ? url : null;
+}
+
 export async function probeMcpRuntime(options: McpRuntimeProbeOptions): Promise<ViewerMcpRuntimeHealthEvidence> {
   const checkedAt = new Date().toISOString();
   const timeout = Math.max(1, options.timeoutMs ?? 15_000);
+  const controlUrl = probeControlUrl(options.env[VIEWER_CONTROL_URL_ENV]);
+  /* Refusing before anything is spawned: a probe that cannot name its own
+     target must never address another one instead. */
+  if (!controlUrl) {
+    return {
+      checkedAt,
+      revision: options.runtime.revision,
+      artifactDigest: options.runtime.artifactDigest,
+      processReady: false,
+      tools: [],
+      calls: { deploymentStatus: false, boardSnapshot: false },
+      ok: false,
+      detail: `MCP runtime probe requires ${VIEWER_CONTROL_URL_ENV}: without the probed runtime's own control endpoint`
+        + " its reads resolve to the Viewer already serving instead of the one under test",
+    };
+  }
   const environment = { ...options.env };
   delete environment[MCP_HEALTH_PROBE_CAPABILITY_ENV];
   if (options.healthProbeCapability) {
@@ -122,7 +150,7 @@ export async function probeMcpRuntime(options: McpRuntimeProbeOptions): Promise<
         detail: missing.length
           ? `MCP runtime is missing tools: ${missing.join(", ")}`
           : mcpProbeFailureDetail({
-            controlUrl: options.env.LLV_VIEWER_CONTROL_URL,
+            controlUrl,
             calls: [
               { name: "deployment_status", ok: deploymentStatus, result: deployment },
               { name: "board_snapshot", ok: boardSnapshot, result: board },
