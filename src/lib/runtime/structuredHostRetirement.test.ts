@@ -138,6 +138,7 @@ async function sweep(over: StructuredHostRetirementDependencies = {}): Promise<S
     durableEventTail: () => determined(12),
     realtimeBound: () => determined(false),
     orchestratorSeatConversations: () => determined(new Set<string>()),
+    revokedSeatConversations: () => determined(new Set<string>()),
     transcriptStat: () => determined({ mtimeMs: NOW - 24 * 3_600_000 }),
     processIdentity: () => determined(HOST_IDENTITY),
     processMemory: () => new Map([[HOST_PID, { rssBytes: 110 * 1024 * 1024, swapBytes: 332 * 1024 * 1024 }]]),
@@ -440,6 +441,101 @@ test("an orchestrator membership establishes a seat even when the seat store can
     orchestratorSeatConversations: () => undetermined("the seat store could not be read"),
     snapshot: () => snapshot({ memberships: { [CONVERSATION]: [{ kind: "orchestrator", project: "repo-a" }] } }),
   });
+});
+
+/* ------------------------------------------------------------------------- *
+ * The revoked-seat rule (#1245).
+ *
+ * The measured failure: rotation revokes authority and nothing else, so the
+ * predecessor kept its host and — because it had scheduled its own monitor —
+ * kept writing its transcript every few minutes. `seat-free` read its
+ * epoch-stamped membership row as a live seat, and `transcript-idle` read its
+ * self-inflicted recency as work. Two clauses, one missing distinction, and a
+ * rotated-away orchestrator that could still act on a project it no longer
+ * held. Both halves are pinned here, and so is everything the rule must NOT
+ * loosen.
+ * ------------------------------------------------------------------------- */
+
+/** The seat store after a rotation: the predecessor still carries the
+    membership row rotation leaves behind, and the durable revocation is what
+    says the seat it names has ended. */
+const rotatedAway: StructuredHostRetirementDependencies = {
+  snapshot: () => snapshot({ memberships: { [CONVERSATION]: [{ kind: "orchestrator", project: "repo-a" }] } }),
+  orchestratorSeatConversations: () => determined(new Set<string>()),
+  revokedSeatConversations: () => determined(new Set([CONVERSATION])),
+};
+
+test("a revoked seat is retired however recently it wrote — the self-tick stops protecting it", async () => {
+  /* Written 90 seconds ago against a six-hour threshold: under the old rule
+     this host cleared `transcript-idle`'s floor at every sweep forever, which
+     is exactly what a 25-minute self-scheduled cron produced in production. */
+  const probe = await sweep({ ...rotatedAway, transcriptStat: () => determined({ mtimeMs: NOW - 90_000 }) });
+  expect(probe.terminated).toHaveLength(1);
+  const retired = probe.report.retired[0]!;
+  expect(retired.conversationId).toBe(CONVERSATION);
+  expect(retired.passed).toContain("seat-free");
+  expect(retired.passed).toContain("transcript-idle");
+  /* The audit says WHY a host two minutes old qualified, so a retirement
+     seconds after a rotation reads as the rotation finishing rather than as
+     the idle threshold having been quietly ignored. */
+  expect(retired.seatRevoked).toBe(true);
+});
+
+test("a retirement under the ordinary threshold never claims the revoked-seat rule", async () => {
+  const probe = await sweep();
+  expect(probe.report.retired[0]!.seatRevoked).toBeUndefined();
+});
+
+test("the revoked-seat rule removes a seat's protection and never a turn's", async () => {
+  /* The one thing the waiver must not become: a licence to kill a predecessor
+     mid-turn. Every clause that protects work in flight still has to pass. */
+  await refusedBy("turn-settled", {
+    ...rotatedAway,
+    snapshot: () => snapshot({
+      memberships: { [CONVERSATION]: [{ kind: "orchestrator", project: "repo-a" }] },
+      conversations: { [CONVERSATION]: conversation({ turn: { state: "busy", source: "assistant", terminalAt: null, observedAt: null } }) },
+    }),
+    transcriptStat: () => determined({ mtimeMs: NOW - 90_000 }),
+  });
+  await refusedBy("attention-settled", {
+    ...rotatedAway,
+    snapshot: () => snapshot({
+      memberships: { [CONVERSATION]: [{ kind: "orchestrator", project: "repo-a" }] },
+      entries: { [`claude:${SESSION}`]: entry({ structuredHost: { ...(entry().structuredHost as object), pendingAttention: ["attention-3"] } }) },
+    }),
+    transcriptStat: () => determined({ mtimeMs: NOW - 90_000 }),
+  });
+});
+
+test("a re-designated seat is live again — a revocation below its epoch decides nothing", async () => {
+  /* The ABA guard, from the retirement side: the seat store answers with the
+     conversations whose NEWEST revocation still stands at or above every epoch
+     a seat names them at, so a re-designation at a newer epoch simply is not in
+     that set, and this host reads live exactly as it should. */
+  await refusedBy("seat-free", {
+    snapshot: () => snapshot({ memberships: { [CONVERSATION]: [{ kind: "orchestrator", project: "repo-a" }] } }),
+    revokedSeatConversations: () => determined(new Set<string>()),
+  });
+});
+
+test("an unreadable revocation record blocks a seat host — unknown is never revoked", async () => {
+  await refusedBy("seat-free", {
+    snapshot: () => snapshot({ memberships: { [CONVERSATION]: [{ kind: "orchestrator", project: "repo-a" }] } }),
+    revokedSeatConversations: () => undetermined("the orchestrator revocation record could not be established"),
+  }, "undetermined");
+});
+
+test("an unreadable revocation record costs an ordinary host nothing", async () => {
+  /* Nothing can revoke a seat this host never held, so the read that failed
+     could not have decided anything about it. Asking it anyway would have
+     turned one unreadable file into a machine that retires no host at all. */
+  const probe = await sweep({ revokedSeatConversations: () => undetermined("the orchestrator revocation record could not be established") });
+  expect(probe.report.retired).toHaveLength(1);
+});
+
+test("a revoked seat is handed to the kill fence as a seat nobody holds", async () => {
+  const probe = await sweep({ ...rotatedAway, transcriptStat: () => determined({ mtimeMs: NOW - 90_000 }) });
+  expect(probe.terminated[0]!.seat).toBe(false);
 });
 
 test("a transcript that is gone from disk blocks retirement", async () => {
@@ -840,7 +936,7 @@ function qualifiedSubject(): StructuredHostRetirementSubject {
     eventCursor: 12,
     durableEventTail: determined(12),
     realtimeBound: determined(false),
-    seat: determined(false),
+    seat: determined("none"),
     transcriptFile: determined({ mtimeMs: NOW - 24 * 3_600_000 }),
     observedStartIdentity: determined(HOST_IDENTITY),
   };

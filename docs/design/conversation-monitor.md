@@ -1,5 +1,25 @@
 # Recurring conversation monitor — issue #741
 
+> **Status: the driver is retired; the scan is not (#1245).** This document
+> described a standalone CLI process on a half-hourly crontab, talking to the
+> Viewer over HTTP and serializing itself with a cross-process lock. That
+> crontab entry was never written on any machine, and #1245 moved the clock
+> inside the release that owns traffic instead — one clock in one process. So
+> `scripts/conversation-monitor.ts`, the HTTP client in `viewerApi.ts`, the
+> `/api/monitor/lock` route and its claim are **gone**. Every section below
+> about running it, scheduling it, or how the lock behaves is history, kept
+> because the reasoning behind the classification is still the reasoning the
+> code uses.
+>
+> What survives and is used today: `evidence.ts`, `githubEvidence.ts`,
+> `classify.ts`'s stall rule, `cards.ts`, `redact.ts` and `journalStore.ts`,
+> all consumed in-process by the seat tick. What survives **undriven** is the
+> operator-request scan itself — `run.ts` and `requests.ts` — because it
+> answers #741's question ("did an operator request fall through the cracks?"),
+> which #746 deferred and the seat tick does not ask. `MonitorDeps.claim` is
+> now required: a future driver states how it serializes itself, because there
+> is no lock left to inherit.
+
 A scheduled job that reads what the operator asked for, checks whether the
 machine is actually tracking it, and puts the gaps on the board.
 
@@ -244,5 +264,6 @@ Run by path, against an isolated `HOME` / `XDG_CONFIG_HOME` / `TMPDIR` /
 `LLV_STATE_DIR`; nothing here touches the shared registry.
 
 ```sh
-bun test src/lib/monitor/ src/app/api/monitor/ scripts/conversation-monitor.test.ts
+bun test src/lib/monitor/run.test.ts src/lib/monitor/requests.test.ts \
+         src/lib/monitor/classify.test.ts src/lib/monitor/journalStore.test.ts
 ```

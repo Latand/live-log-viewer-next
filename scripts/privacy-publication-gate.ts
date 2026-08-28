@@ -1420,36 +1420,20 @@ export type MergeBoundaryReview = { findings: Map<FindingClass, number>; notices
 type CommitIdentity = { address: string; commit: string; field: "author" | "committer"; name: string };
 
 /* The forge's account namespace, `<id>+<handle>` or `<handle>` at the no-reply
-   host of its own domain. The handle names the account, and the account the
-   repository belongs to is the one its origin remote names — so the canonical
-   identity is read from the checkout rather than written down here, where
-   writing it down would publish it. */
+   host of its own domain. The forge issues that address for one purpose: so a
+   contributor's own address stays unpublished when their commits are. An
+   identity on this host therefore names an account, and the account is already
+   public on the pull request the moment it is opened — the composed trailer
+   discloses nothing the contribution has not disclosed. Which account it is
+   does not matter here, so no account is written down and none is read from
+   the checkout. */
 const FORGE_ACCOUNT_DOMAIN = `users.noreply.${FORGE_DOMAIN}`;
 const COMPOSED_ATTRIBUTION_TRAILER = "Co-authored-by";
 
-function forgeAccountHandle(address: string): string | undefined {
+function isForgeAccountAddress(address: string): boolean {
   const separator = address.lastIndexOf("@");
-  if (separator === -1) return undefined;
-  if (address.slice(separator + 1).toLowerCase() !== FORGE_ACCOUNT_DOMAIN) return undefined;
-  const localPart = address.slice(0, separator).toLowerCase();
-  const identifier = localPart.indexOf("+");
-  return identifier === -1 ? localPart : localPart.slice(identifier + 1);
-}
-
-/* `<host>/<owner>/<repository>` in the HTTPS form, `<host>:<owner>/<repository>`
-   in the SSH one. The remote is written by whoever created the checkout — the
-   workflow, or the operator — never by the branch under inspection. */
-function forgeOwner(repository: string): string | undefined {
-  const result = Bun.spawnSync({
-    cmd: ["git", "-C", repository, "config", "--get", "remote.origin.url"],
-    env: withoutWakatimeCredential(process.env),
-    stderr: "pipe",
-    stdout: "pipe",
-  });
-  if (result.exitCode !== 0) return undefined;
-  const owner = new RegExp(`${FORGE_DOMAIN.replaceAll(".", String.raw`\.`)}[/:]([A-Za-z0-9._-]+)/`, "i")
-    .exec(result.stdout.toString().trim());
-  return owner?.[1].toLowerCase();
+  if (separator === -1) return false;
+  return address.slice(separator + 1).toLowerCase() === FORGE_ACCOUNT_DOMAIN;
 }
 
 /** Every identity git recorded on the commits the merge will squash. */
@@ -1493,11 +1477,16 @@ function composedAttributionMessage(identity: CommitIdentity): string {
  *
  * Git records an author and a committer on every commit and a commit cannot be
  * made without them, so the question is never whether an identity publishes but
- * whose. Two answers publish nobody: the account the repository belongs to on
- * the forge, and the machine-attribution mailboxes the trailer rule already
+ * whose. Two answers publish nobody: an account on the forge's no-reply host,
+ * which the forge issues so that the account's own address is not what its
+ * commits carry, and the machine-attribution mailboxes the trailer rule already
  * names. Every other identity is a person, and is reported exactly as an
- * address in a file is — the carve-out for written trailers is not widened,
- * it is read here as it is read there.
+ * address in a file is.
+ *
+ * The no-reply host is read only here, on the identities the merge composes.
+ * A commit message that writes such an address into a trailer by hand, or into
+ * its body, keeps the narrow reading the trailer rule gives it — this is the
+ * merge-boundary identity path, and it widens nothing else.
  */
 export function mergeBoundaryReview(repository: string, base: string): MergeBoundaryReview {
   const findings = new Map<FindingClass, number>();
@@ -1507,10 +1496,9 @@ export function mergeBoundaryReview(repository: string, base: string): MergeBoun
     addFinding(findings, "inspection_error");
     return { findings, notices };
   }
-  const owner = forgeOwner(repository);
   for (const identity of identities) {
     const { attributable } = commitMessageAddressReview(composedAttributionMessage(identity));
-    const publishes = attributable.some((address) => owner === undefined || forgeAccountHandle(address) !== owner);
+    const publishes = attributable.some((address) => !isForgeAccountAddress(address));
     if (!publishes) continue;
     addFinding(findings, "email_address");
     /* The notice names the commit, the field and the trailer, and never the

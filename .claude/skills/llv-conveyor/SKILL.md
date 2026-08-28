@@ -1,11 +1,11 @@
 ---
 name: llv-conveyor
-description: The full issue→implement→review→merge→deploy conveyor for Agent Log Viewer — checkpoint loop, lane lifecycle, merge bars, deploy protocol, resource guard, and recovery playbooks. Use when orchestrating multi-lane development on this repo, running long autonomous sessions, or recovering from crashes/stuck reviews. Builds on live-log-viewer-orchestration (spawn/messaging) and review-loop (flow mechanics).
+description: The full issue→implement→review→merge→deploy conveyor for Agent Log Viewer — wake loop, lane lifecycle, merge bars, deploy protocol, resource guard, and recovery playbooks. Use when orchestrating multi-lane development on this repo, running long autonomous sessions, or recovering from crashes/stuck reviews. Builds on live-log-viewer-orchestration (spawn/messaging) and review-loop (flow mechanics).
 ---
 
 # LLV conveyor — autonomous multi-lane pipeline
 
-The orchestrator (a long-lived Claude session in `~/.agents/tools/live-log-viewer-next`) drives every open issue through: **issue → worktree lane → implementer agent → review flow → merge on APPROVE → batched deploy → cleanup**. It self-paces with ScheduleWakeup checkpoints (1200–1800s; each wakeup prompt carries the full state so the loop survives compaction).
+The orchestrator (a long-lived Claude session in `~/.agents/tools/live-log-viewer-next`) drives every open issue through: **issue → worktree lane → implementer agent → review flow → merge on APPROVE → batched deploy → cleanup**. The Viewer owns the clock (#1245): its seat tick checks this project every few minutes and wakes the seat when work is owed, so the seat never schedules itself — no ScheduleWakeup, no CronCreate, no Monitor loop, and a seat still holding one deletes it the moment the mandate arrives. "Every checkpoint" below means every arriving wake, and each wake re-derives board state from bounded snapshots rather than from what the previous one remembered, so the loop survives compaction, host death and rotation.
 
 ## Lane lifecycle
 

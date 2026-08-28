@@ -1434,7 +1434,11 @@ test("AC4: rotation drops the history, then trims the notes, and refuses only wh
   const trimmed = await executeOrchestratorRotation({
     project: "proj-a",
     clientRequestId: "req_00001036",
-    mandate: stackedMandate("c".repeat(29_000), 2),
+    /* A core sized to leave room for the handoff after the ladder runs. The
+       headroom tracks what delivery appends around a mandate — the initial
+       status contract and, since #1245, the clock handover — so a core that
+       once trimmed to a fit now has ~1.8 KB less to play with. */
+    mandate: stackedMandate("c".repeat(27_000), 2),
     handoffNotes: "n".repeat(2_000),
   }, deps);
 

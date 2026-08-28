@@ -3217,13 +3217,31 @@ describe("mergeBoundaryReview", () => {
     expect(review.notices).toEqual([]);
   });
 
-  test("another account's forge address is not the repository's identity", () => {
+  test("a contributor's forge account identity composes nothing attributable", () => {
+    /* The forge issues this address so the contributor's own one is not what
+       their commits carry, and the handle in front of it is already public on
+       the pull request. Reporting it blocked every outside contribution while
+       exempting the repository's own identity, which has the same shape. */
     const repo = gitRepo();
-    const stranger = ["77+privacy-gate-fixture-stranger", forgeAccountDomain].join("@");
-    commit(repo, "feat: something", { email: stranger, name: "Someone Else" });
+    const contributor = ["77+privacy-gate-fixture-contributor", forgeAccountDomain].join("@");
+    commit(repo, "feat: something", { email: contributor, name: "Some Contributor" });
     const review = mergeBoundaryReview(repo, "main");
 
-    expect(review.findings.get("email_address")).toBe(1);
+    expect(review.findings.size).toBe(0);
+    expect(review.notices).toEqual([]);
+  });
+
+  test("the exemption is the identity path, never the message", () => {
+    /* One address, two surfaces. Composed from an identity it publishes an
+       account; written into a trailer by hand it is still an account handle
+       with a number in front of it, and the trailer rule still reads it that
+       way. This change moves the merge boundary and nothing else. */
+    const repo = gitRepo();
+    const contributor = ["77+privacy-gate-fixture-contributor", forgeAccountDomain].join("@");
+    commit(repo, `feat: something\n\nCo-Authored-By: Some Contributor <${contributor}>`, canonicalIdentity);
+
+    expect(mergeBoundaryReview(repo, "main").findings.size).toBe(0);
+    expect(commitMessageFindings(repo, "main").get("email_address")).toBe(1);
   });
 
   test("a vendor no-reply identity stays machine attribution", () => {
@@ -3247,12 +3265,18 @@ describe("mergeBoundaryReview", () => {
     expect(review.findings.size).toBe(0);
   });
 
-  test("an identity is attributable when no repository account can be resolved", () => {
-    const repo = gitRepo("");
-    commit(repo, "feat: something", canonicalIdentity);
-    const review = mergeBoundaryReview(repo, "main");
+  test("the rule reads the address, not the checkout's remote", () => {
+    /* A fork's checkout, a mirror, a bare clone with no origin at all: which
+       account the repository belongs to no longer decides anything here, so a
+       missing remote neither exempts a person nor reports an account. */
+    const withoutRemote = gitRepo("");
+    const personal = ["someone", "personal.dev"].join("@");
+    commit(withoutRemote, "feat: something", { email: personal, name: "Someone" });
+    expect(mergeBoundaryReview(withoutRemote, "main").findings.get("email_address")).toBe(1);
 
-    expect(review.findings.get("email_address")).toBe(1);
+    const forgeAccounts = gitRepo("");
+    commit(forgeAccounts, "feat: something", canonicalIdentity);
+    expect(mergeBoundaryReview(forgeAccounts, "main").findings.size).toBe(0);
   });
 
   test("the committer identity publishes too", () => {

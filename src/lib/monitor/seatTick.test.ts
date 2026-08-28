@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 
+import { evaluateLiveness } from "@/lib/lifecycle/liveness";
+
 import {
   DEFAULT_SEAT_TICK_POLICY,
   SEAT_TICK_WAKE_INTERVAL_MS,
@@ -469,4 +471,68 @@ test("the wake interval is a constant no environment can set", () => {
   expect(JSON.stringify(policy)).not.toContain("wakeInterval");
   const almostDue = stateWith({ lastWakeAt: new Date(NOW - 59 * MINUTE).toISOString() });
   expect(seatTickDecision(input({ pipelines: [lane()], policy: policy!, state: almostDue })).verdict.kind).toBe("quiet");
+});
+
+/* ------------------------------------------------------------------------- *
+ * What the stall threshold actually catches, checked rather than assumed.
+ *
+ * The production observation on #1245 raised the question this pins: a
+ * permanently BUSY seat and a STUCK seat both produce an endless run of
+ * `skipped`, and the stall threshold is what is supposed to tell them apart.
+ * Both halves of the answer are asserted here against the real
+ * `evaluateLiveness`, because the interesting half is the one it does NOT
+ * catch, and a blind spot nobody wrote down is a blind spot nobody remembers.
+ *
+ * The threshold measures SILENCE — now minus the newest transcript record,
+ * tool traffic included — never how long a turn has been open. So:
+ * ------------------------------------------------------------------------- */
+
+const ALIVE = { host: { state: "alive" as const }, stallAfterMs: DEFAULT_SEAT_TICK_POLICY.stallAfterMs };
+
+test("the stall threshold catches a silent open turn, and never a long busy one", () => {
+  /* CAUGHT: six hours open, nothing written for 41 minutes past a 40-minute
+     threshold. The registry calls it stalled, so the tick stops treating the
+     turn as progress and the seat becomes reachable again. */
+  const silent = evaluateLiveness({ ...ALIVE, turnState: "busy", silentForMs: 41 * MINUTE });
+  expect(silent).toEqual({ lifecycle: "stalled", reason: "host_alive_transcript_silent" });
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: silent.lifecycle, reason: silent.reason } }))).toBe(false);
+
+  /* NOT CAUGHT, and this is the blind spot: the same six-hour turn, writing a
+     tool call thirty seconds ago. Silence is zero, so it reads `running`, the
+     tick calls it progress and drops its check — at every check, for as long
+     as the seat keeps writing. Duration is not an input anywhere on this path,
+     so no threshold on this surface can fire on it. */
+  const busy = evaluateLiveness({ ...ALIVE, turnState: "busy", silentForMs: 30_000 });
+  expect(busy).toEqual({ lifecycle: "running", reason: "host_alive_turn_active" });
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: busy.lifecycle, reason: busy.reason } }))).toBe(true);
+  expect(seatTickDecision(input({ seat: seat({ turn: "busy", activity: { lifecycle: busy.lifecycle, reason: busy.reason } }), pipelines: [lane()] })).verdict)
+    .toEqual({ kind: "skipped", reason: "seat-busy" });
+
+  /* That is the property "never interrupt a working seat" being kept, and it
+     is worth keeping — a seat writing every thirty seconds IS working, and the
+     Viewer cannot tell an eight-hour merge queue from a self-inflicted loop by
+     looking at the transcript clock. What it costs is that a seat which keeps
+     itself busy on purpose is unreachable, which is exactly the deadlock the
+     session cron produced. The answer is upstream of this surface: mandate v11
+     tells the seat to stop doing it, and the revoked-seat retirement ends a
+     predecessor that will not. */
+
+  /* The one case that is NOT a blind spot: a dead host holding an open turn
+     forever. Caught whatever the transcript clock says, which is why the skip
+     terminates rather than waiting behind a turn nothing can finish. */
+  const zombie = evaluateLiveness({ host: { state: "gone" }, turnState: "busy", silentForMs: 0, stallAfterMs: ALIVE.stallAfterMs });
+  expect(zombie).toEqual({ lifecycle: "stalled", reason: "host_gone_turn_open" });
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: zombie.lifecycle, reason: zombie.reason } }))).toBe(false);
+});
+
+test("the stall threshold the tick configures is the one the liveness read applies", () => {
+  /* The number is only meaningful if it travels: `seatTickSources` passes
+     `policy.stallAfterMs` into the liveness request, and that same value is
+     what `evaluateLiveness` compares silence against. A default that never
+     reached the reader would make the whole verification above vacuous. */
+  expect(DEFAULT_SEAT_TICK_POLICY.stallAfterMs).toBe(40 * MINUTE);
+  const justUnder = evaluateLiveness({ ...ALIVE, turnState: "busy", silentForMs: DEFAULT_SEAT_TICK_POLICY.stallAfterMs - 1 });
+  const exactly = evaluateLiveness({ ...ALIVE, turnState: "busy", silentForMs: DEFAULT_SEAT_TICK_POLICY.stallAfterMs });
+  expect(justUnder.lifecycle).toBe("running");
+  expect(exactly.lifecycle).toBe("stalled");
 });

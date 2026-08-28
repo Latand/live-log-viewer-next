@@ -1,18 +1,24 @@
 import type { MonitorSessionRecord } from "./requests";
 import type { MonitorRunRecord } from "./types";
-import { internalServiceHeaders } from "@/lib/agent/operatorAuthority";
 
 /**
- * The monitor's only door into the machine (issue #741).
+ * The shapes the operator-request scan reads the machine in (issue #741), and
+ * nothing else any more.
  *
- * Every fact it reads and every write it makes goes through the Viewer's HTTP
- * API — the orchestrator seat, the conversation catalog, transcripts, board
- * cards, pipelines and flows alike. The mechanism this replaces read
- * `state/pipelines.json` off disk, which is how it kept "working" against a
- * shape the viewer had long since stopped being the only writer of.
+ * This module used to be a door: an HTTP client that a standalone CLI process
+ * pointed at the Viewer on loopback, because #741's monitor ran outside the
+ * Viewer on a crontab that was never written. #1245 moved the clock inside the
+ * release that owns traffic, so there is no second process to speak HTTP to
+ * anything, and `httpViewerApi` retired with the CLI that was its only caller.
  *
- * The interface is what the run logic depends on, so a test drives a fake in
- * memory instead of standing up a server.
+ * What survives is the interface and its row shapes. `evidence.ts`,
+ * `seatTickSources.ts` and `run.ts` are typed against them, and they are the
+ * honest description of what the scan needs: a driver supplies them from
+ * wherever it actually has them — in-process readers for anything inside the
+ * Viewer, a fake in a test — rather than from one transport this module
+ * hard-coded. The single-flight lock went the same way and for the same reason
+ * (see {@link MonitorDeps.claim}): one clock in one process needs no lock, and
+ * a lock kept for a driver that does not exist is a file to leak.
  */
 
 export interface OrchestratorStatusResponse {
@@ -88,11 +94,6 @@ export interface DeliveryInput {
   clientMessageId: string;
 }
 
-/** The single-flight admission the viewer granted, or who holds it. */
-export type RunLockClaim =
-  | { claimed: true; token: string }
-  | { claimed: false; detail: string };
-
 export interface ViewerApi {
   orchestrator(project: string): Promise<OrchestratorStatusResponse>;
   /** The host currently owning a transcript, or null when nothing does. A
@@ -109,257 +110,4 @@ export interface ViewerApi {
   /** Audit journal, owned by the viewer: the monitor never opens the file. */
   readRuns(limit: number): Promise<MonitorRunRecord[]>;
   appendRun(record: MonitorRunRecord): Promise<void>;
-  /** Atomic single-flight admission, likewise owned by the viewer. */
-  claimRunLock(): Promise<RunLockClaim>;
-  releaseRunLock(token: string): Promise<boolean>;
-}
-
-export class ViewerApiError extends Error {
-  constructor(message: string, readonly status: number | null) {
-    super(message);
-    this.name = "ViewerApiError";
-  }
-}
-
-export interface HttpViewerApiOptions {
-  baseUrl: string;
-  fetchImpl?: typeof fetch;
-  timeoutMs?: number;
-}
-
-function object(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function array(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
-
-function str(value: unknown, fallback = ""): string {
-  return typeof value === "string" ? value : fallback;
-}
-
-function num(value: unknown, fallback = 0): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-/** The parsable ISO instants among a pile of maybe-timestamps. */
-function timestamps(values: readonly unknown[]): string[] {
-  return values.filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)));
-}
-
-/** The Viewer speaks HTTP on loopback; the same-origin headers mirror what the
-    MCP bindings send so the CSRF gate on mutating routes is satisfied. */
-export function httpViewerApi(options: HttpViewerApiOptions): ViewerApi {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const timeoutMs = options.timeoutMs ?? 20_000;
-  const base = options.baseUrl.replace(/\/+$/, "");
-
-  async function call(pathname: string, init: RequestInit = {}): Promise<unknown> {
-    const url = new URL(pathname, `${base}/`);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
-    try {
-      response = await fetchImpl(url, {
-        ...init,
-        signal: controller.signal,
-        headers: {
-          accept: "application/json",
-          ...(init.body ? { "content-type": "application/json", origin: base, "sec-fetch-site": "same-origin" } : {}),
-          ...internalServiceHeaders("monitor"),
-          ...(init.headers ?? {}),
-        },
-      });
-    } catch (error) {
-      throw new ViewerApiError(`viewer request to ${pathname} failed: ${error instanceof Error ? error.message : "unknown error"}`, null);
-    } finally {
-      clearTimeout(timer);
-    }
-    if (!response.ok) throw new ViewerApiError(`viewer request to ${pathname} returned ${response.status}`, response.status);
-    try {
-      return (await response.json()) as unknown;
-    } catch (error) {
-      throw new ViewerApiError(`viewer response for ${pathname} was not JSON: ${error instanceof Error ? error.message : "unknown error"}`, response.status);
-    }
-  }
-
-  return {
-    async orchestrator(project) {
-      const scopedProject = project.trim();
-      if (!scopedProject) throw new ViewerApiError("a project is required to resolve the orchestrator seat", null);
-      const params = new URLSearchParams({ project: scopedProject });
-      const payload = object(await call(`api/orchestrator/seat?${params.toString()}`));
-      const record = payload.seat === null || payload.seat === undefined ? null : object(payload.seat);
-      return {
-        record: record && str(record.conversationId)
-          ? {
-            conversationId: str(record.conversationId),
-            path: typeof record.path === "string" ? record.path : null,
-            createdAt: str(record.activatedAt, str(record.designatedAt)),
-          }
-          : null,
-        exists: payload.exists === true,
-      };
-    },
-
-    async hostTarget(transcriptPath) {
-      const payload = object(await call(`api/tmux?path=${encodeURIComponent(transcriptPath)}`));
-      return typeof payload.target === "string" && payload.target ? payload.target : null;
-    },
-
-    async conversations(query) {
-      const params = new URLSearchParams();
-      if (query.project) params.set("project", query.project);
-      if (query.limit) params.set("limit", String(query.limit));
-      const suffix = params.toString();
-      const payload = object(await call(`api/conversations${suffix ? `?${suffix}` : ""}`));
-      return array(payload.items).map((raw) => {
-        const item = object(raw);
-        return {
-          path: str(item.path),
-          project: str(item.project),
-          title: str(item.title),
-          mtime: num(item.mtime),
-          kind: str(item.kind),
-          engine: str(item.engine),
-        };
-      }).filter((item) => item.path);
-    },
-
-    async session(transcriptPath) {
-      const payload = object(await call(`api/session?path=${encodeURIComponent(transcriptPath)}`));
-      return array(payload.messages).map((raw) => {
-        const message = object(raw);
-        return {
-          kind: str(message.kind),
-          role: str(message.role),
-          ts: typeof message.ts === "string" ? message.ts : null,
-          text: str(message.text),
-        };
-      });
-    },
-
-    async tasks() {
-      const payload = object(await call("api/tasks"));
-      return array(payload.tasks).map((raw) => {
-        const task = object(raw);
-        return {
-          id: str(task.id),
-          project: str(task.project),
-          status: str(task.status),
-          text: str(task.text),
-          updatedAt: str(task.updatedAt),
-          assignments: array(task.assignments).map((entry) => {
-            const assignment = object(entry);
-            return { state: str(assignment.state), path: typeof assignment.path === "string" ? assignment.path : null };
-          }),
-          pipelineIds: array(task.pipelineIds).map((id) => str(id)).filter(Boolean),
-        };
-      }).filter((task) => task.id);
-    },
-
-    async pipelines() {
-      const payload = object(await call("api/pipelines"));
-      return array(payload.pipelines).map((raw) => {
-        const pipeline = object(raw);
-        /* Attempt-level instants are where a long-running container actually
-           shows movement; the container's own createdAt never changes. */
-        const activityAt = timestamps([
-          pipeline.pausedAt,
-          pipeline.resumedAt,
-          pipeline.updatedAt,
-          ...array(pipeline.runs).flatMap((run) =>
-            array(object(run).attempts).flatMap((attempt) => {
-              const entry = object(attempt);
-              return [entry.startedAt, entry.completedAt];
-            })),
-        ]);
-        return {
-          id: str(pipeline.id),
-          task: str(pipeline.task),
-          project: str(pipeline.project),
-          state: str(pipeline.state),
-          createdAt: str(pipeline.createdAt),
-          closedAt: typeof pipeline.closedAt === "string" ? pipeline.closedAt : null,
-          spec: str(pipeline.spec),
-          activityAt,
-        };
-      }).filter((pipeline) => pipeline.id);
-    },
-
-    async flows() {
-      const payload = object(await call("api/flows"));
-      return array(payload.flows).map((raw) => {
-        const flow = object(raw);
-        const activityAt = timestamps(array(flow.rounds).flatMap((round) => {
-          const entry = object(round);
-          return [entry.startedAt, entry.spawnStartedAt, entry.relayStartedAt, entry.reviewedAt, entry.relayedAt, entry.terminalAt];
-        }));
-        return {
-          id: str(flow.id),
-          project: str(flow.project),
-          state: str(flow.state),
-          spec: str(flow.spec),
-          createdAt: str(flow.createdAt),
-          closedAt: typeof flow.closedAt === "string" ? flow.closedAt : null,
-          activityAt,
-        };
-      }).filter((flow) => flow.id);
-    },
-
-    async createCard(input) {
-      const payload = object(await call("api/tasks", {
-        method: "POST",
-        body: JSON.stringify({
-          project: input.project,
-          text: input.text,
-          placement: "unplaced",
-          clientRequestId: input.clientRequestId,
-        }),
-      }));
-      const task = object(payload.task);
-      const taskId = str(task.id);
-      if (!taskId) throw new ViewerApiError("board create returned no task id", null);
-      return { taskId };
-    },
-
-    async readRuns(limit) {
-      const payload = object(await call(`api/monitor/runs?limit=${encodeURIComponent(String(limit))}`));
-      return array(payload.runs).filter((run): run is MonitorRunRecord => Boolean(run) && typeof run === "object");
-    },
-
-    async appendRun(record) {
-      await call("api/monitor/runs", { method: "POST", body: JSON.stringify({ record }) });
-    },
-
-    async claimRunLock() {
-      const payload = object(await call("api/monitor/lock", { method: "POST", body: JSON.stringify({ action: "claim" }) }));
-      if (payload.claimed === true && typeof payload.token === "string") return { claimed: true, token: payload.token };
-      return { claimed: false, detail: str(payload.detail, "the monitor lock is held") };
-    },
-
-    async releaseRunLock(token) {
-      const payload = object(await call("api/monitor/lock", { method: "POST", body: JSON.stringify({ action: "release", token }) }));
-      return payload.released === true;
-    },
-
-    async deliver(input): Promise<DeliveryResult> {
-      const payload = object(await call("api/tmux", {
-        method: "POST",
-        body: JSON.stringify({
-          pid: null,
-          path: "",
-          conversationId: input.conversationId,
-          clientMessageId: input.clientMessageId,
-          text: input.text,
-          images: [],
-        }),
-      }));
-      return {
-        outcome: typeof payload.outcome === "string" ? payload.outcome : null,
-        spawned: payload.spawned === true || payload.outcome === "resumed",
-      };
-    },
-  };
 }
