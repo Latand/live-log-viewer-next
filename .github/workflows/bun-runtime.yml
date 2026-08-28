@@ -101,12 +101,30 @@ jobs:
       # without failing the job. `privacy-publication` verifies its own gate the
       # same way, in the same job, before it trusts what the gate then says.
       - name: Verify the runtime checks fail when they should
-        run: >
-          bun test
-          scripts/bun-runtime-workflow.test.ts
-          scripts/verify-viewer-runtime.test.ts
-          src/runtime-host/hostRehearsal.test.ts
-          src/runtime-host/hostRehearsalRun.test.ts
+        shell: bash
+        run: |
+          set -euo pipefail
+          held=(
+            scripts/bun-runtime-workflow.test.ts
+            scripts/verify-viewer-runtime.test.ts
+            src/runtime-host/hostRehearsal.test.ts
+            src/runtime-host/hostRehearsalRun.test.ts
+          )
+          # `bun test` exits 0 for a path that is not there, so a file deleted
+          # out from under this step would shrink what it holds and leave the
+          # step green — the failure this job exists to refuse, one level up.
+          # Existence first, and then the run has to say it covered them all.
+          for file in "${held[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "$file is named here but is not in the tree" >&2
+              exit 1
+            fi
+          done
+          bun test "${held[@]}" 2>&1 | tee "$RUNNER_TEMP/held.log"
+          if ! grep -q "across ${#held[@]} files" "$RUNNER_TEMP/held.log"; then
+            echo "the run did not cover all ${#held[@]} files that hold these verdicts" >&2
+            exit 1
+          fi
 
       - name: Build the Viewer
         env:
