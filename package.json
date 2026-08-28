@@ -16,7 +16,7 @@
   ],
   "engines": {
     "node": ">=20.9.0",
-    "bun": ">=1.2.0"
+    "bun": ">=1.4.0"
   },
   "os": [
     "linux",
@@ -45,7 +45,7 @@
     "entities": "^8.0.0",
     "highlight.js": "^11.11.1",
     "lucide-react": "^1.23.0",
-    "next": "16.2.10",
+    "next": "16.3.2",
     "pdfjs-dist": "^6.2.108",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
@@ -61,7 +61,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^10",
-    "eslint-config-next": "16.2.10",
+    "eslint-config-next": "16.3.2",
     "happy-dom": "^20.10.6",
     "playwright-core": "1.62.1",
     "tailwindcss": "^4",

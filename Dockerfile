@@ -3,7 +3,7 @@
 FROM node:22.16.0-bookworm-slim AS deps
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm install -g bun@1.3.3
+RUN npm install -g bun@1.4.0
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
@@ -12,7 +12,7 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1 \
     NODE_ENV=production \
     NEXT_PUBLIC_RUNTIME_UI=1
-RUN npm install -g bun@1.3.3
+RUN npm install -g bun@1.4.0
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # The compiler cache lives in a BuildKit cache mount: it survives between
@@ -66,7 +66,7 @@ rm -rf /var/lib/apt/lists/*
 # live under a name the nsenter shims never claim: the `bun` shim below
 # redirects to the HOST bun and remaps any cwd outside the mounted host home,
 # which broke `bun run src/runtime-host/main.ts` with "Module not found".
-npm install -g bun@1.3.3
+npm install -g bun@1.4.0
 cp "$(realpath /usr/local/bin/bun)" /usr/local/bin/bun-container
 chmod +x /usr/local/bin/bun-container
 chmod u+s /usr/bin/nsenter
