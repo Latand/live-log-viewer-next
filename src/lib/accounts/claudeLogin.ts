@@ -5,6 +5,8 @@ import path from "node:path";
 
 import { resolveBinary } from "@/lib/agent/cli";
 import { statePath } from "@/lib/configDir";
+import { darwinProcessArgv } from "@/lib/proc/darwinArgv";
+import { darwinProcessIdentity } from "@/lib/proc/darwinIdentity";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 import { AccountMutationBusyError, withAccountMutationLock, withAccountMutationLockAsync } from "./accountMutation";
 
@@ -69,14 +71,23 @@ function procStartToken(pid: number): string | null {
   try { return fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(" ")[21] ?? null; } catch { return null; }
 }
 
-async function waitForProcessExit(pid: number, startToken: string): Promise<void> {
-  while (procStartToken(pid) === startToken) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
-  }
+function exitPoller(startTokenOf: (pid: number) => string | null) {
+  return async function waitForProcessExit(pid: number, startToken: string): Promise<void> {
+    while (startTokenOf(pid) === startToken) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  };
 }
 
 export function isExpectedClaudeLoginCommand(commandLine: string): boolean {
-  const args = commandLine.split("\0").filter(Boolean);
+  return isExpectedClaudeLoginArgv(commandLine.split("\0"));
+}
+
+/** The command half of the fence, over an argument vector: Linux splits
+    /proc/<pid>/cmdline on NUL to get one, macOS reads the kernel's exec-time
+    copy. Both platforms match the same three shapes here. */
+export function isExpectedClaudeLoginArgv(argv: readonly string[]): boolean {
+  const args = argv.filter(Boolean);
   const direct = /(?:^|\/)claude$/.test(args[0] ?? "") && args.length === 4;
   const wrapped = /(?:^|\/)(?:node|bun)$/.test(args[0] ?? "") && /claude/i.test(args[1] ?? "") && args.length === 5;
   /* Inside the Docker runtime `claude` is the nsenter shim — a /bin/sh script —
@@ -90,6 +101,87 @@ export function isExpectedClaudeLoginCommand(commandLine: string): boolean {
 
 function expectedClaude(pid: number): boolean {
   try { return isExpectedClaudeLoginCommand(fs.readFileSync(`/proc/${pid}/cmdline`, "utf8")); } catch { return false; }
+}
+
+/** The two facts the fence needs about a pid: the kernel start token that
+    pins this exact process instance, and the command it is running. */
+export interface ProcessIdentityReaders {
+  startToken(pid: number): string | null;
+  argv(pid: number): readonly string[] | null;
+}
+
+type IdentityPorts = Pick<ClaudeLoginPorts, "pidStartToken" | "isExpectedClaude" | "waitForExit">;
+
+/* macOS has no /proc, so the same two facts come from the kernel directly:
+   proc_pidinfo(PROC_PIDTBSDINFO) for a pid-plus-start-time token, and
+   sysctl(KERN_PROCARGS2) for the exec-time argv. Neither is a relaxation —
+   an unproven pid is still refused adoption and is still never signalled by
+   number. Both readers need the FFI available under Bun, which
+   assertDarwinStructuredRuntime already requires of a macOS server. */
+const darwinIdentityReaders: ProcessIdentityReaders = {
+  startToken: darwinProcessIdentity,
+  argv: darwinProcessArgv,
+};
+
+/* posix_spawn hands back a pid before the child's exec has completed, so a
+   macOS fence read can land while that pid is still the forking viewer — argv
+   reads back as this process's own command line, or briefly not at all while
+   the kernel swaps the image. Reading through that window is not a
+   relaxation: adoption still requires seeing the login command, and every
+   other answer (a stranger's argv, a pid that is gone) is returned at once.
+   Linux never lands here — the spawn returns only after the exec status pipe
+   reports success — which is why the /proc reads never needed this. */
+/* One second is far past any observed exec latency and is only ever spent on
+   a pid that is alive but has not shown its command; a busy machine must not
+   turn that into a refused login. */
+const EXEC_WINDOW_MS = 1_000;
+const EXEC_POLL_MS = 2;
+
+const execWindowLatch = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepThrough(ms: number): void {
+  try { Atomics.wait(execWindowLatch, 0, 0, ms); }
+  catch { const until = Date.now() + ms; while (Date.now() < until) { /* runtime forbids a blocking wait here */ } }
+}
+
+function sameArguments(left: readonly string[], right: readonly string[] | null): boolean {
+  return right !== null && left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
+/** The command of `pid` once that pid is running its own image: this process
+    is never the login it spawned, a command that is neither absent nor ours
+    is already the child's, and a pid with no start token has exited. */
+function executedArgv(pid: number, readers: ProcessIdentityReaders): readonly string[] | null {
+  if (pid === process.pid) return readers.argv(pid);
+  const forking = readers.argv(process.pid);
+  const deadline = Date.now() + EXEC_WINDOW_MS;
+  for (;;) {
+    const argv = readers.argv(pid);
+    if (argv !== null && !sameArguments(argv, forking)) return argv;
+    if (argv === null && readers.startToken(pid) === null) return null;
+    if (Date.now() >= deadline) return argv;
+    sleepThrough(EXEC_POLL_MS);
+  }
+}
+
+function identityPortsFrom(readers: ProcessIdentityReaders): IdentityPorts {
+  return {
+    pidStartToken: readers.startToken,
+    isExpectedClaude: (pid) => {
+      const argv = executedArgv(pid, readers);
+      return argv !== null && isExpectedClaudeLoginArgv(argv);
+    },
+    waitForExit: exitPoller(readers.startToken),
+  };
+}
+
+/** Linux keeps its /proc reads verbatim; darwin gets the kernel-backed pair.
+    `darwin` is injectable so the macOS branch can be exercised from a host
+    that has no macOS kernel to read. */
+export function processIdentityPorts(platform: NodeJS.Platform = process.platform, darwin: ProcessIdentityReaders = darwinIdentityReaders): IdentityPorts {
+  return platform === "darwin"
+    ? identityPortsFrom(darwin)
+    : { pidStartToken: procStartToken, isExpectedClaude: expectedClaude, waitForExit: exitPoller(procStartToken) };
 }
 
 /** A recognized Claude home is either a safe managed home or the exact legacy
@@ -129,9 +221,7 @@ async function structuredStatus(home: string): Promise<{ loggedIn: boolean; meth
 export const realClaudeLoginPorts: ClaudeLoginPorts = {
   spawn: (command, args, options) => spawn(command, args, options) as LoginChild,
   kill: (pid, signal) => { try { process.kill(-pid, signal); } catch { try { process.kill(pid, signal); } catch { /* process already exited */ } } },
-  pidStartToken: procStartToken,
-  isExpectedClaude: expectedClaude,
-  waitForExit: waitForProcessExit,
+  ...processIdentityPorts(),
   status: structuredStatus,
   now: Date.now,
   setTimeout,

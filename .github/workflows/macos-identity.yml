@@ -1,0 +1,57 @@
+name: macOS process identity
+
+# The Claude login fence proves a spawned pid's identity before adopting it.
+# On Linux it reads /proc; on macOS it reads the kernel through libproc and
+# sysctl, and no maintainer here has a Mac. Issue #1256 shipped precisely
+# because that half was never executed anywhere — this job is where it runs.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  darwin-identity:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.3
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The darwin-only tests below skip themselves off darwin, and a silent
+      # skip would leave this job green while proving nothing. This step fails
+      # loudly instead when the runner is not a Mac or the FFI readers cannot
+      # reach the kernel at all.
+      - name: Require live kernel readers on this runner
+        run: |
+          bun -e '
+          const { darwinProcessArgv } = await import("./src/lib/proc/darwinArgv.ts");
+          const { darwinProcessIdentity } = await import("./src/lib/proc/darwinIdentity.ts");
+
+          if (process.platform !== "darwin") throw new Error(`expected a darwin runner, got ${process.platform}`);
+          const argv = darwinProcessArgv(process.pid);
+          const token = darwinProcessIdentity(process.pid);
+          if (!argv || argv.length === 0) throw new Error("KERN_PROCARGS2 argv reader returned nothing for this process");
+          if (!token) throw new Error("proc_pidinfo identity reader returned nothing for this process");
+          console.log(`argv entries: ${argv.length}, identity token fields: ${token.split(":").length}`);
+          '
+
+      - name: Verify the identity fence against the real macOS kernel
+        run: >
+          bun test
+          src/lib/proc/darwinArgv.test.ts
+          src/lib/proc/darwinIdentity.test.ts
+          src/lib/proc/portable.test.ts
+          src/lib/accounts/claudeLogin.test.ts
+          src/lib/accounts/claudeLoginIdentity.test.ts
