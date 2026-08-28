@@ -25,65 +25,48 @@ jobs:
         with:
           bun-version: 1.3.3
 
-      - name: Require a lockfile change with dependency changes
+      # What lands on the default branch is the merge, not the branch. #1246
+      # reached production that way: a pull request that had branched before a
+      # dependency bump was updated onto the default branch, the update resolved
+      # package.json and bun.lock to the branch's older side, and the revert rode
+      # in under a description about something else. The checkout above is the
+      # pull request's merge ref, so HEAD here is exactly what would land, and
+      # the gate compares it against the base the merge sits on.
+      #
+      # The rule is about silence, not about change: a dependency version the
+      # merge moves has to be named in the pull request's own title or body. An
+      # ordinary bump names its packages already, so this stays quiet for the
+      # changes people make deliberately.
+      - name: Refuse a dependency change the merge does not declare
         if: github.event_name != 'push'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         shell: bash
         run: |
           set -euo pipefail
 
-          # A dispatched run carries no pull request payload, and the rule still
-          # has to hold for the branch it names against the protected base.
+          # A dispatched run carries no pull request payload, and the lockfile
+          # half of the rule still has to hold for the branch it names against
+          # the protected base.
           if [[ -z "$BASE_SHA" ]]; then
             git fetch --no-tags --force origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
             BASE_SHA="$(git merge-base "refs/remotes/origin/${DEFAULT_BRANCH}" HEAD)"
-            export BASE_SHA
           fi
 
-          bun -e '
-          const { execFileSync } = require("node:child_process");
+          declaration=()
+          if [[ -n "$PR_NUMBER" ]]; then
+            # The title and body cross into the gate through the environment and
+            # a file, so nothing a pull request writes is ever interpreted as
+            # part of a command.
+            printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "${RUNNER_TEMP}/declaration.md"
+            declaration=(--declaration "${RUNNER_TEMP}/declaration.md")
+          fi
 
-          const base = process.env.BASE_SHA;
-          const dependencySections = [
-            "dependencies",
-            "devDependencies",
-            "optionalDependencies",
-            "peerDependencies",
-            "peerDependenciesMeta",
-            "bundledDependencies",
-            "bundleDependencies",
-            "overrides",
-            "resolutions",
-          ];
-
-          const readPackage = (revision) => JSON.parse(execFileSync(
-            "git",
-            ["show", `${revision}:package.json`],
-            { encoding: "utf8" },
-          ));
-          const basePackage = readPackage(base);
-          const headPackage = readPackage("HEAD");
-          const changedSections = dependencySections.filter((section) =>
-            JSON.stringify(basePackage[section] ?? null) !== JSON.stringify(headPackage[section] ?? null),
-          );
-
-          if (changedSections.length === 0) {
-            console.log("No package.json dependency sections changed");
-            process.exit(0);
-          }
-
-          const changedFiles = execFileSync(
-            "git",
-            ["diff", "--name-only", base, "HEAD"],
-            { encoding: "utf8" },
-          ).trim().split("\n").filter(Boolean);
-          if (!changedFiles.includes("bun.lock")) {
-            throw new Error(`Dependency sections changed without bun.lock: ${changedSections.join(", ")}`);
-          }
-          console.log(`Dependency sections ${changedSections.join(", ")} have a matching bun.lock change`);
-          '
+          bun scripts/dependency-declaration-gate.ts --base "$BASE_SHA" --merge HEAD "${declaration[@]}"
 
       - name: Install production and development dependencies
         run: bun install --frozen-lockfile
