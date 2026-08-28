@@ -6,6 +6,7 @@ import path from "node:path";
 
 import type {
   ViewerHealthEvidence,
+  ViewerHealthProbeObservation,
   ViewerMcpRuntimeIdentity,
   ViewerMcpRuntimePublicationEvidence,
   ViewerMcpRuntimeReconciliation,
@@ -68,11 +69,14 @@ import {
   PROMOTE_ACTION_TIMEOUT_MS,
 } from "../src/runtime-host/deploymentHotState";
 import {
+  candidateLogExcerpt,
   hasViewerDeploymentCapability,
+  probeExcerpt,
   promotedViewerReadinessPhase,
   viewerDeploymentRegistryBackendMode,
   viewerDeploymentReleaseReady,
   viewerDeploymentStructuredHostStartup,
+  viewerHealthFailureDetail,
   viewerHealthRequestPlan,
   waitForViewerReadiness,
   type ViewerCandidateContainerState,
@@ -354,12 +358,73 @@ function serviceToken(candidate: ViewerReleaseIdentity): string | null {
   return viewerAuthenticationTokenFromConfig(fs.readFileSync(composeConfigFile(candidate.container), "utf8"));
 }
 
-async function fetchStatus(url: string, headers: Record<string, string> = {}): Promise<{ status: number; text: string }> {
+const PROBE_TIMEOUT_MS = 5_000;
+
+interface ProbeResponse {
+  status: number;
+  text: string;
+  elapsedMs: number;
+  error?: string;
+}
+
+/** A swallowed transport failure is indistinguishable from a fast rejection in
+    the record afterwards, so the reason and the time it took travel with the
+    status (#790). */
+function probeFailureReason(error: unknown): string {
+  if (error instanceof Error) {
+    if (error.name === "TimeoutError") return `no answer within ${PROBE_TIMEOUT_MS} ms`;
+    return probeExcerpt(`${error.name}: ${error.message}`, 120);
+  }
+  return "transport failure";
+}
+
+async function fetchStatus(url: string, headers: Record<string, string> = {}): Promise<ProbeResponse> {
+  const startedAt = Date.now();
   try {
-    const response = await fetch(url, { headers: { connection: "close", ...headers }, redirect: "manual", signal: AbortSignal.timeout(5_000) });
-    return { status: response.status, text: await response.text() };
+    const response = await fetch(url, { headers: { connection: "close", ...headers }, redirect: "manual", signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    const text = await response.text();
+    return { status: response.status, text, elapsedMs: Date.now() - startedAt };
+  } catch (error) {
+    return { status: 0, text: "", elapsedMs: Date.now() - startedAt, error: probeFailureReason(error) };
+  }
+}
+
+function observation(
+  name: ViewerHealthProbeObservation["name"],
+  url: string,
+  response: ProbeResponse,
+  expected: string,
+  ok: boolean,
+): ViewerHealthProbeObservation {
+  return {
+    name,
+    url,
+    status: response.status,
+    elapsedMs: response.elapsedMs,
+    expected,
+    ok,
+    ...(response.error ? { error: response.error } : {}),
+    ...(ok || !response.text ? {} : { body: probeExcerpt(response.text) }),
+  };
+}
+
+/** Read while the candidate is alive: a failed candidate is retired, and its
+    container - the only place its own account of a 500 exists - with it. */
+async function candidateContainerLog(container: string): Promise<string[]> {
+  try {
+    const child = Bun.spawn(["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", "docker", "logs", "--tail", "40", container], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: withoutWakatimeCredential(process.env),
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return candidateLogExcerpt(`${stdout}\n${stderr}`);
   } catch {
-    return { status: 0, text: "" };
+    return [];
   }
 }
 
@@ -413,6 +478,22 @@ async function probeRoutes(
     expectedAssetsMatch = JSON.stringify(referencedAssets(expectedRoot.text)) === JSON.stringify(paths);
   }
   const processReady = true;
+  const observations: ViewerHealthProbeObservation[] = [
+    observation("root", requests.root.url, root, "200", root.status === 200),
+    ...(authenticated && requests.authenticated
+      ? [observation("authenticated", requests.authenticated.url, authenticated, "200", authenticated.status === 200)]
+      : []),
+    ...(unauthorized && requests.unauthorized
+      ? [observation("unauthorized", requests.unauthorized.url, unauthorized, "403", unauthorized.status === 403)]
+      : []),
+    observation(
+      "capability",
+      requests.capability.url,
+      capability,
+      "200 with capability viewer-deployments version 1",
+      deploymentCapable,
+    ),
+  ];
   const ok = root.status === 200
     && (authenticated === null || authenticated.status === 200)
     && (unauthorized === null || unauthorized.status === 403)
@@ -424,17 +505,19 @@ async function probeRoutes(
     && expectedAssetsMatch;
   return {
     checkedAt: new Date().toISOString(), endpoint, processReady, rootStatus: root.status,
-    authenticatedStatus: authenticated?.status ?? null, unauthorizedStatus: unauthorized?.status ?? null, assets, ok,
+    authenticatedStatus: authenticated?.status ?? null, unauthorizedStatus: unauthorized?.status ?? null,
+    assets, observations, ok,
     ...(ok ? {} : {
-      detail: !deploymentCapable
-        ? "Viewer deployment capability gate failed"
-        : !registryBackendMatches
-          ? `Viewer registry backend mode mismatch: expected ${expectedRegistryBackendMode}, observed ${observedRegistryBackendMode ?? "unavailable"}`
-          : !releaseReady
-            ? "Viewer release startup is incomplete"
-            : expectedAssetsMatch
-              ? "Viewer health or referenced asset gate failed"
-              : "stable listener does not serve the candidate asset set",
+      detail: viewerHealthFailureDetail({
+        observations,
+        assets,
+        deploymentCapable,
+        registryBackendMatches,
+        expectedRegistryBackendMode,
+        observedRegistryBackendMode,
+        releaseReady,
+        expectedAssetsMatch,
+      }) ?? "Viewer health gate failed",
     }),
   };
 }
@@ -445,12 +528,15 @@ async function verifyViewer(
   expectedAssetsEndpoint?: string,
   reportPhase?: (phase: string) => void,
 ): Promise<ViewerHealthEvidence> {
-  return waitForViewerReadiness({
+  const evidence = await waitForViewerReadiness({
     endpoint,
     inspect: () => containerState(candidate.container),
     probe: () => probeRoutes(candidate, endpoint, expectedAssetsEndpoint, reportPhase),
     ...(expectedAssetsEndpoint ? { maxAttempts: 90 } : {}),
   });
+  if (evidence.ok) return evidence;
+  const containerLog = await candidateContainerLog(candidate.container);
+  return containerLog.length > 0 ? { ...evidence, containerLog } : evidence;
 }
 
 export function mcpProbeEnvironment(

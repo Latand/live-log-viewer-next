@@ -523,6 +523,37 @@ export interface ViewerMcpRuntimeReconciliation {
   health: ViewerMcpRuntimeHealthEvidence;
 }
 
+export type ViewerHealthProbeName = "root" | "authenticated" | "unauthorized" | "capability";
+
+/** One readiness request, kept with what the gate asked for. A failed candidate
+    is retired before anyone can inspect it, so this record is the whole account
+    of the probe that is left afterwards (#790). */
+export interface ViewerHealthProbeObservation {
+  name: ViewerHealthProbeName;
+  url: string;
+  /** `0` means no response arrived; `error` then names the transport failure. */
+  status: number;
+  elapsedMs: number;
+  /** What a passing candidate would have answered. */
+  expected: string;
+  /** Whether this request met `expected`. */
+  ok: boolean;
+  error?: string;
+  /** Bounded single-line body excerpt, kept only when the observation failed. */
+  body?: string;
+}
+
+/** How much waiting the readiness loop actually spent, so a timeout can be told
+    apart from an answer the gate rejected. */
+export interface ViewerHealthReadiness {
+  attempts: number;
+  maxAttempts: number;
+  delayMs: number;
+  elapsedMs: number;
+  /** The first attempt's detail, present only when the symptom changed. */
+  firstDetail?: string;
+}
+
 export interface ViewerHealthEvidence {
   checkedAt: string;
   endpoint: string;
@@ -531,6 +562,10 @@ export interface ViewerHealthEvidence {
   authenticatedStatus: number | null;
   unauthorizedStatus: number | null;
   assets: Array<{ path: string; status: number }>;
+  observations?: ViewerHealthProbeObservation[];
+  readiness?: ViewerHealthReadiness;
+  /** Bounded tail of the candidate's own output, read before it is retired. */
+  containerLog?: string[];
   mcpRuntime?: ViewerMcpRuntimeHealthEvidence;
   ok: boolean;
   detail?: string;

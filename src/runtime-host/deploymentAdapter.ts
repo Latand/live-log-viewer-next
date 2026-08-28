@@ -7,6 +7,8 @@ import { statePath } from "@/lib/configDir";
 import { procBackend, type ProcBackend } from "@/lib/proc";
 import type {
   ViewerHealthEvidence,
+  ViewerHealthProbeObservation,
+  ViewerHealthReadiness,
   ViewerMcpRuntimeHealthEvidence,
   ViewerMcpRuntimeIdentity,
   ViewerMcpRuntimePublicationEvidence,
@@ -230,6 +232,50 @@ function publication(value: unknown): ViewerMcpRuntimePublicationEvidence {
   };
 }
 
+const PROBE_NAMES: readonly ViewerHealthProbeObservation["name"][] = ["root", "authenticated", "unauthorized", "capability"];
+
+/** The diagnosis a failed deploy leaves behind (#790) only survives if it
+    crosses this boundary, so each field is recovered here rather than dropped
+    as unknown. Absent fields stay absent: records written before they existed
+    replay unchanged. */
+function probeObservations(value: unknown): ViewerHealthProbeObservation[] {
+  if (!Array.isArray(value)) throw new Error("deployment adapter returned invalid health evidence");
+  return value.map((entry) => {
+    const item = object(entry);
+    if (!PROBE_NAMES.includes(item.name as ViewerHealthProbeObservation["name"])
+      || typeof item.url !== "string"
+      || typeof item.status !== "number"
+      || typeof item.elapsedMs !== "number"
+      || typeof item.expected !== "string"
+      || typeof item.ok !== "boolean") throw new Error("deployment adapter returned invalid health evidence");
+    return {
+      name: item.name as ViewerHealthProbeObservation["name"],
+      url: item.url,
+      status: item.status,
+      elapsedMs: item.elapsedMs,
+      expected: item.expected,
+      ok: item.ok,
+      ...(typeof item.error === "string" ? { error: item.error } : {}),
+      ...(typeof item.body === "string" ? { body: item.body } : {}),
+    };
+  });
+}
+
+function readinessRecord(value: unknown): ViewerHealthReadiness {
+  const item = object(value);
+  if (typeof item.attempts !== "number"
+    || typeof item.maxAttempts !== "number"
+    || typeof item.delayMs !== "number"
+    || typeof item.elapsedMs !== "number") throw new Error("deployment adapter returned invalid health evidence");
+  return {
+    attempts: item.attempts,
+    maxAttempts: item.maxAttempts,
+    delayMs: item.delayMs,
+    elapsedMs: item.elapsedMs,
+    ...(typeof item.firstDetail === "string" ? { firstDetail: item.firstDetail } : {}),
+  };
+}
+
 function evidence(value: unknown): ViewerHealthEvidence {
   const item = object(value);
   const assets = Array.isArray(item.assets) ? item.assets.map((asset) => object(asset)) : [];
@@ -242,6 +288,8 @@ function evidence(value: unknown): ViewerHealthEvidence {
     || (item.unauthorizedStatus !== null && typeof item.unauthorizedStatus !== "number")
     || typeof item.ok !== "boolean"
     || assets.some((asset) => typeof asset.path !== "string" || typeof asset.status !== "number")
+    || (item.containerLog !== undefined
+      && (!Array.isArray(item.containerLog) || item.containerLog.some((line) => typeof line !== "string")))
   ) throw new Error("deployment adapter returned invalid health evidence");
   return {
     checkedAt: item.checkedAt,
@@ -251,6 +299,9 @@ function evidence(value: unknown): ViewerHealthEvidence {
     authenticatedStatus: item.authenticatedStatus,
     unauthorizedStatus: item.unauthorizedStatus,
     assets: assets.map((asset) => ({ path: asset.path as string, status: asset.status as number })),
+    ...(item.observations === undefined ? {} : { observations: probeObservations(item.observations) }),
+    ...(item.readiness === undefined ? {} : { readiness: readinessRecord(item.readiness) }),
+    ...(item.containerLog === undefined ? {} : { containerLog: item.containerLog as string[] }),
     ...(item.mcpRuntime === undefined ? {} : { mcpRuntime: mcpHealthEvidence(item.mcpRuntime) }),
     ok: item.ok,
     ...(typeof item.detail === "string" ? { detail: item.detail } : {}),

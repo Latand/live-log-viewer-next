@@ -1,4 +1,8 @@
-import type { ViewerHealthEvidence } from "@/lib/runtime/contracts";
+import type {
+  ViewerHealthEvidence,
+  ViewerHealthProbeObservation,
+  ViewerHealthReadiness,
+} from "@/lib/runtime/contracts";
 
 export type ViewerCandidateContainerState = "running" | "exited" | "missing";
 
@@ -115,6 +119,114 @@ export function promotedViewerReadinessPhase(
   return `${prefix}${progress.phase.slice(0, Math.max(0, 160 - prefix.length)).trimEnd()}`;
 }
 
+const BODY_EXCERPT_CHARS = 200;
+const DETAIL_CHARS = 600;
+const CANDIDATE_LOG_LINES = 20;
+const CANDIDATE_LOG_CHARS = 200;
+
+/** One printable line, bounded. Probe bodies and candidate output reach the
+    durable deployment record and the operator's terminal, so neither a stack
+    trace nor a megabyte of HTML may travel with them. */
+export function probeExcerpt(text: string, limit = BODY_EXCERPT_CHARS): string {
+  const collapsed = text.replace(/\p{C}/gu, " ").replace(/\s+/g, " ").trim();
+  return collapsed.length > limit ? `${collapsed.slice(0, limit)}...` : collapsed;
+}
+
+/** The candidate is retired as soon as its health gate fails, taking its
+    container logs with it, so the tail is read while it is still alive. */
+export function candidateLogExcerpt(
+  output: string,
+  options: { maxLines?: number; maxChars?: number } = {},
+): string[] {
+  const maxLines = Math.min(Math.max(options.maxLines ?? CANDIDATE_LOG_LINES, 1), 200);
+  const maxChars = Math.min(Math.max(options.maxChars ?? CANDIDATE_LOG_CHARS, 40), 1_000);
+  return output
+    .split("\n")
+    .map((line) => probeExcerpt(line, maxChars))
+    .filter((line) => line.length > 0)
+    .slice(-maxLines);
+}
+
+export function describeProbeObservation(observation: ViewerHealthProbeObservation): string {
+  const answered = observation.status === 0
+    ? `no response (${observation.error ?? "transport failure"})`
+    : `HTTP ${observation.status}`;
+  return `${observation.name} GET ${observation.url} -> ${answered} in ${observation.elapsedMs} ms, expected ${observation.expected}`;
+}
+
+function withBody(sentence: string, observations: ViewerHealthProbeObservation[]): string {
+  const body = observations.find((observation) => observation.body)?.body;
+  return body ? `${sentence}; body: ${body}` : sentence;
+}
+
+export interface ViewerHealthGateOutcome {
+  observations: ViewerHealthProbeObservation[];
+  assets: Array<{ path: string; status: number }>;
+  deploymentCapable: boolean;
+  registryBackendMatches: boolean;
+  expectedRegistryBackendMode: string;
+  observedRegistryBackendMode: string | null;
+  releaseReady: boolean;
+  expectedAssetsMatch: boolean;
+}
+
+/** Names the gate that failed together with the request behind it. The order
+    matters as much as the words: a candidate whose whole surface answers 500 is
+    reported as that, not as the capability gate that happens to be checked
+    first, which is how #790 spent a deploy cycle on a route that was never the
+    problem. */
+export function viewerHealthFailureDetail(outcome: ViewerHealthGateOutcome): string | null {
+  const detail = failedGate(outcome);
+  return detail === null ? null : probeExcerpt(detail, DETAIL_CHARS);
+}
+
+function failedGate(outcome: ViewerHealthGateOutcome): string | null {
+  const failed = outcome.observations.filter((observation) => !observation.ok);
+  const surface = failed.filter((observation) => observation.name !== "capability");
+  if (failed.some((observation) => observation.status === 0)) {
+    return `Viewer candidate did not answer: ${failed.map(describeProbeObservation).join("; ")}`;
+  }
+  if (surface.length > 0) {
+    return withBody(`Viewer HTTP surface failed: ${failed.map(describeProbeObservation).join("; ")}`, failed);
+  }
+  if (!outcome.deploymentCapable) {
+    const capability = outcome.observations.find((observation) => observation.name === "capability");
+    return withBody(
+      `Viewer deployment capability gate failed: ${capability
+        ? describeProbeObservation(capability)
+        : "no capability probe was recorded"}`,
+      failed,
+    );
+  }
+  if (!outcome.registryBackendMatches) {
+    return `Viewer registry backend mode mismatch: expected ${outcome.expectedRegistryBackendMode}, observed ${outcome.observedRegistryBackendMode ?? "unavailable"}`;
+  }
+  if (!outcome.releaseReady) {
+    return "Viewer release startup is incomplete: the capability route answered 200 with releaseReady false";
+  }
+  if (!outcome.expectedAssetsMatch) return "stable listener does not serve the candidate asset set";
+  if (outcome.assets.length === 0) {
+    return "Viewer asset gate failed: the served page referenced no build assets";
+  }
+  const broken = outcome.assets.filter((asset) => asset.status !== 200);
+  if (broken.length > 0) {
+    return `Viewer asset gate failed: ${broken.length} of ${outcome.assets.length} referenced assets did not answer 200 (${broken[0]?.path} -> ${broken[0]?.status})`;
+  }
+  return null;
+}
+
+/** A timeout that reports only the last symptom cannot be told apart from a
+    budget that was too small, so the waiting itself is measured (#790). */
+export function viewerReadinessTimeoutDetail(
+  readiness: ViewerHealthReadiness,
+  lastDetail: string | null,
+): string {
+  const elapsed = `${(readiness.elapsedMs / 1_000).toFixed(1)}s`;
+  const budget = `budget ${readiness.maxAttempts} attempts ${readiness.delayMs} ms apart`;
+  const first = readiness.firstDetail ? `; first attempt: ${readiness.firstDetail}` : "";
+  return `candidate readiness timed out after ${readiness.attempts} attempts over ${elapsed} (${budget}): ${lastDetail ?? "no probe completed"}${first}`;
+}
+
 export interface ViewerReadinessProbe {
   endpoint: string;
   inspect(): Promise<ViewerCandidateContainerState>;
@@ -122,6 +234,7 @@ export interface ViewerReadinessProbe {
   sleep?(delayMs: number): Promise<void>;
   maxAttempts?: number;
   delayMs?: number;
+  now?(): number;
 }
 
 function unavailable(endpoint: string, state: Exclude<ViewerCandidateContainerState, "running">): ViewerHealthEvidence {
@@ -139,20 +252,54 @@ function unavailable(endpoint: string, state: Exclude<ViewerCandidateContainerSt
 }
 
 export async function waitForViewerReadiness(options: ViewerReadinessProbe): Promise<ViewerHealthEvidence> {
-  const attempts = Math.min(Math.max(options.maxAttempts ?? 30, 1), 120);
+  const maxAttempts = Math.min(Math.max(options.maxAttempts ?? 30, 1), 120);
   const delayMs = Math.min(Math.max(options.delayMs ?? 1_000, 0), 10_000);
   const sleep = options.sleep ?? ((delay) => new Promise<void>((resolve) => setTimeout(resolve, delay)));
+  const now = options.now ?? (() => Date.now());
+  const startedAt = now();
   let last: ViewerHealthEvidence | null = null;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+  let firstDetail: string | null = null;
+  let attempts = 0;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const state = await options.inspect();
-    if (state !== "running") return unavailable(options.endpoint, state);
+    if (state !== "running") {
+      return {
+        ...unavailable(options.endpoint, state),
+        readiness: readiness({ attempts, maxAttempts, delayMs, elapsedMs: now() - startedAt, firstDetail, lastDetail: last?.detail ?? null }),
+      };
+    }
+    attempts = attempt;
     last = await options.probe();
     if (last.ok) return last;
-    if (attempt < attempts) await sleep(delayMs);
+    if (attempt === 1) firstDetail = last.detail ?? null;
+    if (attempt < maxAttempts) await sleep(delayMs);
   }
+  const record = readiness({
+    attempts, maxAttempts, delayMs, elapsedMs: now() - startedAt, firstDetail, lastDetail: last?.detail ?? null,
+  });
   return {
     ...(last ?? unavailable(options.endpoint, "missing")),
     ok: false,
-    detail: last?.detail ? `candidate readiness timed out: ${last.detail}` : "candidate readiness timed out",
+    readiness: record,
+    detail: viewerReadinessTimeoutDetail(record, last?.detail ?? null),
+  };
+}
+
+function readiness(input: {
+  attempts: number;
+  maxAttempts: number;
+  delayMs: number;
+  elapsedMs: number;
+  firstDetail: string | null;
+  lastDetail: string | null;
+}): ViewerHealthReadiness {
+  return {
+    attempts: input.attempts,
+    maxAttempts: input.maxAttempts,
+    delayMs: input.delayMs,
+    elapsedMs: Math.max(0, Math.round(input.elapsedMs)),
+    /* Only a symptom that changed while waiting carries information: repeating
+       an identical detail twice says nothing about the budget. */
+    ...(input.firstDetail && input.firstDetail !== input.lastDetail ? { firstDetail: input.firstDetail } : {}),
   };
 }
