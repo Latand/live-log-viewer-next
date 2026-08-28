@@ -11,7 +11,7 @@ process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
 process.env.TMPDIR = path.join(SANDBOX, "tmp");
 fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
-const { readSeatTickState, readSeatTickStateFile, seatTickStateForEpoch, seatTickStatePath, writeSeatTickState } = await import("./state");
+const { readSeatTickState, readSeatTickStateFile, seatTickStateForEpoch, seatTickStatePath, writeSeatTickState } = await import("./seatTickState");
 import { emptySeatTickState } from "./types";
 
 afterAll(() => {
@@ -31,7 +31,7 @@ const row = {
   wakesWithoutChange: { stalled: 2 },
   stalledSeen: ["pipeline_a1"],
   lastWakeFingerprint: "fp-1",
-  digestThrough: 41,
+  eventsThrough: 41,
 };
 
 test("a row survives the write and reads back whole", () => {
@@ -47,7 +47,7 @@ test("one project's write leaves the others' rows alone", () => {
   writeSeatTickState("other", { ...emptySeatTickState(), seatEpoch: 2 }, file);
   const projects = readSeatTickStateFile(file);
   expect(Object.keys(projects).sort()).toEqual(["other", "viewer"]);
-  expect(projects.viewer!.digestThrough).toBe(41);
+  expect(projects.viewer!.eventsThrough).toBe(41);
 });
 
 test("a missing, unreadable or malformed file reads as an empty row rather than throwing", () => {
@@ -78,7 +78,7 @@ test("a rotation hands the clock over: the successor's epoch starts the bookkeep
   /* The lifecycle cursor is the one thing that is not the seat's: it belongs to
      the project, and replaying a rotation's worth of events would wake the
      successor for every lane that moved while the seat was changing hands. */
-  expect(successor.digestThrough).toBe(41);
+  expect(successor.eventsThrough).toBe(41);
 });
 
 test("the same epoch keeps the row it was given", () => {

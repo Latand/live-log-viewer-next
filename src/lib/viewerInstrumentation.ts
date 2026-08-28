@@ -335,7 +335,7 @@ export async function startCurrentReleaseControllers(
     loadTelegramReportScheduler: () => import("@/lib/telegram/reportRunner"),
     loadTelegramConnectorBoot: () => import("@/lib/telegram/connectorBoot"),
     loadStructuredHostRetirement: () => import("@/lib/runtime/structuredHostRetirement"),
-    loadSeatTick: () => import("@/lib/seatTick/controller"),
+    loadSeatTick: () => import("@/lib/monitor/seatTickController"),
   },
 ): Promise<void> {
   const { startFlowPipelineController } = await loaders.loadFlowPipelineController();

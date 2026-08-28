@@ -1,12 +1,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 
-import { agentRegistry, type AgentHostStatus } from "@/lib/agent/registry";
+import { agentRegistry } from "@/lib/agent/registry";
 import { statePath } from "@/lib/configDir";
-import { pollLifecycleDigest } from "@/lib/lifecycle/digest";
-import { evidenceFromPipelines, evidenceFromTasks } from "@/lib/monitor/evidence";
-import type { PipelineSummary, TaskSummary } from "@/lib/monitor/viewerApi";
-import { activeOrchestratorSeats, canonicalOrchestratorProject, orchestratorSeatFor } from "@/lib/orchestrator/seats";
+import { pageFromEvents, readLifecycleJournal, someMatchingEvent } from "@/lib/lifecycle/journal";
+import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessRecord } from "@/lib/lifecycle/liveness";
+import { isTerminalHighSignalEvent } from "@/lib/lifecycle/vocabulary";
+import { canonicalOrchestratorProject, activeOrchestratorSeats, orchestratorSeatFor } from "@/lib/orchestrator/seats";
 import { loadPipelinesForList } from "@/lib/pipelines/store";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -15,7 +15,10 @@ import type { StructuredHostRetirementReport } from "@/lib/runtime/structuredHos
 import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 
+import { evidenceFromPipelines, evidenceFromTasks } from "./evidence";
+import type { PipelineSummary, TaskSummary } from "./viewerApi";
 import {
+  type SeatTickActivity,
   type SeatTickCheckInput,
   type SeatTickEventInput,
   type SeatTickPipelineInput,
@@ -30,11 +33,19 @@ import {
  * Everything the pre-check reads (issue #1245), and nothing else.
  *
  * Every source here is durable and already written by the Viewer: the seat
- * store, the pipeline store, the board, the lifecycle journal, the deployment
- * ledger and the host retirement report. No transcript is scanned and no model
- * is called — the only file this opens beyond those is a running stage's
- * transcript, and only to `stat` it.
+ * store, the pipeline store, the board, the lifecycle journal, the liveness
+ * plane, the deployment ledger and the host retirement report. No transcript is
+ * scanned by this module and no model is called — the one transcript read in
+ * the whole check belongs to `agent_activity`'s own bounded evidence pass,
+ * which is where the answer to "is this turn still moving?" already lives.
  */
+
+/** How much of the lifecycle journal one check carries. The reason a terminal
+    event is never buried by a backlog is {@link SeatTickCheckInput.terminalPending},
+    which is asked over the whole pending range rather than this page. */
+const EVENT_PAGE = 200;
+/** Liveness rows one project's check asks for. */
+const LIVENESS_LIMIT = 60;
 
 export interface SeatTickSources {
   seatFor: typeof orchestratorSeatFor;
@@ -43,10 +54,13 @@ export interface SeatTickSources {
   pipelines: () => readonly Pipeline[];
   tasks: () => BoardTask[];
   registry: () => ReturnType<typeof agentRegistry>;
-  /** The seat host's recorded status, or null when no entry names it. */
-  hostStatus: (conversationId: string) => AgentHostStatus | null;
-  digest: typeof pollLifecycleDigest;
-  transcriptMtimeMs: (path: string) => number | null;
+  /** The registry's own activity verdict — `agent_activity`'s answer, which is
+      the only thing this module is allowed to call a stall. */
+  liveness: (request: { project?: string; conversationId?: string; stallAfterMs: number; limit: number }) => Promise<AgentLivenessRecord[]>;
+  /** The lifecycle journal, read whole and paged in-process, so the tick's own
+      cursor decides what is unread rather than a cursor that advanced at poll
+      time. */
+  lifecycleJournal: typeof readLifecycleJournal;
   deployments: typeof ledgerDeployments;
   retirementReport: () => StructuredHostRetirementReport | null;
   now: () => number;
@@ -59,24 +73,16 @@ export function defaultSeatTickSources(): SeatTickSources {
     pipelines: () => loadPipelinesForList(),
     tasks: () => loadTasks(),
     registry: () => agentRegistry(),
-    hostStatus: (conversationId) => {
-      const registry = agentRegistry();
-      const conversation = registry.conversation(conversationId as `conversation_${string}`);
-      if (!conversation) return null;
-      const sessions = new Set(conversation.generations.map((generation) => generation.id));
-      for (const entry of Object.values(registry.snapshot().entries)) {
-        if (sessions.has(entry.key.sessionId)) return entry.status;
-      }
-      return null;
+    liveness: async (request) => {
+      const snapshot = await agentLivenessSnapshot({
+        ...(request.conversationId ? { conversationId: request.conversationId } : {}),
+        ...(request.project ? { project: request.project, liveOnly: true } : {}),
+        stallAfterMs: request.stallAfterMs,
+        limit: request.limit,
+      }, productionLivenessSources());
+      return snapshot.conversations;
     },
-    digest: pollLifecycleDigest,
-    transcriptMtimeMs: (pathname) => {
-      try {
-        return fs.statSync(pathname).mtimeMs;
-      } catch {
-        return null;
-      }
-    },
+    lifecycleJournal: readLifecycleJournal,
     deployments: ledgerDeployments,
     retirementReport: () => {
       try {
@@ -125,44 +131,60 @@ function taskSummary(task: BoardTask & { pipelineIds: string[] }): TaskSummary {
   };
 }
 
-/**
- * How long the running stage's transcript has been silent under an open turn.
- *
- * This is the registry's own `stalled` rule read at the tick's threshold: an
- * open turn plus a transcript that stopped growing. A transcript that cannot be
- * read returns null, because an unread transcript is not a silent one — the
- * pre-check must never call a lane stuck on the strength of a failed `stat`.
- */
-function silentForMs(pipeline: Pipeline, sources: SeatTickSources, now: number): number | null {
-  const stageId = pipeline.cursor?.stageId ?? null;
-  if (!stageId) return null;
-  const run = pipeline.runs.find((entry) => entry.stageId === stageId);
-  const attempt = [...(run?.attempts ?? [])].reverse().find((entry) => entry.state === "running");
-  if (!attempt?.agentPath) return null;
-  const conversation = attempt.conversationId?.startsWith("conversation_")
-    ? sources.registry().conversation(attempt.conversationId as `conversation_${string}`)
-    : sources.registry().conversationForPath(attempt.agentPath);
-  /* A settled turn is not a stall, whatever the transcript's age. A running
-     attempt with NO conversation record at all is left to the mtime check on
-     purpose: that is the "running stage whose host the engine has not noticed"
-     shape, and it still has to clear two consecutive checks and the silence
-     threshold before anything calls it stuck. */
-  if (conversation && conversation.turn.state !== "busy" && conversation.turn.state !== "unknown") return null;
-  const mtimeMs = sources.transcriptMtimeMs(attempt.agentPath);
-  if (mtimeMs === null) return null;
-  return Math.max(0, now - mtimeMs);
+function activityOf(record: AgentLivenessRecord | undefined): SeatTickActivity | null {
+  return record ? { lifecycle: record.lifecycle, reason: record.reason } : null;
 }
 
-function seatInput(project: string, sources: SeatTickSources): SeatTickSeatInput | null {
+/**
+ * The liveness rows for a project, indexed by the pipeline each one is running.
+ *
+ * A liveness read that cannot answer answers with nothing. It never says
+ * "dead", and a lane with no row is a lane the tick has no stall evidence
+ * about — which the decision reads as "still in flight", never as "stuck".
+ */
+async function laneActivity(project: string, policy: SeatTickPolicy, sources: SeatTickSources): Promise<Map<string, SeatTickActivity>> {
+  const byPipeline = new Map<string, SeatTickActivity>();
+  let rows: AgentLivenessRecord[];
+  try {
+    rows = await sources.liveness({ project, stallAfterMs: policy.stallAfterMs, limit: LIVENESS_LIMIT });
+  } catch {
+    return byPipeline;
+  }
+  for (const row of rows) {
+    const pipelineId = row.pipeline?.pipelineId;
+    if (!pipelineId || byPipeline.has(pipelineId)) continue;
+    const activity = activityOf(row);
+    if (activity) byPipeline.set(pipelineId, activity);
+  }
+  return byPipeline;
+}
+
+/**
+ * The seat, with the registry's verdict on the turn it is holding.
+ *
+ * The verdict is only asked for when the registry says the turn is open, which
+ * is the only case anything reads it: a settled turn is never skipped and never
+ * signalled. Targeted by conversation id, the way `get_orchestrator` asks it —
+ * the targeted branch resolves one transcript and never sweeps the catalog.
+ */
+async function seatInput(project: string, policy: SeatTickPolicy, sources: SeatTickSources): Promise<SeatTickSeatInput | null> {
   const seat = sources.seatFor(project).active;
   if (!seat?.conversationId) return null;
   const conversation = sources.registry().conversation(seat.conversationId as `conversation_${string}`);
-  return {
-    conversationId: seat.conversationId,
-    seatEpoch: seat.seatEpoch,
-    path: seat.path,
-    turn: conversation?.turn.state ?? "unknown",
-  };
+  const turn = conversation?.turn.state ?? "unknown";
+  let activity: SeatTickActivity | null = null;
+  if (turn === "busy") {
+    try {
+      const rows = await sources.liveness({ conversationId: seat.conversationId, stallAfterMs: policy.stallAfterMs, limit: 1 });
+      activity = activityOf(rows[0]);
+    } catch {
+      /* An unanswerable liveness read says nothing. The decision treats an
+         absent verdict as "not provably progressing", so the tick keeps working
+         rather than waiting behind a turn it cannot see. */
+      activity = null;
+    }
+  }
+  return { conversationId: seat.conversationId, seatEpoch: seat.seatEpoch, path: seat.path, turn, activity };
 }
 
 function signals(project: string, seat: SeatTickSeatInput | null, sources: SeatTickSources): SeatTickSignalInput[] {
@@ -177,11 +199,13 @@ function signals(project: string, seat: SeatTickSeatInput | null, sources: SeatT
   if (report && (report.failed.length > 0 || undetermined > 0)) {
     found.push({ id: "host-retirement", label: `host retirement: ${report.failed.length} failed, ${undetermined} undetermined` });
   }
-  /* The one signal that is about the seat itself: its host is gone while a turn
-     is still open. The tick's wake is what brings such a seat back, which is the
-     reversal recorded in this PR's ADR. */
-  if (seat && seat.turn === "busy" && sources.hostStatus(seat.conversationId) === "dead") {
-    found.push({ id: "seat-host", label: `the seat's own host is dead under an open turn in ${project}` });
+  /* The one signal that is about the seat itself: its own turn has stopped
+     progressing. The tick's wake is what brings such a seat back, which is the
+     reversal recorded in this PR's ADR — and, because this is a signal, it is
+     agenda enough for the hourly interval to carry it. */
+  const seatActivity = seat?.activity;
+  if (seat && seat.turn === "busy" && seatActivity && (seatActivity.lifecycle === "stalled" || seatActivity.lifecycle === "gone")) {
+    found.push({ id: "seat-host", label: `the seat's own turn is ${seatActivity.lifecycle} in ${project} (${seatActivity.reason})` });
   }
   return found;
 }
@@ -220,24 +244,54 @@ export function seatTickProjects(sources: SeatTickSources): string[] {
   return [...projects].sort();
 }
 
-export function gatherSeatTickInput(
+/**
+ * Everything past the seat's own event cursor.
+ *
+ * The lifecycle digest's per-subscriber cursor is not used here, and the reason
+ * is the one rule this whole file is arranged around: that cursor advances when
+ * the relay is READ, and an acknowledged event is never offered again. A wake
+ * that is then refused at the seat epoch, held by a migration, or queued behind
+ * a host that never takes it would leave the seat permanently unaware of the
+ * lane event that produced it. So the tick keeps its own cursor in its own row
+ * and moves it only when a wake actually landed — and, exactly as the digest
+ * does, it asks about a pending terminal event over the whole range rather than
+ * one page of it.
+ */
+function eventsSince(project: string, cursor: number, sources: SeatTickSources): { events: SeatTickEventInput[]; terminalPending: boolean } {
+  const journal = sources.lifecycleJournal();
+  const query = { project, afterSeq: cursor };
+  const page = pageFromEvents(journal, { ...query, limit: EVENT_PAGE });
+  return {
+    events: page.events.map((event) => ({
+      seq: event.seq,
+      at: event.at,
+      type: event.type,
+      summary: event.summary,
+      pipelineId: event.pipelineId,
+    })),
+    terminalPending: someMatchingEvent(journal, query, (event) => isTerminalHighSignalEvent(event.type)),
+  };
+}
+
+export async function gatherSeatTickInput(
   project: string,
   state: SeatTickProjectState,
   policy: SeatTickPolicy,
   sources: SeatTickSources,
-): SeatTickCheckInput {
+): Promise<SeatTickCheckInput> {
   const now = sources.now();
-  const seat = seatInput(project, sources);
   const canonical = canonicalOrchestratorProject(project);
+  const seat = await seatInput(canonical, policy, sources);
 
   const openLanes = sources.pipelines().filter((pipeline) => isOpen(pipeline) && canonicalOrchestratorProject(pipeline.project) === canonical);
   const evidence = evidenceFromPipelines(openLanes.map(pipelineSummary));
+  const activity = openLanes.length > 0 ? await laneActivity(canonical, policy, sources) : new Map<string, SeatTickActivity>();
   const pipelines: SeatTickPipelineInput[] = openLanes.map((pipeline, index) => ({
     id: pipeline.id,
     title: evidence[index]!.title,
     state: evidence[index]!.state,
     updatedAt: evidence[index]!.updatedAt,
-    silentForMs: silentForMs(pipeline, sources, now),
+    stageActivity: activity.get(pipeline.id) ?? null,
     stageId: pipeline.cursor?.stageId ?? null,
   }));
 
@@ -253,22 +307,7 @@ export function gatherSeatTickInput(
     owned: taskEvidence[index]!.owner !== null,
   }));
 
-  /* The digest is consumed only by a check that will actually decide. A seat
-     mid-turn is skipped, and a skipped check that had swallowed a relay would
-     lose the very lane events the next one needs. */
-  const busy = seat?.turn === "busy";
-  let events: SeatTickEventInput[] = [];
-  let digestThrough = state.digestThrough;
-  if (seat && !busy) {
-    const relay = sources.digest({ subscriberId: `seat-tick:${canonical}`, project: canonical, now, maxItems: 25 });
-    events = (relay.relay?.items ?? []).map((item) => ({
-      at: item.at,
-      type: item.type,
-      summary: item.summary,
-      pipelineId: item.pipelineId,
-    }));
-    digestThrough = relay.cursor;
-  }
+  const { events, terminalPending } = eventsSince(canonical, state.eventsThrough, sources);
 
   return {
     project: canonical,
@@ -277,9 +316,9 @@ export function gatherSeatTickInput(
     pipelines,
     tasks,
     events,
+    terminalPending,
     signals: signals(canonical, seat, sources),
     changeFingerprint: changeFingerprint(pipelines, tasks),
-    digestThrough,
     state,
     policy,
   };

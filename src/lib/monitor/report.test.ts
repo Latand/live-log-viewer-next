@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 
-import { proposalRef, seatTickProposalMessage, seatTickWakeMessage } from "./message";
+import { seatTickProposalRef } from "./cards";
+import { seatTickProposalMessage, seatTickWakeMessage } from "./report";
+
+/**
+ * The seat tick's two briefs (#1245), rendered by the module that already
+ * renders the monitor's own report.
+ */
 
 const PROJECT = "viewer";
 
@@ -46,7 +52,7 @@ test("the proposal brief asks for one ranked card and forbids opening issues or 
   expect(text).toContain("#1245 the native seat tick [design, monitor]");
   expect(text).toContain("ONE ranked list of at most 5 actions");
   expect(text).toContain("single board card in inbox");
-  expect(text).toContain(`monitor-ref: ${proposalRef("20693")}`);
+  expect(text).toContain(`monitor-ref: ${seatTickProposalRef("20693")}`);
   expect(text).toContain("Open no GitHub issue and start no pipeline from this");
 });
 
@@ -58,5 +64,5 @@ test("an unreadable gh leaves the slot working from the board rather than failin
 /* `monitorRefIn` reads `[A-Za-z0-9_-]{4,64}` — a colon in the ref would make the
    marker unreadable, and the next tick would mint a second proposal card. */
 test("the proposal ref stays inside what the card marker can read back", () => {
-  expect(proposalRef("20693")).toMatch(/^[A-Za-z0-9_-]{4,64}$/);
+  expect(seatTickProposalRef("20693")).toMatch(/^[A-Za-z0-9_-]{4,64}$/);
 });

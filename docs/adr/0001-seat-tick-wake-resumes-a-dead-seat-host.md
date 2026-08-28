@@ -30,7 +30,7 @@ through `deliverConversationMessage` by durable conversation id — the same
 engine-agnostic path `POST /api/tmux` and `send_message_to_orchestrator` use —
 and its recovery of a dead structured conversation is a success, not a failure.
 
-Two limits travel with the decision and are not separable from it:
+Three limits travel with the decision and are not separable from it:
 
 1. **Never a creation.** A wake resumes a host for a seat that already exists. A
    project with no active seat gets the `no-seat` verdict: a journal line and one
@@ -38,6 +38,15 @@ Two limits travel with the decision and are not separable from it:
 2. **Never a stale seat.** The seat epoch is re-read immediately before the send.
    A seat revoked or rotated between the decision and the send is refused, the
    refusal is journaled, and no wake is recorded as having happened.
+3. **Never a wake that did not land.** Resuming a host makes "the send was
+   accepted" and "the seat has the message" two different facts, so only the
+   second counts. A delivery the layer parked behind an account migration
+   (`held`), left with the runtime (`queued`, `delivering`) or has not routed at
+   all (`pending`) does not advance the wake stamp and does not advance the
+   lifecycle event cursor — an acknowledged event is never offered again, so
+   acking one before it landed is how a rotation loses the lane event its
+   successor needed. The next check re-raises the same wake under the same
+   `clientMessageId`, which makes the retry a replay rather than a second copy.
 
 #741's rule stands unchanged for #741's own runs; nothing here edits it.
 

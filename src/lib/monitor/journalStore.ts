@@ -6,7 +6,16 @@ import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { withFileTransactionSync } from "@/lib/state/fileTransaction";
 
-import type { MonitorOutcome, MonitorRunRecord, MonitorSkip, RequestState } from "./types";
+import {
+  SEAT_TICK_WAKE_REASON_KINDS,
+  type MonitorOutcome,
+  type MonitorRunRecord,
+  type MonitorSkip,
+  type RequestState,
+  type SeatTickRunRecord,
+  type SeatTickVerdictKind,
+  type SeatTickWakeReasonKind,
+} from "./types";
 
 /**
  * Server side of the monitor's audit journal and single-flight lock (#741).
@@ -177,6 +186,76 @@ function trim(filePath: string, retention: number): void {
 
 export function readRunRecords(limit: number, filePath = monitorJournalPath()): MonitorRunRecord[] {
   return readJournalRecords(limit, { filePath, sanitize: sanitizeRunRecord });
+}
+
+/* ------------------------------------------------------------------------- *
+ * The seat tick's own journal (#1245), on the same two guarantees.
+ *
+ * It answers the failure mode nothing on disk could answer before: absence. A
+ * seat with no tick left no artifact, so a successor could not tell it was
+ * missing one, and the operator could not tell how often the predecessor had
+ * been ticking — the successor that finally found a predecessor's schedule
+ * guessed both numbers from its transcript. Every check leaves a line here,
+ * including a check that threw and a second clock refused at start, so "no
+ * line" means "no check" and the cadence is a readable fact.
+ * ------------------------------------------------------------------------- */
+
+/** Checks retained before the oldest are dropped. At a five-minute cadence this
+    is a bit over a day of history per project, which is the window anything
+    diagnosing a tick actually looks at. */
+export const SEAT_TICK_RUN_HISTORY = 500;
+
+const SEAT_TICK_VERDICTS: SeatTickVerdictKind[] = ["quiet", "wake", "proactive", "no-seat", "skipped", "error", "refused"];
+
+export function seatTickJournalPath(): string {
+  return process.env.LLV_SEAT_TICK_AUDIT_FILE?.trim() || statePath(path.join("seat-tick", "runs.ndjson"));
+}
+
+/**
+ * Accept only a record shaped like a check line, and keep only the fields the
+ * journal is allowed to carry — the same boundary {@link sanitizeRunRecord}
+ * draws for a monitor run, for the same reason: a caller that tried to smuggle
+ * transcript text, a path or an extra property through loses it here rather
+ * than on the honour system.
+ */
+export function sanitizeSeatTickRecord(value: unknown): SeatTickRunRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const project = text(raw.project, 200) ?? "";
+  const verdict = SEAT_TICK_VERDICTS.find((candidate) => candidate === raw.verdict);
+  if (raw.schemaVersion !== 1 || !verdict) return null;
+  /* Every line names the project it decided about — except the refusal of a
+     second clock, which is about the process and no project in particular. A
+     nameless line of any other kind is a line nothing can be read out of. */
+  if (!project && verdict !== "refused") return null;
+
+  const delivery = (raw.delivery ?? null) as Record<string, unknown> | null;
+  const clientMessageId = delivery ? text(delivery.clientMessageId, 200) : null;
+  const outcome = delivery ? text(delivery.outcome, 60) : null;
+
+  return {
+    schemaVersion: 1,
+    at: text(raw.at, 40) ?? "",
+    project,
+    seatEpoch: typeof raw.seatEpoch === "number" && Number.isSafeInteger(raw.seatEpoch) ? raw.seatEpoch : null,
+    verdict,
+    reasons: (Array.isArray(raw.reasons) ? raw.reasons : [])
+      .filter((entry): entry is SeatTickWakeReasonKind => SEAT_TICK_WAKE_REASON_KINDS.includes(entry as SeatTickWakeReasonKind)),
+    items: count(raw.items),
+    deferred: count(raw.deferred),
+    eventsThrough: count(raw.eventsThrough),
+    delivery: clientMessageId && outcome ? { clientMessageId, outcome } : null,
+    detail: text(raw.detail, DETAIL_LIMIT),
+  };
+}
+
+export function appendSeatTickRecord(record: SeatTickRunRecord, filePath = seatTickJournalPath()): void {
+  appendJournalRecord(record, { filePath, retention: SEAT_TICK_RUN_HISTORY, busyMessage: "the seat tick journal is busy" });
+}
+
+/** The newest `limit` checks, oldest first. */
+export function readSeatTickRecords(limit: number, filePath = seatTickJournalPath()): SeatTickRunRecord[] {
+  return readJournalRecords(limit, { filePath, sanitize: sanitizeSeatTickRecord });
 }
 
 export type MonitorLockClaim =

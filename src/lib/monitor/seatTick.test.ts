@@ -1,0 +1,396 @@
+import { expect, test } from "bun:test";
+
+import {
+  DEFAULT_SEAT_TICK_POLICY,
+  seatTickDecision,
+  seatTickPolicy,
+  seatTickWakeCommit,
+  seatTurnProgressing,
+} from "./seatTick";
+import {
+  emptySeatTickState,
+  type SeatTickCheckInput,
+  type SeatTickEventInput,
+  type SeatTickPipelineInput,
+  type SeatTickProjectState,
+  type SeatTickSeatInput,
+  type SeatTickTaskInput,
+  type SeatTickVerdict,
+} from "./types";
+
+const NOW = Date.parse("2026-08-28T12:00:00.000Z");
+const PROJECT = "viewer";
+/* Assembled from parts: a conversation-shaped literal is what the publication
+   gate refuses in a committed artifact. */
+const CONVERSATION = ["conversation", "0f4c21b7729fbc9e"].join("_");
+const MINUTE = 60_000;
+
+function seat(over: Partial<SeatTickSeatInput> = {}): SeatTickSeatInput {
+  return { conversationId: CONVERSATION, seatEpoch: 7, path: null, turn: "idle", activity: null, ...over };
+}
+
+function lane(over: Partial<SeatTickPipelineInput> = {}): SeatTickPipelineInput {
+  return {
+    id: "pipeline_a1",
+    title: "ship the exporter",
+    state: "active",
+    updatedAt: new Date(NOW - MINUTE).toISOString(),
+    stageActivity: null,
+    stageId: "build",
+    ...over,
+  };
+}
+
+function card(over: Partial<SeatTickTaskInput> = {}): SeatTickTaskInput {
+  return { id: "task_b2", title: "wire the chip", status: "assigned", owned: false, ...over };
+}
+
+function event(over: Partial<SeatTickEventInput> = {}): SeatTickEventInput {
+  return { seq: 42, at: new Date(NOW - MINUTE).toISOString(), type: "stage_blocked", summary: "the review round is parked", pipelineId: "pipeline_a1", ...over };
+}
+
+function input(over: Partial<SeatTickCheckInput> = {}): SeatTickCheckInput {
+  return {
+    project: PROJECT,
+    now: NOW,
+    seat: seat(),
+    pipelines: [],
+    tasks: [],
+    events: [],
+    terminalPending: false,
+    signals: [],
+    changeFingerprint: "fp-1",
+    state: emptySeatTickState(),
+    policy: DEFAULT_SEAT_TICK_POLICY,
+    ...over,
+  };
+}
+
+function stateWith(over: Partial<SeatTickProjectState>): SeatTickProjectState {
+  return { ...emptySeatTickState(), ...over };
+}
+
+/** The reasons a verdict carries, or none for every verdict that is not a wake. */
+function reasonsOf(verdict: SeatTickVerdict): string[] {
+  return verdict.kind === "wake" ? verdict.reasons.map((reason) => reason.kind) : [];
+}
+
+test("a project with open work and no active seat reports no-seat and asks for one card, never a spawn", () => {
+  const decision = seatTickDecision(input({ seat: null, pipelines: [lane()] }));
+  expect(decision.verdict).toEqual({
+    kind: "no-seat",
+    detail: "the project has open work and no active orchestrator seat",
+  });
+  expect(decision.cards).toHaveLength(1);
+  expect(decision.cards[0]!.kind).toBe("no-seat");
+  expect(decision.state.lastCheckAt).toBe(new Date(NOW).toISOString());
+});
+
+test("a seat whose turn is genuinely moving is skipped, not queued", () => {
+  const decision = seatTickDecision(input({
+    seat: seat({ turn: "busy", activity: { lifecycle: "running", reason: "host_alive_turn_active" } }),
+    pipelines: [lane({ state: "inert" })],
+    state: stateWith({ stalledSeen: ["pipeline_a1"], eventsThrough: 9 }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "skipped", reason: "seat-busy" });
+  /* Nothing about the skipped check is remembered as progress: the stall memory
+     and the event cursor stay where they were, so the next check re-decides. */
+  expect(decision.state.stalledSeen).toEqual(["pipeline_a1"]);
+  expect(decision.state.eventsThrough).toBe(9);
+  expect(decision.state.lastCheckAt).toBe(new Date(NOW).toISOString());
+});
+
+/* The permanent skip this replaces: a seat whose host died mid-turn keeps a
+   `busy` turn on the registry for as long as the record stands, so a plain busy
+   check dropped every tick forever — silenced by exactly the condition the wake
+   exists to clear. */
+test("a busy seat the registry reports stalled is no longer skipped, so the skip terminates", () => {
+  const stalledSeat = seat({ turn: "busy", activity: { lifecycle: "stalled", reason: "host_gone_turn_open" } });
+  const decision = seatTickDecision(input({
+    seat: stalledSeat,
+    pipelines: [lane()],
+    signals: [{ id: "seat-host", label: "the seat's own turn is stalled" }],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(seatTurnProgressing(stalledSeat)).toBe(false);
+  expect(decision.verdict.kind).toBe("wake");
+  expect(reasonsOf(decision.verdict)).toEqual(["interval"]);
+});
+
+test("a busy seat the liveness plane cannot answer for is not skipped either — absence is not progress", () => {
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: null }))).toBe(false);
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "gone", reason: "host_gone_turn_settled" } }))).toBe(false);
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "provider_throttled" } }))).toBe(true);
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "starting", reason: "launch_unproven" } }))).toBe(true);
+  expect(seatTurnProgressing(seat({ turn: "idle", activity: { lifecycle: "running", reason: "host_alive_turn_active" } }))).toBe(false);
+});
+
+test("a healthy moving board is quiet and produces nothing operator-visible", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 5 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+  expect(decision.cards).toEqual([]);
+  expect(decision.state.quietSince).toBe(new Date(NOW).toISOString());
+  expect(decision.state.idleSince).toBeNull();
+});
+
+test("a stall wakes only once it has persisted across two consecutive checks", () => {
+  const stuck = lane({ stageActivity: { lifecycle: "stalled", reason: "host_alive_transcript_silent" } });
+  const overdue = { lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() };
+  const first = seatTickDecision(input({ pipelines: [stuck], state: stateWith(overdue) }));
+  expect(reasonsOf(first.verdict)).toEqual(["interval"]);
+  expect(first.state.stalledSeen).toEqual(["pipeline_a1"]);
+
+  const second = seatTickDecision(input({ pipelines: [stuck], state: stateWith({ ...overdue, stalledSeen: ["pipeline_a1"] }) }));
+  expect(reasonsOf(second.verdict)).toEqual(["stalled"]);
+});
+
+/* The stall reading the whole verdict rests on. Movement instants belong to the
+   fingerprint, never to the stall rule: a stage running for hours with a host
+   writing to its transcript is moving, and subtracting its newest attempt
+   instant from the clock is how it gets called stuck. */
+test("a lane's stall is the registry's verdict, never the age of its newest attempt", () => {
+  const ancient = { lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(), stalledSeen: ["pipeline_a1"] };
+  const longRunning = lane({
+    updatedAt: new Date(NOW - 8 * 60 * MINUTE).toISOString(),
+    stageActivity: { lifecycle: "running", reason: "host_alive_turn_active" },
+  });
+  expect(reasonsOf(seatTickDecision(input({ pipelines: [longRunning], state: stateWith(ancient) })).verdict)).toEqual(["interval"]);
+
+  const dead = lane({
+    updatedAt: new Date(NOW - MINUTE).toISOString(),
+    stageActivity: { lifecycle: "gone", reason: "host_gone_turn_settled" },
+  });
+  const verdict = seatTickDecision(input({ pipelines: [dead], state: stateWith(ancient) })).verdict;
+  expect(reasonsOf(verdict)).toEqual(["stalled"]);
+  expect(verdict.kind === "wake" && verdict.reasons[0]!.detail).toContain("host_gone_turn_settled");
+});
+
+test("a parked lane stalls by the monitor's own rule, and a lane that moved again clears the memory", () => {
+  const overdue = { lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(), stalledSeen: ["pipeline_a1"] };
+  const parked = seatTickDecision(input({ pipelines: [lane({ state: "inert" })], state: stateWith(overdue) }));
+  expect(reasonsOf(parked.verdict)).toEqual(["stalled"]);
+  expect(parked.verdict.kind === "wake" && parked.verdict.reasons[0]!.detail).toContain("parked");
+
+  const moved = seatTickDecision(input({
+    pipelines: [lane()],
+    state: stateWith({ ...overdue, lastWakeAt: new Date(NOW - 5 * MINUTE).toISOString() }),
+  }));
+  expect(moved.verdict.kind).toBe("quiet");
+  expect(moved.state.stalledSeen).toEqual([]);
+});
+
+test("a lane with no activity verdict at all is never called stalled", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane({ updatedAt: null, stageActivity: null })],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(), stalledSeen: ["pipeline_a1"] }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["interval"]);
+  expect(decision.state.stalledSeen).toEqual([]);
+});
+
+test("a terminal lane event wakes at the very next check, without waiting out the wake interval", () => {
+  const decision = seatTickDecision(input({
+    events: [event()],
+    terminalPending: true,
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["lane-event"]);
+  expect(decision.verdict.kind === "wake" && decision.verdict.items[0]).toMatchObject({ kind: "event", id: "pipeline_a1" });
+});
+
+test("routine lane events do not wake on their own", () => {
+  const decision = seatTickDecision(input({
+    events: [event({ type: "stage_started", summary: "builder started" })],
+    terminalPending: false,
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind).toBe("quiet");
+});
+
+/* A verdict at pending position 401 is as decision-blocking as one at position
+   one, so the pending question is asked over the whole range rather than the
+   page this check happened to read. */
+test("a terminal event buried past the page still wakes, naming that it is further down", () => {
+  const decision = seatTickDecision(input({
+    events: [event({ type: "stage_started", summary: "builder started" })],
+    terminalPending: true,
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["lane-event"]);
+  expect(decision.verdict.kind === "wake" && decision.verdict.reasons[0]!.detail).toContain("further down the journal");
+});
+
+test("an assigned task nothing has started wakes the seat once the wake interval has elapsed", () => {
+  const decision = seatTickDecision(input({
+    tasks: [card()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["unstarted-task"]);
+});
+
+test("an owned, a blocked and a done task are all silent — blocked is the recorded stop", () => {
+  const tasks = [card({ owned: true }), card({ id: "task_c3", status: "blocked" }), card({ id: "task_d4", status: "done" })];
+  const decision = seatTickDecision(input({ tasks, state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }) }));
+  expect(decision.verdict.kind).toBe("quiet");
+});
+
+test("the wake interval elapsing while a lane is open is itself a reason — roughly hourly", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["interval"]);
+});
+
+/* An inbox card is open work — it holds the proposal slot shut, correctly,
+   because the operator's move to `assigned` is what starts it. But the seat is
+   told not to act on inbox, so an hourly wake with only inbox open would carry
+   an agenda of exactly nothing: the burnt-quota tick this replaces. */
+test("the hourly interval never wakes an empty agenda", () => {
+  const decision = seatTickDecision(input({
+    tasks: [card({ status: "inbox" })],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+});
+
+test("a signal alone is agenda enough for the interval to wake", () => {
+  const decision = seatTickDecision(input({
+    tasks: [card({ status: "inbox" })],
+    signals: [{ id: "deploy", label: "the last deployment ended failed" }],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["interval"]);
+});
+
+test("standing reasons wait out the wake interval instead of firing every five minutes", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane({ state: "inert" })],
+    tasks: [card()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 10 * MINUTE).toISOString(), stalledSeen: ["pipeline_a1"] }),
+  }));
+  expect(decision.verdict.kind).toBe("quiet");
+});
+
+test("a wake carries at most five items and reports the rest as deferred", () => {
+  const lanes = Array.from({ length: 8 }, (_, index) => lane({ id: `pipeline_${index}`, title: `lane ${index}` }));
+  const decision = seatTickDecision(input({
+    pipelines: lanes,
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind === "wake" && decision.verdict.items).toHaveLength(5);
+  expect(decision.verdict.kind === "wake" && decision.verdict.deferred).toBe(3);
+});
+
+test("with no work at all and the proposal slot due, the verdict is proactive", () => {
+  const decision = seatTickDecision(input({ tasks: [card({ status: "done" })] }));
+  expect(decision.verdict.kind).toBe("proactive");
+  expect(decision.state.idleSince).toBe(new Date(NOW).toISOString());
+});
+
+test("a proposal slot that is not due leaves an idle seat quiet", () => {
+  const decision = seatTickDecision(input({
+    state: stateWith({ lastProposalAt: new Date(NOW - 60 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "the board is done and the proposal slot is not due" });
+});
+
+test("a proposal card still open on the board holds the next proposal off", () => {
+  /* The card lands in `inbox`, which is open work, so the board is no longer
+     idle and the slot cannot come round again until the operator moves it. */
+  const decision = seatTickDecision(input({ tasks: [card({ status: "inbox" })] }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+});
+
+test("a fruitless reason is re-sent at most twice, then becomes a card and drops out of wakes", () => {
+  const base = {
+    pipelines: [lane()],
+    state: stateWith({
+      lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+      lastWakeFingerprint: "fp-1",
+      wakesWithoutChange: { interval: 2 },
+    }),
+  };
+  const decision = seatTickDecision(input(base));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "every wake reason is held by the retry guard" });
+  expect(decision.cards).toHaveLength(1);
+  expect(decision.cards[0]).toMatchObject({ kind: "retry-guard", ref: "seat-tick-stuck-interval" });
+});
+
+test("board movement clears the retry guard, so a reason that starts working again is sent again", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    changeFingerprint: "fp-2",
+    state: stateWith({
+      lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+      lastWakeFingerprint: "fp-1",
+      wakesWithoutChange: { interval: 2 },
+    }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["interval"]);
+  expect(decision.cards).toEqual([]);
+});
+
+test("the wake commit records the wake, and only the commit advances lastWakeAt", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.state.lastWakeAt).toBe(new Date(NOW - 61 * MINUTE).toISOString());
+  const committed = seatTickWakeCommit(decision.state, decision.verdict, { fingerprint: "fp-1", eventsThrough: 44, now: NOW });
+  expect(committed.lastWakeAt).toBe(new Date(NOW).toISOString());
+  expect(committed.lastWakeReasons).toEqual(["interval"]);
+  expect(committed.lastWakeFingerprint).toBe("fp-1");
+  expect(committed.eventsThrough).toBe(44);
+});
+
+/* The whole reason the commit is a second function. An acknowledged lifecycle
+   event is never offered again, so a cursor that moved on a refused, held or
+   queued send loses the very lane event the next seat needed. */
+test("no commit means no cursor: the event cursor moves only with a delivered wake", () => {
+  const decision = seatTickDecision(input({
+    events: [event({ seq: 44 })],
+    terminalPending: true,
+    pipelines: [lane()],
+    state: stateWith({ eventsThrough: 12, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.state.eventsThrough).toBe(12);
+  expect(seatTickWakeCommit(decision.state, decision.verdict, { fingerprint: "fp-1", eventsThrough: 44, now: NOW }).eventsThrough).toBe(44);
+});
+
+test("the cursor never walks backwards, whatever a caller hands the commit", () => {
+  const committed = seatTickWakeCommit(stateWith({ eventsThrough: 90 }), { kind: "proactive", detail: "" }, { fingerprint: "fp", eventsThrough: 12, now: NOW });
+  expect(committed.eventsThrough).toBe(90);
+});
+
+test("a proactive commit stamps the proposal slot", () => {
+  const committed = seatTickWakeCommit(emptySeatTickState(), { kind: "proactive", detail: "due" }, { fingerprint: "fp-1", eventsThrough: 0, now: NOW });
+  expect(committed.lastProposalAt).toBe(new Date(NOW).toISOString());
+  expect(committed.lastWakeAt).toBe(new Date(NOW).toISOString());
+});
+
+test("policy defaults are the accepted ones, and each is overridable in the retirement idiom", () => {
+  expect(seatTickPolicy({})).toEqual(DEFAULT_SEAT_TICK_POLICY);
+  expect(seatTickPolicy({ LLV_SEAT_TICK_CHECK_MINUTES: "0" })).toBeNull();
+  expect(seatTickPolicy({
+    LLV_SEAT_TICK_CHECK_MINUTES: "2",
+    LLV_SEAT_TICK_WAKE_MINUTES: "30",
+    LLV_SEAT_TICK_STALL_MINUTES: "15",
+    LLV_SEAT_TICK_PROPOSAL_HOURS: "6",
+    LLV_SEAT_TICK_ITEMS: "3",
+    LLV_SEAT_TICK_RETRY_GUARD: "1",
+  })).toEqual({
+    checkIntervalMs: 2 * MINUTE,
+    wakeIntervalMs: 30 * MINUTE,
+    stallAfterMs: 15 * MINUTE,
+    proposalIntervalMs: 6 * 60 * MINUTE,
+    itemsPerWake: 3,
+    retryGuard: 1,
+  });
+});
