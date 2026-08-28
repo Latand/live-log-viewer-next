@@ -30,7 +30,7 @@ through `deliverConversationMessage` by durable conversation id — the same
 engine-agnostic path `POST /api/tmux` and `send_message_to_orchestrator` use —
 and its recovery of a dead structured conversation is a success, not a failure.
 
-Four limits travel with the decision and are not separable from it:
+Five limits travel with the decision and are not separable from it:
 
 1. **Never a creation.** A wake resumes a host for a seat that already exists. A
    project with no active seat gets the `no-seat` verdict: a journal line and one
@@ -61,6 +61,18 @@ Four limits travel with the decision and are not separable from it:
    early one — and no reset when the seat rotates. The bound is what makes the
    cost below a number rather than a hope, so a reason allowed to jump it would
    be a decision to reopen this ADR, not an implementation detail.
+5. **Never two tickers for one seat.** Limit 4 bounds a project, so it holds
+   only while one process is ticking it; two overlapping clocks would double
+   every number below. Two refusals hold it, and neither is a lock. A second
+   start inside one process is refused out loud and journaled. And one process
+   is not one process for ever — a deploy promotes a successor beside a
+   predecessor that is still running with its timer armed — so every sweep
+   re-asks whether this release still owns viewer traffic, which is the durable
+   fact both processes read. A release that has been replaced refuses the
+   sweep, records the lost authority where the line outlives the process that
+   wrote it, and stops its own clock. A cross-process lock is deliberately
+   absent: it would be a second, weaker answer beside the authority both
+   processes already read, and a stale one would silence the tick outright.
 
 #741's rule stands unchanged for #741's own runs; nothing here edits it.
 
@@ -68,11 +80,11 @@ Four limits travel with the decision and are not separable from it:
 
 The cost is real and bounded. A wake can boot a host that the retirement sweep
 reclaimed minutes earlier, so the two can trade a host back and forth: worst
-case one resume per project per wake interval (60 minutes, limit 4) for as long
-as work stays open and the seat stays idle between wakes. That is the intended
-loop rather than a leak — retirement reclaims what is not needed, the tick
-brings back what is — and the wake interval is the bound on how often the trade
-can happen. Retirement's own predicate still refuses every host that owes
+case one resume per project per wake interval (60 minutes, limits 4 and 5) for
+as long as work stays open and the seat stays idle between wakes. That is the
+intended loop rather than a leak — retirement reclaims what is not needed, the
+tick brings back what is — and the wake interval is the bound on how often the
+trade can happen. Retirement's own predicate still refuses every host that owes
 anything, so a resumed seat is never reclaimed mid-turn.
 
 The benefit is that "the tick survives rotation" and "hosts do not accumulate"
