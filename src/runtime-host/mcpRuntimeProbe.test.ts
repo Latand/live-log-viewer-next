@@ -8,7 +8,7 @@ import { MCP_TOOL_NAMES } from "@/lib/mcp/server";
 import { RuntimeHost } from "./host";
 import { RuntimeJournal } from "./journal";
 import { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
-import { mcpProbeFailureDetail, probeControlUrl, probeMcpRuntime, VIEWER_CONTROL_URL_ENV } from "./mcpRuntimeProbe";
+import { mcpProbeCallFailures, mcpProbeFailureDetail, probeControlUrl, probeMcpRuntime, VIEWER_CONTROL_URL_ENV } from "./mcpRuntimeProbe";
 import { serveRuntimeHost } from "./socket";
 
 /* The probed runtime reads through the control endpoint it is handed. Unset, it
@@ -81,6 +81,7 @@ test("host-admitted managed MCP probes discover the complete surface, call requi
       expect(evidence.tools).toHaveLength(MCP_TOOL_NAMES.length);
       expect(evidence.tools).toContain("deployment_status");
       expect(evidence.tools).toContain("board_snapshot");
+      expect(evidence.callFailures).toBeUndefined();
       expect(processId).not.toBeNull();
       expect(() => process.kill(processId!, 0)).toThrow();
     }
@@ -344,4 +345,65 @@ test("a probe keeps the control endpoint it was handed", () => {
   expect(probeControlUrl("https://viewer.invalid/base")).toBe("https://viewer.invalid/base");
   expect(probeControlUrl("ftp://viewer.invalid")).toBeNull();
   expect(probeControlUrl(undefined)).toBeNull();
+});
+
+
+/* Three deploys failed on `boardSnapshot: false` and a sentence that named no
+   reason. The refusal the candidate's own runtime produced is the only account
+   of it there will ever be - the candidate is retired seconds later. */
+test("every refused read is kept with the tool's own reason and its failure code", () => {
+  expect(mcpProbeCallFailures([
+    { name: "deployment_status", ok: true, result: { structuredContent: { ok: true } } },
+    {
+      name: "board_snapshot",
+      ok: false,
+      result: {
+        isError: true,
+        structuredContent: {
+          ok: false,
+          code: "tool_failed",
+          error: "file scanner worker exited before completion (1)",
+        },
+      },
+    },
+  ])).toEqual([{
+    tool: "board_snapshot",
+    code: "tool_failed",
+    error: "file scanner worker exited before completion (1)",
+  }]);
+});
+
+test("a refusal with no code, and one that answered nothing at all, are both still kept", () => {
+  expect(mcpProbeCallFailures([
+    {
+      name: "board_snapshot",
+      ok: false,
+      result: { isError: true, content: [{ type: "text", text: "the corpus could not be read" }] },
+    },
+    { name: "deployment_status", ok: false, result: undefined },
+  ])).toEqual([
+    { tool: "board_snapshot", error: "the corpus could not be read" },
+    { tool: "deployment_status", error: "no result" },
+  ]);
+});
+
+/* The record is durable and the operator pastes it into issues, so the capture
+   redacts and clamps exactly where `containerLog` does. The refusal that
+   blocked these deploys named a filesystem path, which is precisely the shape
+   that must not survive into a published artifact. */
+test("a refusal naming a home path is redacted and clamped before it is recorded", () => {
+  const refusal = `Module not found ${["", "home", "someone", "checkout", "fileScanner.worker.ts"].join("/")}\n`
+    + `${"scan detail. ".repeat(60)}`;
+  const [failure] = mcpProbeCallFailures([{
+    name: "board_snapshot",
+    ok: false,
+    result: { isError: true, structuredContent: { ok: false, code: "tool_failed", error: refusal } },
+  }]);
+
+  expect(failure!.error).not.toContain(["", "home", "someone"].join("/"));
+  expect(failure!.error).toContain("Module not found");
+  expect(failure!.error).toContain("fileScanner.worker.ts");
+  expect(failure!.error).not.toContain("\n");
+  expect(failure!.error.endsWith("...")).toBe(true);
+  expect(failure!.error.length).toBeLessThan(refusal.length / 2);
 });

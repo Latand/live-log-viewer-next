@@ -9,6 +9,7 @@ import type {
   ViewerHealthEvidence,
   ViewerHealthProbeObservation,
   ViewerHealthReadiness,
+  ViewerMcpRuntimeCallFailure,
   ViewerMcpRuntimeHealthEvidence,
   ViewerMcpRuntimeIdentity,
   ViewerMcpRuntimePublicationEvidence,
@@ -324,6 +325,7 @@ function mcpHealthEvidence(value: unknown): ViewerMcpRuntimeHealthEvidence {
     || typeof item.ok !== "boolean") {
     throw new Error("deployment adapter returned invalid MCP runtime health evidence");
   }
+  const callFailures = mcpCallFailures(item.callFailures);
   return {
     checkedAt: item.checkedAt,
     revision: item.revision,
@@ -334,9 +336,31 @@ function mcpHealthEvidence(value: unknown): ViewerMcpRuntimeHealthEvidence {
       deploymentStatus: calls.deploymentStatus,
       boardSnapshot: calls.boardSnapshot,
     },
+    ...(callFailures.length ? { callFailures } : {}),
     ok: item.ok,
     ...(typeof item.detail === "string" ? { detail: item.detail } : {}),
   };
+}
+
+/** Why each refused read failed, carried across the adapter boundary. Dropping
+    it here would return the deployment record to a pair of booleans, which is
+    the defect the probe evidence exists to end (#790). */
+function mcpCallFailures(value: unknown): ViewerMcpRuntimeCallFailure[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("deployment adapter returned invalid MCP runtime call failures");
+  return value.map((entry) => {
+    const failure = object(entry);
+    if (typeof failure.tool !== "string"
+      || typeof failure.error !== "string"
+      || (failure.code !== undefined && typeof failure.code !== "string")) {
+      throw new Error("deployment adapter returned invalid MCP runtime call failures");
+    }
+    return {
+      tool: failure.tool,
+      ...(failure.code === undefined ? {} : { code: failure.code as string }),
+      error: failure.error,
+    };
+  });
 }
 
 /** `null` is the adapter's "the published runtime already matches" answer. */

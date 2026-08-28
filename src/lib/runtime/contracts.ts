@@ -504,6 +504,18 @@ export interface ViewerReleaseIdentity {
   mcpRuntime?: ViewerMcpRuntimeIdentity;
 }
 
+/** What one refused probe read actually answered. `calls` says which read
+    failed; without this the deployment record cannot say why, and the tool's
+    own account of the refusal dies with the candidate (#790). Bounded and
+    redacted at the point of capture, like `containerLog`. */
+export interface ViewerMcpRuntimeCallFailure {
+  tool: string;
+  /** The MCP failure envelope's code, when the refusal carried one. */
+  code?: string;
+  /** The refusal text, single-line, redacted and length-bounded. */
+  error: string;
+}
+
 export interface ViewerMcpRuntimeHealthEvidence {
   checkedAt: string;
   revision: string;
@@ -514,6 +526,9 @@ export interface ViewerMcpRuntimeHealthEvidence {
     deploymentStatus: boolean;
     boardSnapshot: boolean;
   };
+  /** Every read that did not answer `ok`, in call order. Absent when they all
+      passed. */
+  callFailures?: ViewerMcpRuntimeCallFailure[];
   ok: boolean;
   detail?: string;
 }
