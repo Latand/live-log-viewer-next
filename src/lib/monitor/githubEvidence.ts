@@ -29,7 +29,9 @@ export interface GithubEvidenceOptions {
   timeoutMs?: number;
 }
 
-function defaultRunner(cwd: string, timeoutMs: number): GithubRunner {
+/** The one `gh` seam. Shared with the seat tick's proposal source (#1245), so
+    there is a single place a command, a timeout or a buffer bound is chosen. */
+export function githubRunner(cwd: string, timeoutMs: number): GithubRunner {
   return async (args) => {
     const { stdout } = await execFileAsync("gh", args, { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
     return stdout;
@@ -63,7 +65,7 @@ function parseRows(raw: string, kind: GithubEvidenceRow["kind"]): GithubEvidence
 /** A `github` dependency for the run: open and recently closed work, both kinds. */
 export function githubEvidenceSource(options: GithubEvidenceOptions): () => Promise<GithubEvidenceRow[]> {
   const limit = String(options.limit ?? 60);
-  const run = options.run ?? defaultRunner(options.cwd, options.timeoutMs ?? 20_000);
+  const run = options.run ?? githubRunner(options.cwd, options.timeoutMs ?? 20_000);
   const fields = "number,title,state,updatedAt";
   return async () => {
     const [prs, issues] = await Promise.all([

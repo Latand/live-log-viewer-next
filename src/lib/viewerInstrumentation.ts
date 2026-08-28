@@ -88,6 +88,8 @@ interface CurrentReleaseControllerLoaders {
   loadTelegramConnectorBoot?: () => Promise<{ provisionTelegramConnectorAtStartup: () => Promise<unknown> }>;
   /** Optional for the same reason. */
   loadStructuredHostRetirement?: () => Promise<{ startStructuredHostRetirement: () => void }>;
+  /** Optional for the same reason. */
+  loadSeatTick?: () => Promise<{ startSeatTick: () => boolean }>;
 }
 
 interface ViewerRuntimeActivationSteps {
@@ -333,6 +335,7 @@ export async function startCurrentReleaseControllers(
     loadTelegramReportScheduler: () => import("@/lib/telegram/reportRunner"),
     loadTelegramConnectorBoot: () => import("@/lib/telegram/connectorBoot"),
     loadStructuredHostRetirement: () => import("@/lib/runtime/structuredHostRetirement"),
+    loadSeatTick: () => import("@/lib/seatTick/controller"),
   },
 ): Promise<void> {
   const { startFlowPipelineController } = await loaders.loadFlowPipelineController();
@@ -376,6 +379,19 @@ export async function startCurrentReleaseControllers(
     retirement?.startStructuredHostRetirement();
   } catch (error) {
     console.error("[host retirement] sweep start failed", error instanceof Error ? error.name : "unknown");
+  }
+  /* The seat tick (#1245). It belongs here for the reason every controller
+     above does — one clock, in the release that owns traffic — and for one of
+     its own: "exactly one active ticker per seat" is guaranteed by there being
+     exactly one process that starts it, which is what makes a cross-process
+     lock unnecessary rather than merely omitted. A rotation therefore hands the
+     tick over with nobody configuring anything, and a Viewer restart resumes it
+     from the durable stamps rather than from a timer that happened to survive. */
+  try {
+    const seatTick = await loaders.loadSeatTick?.();
+    seatTick?.startSeatTick();
+  } catch (error) {
+    console.error("[seat tick] start failed", error instanceof Error ? error.name : "unknown");
   }
   if (env.LLV_ACCOUNT_CONTROLLER_DISABLED === "1") return;
   const { startAccountMigrationController } = await loaders.loadAccountMigrationController();
