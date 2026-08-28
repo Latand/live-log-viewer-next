@@ -381,12 +381,15 @@ export async function startCurrentReleaseControllers(
     console.error("[host retirement] sweep start failed", error instanceof Error ? error.name : "unknown");
   }
   /* The seat tick (#1245). It belongs here for the reason every controller
-     above does — one clock, in the release that owns traffic — and for one of
-     its own: "exactly one active ticker per seat" is guaranteed by there being
-     exactly one process that starts it, which is what makes a cross-process
-     lock unnecessary rather than merely omitted. A rotation therefore hands the
-     tick over with nobody configuring anything, and a Viewer restart resumes it
-     from the durable stamps rather than from a timer that happened to survive. */
+     above does — one clock, in the release that owns traffic. Starting here
+     makes this the only process that starts a ticker, but not the only one that
+     is running one: this activation is reached once, and a promoted successor
+     leaves the predecessor alive with its timer armed. So the tick re-asks
+     `viewerReleaseOwnsTraffic` at the top of every sweep and stops its own clock
+     when the answer has turned, which is what makes a cross-process lock
+     unnecessary rather than merely omitted. A rotation hands the tick over with
+     nobody configuring anything, and a Viewer restart resumes it from the
+     durable stamps rather than from a timer that happened to survive. */
   try {
     const seatTick = await loaders.loadSeatTick?.();
     seatTick?.startSeatTick();
