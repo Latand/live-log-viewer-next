@@ -39,7 +39,7 @@ import { buildSubagentTrays } from "./scheme/subagentTray";
 import type { SubagentTrayApi } from "./scheme/SubagentTrayView";
 import { conversationIdentity, formatConversationHash } from "@/lib/accounts/identity";
 import { recordFocusNavigation } from "@/lib/navigation/focusHistory";
-import { collapsibleWorkerFiles, groupWorkerStacks, pipelineCursorStagePaths, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
+import { collapsibleWorkerFiles, conversationSeenKey, finishedLaneOutcomePaths, groupWorkerStacks, pipelineCursorStagePaths, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { launchHistoryClaimPaths, launchHistoryFor, pipelineRetryTarget, retryPipelineLaunch } from "./launchHistoryModel";
 import { LaunchHistory } from "./LaunchHistory";
 import { isPlacedTask } from "./scheme/taskGeometry";
@@ -499,6 +499,18 @@ function ProjectDashboardView({
     () => new Set([...board.explicitManual, ...prefs.expanded, ...favoriteRows.map((row) => row.file.path)]),
     [board.explicitManual, prefs.expanded, favoriteRows],
   );
+  /* Durable acknowledgements (#1244): when the operator last opened each
+     conversation, in epoch seconds. A finished lane holds its outcome card
+     until a stamp here is at least as new as that transcript's last write. */
+  const seenAt = useMemo(() => new Map(Object.entries(board.prefs.seenAt ?? {})), [board.prefs.seenAt]);
+  /* Opening a conversation — or explicitly closing its card — is the act that
+     marks a finished outcome read. Nothing else does: a card sitting on screen
+     while the operator looks elsewhere stays unread however long it sits. */
+  const markConversationSeen = (file: FileEntry) => board.markSeen(conversationSeenKey(file));
+  const markPathSeen = (path: string) => {
+    const file = files.find((entry) => entry.path === path);
+    if (file) markConversationSeen(file);
+  };
   const [drafts, setDrafts] = useState<string[]>([]);
   const [pendingRestoredHandoffs, setPendingRestoredHandoffs] = useState<Set<string>>(() => new Set());
   /* The phone focus view reports its currently-focused conversation here so the
@@ -693,8 +705,9 @@ function ProjectDashboardView({
       pinnedPaths,
       protectedPaths: protectedCollapsePaths,
       activeDeliveryConversationIds,
+      seenAt,
     }),
-    [files, flows, tasks, conversationAliases, nowMs, idleCollapseMinutes, pipelines, pipelinesError, pinnedPaths, protectedCollapsePaths, activeDeliveryConversationIds],
+    [files, flows, tasks, conversationAliases, nowMs, idleCollapseMinutes, pipelines, pipelinesError, pinnedPaths, protectedCollapsePaths, activeDeliveryConversationIds, seenAt],
   );
   const deckFlows = useMemo(
     () => (directReviewGroups.length ? [...flows, ...directReviewGroups] : flows),
@@ -766,6 +779,13 @@ function ProjectDashboardView({
     () => compactPipelineArtifactPaths(pipelines, deckFlows, files),
     [pipelines, deckFlows, files],
   );
+  /* One card per FINISHED lane — the agent that finished it — held on the board
+     until its outcome has been opened (#1244). A lane the operator closed is
+     already dismissed and holds nothing. */
+  const outcomePaths = useMemo(
+    () => finishedLaneOutcomePaths(pipelinesError ? [] : pipelines, deckFlows, files),
+    [pipelines, pipelinesError, deckFlows, files],
+  );
   /* Collapse-eligible conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
      full-size cards (a spawned worker stays a column under an active parent
@@ -780,10 +800,10 @@ function ProjectDashboardView({
       pinnedPaths,
       protectedPaths: protectedCollapsePaths,
       activeDeliveryConversationIds,
-      nowMs,
-      idleMs: idleCollapseMinutes === null ? null : idleCollapseMinutes * 60_000,
+      outcomePaths,
+      seenAt,
     }),
-    [files, project, deckFlows, pipelines, pipelinesError, pinnedPaths, protectedCollapsePaths, activeDeliveryConversationIds, nowMs, idleCollapseMinutes],
+    [files, project, deckFlows, pipelines, pipelinesError, pinnedPaths, protectedCollapsePaths, activeDeliveryConversationIds, outcomePaths, seenAt],
   );
   const collapsedPaths = useMemo(() => new Set(collapsibleWorkers.map((file) => file.path)), [collapsibleWorkers]);
   const keepExpandedPaths = useMemo(
@@ -1290,6 +1310,11 @@ function ProjectDashboardView({
        it never re-records and the log stays a single linear trail. */
     const title = projectCatalog.get(path)?.title ?? files.find((file) => file.path === path)?.title ?? "";
     history.record({ kind: "close", path, title });
+    /* Closing a card is the explicit dismissal a finished-but-unread outcome
+       needs (#1244): it takes effect at once, and restoring the card later
+       brings back a read result rather than a fresh unread one. */
+    const closed = files.find((file) => file.path === path);
+    if (closed) markConversationSeen(closed);
     applyClose(path);
   };
 
@@ -1386,6 +1411,7 @@ function ProjectDashboardView({
     /* Every same-project branch below is a deliberate card focus: record the
        typed history entry once, up front. Repeats coalesce. */
     recordFocusNavigation(file, project);
+    markConversationSeen(file);
     /* Compact pipeline history stays out of Fit All/minimap until requested.
        A transcript click restores one ephemeral pane for inspection without
        changing durable board membership or duplicating the evidence row. */
@@ -1431,6 +1457,7 @@ function ProjectDashboardView({
     /* A folded sub-agent is a card focus like any other for history purposes;
        the reveal itself stays ephemeral and never mutates durable placement. */
     recordFocusNavigation(file, project);
+    markConversationSeen(file);
     pendingFocusRef.current = path;
     setEphemeral((prev) => (prev.includes(path) ? prev : [...prev, path]));
   };
@@ -2070,6 +2097,7 @@ function ProjectDashboardView({
                 onSpawnRetry={retryLaunch}
                 onTaskDraft={openTaskDraft}
                 onOpenTask={openTask}
+                onConversationOpened={markPathSeen}
                 placeTaskId={placeTask?.id ?? null}
                 onTaskPlaced={() => setPlaceTask(null)}
                 newTaskNonce={newTaskNonce}

@@ -5,7 +5,7 @@ import type { FileEntry } from "@/lib/types";
 import { currentConversationFile, withoutArchivedPredecessors } from "@/lib/accounts/identity";
 
 import { projectKey } from "@/components/projectModel";
-import { collapseContext, keepExpanded, workerCollapseIdleMs } from "@/components/scheme/workerCollapse";
+import { collapseContext, collapseExempt, conversationSettled, workerCollapseIdleMs } from "@/components/scheme/workerCollapse";
 
 import { isActiveFlow } from "./flowModel";
 
@@ -75,6 +75,9 @@ export interface DirectReviewGroupsInput {
   pinnedPaths?: ReadonlySet<string>;
   protectedPaths?: ReadonlySet<string>;
   activeDeliveryConversationIds?: ReadonlySet<string>;
+  /** Durable "last opened" stamps, so a held finished outcome reads the same
+      here as it does on the board (#1244). */
+  seenAt?: ReadonlyMap<string, number>;
 }
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
@@ -91,8 +94,7 @@ export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
     pinnedPaths: input.pinnedPaths ?? EMPTY_PATHS,
     protectedPaths: input.protectedPaths,
     activeDeliveryConversationIds: input.activeDeliveryConversationIds,
-    nowMs,
-    idleMs,
+    seenAt: input.seenAt,
   });
 
   const out: Flow[] = [];
@@ -110,9 +112,16 @@ export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
     const rounds = members.map<Round>((member, index) => {
       const { file } = member;
       const outcome = file.review ?? null;
-      /* Direct reviewers share the board's expansion decision, including
-         delivery, pin, terminal, input, process, and idle-window evidence. */
-      const failed = !outcome && !keepExpanded(file, expansionContext);
+      /* Direct reviewers share the board's exemptions — live work, delivery,
+         input, pin — so protected reviewers are never called failed. What the
+         board no longer decides for them is the effect of silence: since #1244
+         a quiet unfinished card STAYS on the board, while a reviewer silent
+         past this projection's own freshness horizon has stopped without
+         reviewing, and the round record has to say so. */
+      const quietPastHorizon = idleMs !== null && nowMs - file.mtime * 1000 >= idleMs;
+      const failed = !outcome
+        && !collapseExempt(file, expansionContext)
+        && (conversationSettled(file, expansionContext) || quietPastHorizon);
       return {
         n: index + 1,
         reviewerPath: file.path,

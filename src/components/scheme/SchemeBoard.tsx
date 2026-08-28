@@ -133,6 +133,10 @@ interface Props {
   onTaskDraft?: (task: BoardTask) => void;
   /** Reveal a task linked from a compact pipeline rail. */
   onOpenTask?: (task: BoardTask) => void;
+  /** The operator opened this conversation full-pane. That gesture is what the
+      board counts as having SEEN a finished lane's outcome (#1244), so it is
+      reported up rather than kept as local overlay state. */
+  onConversationOpened?: (path: string) => void;
   /** Fold a full card back into its status stack (drops the durable expand
       pin). Absent in map mode and while status stacks are unavailable. */
   onTaskCollapse?: (task: BoardTask) => void;
@@ -217,6 +221,7 @@ export function SchemeBoard({
   onSpawnRetry,
   onTaskDraft,
   onOpenTask,
+  onConversationOpened,
   onTaskCollapse,
   placeTaskId,
   onTaskPlaced,
@@ -427,6 +432,7 @@ export function SchemeBoard({
       if (!node?.file.renamable) return;
       event.preventDefault();
       setExpanded(path);
+      conversationOpenedRef.current?.(path);
       setRenameRequest((prev) => requestRename(prev, path));
     };
     window.addEventListener("keydown", onKey, true);
@@ -454,6 +460,7 @@ export function SchemeBoard({
   const closeRef = useRef(onClose);
   const draftCloseRef = useRef(onDraftClose);
   const draftSpawnedRef = useRef(onDraftSpawned);
+  const conversationOpenedRef = useRef(onConversationOpened);
   const handoffRef = useRef(onHandoff);
   const spawnRetryRef = useRef(onSpawnRetry);
   const taskDraftRef = useRef(onTaskDraft);
@@ -465,6 +472,7 @@ export function SchemeBoard({
     closeRef.current = onClose;
     draftCloseRef.current = onDraftClose;
     draftSpawnedRef.current = onDraftSpawned;
+    conversationOpenedRef.current = onConversationOpened;
     handoffRef.current = onHandoff;
     spawnRetryRef.current = onSpawnRetry;
     taskDraftRef.current = onTaskDraft;
@@ -487,7 +495,10 @@ export function SchemeBoard({
   const stableOpenTask = useCallback((task: BoardTask) => openTaskRef.current?.(task), []);
   /* The handle renders only when the opener wired a handler (not in map mode). */
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
-  const stableExpand = useCallback((path: string) => setExpanded(path), []);
+  const stableExpand = useCallback((path: string) => {
+    setExpanded(path);
+    conversationOpenedRef.current?.(path);
+  }, []);
 
   /* Compact node strips keep their path/flow navigation below. The group graph
      resolves every materialized stage by conversation id through stableSelect. */

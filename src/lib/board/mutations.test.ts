@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { applyBoardMutations } from "./mutations";
+import { applyBoardMutations, MAX_SEEN_STAMPS } from "./mutations";
 
 const board = (prefs: Partial<{ manual: string[]; hidden: string[]; expanded: string[]; favorites: string[] }> = {}) => ({
   schemaVersion: 1 as const,
@@ -101,6 +101,30 @@ describe("board mutations", () => {
     expect(off.prefs.favorites).toEqual([]);
     // Removing an absent id leaves the set untouched.
     expect(applyBoardMutations(off, [{ kind: "set-favorite", id: "conv-1", favorite: false }]).prefs.favorites).toEqual([]);
+  });
+
+  test("mark-seen stamps a conversation forward only, and survives a resume remap (#1244)", () => {
+    const opened = applyBoardMutations(board({ manual: ["/old"] }), [{ kind: "mark-seen", id: "conv-1", at: 1_700 }]);
+    expect(opened.prefs.seenAt).toEqual({ "conv-1": 1_700 });
+    /* Forward only: a late or replayed write can never un-see an outcome, which
+       is why the stamp needs no causal fence. */
+    expect(applyBoardMutations(opened, [{ kind: "mark-seen", id: "conv-1", at: 900 }]).prefs.seenAt).toEqual({ "conv-1": 1_700 });
+    expect(applyBoardMutations(opened, [{ kind: "mark-seen", id: "conv-1", at: 2_400 }]).prefs.seenAt).toEqual({ "conv-1": 2_400 });
+    /* Keyed by durable identity, so a remap that mints a new transcript path
+       leaves the acknowledgement intact. */
+    const remapped = applyBoardMutations(opened, [{ kind: "remap-paths", pairs: [{ from: "/old", to: "/new" }] }]);
+    expect(remapped.prefs.seenAt).toEqual({ "conv-1": 1_700 });
+  });
+
+  test("acknowledgements are bounded, keeping the freshest stamps (#1244)", () => {
+    const stamps = Array.from({ length: MAX_SEEN_STAMPS + 10 }, (_, index) => (
+      { kind: "mark-seen" as const, id: `conv-${index}`, at: 1_000 + index }
+    ));
+    const seenAt = applyBoardMutations(board(), stamps).prefs.seenAt ?? {};
+    expect(Object.keys(seenAt)).toHaveLength(MAX_SEEN_STAMPS);
+    /* The ten oldest fell off; the newest is still there. */
+    expect(seenAt["conv-0"]).toBeUndefined();
+    expect(seenAt[`conv-${MAX_SEEN_STAMPS + 9}`]).toBe(1_000 + MAX_SEEN_STAMPS + 9);
   });
 
   test("set-engine-child-fold toggles the durable pin idempotently and clears placement on fold", () => {

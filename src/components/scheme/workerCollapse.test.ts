@@ -11,9 +11,10 @@ import {
   collapsibleWorkerFiles,
   conversationSettled,
   computeWorkerStacks,
-  DEFAULT_WORKER_COLLAPSE_IDLE_MS,
+  finishedLaneOutcomePaths,
   groupWorkerStacks,
   keepExpanded,
+  outcomeSeen,
   pipelineCursorStagePaths,
   pipelineOriginOf,
   pipelineStageAgentPaths,
@@ -102,8 +103,6 @@ const pipelineMembership = (containerId: string) => ({
 const ctx = (over: Partial<Parameters<typeof shouldCollapseWorker>[1]> = {}) => ({
   flows: [] as Flow[],
   pipelineStagePaths: new Set<string>(),
-  nowMs: NOW,
-  idleMs: DEFAULT_WORKER_COLLAPSE_IDLE_MS,
   pinnedPaths: new Set<string>(),
   protectedPaths: new Set<string>(),
   ...over,
@@ -238,7 +237,7 @@ describe("keepExpanded — one board rule", () => {
     expect(shouldCollapseWorker(file, ctx())).toBe(true);
   });
 
-  test("live / running / awaiting-input work stays expanded; stalled alone does not", () => {
+  test("live / running / awaiting-input work stays expanded; so does a stalled agent that simply stopped (#1244)", () => {
     for (const over of [
       { activity: "live" as const },
       { proc: "running" as const },
@@ -248,8 +247,22 @@ describe("keepExpanded — one board rule", () => {
       const file = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 24 * 3600, ...over });
       expect(keepExpanded(file, ctx())).toBe(true);
     }
+    /* A stalled agent stopped writing without finishing: the work is still
+       owed, so it stays. Terminal evidence on the same card still folds it. */
     const stalled = entry({ path: "/stalled", activity: "stalled", kind: "subagent", parent: "/r", mtime: NOW_SEC - 24 * 3600 });
-    expect(keepExpanded(stalled, ctx())).toBe(false);
+    expect(keepExpanded(stalled, ctx())).toBe(true);
+    expect(keepExpanded(entry({ ...stalled, proc: "done" }), ctx())).toBe(false);
+  });
+
+  test("a lane parked at a provider limit stays expanded however quiet (#1244)", () => {
+    const parked = entry({
+      path: "/w",
+      kind: "subagent",
+      parent: "/r",
+      mtime: NOW_SEC - 24 * 3600,
+      rateLimit: { kind: "provider", until: null } as unknown as FileEntry["rateLimit"],
+    });
+    expect(keepExpanded(parked, ctx())).toBe(true);
   });
 
   test("a held migration delivery keeps its target expanded", () => {
@@ -265,6 +278,7 @@ describe("keepExpanded — one board rule", () => {
       path: "/w",
       kind: "subagent",
       parent: "/r",
+      proc: "done",
       mtime: NOW_SEC - 24 * 3600,
       migration: { intentId: "i", trigger: "manual", phase: "verifying", targetAccountId: "a", heldDeliveries: 0, failure: null },
     });
@@ -287,11 +301,13 @@ describe("keepExpanded — one board rule", () => {
     expect(keepExpanded(file, ctx({ activeDeliveryConversationIds: new Set(["conversation-w"]) }))).toBe(true);
   });
 
-  test("never disables idle-only collapse while terminal evidence still folds", () => {
-    const idle = entry({ path: "/idle", mtime: NOW_SEC - 24 * 3600 });
-    const terminal = entry({ path: "/terminal", mtime: NOW_SEC - 24 * 3600, proc: "done" });
-    expect(keepExpanded(idle, ctx({ idleMs: null }))).toBe(true);
-    expect(keepExpanded(terminal, ctx({ idleMs: null }))).toBe(false);
+  test("transcript age decides nothing: unfinished stays at any age, terminal evidence folds at any age (#1244)", () => {
+    for (const ageSeconds of [5, 3 * 3600, 30 * 24 * 3600]) {
+      const unfinished = entry({ path: "/idle", mtime: NOW_SEC - ageSeconds });
+      const terminal = entry({ path: "/terminal", mtime: NOW_SEC - ageSeconds, proc: "done" });
+      expect(keepExpanded(unfinished, ctx())).toBe(true);
+      expect(keepExpanded(terminal, ctx())).toBe(false);
+    }
   });
 });
 
@@ -343,7 +359,6 @@ describe("shouldCollapseWorker", () => {
       project: "demo",
       flows,
       pinnedPaths: new Set(),
-      nowMs: NOW,
     });
     expect(collapsed.map((file) => file.path)).toEqual([killedAuthored.path, verdictlessReviewer.path]);
 
@@ -352,7 +367,6 @@ describe("shouldCollapseWorker", () => {
       project: "demo",
       flows,
       pinnedPaths: new Set([killedAuthored.path, verdictlessReviewer.path]),
-      nowMs: NOW,
     });
     expect(pinned).toEqual([]);
   });
@@ -379,7 +393,6 @@ describe("shouldCollapseWorker", () => {
       flows: [],
       pinnedPaths: new Set(),
       renderedPaths: new Set(),
-      nowMs: NOW,
     });
 
     expect(stacks.flatMap((stack) => stack.items).map((file) => file.path).sort())
@@ -447,17 +460,136 @@ describe("shouldCollapseWorker", () => {
     expect(shouldCollapseWorker(impl, ctx({ flows: closed }))).toBe(true);
   });
 
-  test("a non-reviewer worker collapses only past the idle window", () => {
-    const fresh = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 60 });
-    const stale = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 121 * 60 });
-    expect(shouldCollapseWorker(fresh, ctx())).toBe(false);
-    expect(shouldCollapseWorker(stale, ctx())).toBe(true);
+  test("a non-reviewer worker collapses on its terminal outcome, never on quiet (#1244)", () => {
+    /* The regression the operator reported: a worker whose transcript is older
+       than every window is still owed work, and stays. */
+    const stale = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 30 * 24 * 3600 });
+    expect(shouldCollapseWorker(stale, ctx())).toBe(false);
+    expect(shouldCollapseWorker(entry({ ...stale, authoritativeTurn: { state: "terminal" } as FileEntry["authoritativeTurn"] }), ctx())).toBe(true);
   });
 
-  test("the idle window is configurable", () => {
-    const file = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 6 * 60 });
-    expect(shouldCollapseWorker(file, ctx({ idleMs: 15 * 60 * 1000 }))).toBe(false);
-    expect(shouldCollapseWorker(file, ctx({ idleMs: 5 * 60 * 1000 }))).toBe(true);
+  test("each unfinished-but-quiet pipeline state keeps its stage card past any window (#1244)", () => {
+    /* needs_decision, blocked/parked (paused), and queued (provisioning) all
+       stop writing to the transcript while the pipeline still owes a result;
+       so does a stage whose host died — its attempt is still the cursor. */
+    const stage = entry({ path: "/stage", mtime: NOW_SEC - 30 * 24 * 3600, proc: "killed" });
+    for (const state of ["provisioning", "running", "needs_decision", "paused"] as const) {
+      const pipelines = [{
+        id: "pl",
+        state,
+        cursor: { stageId: "build" },
+        runs: [{ stageId: "build", attempts: [{ agentPath: "/stage" }] }],
+      }] as unknown as Pipeline[];
+      const protectedPaths = pipelineCursorStagePaths(pipelines, [stage]);
+      expect([...protectedPaths]).toEqual(["/stage"]);
+      expect(shouldCollapseWorker(stage, ctx({ pipelines, protectedPaths }))).toBe(false);
+    }
+  });
+
+  test("a builder awaiting a relay keeps its card while the flow is open (#1244)", () => {
+    const impl = entry({ path: "/impl", parent: "/orchestrator", mtime: NOW_SEC - 30 * 24 * 3600 });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", state: "relay_pending" })];
+    expect(shouldCollapseWorker(impl, ctx({ flows }))).toBe(false);
+  });
+});
+
+describe("finished work is held until its outcome has been seen (#1244 follow-up)", () => {
+  const completedPipeline = (over: Record<string, unknown> = {}) => ([{
+    id: "pl",
+    state: "completed",
+    cursor: null,
+    runs: [{ stageId: "research", attempts: [{ agentPath: "/research" }] }],
+    ...over,
+  }] as unknown as Pipeline[]);
+
+  const researcher = () => entry({
+    path: "/research",
+    parent: "/orchestrator",
+    proc: "done",
+    mtime: NOW_SEC - 3600,
+    durableLineage: {
+      kind: "spawn",
+      role: "builder",
+      parentConversationId: "conversation-orchestrator",
+      reviewsConversationId: null,
+      memberships: [pipelineMembership("pl")],
+    },
+  });
+
+  test("the outcome card of a completed lane is the last stage attempt it ran", () => {
+    const pipelines = completedPipeline({
+      runs: [
+        { stageId: "plan", attempts: [{ agentPath: "/plan" }] },
+        { stageId: "research", attempts: [{ agentPath: "/superseded", historical: true }, { agentPath: "/research" }] },
+      ],
+    });
+    expect([...finishedLaneOutcomePaths(pipelines, [])]).toEqual(["/research"]);
+  });
+
+  test("a lane the operator closed or hid holds nothing — closing IS the dismissal", () => {
+    expect([...finishedLaneOutcomePaths(completedPipeline({ hiddenAt: "2026-08-27T00:00:00Z" }), [])]).toEqual([]);
+    expect([...finishedLaneOutcomePaths(completedPipeline({ state: "closed" }), [])]).toEqual([]);
+    expect([...finishedLaneOutcomePaths([], [flow({ id: "f1", implementerPath: "/impl", state: "closed" })])]).toEqual([]);
+  });
+
+  test("a settled flow holds its implementer, the card that carries the outcome", () => {
+    for (const state of ["approved", "done_comment"] as const) {
+      expect([...finishedLaneOutcomePaths([], [flow({ id: "f1", implementerPath: "/impl", state })])]).toEqual(["/impl"]);
+    }
+  });
+
+  test("a lane that completes while the operator is elsewhere is still on the board, unread", () => {
+    const pipelines = completedPipeline();
+    const context = ctx({ pipelines, outcomePaths: finishedLaneOutcomePaths(pipelines, []) });
+    expect(conversationSettled(researcher(), context)).toBe(true);
+    expect(outcomeSeen(researcher(), context)).toBe(false);
+    expect(shouldCollapseWorker(researcher(), context)).toBe(false);
+  });
+
+  test("an unread finished card does not collapse regardless of age", () => {
+    const pipelines = completedPipeline();
+    const ancient = entry({ ...researcher(), mtime: NOW_SEC - 30 * 24 * 3600 });
+    expect(shouldCollapseWorker(ancient, ctx({ pipelines, outcomePaths: finishedLaneOutcomePaths(pipelines, []) }))).toBe(false);
+  });
+
+  test("opening the conversation is what counts as seen; it then folds under the normal rule", () => {
+    const pipelines = completedPipeline();
+    const file = researcher();
+    const context = (seenSeconds: number) => ctx({
+      pipelines,
+      outcomePaths: finishedLaneOutcomePaths(pipelines, []),
+      seenAt: new Map([[file.path, seenSeconds]]),
+    });
+    /* Opened BEFORE the outcome landed — the operator saw a running lane, not
+       its result, so the card is still unread. */
+    expect(shouldCollapseWorker(file, context(file.mtime - 1))).toBe(false);
+    /* Opened after the last thing the lane wrote: seen, and it folds. */
+    expect(outcomeSeen(file, context(file.mtime))).toBe(true);
+    expect(shouldCollapseWorker(file, context(file.mtime + 60))).toBe(true);
+  });
+
+  test("acknowledgement is keyed by durable conversation identity, not by path", () => {
+    const pipelines = completedPipeline();
+    const file = entry({ ...researcher(), conversationId: "conversation-research" });
+    const context = ctx({
+      pipelines,
+      outcomePaths: finishedLaneOutcomePaths(pipelines, []),
+      seenAt: new Map([["conversation-research", file.mtime]]),
+    });
+    expect(shouldCollapseWorker(file, context)).toBe(true);
+  });
+
+  test("only the outcome card is held: the lane's other settled members still fold (#1172 kept)", () => {
+    const pipelines = completedPipeline({
+      runs: [
+        { stageId: "plan", attempts: [{ agentPath: "/plan" }] },
+        { stageId: "research", attempts: [{ agentPath: "/research" }] },
+      ],
+    });
+    const planner = entry({ ...researcher(), path: "/plan" });
+    const context = ctx({ pipelines, outcomePaths: finishedLaneOutcomePaths(pipelines, []) });
+    expect(shouldCollapseWorker(planner, context)).toBe(true);
+    expect(shouldCollapseWorker(researcher(), context)).toBe(false);
   });
 });
 
@@ -516,7 +648,6 @@ describe("pipelineStageAgentPaths", () => {
       pipelines,
       pinnedPaths: new Set(),
       protectedPaths,
-      nowMs: NOW,
     })).toEqual([]);
   });
 
@@ -573,7 +704,7 @@ describe("claims across recorded path spellings (#943 follow-up)", () => {
       ],
     })];
     const files = corpus(finished, running);
-    expect(collapsibleWorkerFiles({ files, project: "demo", flows, pinnedPaths: new Set(), nowMs: NOW }).map((file) => file.path))
+    expect(collapsibleWorkerFiles({ files, project: "demo", flows, pinnedPaths: new Set() }).map((file) => file.path))
       .toEqual([finished.path]);
   });
 
@@ -596,12 +727,14 @@ describe("claims across recorded path spellings (#943 follow-up)", () => {
 });
 
 describe("collapsibleWorkerFiles — independent conversation projection", () => {
-  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 3 * 60 * 60, ...over });
+  /* Settled, not merely quiet: since #1244 the projection folds on terminal
+     evidence alone, so every fixture here names the evidence it folds on. */
+  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 3 * 60 * 60, proc: "done", ...over });
 
-  test("folds an idle ancestor while its live descendant stays expanded", () => {
+  test("folds a settled ancestor while its live descendant stays expanded", () => {
     const parent = stale({ path: "/p", kind: "subagent", parent: "/root" });
     const liveChild = entry({ path: "/p/c", kind: "subagent", parent: "/p", activity: "live" });
-    const paths = collapsibleWorkerFiles({ files: [parent, liveChild], project: "demo", flows: [], pinnedPaths: new Set(), nowMs: NOW }).map((f) => f.path);
+    const paths = collapsibleWorkerFiles({ files: [parent, liveChild], project: "demo", flows: [], pinnedPaths: new Set() }).map((f) => f.path);
     expect(paths).toContain("/p");
     expect(paths).not.toContain("/p/c");
   });
@@ -609,25 +742,25 @@ describe("collapsibleWorkerFiles — independent conversation projection", () =>
   test("authorship on a descendant does not veto either view collapse", () => {
     const parent = stale({ path: "/p", kind: "subagent", parent: "/root" });
     const touchedChild = stale({ path: "/p/c", kind: "subagent", parent: "/p", userAuthored: true });
-    const paths = collapsibleWorkerFiles({ files: [parent, touchedChild], project: "demo", flows: [], pinnedPaths: new Set(), nowMs: NOW }).map((f) => f.path);
+    const paths = collapsibleWorkerFiles({ files: [parent, touchedChild], project: "demo", flows: [], pinnedPaths: new Set() }).map((f) => f.path);
     expect(paths).toContain("/p");
     expect(paths).toContain("/p/c");
   });
 
-  test("folds a worker whose entire subtree is quiet", () => {
+  test("folds a worker whose entire subtree has settled", () => {
     const parent = stale({ path: "/p", kind: "subagent", parent: "/root" });
     const quietChild = stale({ path: "/p/c", kind: "subagent", parent: "/p" });
-    const paths = collapsibleWorkerFiles({ files: [parent, quietChild], project: "demo", flows: [], pinnedPaths: new Set(), nowMs: NOW }).map((f) => f.path);
+    const paths = collapsibleWorkerFiles({ files: [parent, quietChild], project: "demo", flows: [], pinnedPaths: new Set() }).map((f) => f.path);
     expect(new Set(paths)).toEqual(new Set(["/p", "/p/c"]));
   });
 
   test("never folds an active pipeline's protected full-pane stage, but still folds its superseded retry (#507 final)", () => {
-    /* Both transcripts are aged-idle pipeline-stage workers. The latest attempt
+    /* Both transcripts are settled pipeline-stage workers. The latest attempt
        (/stage-latest) is a protected full-pane card on the cursor-bearing
        pipeline, so it stays a real card; the superseded earlier retry
        (/stage-retry) is absent from the protected set and still folds. */
-    const latest = stale({ path: "/stage-latest" });
-    const retry = stale({ path: "/stage-retry" });
+    const latest = stale({ path: "/stage-latest", proc: "killed" });
+    const retry = stale({ path: "/stage-retry", proc: "killed" });
     const pipelines = [{
       id: "pl", runs: [{ attempts: [{ agentPath: "/stage-retry" }, { agentPath: "/stage-latest" }] }],
     }] as unknown as Pipeline[];
@@ -638,7 +771,6 @@ describe("collapsibleWorkerFiles — independent conversation projection", () =>
       pipelines,
       pinnedPaths: new Set(),
       protectedPaths: new Set(["/stage-latest"]),
-      nowMs: NOW,
     }).map((f) => f.path);
     expect(paths).not.toContain("/stage-latest");
     expect(paths).toContain("/stage-retry");
@@ -646,7 +778,7 @@ describe("collapsibleWorkerFiles — independent conversation projection", () =>
 });
 
 describe("computeWorkerStacks", () => {
-  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 3 * 60 * 60, ...over });
+  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 3 * 60 * 60, proc: "done", ...over });
 
   test("groups collapse-eligible workers per flow, then per worktree (from flows, no file.flow)", () => {
     // Files carry NO flow annotation (as /api/files serves them); classification
@@ -661,7 +793,6 @@ describe("computeWorkerStacks", () => {
       flows,
       renderedPaths: new Set(),
       pinnedPaths: new Set(),
-      nowMs: NOW,
     });
     expect(stacks.map((s) => s.kind)).toEqual(["flow", "worktree"]);
     expect(stacks[0]!.items.map((f) => f.path)).toEqual(["/rev"]);
@@ -676,12 +807,11 @@ describe("computeWorkerStacks", () => {
       flows: [],
       renderedPaths: new Set(["/w"]),
       pinnedPaths: new Set(),
-      nowMs: NOW,
     });
     expect(stacks).toHaveLength(0);
   });
 
-  test("owner roots and user-authored workers follow the same idle rule", () => {
+  test("owner roots and user-authored workers follow the same settlement rule", () => {
     const root = stale({ path: "/root" });
     const touched = stale({ path: "/w", kind: "subagent", parent: "/root", userAuthored: true });
     const stacks = computeWorkerStacks({
@@ -690,7 +820,6 @@ describe("computeWorkerStacks", () => {
       flows: [],
       renderedPaths: new Set(),
       pinnedPaths: new Set(),
-      nowMs: NOW,
     });
     expect(stacks.flatMap((stack) => stack.items).map((file) => file.path).sort()).toEqual(["/root", "/w"]);
   });

@@ -151,6 +151,13 @@ export interface BoardProjectStateV1 {
        because legacy board files omit both; the store defaults them to empty. */
     foldedEngineChildIds?: string[];
     expandedEngineTrayParentIds?: string[];
+    /* Epoch SECONDS at which the operator last OPENED each conversation, keyed
+       by durable conversation identity like `favorites` (issue #1244). A lane
+       that finished holds its outcome card on the board until a stamp here is
+       at least as new as the last thing that conversation wrote. Monotonic per
+       key and merged by maximum, so it needs no causal fence: there is no "off"
+       value a stale writer could restore. Bounded, freshest first. */
+    seenAt?: Record<string, number>;
     /** Minutes before an unsettled idle conversation folds. Null disables the
         age-only rule; terminal evidence continues to fold immediately. */
     idleCollapseMinutes?: number | null;

@@ -12,7 +12,7 @@ import { DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES, MAX_BOARD_IDLE_COLLAPSE_MINUTES } 
 import type { BoardFileV1, BoardProjectStateV1 } from "@/lib/view/types";
 
 export const BOARD_FILE = statePath("board.json");
-const EMPTY_PREFS: BoardProjectStateV1["prefs"] = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], idleCollapseMinutes: DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES, viewMode: null, taskPanelOpen: false };
+const EMPTY_PREFS: BoardProjectStateV1["prefs"] = { manual: [], hidden: [], expanded: [], favorites: [], foldedEngineChildIds: [], expandedEngineTrayParentIds: [], seenAt: {}, idleCollapseMinutes: DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES, viewMode: null, taskPanelOpen: false };
 const BOARD_LOCK_ATTEMPTS = 1_000;
 const BOARD_LOCK_WAIT_MS = 5;
 const BOARD_LOCK_STALE_MS = 30_000;
@@ -31,6 +31,11 @@ function aliases(value: unknown): value is Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   return Object.values(value).every((item) => typeof item === "string");
 }
+/** Acknowledgement stamps: epoch seconds, so any finite non-negative number. */
+function seenStamps(value: unknown): value is Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.values(value).every((item) => typeof item === "number" && Number.isFinite(item) && (item as number) >= 0);
+}
 function keyRevisions(value: unknown): value is Record<string, number> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   return Object.values(value).every((item) => Number.isInteger(item) && (item as number) >= 0);
@@ -44,6 +49,7 @@ function projectState(value: unknown): value is BoardProjectStateV1 {
     (prefs!.favorites === undefined || stringArray(prefs!.favorites)) &&
     (prefs!.foldedEngineChildIds === undefined || stringArray(prefs!.foldedEngineChildIds)) &&
     (prefs!.expandedEngineTrayParentIds === undefined || stringArray(prefs!.expandedEngineTrayParentIds)) &&
+    (prefs!.seenAt === undefined || seenStamps(prefs!.seenAt)) &&
     (prefs!.idleCollapseMinutes === undefined || prefs!.idleCollapseMinutes === null
       || (Number.isInteger(prefs!.idleCollapseMinutes) && prefs!.idleCollapseMinutes! > 0 && prefs!.idleCollapseMinutes! <= MAX_BOARD_IDLE_COLLAPSE_MINUTES)) &&
     (state.explicitManual === undefined || stringArray(state.explicitManual)) &&
@@ -51,6 +57,15 @@ function projectState(value: unknown): value is BoardProjectStateV1 {
     (state.keyRevisions === undefined || keyRevisions(state.keyRevisions)) &&
     (state.keyRevisionFloor === undefined || (Number.isInteger(state.keyRevisionFloor) && state.keyRevisionFloor! >= 0)) &&
     (prefs!.viewMode === null || prefs!.viewMode === "scheme" || prefs!.viewMode === "list") && typeof prefs!.taskPanelOpen === "boolean";
+}
+
+/** Union of acknowledgement maps, newest stamp per conversation identity. */
+function mergeSeenAt(maps: readonly (Record<string, number> | undefined)[]): Record<string, number> {
+  const merged: Record<string, number> = {};
+  for (const map of maps) {
+    for (const [id, at] of Object.entries(map ?? {})) merged[id] = Math.max(merged[id] ?? 0, at);
+  }
+  return merged;
 }
 
 function emptyBoard(): BoardProjectStateV1 {
@@ -110,6 +125,7 @@ function read(filePath: string): BoardFileV1 {
         favorites: state.prefs.favorites ?? [],
         foldedEngineChildIds: state.prefs.foldedEngineChildIds ?? [],
         expandedEngineTrayParentIds: state.prefs.expandedEngineTrayParentIds ?? [],
+        seenAt: state.prefs.seenAt ?? {},
         idleCollapseMinutes: state.prefs.idleCollapseMinutes === undefined
           ? DEFAULT_BOARD_IDLE_COLLAPSE_MINUTES
           : state.prefs.idleCollapseMinutes,
@@ -442,6 +458,9 @@ function mergedBoards(states: readonly BoardProjectStateV1[]): BoardProjectState
        reconciliation, exactly like favorites (issue #142 S2). */
     foldedEngineChildIds: [...new Set(ordered.flatMap((state) => state.prefs.foldedEngineChildIds ?? []))],
     expandedEngineTrayParentIds: [...new Set(ordered.flatMap((state) => state.prefs.expandedEngineTrayParentIds ?? []))],
+    /* Acknowledgements merge by MAXIMUM (issue #1244): two projects folding
+       together must not un-see an outcome one of them had already seen. */
+    seenAt: mergeSeenAt(ordered.map((state) => state.prefs.seenAt)),
     viewMode,
     taskPanelOpen,
   };

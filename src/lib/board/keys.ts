@@ -134,6 +134,13 @@ export function mutationKeys(mutation: BoardMutationV1, aliases: Record<string, 
       return [foldKey(mutation.id), forPath(mutation.path)];
     case "set-engine-tray-expanded":
       return [trayKey(mutation.parentId)];
+    /* Deliberately fenceless (#1244). An acknowledgement only ever moves a
+       per-conversation stamp FORWARD, so concurrent writers converge on the
+       newest one and there is no "off" value a stale writer could restore —
+       the whole failure a causal key exists to prevent. Naming a key here would
+       also put one clock per conversation ever opened into the fence map. */
+    case "mark-seen":
+      return [];
     case "set-presentation":
       return [
         ...(mutation.viewMode === undefined ? [] : [VIEW_MODE_KEY]),
