@@ -1219,7 +1219,7 @@ export function inspectPaths(
   return findings;
 }
 
-export function formatPrivacyReport(findings: Map<FindingClass, number>): string {
+export function formatPrivacyReport(findings: Map<FindingClass, number>, notices: string[] = []): string {
   if (findings.size === 0) {
     return "PRIVACY GATE: PASS\n";
   }
@@ -1227,6 +1227,9 @@ export function formatPrivacyReport(findings: Map<FindingClass, number>): string
   for (const [finding, count] of [...findings].sort(([left], [right]) => left.localeCompare(right))) {
     lines.push(`${finding}: ${count}`);
   }
+  /* A count says a class was found; a notice says where, for the findings
+     whose location is a commit nobody can grep for. */
+  lines.push(...notices);
   return `${lines.join("\n")}\n`;
 }
 
@@ -1412,8 +1415,118 @@ export function commitMessageFindings(repository: string, base: string): Map<Fin
   return findings;
 }
 
-export function reportPrivacyFindings(findings: Map<FindingClass, number>): void {
-  process.stdout.write(formatPrivacyReport(findings));
+export type MergeBoundaryReview = { findings: Map<FindingClass, number>; notices: string[] };
+
+type CommitIdentity = { address: string; commit: string; field: "author" | "committer"; name: string };
+
+/* The forge's account namespace, `<id>+<handle>` or `<handle>` at the no-reply
+   host of its own domain. The handle names the account, and the account the
+   repository belongs to is the one its origin remote names — so the canonical
+   identity is read from the checkout rather than written down here, where
+   writing it down would publish it. */
+const FORGE_ACCOUNT_DOMAIN = `users.noreply.${FORGE_DOMAIN}`;
+const COMPOSED_ATTRIBUTION_TRAILER = "Co-authored-by";
+
+function forgeAccountHandle(address: string): string | undefined {
+  const separator = address.lastIndexOf("@");
+  if (separator === -1) return undefined;
+  if (address.slice(separator + 1).toLowerCase() !== FORGE_ACCOUNT_DOMAIN) return undefined;
+  const localPart = address.slice(0, separator).toLowerCase();
+  const identifier = localPart.indexOf("+");
+  return identifier === -1 ? localPart : localPart.slice(identifier + 1);
+}
+
+/* `<host>/<owner>/<repository>` in the HTTPS form, `<host>:<owner>/<repository>`
+   in the SSH one. The remote is written by whoever created the checkout — the
+   workflow, or the operator — never by the branch under inspection. */
+function forgeOwner(repository: string): string | undefined {
+  const result = Bun.spawnSync({
+    cmd: ["git", "-C", repository, "config", "--get", "remote.origin.url"],
+    env: withoutWakatimeCredential(process.env),
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  if (result.exitCode !== 0) return undefined;
+  const owner = new RegExp(`${FORGE_DOMAIN.replaceAll(".", String.raw`\.`)}[/:]([A-Za-z0-9._-]+)/`, "i")
+    .exec(result.stdout.toString().trim());
+  return owner?.[1].toLowerCase();
+}
+
+/** Every identity git recorded on the commits the merge will squash. */
+function branchIdentities(repository: string, base: string): CommitIdentity[] | undefined {
+  const result = Bun.spawnSync({
+    cmd: ["git", "-C", repository, "log", "--format=%H%x00%an%x00%ae%x00%cn%x00%ce", `${base}..HEAD`],
+    env: withoutWakatimeCredential(process.env),
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  if (result.exitCode !== 0) return undefined;
+  const identities: CommitIdentity[] = [];
+  /* An identity carries no newline — git refuses to record one — so a commit
+     is a line and its five fields are NUL-separated within it. */
+  for (const line of result.stdout.toString().split("\n")) {
+    if (line === "") continue;
+    const [commit, authorName, authorAddress, committerName, committerAddress] = line.split("\0");
+    if (committerAddress === undefined) return undefined;
+    identities.push({ address: authorAddress, commit, field: "author", name: authorName });
+    if (committerName === authorName && committerAddress === authorAddress) continue;
+    identities.push({ address: committerAddress, commit, field: "committer", name: committerName });
+  }
+  return identities;
+}
+
+/* One identity in the shape the forge composes it: a message whose last
+   paragraph is the attribution trailer, so the trailer rules read a composed
+   trailer exactly as they read a written one. */
+function composedAttributionMessage(identity: CommitIdentity): string {
+  return `squash merge\n\n${COMPOSED_ATTRIBUTION_TRAILER}: ${identity.name} <${identity.address}>\n`;
+}
+
+/**
+ * The identities the forge will publish in the commit it composes at merge.
+ *
+ * `--check-commits` reads the messages the branch carries, and the commit that
+ * lands on the default branch is none of them: a squash merge writes a new
+ * message and lifts every identity git recorded on the branch commits into a
+ * `Co-authored-by:` trailer of its own. Nothing had ever read those identities,
+ * so an address on no message at all reached the public history as a trailer.
+ *
+ * Git records an author and a committer on every commit and a commit cannot be
+ * made without them, so the question is never whether an identity publishes but
+ * whose. Two answers publish nobody: the account the repository belongs to on
+ * the forge, and the machine-attribution mailboxes the trailer rule already
+ * names. Every other identity is a person, and is reported exactly as an
+ * address in a file is — the carve-out for written trailers is not widened,
+ * it is read here as it is read there.
+ */
+export function mergeBoundaryReview(repository: string, base: string): MergeBoundaryReview {
+  const findings = new Map<FindingClass, number>();
+  const notices: string[] = [];
+  const identities = branchIdentities(repository, base);
+  if (identities === undefined) {
+    addFinding(findings, "inspection_error");
+    return { findings, notices };
+  }
+  const owner = forgeOwner(repository);
+  for (const identity of identities) {
+    const { attributable } = commitMessageAddressReview(composedAttributionMessage(identity));
+    const publishes = attributable.some((address) => owner === undefined || forgeAccountHandle(address) !== owner);
+    if (!publishes) continue;
+    addFinding(findings, "email_address");
+    /* The notice names the commit, the field and the trailer, and never the
+       address: this report is itself published — a check run's log on a public
+       repository — and a report that quotes the address to prove it leaked,
+       leaks it. `git show -s <commit>` names it to whoever is fixing it. */
+    notices.push(
+      `merge_boundary: ${identity.commit.slice(0, 12)} ${identity.field} identity`
+      + ` composes an attributable ${COMPOSED_ATTRIBUTION_TRAILER} trailer (address withheld)`,
+    );
+  }
+  return { findings, notices };
+}
+
+export function reportPrivacyFindings(findings: Map<FindingClass, number>, notices: string[] = []): void {
+  process.stdout.write(formatPrivacyReport(findings, notices));
   if (findings.size === 0) return;
   process.exitCode = 1;
 }
@@ -1439,10 +1552,19 @@ if (import.meta.main) {
     inspectionRoot,
     trustedBase,
   );
+  const notices: string[] = [];
   if (arguments_.includes("--check-commits")) {
     for (const [finding, count] of commitMessageFindings(inspectionRoot, trustedBase)) {
       pathFindings.set(finding, (pathFindings.get(finding) ?? 0) + count);
     }
+    /* The branch commits publish their messages when they are pushed; the merge
+       publishes a commit composed from their identities. Both are the commit
+       surface, so one flag reads both. */
+    const boundary = mergeBoundaryReview(inspectionRoot, trustedBase);
+    for (const [finding, count] of boundary.findings) {
+      pathFindings.set(finding, (pathFindings.get(finding) ?? 0) + count);
+    }
+    notices.push(...boundary.notices);
   }
-  reportPrivacyFindings(pathFindings);
+  reportPrivacyFindings(pathFindings, notices);
 }
