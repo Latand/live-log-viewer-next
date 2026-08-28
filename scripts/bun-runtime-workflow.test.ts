@@ -65,6 +65,34 @@ test("the interpreter under test is the pin the image ships, not a version writt
   expect(dockerfile).toContain("npm install -g bun@");
 });
 
+test("the job proves its own checks can go red, and does not only report that they went green", () => {
+  // The tests that hold both verdicts — an empty target list is a failure, and
+  // every way the rehearsal can be let down produces `ok: false` — run in this
+  // job, at the same commit, rather than in a suite no workflow invokes.
+  const held = scripts.find((script) => script.includes("bun test")) ?? "";
+  for (const file of [
+    "scripts/bun-runtime-workflow.test.ts",
+    "scripts/verify-viewer-runtime.test.ts",
+    "src/runtime-host/hostRehearsal.test.ts",
+  ]) {
+    expect(held).toContain(file);
+  }
+
+  // And end to end on the runner: each half is handed a subject that does not
+  // hold. What makes these controls rather than ceremony is that a check which
+  // stays green against one of them fails the job, so the refusals are named.
+  const control = scripts.find((script) => script.includes("red-path control")) ?? "";
+  expect(control).toContain("app-page.runtime.prod.js");
+  expect(control).toContain("LLV_RUNTIME_HOST_REHEARSAL_ROOT=");
+  for (const refusal of [
+    "the viewer check passed where there is no build to load",
+    "the viewer check passed with $runtime_module unloadable",
+    "the rehearsal passed against a root with no runtime host in it",
+  ]) {
+    expect(control).toContain(refusal);
+  }
+});
+
 test("the job runs at the pull request's own commit", () => {
   const checkout = steps.find((step) => step.uses?.startsWith("actions/checkout@"));
   expect(checkout?.with?.ref).toContain("github.event.pull_request.head.sha");

@@ -93,6 +93,21 @@ jobs:
       # The same environment the image's build stage sets. NODE_ENV belongs to
       # the build and not to the install above, which needs the dev
       # dependencies the compiler runs on.
+      # A check is evidence only if it can go red, and "it goes red, I ran it"
+      # is the claim three rounds of #1248 could not attribute to anything.
+      # These are the tests that hold the two verdicts: an empty target list is
+      # a failure rather than a clean sweep of nothing, every way the rehearsal
+      # can be let down produces `ok: false`, and no step of this job can fail
+      # without failing the job. `privacy-publication` verifies its own gate the
+      # same way, in the same job, before it trusts what the gate then says.
+      - name: Verify the runtime checks fail when they should
+        run: >
+          bun test
+          scripts/bun-runtime-workflow.test.ts
+          scripts/verify-viewer-runtime.test.ts
+          src/runtime-host/hostRehearsal.test.ts
+          src/runtime-host/hostRehearsalRun.test.ts
+
       - name: Build the Viewer
         env:
           NEXT_TELEMETRY_DISABLED: "1"
@@ -116,3 +131,55 @@ jobs:
       # took exits non-zero here.
       - name: Rehearse the runtime host under the pinned Bun
         run: bun scripts/verify-runtime-host.ts
+
+      # The same question end to end, on this runner, under this interpreter,
+      # after the evidence above has been produced: each check is handed a
+      # subject that does not hold and has to answer with a non-zero exit. The
+      # Viewer half gets no build at all, and then the incident's own module
+      # made unloadable on purpose — the failure that answered 500 on every
+      # route, induced rather than waited for. The host half gets a root with
+      # no runtime host in it, so the stable listener is never held. A check
+      # that stays green against one of these cannot fail this job, and
+      # everything above it is ceremony.
+      - name: Prove each check goes red when its subject does not hold
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD"
+          runtime_module="node_modules/next/dist/compiled/next-server/app-page.runtime.prod.js"
+          intact="$RUNNER_TEMP/app-page.runtime.prod.js.intact"
+
+          no_build="$(mktemp -d)"
+          if (cd "$no_build" && bun "$root/scripts/verify-viewer-runtime.ts"); then
+            echo "the viewer check passed where there is no build to load" >&2
+            exit 1
+          fi
+
+          # Restored on the way out however this step ends, so a later reader of
+          # this workspace is not looking at a module this step broke.
+          cp "$runtime_module" "$intact"
+          trap 'cp -f "$intact" "$runtime_module"' EXIT
+          echo 'throw new Error("unloadable on purpose, for the red-path control");' > "$runtime_module"
+          if bun "$root/scripts/verify-viewer-runtime.ts" > "$RUNNER_TEMP/viewer-red.json"; then
+            echo "the viewer check passed with $runtime_module unloadable" >&2
+            exit 1
+          fi
+          if ! grep -q "app-page.runtime.prod.js" "$RUNNER_TEMP/viewer-red.json"; then
+            echo "the viewer check failed without naming the module that did not load" >&2
+            exit 1
+          fi
+          cp -f "$intact" "$runtime_module"
+
+          # `hostRehearsalRun.ts` is the rehearsal's own entry point, and the
+          # root it is given is where it looks for `src/runtime-host/main.ts`.
+          # A generation that cannot start is a listener nobody holds, which is
+          # the shape the incident had.
+          no_host="$(mktemp -d)"
+          if LLV_RUNTIME_HOST_REHEARSAL_ROOT="$no_host" bun src/runtime-host/hostRehearsalRun.ts > "$RUNNER_TEMP/host-red.json"; then
+            echo "the rehearsal passed against a root with no runtime host in it" >&2
+            exit 1
+          fi
+          if ! grep -q '"ok":false' "$RUNNER_TEMP/host-red.json"; then
+            echo "the rehearsal failed without reporting a verdict" >&2
+            exit 1
+          fi
