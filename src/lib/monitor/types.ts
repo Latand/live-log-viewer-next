@@ -1,4 +1,4 @@
-import type { LifecycleEventType, LifecycleState } from "@/lib/lifecycle/vocabulary";
+import type { LifecycleEventType, LifecycleState, LifecycleTurnState } from "@/lib/lifecycle/vocabulary";
 
 /**
  * Domain vocabulary of the recurring conversation monitor (issue #741).
@@ -233,6 +233,19 @@ export type SeatTickVerdict =
 export interface SeatTickActivity {
   lifecycle: LifecycleState;
   reason: string;
+  /**
+   * The turn state the verdict above was computed FROM — the transcript's own
+   * evidence, which is a different fact from {@link SeatTickSeatInput.turn}.
+   *
+   * The two were read as one and disagreed (#1262). The registry's record says
+   * a turn is open; the transcript says whether one actually is. A seat that
+   * ended its turn and went quiet crosses the silence threshold and is reported
+   * `stalled` all the same, because the threshold measures silence rather than
+   * an open turn — so a stall that rests on silence is only the seat's stall
+   * when this says the turn is open. Absent when the caller carried no row,
+   * which is never read as an open turn.
+   */
+  turnState?: LifecycleTurnState;
 }
 
 /** The active seat as the check sees it: durable identity, the registry's turn
@@ -270,6 +283,10 @@ export interface SeatTickTaskInput {
   status: "inbox" | "assigned" | "blocked" | "done";
   /** A linked pipeline or a live assignment already owns it. */
   owned: boolean;
+  /** When the card last moved. An assigned card nobody started is only an
+      unstarted TASK while this is recent; past the backlog bound it is
+      backlog, and a wake reason nothing can discharge (#1262). */
+  updatedAt: string | null;
 }
 
 export interface SeatTickEventInput {
@@ -294,10 +311,27 @@ export interface SeatTickSignalInput {
     (see `SEAT_TICK_WAKE_INTERVAL_MS`) rather than a field something can set. */
 export interface SeatTickPolicy {
   checkIntervalMs: number;
+  /**
+   * What the tick asks the liveness plane to call stalled: forty minutes by
+   * default, and the number that travels into the read rather than a second
+   * threshold derived here.
+   *
+   * It measures SILENCE — the gap since the newest transcript record, tool
+   * traffic included — and nothing else. Not how long a turn has been open: a
+   * turn writing every thirty seconds never crosses it however long it runs.
+   * And not "silence under an open turn" either, which is the reading that
+   * looks obvious and is wrong — the liveness verdict crosses into `stalled`
+   * on silence whether the transcript's turn is open or settled, so whether a
+   * seat is stalled or merely quiet is decided by
+   * {@link SeatTickActivity.turnState} beside it (#1262).
+   */
   stallAfterMs: number;
   proposalIntervalMs: number;
   itemsPerWake: number;
   retryGuard: number;
+  /** How long an assigned card nobody started stays an unstarted task before
+      it becomes backlog the wake stops naming (#1262). */
+  backlogAfterMs: number;
 }
 
 /**
@@ -368,8 +402,15 @@ export interface SeatTickProjectState {
    * Advanced only by a delivered wake. Acknowledging at read time is how a
    * lane event gets lost across a rotation or a refused send: the cursor moves,
    * the message never arrives, and nothing offers the event again.
+   *
+   * Null means the tick has never established where the journal stood for this
+   * project, which is not the same as zero. Zero is a real cursor with the
+   * whole journal ahead of it, and a first check that read it that way handed
+   * the seat four days of settled work as its instruction for the turn
+   * (#1262). The first check seals it to the journal head instead — a first
+   * run has no backlog to catch up on — and every later check pages from it.
    */
-  eventsThrough: number;
+  eventsThrough: number | null;
   /** The last wake the layer accepted without landing, and the seat it was
       addressed to. Survives a rotation precisely so the successor's first check
       can revoke what is still waiting for the predecessor. */
@@ -459,7 +500,7 @@ export function emptySeatTickState(): SeatTickProjectState {
     lastProposalAt: null,
     stalledSeen: [],
     lastWakeFingerprint: null,
-    eventsThrough: 0,
+    eventsThrough: null,
     outstandingWake: null,
   };
 }

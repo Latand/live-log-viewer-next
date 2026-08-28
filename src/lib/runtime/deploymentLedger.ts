@@ -91,6 +91,60 @@ export function ledgerDeployments(
 }
 
 /**
+ * How many deployment rows the newest-first window carries before recency is
+ * settled in memory. The SQL ordering below is the ledger's own write clock,
+ * which is close enough to recency to bound the read; the record's `createdAt`
+ * is what actually decides, so the window only has to be wide enough to contain
+ * the newest record under any plausible skew between the two.
+ */
+const LATEST_DEPLOYMENT_WINDOW = 25;
+
+/**
+ * The most recently STARTED deployment, or null when the ledger has none.
+ *
+ * Separate from {@link ledgerDeployments} on purpose. That function mirrors the
+ * runtime snapshot's ordering — entity id — which is a random UUID per
+ * deployment and therefore says nothing about time; slicing a "tail" from it
+ * and reading the last element answers with an arbitrary deployment. A caller
+ * that reported the last deployment's outcome from it told an orchestrator that
+ * production had rolled back while the four newest deploys had all succeeded
+ * (#1262), which invites a rollback hunt against a healthy production.
+ *
+ * So recency is asked for explicitly here: newest-first by the row's own write
+ * clock, then decided on the record's own `createdAt` (its `updatedAt` when a
+ * record carries no readable start), with the SQL order breaking a tie between
+ * deployments admitted in the same millisecond.
+ */
+export function latestLedgerDeployment(
+  env: NodeJS.ProcessEnv = process.env,
+): DeploymentLedgerRead<ViewerDeploymentStatus | null> {
+  const db = openLedger(env);
+  if (!db) return unreadable();
+  try {
+    const rows = db.query<{ id: string; state_json: string }, [string, number]>(
+      "SELECT id, state_json FROM entities WHERE kind = ? ORDER BY COALESCE(updated_at, 0) DESC, id DESC LIMIT ?",
+    ).all("deployment", LATEST_DEPLOYMENT_WINDOW);
+    let latest: ViewerDeploymentStatus | null = null;
+    let latestAt = Number.NEGATIVE_INFINITY;
+    for (const row of rows) {
+      const status = deploymentStatus(row.state_json, row.id);
+      if (!status) return unreadable();
+      const at = Date.parse(status.createdAt);
+      const tie = Date.parse(status.updatedAt);
+      const rank = Number.isFinite(at) ? at : Number.isFinite(tie) ? tie : Number.NEGATIVE_INFINITY;
+      if (latest && rank <= latestAt) continue;
+      latest = status;
+      latestAt = rank;
+    }
+    return { state: "ok", value: latest };
+  } catch {
+    return unreadable();
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * One deployment by id. A readable miss is represented by `undefined`;
  * malformed state and storage failures remain an explicit unreadable plane.
  */

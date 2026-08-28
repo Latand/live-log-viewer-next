@@ -144,7 +144,7 @@ function harness(options: {
         ? [{ lifecycle: "running", reason: "host_alive_turn_active", ...options.seatActivity } as AgentLivenessRecord]
         : []),
       lifecycleJournal: () => ({ version: 1, lastSeq: options.events?.at(-1)?.seq ?? 0, events: options.events ?? [], retired: [] }),
-      deployments: () => ({ state: "unreadable", error: "no ledger" }) as never,
+      latestDeployment: () => ({ state: "unreadable", error: "no ledger" }) as never,
       retirementReport: () => null,
       wakeState: async () => {
         if (options.holderThrows) throw new Error("the layer holding the wake cannot be read");
@@ -482,6 +482,39 @@ test("a delivered wake is what moves the event cursor past the events it carried
   const record = await runSeatTickCheck(PROJECT, rig.deps);
   expect(record!.reasons).toEqual(["lane-event"]);
   expect(rig.written[0]!.eventsThrough).toBe(44);
+});
+
+/* #1262, end to end: the seat's very first check, against a journal that
+   already holds a day of settled work. The wake that produced the report said
+   "stage_completed since the last delivered wake and 85 more" for a seat that
+   had never had a delivered wake at all. */
+test("a project's first check seals the cursor at the head instead of replaying the journal", async () => {
+  const history = [terminalEvent(9848), terminalEvent(9850), terminalEvent(9853)];
+  const rig = harness({ pipelines: OPEN_LANE, events: history, state: OVERDUE });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  /* The lane is open and the hour has elapsed, so a wake is owed — but on the
+     open lane, not on three days of finished stages. */
+  expect(record!.reasons).toEqual(["interval"]);
+  expect(rig.sent[0]!.text).not.toContain("the round passed");
+  expect(record!.items).toBe(1);
+  expect(record!.eventsThrough).toBe(9853);
+  expect(rig.written[0]!.eventsThrough).toBe(9853);
+});
+
+/* And the check after it is the one the cursor exists for: what happened since
+   the tick began is still delivered, in full. */
+test("the check after the seal carries the events that arrived since it", async () => {
+  const history = [terminalEvent(9848), terminalEvent(9853)];
+  const sealed = harness({ pipelines: OPEN_LANE, events: history, state: OVERDUE });
+  await runSeatTickCheck(PROJECT, sealed.deps);
+  const next = harness({
+    pipelines: OPEN_LANE,
+    events: [...history, terminalEvent(9854)],
+    state: { ...OVERDUE, eventsThrough: sealed.written[0]!.eventsThrough },
+  });
+  const record = await runSeatTickCheck(PROJECT, next.deps);
+  expect(record!.reasons).toEqual(["lane-event"]);
+  expect(record!.eventsThrough).toBe(9854);
 });
 
 test("a failed delivery leaves the wake stamp where it was, so the next check retries", async () => {
