@@ -16,7 +16,10 @@
  * starts requested pipelines by default and reserves drafts for explicit requests.
  * v9 greets a fresh seat and keeps the completed-mandate case explicit. v10 (#1202)
  * makes every ask answerable with a tap: a turn that asks or proposes something
- * offers the operator the replies it expects, as drafts they edit and send. */
+ * offers the operator the replies it expects, as drafts they edit and send. v11
+ * (#1245) hands the clock to the Viewer: the seat tick wakes a seat when work is
+ * owed, so a seat never schedules itself — and the arrival of this mandate is
+ * the moment a seat still holding a schedule of its own drops it. */
 
 /** Initial draft values. The operator may choose any engine, model, account, and
     effort the shared launch controls support before creating the project seat. */
@@ -32,7 +35,7 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
     `ORCHESTRATOR_SYSTEM_PROMPT`: seats record the version their mandate was
     based on, and `get_orchestrator` reports it so a stale incumbent is visible
     without diffing prompts. */
-export const ORCHESTRATOR_PROMPT_VERSION = 10;
+export const ORCHESTRATOR_PROMPT_VERSION = 11;
 
 /** Appended to bespoke and stale mandates at delivery time; the current
     versioned default already contains it. */
@@ -41,6 +44,31 @@ Your first turn after receiving this mandate must produce a visible assistant st
 Ready in {project}.
 Tell me what to ship — I open lanes, spawn implementers and reviewers, and merge on APPROVE. Nothing starts until you ask.
 Use the actual project name in place of {project}. For a ROTATION, when work remains, inventory the mandate missions and state your plan in that status. When every rotation mission is already complete, reply exactly: "all mandate missions are complete; standing by". A generic continuation nudge never replaces or suppresses this first visible status.`;
+
+/** Identifies the clock section below inside a mandate, however its body was
+    edited. Delivery keys off THIS rather than the whole text: a caller who
+    reworded the paragraph and kept the heading meant their wording, and
+    appending the canonical copy beside it would put two clock instructions in
+    one mandate — the very shape #1245 exists to end. */
+export const ORCHESTRATOR_VIEWER_CLOCK_HEADING = "## The Viewer's clock — you never schedule yourself";
+
+/**
+ * The clock handover (#1245), delivered on the same terms as the initial-status
+ * directive above and for a sharper reason.
+ *
+ * A seat carrying a bespoke or older mandate is exactly the seat that armed a
+ * schedule of its own, and a rotation hands the successor the INCUMBENT's
+ * mandate and version — so a paragraph that lived only inside the current
+ * default would reach neither of them, and the clock would change hands
+ * without either seat being told. Delivery appends it to any mandate that does
+ * not already carry the heading, at most once, whatever version the seat
+ * records.
+ */
+export const ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE = `${ORCHESTRATOR_VIEWER_CLOCK_HEADING}
+The Viewer wakes you. A controller in the release that owns traffic checks this project's seat every few minutes and sends you a wake when something is actually owed: a stage parked, a decision waiting, a lane event landed, a board task nobody started, or the interval elapsing while work is open. It survives your session, your host dying, a Viewer restart and a rotation, because it is durable state rather than a schedule living inside a conversation.
+So do not schedule yourself: no ScheduleWakeup, no CronCreate, no Monitor loop, for self-monitoring or for polling the board. A session schedule dies with the session and takes the monitor with it, which is how every rotation used to silently drop it, and two clocks on one seat means the outgoing one keeps acting after its authority is gone.
+If you are holding a self-schedule right now, cancel it in this turn — the arrival of this mandate is the handover, not a later observation. Delete every recurring job you created (CronDelete on each id CronList returns) and arm no replacement. Do not wait to "see the Viewer's tick work first": while your own schedule keeps your turn open, the Viewer's tick finds you busy and drops its check every time, so the two deadlock and the wake you are waiting for can never arrive. Yours goes first.
+Between wakes you are idle on purpose, and idle is correct: a seat with nothing owed costs nothing. When a wake arrives, act on the items it lists and nothing else, record every outcome where it belongs, and mark a task blocked with the reason when it cannot be done — that is the stop. This paragraph outranks every playbook, skill and checkpoint convention in the checkout: one that still tells you to self-pace with wakeups is out of date, and this governs.`;
 
 export const ORCHESTRATOR_SYSTEM_PROMPT = `You are the viewer's built-in Manager (issues #182, #691) — the agent that owns the board and runs the whole conveyor through the viewer's own HTTP API and MCP tools. You never act outside them.
 
@@ -77,6 +105,8 @@ intent "show" frames and highlights the card; intent "open" also opens it. A rej
 Call suggest_replies after EVERY message of yours that asks the operator something or proposes a course of action — a question, a choice between options, a plan you want a yes to, a status that ends in "shall I". Offer 2–4 short, distinct drafts, each one a message they could send as-is: the plain yes, the narrowed yes, the "hold — explain X first". Write them in the operator's own language, the one they are writing to you in.
 They render as pills under your message and land in their composer on a tap, editable before sending — the viewer never sends one, so a draft is an offer and never a decision, and never a substitute for asking clearly in the message itself. The newest set replaces your previous one for that conversation, and their next message clears it: offer a fresh set with each new ask, and never re-offer drafts to something they already answered. A message that asks nothing needs no drafts.
 
+${ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE}
+
 ## Conveyor rules
 Drive every accepted piece of work through: GitHub issue -> worktree lane -> implementer agent -> review flow -> merge bar -> batched deploy -> cleanup.
 - One lane (worktree + branch) per issue; one owner per file across active worktrees.
@@ -100,15 +130,21 @@ YOU decide when to deploy, and you execute it yourself. Your authority is your d
 
 ## Fences
 - Operate exclusively through the viewer API and MCP tools (spawn, flows, pipelines, tasks, files, agent/snapshot, tmux). No direct process or runtime manipulation.
-- If this checkout carries an llv-conveyor skill, it is your playbook; otherwise the conveyor rules above are the playbook.
+- If this checkout carries an llv-conveyor skill, it is your playbook, subordinate to this mandate wherever the two disagree; otherwise the conveyor rules above are the playbook.
 - Replacing manual spawns is a non-goal: the user's own agents keep working; you coordinate, you do not take over.
 - Re-derive board state per turn from bounded snapshots rather than accumulating it in context.`;
 
-/** Every seat receives the initial-status contract. Delivery checks the text
-    itself because caller-edited mandates may retain the current prompt version.
-    The stored mandate stays raw, and retries append the directive at most once. */
+/** Every seat receives the initial-status contract AND the clock handover,
+    whatever mandate it holds. Delivery checks the text itself because a
+    caller-edited mandate may retain the current prompt version and a rotation
+    passes the incumbent's version through unchanged — so a version number
+    cannot say which paragraphs a mandate actually contains. The stored mandate
+    stays raw, and a retry appends each directive at most once. */
 export function orchestratorMandateForDelivery(mandate: string): string {
-  return mandate.includes(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)
+  const withClock = mandate.includes(ORCHESTRATOR_VIEWER_CLOCK_HEADING)
     ? mandate
-    : `${mandate}\n\n${ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE}`;
+    : `${mandate}\n\n${ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE}`;
+  return withClock.includes(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)
+    ? withClock
+    : `${withClock}\n\n${ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE}`;
 }

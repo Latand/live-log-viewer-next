@@ -16,10 +16,8 @@ const {
   SEAT_TICK_RUN_HISTORY,
   appendRunRecord,
   appendSeatTickRecord,
-  claimMonitorRun,
   readRunRecords,
   readSeatTickRecords,
-  releaseMonitorRun,
   sanitizeRunRecord,
   sanitizeSeatTickRecord,
   seatTickJournalPath,
@@ -130,52 +128,6 @@ describe("record sanitation at the boundary", () => {
     expect(sanitizeRunRecord({ ...record("run-z", "clean"), schemaVersion: 2 })).toBeNull();
     expect(sanitizeRunRecord({ ...record("run-z", "clean"), outcome: "invented" })).toBeNull();
   });
-});
-
-describe("single-flight claim", () => {
-  test("a second overlapping run loses, and the winner's token frees it", () => {
-    const lock = path.join(SANDBOX, "lock-a", "run.lock");
-    const first = claimMonitorRun({ lockPath: lock, pidAlive: () => true });
-    expect(first.claimed).toBe(true);
-    const second = claimMonitorRun({ lockPath: lock, pidAlive: () => true });
-    expect(second.claimed).toBe(false);
-    if (!second.claimed) expect(second.detail).toContain("lock");
-
-    /* Only the holder may release: a superseded run must not free the lock its
-       successor is holding. */
-    expect(releaseMonitorRun("some-other-token", { lockPath: lock })).toBe(false);
-    expect(first.claimed && releaseMonitorRun(first.token, { lockPath: lock })).toBe(true);
-    const third = claimMonitorRun({ lockPath: lock, pidAlive: () => true });
-    expect(third.claimed).toBe(true);
-  });
-
-  test("a lock left behind by a dead run is reclaimed", () => {
-    const lock = path.join(SANDBOX, "lock-b", "run.lock");
-    expect(claimMonitorRun({ lockPath: lock, pidAlive: () => true }).claimed).toBe(true);
-    expect(claimMonitorRun({ lockPath: lock, pidAlive: () => false }).claimed).toBe(true);
-  });
-
-  test("a lock older than the stale window is reclaimed", () => {
-    const lock = path.join(SANDBOX, "lock-c", "run.lock");
-    expect(claimMonitorRun({ lockPath: lock, pidAlive: () => true, now: () => 1_000 }).claimed).toBe(true);
-    expect(claimMonitorRun({ lockPath: lock, pidAlive: () => true, now: () => 1_000 + 40 * 60 * 1000 }).claimed).toBe(true);
-  });
-
-  test("exactly one of four racing PROCESSES wins the lock", async () => {
-    /* In-process claims prove nothing about atomicity: a read-then-write race
-       needs two schedulers. Four children start at one shared instant. */
-    const lock = path.join(SANDBOX, "lock-race", "run.lock");
-    fs.mkdirSync(path.dirname(lock), { recursive: true });
-    const child = path.join(import.meta.dir, "lockClaimChild.ts");
-    const startAt = Date.now() + 1_200;
-    const results = await Promise.all(Array.from({ length: 4 }, async () => {
-      const proc = Bun.spawn(["bun", child, lock, String(startAt)], { stdout: "pipe", stderr: "pipe", env: { ...process.env } });
-      const stdout = await new Response(proc.stdout).text();
-      await proc.exited;
-      return JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}") as { claimed?: boolean };
-    }));
-    expect(results.filter((result) => result.claimed === true)).toHaveLength(1);
-  }, 30_000);
 });
 
 /**

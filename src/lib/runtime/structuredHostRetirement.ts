@@ -4,7 +4,7 @@ import path from "node:path";
 import { agentRegistry, type AgentHostStatus, type ProcessIdentity, type RegistryFile } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { statePath } from "@/lib/configDir";
-import { activeOrchestratorSeatsOrUnknown } from "@/lib/orchestrator/seats";
+import { activeOrchestratorSeatsOrUnknown, revokedOrchestratorSeatConversationsOrUnknown } from "@/lib/orchestrator/seats";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import type { ProcessMemory } from "@/lib/proc/types";
@@ -155,6 +155,27 @@ export const STRUCTURED_HOST_RETIREMENT_CLAUSES = [
 export type StructuredHostRetirementClause = typeof STRUCTURED_HOST_RETIREMENT_CLAUSES[number];
 
 /**
+ * Where one host stands with the orchestrator seat — the third answer #1245
+ * needed and a boolean could not carry.
+ *
+ * Rotation is authority-only: `executeOrchestratorRotation` records a
+ * revocation and leaves the predecessor's session, host and Viewer access
+ * exactly as they were, while the registry membership row that says
+ * "orchestrator" is epoch-stamped and never removed. So a rotated-away seat
+ * read as `live` here forever, and `seat-free` — the very first clause —
+ * refused it forever. It then defeated `transcript-idle` too, by the activity
+ * that should have disqualified it: a seat that schedules itself writes its
+ * transcript every few minutes and is never idle. Both readings came from the
+ * same missing distinction, which is why one field carries it rather than two.
+ *
+ * - `none` — no seat evidence at all, the ordinary host.
+ * - `live` — a seat somebody is still seated in. Blocks retirement outright.
+ * - `revoked` — a seat whose authority the durable store has ended. It is not
+ *   a live seat, and its recency is not evidence of anything worth keeping.
+ */
+export type StructuredHostSeatStanding = "none" | "live" | "revoked";
+
+/**
  * Everything the predicate reads about one host, gathered before any of it is
  * judged, so the audit can report the facts alongside the verdict.
  *
@@ -195,8 +216,8 @@ export interface StructuredHostRetirementSubject {
       is bound — a state the sweep refuses on rather than reads as "no call". */
   realtimeBound: Determinable<boolean>;
   /** Undetermined when neither the registry nor the durable seat store
-      establishes whether this host holds a seat. */
-  seat: Determinable<boolean>;
+      establishes where this host stands with the seat. */
+  seat: Determinable<StructuredHostSeatStanding>;
   /** The transcript's modification time, a determined `null` when the host
       names none or it is genuinely gone, and undetermined when the path could
       not be read at all. */
@@ -228,6 +249,14 @@ type ClauseAnswer = Determinable<string | null>;
 const PASSES: ClauseAnswer = determined(null);
 const refuses = (reason: string): ClauseAnswer => determined(reason);
 
+/** Whether the durable seat store has ENDED this host's authority. Undetermined
+    is never revoked: `seat-free` has already refused on it by the time any
+    later clause asks, and a waiver granted on an unread store would be exactly
+    the invented fallback this predicate refuses to let a clause express. */
+function seatWasRevoked(subject: StructuredHostRetirementSubject): boolean {
+  return subject.seat.determined && subject.seat.value === "revoked";
+}
+
 /** The identity the kill is fenced to, or the reason there is none to fence to.
  *
  * The fence #1203 built binds a kill to the identity the record stored, and
@@ -255,13 +284,27 @@ function recordedStartIdentity(subject: StructuredHostRetirementSubject): Determ
  * mistake #1199's review already caught once, and an orchestrator is exactly
  * the host that sits quiet for hours between operator messages, so it would
  * pass every other clause.
+ *
+ * THE REVOKED-SEAT RULE (#1245) is one rule read in two of these clauses,
+ * because a revocation says two things at once and both have to land or
+ * neither is worth saying. `seat-free` stops calling a revoked seat live: the
+ * epoch-stamped membership row a rotation leaves behind is a record of the
+ * seat that ended, not evidence of one somebody holds. `transcript-idle` waives
+ * its threshold for the same host: what that clause measures is whether
+ * anything would be lost by stopping, and a seat whose authority has been
+ * revoked can lose nothing it is still entitled to do — the observed failure
+ * was a predecessor whose own self-scheduled monitor kept its transcript warm
+ * and so kept it permanently ineligible for the sweep that should have ended
+ * it. Every other clause still applies unchanged, so the predecessor's turn
+ * still has to settle, its questions still have to be answered and its queue
+ * still has to drain: the rule removes a seat's protection, never a turn's.
  */
 const CLAUSE_CHECKS: Record<
   StructuredHostRetirementClause,
   (subject: StructuredHostRetirementSubject, options: { now: number; idleMs: number }) => ClauseAnswer
 > = {
   "seat-free": (subject) => mapDeterminable(subject.seat,
-    (held) => (held ? "the host holds a live orchestrator seat" : null)),
+    (standing) => (standing === "live" ? "the host holds a live orchestrator seat" : null)),
 
   "turn-settled": (subject) => {
     if (subject.activeTurnRef !== null) return refuses(`turn ${subject.activeTurnRef} is in flight`);
@@ -319,6 +362,14 @@ const CLAUSE_CHECKS: Record<
        refused; saying it again here keeps the clause true on its own terms
        rather than relying on the clause before it. */
     if (stat === null) return "the transcript is not present on disk";
+    /* The revoked-seat waiver (#1245). Recency is evidence that a host is
+       doing something, and this is the one host whose doing something is the
+       problem: rotation ends its authority and nothing else, so it kept
+       ticking, kept writing, and kept clearing this threshold's floor by the
+       activity that disqualified it. The waiver is narrow on purpose — it is
+       read off a determined revocation and nothing weaker, and every clause
+       that protects work in flight still had to pass to get here. */
+    if (seatWasRevoked(subject)) return null;
     const idleMs = options.now - stat.mtimeMs;
     return idleMs < options.idleMs
       ? `the transcript was written ${Math.max(0, Math.round(idleMs / 1_000))}s ago`
@@ -383,6 +434,10 @@ export interface StructuredHostRetirementRecord {
   idleMs: number;
   /** The clauses that qualified this host, in the order they were checked. */
   passed: StructuredHostRetirementClause[];
+  /** Set when the revoked-seat rule (#1245) is what let this host through, so
+      a retirement seconds after a rotation is legible as the rotation
+      finishing rather than as the idle threshold having been ignored. */
+  seatRevoked?: true;
   /** How the tree was ended: through the runtime that held the host, by the
       signal ladder, or not at all because it had already exited. */
   via: Extract<StructuredHostTerminationOutcome, { ok: true }>["via"];
@@ -459,6 +514,9 @@ export interface StructuredHostRetirementDependencies {
   /** Undetermined when the durable seat store could not be established — the
       sweep refuses rather than reading silence as "no seats". */
   orchestratorSeatConversations?: () => Determinable<ReadonlySet<string>>;
+  /** The other half of the same store: seats whose authority has been revoked
+      (#1245). Undetermined on the same terms, and for the same reason. */
+  revokedSeatConversations?: () => Determinable<ReadonlySet<string>>;
   /** A determined `null` is a transcript that is genuinely not there; an
       unreadable path is undetermined. */
   transcriptStat?: (pathname: string) => Determinable<{ mtimeMs: number } | null>;
@@ -555,18 +613,54 @@ function defaultRealtimeBound(conversationId: string): Determinable<boolean> {
  * still say "unknown", and unknown refuses.
  */
 function defaultOrchestratorSeatConversations(): Determinable<ReadonlySet<string>> {
-  let active: ReturnType<typeof activeOrchestratorSeatsOrUnknown>;
+  let seats: Set<string>;
   try {
-    active = activeOrchestratorSeatsOrUnknown();
+    const active = activeOrchestratorSeatsOrUnknown();
+    if (active === null) return undetermined("the orchestrator seat store could not be established");
+    const resolveAlias = registryConversationAlias();
+    seats = new Set(active.flatMap((seat) => (seat.conversationId ? [resolveAlias(seat.conversationId)] : [])));
   } catch (error) {
     return undetermined(`the orchestrator seat store could not be read: ${safeReason(error)}`);
   }
-  if (active === null) return undetermined("the orchestrator seat store could not be established");
-  const seats = new Set<string>();
-  for (const seat of active) {
-    if (seat.conversationId) seats.add(seat.conversationId);
-  }
   return determined(seats);
+}
+
+/**
+ * A raw conversation id mapped onto the identity the registry canonicalized it
+ * to, for the two durable seat reads either side of it.
+ *
+ * Both are joined against `conversation.id` from the registry snapshot, which
+ * IS canonical; the seat file keeps whatever id each row was written with. A
+ * migration between the two is enough to make a revoked seat read as live —
+ * the sweep would then refuse it forever, which is the exact failure #1245
+ * exists to end — so the join resolves through the same aliasing the authority
+ * resolver takes from its sources.
+ */
+function registryConversationAlias(): (conversationId: string) => string {
+  const registry = agentRegistry();
+  return (conversationId) => registry.canonicalConversationId(conversationId as `conversation_${string}`);
+}
+
+/**
+ * Conversations whose seat authority the durable store has ended, or null when
+ * that store could not be established.
+ *
+ * Read separately from the live seats above, and unknown here refuses exactly
+ * as unknown there does: the two answers combine in {@link seatStanding}, and a
+ * silence read as "revoked by nobody" would keep a rotated-away orchestrator
+ * alive, while a silence read as "revoked" would retire a seated one. Neither
+ * is a guess this may make, so it does not.
+ */
+function defaultRevokedSeatConversations(): Determinable<ReadonlySet<string>> {
+  let revoked: ReturnType<typeof revokedOrchestratorSeatConversationsOrUnknown>;
+  try {
+    revoked = revokedOrchestratorSeatConversationsOrUnknown(registryConversationAlias());
+  } catch (error) {
+    return undetermined(`the orchestrator revocation record could not be read: ${safeReason(error)}`);
+  }
+  return revoked === null
+    ? undetermined("the orchestrator revocation record could not be established")
+    : determined(revoked);
 }
 
 /** An error reduced to something an audit line can carry. */
@@ -635,7 +729,8 @@ function recordRetirementReport(report: StructuredHostRetirementReport): void {
     console.error("[host retirement] journal could not be appended", error);
   }
   for (const retired of report.retired) {
-    console.warn(`[host retirement] retired ${retired.key} (${retired.role ?? "no role"}, idle ${Math.round(retired.idleMs / 60_000)}m) via ${retired.via}: ${retired.reclaimed.processes} process(es), ${Math.round(retired.reclaimed.rssBytes / 1_048_576)} MiB resident + ${Math.round(retired.reclaimed.swapBytes / 1_048_576)} MiB swapped reclaimed`);
+    const why = retired.seatRevoked ? ", revoked seat" : "";
+    console.warn(`[host retirement] retired ${retired.key} (${retired.role ?? "no role"}, idle ${Math.round(retired.idleMs / 60_000)}m${why}) via ${retired.via}: ${retired.reclaimed.processes} process(es), ${Math.round(retired.reclaimed.rssBytes / 1_048_576)} MiB resident + ${Math.round(retired.reclaimed.swapBytes / 1_048_576)} MiB swapped reclaimed`);
   }
   for (const failure of report.failed) {
     console.warn(`[host retirement] left ${failure.key} intact: ${failure.error}`);
@@ -742,6 +837,8 @@ interface RetirementInputs {
       bounded but not small, and this is a file. Undetermined when it could not
       be read at all, which is a refusal rather than an empty set. */
   seatConversations: Determinable<ReadonlySet<string>>;
+  /** Revoked seats, on the same terms and from the same pass. */
+  revokedConversations: Determinable<ReadonlySet<string>>;
 }
 
 /** Per-host facts that come from a durable read the whole pass shares. */
@@ -749,6 +846,7 @@ interface RetirementSources {
   snapshot: () => RegistryFile;
   handoffRows: () => Determinable<readonly HandoffRow[]>;
   seatConversations: () => Determinable<ReadonlySet<string>>;
+  revokedConversations: () => Determinable<ReadonlySet<string>>;
 }
 
 function retirementInputs(sources: RetirementSources): RetirementInputs {
@@ -763,6 +861,7 @@ function retirementInputs(sources: RetirementSources): RetirementInputs {
     undelivered: undeliveredHandoffIndex(sources.handoffRows(), file),
     openOperations: openOperationIndex(file),
     seatConversations: sources.seatConversations(),
+    revokedConversations: sources.revokedConversations(),
   };
 }
 
@@ -787,20 +886,36 @@ function retirementCandidates(file: RegistryFile) {
 }
 
 /**
- * Whether this conversation holds a live orchestrator seat, or null when that
- * cannot be established.
+ * Where this conversation stands with the orchestrator seat, or unknown when
+ * that cannot be established.
  *
- * A registry orchestrator membership is durable evidence on its own. The seat
- * store is the live authority, so when it cannot be read a conversation with no
- * membership row is unknown — never free.
+ * A registry orchestrator membership is durable evidence that a seat was HELD.
+ * The seat store is the live authority on whether it still is, so when it
+ * cannot be read a conversation with no membership row is unknown — never free.
+ *
+ * The revocation record is asked only of a conversation that has seat evidence
+ * at all, and that ordering is the whole point: nothing can revoke a seat an
+ * ordinary host never held, so an unreadable revocation record costs those
+ * hosts nothing, and the one host it can decide is the one whose answer
+ * matters.
+ *
+ * `conversationId` is the registry's canonical id, and both sets are keyed the
+ * same way (see {@link registryConversationAlias}) — a raw seat-file id on
+ * either side would miss the join for a migrated identity.
  */
-function seatStatus(
+function seatStanding(
   conversationId: string,
   memberships: readonly { kind: string }[],
   seatConversations: Determinable<ReadonlySet<string>>,
-): Determinable<boolean> {
-  if (memberships.some((membership) => membership.kind === "orchestrator")) return determined(true);
-  return mapDeterminable(seatConversations, (seats) => seats.has(conversationId));
+  revokedConversations: Determinable<ReadonlySet<string>>,
+): Determinable<StructuredHostSeatStanding> {
+  const held: Determinable<boolean> = memberships.some((membership) => membership.kind === "orchestrator")
+    ? determined(true)
+    : mapDeterminable(seatConversations, (seats) => seats.has(conversationId));
+  if (!held.determined) return held;
+  if (!held.value) return determined("none");
+  return mapDeterminable(revokedConversations,
+    (revoked) => (revoked.has(conversationId) ? "revoked" : "live"));
 }
 
 function retirementSubject(
@@ -849,7 +964,7 @@ function retirementSubject(
       : readers.realtimeBound(conversationId),
     seat: conversation === null
       ? undetermined("no conversation record establishes whether this host holds a seat")
-      : seatStatus(conversation.id, memberships, inputs.seatConversations),
+      : seatStanding(conversation.id, memberships, inputs.seatConversations, inputs.revokedConversations),
     transcriptFile: entry.artifactPath
       ? readers.transcriptStat(entry.artifactPath)
       : determined(null),
@@ -923,6 +1038,7 @@ export async function runStructuredHostRetirementSweep(
     snapshot,
     handoffRows,
     seatConversations: dependencies.orchestratorSeatConversations ?? defaultOrchestratorSeatConversations,
+    revokedConversations: dependencies.revokedSeatConversations ?? defaultRevokedSeatConversations,
   };
   const readers: RetirementReaders = {
     durableEventTail: dependencies.durableEventTail ?? ((sessionId: string) => durableRuntimeEventTailSeq(sessionId)),
@@ -1050,7 +1166,10 @@ export async function runStructuredHostRetirementSweep(
       engine: subject.key.engine,
       sessionId: subject.key.sessionId,
       conversationId: subject.conversationId,
-      seat: killRefFact(subject.seat),
+      /* The gate's question is "is this a LIVE seat", and a revoked one is not:
+         the same distinction the predicate just made, handed across in the two
+         values that gate speaks. */
+      seat: subject.seat.determined ? subject.seat.value === "live" : null,
       turnBusy: killRefFact(subject.turnBusy),
       owned: owned(subject.key),
       lastActiveAt: transcriptMtimeMs === null ? null : new Date(transcriptMtimeMs).toISOString(),
@@ -1082,6 +1201,7 @@ export async function runStructuredHostRetirementSweep(
       cwd: subject.cwd,
       idleMs: transcriptMtimeMs === null ? 0 : startedAtMs - transcriptMtimeMs,
       passed: verdict.passed,
+      ...(seatWasRevoked(subject) ? { seatRevoked: true as const } : {}),
       via: outcome.via,
       pids: outcome.pids,
       reclaimed,

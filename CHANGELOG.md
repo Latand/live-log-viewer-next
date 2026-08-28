@@ -7,6 +7,60 @@ guarantees for the 1.x series.
 
 ## [Unreleased]
 
+### Added
+- The Viewer ticks the orchestrator seat, so a rotation stops dropping the
+  monitor (#1245). The monitor that had been driving orchestrator sessions was
+  never a feature: it was a schedule an agent armed inside its own session, so
+  nothing was written to disk, it died with the session, and every rotation
+  silently dropped it — a successor started with no tick and no way to know one
+  was missing. The clock now lives in the release that owns traffic, beside the
+  controllers that already reconcile flows and retire hosts. A cheap check every
+  few minutes reads durable state only — the seat, the open lanes, the board,
+  the lifecycle journal past the seat's own cursor — and answers one of
+  `wake`, `quiet`, `proactive`, `no-seat` or `skipped`; the model runs only on a
+  wake, at most once an hour per project. Every check appends one sanitized line
+  to `state/seat-tick/runs.ndjson`, so "no line" means "no check" and the
+  absence of a tick is a readable fact rather than a silence. A tick that lands
+  while the seat's turn is genuinely progressing is dropped, never queued.
+
+### Changed
+- The orchestrator mandate is at v11: the Viewer owns the clock, a seat never
+  schedules itself, and a seat still holding a schedule drops it in the turn the
+  mandate lands in rather than waiting to observe the replacement work (#1245).
+  Waiting cannot work — a seat's own schedule keeps its turn open, so the
+  Viewer's tick finds it busy and drops every check, and the two mechanisms
+  deadlock. The handover paragraph is delivered with every mandate, whatever
+  version the seat carries: a rotation hands the successor the incumbent's
+  mandate and version, and a bespoke mandate never had the paragraph at all, so
+  the seats most likely to be holding a schedule are exactly the ones a
+  versioned-default-only paragraph would never reach. It is appended at most
+  once, so a re-delivery after a host death reads the same. The checked-in
+  conveyor playbook says the same thing the mandate does — it used to tell the
+  seat to self-pace with wakeup checkpoints, which made the rule unenforceable
+  by contradiction.
+- Automatic host retirement ends a rotated-away orchestrator (#1245). Rotation
+  revokes authority and nothing else, so a predecessor kept its host — and,
+  while it was ticking itself, kept its transcript warm enough to clear the idle
+  threshold forever, staying alive by the activity that should have disqualified
+  it. The retirement predicate now tells a revoked seat from a live one and
+  waives the idle threshold for it. A durable revocation stands on its own: a
+  later designation that failed terminally stops masking it, and the standing
+  follows an identity through a migration alias, so neither a failed
+  re-designation nor a migrated id leaves a revoked seat protected. Everything
+  protecting work in flight is unchanged: the turn still has to settle,
+  questions still have to be answered, the queue still has to drain.
+
+### Removed
+- The conversation monitor's standalone CLI driver, its HTTP client and its
+  cross-process lock (#1245): `scripts/conversation-monitor.ts`, `httpViewerApi`
+  and `POST /api/monitor/lock`. They existed for an external process on a
+  crontab that was never written on any machine, and one clock in one process
+  needs no lock. The classification the CLI drove — evidence, GitHub
+  correlation, the stall rule, board cards, redaction and the audit journal — is
+  kept and is what the seat tick reuses; the operator-request transcript scan is
+  kept in the tree, undriven, and now requires a caller to supply its own
+  single-flight admission. `GET /api/monitor/runs` is unchanged.
+
 ## [1.0.0] — 2026-07-31
 
 ### Fixed

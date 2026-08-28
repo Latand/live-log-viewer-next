@@ -11,6 +11,8 @@ import {
   ORCHESTRATOR_PROMPT_VERSION,
   ORCHESTRATOR_SPAWN_CONFIG,
   ORCHESTRATOR_SYSTEM_PROMPT,
+  ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE,
+  ORCHESTRATOR_VIEWER_CLOCK_HEADING,
   orchestratorMandateForDelivery,
 } from "./prompt";
 
@@ -86,8 +88,8 @@ test("bridge reports survive as the second channel, for the operator away from t
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
    this constant as defaultPromptVersion, so an older seat reads as stale without a diff. */
-test("the default mandate is at version 10", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(10);
+test("the default mandate is at version 11", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(11);
 });
 
 /* #1202 — every ask the manager makes should be answerable with a tap, so the
@@ -112,9 +114,58 @@ test("the mandate greets a fresh seat and preserves the exact rotation standby s
   expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("generic continuation nudge");
 });
 
-test("the conveyor skill reference is portable across checkouts", () => {
-  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("If this checkout carries an llv-conveyor skill, it is your playbook; otherwise the conveyor rules above are the playbook.");
+/* #1245 v11 — the Viewer owns the clock. This paragraph is not documentation:
+   production measured a seat whose own session cron kept its turn open, so the
+   native tick logged 20 consecutive "skipped — the seat's turn is progressing"
+   and could never reach it. The two mechanisms deadlock, and the only thing
+   that breaks the deadlock is the seat dropping its own schedule first. So the
+   mandate has to say that, in that order, and say it to a seat that is already
+   holding one. */
+test("the mandate hands the clock to the Viewer and forbids a seat scheduling itself", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("## The Viewer's clock — you never schedule yourself");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("The Viewer wakes you");
+  /* Named tool by tool: "do not self-schedule" alone left CronCreate looking
+     like a different thing from ScheduleWakeup, and CronCreate is what the
+     measured seat actually used. */
+  for (const tool of ["ScheduleWakeup", "CronCreate", "Monitor"]) {
+    expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain(tool);
+  }
+  /* Idle between wakes is the correct state, not a symptom to fix by arming
+     something — the belief that produced the self-schedule in the first place. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Between wakes you are idle on purpose");
+});
+
+test("the mandate's own arrival is the handover, and it says why waiting cannot work", () => {
+  /* The decision this PR had to make and state: an explicit step, because
+     "retire the fallback once you observe a native wake" is unsatisfiable while
+     the fallback is what prevents the wake. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("cancel it in this turn");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("the arrival of this mandate is the handover, not a later observation");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("CronDelete");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Do not wait to \"see the Viewer's tick work first\"");
+  /* The mechanism spelled out, so a seat that reasons about the instruction
+     reaches the same conclusion instead of deciding it is over-cautious. */
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("the Viewer's tick finds you busy and drops its check every time");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("Yours goes first");
+});
+
+test("the conveyor skill reference is portable across checkouts, and subordinate to the mandate", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("If this checkout carries an llv-conveyor skill, it is your playbook, subordinate to this mandate wherever the two disagree; otherwise the conveyor rules above are the playbook.");
   expect(ORCHESTRATOR_SYSTEM_PROMPT).not.toContain("The llv-conveyor skill in this checkout is your playbook");
+});
+
+/* #1245 — a mandate that forbids self-scheduling while the playbook it points
+   at demands one is worse than neither: the seat has to pick, and the rule
+   stops being enforceable. The playbook lives in this repository, so the
+   agreement is checkable here rather than left to whoever edits it next. */
+test("the checked-in playbook agrees with the mandate about the clock", () => {
+  const skill = fs.readFileSync(path.join(import.meta.dir, "../../../.claude/skills/llv-conveyor/SKILL.md"), "utf8");
+  expect(skill).toContain("The Viewer owns the clock");
+  expect(skill).toContain("the seat never schedules itself");
+  /* The exact instruction that contradicted the mandate: self-pacing on a
+     wakeup interval, which is what the measured seat was doing. */
+  expect(skill).not.toContain("self-paces with ScheduleWakeup");
+  expect(skill).not.toContain("ScheduleWakeup checkpoints");
 });
 
 test("mandate delivery keys off directive content and appends it exactly once", () => {
@@ -125,6 +176,44 @@ test("mandate delivery keys off directive content and appends it exactly once", 
   expect(delivered.split(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE)).toHaveLength(2);
   expect(orchestratorMandateForDelivery(delivered)).toBe(delivered);
   expect(orchestratorMandateForDelivery(ORCHESTRATOR_SYSTEM_PROMPT)).toBe(ORCHESTRATOR_SYSTEM_PROMPT);
+});
+
+/* #1245 — the handover has to reach the seat that is actually holding a
+   schedule, and that seat is precisely the one NOT carrying the current
+   default: a rotation hands the successor the incumbent's mandate and version,
+   and a bespoke mandate never had the paragraph at all. A paragraph that lived
+   only inside the versioned default would change the clock's owner without
+   telling either of them. */
+test("the clock handover reaches a bespoke or older mandate, exactly once", () => {
+  const stale = "A v10 seat's own mandate, carried through a rotation.";
+  const delivered = orchestratorMandateForDelivery(stale);
+
+  expect(delivered).toStartWith(stale);
+  expect(delivered).toContain(ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE);
+  expect(delivered).toContain(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE);
+  expect(delivered.split(ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE)).toHaveLength(2);
+  /* Idempotent: re-delivery after a host death appends nothing, so a seat
+     never reads the handover twice in one mandate. */
+  expect(orchestratorMandateForDelivery(delivered)).toBe(delivered);
+  /* A mandate that already carries the paragraph — the current default, or a
+     caller-edited copy of it — is delivered untouched. */
+  expect(orchestratorMandateForDelivery(`${ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE}\n\nmy own rules`))
+    .toContain(ORCHESTRATOR_INITIAL_STATUS_DIRECTIVE);
+  expect(orchestratorMandateForDelivery(`${ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE}\n\nmy own rules`)
+    .split(ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE)).toHaveLength(2);
+
+  /* And a caller who reworded the section under its own heading keeps THEIR
+     wording. Appending the canonical copy beside it would deliver two clock
+     instructions in one mandate, which is the shape this is fixing. */
+  const reworded = `${ORCHESTRATOR_VIEWER_CLOCK_HEADING}\nWake only when the Viewer tells you to.`;
+  expect(orchestratorMandateForDelivery(reworded)).not.toContain(ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE);
+  expect(orchestratorMandateForDelivery(reworded)).toStartWith(reworded);
+});
+
+/* The versioned default carries it inline, so a fresh seat reads it in place
+   rather than as an appendix — and delivery has nothing to append. */
+test("the current default already contains the clock directive", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain(ORCHESTRATOR_VIEWER_CLOCK_DIRECTIVE);
 });
 
 /* #1016 — the seat had the attention tool and never used it: nothing it read said

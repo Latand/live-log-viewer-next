@@ -17,6 +17,7 @@ import {
   orchestratorSeatFor,
   readOrchestratorSeatFile,
   rekeyOrchestratorSeatPaths,
+  revokedOrchestratorSeatConversationsOrUnknown,
 } from "./seats";
 
 let sandbox = "";
@@ -311,6 +312,107 @@ test("an unestablished seat store answers unknown, and an absent one answers non
   beginOrchestratorSeatIntent({ project: "proj-a", mandate: "m", clientRequestId: "req_0000001", mode: "spawn", now: AT });
   completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
   expect(activeOrchestratorSeatsOrUnknown()?.map((seat) => seat.conversationId)).toEqual(["conversation_a"]);
+});
+
+test("a rotated-away conversation reads as revoked, and a re-designated one stops reading so", () => {
+  /* The fact automatic host retirement (#1245) ends a predecessor on. Rotation
+     revokes authority and leaves the host, so this is the only durable thing
+     that says the seat it holds is over. */
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "first", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
+  expect([...revokedOrchestratorSeatConversationsOrUnknown()!]).toEqual([]);
+
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "second", clientRequestId: "req_0000002", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000002", conversationId: "conversation_b", path: null, now: AT });
+  expect([...revokedOrchestratorSeatConversationsOrUnknown()!]).toEqual(["conversation_a"]);
+  /* The successor is not revoked by its predecessor's revocation. */
+  expect(revokedOrchestratorSeatConversationsOrUnknown()!.has("conversation_b")).toBe(false);
+
+  /* The ABA guard: seating the SAME conversation again mints a strictly newer
+     epoch, so the standing revocation at epoch 1 no longer stands at or above
+     every epoch a seat names it at, and the identity is live again. */
+  beginOrchestratorSeatIntent({ project: "proj-b", mandate: "third", clientRequestId: "req_0000003", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-b", clientRequestId: "req_0000003", conversationId: "conversation_a", path: null, now: AT });
+  expect([...revokedOrchestratorSeatConversationsOrUnknown()!]).toEqual([]);
+});
+
+test("a pending seat protects its conversation from reading as revoked", () => {
+  /* An intent that has not settled yet still names the conversation at a newer
+     epoch than the revocation, and retiring its host mid-designation would
+     kill the seat the operator is in the middle of creating. */
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "first", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "second", clientRequestId: "req_0000002", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000002", conversationId: "conversation_b", path: null, now: AT });
+  expect([...revokedOrchestratorSeatConversationsOrUnknown()!]).toEqual(["conversation_a"]);
+
+  beginOrchestratorSeatIntent({
+    project: "proj-c", mandate: "adopt the predecessor", clientRequestId: "req_0000004",
+    mode: "existing", conversationId: "conversation_a", now: AT,
+  });
+  expect([...revokedOrchestratorSeatConversationsOrUnknown()!]).toEqual([]);
+});
+
+test("a pending intent that failed terminally stops masking the revocation", () => {
+  /* The protection above lapses at the error. A recorded error is the intent's
+     TERMINAL state, and the row keeps its pending position until the NEXT
+     designation for that project moves it to history — a call that may never
+     come. Reading the failed row as a seat would leave the predecessor's
+     revocation masked, and its host running, indefinitely: the revoked seat
+     that keeps acting is the whole reason #1245 exists. */
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "first", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "second", clientRequestId: "req_0000002", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000002", conversationId: "conversation_b", path: null, now: AT });
+
+  beginOrchestratorSeatIntent({
+    project: "proj-c", mandate: "adopt the predecessor", clientRequestId: "req_0000004",
+    mode: "existing", conversationId: "conversation_a", now: AT,
+  });
+  expect([...revokedOrchestratorSeatConversationsOrUnknown()!]).toEqual([]);
+
+  failOrchestratorSeatIntent("proj-c", "req_0000004", "the mandate could not be delivered");
+  /* Still in the pending position, and no longer protecting anything. */
+  expect(readOrchestratorSeatFile().pending["proj-c"]?.intent.error).toBe("the mandate could not be delivered");
+  expect([...revokedOrchestratorSeatConversationsOrUnknown()!]).toEqual(["conversation_a"]);
+});
+
+test("revoked standing follows an identity across a migration alias, in both directions", () => {
+  /* The caller joins this set against the registry's CANONICAL conversation id,
+     and the seat file keeps whatever id each row was written with. One
+     migration between the two is enough to decide a host's fate the wrong way
+     round, so the resolver is applied to both sides of the epoch comparison —
+     exactly as the authority resolver applies its own. */
+  const migrated = (conversationId: string) => (conversationId === "conversation_a" ? "conversation_a2" : conversationId);
+
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "first", clientRequestId: "req_0000001", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000001", conversationId: "conversation_a", path: null, now: AT });
+  beginOrchestratorSeatIntent({ project: "proj-a", mandate: "second", clientRequestId: "req_0000002", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-a", clientRequestId: "req_0000002", conversationId: "conversation_b", path: null, now: AT });
+
+  /* Unresolved, the revocation names an id the caller never asks about, and the
+     rotated-away host reads as a live seat forever. */
+  expect([...revokedOrchestratorSeatConversationsOrUnknown()!]).toEqual(["conversation_a"]);
+  expect([...revokedOrchestratorSeatConversationsOrUnknown(migrated)!]).toEqual(["conversation_a2"]);
+
+  /* The other direction: the identity is re-designated under the id it was
+     migrated ONTO. The newer epoch has to lift the older revocation, or the
+     sweep would retire a seat somebody is sitting in. */
+  beginOrchestratorSeatIntent({ project: "proj-c", mandate: "third", clientRequestId: "req_0000005", mode: "spawn", now: AT });
+  completeOrchestratorSeatIntent({ project: "proj-c", clientRequestId: "req_0000005", conversationId: "conversation_a2", path: null, now: AT });
+  expect([...revokedOrchestratorSeatConversationsOrUnknown(migrated)!]).toEqual([]);
+});
+
+test("an unestablished seat store answers unknown for revocations too", () => {
+  /* Same discipline as the active-seat reader beside it, and for the mirror
+     reason: silence read as "revoked by nobody" keeps a rotated-away
+     orchestrator alive forever, and silence read as "revoked" would clear a
+     seated one for the kill. An absent file is a real "nothing revoked". */
+  expect([...revokedOrchestratorSeatConversationsOrUnknown()!]).toEqual([]);
+
+  const file = path.join(sandbox, "orchestrator-seats.json");
+  fs.writeFileSync(file, "{not json", "utf8");
+  expect(revokedOrchestratorSeatConversationsOrUnknown()).toBeNull();
 });
 
 test("identity migration rekeys the active seat path idempotently", () => {
