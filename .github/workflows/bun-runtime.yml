@@ -149,12 +149,14 @@ jobs:
           runtime_module="node_modules/next/dist/compiled/next-server/app-page.runtime.prod.js"
           intact="$RUNNER_TEMP/app-page.runtime.prod.js.intact"
 
+          echo "control 1 of 3: the Viewer check against no build at all"
           no_build="$(mktemp -d)"
           if (cd "$no_build" && bun "$root/scripts/verify-viewer-runtime.ts"); then
             echo "the viewer check passed where there is no build to load" >&2
             exit 1
           fi
 
+          echo "control 2 of 3: the Viewer check against an unloadable $runtime_module"
           # Restored on the way out however this step ends, so a later reader of
           # this workspace is not looking at a module this step broke.
           cp "$runtime_module" "$intact"
@@ -174,6 +176,7 @@ jobs:
           # root it is given is where it looks for `src/runtime-host/main.ts`.
           # A generation that cannot start is a listener nobody holds, which is
           # the shape the incident had.
+          echo "control 3 of 3: the rehearsal against a root with no runtime host"
           no_host="$(mktemp -d)"
           if LLV_RUNTIME_HOST_REHEARSAL_ROOT="$no_host" bun src/runtime-host/hostRehearsalRun.ts > "$RUNNER_TEMP/host-red.json"; then
             echo "the rehearsal passed against a root with no runtime host in it" >&2
@@ -183,3 +186,6 @@ jobs:
             echo "the rehearsal failed without reporting a verdict" >&2
             exit 1
           fi
+          # Its stdout is the report, and a reader of this log should be able to
+          # see the induced failure rather than infer it from a green step.
+          cat "$RUNNER_TEMP/host-red.json"
