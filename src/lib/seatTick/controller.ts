@@ -124,7 +124,12 @@ export async function runSeatTickCheck(
   const deliver = dependencies.deliver ?? deliverConversationMessage;
   const ensureCard = dependencies.ensureCard ?? ensureSeatTickCard;
 
-  const gathered = gatherSeatTickInput(project, readState(project), policy, sources);
+  /* Canonical before the read, because the write below is keyed by the
+     canonical name: an alias read against a canonical write would find an empty
+     row every check, and an empty row has never been woken, so the tick would
+     wake on every check instead of hourly. */
+  const canonical = canonicalOrchestratorProject(project);
+  const gathered = gatherSeatTickInput(canonical, readState(canonical), policy, sources);
   const input = { ...gathered, state: seatTickStateForEpoch(gathered.state, gathered.seat?.seatEpoch ?? null) };
   const decision = seatTickDecision(input);
   const at = new Date(input.now).toISOString();

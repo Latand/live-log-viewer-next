@@ -184,7 +184,15 @@ export function seatTickDecision(input: SeatTickCheckInput): SeatTickDecision {
   if (wakeDue && unstarted.length > 0) {
     candidates.push({ kind: "unstarted-task", detail: `${unstarted.length} assigned board task(s) nothing has started` });
   }
-  if (wakeDue && openWork && candidates.length === 0) {
+  /* The interval is a floor on wakes, never a licence to speak with nothing to
+     say. Reaching here with no candidate means no lane event, no persisted
+     stall and no unstarted task, so an interval wake would carry exactly the
+     open lanes and the signals. A board whose only open work is an inbox card —
+     open work, but work the seat is told not to touch, because the operator's
+     move to assigned is what starts it — leaves that agenda empty, and an
+     hourly wake with an empty agenda is the burnt-quota tick this replaces. */
+  const intervalAgenda = input.pipelines.some(isOpenLane) || input.signals.length > 0;
+  if (wakeDue && openWork && intervalAgenda && candidates.length === 0) {
     candidates.push({ kind: "interval", detail: "the wake interval elapsed while work is open" });
   }
 

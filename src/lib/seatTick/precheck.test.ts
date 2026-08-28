@@ -207,6 +207,29 @@ test("the wake interval elapsing while a lane is open is itself a reason — rou
   expect(decision.verdict.reasons.map((reason) => reason.kind)).toEqual(["interval"]);
 });
 
+test("the hourly interval never wakes an empty agenda — an inbox card nobody moved is nothing to say", () => {
+  /* An inbox card is open work, so the seat is not idle and the proposal slot
+     stays shut. But the seat is told not to act on inbox — the operator's move
+     to assigned is what starts it — so an interval wake here would carry no
+     items at all. A wake with an empty agenda is the burnt-quota tick this
+     mechanism exists to end, so the interval reason keeps its silence. */
+  const decision = seatTickDecision(input({
+    tasks: [card({ status: "inbox" })],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind).toBe("quiet");
+  expect(decision.state.idleSince).toBeNull();
+});
+
+test("a signal alone is agenda enough for the interval to wake", () => {
+  const decision = seatTickDecision(input({
+    tasks: [card({ status: "inbox" })],
+    signals: [{ id: "deploy", label: "the last deployment ended failed" }],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["interval"]);
+});
+
 test("standing reasons wait out the wake interval instead of firing every five minutes", () => {
   const silent = lane({ silentForMs: 45 * MINUTE });
   const seen = stateWith({ stalledSeen: ["pipeline_a1"], lastWakeAt: new Date(NOW - 10 * MINUTE).toISOString() });
