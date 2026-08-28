@@ -295,7 +295,7 @@ async function reconcileOutstandingWake(context: {
     reasons: [],
     items: 0,
     deferred: 0,
-    eventsThrough: next.eventsThrough,
+    eventsThrough: next.eventsThrough ?? 0,
     delivery: { clientMessageId: outstanding.clientMessageId, outcome: settlement.outcome },
     detail: settlement.detail,
   });
@@ -425,7 +425,11 @@ async function check(
 
   const gathered = await gatherSeatTickInput(canonical, settled, policy, sources);
   const at = new Date(gathered.now).toISOString();
-  const input = { ...gathered, state: seatTickStateForEpoch(settled, gathered.seat?.seatEpoch ?? null) };
+  /* The gather's own row, not the one it was handed: a first check seals the
+     event cursor at the journal head while reading it, and re-deriving the row
+     from `settled` here would drop the seal and read the whole journal as
+     unread again at the next check. */
+  const input = { ...gathered, state: seatTickStateForEpoch(gathered.state, gathered.seat?.seatEpoch ?? null) };
   const decision = seatTickDecision(input);
 
   for (const card of decision.cards) {
@@ -494,7 +498,7 @@ async function check(
          keeps its place and is offered again. */
       const commit = seatTickWakeCommitPlan(verdict, {
         fingerprint: input.changeFingerprint,
-        eventsThrough: input.events.at(-1)?.seq ?? state.eventsThrough,
+        eventsThrough: input.events.at(-1)?.seq ?? state.eventsThrough ?? 0,
       });
       if (commit && wakeReached(outcome)) {
         state = seatTickWakeCommit(state, commit, input.now);
@@ -539,7 +543,7 @@ async function check(
     reasons: verdict.kind === "wake" ? verdict.reasons.map((reason) => reason.kind) : [],
     items: verdict.kind === "wake" ? verdict.items.length : 0,
     deferred: verdict.kind === "wake" ? verdict.deferred : 0,
-    eventsThrough: state.eventsThrough,
+    eventsThrough: state.eventsThrough ?? 0,
     delivery,
     detail: verdictDetail(verdict),
   };

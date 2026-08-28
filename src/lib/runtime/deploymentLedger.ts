@@ -91,6 +91,71 @@ export function ledgerDeployments(
 }
 
 /**
+ * Recency, expressed to the store rather than guessed at in memory.
+ *
+ * A deployment's start instant lives in the JSON value, not in a column, so the
+ * ordering has to reach into it — which the ledger's own queries already do
+ * (`json_extract` over `state_json` is how the runtime snapshot separates live
+ * sessions from dead ones). `julianday` turns the ISO-8601 text `createdAt`
+ * carries into a number, and answers NULL for anything it cannot read as a
+ * time; SQLite sorts NULL last under DESC, which is where a record that cannot
+ * say when it started belongs. `updatedAt` stands in only for a record with no
+ * readable start at all, and the row's write clock and then the id break a tie
+ * between two deployments admitted in the same instant.
+ *
+ * Ordering on an expression means no index can serve it, so the store sorts the
+ * deployment rows to answer. That is the whole cost, it is bounded by how many
+ * deployments this host has ever run, and it buys an answer that does not
+ * depend on the newest record happening to fall inside a window.
+ */
+const NEWEST_DEPLOYMENT_FIRST = `
+  ORDER BY COALESCE(
+      julianday(json_extract(state_json, '$.createdAt')),
+      julianday(json_extract(state_json, '$.updatedAt'))
+    ) DESC,
+    COALESCE(updated_at, 0) DESC,
+    id DESC
+`;
+
+/**
+ * The most recently STARTED deployment, or null when the ledger has none.
+ *
+ * Separate from {@link ledgerDeployments} on purpose. That function mirrors the
+ * runtime snapshot's ordering — entity id — which is a random UUID per
+ * deployment and therefore says nothing about time; slicing a "tail" from it
+ * and reading the last element answers with an arbitrary deployment. A caller
+ * that reported the last deployment's outcome from it told an orchestrator that
+ * production had rolled back while the four newest deploys had all succeeded
+ * (#1262), which invites a rollback hunt against a healthy production.
+ *
+ * A window over that ordering would be the same defect with a larger constant:
+ * whichever number it picked, a ledger whose newest record fell outside it
+ * would answer with an older deployment again, and nothing about the store
+ * makes such a number safe. So the store is asked for the newest record and
+ * hands back exactly one — {@link NEWEST_DEPLOYMENT_FIRST} is the ordering it
+ * decides on, and `LIMIT 1` is the whole of the read. Only that record has to
+ * be readable: a corrupt row further down the ledger is not this answer.
+ */
+export function latestLedgerDeployment(
+  env: NodeJS.ProcessEnv = process.env,
+): DeploymentLedgerRead<ViewerDeploymentStatus | null> {
+  const db = openLedger(env);
+  if (!db) return unreadable();
+  try {
+    const row = db.query<{ id: string; state_json: string }, [string]>(
+      `SELECT id, state_json FROM entities WHERE kind = ?${NEWEST_DEPLOYMENT_FIRST} LIMIT 1`,
+    ).get("deployment");
+    if (!row) return { state: "ok", value: null };
+    const status = deploymentStatus(row.state_json, row.id);
+    return status ? { state: "ok", value: status } : unreadable();
+  } catch {
+    return unreadable();
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * One deployment by id. A readable miss is represented by `undefined`;
  * malformed state and storage failures remain an explicit unreadable plane.
  */

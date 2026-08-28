@@ -13,7 +13,7 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
 const { gatherSeatTickInput, repoDirForProject, runtimeWakeState, seatTickProjects, withdrawRuntimeWake } = await import("./seatTickSources");
 import type { SeatTickSources } from "./seatTickSources";
-const { DEFAULT_SEAT_TICK_POLICY } = await import("./seatTick");
+const { DEFAULT_SEAT_TICK_POLICY, seatTickDecision } = await import("./seatTick");
 import type { AgentLivenessRecord } from "@/lib/lifecycle/liveness";
 import type { LifecycleEvent, LifecycleJournalFile } from "@/lib/lifecycle/journal";
 import { emptySeatTickState, type SeatTickProjectState } from "./types";
@@ -56,6 +56,25 @@ function lane(over: Record<string, unknown> = {}): Record<string, unknown> {
     srcConversationId: null,
     createdAt: "2026-08-28T09:00:00.000Z",
     closedAt: null,
+    ...over,
+  };
+}
+
+const DAY_MS = 24 * 60 * 60_000;
+
+/** A board card as the store holds one. `updatedAt` is the field the backlog
+    bound reads and the change fingerprint carries, so every case below sets it
+    deliberately. */
+function boardCard(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "task_b2",
+    project: PROJECT,
+    status: "assigned",
+    text: "wire the chip",
+    placement: "unplaced",
+    assignments: [],
+    createdAt: new Date(NOW - 90 * DAY_MS).toISOString(),
+    updatedAt: new Date(NOW - 30 * 60_000).toISOString(),
     ...over,
   };
 }
@@ -110,6 +129,7 @@ function sources(over: {
   seatRows?: AgentLivenessRecord[];
   livenessThrows?: boolean;
   events?: LifecycleEvent[];
+  latestDeployment?: ReturnType<SeatTickSources["latestDeployment"]>;
   livenessCalls?: { project?: string; conversationId?: string; stallAfterMs: number }[];
 }): SeatTickSources {
   return {
@@ -131,7 +151,7 @@ function sources(over: {
       return request.conversationId ? over.seatRows ?? [] : over.laneRows ?? [];
     },
     lifecycleJournal: () => journal(over.events ?? []),
-    deployments: () => ({ state: "unreadable", error: "no ledger" }) as never,
+    latestDeployment: () => over.latestDeployment ?? ({ state: "unreadable", error: "no ledger" }) as never,
     retirementReport: () => null,
     wakeState: async () => "retained",
     withdrawWake: async () => "withdrawn",
@@ -141,6 +161,12 @@ function sources(over: {
 
 function gather(over: Parameters<typeof sources>[0], state: SeatTickProjectState = emptySeatTickState()) {
   return gatherSeatTickInput(PROJECT, state, DEFAULT_SEAT_TICK_POLICY, sources(over));
+}
+
+/** A row whose cursor was established at some earlier check. Distinct from the
+    empty row, whose cursor is null because nothing has established one yet. */
+function withCursor(eventsThrough: number, over: Partial<SeatTickProjectState> = {}): SeatTickProjectState {
+  return { ...emptySeatTickState(), eventsThrough, ...over };
 }
 
 afterAll(() => {
@@ -153,7 +179,7 @@ afterAll(() => {
 
 test("a lane carries the registry's own verdict for the turn its stage is holding", async () => {
   const input = await gather({ laneRows: [livenessRow()] });
-  expect(input.pipelines[0]!.stageActivity).toEqual({ lifecycle: "stalled", reason: "host_alive_transcript_silent" });
+  expect(input.pipelines[0]!.stageActivity).toEqual({ lifecycle: "stalled", reason: "host_alive_transcript_silent", turnState: "busy" });
 });
 
 /* The tick asks `agent_activity` at its own threshold rather than re-deriving
@@ -207,6 +233,54 @@ test("a seat whose turn is moving raises no seat-host signal", async () => {
   expect(input.signals).toEqual([]);
 });
 
+/* #1262: the two readings of "the seat's turn", and which one the signal is
+   entitled to. The registry's record says a turn is open; the transcript says
+   whether one actually is. The silence threshold measures silence alone, so a
+   seat that ended its turn cleanly and sat quiet past forty minutes is reported
+   `stalled` — and the wake told the seat its own turn had stalled while it had
+   simply finished. The verdict travels with the turn it was computed from. */
+test("a seat that finished its turn and went quiet is not a stalled seat", async () => {
+  const settled = await gather({
+    seatTurn: "busy",
+    seatRows: [livenessRow({
+      conversationId: CONVERSATION,
+      lifecycle: "stalled",
+      reason: "host_alive_transcript_silent",
+      turnState: "idle",
+      pipeline: null,
+      silentForMs: 41 * 60_000,
+    })],
+  });
+  expect(settled.signals).toEqual([]);
+  expect(settled.seat!.activity).toEqual({ lifecycle: "stalled", reason: "host_alive_transcript_silent", turnState: "idle" });
+
+  /* The stall that is real — an open turn nothing has advanced for forty
+     minutes — still says so, because that is the seat the wake exists to
+     resume. */
+  const stuck = await gather({
+    seatTurn: "busy",
+    seatRows: [livenessRow({
+      conversationId: CONVERSATION,
+      lifecycle: "stalled",
+      reason: "host_alive_transcript_silent",
+      turnState: "busy",
+      pipeline: null,
+      silentForMs: 41 * 60_000,
+    })],
+  });
+  expect(stuck.signals.map((signal) => signal.id)).toEqual(["seat-host"]);
+});
+
+/* A dead host is a dead host whatever its turn was doing, and a wake resuming
+   it is the reversal this mechanism's ADR records. */
+test("a seat whose host is gone raises the signal even with a settled turn", async () => {
+  const input = await gather({
+    seatTurn: "busy",
+    seatRows: [livenessRow({ conversationId: CONVERSATION, lifecycle: "gone", reason: "host_gone_turn_settled", turnState: "idle", pipeline: null })],
+  });
+  expect(input.signals.map((signal) => signal.id)).toEqual(["seat-host"]);
+});
+
 test("a closed lane is not gathered at all, so it can neither stall nor fill a wake", async () => {
   const input = await gather({ pipelines: [lane({ state: "completed", closedAt: "2026-08-28T11:30:00.000Z" })] });
   expect(input.pipelines).toEqual([]);
@@ -225,22 +299,177 @@ test("the fingerprint moves when a lane or a card moves, and only then", async (
    therefore acknowledge nothing at all. */
 test("events are read past the tick's own cursor, and reading acknowledges nothing", async () => {
   const events = [event(10), event(11, { type: "review_verdict", summary: "the round passed" }), event(12)];
-  const input = await gather({ events }, { ...emptySeatTickState(), eventsThrough: 10 });
+  const input = await gather({ events }, withCursor(10));
   expect(input.events.map((entry) => entry.seq)).toEqual([11, 12]);
   expect(input.terminalPending).toBe(true);
   /* Same cursor, same answer: a second read of the same state re-offers them. */
-  const again = await gather({ events }, { ...emptySeatTickState(), eventsThrough: 10 });
+  const again = await gather({ events }, withCursor(10));
   expect(again.events.map((entry) => entry.seq)).toEqual([11, 12]);
 });
 
+/* ------------------------------------------------------------------------- *
+ * #1262: where the cursor starts.
+ *
+ * Every case below is driven from a journal that already HOLDS history — a
+ * terminal verdict, a merged pull request, four days of lane events. An empty
+ * journal agrees with any cursor at all and would have caught none of this.
+ * ------------------------------------------------------------------------- */
+
+/* The report: a first wake claiming "since the last delivered wake" while
+   naming pull requests merged four days earlier, with ninety-three more items
+   behind them. There had never been a delivered wake; the cursor started at
+   zero and read the whole journal as unread. */
+test("a seat with no cursor yet starts at the present, so its first check carries no history", async () => {
+  const history = [
+    event(9848, { type: "review_verdict", summary: "the round passed" }),
+    event(9850, { type: "stage_completed", summary: "the builder finished" }),
+    event(9853, { type: "stage_completed", summary: "the reviewer finished" }),
+  ];
+  const input = await gather({ events: history });
+  expect(input.events).toEqual([]);
+  expect(input.terminalPending).toBe(false);
+  /* And the seal is written down, so the next check pages from it rather than
+     re-deciding where the present was. */
+  expect(input.state.eventsThrough).toBe(9853);
+});
+
+test("the seal is the journal head, so everything after the tick began is still delivered", async () => {
+  const history = [event(9848, { type: "review_verdict", summary: "the round passed" })];
+  const first = await gather({ events: history });
+  const later = [...history, event(9849, { type: "stage_blocked", summary: "the review round is parked" })];
+  const second = await gather({ events: later }, first.state);
+  expect(second.events.map((entry) => entry.seq)).toEqual([9849]);
+  expect(second.terminalPending).toBe(true);
+});
+
+/* The over-correction the fix must not make. A cursor a previous wake earned is
+   a fact about what the seat was told, and jumping it to the head would drop
+   exactly the events nobody has been told about yet. */
+test("a seat that already has a cursor keeps reading from it, never from the present", async () => {
+  const history = [
+    event(40, { type: "stage_completed", summary: "the builder finished" }),
+    event(41, { type: "review_verdict", summary: "the round passed" }),
+    event(42, { type: "stage_completed", summary: "the reviewer finished" }),
+  ];
+  const input = await gather({ events: history }, withCursor(40, { lastWakeAt: "2026-08-28T11:00:00.000Z" }));
+  expect(input.events.map((entry) => entry.seq)).toEqual([41, 42]);
+  expect(input.state.eventsThrough).toBe(40);
+});
+
+/* ------------------------------------------------------------------------- *
+ * #1262: the wake reason that could never be discharged.
+ *
+ * Driven from the condition that produced it rather than from an empty room:
+ * a journal already holding four days of terminal lane events the seat has
+ * been told about, and a board of assigned cards nobody will ever start. The
+ * reported wake said `9 assigned board task(s) nothing has started` on every
+ * interval for ever, because "assigned and unowned" is permanently true of a
+ * card that is really a status note from two months ago.
+ * ------------------------------------------------------------------------- */
+
+/** Terminal lane events the seat has already been woken for. Every check below
+    reads them and must carry none of them forward: they are history, and the
+    cursor is what says so. */
+const SETTLED_HISTORY = [
+  event(9840, { type: "stage_completed", summary: "the builder finished" }),
+  event(9845, { type: "review_verdict", summary: "the round passed" }),
+  event(9850, { type: "stage_completed", summary: "the reviewer finished" }),
+  event(9853, { type: "review_verdict", summary: "the round passed" }),
+];
+const OVERDUE = { lastWakeAt: new Date(NOW - 61 * 60_000).toISOString() };
+
+/** The reason kinds a verdict carries, and none for a verdict that is not a
+    wake. */
+function reasonsOf(decision: ReturnType<typeof seatTickDecision>): string[] {
+  return decision.verdict.kind === "wake" ? decision.verdict.reasons.map((reason) => reason.kind) : [];
+}
+
+test("under a journal the cursor has already passed, only a card that recently moved wakes the seat", async () => {
+  const board = [
+    boardCard({ id: "task_b2", updatedAt: new Date(NOW - 30 * 60_000).toISOString() }),
+    boardCard({ id: "task_c3", updatedAt: new Date(NOW - 20 * DAY_MS).toISOString() }),
+    boardCard({ id: "task_d4", updatedAt: new Date(NOW - 90 * DAY_MS).toISOString() }),
+  ];
+  const input = await gather({ pipelines: [], tasks: board, events: SETTLED_HISTORY }, withCursor(9853, OVERDUE));
+  /* The journal is full and the check carries none of it, which is the whole
+     point of the fixture: what wakes the seat here can only be the board. */
+  expect(input.events).toEqual([]);
+  expect(input.terminalPending).toBe(false);
+
+  const decision = seatTickDecision(input);
+  expect(reasonsOf(decision)).toEqual(["unstarted-task"]);
+  expect(decision.verdict.kind === "wake" && decision.verdict.reasons[0]!.detail)
+    .toBe("1 assigned board task(s) nothing has started, and 2 older than the backlog bound the wake no longer names");
+  expect(decision.verdict.kind === "wake" && decision.verdict.items.map((item) => item.id)).toEqual(["task_b2"]);
+});
+
+/* The permanently-true reason, gone: a board of nothing but stale assigned
+   cards owes the seat nothing, however much the journal behind it holds. */
+test("a board whose assigned cards are all past the backlog bound wakes nobody", async () => {
+  const board = [
+    boardCard({ id: "task_c3", updatedAt: new Date(NOW - 20 * DAY_MS).toISOString() }),
+    boardCard({ id: "task_d4", updatedAt: new Date(NOW - 90 * DAY_MS).toISOString() }),
+  ];
+  const input = await gather({ pipelines: [], tasks: board, events: SETTLED_HISTORY }, withCursor(9853, OVERDUE));
+  expect(seatTickDecision(input).verdict.kind).toBe("quiet");
+});
+
+/* The guard half of the same defect. `updatedAt` decides whether a card is an
+   unstarted task or backlog, so moving the card IS the discharge — and while
+   that field was missing from the change fingerprint, the guard entry keyed on
+   the fingerprint could not see the movement and went on suppressing the reason
+   past the condition it was guarding. */
+test("moving a stale card moves the fingerprint, so the retry guard cannot outlive the staleness it guarded", async () => {
+  const stale = await gather(
+    { pipelines: [], tasks: [boardCard({ updatedAt: new Date(NOW - 40 * DAY_MS).toISOString() })], events: SETTLED_HISTORY },
+    withCursor(9853, OVERDUE),
+  );
+  const moved = await gather(
+    { pipelines: [], tasks: [boardCard({ updatedAt: new Date(NOW - 2 * 60 * 60_000).toISOString() })], events: SETTLED_HISTORY },
+    withCursor(9853, OVERDUE),
+  );
+  expect(moved.changeFingerprint).not.toBe(stale.changeFingerprint);
+
+  /* A guard that has run out of patience on the state the card was in before
+     the operator touched it. */
+  const spent = { wakesWithoutChange: { "unstarted-task": DEFAULT_SEAT_TICK_POLICY.retryGuard } };
+  const released = seatTickDecision({ ...moved, state: { ...moved.state, ...spent, lastWakeFingerprint: stale.changeFingerprint } });
+  expect(reasonsOf(released)).toEqual(["unstarted-task"]);
+  expect(released.cards).toEqual([]);
+
+  /* And it is the movement that released it, not the guard having lapsed: the
+     same guard against the state this check actually read still holds. */
+  const held = seatTickDecision({ ...moved, state: { ...moved.state, ...spent, lastWakeFingerprint: moved.changeFingerprint } });
+  expect(reasonsOf(held)).toEqual([]);
+  expect(held.cards.map((card) => card.kind)).toEqual(["retry-guard"]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * #1262: which deployment the signal is about.
+ * ------------------------------------------------------------------------- */
+
+function deployment(over: { phase: string; terminal?: boolean }): ReturnType<SeatTickSources["latestDeployment"]> {
+  return { state: "ok", value: { phase: over.phase, terminal: over.terminal ?? true } } as never;
+}
+
+test("the deployment signal reports the latest deployment, and stays silent when it succeeded", async () => {
+  const healthy = await gather({ latestDeployment: deployment({ phase: "succeeded" }) });
+  expect(healthy.signals).toEqual([]);
+  const regressed = await gather({ latestDeployment: deployment({ phase: "rolled-back" }) });
+  expect(regressed.signals).toEqual([{ id: "deploy", label: "the last deployment ended rolled-back" }]);
+  /* A deployment still running is not an outcome to report at all. */
+  const running = await gather({ latestDeployment: deployment({ phase: "promoting", terminal: false }) });
+  expect(running.signals).toEqual([]);
+});
+
 test("only terminal high-signal events count as pending; routine progress does not", async () => {
-  const input = await gather({ events: [event(10), event(11)] });
+  const input = await gather({ events: [event(10), event(11)] }, withCursor(0));
   expect(input.events).toHaveLength(2);
   expect(input.terminalPending).toBe(false);
 });
 
 test("another project's events are not this project's", async () => {
-  const input = await gather({ events: [event(10, { project: "other", type: "review_verdict" })] });
+  const input = await gather({ events: [event(10, { project: "other", type: "review_verdict" })] }, withCursor(0));
   expect(input.events).toEqual([]);
   expect(input.terminalPending).toBe(false);
 });

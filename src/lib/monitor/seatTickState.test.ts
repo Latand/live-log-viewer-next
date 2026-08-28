@@ -169,6 +169,50 @@ test("losing the seat entirely resets to an unseated row", () => {
   expect(seatTickStateForEpoch(row, null).seatEpoch).toBeNull();
 });
 
+/* ------------------------------------------------------------------------- *
+ * #1262: what a cursor of zero meant, and what it means now.
+ * ------------------------------------------------------------------------- */
+
+/* The row shape this replaces could not say "no cursor yet". It wrote zero,
+   and a zero cursor reads the lifecycle journal from the beginning — which is
+   how a first wake arrived carrying four-day-old merges. A version 1 row that
+   was never woken is that unestablished cursor, so it reads as one. */
+test("a version 1 row that was never woken has no cursor rather than a cursor at zero", () => {
+  const file = path.join(SANDBOX, "legacy-unwoken.json");
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    projects: { viewer: { ...emptySeatTickState(), seatEpoch: 4, eventsThrough: 0, lastWakeAt: null } },
+  }));
+  expect(readSeatTickState("viewer", file).eventsThrough).toBeNull();
+});
+
+/* And the over-correction that must not happen: a row whose wake DID land read
+   the journal past zero and found nothing for its project. That zero is a fact
+   about what the seat was told, so moving it to the head would skip events
+   nobody has been told about. */
+test("a version 1 row with a delivered wake keeps the cursor it earned", () => {
+  const file = path.join(SANDBOX, "legacy-woken.json");
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    projects: {
+      viewer: { ...emptySeatTickState(), seatEpoch: 4, eventsThrough: 0, lastWakeAt: "2026-08-28T11:00:00.000Z" },
+      other: { ...emptySeatTickState(), seatEpoch: 5, eventsThrough: 9853, lastWakeAt: null },
+    },
+  }));
+  const projects = readSeatTickStateFile(file);
+  expect(projects.viewer!.eventsThrough).toBe(0);
+  expect(projects.other!.eventsThrough).toBe(9853);
+});
+
+/* Once the row is the current shape, a zero is a zero: the migration is a
+   reading of the old shape, never a rule that keeps re-firing. */
+test("a sealed cursor of zero written by this version stays a cursor", () => {
+  const file = path.join(SANDBOX, "sealed-zero.json");
+  writeSeatTickState("viewer", { ...emptySeatTickState(), eventsThrough: 0 }, file);
+  expect(readSeatTickState("viewer", file).eventsThrough).toBe(0);
+  expect(JSON.parse(fs.readFileSync(file, "utf8")).version).toBe(2);
+});
+
 test("the state file lives under the viewer state dir with no configuration", () => {
   expect(seatTickStatePath()).toBe(path.join(SANDBOX, "state", "seat-tick.json"));
 });

@@ -24,7 +24,16 @@ import {
  * stamps rather than from a process's memory.
  */
 
-const SEAT_TICK_STATE_VERSION = 1;
+/**
+ * Version 2 changes one field's meaning: `eventsThrough` may be null, and null
+ * means "the tick has never established where the journal stood", which version
+ * 1 could not say. It wrote a literal zero for that, and a zero cursor reads the
+ * journal from the beginning — the replay in #1262. A version 1 row that has
+ * never had a delivered wake is therefore migrated to null on read, so its next
+ * check seals it at the head; a row that HAS been woken keeps its cursor exactly
+ * where it is, because that number is a fact about what the seat was told.
+ */
+const SEAT_TICK_STATE_VERSION = 2;
 
 interface SeatTickStateFile {
   version: number;
@@ -56,6 +65,24 @@ function normalizeWakeCommit(value: unknown): SeatTickWakeCommit | null {
   };
 }
 
+/**
+ * The cursor a row starts the next check from.
+ *
+ * Absent is null — nothing has been established yet. The one migration is the
+ * version 1 zero on a row with no delivered wake: that row was never told
+ * anything, so its zero is the uninitialised cursor written the only way the old
+ * shape could write it, and reading it as a real cursor is what replayed the
+ * whole journal. A zero beside a wake stamp is left alone: the seat WAS woken,
+ * the wake read no events past zero, and moving that cursor forward would skip
+ * events nobody has been told about.
+ */
+function eventsThrough(raw: Record<string, unknown>, legacy: boolean): number | null {
+  const value = raw.eventsThrough;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return null;
+  if (legacy && value === 0 && !isoOrNull(raw.lastWakeAt)) return null;
+  return value;
+}
+
 function normalizeOutstandingWake(value: unknown): SeatTickOutstandingWake | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
@@ -73,7 +100,7 @@ function normalizeOutstandingWake(value: unknown): SeatTickOutstandingWake | nul
   };
 }
 
-function normalizeRow(value: unknown): SeatTickProjectState {
+function normalizeRow(value: unknown, legacy: boolean): SeatTickProjectState {
   const empty = emptySeatTickState();
   if (!value || typeof value !== "object" || Array.isArray(value)) return empty;
   const raw = value as Record<string, unknown>;
@@ -97,7 +124,7 @@ function normalizeRow(value: unknown): SeatTickProjectState {
       .filter((entry): entry is string => typeof entry === "string" && entry.length > 0 && entry.length <= 100)
       .slice(0, 200),
     lastWakeFingerprint: typeof raw.lastWakeFingerprint === "string" ? raw.lastWakeFingerprint.slice(0, 200) : null,
-    eventsThrough: typeof raw.eventsThrough === "number" && Number.isInteger(raw.eventsThrough) && raw.eventsThrough >= 0 ? raw.eventsThrough : 0,
+    eventsThrough: eventsThrough(raw, legacy),
     outstandingWake: normalizeOutstandingWake(raw.outstandingWake),
   };
 }
@@ -106,10 +133,12 @@ function readFile(filePath: string): SeatTickStateFile {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { version: SEAT_TICK_STATE_VERSION, projects: {} };
-    const projects = ((parsed as SeatTickStateFile).projects ?? {}) as Record<string, unknown>;
+    const file = parsed as Partial<SeatTickStateFile>;
+    const legacy = !(typeof file.version === "number" && file.version >= SEAT_TICK_STATE_VERSION);
+    const projects = (file.projects ?? {}) as Record<string, unknown>;
     return {
       version: SEAT_TICK_STATE_VERSION,
-      projects: Object.fromEntries(Object.entries(projects).map(([project, row]) => [project, normalizeRow(row)])),
+      projects: Object.fromEntries(Object.entries(projects).map(([project, row]) => [project, normalizeRow(row, legacy)])),
     };
   } catch {
     return { version: SEAT_TICK_STATE_VERSION, projects: {} };

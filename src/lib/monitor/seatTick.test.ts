@@ -47,7 +47,14 @@ function lane(over: Partial<SeatTickPipelineInput> = {}): SeatTickPipelineInput 
 }
 
 function card(over: Partial<SeatTickTaskInput> = {}): SeatTickTaskInput {
-  return { id: "task_b2", title: "wire the chip", status: "assigned", owned: false, ...over };
+  return {
+    id: "task_b2",
+    title: "wire the chip",
+    status: "assigned",
+    owned: false,
+    updatedAt: new Date(NOW - MINUTE).toISOString(),
+    ...over,
+  };
 }
 
 function event(over: Partial<SeatTickEventInput> = {}): SeatTickEventInput {
@@ -131,9 +138,30 @@ test("a busy seat the registry reports stalled is no longer skipped, so the skip
 test("a busy seat the liveness plane cannot answer for is not skipped either — absence is not progress", () => {
   expect(seatTurnProgressing(seat({ turn: "busy", activity: null }))).toBe(false);
   expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "gone", reason: "host_gone_turn_settled" } }))).toBe(false);
-  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "provider_throttled" } }))).toBe(true);
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "provider_throttled", turnState: "busy" } }))).toBe(true);
   expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "starting", reason: "launch_unproven" } }))).toBe(true);
   expect(seatTurnProgressing(seat({ turn: "idle", activity: { lifecycle: "running", reason: "host_alive_turn_active" } }))).toBe(false);
+});
+
+/* #1262: the registry's turn record and the transcript's own turn are two
+   different facts, and the tick read them as one. A seat that finished its turn
+   leaves the registry record open for a while; the liveness verdict for it is
+   `waiting` (`host_alive_turn_idle`), which the tick counted as progress — so
+   an available seat was skipped at every check for as long as the stale record
+   stood, and could not be woken at all. Only the turn a retry deadline is
+   holding open is progress. */
+test("a seat whose turn the transcript says settled is available, not progressing", () => {
+  const settled = seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "host_alive_turn_idle", turnState: "idle" } });
+  expect(seatTurnProgressing(settled)).toBe(false);
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "provider_throttled", turnState: "busy" } }))).toBe(true);
+  /* An unstated turn is not a turn anybody proved open. */
+  expect(seatTurnProgressing(seat({ turn: "busy", activity: { lifecycle: "waiting", reason: "host_alive_turn_idle" } }))).toBe(false);
+  const decision = seatTickDecision(input({
+    seat: settled,
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind).toBe("wake");
 });
 
 test("a healthy moving board is quiet and produces nothing operator-visible", () => {
@@ -245,6 +273,31 @@ test("an assigned task nothing has started wakes the seat once the wake interval
     state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
   }));
   expect(reasonsOf(decision.verdict)).toEqual(["unstarted-task"]);
+});
+
+/* #1262: the bound itself, at the layer that applies it. What the bound is FOR
+   — a board of stale assigned cards that could never discharge the reason, and
+   a movement that brings one back — is a claim about a real board under a real
+   journal, so its regression is driven from those fixtures in
+   `seatTickSources.test.ts` rather than asserted over an empty room here. */
+test("a card with no readable movement instant is backlog, because staleness cannot be disproved", () => {
+  const overdue = { lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() };
+  expect(seatTickDecision(input({ tasks: [card({ updatedAt: null })], state: stateWith(overdue) })).verdict.kind).toBe("quiet");
+  expect(seatTickDecision(input({ tasks: [card({ updatedAt: "not a time" })], state: stateWith(overdue) })).verdict.kind).toBe("quiet");
+});
+
+/* The seat is told why the number it is given is smaller than the board it can
+   see, rather than being left to conclude the tick cannot count. */
+test("the wake names the backlog it held back, and carries only the live cards as items", () => {
+  const tasks = [
+    card({ updatedAt: new Date(NOW - 30 * MINUTE).toISOString() }),
+    card({ id: "task_c3", updatedAt: new Date(NOW - 20 * 24 * 60 * MINUTE).toISOString() }),
+    card({ id: "task_d4", updatedAt: new Date(NOW - 90 * 24 * 60 * MINUTE).toISOString() }),
+  ];
+  const decision = seatTickDecision(input({ tasks, state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }) }));
+  expect(decision.verdict.kind === "wake" && decision.verdict.reasons[0]!.detail)
+    .toBe("1 assigned board task(s) nothing has started, and 2 older than the backlog bound the wake no longer names");
+  expect(decision.verdict.kind === "wake" && decision.verdict.items.map((item) => item.id)).toEqual(["task_b2"]);
 });
 
 test("an owned, a blocked and a done task are all silent — blocked is the recorded stop", () => {
@@ -397,12 +450,14 @@ test("policy defaults are the accepted ones, and each is overridable in the reti
     LLV_SEAT_TICK_PROPOSAL_HOURS: "6",
     LLV_SEAT_TICK_ITEMS: "3",
     LLV_SEAT_TICK_RETRY_GUARD: "1",
+    LLV_SEAT_TICK_BACKLOG_DAYS: "5",
   })).toEqual({
     checkIntervalMs: 2 * MINUTE,
     stallAfterMs: 15 * MINUTE,
     proposalIntervalMs: 6 * 60 * MINUTE,
     itemsPerWake: 3,
     retryGuard: 1,
+    backlogAfterMs: 5 * 24 * 60 * MINUTE,
   });
 });
 

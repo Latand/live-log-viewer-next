@@ -11,7 +11,7 @@ import { loadPipelinesForList } from "@/lib/pipelines/store";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
-import { ledgerDeployments } from "@/lib/runtime/deploymentLedger";
+import { latestLedgerDeployment } from "@/lib/runtime/deploymentLedger";
 import type { StructuredHostRetirementReport } from "@/lib/runtime/structuredHostRetirement";
 import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -155,7 +155,9 @@ export interface SeatTickSources {
       cursor decides what is unread rather than a cursor that advanced at poll
       time. */
   lifecycleJournal: typeof readLifecycleJournal;
-  deployments: typeof ledgerDeployments;
+  /** The most recently started deployment, read in recency order rather than
+      sliced off an ordering that has nothing to do with time. */
+  latestDeployment: typeof latestLedgerDeployment;
   retirementReport: () => StructuredHostRetirementReport | null;
   /** Whether the layer holding a retained wake still has it, and whether the
       seat ever got it. The tick's stamps move on this answer and nothing else. */
@@ -183,7 +185,7 @@ export function defaultSeatTickSources(): SeatTickSources {
       return snapshot.conversations;
     },
     lifecycleJournal: readLifecycleJournal,
-    deployments: ledgerDeployments,
+    latestDeployment: latestLedgerDeployment,
     retirementReport: () => {
       try {
         return JSON.parse(fs.readFileSync(statePath("host-retirement-report.json"), "utf8")) as StructuredHostRetirementReport;
@@ -263,7 +265,11 @@ function taskSummary(task: BoardTask & { pipelineIds: string[] }): TaskSummary {
 }
 
 function activityOf(record: AgentLivenessRecord | undefined): SeatTickActivity | null {
-  return record ? { lifecycle: record.lifecycle, reason: record.reason } : null;
+  /* The row's own turn state travels with its verdict. Reading the verdict
+     without it is how a settled turn that had simply gone quiet was reported as
+     the seat's stall (#1262): the threshold measures silence, not an open
+     turn. */
+  return record ? { lifecycle: record.lifecycle, reason: record.reason, turnState: record.turnState } : null;
 }
 
 /**
@@ -320,8 +326,14 @@ async function seatInput(project: string, policy: SeatTickPolicy, sources: SeatT
 
 function signals(project: string, seat: SeatTickSeatInput | null, sources: SeatTickSources): SeatTickSignalInput[] {
   const found: SeatTickSignalInput[] = [];
-  const deployments = sources.deployments(1);
-  const last = deployments.state === "ok" ? deployments.value[deployments.value.length - 1] : null;
+  /* The LATEST deployment, asked for as such. The ledger's default ordering is
+     by entity id — a random UUID — so taking an element out of a one-row "tail"
+     reported a rolled-back deploy from earlier in the day while the four newest
+     had all succeeded (#1262). A signal that says production rolled back is one
+     an orchestrator acts on, so it has to be about the deployment that actually
+     happened last. */
+  const latest = sources.latestDeployment();
+  const last = latest.state === "ok" ? latest.value : null;
   if (last && last.terminal && last.phase !== "succeeded") {
     found.push({ id: "deploy", label: `the last deployment ended ${last.phase}` });
   }
@@ -335,10 +347,27 @@ function signals(project: string, seat: SeatTickSeatInput | null, sources: SeatT
      reversal recorded in this PR's ADR — and, because this is a signal, it is
      agenda enough for the hourly interval to carry it. */
   const seatActivity = seat?.activity;
-  if (seat && seat.turn === "busy" && seatActivity && (seatActivity.lifecycle === "stalled" || seatActivity.lifecycle === "gone")) {
+  if (seat && seat.turn === "busy" && seatActivity && seatStalled(seatActivity)) {
     found.push({ id: "seat-host", label: `the seat's own turn is ${seatActivity.lifecycle} in ${project} (${seatActivity.reason})` });
   }
   return found;
+}
+
+/**
+ * Whether the seat's own turn has stopped, in the sense the signal claims.
+ *
+ * `gone` is the host: it is dead whatever the turn was doing, and resuming it
+ * is what the wake is for. `stalled` is the one that needed narrowing. It has
+ * two roots — a dead host or an expired launch under an OPEN turn, and a
+ * transcript silent past the threshold — and the second fires on silence alone,
+ * so a seat that finished its turn cleanly and sat quiet for forty minutes was
+ * reported stalled to itself (#1262). The transcript's own turn state, which is
+ * what the verdict was computed from, is what tells the two apart; the
+ * registry's turn record is a different fact and is stale in exactly this case.
+ */
+function seatStalled(activity: SeatTickActivity): boolean {
+  if (activity.lifecycle === "gone") return true;
+  return activity.lifecycle === "stalled" && activity.turnState === "busy";
 }
 
 /** The repository a project's `gh` reads run in: the newest pipeline that named
@@ -351,12 +380,22 @@ export function repoDirForProject(project: string, sources: SeatTickSources): st
   return named[0]?.repoDir ?? null;
 }
 
-/** A digest of everything a wake could change. Two equal fingerprints across
-    two wakes is exactly what "that wake changed nothing" means. */
+/**
+ * A digest of everything a wake could change. Two equal fingerprints across two
+ * wakes is exactly what "that wake changed nothing" means.
+ *
+ * Every field a wake reason is decided from has to be in here, because this
+ * digest is also what identifies a retry-guard entry: a guard keyed on less
+ * than the condition it guards outlives that condition. A card's `updatedAt` is
+ * the case #1262 produced — it decides whether the card is an unstarted task or
+ * backlog, so moving a stale card is precisely the act that should bring the
+ * reason back, and while it was missing from here the guard held the reason
+ * suppressed with the card's movement invisible to it.
+ */
 function changeFingerprint(pipelines: readonly SeatTickPipelineInput[], tasks: readonly SeatTickTaskInput[]): string {
   const parts = [
     ...pipelines.map((pipeline) => `p:${pipeline.id}:${pipeline.state}:${pipeline.updatedAt ?? ""}`),
-    ...tasks.map((task) => `t:${task.id}:${task.status}:${task.owned}`),
+    ...tasks.map((task) => `t:${task.id}:${task.status}:${task.owned}:${task.updatedAt ?? ""}`),
   ].sort();
   return crypto.createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32);
 }
@@ -388,8 +427,24 @@ export function seatTickProjects(sources: SeatTickSources): string[] {
  * does, it asks about a pending terminal event over the whole range rather than
  * one page of it.
  */
-function eventsSince(project: string, cursor: number, sources: SeatTickSources): { events: SeatTickEventInput[]; terminalPending: boolean } {
+function eventsSince(
+  project: string,
+  cursor: number | null,
+  sources: SeatTickSources,
+): { events: SeatTickEventInput[]; terminalPending: boolean; cursor: number } {
   const journal = sources.lifecycleJournal();
+  /* `lastSeq` is the head the journal maintains; the newest event's seq is the
+     same number written a second way, and taking the larger keeps a head that
+     somehow lagged its own events from replaying them as new. */
+  const head = Math.max(journal.lastSeq, journal.events.at(-1)?.seq ?? 0);
+  /* The first check for a project SEALS the cursor at the head instead of
+     reading from zero. A first run has no backlog to catch up on: everything
+     already in the journal happened before the tick existed for this seat, and
+     handing it over as the seat's instruction for the turn is what #1262
+     records — four-day-old merges listed as work, with ninety-three more items
+     held back. The seal is written once and only once; from then on the cursor
+     is the seat's, and it moves only when a wake lands. */
+  if (cursor === null) return { events: [], terminalPending: false, cursor: head };
   const query = { project, afterSeq: cursor };
   const page = pageFromEvents(journal, { ...query, limit: EVENT_PAGE });
   return {
@@ -401,6 +456,7 @@ function eventsSince(project: string, cursor: number, sources: SeatTickSources):
       pipelineId: event.pipelineId,
     })),
     terminalPending: someMatchingEvent(journal, query, (event) => isTerminalHighSignalEvent(event.type)),
+    cursor,
   };
 }
 
@@ -436,9 +492,10 @@ export async function gatherSeatTickInput(
     title: taskEvidence[index]!.title,
     status: task.status,
     owned: taskEvidence[index]!.owner !== null,
+    updatedAt: task.updatedAt ?? null,
   }));
 
-  const { events, terminalPending } = eventsSince(canonical, state.eventsThrough, sources);
+  const { events, terminalPending, cursor } = eventsSince(canonical, state.eventsThrough, sources);
 
   return {
     project: canonical,
@@ -450,7 +507,10 @@ export async function gatherSeatTickInput(
     terminalPending,
     signals: signals(canonical, seat, sources),
     changeFingerprint: changeFingerprint(pipelines, tasks),
-    state,
+    /* The sealed cursor travels on the state the decision carries forward, so a
+       check of any verdict — a skip included, which remembers nothing else —
+       persists where the journal stood when the tick first saw this project. */
+    state: { ...state, eventsThrough: cursor },
     policy,
   };
 }

@@ -73,6 +73,7 @@ export const DEFAULT_SEAT_TICK_POLICY: SeatTickPolicy = {
   proposalIntervalMs: 24 * 60 * MINUTE_MS,
   itemsPerWake: 5,
   retryGuard: 2,
+  backlogAfterMs: 3 * 24 * 60 * MINUTE_MS,
 };
 
 function positive(raw: string | undefined, fallback: number, scale: number): number {
@@ -101,6 +102,7 @@ export function seatTickPolicy(env: Readonly<Record<string, string | undefined>>
     proposalIntervalMs: positive(env.LLV_SEAT_TICK_PROPOSAL_HOURS, DEFAULT_SEAT_TICK_POLICY.proposalIntervalMs, 60 * MINUTE_MS),
     itemsPerWake: Math.floor(positive(env.LLV_SEAT_TICK_ITEMS, DEFAULT_SEAT_TICK_POLICY.itemsPerWake, 1)),
     retryGuard: Math.floor(positive(env.LLV_SEAT_TICK_RETRY_GUARD, DEFAULT_SEAT_TICK_POLICY.retryGuard, 1)),
+    backlogAfterMs: positive(env.LLV_SEAT_TICK_BACKLOG_DAYS, DEFAULT_SEAT_TICK_POLICY.backlogAfterMs, 24 * 60 * MINUTE_MS),
   };
 }
 
@@ -108,8 +110,29 @@ function isOpenLane(pipeline: SeatTickPipelineInput): boolean {
   return pipeline.state !== "terminal";
 }
 
-function isUnstarted(task: SeatTickTaskInput): boolean {
-  return task.status === "assigned" && !task.owned;
+/**
+ * An assigned card nobody started — and only while that is a fact about NOW.
+ *
+ * "Assigned with no pipeline" accumulates. A board carrying historical status
+ * notes parked in `assigned` months ago makes the condition permanently true,
+ * so the reason fires on every interval for ever, carrying the same items, and
+ * the first thing the tick teaches a seat is to ignore one of its own wake
+ * reasons (#1262). The bound is the card's own movement: past
+ * {@link SeatTickPolicy.backlogAfterMs} untouched it is backlog, not work
+ * waiting to start.
+ *
+ * That is also what discharges it, without a second mechanism for silencing a
+ * signal: the seat already moves, edits, blocks or closes a card, and any of
+ * those makes it recent again — a card the seat judged not to be work drops
+ * out on its own once nobody touches it.
+ */
+function isUnstarted(task: SeatTickTaskInput, now: number, backlogAfterMs: number): boolean {
+  if (task.status !== "assigned" || task.owned) return false;
+  const movedAt = task.updatedAt ? Date.parse(task.updatedAt) : Number.NaN;
+  /* A card with no readable movement instant cannot be shown to be recent, and
+     the whole failure being fixed here is a reason that can never stop being
+     true, so the unprovable case is backlog. */
+  return Number.isFinite(movedAt) && now - movedAt < backlogAfterMs;
 }
 
 /** Work the seat could still carry: an open lane, or a board card that is
@@ -128,14 +151,23 @@ function hasOpenWork(input: SeatTickCheckInput): boolean {
  * on the registry forever, so a plain busy check skipped that seat at every
  * five-minute check for as long as the record stood — a permanent silence
  * produced by exactly the condition the wake exists to clear. Here the registry
- * decides: `running`, `waiting` (idle or a provider retry deadline) and
- * `starting` (inside the launch grace, which expires into `stalled` or `gone`
- * on its own) are progress; everything else, absent verdicts included, is not.
+ * decides: `running`, `waiting` under a turn the transcript still shows open (a
+ * provider retry deadline) and `starting` (inside the launch grace, which
+ * expires into `stalled` or `gone` on its own) are progress; everything else,
+ * absent verdicts included, is not.
  */
 export function seatTurnProgressing(seat: SeatTickSeatInput): boolean {
   if (seat.turn !== "busy") return false;
-  const lifecycle = seat.activity?.lifecycle;
-  return lifecycle === "running" || lifecycle === "waiting" || lifecycle === "starting";
+  const activity = seat.activity;
+  if (!activity) return false;
+  /* `waiting` covers two different seats. One is a turn held open by a provider
+     retry deadline, which is progress. The other is `host_alive_turn_idle`: the
+     transcript says the turn SETTLED and only the registry's record still calls
+     it open — a seat sitting available, which the tick then skipped at every
+     check for as long as the stale record stood (#1262). The evidence the
+     verdict came from decides between them. */
+  if (activity.lifecycle === "waiting") return activity.turnState === "busy";
+  return activity.lifecycle === "running" || activity.lifecycle === "starting";
 }
 
 /**
@@ -215,7 +247,8 @@ export function seatTickDecision(input: SeatTickCheckInput): SeatTickDecision {
   /* A stall is only reported once it survived a second check, so a lane between
      two attempts is never called stuck. */
   const persistedStalls = stalled.filter((entry) => input.state.stalledSeen.includes(entry.pipeline.id));
-  const unstarted = input.tasks.filter(isUnstarted);
+  const unstarted = input.tasks.filter((task) => isUnstarted(task, input.now, input.policy.backlogAfterMs));
+  const backlog = input.tasks.filter((task) => task.status === "assigned" && !task.owned).length - unstarted.length;
   const openWork = hasOpenWork(input);
   /* The one gate every wake passes. It reads `lastWakeAt`, which the project
      keeps across a rotation, so an incoming seat inherits the bound rather than
@@ -246,7 +279,11 @@ export function seatTickDecision(input: SeatTickCheckInput): SeatTickDecision {
       candidates.push({ kind: "stalled", detail: persistedStalls[0]!.reason });
     }
     if (unstarted.length > 0) {
-      candidates.push({ kind: "unstarted-task", detail: `${unstarted.length} assigned board task(s) nothing has started` });
+      /* The excluded count travels with the reason so a seat reading "2" beside
+         a board showing twenty-nine assigned cards can see why, rather than
+         concluding the tick cannot count. */
+      const held = backlog > 0 ? `, and ${backlog} older than the backlog bound the wake no longer names` : "";
+      candidates.push({ kind: "unstarted-task", detail: `${unstarted.length} assigned board task(s) nothing has started${held}` });
     }
     /* The interval is a floor on wakes, never a licence to speak with nothing
        to say. Reaching here with no candidate means no lane event, no persisted
@@ -386,7 +423,7 @@ export function seatTickWakeCommit(
   now: number,
 ): SeatTickProjectState {
   const at = new Date(now).toISOString();
-  const eventsThrough = Math.max(state.eventsThrough, commit.eventsThrough);
+  const eventsThrough = Math.max(state.eventsThrough ?? 0, commit.eventsThrough);
   if (commit.proposal) {
     return {
       ...state,
