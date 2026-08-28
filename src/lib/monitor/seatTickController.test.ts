@@ -14,8 +14,14 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 const { reconcileSeatTick, runSeatTickCheck, startSeatTick, stopSeatTick, wakeReached } = await import("./seatTickController");
 const { DEFAULT_SEAT_TICK_POLICY } = await import("./seatTick");
 import type { SeatTickControllerDependencies } from "./seatTickController";
-import type { SeatTickPendingDelivery } from "./seatTickSources";
-import { emptySeatTickState, type SeatTickCard, type SeatTickProjectState, type SeatTickRunRecord } from "./types";
+import type { SeatTickWakeState, SeatTickWithdrawal } from "./seatTickSources";
+import {
+  emptySeatTickState,
+  type SeatTickCard,
+  type SeatTickOutstandingWake,
+  type SeatTickProjectState,
+  type SeatTickRunRecord,
+} from "./types";
 import type { AgentLivenessRecord } from "@/lib/lifecycle/liveness";
 import type { LifecycleEvent } from "@/lib/lifecycle/journal";
 import type { ConversationMessage, DeliveryOutcome } from "@/lib/delivery";
@@ -41,7 +47,7 @@ interface Harness {
   journal: SeatTickRunRecord[];
   cards: { project: string; card: SeatTickCard }[];
   written: SeatTickProjectState[];
-  revoked: { id: string; reason: string }[];
+  withdrawn: { wake: SeatTickOutstandingWake; reason: string }[];
   seat: { conversationId: string; seatEpoch: number; path: string | null } | null;
 }
 
@@ -57,17 +63,20 @@ function harness(options: {
   deliveryThrows?: boolean;
   /** Swaps the seat after the decision, the way a rotation lands mid-check. */
   rotateBeforeSend?: { conversationId: string; seatEpoch: number; path: string | null } | null;
-  /** What the runtime is still holding for the seat's conversation. */
-  pending?: SeatTickPendingDelivery[];
-  pendingThrows?: boolean;
+  /** What the layer holding a retained wake says has become of it. */
+  wakeState?: SeatTickWakeState;
+  /** What taking that wake back out of the holder's queue achieves. */
+  withdrawal?: SeatTickWithdrawal;
+  /** The holder cannot be reached at all, for either question. */
+  holderThrows?: boolean;
 }): Harness {
   const sent: ConversationMessage[] = [];
   const journal: SeatTickRunRecord[] = [];
   const cards: { project: string; card: SeatTickCard }[] = [];
   const written: SeatTickProjectState[] = [];
-  const revoked: { id: string; reason: string }[] = [];
-  const result: Harness = { deps: {}, sent, journal, cards, written, revoked, seat: options.seat === undefined ? { conversationId: CONVERSATION, seatEpoch: 7, path: null } : options.seat };
-  let gathered = false;
+  const withdrawn: { wake: SeatTickOutstandingWake; reason: string }[] = [];
+  const result: Harness = { deps: {}, sent, journal, cards, written, withdrawn, seat: options.seat === undefined ? { conversationId: CONVERSATION, seatEpoch: 7, path: null } : options.seat };
+  let reads = 0;
 
   const pipelines = (options.pipelines ?? []).map((entry) => ({
     id: entry.id,
@@ -117,10 +126,11 @@ function harness(options: {
     proposalIssues: async () => [{ number: 1245, title: "the native seat tick", labels: ["design"], updatedAt: null }],
     sources: {
       seatFor: () => {
-        /* The first read is the gather; every read after it is the re-check the
-           send takes, which is where a rotation must be caught. */
-        const seat = gathered && options.rotateBeforeSend !== undefined ? options.rotateBeforeSend : result.seat;
-        gathered = true;
+        reads += 1;
+        /* Reads one and two are the opening reconcile and the gather; every
+           read after them is the re-check the send takes, which is where a
+           rotation must be caught. */
+        const seat = reads > 2 && options.rotateBeforeSend !== undefined ? options.rotateBeforeSend : result.seat;
         return { active: seat as never, pending: null, history: [] };
       },
       activeSeats: () => [PROJECT],
@@ -136,11 +146,15 @@ function harness(options: {
       lifecycleJournal: () => ({ version: 1, lastSeq: options.events?.at(-1)?.seq ?? 0, events: options.events ?? [], retired: [] }),
       deployments: () => ({ state: "unreadable", error: "no ledger" }) as never,
       retirementReport: () => null,
-      pendingDeliveries: () => {
-        if (options.pendingThrows) throw new Error("the registry cannot be read");
-        return options.pending ?? [];
+      wakeState: async () => {
+        if (options.holderThrows) throw new Error("the layer holding the wake cannot be read");
+        return options.wakeState ?? "retained";
       },
-      revokeDelivery: (id, reason) => { revoked.push({ id, reason }); },
+      withdrawWake: async (wake, reason) => {
+        if (options.holderThrows) throw new Error("the layer holding the wake cannot be read");
+        withdrawn.push({ wake, reason });
+        return options.withdrawal ?? "withdrawn";
+      },
       now: () => NOW,
     },
   };
@@ -148,6 +162,20 @@ function harness(options: {
 }
 
 const OVERDUE = { lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() };
+const RECENT = { lastWakeAt: new Date(NOW - 5 * MINUTE).toISOString() };
+
+/** A wake the layer accepted and kept, as the row remembers it: which layer is
+    holding it, and what its landing would stamp. */
+function outstandingWake(over: Partial<SeatTickOutstandingWake> = {}): SeatTickOutstandingWake {
+  return {
+    clientMessageId: "seat-tick:viewer:7:first:interval:fp-1",
+    conversationId: CONVERSATION,
+    seatEpoch: 7,
+    operationId: "op-wake-1",
+    commit: { proposal: false, reasons: ["interval"], fingerprint: "fp-1", eventsThrough: 44 },
+    ...over,
+  };
+}
 const OPEN_LANE = [{ id: "pipeline_a1", state: "running", createdAt: "2026-08-28T11:00:00.000Z", movedAt: "2026-08-28T11:58:00.000Z" }];
 
 function terminalEvent(seq: number): LifecycleEvent {
@@ -266,54 +294,134 @@ test("a held wake leaves the wake stamp and the event cursor exactly where they 
 /* The half of the epoch check the re-read before the send cannot do. The layer
    keeps a held or queued payload durably, so the seat can rotate while it
    waits — and it would then arrive at the predecessor, which is the failure
-   this whole mechanism exists to end. */
-test("a wake the layer kept is written down against the epoch it was raised for", async () => {
+   this whole mechanism exists to end. The record names WHICH layer kept it,
+   because a revocation aimed at the wrong one changes nothing. */
+test("a wake the runtime host queued is written down against that operation", async () => {
   const rig = harness({
     pipelines: OPEN_LANE,
-    state: OVERDUE,
-    delivery: { ok: true, target: null, outcome: "held" },
+    events: [terminalEvent(44)],
+    state: { ...OVERDUE, eventsThrough: 12 },
+    delivery: { ok: true, target: null, outcome: "queued", operationId: "op-wake-1", receipt: {} as never, structured: true },
   });
   const record = await runSeatTickCheck(PROJECT, rig.deps);
   expect(rig.written[0]!.outstandingWake).toEqual({
     clientMessageId: record!.delivery!.clientMessageId,
     conversationId: CONVERSATION,
     seatEpoch: 7,
+    operationId: "op-wake-1",
+    commit: { proposal: false, reasons: ["lane-event"], fingerprint: record!.delivery!.clientMessageId.split(":").at(-1)!, eventsThrough: 44 },
   });
 });
 
-test("the next check takes that wake back the moment the epoch under it moves", async () => {
-  const outstanding = { clientMessageId: "seat-tick:viewer:7:first:interval:fp-1", conversationId: CONVERSATION, seatEpoch: 7 };
+/* And the hold that never reached a host: there is no runtime operation, so the
+   Viewer registry's own reservation IS the retention and the record says so by
+   carrying no operation id. */
+test("a wake an account migration held names no operation, because no host has it", async () => {
+  const rig = harness({
+    pipelines: OPEN_LANE,
+    state: OVERDUE,
+    delivery: { ok: true, target: null, outcome: "held" },
+  });
+  await runSeatTickCheck(PROJECT, rig.deps);
+  expect(rig.written[0]!.outstandingWake).toMatchObject({ operationId: null, seatEpoch: 7 });
+});
+
+test("the next check takes that wake back out of the queue holding it, the moment the epoch moves", async () => {
   const rig = harness({
     seat: { conversationId: SUCCESSOR, seatEpoch: 8, path: null },
     pipelines: OPEN_LANE,
     /* The row the predecessor left: its epoch, and its unlanded wake. */
-    state: { ...OVERDUE, seatEpoch: 7, outstandingWake: outstanding },
-    pending: [
-      { id: "delivery_kept", clientMessageId: outstanding.clientMessageId, state: "held" },
-      { id: "delivery_other", clientMessageId: "someone-else", state: "held" },
-    ],
+    state: { ...OVERDUE, seatEpoch: 7, outstandingWake: outstandingWake() },
   });
   await runSeatTickCheck(PROJECT, rig.deps);
-  expect(rig.revoked.map((entry) => entry.id)).toEqual(["delivery_kept"]);
-  expect(rig.revoked[0]!.reason).toContain("has since been replaced");
+  expect(rig.withdrawn).toHaveLength(1);
+  expect(rig.withdrawn[0]!.wake.operationId).toBe("op-wake-1");
+  expect(rig.withdrawn[0]!.reason).toContain("has since been replaced");
   const revocation = rig.journal.find((line) => line.verdict === "revoked");
-  expect(revocation).toMatchObject({ seatEpoch: 7, delivery: { outcome: "revoked" } });
+  expect(revocation).toMatchObject({ seatEpoch: 7, delivery: { outcome: "withdrawn" } });
   expect(rig.written[0]!.outstandingWake).toBeNull();
 });
 
-/* The same seat is not a replacement, so its unlanded wake stays outstanding —
-   that one is the replay the next check re-raises under the same key. */
-test("a seat that is still the same seat keeps its outstanding wake", async () => {
-  const outstanding = { clientMessageId: "seat-tick:viewer:7:first:interval:fp-1", conversationId: CONVERSATION, seatEpoch: 7 };
+/* The answer this mechanism has to be able to give. A holder that has already
+   let the payload go cannot be made to take it back, and reporting that as a
+   revocation would be the silent version of the very defect being prevented. */
+test("a withdrawal the holder was already past is recorded as too late, never as a revocation", async () => {
   const rig = harness({
+    seat: { conversationId: SUCCESSOR, seatEpoch: 8, path: null },
     pipelines: OPEN_LANE,
-    state: { lastWakeAt: new Date(NOW - 5 * MINUTE).toISOString(), outstandingWake: outstanding },
-    pending: [{ id: "delivery_kept", clientMessageId: outstanding.clientMessageId, state: "held" }],
+    state: { ...OVERDUE, seatEpoch: 7, outstandingWake: outstandingWake() },
+    withdrawal: "too-late",
   });
   await runSeatTickCheck(PROJECT, rig.deps);
-  expect(rig.revoked).toEqual([]);
+  const revocation = rig.journal.find((line) => line.verdict === "revoked")!;
+  expect(revocation.delivery).toMatchObject({ outcome: "too-late" });
+  expect(revocation.detail).toContain("may have received it");
+});
+
+/* The same seat is not a replacement, so a wake the holder still has stays
+   outstanding — that one is the replay the next check re-raises under the same
+   key. */
+test("a seat that is still the same seat keeps a wake its holder is still holding", async () => {
+  const outstanding = outstandingWake();
+  const rig = harness({
+    pipelines: OPEN_LANE,
+    state: { ...RECENT, outstandingWake: outstanding },
+    wakeState: "retained",
+  });
+  await runSeatTickCheck(PROJECT, rig.deps);
+  expect(rig.withdrawn).toEqual([]);
   expect(rig.journal.some((line) => line.verdict === "revoked")).toBe(false);
   expect(rig.written[0]!.outstandingWake).toEqual(outstanding);
+});
+
+/* The other half of the same question, and the reason `queued` may be believed
+   at all. A structured host admits every send as queued whether it is idle or
+   mid-turn, so "did the seat get it?" is only ever answered by the layer that
+   took it — and that answer has to apply the stamp and the cursor the raising
+   check wrote down. Without it the hourly bound the ADR rests on is bypassed by
+   a wake that was delivered and never recorded. */
+test("a wake the holder delivered after the send is credited with the plan that raised it", async () => {
+  const outstanding = outstandingWake();
+  const rig = harness({
+    pipelines: OPEN_LANE,
+    state: { ...RECENT, eventsThrough: 12, outstandingWake: outstanding },
+    wakeState: "landed",
+  });
+  await runSeatTickCheck(PROJECT, rig.deps);
+  const landing = rig.journal.find((line) => line.verdict === "landed")!;
+  expect(landing.delivery).toEqual({ clientMessageId: outstanding.clientMessageId, outcome: "landed" });
+  expect(rig.written[0]!.lastWakeAt).toBe(new Date(NOW).toISOString());
+  expect(rig.written[0]!.lastWakeReasons).toEqual(["interval"]);
+  expect(rig.written[0]!.eventsThrough).toBe(44);
+  expect(rig.written[0]!.outstandingWake).toBeNull();
+});
+
+/* And the bound that landing restores: an hour has to pass from the delivery
+   the holder made, not from a delivery the tick happened to observe. */
+test("crediting the landing starts the hourly bound, so the same check does not wake again", async () => {
+  const rig = harness({
+    pipelines: OPEN_LANE,
+    state: { ...OVERDUE, outstandingWake: outstandingWake() },
+    wakeState: "landed",
+  });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(rig.sent).toEqual([]);
+  expect(record!.verdict).toBe("quiet");
+});
+
+/* A holder that settled the payload without delivering it woke nobody, so no
+   stamp moves and the wake is owed again. */
+test("a wake the holder settled unsent moves no stamp, and the same check raises it again", async () => {
+  const rig = harness({
+    pipelines: OPEN_LANE,
+    state: { ...OVERDUE, eventsThrough: 12, outstandingWake: outstandingWake() },
+    wakeState: "dropped",
+  });
+  await runSeatTickCheck(PROJECT, rig.deps);
+  const dropped = rig.journal.find((line) => line.verdict === "dropped")!;
+  expect(dropped.delivery).toMatchObject({ outcome: "dropped" });
+  expect(dropped.eventsThrough).toBe(12);
+  expect(rig.sent).toHaveLength(1);
 });
 
 /* A rotation that lands while the send is in flight is the one the row cannot
@@ -323,47 +431,47 @@ test("a rotation during the send is caught by the same check that made the wake"
   const rig = harness({
     pipelines: OPEN_LANE,
     state: OVERDUE,
-    delivery: { ok: true, target: null, outcome: "queued", operationId: "op", receipt: {} as never, structured: true },
+    delivery: { ok: true, target: null, outcome: "queued", operationId: "op-inflight", receipt: {} as never, structured: true },
   });
-  let sends = 0;
+  let reads = 0;
   const seatFor = rig.deps.sources!.seatFor;
   rig.deps.sources!.seatFor = ((project: string) => {
-    sends += 1;
-    /* The gather and the pre-send re-check see the incumbent; the read after
-       the send sees the successor that landed meanwhile. */
-    return sends > 2
+    reads += 1;
+    /* The opening reconcile, the gather and the pre-send re-check all see the
+       incumbent; the read after the send sees the successor that landed
+       meanwhile. */
+    return reads > 3
       ? { active: { conversationId: SUCCESSOR, seatEpoch: 8, path: null } as never, pending: null, history: [] }
       : seatFor(project);
   }) as typeof seatFor;
-  rig.deps.sources!.pendingDeliveries = () => [{ id: "delivery_queued", clientMessageId: rig.sent[0]!.clientMessageId ?? null, state: "assigned" }];
   await runSeatTickCheck(PROJECT, rig.deps);
-  expect(rig.revoked.map((entry) => entry.id)).toEqual(["delivery_queued"]);
+  expect(rig.withdrawn.map((entry) => entry.wake.operationId)).toEqual(["op-inflight"]);
   expect(rig.written[0]!.outstandingWake).toBeNull();
 });
 
-/* A registry that cannot answer must not take the check down with it: the
-   refusal is recorded, and the check goes on to its own verdict. */
-test("a revocation the registry cannot serve is journaled rather than thrown", async () => {
-  const outstanding = { clientMessageId: "seat-tick:viewer:7:first:interval:fp-1", conversationId: CONVERSATION, seatEpoch: 7 };
+/* A holder that cannot answer must not take the check down with it, and it is
+   not evidence either way: the payload is exactly where it was, so the row
+   keeps it and the next check asks again. */
+test("a holder that cannot be reached is journaled, and leaves the wake outstanding", async () => {
+  const outstanding = outstandingWake();
   const rig = harness({
     seat: { conversationId: SUCCESSOR, seatEpoch: 8, path: null },
     pipelines: OPEN_LANE,
-    state: { ...OVERDUE, seatEpoch: 7, outstandingWake: outstanding },
-    pendingThrows: true,
+    state: { ...RECENT, seatEpoch: 7, outstandingWake: outstanding },
+    holderThrows: true,
   });
   const record = await runSeatTickCheck(PROJECT, rig.deps);
   expect(record!.verdict).not.toBe("error");
-  const revocation = rig.journal.find((line) => line.verdict === "revoked");
-  expect(revocation!.detail).toContain("could not be revoked");
+  const revocation = rig.journal.find((line) => line.verdict === "revoked")!;
+  expect(revocation.delivery).toMatchObject({ outcome: "unknown" });
+  expect(revocation.detail).toContain("could not be revoked");
+  expect(rig.written[0]!.outstandingWake).toEqual(outstanding);
 });
 
-test("a wake that landed settles the outstanding one, because the seat now has it", async () => {
+test("a wake that landed at the send settles the outstanding one, because the seat now has it", async () => {
   const rig = harness({
     pipelines: OPEN_LANE,
-    state: {
-      ...OVERDUE,
-      outstandingWake: { clientMessageId: "seat-tick:viewer:7:first:interval:fp-1", conversationId: CONVERSATION, seatEpoch: 7 },
-    },
+    state: { ...OVERDUE, outstandingWake: outstandingWake() },
   });
   await runSeatTickCheck(PROJECT, rig.deps);
   expect(rig.written[0]!.outstandingWake).toBeNull();

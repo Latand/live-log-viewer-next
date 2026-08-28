@@ -10,6 +10,7 @@ import { canonicalOrchestratorProject, activeOrchestratorSeats, orchestratorSeat
 import { loadPipelinesForList } from "@/lib/pipelines/store";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { Pipeline } from "@/lib/pipelines/types";
+import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { ledgerDeployments } from "@/lib/runtime/deploymentLedger";
 import type { StructuredHostRetirementReport } from "@/lib/runtime/structuredHostRetirement";
 import { loadTasks } from "@/lib/tasks/store";
@@ -21,6 +22,7 @@ import {
   type SeatTickActivity,
   type SeatTickCheckInput,
   type SeatTickEventInput,
+  type SeatTickOutstandingWake,
   type SeatTickPipelineInput,
   type SeatTickPolicy,
   type SeatTickProjectState,
@@ -47,12 +49,96 @@ const EVENT_PAGE = 200;
 /** Liveness rows one project's check asks for. */
 const LIVENESS_LIMIT = 60;
 
-/** One delivery the runtime is still holding for a conversation, in the only
-    three fields the tick needs to recognize its own and take it back. */
-export interface SeatTickPendingDelivery {
-  id: string;
-  clientMessageId: string | null;
-  state: "held" | "assigned" | "delivered" | "failed" | "delivery-uncertain";
+/**
+ * What became of a wake the delivery layer accepted and kept.
+ *
+ * Asked of whichever layer is actually holding it, never of a mirror of that
+ * layer. `retained` means it is still the holder's to deliver, so no stamp of
+ * the tick's may move; `landed` means the seat has it; `dropped` means the
+ * holder settled it without ever delivering it, so the next check may raise it
+ * again; `unknown` means the holder could not be asked, which is not evidence
+ * of anything and leaves the wake outstanding.
+ */
+export type SeatTickWakeState = "retained" | "landed" | "dropped" | "unknown";
+
+/**
+ * What taking a retained wake back achieved.
+ *
+ * `too-late` is the answer this whole mechanism has to be able to give: the
+ * holder had already let the payload go, so the replaced seat may have received
+ * it. Reporting it as a revocation would be the silent version of the defect
+ * the tick exists to prevent, so it is named instead.
+ */
+export type SeatTickWithdrawal = "withdrawn" | "too-late" | "unknown";
+
+/** Runtime receipt statuses the host has not finished with. `delivering` and
+    `applying` are the drain's own in-flight window: still not landed, and no
+    longer safe to take back. */
+const RUNTIME_QUEUED: ReadonlySet<string> = new Set(["pending", "queued"]);
+const RUNTIME_IN_FLIGHT: ReadonlySet<string> = new Set(["delivering", "applying"]);
+const RUNTIME_LANDED: ReadonlySet<string> = new Set(["delivered", "applied", "answered"]);
+
+/** The delivery the Viewer registry is holding under this wake's idempotency
+    key. The key is the tick's own and carries the project, the seat epoch and
+    the state fingerprint, so it identifies one wake across the whole file. */
+function registryDeliveryFor(wake: SeatTickOutstandingWake): { id: string; state: string } | null {
+  const found = Object.values(agentRegistry().readOnlySnapshot().heldDeliveries)
+    .find((delivery) => delivery.clientMessageId === wake.clientMessageId);
+  return found ? { id: found.id, state: found.state } : null;
+}
+
+/**
+ * The runtime host's own verdict on the operation carrying this wake.
+ *
+ * `currentRetryLeaf` follows a retried send to the operation that is actually
+ * live, because a retry leaves the parent terminal and the leaf is the one the
+ * drain will deliver. An operation the host has never heard of is one nothing
+ * will deliver, which is a drop rather than an unknown.
+ */
+export async function runtimeWakeState(operationId: string, client: RuntimeHostClient): Promise<SeatTickWakeState> {
+  const current = await client.operationStatus(operationId, { currentRetryLeaf: true });
+  if (!current) return "dropped";
+  const status = current.receipt.status;
+  if (RUNTIME_QUEUED.has(status) || RUNTIME_IN_FLIGHT.has(status)) return "retained";
+  if (RUNTIME_LANDED.has(status)) return "landed";
+  /* `failed`, `interrupted` and the terminal-but-unverified `uncertain`. None
+     of them is evidence the seat was woken, so none of them advances a stamp. */
+  return "dropped";
+}
+
+/**
+ * Take the wake out of the runtime host's queue.
+ *
+ * This is the same operation transition the delivery drain itself issues to
+ * abandon an effect: it settles the receipt and completes the outbox row inside
+ * one immediate transaction, so the drain cannot pick the effect up afterwards.
+ * Marking the Viewer's registry mirror instead would leave the host's queue
+ * untouched and the wake would still be delivered.
+ *
+ * An operation already in the drain's hands is deliberately NOT transitioned.
+ * The engine write may have happened, and failing the receipt underneath a
+ * drain that is about to settle it would break that drain for a claim the tick
+ * cannot honestly make anyway.
+ */
+export async function withdrawRuntimeWake(
+  operationId: string,
+  reason: string,
+  client: RuntimeHostClient,
+): Promise<SeatTickWithdrawal> {
+  const current = await client.operationStatus(operationId, { currentRetryLeaf: true });
+  if (!current) return "withdrawn";
+  const status = current.receipt.status;
+  if (RUNTIME_LANDED.has(status) || RUNTIME_IN_FLIGHT.has(status)) return "too-late";
+  if (!RUNTIME_QUEUED.has(status)) return "withdrawn";
+  try {
+    const settled = await client.transitionOperation(current.operationId, "failed", { reason });
+    return settled.receipt.status === "failed" ? "withdrawn" : "too-late";
+  } catch {
+    /* The host refuses the transition exactly when the operation left the queue
+       between the read and the write — which is the drain taking it. */
+    const after = await client.operationStatus(current.operationId, { currentRetryLeaf: true });
+    return after && RUNTIME_LANDED.has(after.receipt.status) ? "too-late" : "unknown";
+  }
 }
 
 export interface SeatTickSources {
@@ -71,12 +157,12 @@ export interface SeatTickSources {
   lifecycleJournal: typeof readLifecycleJournal;
   deployments: typeof ledgerDeployments;
   retirementReport: () => StructuredHostRetirementReport | null;
-  /** What the runtime is still holding for a conversation. The tick reads this
-      to find the wake it sent that never landed. */
-  pendingDeliveries: (conversationId: string) => SeatTickPendingDelivery[];
-  /** Take a retained wake back before it can land. The reason is stored on the
-      delivery, so the revocation is legible where the delivery is. */
-  revokeDelivery: (id: string, reason: string) => void;
+  /** Whether the layer holding a retained wake still has it, and whether the
+      seat ever got it. The tick's stamps move on this answer and nothing else. */
+  wakeState: (wake: SeatTickOutstandingWake) => Promise<SeatTickWakeState>;
+  /** Take a retained wake back from that same layer, before it can reach a seat
+      that has been replaced. The reason is stored where the payload is. */
+  withdrawWake: (wake: SeatTickOutstandingWake, reason: string) => Promise<SeatTickWithdrawal>;
   now: () => number;
 }
 
@@ -105,10 +191,37 @@ export function defaultSeatTickSources(): SeatTickSources {
         return null;
       }
     },
-    pendingDeliveries: (conversationId) => agentRegistry()
-      .pendingDeliveries(conversationId as `conversation_${string}`)
-      .map((delivery) => ({ id: delivery.id, clientMessageId: delivery.clientMessageId, state: delivery.state })),
-    revokeDelivery: (id, reason) => { agentRegistry().terminalizeHeldDelivery(id, reason); },
+    /* One rule for both halves: ask, and act on, the layer that is actually
+       holding the payload. A send the runtime host queued belongs to the runtime
+       host — the registry row beside it is a mirror, and settling a mirror stops
+       nothing. A send parked behind an account migration never reached a host at
+       all, and there the registry reservation IS the retention. */
+    wakeState: async (wake) => {
+      if (wake.operationId) {
+        const client = runtimeHostClient();
+        return client ? runtimeWakeState(wake.operationId, client) : "unknown";
+      }
+      const delivery = registryDeliveryFor(wake);
+      if (!delivery) return "unknown";
+      if (delivery.state === "delivered") return "landed";
+      if (delivery.state === "failed") return "dropped";
+      return "retained";
+    },
+    withdrawWake: async (wake, reason) => {
+      if (wake.operationId) {
+        const client = runtimeHostClient();
+        return client ? withdrawRuntimeWake(wake.operationId, reason, client) : "unknown";
+      }
+      const delivery = registryDeliveryFor(wake);
+      if (!delivery) return "unknown";
+      if (delivery.state === "delivered") return "too-late";
+      if (delivery.state === "failed") return "withdrawn";
+      agentRegistry().terminalizeHeldDelivery(delivery.id, reason);
+      /* An attempt whose journal outcome is unknown may already have been
+         written to the engine; terminalizing stops another attempt, and the
+         honest report is still that the seat may have it. */
+      return delivery.state === "delivery-uncertain" ? "too-late" : "withdrawn";
+    },
     now: () => Date.now(),
   };
 }

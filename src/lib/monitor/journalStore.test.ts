@@ -216,15 +216,15 @@ describe("seat tick check journal", () => {
   });
 
   /* The lines that exist so an absence is never a silence: a wake nobody
-     received, a check that threw, a clock refused for want of authority, and a
-     wake taken back from a seat that had already been replaced. */
-  test("a refused send, a failed check, a refused clock and a revoked wake are all on the record", () => {
+     received, a check that threw, a clock refused for want of authority, and
+     every way a retained wake stops being outstanding. */
+  test("a refused send, a failed check, a refused clock and a settled wake are all on the record", () => {
     const refusals = path.join(SANDBOX, "seat-tick-refusals.ndjson");
     appendSeatTickRecord(check({ verdict: "wake", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "seat-rotated" } }), refusals);
     appendSeatTickRecord(check({ verdict: "error", detail: "the check failed: the delivery layer is unavailable" }), refusals);
     appendSeatTickRecord(check({ verdict: "refused", project: "", detail: "a second seat tick start was refused" }), refusals);
     appendSeatTickRecord(check({ verdict: "refused", project: "", detail: "the seat tick sweep was refused and this process's clock stopped" }), refusals);
-    appendSeatTickRecord(check({ verdict: "revoked", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "revoked" }, detail: "a wake the delivery layer had accepted but not landed was revoked" }), refusals);
+    appendSeatTickRecord(check({ verdict: "revoked", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "withdrawn" }, detail: "a wake the delivery layer had accepted but not landed was taken out of its queue" }), refusals);
     const records = readSeatTickRecords(10, refusals);
     expect(records.map((entry) => entry.verdict)).toEqual(["wake", "error", "refused", "refused", "revoked"]);
     expect(records[0]!.delivery).toEqual({ clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "seat-rotated" });
@@ -235,7 +235,20 @@ describe("seat tick check journal", () => {
     /* The sweep a promoted successor took over: the refusal outlives the
        process that wrote it, which is the whole reason it goes here. */
     expect(records[3]!.detail).toContain("clock stopped");
-    expect(records[4]!.delivery).toEqual({ clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "revoked" });
+    expect(records[4]!.delivery).toEqual({ clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "withdrawn" });
+  });
+
+  /* The two answers only the layer holding a retained wake can give. They are
+     journal lines rather than inferences precisely because the send that raised
+     the wake could not answer them: a structured host accepts every send the
+     same way, so what became of one is a later fact. */
+  test("a wake its holder delivered, and one its holder settled unsent, are both journal lines", () => {
+    const settled = path.join(SANDBOX, "seat-tick-settled.ndjson");
+    appendSeatTickRecord(check({ verdict: "landed", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "landed" }, detail: "a wake the delivery layer had kept reached the seat" }), settled);
+    appendSeatTickRecord(check({ verdict: "dropped", delivery: { clientMessageId: "seat-tick:viewer:7:interval:fp", outcome: "dropped" }, detail: "the layer holding the wake settled it without delivering it" }), settled);
+    const records = readSeatTickRecords(10, settled);
+    expect(records.map((entry) => entry.verdict)).toEqual(["landed", "dropped"]);
+    expect(records.map((entry) => entry.delivery?.outcome)).toEqual(["landed", "dropped"]);
   });
 
   test("the sanitizer keeps only journal fields — smuggled transcript text and paths lose at the boundary", () => {

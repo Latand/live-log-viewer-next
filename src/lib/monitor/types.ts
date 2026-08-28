@@ -301,20 +301,48 @@ export interface SeatTickPolicy {
 }
 
 /**
- * A wake the delivery layer accepted and has NOT landed, retained durably by
- * the runtime against the conversation it was addressed to.
+ * What a wake changes about the row when it lands.
  *
- * It is remembered because the retention outlives the check that made it. The
- * seat can rotate while the payload waits, and a payload that then flushes
- * reaches a predecessor that no longer holds the project — the exact failure
- * this mechanism exists to end. So the retained wake is bound to the epoch it
- * was raised for, and the first check that reads a different epoch revokes it
- * instead of letting it arrive.
+ * Carried on the outstanding wake because a retained wake lands — or fails to —
+ * after the check that raised it has ended, and the check that observes the
+ * landing no longer holds the decision behind it. Committing the wake stamp
+ * from anything else would credit the seat with a different message.
+ */
+export interface SeatTickWakeCommit {
+  /** A proposal wake, which advances the 24-hour slot as well as the stamp. */
+  proposal: boolean;
+  reasons: SeatTickWakeReasonKind[];
+  fingerprint: string;
+  eventsThrough: number;
+}
+
+/**
+ * A wake the delivery layer accepted and has NOT landed, retained durably
+ * against the conversation it was addressed to.
+ *
+ * It is remembered because the retention outlives the check that made it, and
+ * both questions the tick can still ask about it are asked of whichever layer
+ * is holding it:
+ *
+ * - **Did it land?** Only the holder knows. Until it answers, no stamp moves
+ *   and no lifecycle event is acknowledged.
+ * - **Can it be taken back?** The seat can rotate while the payload waits, and
+ *   a payload that then flushes reaches a predecessor that no longer holds the
+ *   project — the exact failure this mechanism exists to end.
+ *
+ * {@link operationId} is what makes both questions answerable of the right
+ * layer: a send the runtime host queued is the runtime host's, and marking the
+ * Viewer's mirror of it does not stop the host's drain from delivering it.
  */
 export interface SeatTickOutstandingWake {
   clientMessageId: string;
   conversationId: string;
   seatEpoch: number;
+  /** The runtime host operation holding this wake, when the runtime took it.
+      Null when the retention is the Viewer registry's own reservation — an
+      account migration hold, or a legacy send that never reached a host. */
+  operationId: string | null;
+  commit: SeatTickWakeCommit;
 }
 
 /** The durable row per project, `state/seat-tick.json`. */
@@ -384,11 +412,19 @@ export interface SeatTickDecision {
   cards: SeatTickCard[];
 }
 
-/** What one check recorded. Three kinds are journal-only: `error` is a check
+/** What one check recorded. Five kinds are journal-only: `error` is a check
     that threw, `refused` a sweep or a second clock refused for want of
-    authority, and `revoked` a retained wake taken back from a seat that had
-    already been replaced. */
-export type SeatTickVerdictKind = SeatTickVerdict["kind"] | "error" | "refused" | "revoked";
+    authority, and the other three are what became of a retained wake — it was
+    taken back from a seat that had already been replaced (`revoked`), the
+    layer holding it delivered it after all (`landed`), or that layer settled it
+    without ever delivering it (`dropped`). */
+export type SeatTickVerdictKind =
+  | SeatTickVerdict["kind"]
+  | "error"
+  | "refused"
+  | "revoked"
+  | "landed"
+  | "dropped";
 
 /**
  * One audited check. Like {@link MonitorRunRecord} it carries no transcript

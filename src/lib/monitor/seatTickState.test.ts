@@ -36,7 +36,13 @@ const row = {
   stalledSeen: ["pipeline_a1"],
   lastWakeFingerprint: "fp-1",
   eventsThrough: 41,
-  outstandingWake: { clientMessageId: "seat-tick:viewer:7:first:interval:fp-1", conversationId: CONVERSATION, seatEpoch: 7 },
+  outstandingWake: {
+    clientMessageId: "seat-tick:viewer:7:first:interval:fp-1",
+    conversationId: CONVERSATION,
+    seatEpoch: 7,
+    operationId: "op-wake-1",
+    commit: { proposal: false, reasons: ["interval" as const], fingerprint: "fp-1", eventsThrough: 44 },
+  },
 };
 
 test("a row survives the write and reads back whole", () => {
@@ -99,11 +105,58 @@ test("the bound and the unlanded wake survive the rotation, because neither is t
   expect(successor.outstandingWake).toEqual(row.outstandingWake);
 });
 
-test("a hand-edited outstanding wake missing any of its three fields is dropped", () => {
+test("a hand-edited outstanding wake missing any required field is dropped", () => {
   const file = path.join(SANDBOX, "half-wake.json");
   fs.writeFileSync(file, JSON.stringify({
     version: 1,
     projects: { viewer: { ...row, outstandingWake: { clientMessageId: "seat-tick:viewer:7:first:interval:fp-1" } } },
+  }));
+  expect(readSeatTickState("viewer", file).outstandingWake).toBeNull();
+});
+
+/* The commit is what a landing observed a check later applies. A record that
+   cannot say what its wake would stamp is worse than no record: it would credit
+   the seat with the wrong hour and the wrong cursor. */
+test("an outstanding wake with no commit plan is dropped rather than half-honoured", () => {
+  const file = path.join(SANDBOX, "planless-wake.json");
+  const { commit: _commit, ...planless } = row.outstandingWake;
+  fs.writeFileSync(file, JSON.stringify({ version: 1, projects: { viewer: { ...row, outstandingWake: planless } } }));
+  expect(readSeatTickState("viewer", file).outstandingWake).toBeNull();
+});
+
+/* The handle that says which layer is holding the payload. A registry hold has
+   none, and that absence is meaningful rather than malformed. */
+test("an outstanding wake with no operation id is a registry-held one, and survives", () => {
+  const file = path.join(SANDBOX, "held-wake.json");
+  const { operationId: _operationId, ...held } = row.outstandingWake;
+  fs.writeFileSync(file, JSON.stringify({ version: 1, projects: { viewer: { ...row, outstandingWake: held } } }));
+  expect(readSeatTickState("viewer", file).outstandingWake).toEqual({ ...row.outstandingWake, operationId: null });
+});
+
+test("a hand-edited commit plan keeps only reason kinds the tick knows", () => {
+  const file = path.join(SANDBOX, "smuggled-plan.json");
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    projects: {
+      viewer: {
+        ...row,
+        outstandingWake: { ...row.outstandingWake, commit: { ...row.outstandingWake.commit, reasons: ["interval", "invented"] } },
+      },
+    },
+  }));
+  expect(readSeatTickState("viewer", file).outstandingWake!.commit.reasons).toEqual(["interval"]);
+});
+
+test("a commit plan with an impossible cursor drops the whole record", () => {
+  const file = path.join(SANDBOX, "negative-cursor.json");
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    projects: {
+      viewer: {
+        ...row,
+        outstandingWake: { ...row.outstandingWake, commit: { ...row.outstandingWake.commit, eventsThrough: -4 } },
+      },
+    },
   }));
   expect(readSeatTickState("viewer", file).outstandingWake).toBeNull();
 });

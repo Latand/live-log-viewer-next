@@ -9,6 +9,7 @@ import {
   SEAT_TICK_WAKE_REASON_KINDS,
   type SeatTickOutstandingWake,
   type SeatTickProjectState,
+  type SeatTickWakeCommit,
   type SeatTickWakeReasonKind,
 } from "./types";
 
@@ -38,14 +39,38 @@ function isoOrNull(value: unknown): string | null {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
 }
 
+/** The commit a landing will apply. A row missing it is a row from before the
+    plan was recorded, and a wake whose landing cannot be credited correctly is
+    better forgotten than credited wrongly — so the whole record drops. */
+function normalizeWakeCommit(value: unknown): SeatTickWakeCommit | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.fingerprint !== "string" || !raw.fingerprint) return null;
+  if (typeof raw.eventsThrough !== "number" || !Number.isInteger(raw.eventsThrough) || raw.eventsThrough < 0) return null;
+  return {
+    proposal: raw.proposal === true,
+    reasons: (Array.isArray(raw.reasons) ? raw.reasons : [])
+      .filter((entry): entry is SeatTickWakeReasonKind => SEAT_TICK_WAKE_REASON_KINDS.includes(entry as SeatTickWakeReasonKind)),
+    fingerprint: raw.fingerprint.slice(0, 200),
+    eventsThrough: raw.eventsThrough,
+  };
+}
+
 function normalizeOutstandingWake(value: unknown): SeatTickOutstandingWake | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
   const clientMessageId = typeof raw.clientMessageId === "string" ? raw.clientMessageId.slice(0, 300) : "";
   const conversationId = typeof raw.conversationId === "string" ? raw.conversationId.slice(0, 200) : "";
   const seatEpoch = raw.seatEpoch;
-  if (!clientMessageId || !conversationId || typeof seatEpoch !== "number" || !Number.isSafeInteger(seatEpoch)) return null;
-  return { clientMessageId, conversationId, seatEpoch };
+  const commit = normalizeWakeCommit(raw.commit);
+  if (!clientMessageId || !conversationId || !commit || typeof seatEpoch !== "number" || !Number.isSafeInteger(seatEpoch)) return null;
+  return {
+    clientMessageId,
+    conversationId,
+    seatEpoch,
+    operationId: typeof raw.operationId === "string" && raw.operationId ? raw.operationId.slice(0, 200) : null,
+    commit,
+  };
 }
 
 function normalizeRow(value: unknown): SeatTickProjectState {

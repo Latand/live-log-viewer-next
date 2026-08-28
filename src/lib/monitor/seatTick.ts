@@ -15,6 +15,7 @@ import {
   type SeatTickSeatInput,
   type SeatTickTaskInput,
   type SeatTickVerdict,
+  type SeatTickWakeCommit,
   type SeatTickWakeReason,
   type SeatTickWakeReasonKind,
 } from "./types";
@@ -345,16 +346,35 @@ function wakeItems(context: {
 }
 
 /**
- * The half of the state transition that only a DELIVERED wake earns.
+ * Everything a wake will change if — and only if — it lands.
+ *
+ * Separated from the commit itself because the two can happen in different
+ * checks. A send the delivery layer accepted but kept lands later, at the
+ * holder's pace, and the check that observes the landing has its own decision
+ * about its own board. Committing that check's fingerprint and cursor for a
+ * message raised minutes earlier would credit the seat with the wrong wake, so
+ * the raising check writes the plan down and the landing applies it verbatim.
+ */
+export function seatTickWakeCommitPlan(
+  verdict: SeatTickVerdict,
+  context: { fingerprint: string; eventsThrough: number },
+): SeatTickWakeCommit | null {
+  if (verdict.kind === "proactive") return { proposal: true, reasons: [], ...context };
+  if (verdict.kind !== "wake") return null;
+  return { proposal: false, reasons: verdict.reasons.map((reason) => reason.kind), ...context };
+}
+
+/**
+ * The half of the state transition that only a LANDED wake earns.
  *
  * Kept apart from {@link seatTickDecision} on purpose, and it is the reason the
  * two halves exist at all. A wake whose seat epoch moved between the decision
  * and the send is refused at the send; a wake the delivery layer held or queued
- * is somewhere other than the seat. Neither may leave a record saying the seat
- * was woken, and neither may advance the event cursor — an acknowledged event
- * is never offered again, so acking one before it landed is how a rotation
- * loses the lane event its successor needed. Only the controller, holding the
- * delivery outcome, may apply this.
+ * is somewhere other than the seat, and stays that way until the layer holding
+ * it says otherwise. Neither may leave a record saying the seat was woken, and
+ * neither may advance the event cursor — an acknowledged event is never offered
+ * again, so acking one before it landed is how a rotation loses the lane event
+ * its successor needed.
  *
  * Landing is also what settles the outstanding wake: a message the seat has is
  * no longer a payload waiting somewhere for a seat that may be replaced before
@@ -362,27 +382,26 @@ function wakeItems(context: {
  */
 export function seatTickWakeCommit(
   state: SeatTickProjectState,
-  verdict: SeatTickVerdict,
-  context: { fingerprint: string; eventsThrough: number; now: number },
+  commit: SeatTickWakeCommit,
+  now: number,
 ): SeatTickProjectState {
-  const at = new Date(context.now).toISOString();
-  const eventsThrough = Math.max(state.eventsThrough, context.eventsThrough);
-  if (verdict.kind === "proactive") {
+  const at = new Date(now).toISOString();
+  const eventsThrough = Math.max(state.eventsThrough, commit.eventsThrough);
+  if (commit.proposal) {
     return {
       ...state,
       lastWakeAt: at,
       lastProposalAt: at,
       lastWakeReasons: [],
-      lastWakeFingerprint: context.fingerprint,
+      lastWakeFingerprint: commit.fingerprint,
       quietSince: null,
       eventsThrough,
       outstandingWake: null,
     };
   }
-  if (verdict.kind !== "wake") return state;
 
-  const carried = verdict.reasons.map((reason) => reason.kind);
-  const fruitless = state.lastWakeFingerprint === context.fingerprint;
+  const carried = commit.reasons;
+  const fruitless = state.lastWakeFingerprint === commit.fingerprint;
   const wakesWithoutChange: Partial<Record<SeatTickWakeReasonKind, number>> = {};
   for (const kind of SEAT_TICK_WAKE_REASON_KINDS) {
     if (!carried.includes(kind)) continue;
@@ -392,7 +411,7 @@ export function seatTickWakeCommit(
     ...state,
     lastWakeAt: at,
     lastWakeReasons: carried,
-    lastWakeFingerprint: context.fingerprint,
+    lastWakeFingerprint: commit.fingerprint,
     wakesWithoutChange,
     quietSince: null,
     idleSince: null,

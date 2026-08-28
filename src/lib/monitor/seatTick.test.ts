@@ -6,6 +6,7 @@ import {
   seatTickDecision,
   seatTickPolicy,
   seatTickWakeCommit,
+  seatTickWakeCommitPlan,
   seatTurnProgressing,
 } from "./seatTick";
 import {
@@ -17,6 +18,7 @@ import {
   type SeatTickSeatInput,
   type SeatTickTaskInput,
   type SeatTickVerdict,
+  type SeatTickWakeCommit,
 } from "./types";
 
 const NOW = Date.parse("2026-08-28T12:00:00.000Z");
@@ -74,6 +76,12 @@ function stateWith(over: Partial<SeatTickProjectState>): SeatTickProjectState {
 /** The reasons a verdict carries, or none for every verdict that is not a wake. */
 function reasonsOf(verdict: SeatTickVerdict): string[] {
   return verdict.kind === "wake" ? verdict.reasons.map((reason) => reason.kind) : [];
+}
+
+/** What a verdict would commit if its wake landed. Non-null for every verdict
+    these commit tests use. */
+function plan(verdict: SeatTickVerdict, fingerprint: string, eventsThrough: number): SeatTickWakeCommit {
+  return seatTickWakeCommitPlan(verdict, { fingerprint, eventsThrough })!;
 }
 
 test("a project with open work and no active seat reports no-seat and asks for one card, never a spawn", () => {
@@ -346,7 +354,7 @@ test("the wake commit records the wake, and only the commit advances lastWakeAt"
     state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
   }));
   expect(decision.state.lastWakeAt).toBe(new Date(NOW - 61 * MINUTE).toISOString());
-  const committed = seatTickWakeCommit(decision.state, decision.verdict, { fingerprint: "fp-1", eventsThrough: 44, now: NOW });
+  const committed = seatTickWakeCommit(decision.state, plan(decision.verdict, "fp-1", 44), NOW);
   expect(committed.lastWakeAt).toBe(new Date(NOW).toISOString());
   expect(committed.lastWakeReasons).toEqual(["interval"]);
   expect(committed.lastWakeFingerprint).toBe("fp-1");
@@ -364,16 +372,16 @@ test("no commit means no cursor: the event cursor moves only with a delivered wa
     state: stateWith({ eventsThrough: 12, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
   }));
   expect(decision.state.eventsThrough).toBe(12);
-  expect(seatTickWakeCommit(decision.state, decision.verdict, { fingerprint: "fp-1", eventsThrough: 44, now: NOW }).eventsThrough).toBe(44);
+  expect(seatTickWakeCommit(decision.state, plan(decision.verdict, "fp-1", 44), NOW).eventsThrough).toBe(44);
 });
 
 test("the cursor never walks backwards, whatever a caller hands the commit", () => {
-  const committed = seatTickWakeCommit(stateWith({ eventsThrough: 90 }), { kind: "proactive", detail: "" }, { fingerprint: "fp", eventsThrough: 12, now: NOW });
+  const committed = seatTickWakeCommit(stateWith({ eventsThrough: 90 }), plan({ kind: "proactive", detail: "" }, "fp", 12), NOW);
   expect(committed.eventsThrough).toBe(90);
 });
 
 test("a proactive commit stamps the proposal slot", () => {
-  const committed = seatTickWakeCommit(emptySeatTickState(), { kind: "proactive", detail: "due" }, { fingerprint: "fp-1", eventsThrough: 0, now: NOW });
+  const committed = seatTickWakeCommit(emptySeatTickState(), plan({ kind: "proactive", detail: "due" }, "fp-1", 0), NOW);
   expect(committed.lastProposalAt).toBe(new Date(NOW).toISOString());
   expect(committed.lastWakeAt).toBe(new Date(NOW).toISOString());
 });

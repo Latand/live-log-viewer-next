@@ -197,8 +197,9 @@ export function readRunRecords(limit: number, filePath = monitorJournalPath()): 
  * been ticking — the successor that finally found a predecessor's schedule
  * guessed both numbers from its transcript. Every check leaves a line here,
  * including a check that threw, a sweep refused for want of traffic authority
- * and a wake taken back from a replaced seat, so "no line" means "no check" and
- * the cadence is a readable fact.
+ * and every way a retained wake stops being outstanding — taken back from a
+ * replaced seat, delivered by its holder after all, or settled unsent — so "no
+ * line" means "no check" and the cadence is a readable fact.
  * ------------------------------------------------------------------------- */
 
 /** Checks retained before the oldest are dropped. At a five-minute cadence this
@@ -206,7 +207,18 @@ export function readRunRecords(limit: number, filePath = monitorJournalPath()): 
     diagnosing a tick actually looks at. */
 export const SEAT_TICK_RUN_HISTORY = 500;
 
-const SEAT_TICK_VERDICTS: SeatTickVerdictKind[] = ["quiet", "wake", "proactive", "no-seat", "skipped", "error", "refused", "revoked"];
+const SEAT_TICK_VERDICTS: SeatTickVerdictKind[] = [
+  "quiet",
+  "wake",
+  "proactive",
+  "no-seat",
+  "skipped",
+  "error",
+  "refused",
+  "revoked",
+  "landed",
+  "dropped",
+];
 
 export function seatTickJournalPath(): string {
   return process.env.LLV_SEAT_TICK_AUDIT_FILE?.trim() || statePath(path.join("seat-tick", "runs.ndjson"));

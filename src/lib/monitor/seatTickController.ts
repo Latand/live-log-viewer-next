@@ -13,7 +13,7 @@ import { openIssuesForProposal, type ProposalIssue } from "./githubEvidence";
 import { appendSeatTickRecord } from "./journalStore";
 import { redactMonitorText } from "./redact";
 import { seatTickProposalMessage, seatTickWakeMessage } from "./report";
-import { seatTickDecision, seatTickPolicy, seatTickWakeCommit } from "./seatTick";
+import { seatTickDecision, seatTickPolicy, seatTickWakeCommit, seatTickWakeCommitPlan } from "./seatTick";
 import { readSeatTickState, seatTickStateForEpoch, writeSeatTickState } from "./seatTickState";
 import {
   defaultSeatTickSources,
@@ -28,6 +28,7 @@ import type {
   SeatTickProjectState,
   SeatTickRunRecord,
   SeatTickVerdict,
+  SeatTickVerdictKind,
 } from "./types";
 
 /**
@@ -56,9 +57,12 @@ import type {
  *   seat epoch is re-read immediately before the send, and a seat that moved in
  *   between is refused — the wake is journaled as refused, and nothing about it
  *   is recorded as a wake the successor received. A send the layer accepted but
- *   kept (held behind a migration, queued with a runtime) is remembered as
- *   outstanding and revoked the moment the epoch under it moves, because a
- *   retained payload outlives the check that made it.
+ *   kept (held behind a migration, queued with a runtime host) is remembered as
+ *   outstanding, because a retained payload outlives the check that made it,
+ *   and every later check asks the layer HOLDING it what became of it: still
+ *   waiting, delivered after all, or settled unsent. That one question answers
+ *   both halves of the tick's accounting — when a stamp may move, and what a
+ *   revocation has to reach — so the two cannot drift apart.
  * - It queued its fires and then double-fired into a finished turn. Here a seat
  *   whose turn is genuinely progressing is skipped and the tick is dropped;
  *   nothing is ever held.
@@ -109,14 +113,24 @@ function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): vo
 }
 
 /**
- * Whether the seat actually has the message.
+ * Whether the seat actually has the message, judged at the moment of the send.
  *
  * A send the delivery layer accepted is not the same as a wake the seat
  * received. `held` parks it behind an account migration, `queued` and
- * `delivering` leave it with the runtime and not the audience, and `pending`
- * has not reached a host at all. Recording any of those as a wake starts the
- * hourly clock on a message nobody read, and — worse — acknowledges the
- * lifecycle events that produced it, which are then never offered again.
+ * `delivering` leave it with the runtime host and not the audience, and
+ * `pending` has not reached a host at all. Recording any of those as a wake
+ * starts the hourly clock on a message nobody read, and — worse — acknowledges
+ * the lifecycle events that produced it, which are then never offered again.
+ *
+ * `queued` is the one worth spelling out, because a structured host admits
+ * EVERY send as queued whether it is idle or mid-turn: the answer here is not
+ * "the host is busy", it is "the runtime host has this and the seat does not
+ * yet". Which is exactly why a false is not the end of the story. The wake is
+ * recorded against the operation the runtime host queued it under, and
+ * {@link reconcileOutstandingWake} asks that host what became of it — so the
+ * message the host does deliver is credited at the next check instead of being
+ * disbelieved for ever, and the message it has not delivered yet can still be
+ * taken back out of its queue.
  */
 export function wakeReached(outcome: DeliveryOutcome): boolean {
   if (!outcome.ok) return false;
@@ -180,23 +194,58 @@ function wakeRetained(outcome: DeliveryOutcome): boolean {
   return outcome.ok && !wakeReached(outcome);
 }
 
+/** Which layer is holding a retained wake, in the one field that says so. A
+    structured send names the runtime host operation it was queued under; a
+    migration hold and a legacy send name nothing, and the Viewer registry's own
+    reservation is then the retention. */
+function retainedOperationId(outcome: DeliveryOutcome): string | null {
+  return outcome.ok ? outcome.operationId ?? null : null;
+}
+
 const REVOKED_WAKE_REASON = "the seat tick revoked a wake raised for a seat that has since been replaced";
 
+/** What the reconcile concluded: the journal line it owes, and what the row
+    does with the wake — credit it, forget it, or keep it for the next check.
+    Null is the answer that settles nothing and is worth no line of its own. */
+interface WakeSettlement {
+  verdict: SeatTickVerdictKind;
+  outcome: string;
+  detail: string;
+  row: "commit" | "clear" | "keep";
+}
+
 /**
- * Bind a retained wake to the epoch it was raised for.
+ * Settle a retained wake by asking the layer that is actually holding it.
  *
- * This is the half of the epoch check the re-read before the send cannot do. A
- * send is refused when the seat moved BEFORE it; this covers the seat moving
- * after it, while the payload is still waiting somewhere — the layer keeps a
- * `held` or `queued` message durably, so "the send was refused at the epoch"
- * stops being true the moment the epoch moves under a message already in the
- * runtime's hands. A predecessor woken that way is precisely the failure this
- * issue was filed about, so the wake is taken back rather than allowed to land.
+ * Two questions used to be answered in two places, from two different pictures
+ * of where the wake was, and they disagreed. They are one question here:
  *
- * The seat that is still the same seat keeps its outstanding wake: that one is
- * the replay the next check re-raises under the same `clientMessageId`.
+ * - **Did it land?** A send the layer merely accepted advances no stamp and
+ *   acknowledges no lifecycle event, and a structured host accepts every send
+ *   the same way whether it is idle or busy — so the answer cannot be read off
+ *   the send at all. It is read off the holder afterwards, and the wake it did
+ *   deliver is credited then, with the plan the raising check wrote down.
+ * - **Can it still be taken back?** This is the half of the epoch check the
+ *   re-read before the send cannot do. A send is refused when the seat moved
+ *   BEFORE it; this covers the seat moving after it, while the payload is still
+ *   waiting somewhere. A predecessor woken that way is precisely the failure
+ *   this issue was filed about.
+ *
+ * Both go to the same holder — the runtime host for a send it queued, the
+ * Viewer registry for a hold that never reached a host — because a revocation
+ * aimed anywhere else is a revocation the delivery path ignores. And when the
+ * holder has already let the payload go, that is said out loud (`too-late`)
+ * rather than reported as a successful revocation.
+ *
+ * The seat that is still the same seat keeps a wake still in flight: that one
+ * is the replay the next check re-raises under the same `clientMessageId`.
+ *
+ * A landing credited here is stamped at the instant it was OBSERVED rather than
+ * the instant it happened, so the hourly bound starts up to one check interval
+ * late. That is the safe direction: the bound is a floor on how often a seat is
+ * woken, and erring late never lets a wake jump it.
  */
-function revokeOutstandingWake(context: {
+async function reconcileOutstandingWake(context: {
   project: string;
   state: SeatTickProjectState;
   /** The seat as it stands NOW. A seat row with no conversation id is nobody
@@ -205,46 +254,100 @@ function revokeOutstandingWake(context: {
   sources: SeatTickSources;
   appendRecord: typeof appendSeatTickRecord;
   at: string;
-}): SeatTickProjectState {
+  now: number;
+}): Promise<SeatTickProjectState> {
   const outstanding = context.state.outstandingWake;
   if (!outstanding) return context.state;
-  if (context.seat
-    && context.seat.conversationId === outstanding.conversationId
-    && context.seat.seatEpoch === outstanding.seatEpoch) return context.state;
+  const replaced = !context.seat
+    || context.seat.conversationId !== outstanding.conversationId
+    || context.seat.seatEpoch !== outstanding.seatEpoch;
 
-  let revoked = 0;
-  let detail = "";
+  let settlement: WakeSettlement | null;
   try {
-    for (const delivery of context.sources.pendingDeliveries(outstanding.conversationId)) {
-      if (delivery.clientMessageId !== outstanding.clientMessageId) continue;
-      if (delivery.state === "delivered" || delivery.state === "failed") continue;
-      context.sources.revokeDelivery(delivery.id, REVOKED_WAKE_REASON);
-      revoked += 1;
-    }
-    detail = revoked > 0
-      ? `a wake the delivery layer had accepted but not landed was revoked before it could reach the replaced seat (${revoked} retained payload(s))`
-      : "the wake raised for the replaced seat was already settled; nothing was left to revoke";
+    settlement = replaced
+      ? withdrawal(await context.sources.withdrawWake(outstanding, REVOKED_WAKE_REASON))
+      : landing(await context.sources.wakeState(outstanding));
   } catch (error) {
-    /* A registry that cannot answer must not take the check down with it: the
-       wake stamp did not move for this send either, so the worst case is the
-       predecessor receiving one message the successor will not be told about. */
-    detail = `the wake raised for the replaced seat could not be revoked: ${redactMonitorText(error instanceof Error ? error.message : "unknown error")}`;
+    const reason = redactMonitorText(error instanceof Error ? error.message : "unknown error");
+    /* A holder that cannot answer must not take the check down with it, and it
+       is not evidence either way: the wake stays outstanding, so the next check
+       asks again rather than crediting or discarding it on a failed read. */
+    settlement = replaced
+      ? { verdict: "revoked", outcome: "unknown", row: "keep", detail: `the wake raised for the replaced seat could not be revoked: ${reason}` }
+      : null;
   }
+  if (!settlement) return context.state;
+
+  const next: SeatTickProjectState = settlement.row === "commit"
+    ? seatTickWakeCommit(context.state, outstanding.commit, context.now)
+    : settlement.row === "clear"
+      ? { ...context.state, outstandingWake: null }
+      /* An unreachable holder leaves the payload exactly where it was, so the
+         row keeps it: a later check is the one that takes it back. */
+      : context.state;
 
   context.appendRecord({
     schemaVersion: 1,
     at: context.at,
     project: context.project,
     seatEpoch: outstanding.seatEpoch,
-    verdict: "revoked",
+    verdict: settlement.verdict,
     reasons: [],
     items: 0,
     deferred: 0,
-    eventsThrough: context.state.eventsThrough,
-    delivery: { clientMessageId: outstanding.clientMessageId, outcome: revoked > 0 ? "revoked" : "already-settled" },
-    detail,
+    eventsThrough: next.eventsThrough,
+    delivery: { clientMessageId: outstanding.clientMessageId, outcome: settlement.outcome },
+    detail: settlement.detail,
   });
-  return { ...context.state, outstandingWake: null };
+  return next;
+}
+
+function withdrawal(result: Awaited<ReturnType<SeatTickSources["withdrawWake"]>>): WakeSettlement {
+  if (result === "withdrawn") {
+    return {
+      verdict: "revoked",
+      outcome: "withdrawn",
+      row: "clear",
+      detail: "a wake the delivery layer had accepted but not landed was taken out of its queue before it could reach the replaced seat",
+    };
+  }
+  if (result === "too-late") {
+    return {
+      verdict: "revoked",
+      outcome: "too-late",
+      row: "clear",
+      detail: "the wake raised for the replaced seat could not be taken back: the layer holding it had already let it go, so the replaced seat may have received it",
+    };
+  }
+  return {
+    verdict: "revoked",
+    outcome: "unknown",
+    row: "keep",
+    detail: "the wake raised for the replaced seat could not be revoked: the layer holding it did not answer",
+  };
+}
+
+function landing(result: Awaited<ReturnType<SeatTickSources["wakeState"]>>): WakeSettlement | null {
+  if (result === "landed") {
+    return {
+      verdict: "landed",
+      outcome: "landed",
+      row: "commit",
+      detail: "a wake the delivery layer had kept reached the seat; the wake stamp and the event cursor move now, on the plan the check that raised it wrote down",
+    };
+  }
+  if (result === "dropped") {
+    return {
+      verdict: "dropped",
+      outcome: "dropped",
+      row: "clear",
+      detail: "the layer holding the wake settled it without delivering it, so no stamp moves and the next check may raise it again",
+    };
+  }
+  /* `retained` is the steady state between two checks and `unknown` is a read
+     that failed; neither settles anything, and neither is worth a line of its
+     own beside the check's. */
+  return null;
 }
 
 /**
@@ -302,20 +405,27 @@ async function check(
   const deliver = dependencies.deliver ?? deliverConversationMessage;
   const ensureCard = dependencies.ensureCard ?? ensureSeatTickCard;
 
-  const gathered = await gatherSeatTickInput(canonical, readState(canonical), policy, sources);
-  const at = new Date(gathered.now).toISOString();
-  /* Before anything is decided: a wake this project left outstanding under a
-     seat that has since been replaced is taken back. The row carried it across
-     the rotation for exactly this moment. */
-  const reconciled = revokeOutstandingWake({
-    project: gathered.project,
-    state: seatTickStateForEpoch(gathered.state, gathered.seat?.seatEpoch ?? null),
-    seat: gathered.seat,
+  /* Before anything is READ, let alone decided: settle the wake this project
+     left outstanding. It has to come first because both of its answers change
+     what the rest of this check may conclude — a landing moves the event cursor
+     the gather pages from and starts the hourly bound, and a rotation means
+     taking the payload back out of the queue the row carried it across the
+     rotation for. */
+  const opening = sources.now();
+  const openingSeat = sources.seatFor(canonical).active ?? null;
+  const settled = await reconcileOutstandingWake({
+    project: canonical,
+    state: seatTickStateForEpoch(readState(canonical), openingSeat?.seatEpoch ?? null),
+    seat: openingSeat,
     sources,
     appendRecord,
-    at,
+    at: new Date(opening).toISOString(),
+    now: opening,
   });
-  const input = { ...gathered, state: reconciled };
+
+  const gathered = await gatherSeatTickInput(canonical, settled, policy, sources);
+  const at = new Date(gathered.now).toISOString();
+  const input = { ...gathered, state: seatTickStateForEpoch(settled, gathered.seat?.seatEpoch ?? null) };
   const decision = seatTickDecision(input);
 
   for (const card of decision.cards) {
@@ -382,27 +492,38 @@ async function check(
          routine progress between them is what the seat is deliberately not
          told about one line at a time. Anything the page bound left behind
          keeps its place and is offered again. */
-      if (wakeReached(outcome)) {
-        const eventsThrough = input.events.at(-1)?.seq ?? state.eventsThrough;
-        state = seatTickWakeCommit(state, verdict, { fingerprint: input.changeFingerprint, eventsThrough, now: input.now });
-      } else if (wakeRetained(outcome)) {
+      const commit = seatTickWakeCommitPlan(verdict, {
+        fingerprint: input.changeFingerprint,
+        eventsThrough: input.events.at(-1)?.seq ?? state.eventsThrough,
+      });
+      if (commit && wakeReached(outcome)) {
+        state = seatTickWakeCommit(state, commit, input.now);
+      } else if (commit && wakeRetained(outcome)) {
         /* Accepted and kept. The payload now outlives this check, so it is
-           written down against the epoch it was raised for — and re-checked at
-           once, because the rotation that matters most is the one that landed
-           while the send was in flight. */
+           written down with the handle of whichever layer kept it and the
+           commit this wake would earn — then reconciled at once, because the
+           rotation that matters most is the one that landed while the send was
+           in flight, and because a fast drain may already have delivered it. */
         state = {
           ...state,
-          /* The seat the rotation check just proved `current` still is, in the
-             one form that is typed as an addressable conversation. */
-          outstandingWake: { clientMessageId, conversationId: input.seat.conversationId, seatEpoch: input.seat.seatEpoch },
+          outstandingWake: {
+            clientMessageId,
+            /* The seat the rotation check just proved `current` still is, in
+               the one form that is typed as an addressable conversation. */
+            conversationId: input.seat.conversationId,
+            seatEpoch: input.seat.seatEpoch,
+            operationId: retainedOperationId(outcome),
+            commit,
+          },
         };
-        state = revokeOutstandingWake({
+        state = await reconcileOutstandingWake({
           project: input.project,
           state,
           seat: sources.seatFor(input.project).active ?? null,
           sources,
           appendRecord,
           at,
+          now: input.now,
         });
       }
     }

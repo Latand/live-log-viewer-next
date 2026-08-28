@@ -41,20 +41,49 @@ Five limits travel with the decision and are not separable from it:
 3. **Never a wake that did not land, and never one that outlives its seat.**
    Resuming a host makes "the send was accepted" and "the seat has the message"
    two different facts, so only the second counts. A delivery the layer parked
-   behind an account migration (`held`), left with the runtime (`queued`,
+   behind an account migration (`held`), left with the runtime host (`queued`,
    `delivering`) or has not routed at all (`pending`) does not advance the wake
    stamp and does not advance the lifecycle event cursor — an acknowledged event
    is never offered again, so acking one before it landed is how a rotation
-   loses the lane event its successor needed. The next check re-raises the same
-   wake under the same `clientMessageId`, which makes the retry a replay rather
-   than a second copy.
+   loses the lane event its successor needed. A structured host makes this
+   unavoidable rather than incidental: it admits *every* send as `queued`,
+   whether the seat is idle or mid-turn, so the send's own answer can never say
+   whether the seat got the message.
 
-   A payload the layer kept is also durable, so limit 2 alone would not hold it:
-   the epoch can move while the message waits, and the wake would then arrive at
-   a predecessor. Every retained wake is therefore recorded against the epoch it
-   was raised for and revoked — at once if the rotation landed during the send,
-   otherwise by the next check, which is why the record survives the rotation
-   that clears the rest of the row.
+   Which is why the retained wake is recorded against the layer that is actually
+   holding it — the runtime host operation for a send it queued, the Viewer's
+   own reservation for a hold that never reached a host — and every later check
+   asks that layer one question: is this still yours? Three answers, and both
+   halves of the accounting come out of them:
+
+   - **Still holding it.** Nothing moves. The next check re-raises the same wake
+     under the same `clientMessageId`, which makes the retry a replay rather
+     than a second copy.
+   - **Delivered it.** The wake landed, and it is credited then, with the stamp
+     and the cursor the check that raised it wrote down. Without this the hourly
+     bound in limit 4 would be bypassed by every wake that was delivered and
+     never observed.
+   - **Settled it unsent.** Nobody was woken, so no stamp moves and the wake is
+     owed again.
+
+   A payload the layer kept is durable, so limit 2 alone would not hold it: the
+   epoch can move while the message waits, and the wake would then arrive at a
+   predecessor. So when the epoch under a retained wake moves, the wake is taken
+   back out of that same layer — the runtime host's operation is failed, which
+   completes the outbox row the drain would have delivered from. A revocation
+   recorded anywhere else is one the delivery path ignores, which reproduces the
+   defect this ADR is about rather than preventing it. The withdrawal happens at
+   once if the rotation landed during the send, otherwise at the next check,
+   which is why the record survives the rotation that clears the rest of the row.
+
+   And when the holder has already let the payload go — the drain has it, or has
+   delivered it — that is recorded as exactly that (`too-late`) rather than as a
+   successful revocation. The Viewer cannot recall a message an engine has
+   already been given, and that residue is real: in that narrow race a replaced
+   seat may read one wake. What the mechanism owes there is to say so, on the
+   line where the withdrawal is recorded, instead of reporting a revocation that
+   did not happen — and to record nothing about it as a wake the project
+   received, so the successor is still owed everything the message carried.
 4. **Never more often than the wake interval, for any reason.** One
    project-scoped 60-minute bound, with no environment override, no exempt
    reason kind — a terminal lane event leads the next wake instead of raising an
