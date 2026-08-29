@@ -1374,6 +1374,67 @@ test("unknown Codex durable state continues from runtime-running evidence", asyn
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
+test("a live Codex row whose transcript cannot be read launches nothing and is told nothing", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-codex-corrupt-live-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "00000000-0000-0000-0000-000000000001";
+  /* The live row the two cases above continue from, with one fact changed: the
+     transcript ends on a record cut off mid-write, so the tail read is
+     `uncertain` and this boot observes nothing about the turn. Everything still
+     arguing for a continuation — the `busy` word, the retained active turn —
+     was written by whoever touched the row last and says exactly the same thing
+     for a turn that ended hours ago (#1281). */
+  const { conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-retained-through-corrupt-tail",
+    transcriptRecords: [
+      { timestamp: "2026-07-15T05:59:00.000Z", payload: { type: "user_message" } },
+      { timestamp: "2026-07-15T05:59:30.000Z", payload: { type: "function_call", call_id: "c1" } },
+    ],
+    transcriptSuffix: '\n{"timestamp":"2026-07-15T05:59:4',
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const ledger = createFakeDeliveryLedger();
+  const host = Object.assign(new FakeEngineHost(ledger), { onStateChange: () => () => {} });
+  const selected: string[] = [];
+
+  try {
+    await adoptStructuredHostsAtStartup({
+      registry,
+      client,
+      /* The host is handed over whether or not the filter asked for it, so the
+         second assertion is about the continuation itself rather than about
+         there being nothing to send through. */
+      adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+        const entry = received.snapshot().entries[`codex:${sessionId}`]!;
+        if (shouldAdopt(entry)) selected.push(`codex:${sessionId}`);
+        return [{ key: { engine: "codex", sessionId }, host: host as never }];
+      },
+      adoptClaude: async () => [],
+      hostClaimed: () => true,
+    });
+
+    expect(selected).toEqual([]);
+    expect(ledger.writes).toEqual([]);
+    expect(journal.snapshot().recentOperations.filter((receipt) =>
+      receipt.idempotencyKey.startsWith("recovery-continuation-"))).toEqual([]);
+    /* The row keeps its turn word and its host metadata: unreadable evidence
+       settles nothing in either direction. */
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("busy");
+    expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+      status: "live",
+      structuredHost: { activeTurnRef: "turn-retained-through-corrupt-tail" },
+    });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a stale runtime-running projection cannot revive an idle registry host", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-stale-running-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -2248,6 +2309,11 @@ test("a busy Codex turn advances after container replacement without operator me
     turn: "busy",
     activeTurnRef: "turn-interrupted-by-promotion",
     transcriptRecords: [{ timestamp: "2026-07-20T11:47:00.000Z", payload: { type: "task_started" } }],
+    /* The host below appends to this file, so it has to end on a record
+       boundary: without the newline the appended record lands on the same line
+       as the first, and the transcript this case is about becomes one nothing
+       can parse. */
+    transcriptSuffix: "\n",
   });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeJournalClient(journal);
@@ -2752,7 +2818,7 @@ test.each(["codex", "claude"] as const)(
 );
 
 test.each(["codex", "claude"] as const)(
-  "startup keeps a %s host adoption-eligible when malformed JSON follows a terminal marker",
+  "startup launches no %s host when malformed JSON follows a terminal marker",
   async (engine) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-corrupt-tail-${engine}-`));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -2769,14 +2835,26 @@ test.each(["codex", "claude"] as const)(
       transcriptSuffix: "\n{corrupt",
     });
 
-    expect(await startupAdoptionAttempts(registry)).toEqual([`${engine}:${sessionId}`]);
+    /* The tail read comes back `uncertain`, so this boot has made no
+       observation of this turn at all. What is left saying a turn is in flight
+       is the word on the row and the active-turn ref beside it, both inherited
+       from whoever wrote them last — and starting a CLI process on them resumes
+       a turn that may have ended hours ago, which for Codex also spends a paid
+       continuation saying so (#1281). Nothing is retired either: the row is
+       held out of the skipped-host demotion, so the next boot that can read the
+       artifact still finds it exactly as it is. */
+    expect(await startupAdoptionAttempts(registry)).toEqual([]);
+    expect(registry.snapshot().entries[`${engine}:${sessionId}`]).toMatchObject({
+      status: "live",
+      structuredHost: { activeTurnRef: `active-${engine}` },
+    });
 
     fs.rmSync(directory, { recursive: true, force: true });
   },
 );
 
 test.each(["codex", "claude"] as const)(
-  "startup keeps a %s host adoption-eligible when a truncated record follows a terminal marker",
+  "startup launches no %s host when a truncated record follows a terminal marker",
   async (engine) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-truncated-tail-${engine}-`));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -2793,14 +2871,23 @@ test.each(["codex", "claude"] as const)(
       transcriptSuffix: '\n{"next_turn":',
     });
 
-    expect(await startupAdoptionAttempts(registry)).toEqual([`${engine}:${sessionId}`]);
+    /* The tail read comes back `uncertain`, so this boot has made no
+       observation of this turn at all. What is left saying a turn is in flight
+       is the word on the row and the active-turn ref beside it, both inherited
+       from whoever wrote them last — and starting a CLI process on them resumes
+       a turn that may have ended hours ago, which for Codex also spends a paid
+       continuation saying so (#1281). Nothing is retired either: the row is
+       held out of the skipped-host demotion, so the next boot that can read the
+       artifact still finds it exactly as it is. */
+    expect(await startupAdoptionAttempts(registry)).toEqual([]);
+    expect(registry.snapshot().entries[`${engine}:${sessionId}`]).toMatchObject({ status: "live" });
 
     fs.rmSync(directory, { recursive: true, force: true });
   },
 );
 
 test.each(["codex", "claude"] as const)(
-  "startup keeps a %s host adoption-eligible while its transcript grows during the tail read",
+  "startup launches no %s host while its transcript grows during the tail read",
   async (engine) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-growing-tail-${engine}-`));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -2833,7 +2920,16 @@ test.each(["codex", "claude"] as const)(
     });
 
     try {
-      expect(await startupAdoptionAttempts(registry)).toEqual([`${engine}:${sessionId}`]);
+    /* The tail read comes back `uncertain`, so this boot has made no
+       observation of this turn at all. What is left saying a turn is in flight
+       is the word on the row and the active-turn ref beside it, both inherited
+       from whoever wrote them last — and starting a CLI process on them resumes
+       a turn that may have ended hours ago, which for Codex also spends a paid
+       continuation saying so (#1281). Nothing is retired either: the row is
+       held out of the skipped-host demotion, so the next boot that can read the
+       artifact still finds it exactly as it is. */
+      expect(await startupAdoptionAttempts(registry)).toEqual([]);
+      expect(registry.snapshot().entries[`${engine}:${sessionId}`]).toMatchObject({ status: "live" });
     } finally {
       open.mockRestore();
       fs.rmSync(directory, { recursive: true, force: true });
@@ -2847,7 +2943,7 @@ test.each([
   ["claude", "missing"],
   ["claude", "unreadable"],
 ] as const)(
-  "startup keeps a %s host adoption-eligible when its transcript path is %s",
+  "startup launches no %s host when its transcript path is %s",
   async (engine, condition) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-${condition}-${engine}-`));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -2865,7 +2961,16 @@ test.each([
     if (condition === "missing") fs.rmSync(artifactPath);
     else fs.chmodSync(artifactPath, 0o000);
 
-    expect(await startupAdoptionAttempts(registry)).toEqual([`${engine}:${sessionId}`]);
+    /* The tail read comes back `uncertain`, so this boot has made no
+       observation of this turn at all. What is left saying a turn is in flight
+       is the word on the row and the active-turn ref beside it, both inherited
+       from whoever wrote them last — and starting a CLI process on them resumes
+       a turn that may have ended hours ago, which for Codex also spends a paid
+       continuation saying so (#1281). Nothing is retired either: the row is
+       held out of the skipped-host demotion, so the next boot that can read the
+       artifact still finds it exactly as it is. */
+    expect(await startupAdoptionAttempts(registry)).toEqual([]);
+    expect(registry.snapshot().entries[`${engine}:${sessionId}`]).toMatchObject({ status: "live" });
 
     if (condition === "unreadable") fs.chmodSync(artifactPath, 0o600);
     fs.rmSync(directory, { recursive: true, force: true });

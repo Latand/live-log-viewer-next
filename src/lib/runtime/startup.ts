@@ -353,6 +353,7 @@ function interruptedCodexConversations(
   registry: AgentRegistry,
   shouldAdopt: StructuredHostAdoptionFilter,
   runtimeRunningConversationIds: ReadonlySet<string>,
+  unreadableTranscriptHostKeys: ReadonlySet<string>,
   snapshot: RegistryFile = registry.readOnlySnapshot(),
 ): ReadonlyMap<string, ViewerConversationId> {
   return new Map(Object.values(snapshot.conversations).flatMap((conversation) => {
@@ -360,6 +361,12 @@ function interruptedCodexConversations(
     if (conversation.engine !== "codex" || !generation) return [];
     const key = { engine: "codex" as const, sessionId: generation.id };
     const entry = snapshot.entries[sessionKeyId(key)];
+    /* A continuation is a paid turn spent telling a seat to resume something.
+       When this boot could not read the transcript at all, the word on the row
+       is the only thing left saying there is anything to resume — and it is
+       inherited from whoever wrote it last, so it says that just as loudly for
+       a turn that ended hours ago (#1281). No current evidence, no nudge. */
+    if (unreadableTranscriptHostKeys.has(sessionKeyId(key))) return [];
     const interrupted = conversation.turn.state === "busy"
       || (conversation.turn.state === "unknown"
         && (Boolean(entry?.structuredHost?.activeTurnRef)
@@ -465,18 +472,32 @@ function persistedTurnState(
   return turnStateFromRecords(records.slice(turnStartIndex), "codex", true);
 }
 
-async function refreshStructuredTranscriptState(registry: AgentRegistry): Promise<void> {
+/**
+ * Reconciles what the transcripts on disk currently say, and reports the live
+ * conversations whose transcript this boot could not read.
+ *
+ * The second half is load-bearing (#1281). A tail read that comes back
+ * `uncertain` — corrupt JSON, a record truncated mid-write, a file that grew
+ * under the read, a path that is missing or unreadable — makes no observation,
+ * so the conversation keeps whatever turn word the last writer left on the row.
+ * That word then decided both whether to launch a host for the row and whether
+ * to tell it to continue, which is a status word deciding a paid turn on a
+ * transcript nobody in this process has managed to read.
+ */
+async function refreshStructuredTranscriptState(registry: AgentRegistry): Promise<ReadonlySet<string>> {
   const snapshot = registry.readOnlySnapshot();
   const observedAt = new Date().toISOString();
   const candidates = Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
     if (!generation) return [];
-    const entry = snapshot.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+    const hostKey = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
+    const entry = snapshot.entries[hostKey];
     return entry?.structuredHost && entry.status === "live" && !conversation.supersededBy
-      ? [{ conversation, generation }]
+      ? [{ conversation, generation, hostKey }]
       : [];
   });
   const observations: Parameters<AgentRegistry["reconcileConversations"]>[0] = [];
+  const unreadable = new Set<string>();
   let nextCandidate = 0;
   const workers = Array.from(
     { length: Math.min(TRANSCRIPT_REFRESH_CONCURRENCY, candidates.length) },
@@ -484,9 +505,12 @@ async function refreshStructuredTranscriptState(registry: AgentRegistry): Promis
       while (nextCandidate < candidates.length) {
         const candidate = candidates[nextCandidate++];
         if (!candidate) continue;
-        const { conversation, generation } = candidate;
+        const { conversation, generation, hostKey } = candidate;
         const tail = await readStableTailRecords(generation.path);
-        if (tail.integrity !== "complete") continue;
+        if (tail.integrity !== "complete") {
+          unreadable.add(hostKey);
+          continue;
+        }
         const turn = persistedTurnState(tail.records, conversation.engine, tail.prefixTruncated);
         if (turn.state !== "busy" && turn.state !== "terminal") continue;
         observations.push({
@@ -503,6 +527,7 @@ async function refreshStructuredTranscriptState(registry: AgentRegistry): Promis
   );
   await Promise.all(workers);
   if (observations.length > 0) registry.reconcileConversations(observations);
+  return unreadable;
 }
 
 function canonicalConversationId(registry: AgentRegistry, conversationId: string): string {
@@ -570,6 +595,7 @@ function structuredStartupAdoptionFilter(
   snapshot: RegistryFile = registry.readOnlySnapshot(),
   orchestratorRecoveries: ReadonlyMap<string, readonly OrchestratorRestartRecoveryTarget[]> = new Map(),
   orchestratorSeats: () => OrchestratorSeat[] = activeOrchestratorSeats,
+  unreadableTranscriptHostKeys: ReadonlySet<string> = new Set(),
 ): StructuredHostAdoptionFilter {
   const conversationsByCurrentEntry = new Map(Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
@@ -598,6 +624,16 @@ function structuredStartupAdoptionFilter(
       || signals.pendingOperationConversationIds.has(conversationId);
     if (hasPendingWork) return true;
     if (conversation.turn.state === "terminal") return false;
+    /* Past this point the only thing left arguing for a launch is the turn the
+       row claims is unfinished. When this boot could not read the transcript,
+       that claim rests on a word nothing has confirmed since the last writer
+       left it, so it starts a CLI process — and, for Codex, a continuation
+       nudge — for a turn that may have ended long ago (#1281). Work that is
+       actually owed still wins: a held delivery or a pending operation is
+       evidence in its own right, and both were answered above. Refusing the
+       launch is the whole of it: the row itself is held out of the demotion
+       below, so unreadable evidence retires nothing either. */
+    if (unreadableTranscriptHostKeys.has(sessionKeyId(entry.key))) return false;
     const runtimeHostedRunning = signals.hostedRunningConversationIds.has(conversationId);
     const unfinishedTurn = conversation.turn.state === "busy"
       || Boolean(entry.structuredHost?.activeTurnRef)
@@ -618,7 +654,9 @@ export interface StructuredStartupDependencies {
   /** Whether the delivery controller resolves a host this pass adopted. */
   hostClaimed?: (key: SessionKey) => boolean;
   orchestratorSeats?: typeof activeOrchestratorSeats;
-  refreshTranscriptState?: (registry: AgentRegistry) => Promise<void>;
+  /** Reconciles transcript state, answering which conversations it could not
+      read. A stub that answers nothing reports nothing unreadable. */
+  refreshTranscriptState?: (registry: AgentRegistry) => Promise<ReadonlySet<string> | void>;
   adopt?: typeof adoptCodexRegistryHosts;
   adoptClaude?: typeof adoptClaudeRegistryHosts;
   resolveCodexOwner?: (entry: AgentRegistryEntry) => { home: string; kind: "legacy" | "managed" } | null;
@@ -663,7 +701,8 @@ export async function adoptStructuredHostsAtStartup(
     completedHosts: 0,
     totalHosts: null,
   });
-  await (dependencies.refreshTranscriptState ?? refreshStructuredTranscriptState)(registry);
+  const unreadableTranscripts = await (dependencies.refreshTranscriptState ?? refreshStructuredTranscriptState)(registry)
+    ?? new Set<string>();
   let orchestratorHostKeys = currentOrchestratorRestartRecoveryHostKeys(
     registry,
     orchestratorRecoveries,
@@ -687,6 +726,7 @@ export async function adoptStructuredHostsAtStartup(
     registry.readOnlySnapshot(),
     orchestratorRecoveriesByHostKey,
     orchestratorSeats,
+    unreadableTranscripts,
   );
   const adoptionCandidates = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
     entry.structuredHost && shouldAdopt(entry));
@@ -817,7 +857,14 @@ export async function adoptStructuredHostsAtStartup(
   rememberStructuredStartupRetry(nextAdoptedHosts, orchestratorRecoveries);
   const candidateHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
   const shouldRetainCandidateOrAdopt: StructuredHostAdoptionFilter = (entry) =>
-    candidateHostKeys.has(sessionKeyId(entry.key)) || shouldAdopt(entry);
+    candidateHostKeys.has(sessionKeyId(entry.key))
+    /* A row this boot could not read a transcript for is left exactly as it
+       was. The demotion below retires a skipped row — it releases the endpoint,
+       clears the active turn and can signal an unclaimable Claude orphan — and
+       an unreadable tail is no more grounds for that than it is for a launch
+       (#1281). Whatever can read the artifact next decides. */
+    || unreadableTranscripts.has(sessionKeyId(entry.key))
+    || shouldAdopt(entry);
   const candidateCodexHosts = nextAdoptedHosts.filter(
     (item): item is AdoptedCodexHost => item.key.engine === "codex"
       && !orchestratorHostKeys.has(sessionKeyId(item.key)),
@@ -846,6 +893,7 @@ export async function adoptStructuredHostsAtStartup(
     publicationSnapshot,
     orchestratorRecoveriesByHostKey,
     orchestratorSeats,
+    unreadableTranscripts,
   );
   const finalHostKeys = new Set(nextAdoptedHosts.map((item) => sessionKeyId(item.key)));
   const shouldPublish: StructuredHostAdoptionFilter = (entry) =>
@@ -854,6 +902,7 @@ export async function adoptStructuredHostsAtStartup(
     registry,
     shouldPublish,
     signals.hostedRunningConversationIds,
+    unreadableTranscripts,
     publicationSnapshot,
   );
   const finalCodexHosts = nextAdoptedHosts.filter(
