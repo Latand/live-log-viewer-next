@@ -10,12 +10,17 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
+import { UNKNOWN_RESET_RECHECK_MS } from "./accountPark";
 import type { RuntimeHostClient } from "./client";
 import { reconcileDeadStructuredRegistryHost } from "./registry";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { structuredResumeSessionId } from "./structuredSpawn";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-recovery-"));
+/* Publish-readiness now reads the limits cache out of the viewer state dir, so
+   this suite pins that dir inside its own sandbox: no test here may read or
+   write the state directory the running viewer owns. */
+process.env.LLV_STATE_DIR = path.join(sandbox, "state");
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
 test("dead-host reconciliation preserves a replacement spawn staged after observation", () => {
@@ -897,6 +902,206 @@ test("live structured ownership prevents a duplicate recovery host", async () =>
   });
 
   expect(result).toMatchObject({ target: null, conversationId: conversation.id, spawned: false });
+  expect(spawnCalls).toBe(0);
+});
+
+test("issue 611: a live host parked behind a provider limit is held, not published and not replaced", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `parked-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "parked-account");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "parked-account",
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:parked",
+      process: { pid: process.pid, startIdentity: null },
+      eventCursor: 11,
+      protocolVersion: "v2",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: "structured-host:parked",
+    pendingAction: null,
+  });
+  /* The runtime's own reading of the account, exactly as the quota controller
+     records it — never the transcript prose at the quota-warning prompt. */
+  const now = Date.now();
+  const resetAt = Math.floor(now / 1_000) + 3_600;
+  const observedAt = new Date(now).toISOString();
+  registry.recordQuotaEvaluation({
+    engine: "codex",
+    observations: [{
+      engine: "codex",
+      accountId: "parked-account",
+      authenticated: true,
+      authCheckedAt: observedAt,
+      limits: {
+        session: { usedPercent: 100, resetsAt: resetAt },
+        weekly: { usedPercent: 31, resetsAt: resetAt + 86_400 },
+        plan: "pro",
+        capturedAt: Math.floor(now / 1_000),
+      },
+      provenance: { source: "live", reason: null, staleSince: null },
+      observedAt,
+      bootId: "boot-parked",
+    }],
+    signature: null,
+    bootId: "boot-parked",
+    now: observedAt,
+    minimumGapMs: 60_000,
+  });
+  let spawnCalls = 0;
+
+  const result = await recoverDeadStructuredConversation({
+    path: artifactPath,
+    conversationId: conversation.id,
+  }, {
+    registry,
+    transport: () => "structured",
+    spawn: async () => {
+      spawnCalls += 1;
+      throw new Error("a parked host must not be replaced");
+    },
+  });
+
+  expect(result).toEqual({
+    target: null,
+    path: artifactPath,
+    conversationId: conversation.id,
+    spawned: false,
+    hold: {
+      reason: "quota_exhausted",
+      accountId: "parked-account",
+      until: new Date(resetAt * 1_000).toISOString(),
+      resetKnown: true,
+    },
+  });
+  /* The park belongs to the account, so the host keeps its process and its
+     claim: terminating it would throw away the continuation the caller wants. */
+  expect(spawnCalls).toBe(0);
+  expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    claimOwner: "structured-host:parked",
+    structuredHost: { endpoint: "stdio:parked" },
+  });
+});
+
+test("issue 611: a live host whose account is spent with no reset is held on a bounded recheck, then published once it reads usable", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `unknown-reset-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "spent-account");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "spent-account",
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:spent",
+      process: { pid: process.pid, startIdentity: null },
+      eventCursor: 7,
+      protocolVersion: "v2",
+      writerClaimEpoch: 2,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 2,
+    claimOwner: "structured-host:spent",
+    pendingAction: null,
+  });
+  /* The exact reading the deadlock was about: the window is spent and the
+     provider named no reset, so nothing can say when it comes back. */
+  const observedAt = new Date().toISOString();
+  const recordObservation = (usedPercent: number, resetsAt: number | null, at: string) => registry.recordQuotaEvaluation({
+    engine: "codex",
+    observations: [{
+      engine: "codex",
+      accountId: "spent-account",
+      authenticated: true,
+      authCheckedAt: at,
+      limits: {
+        session: { usedPercent, resetsAt },
+        weekly: { usedPercent: 44, resetsAt: null },
+        plan: "pro",
+        capturedAt: Math.floor(Date.parse(at) / 1_000),
+      },
+      provenance: { source: "live", reason: null, staleSince: null },
+      observedAt: at,
+      bootId: "boot-spent",
+    }],
+    signature: null,
+    bootId: "boot-spent",
+    now: at,
+    minimumGapMs: 0,
+  });
+  recordObservation(100, null, observedAt);
+  let spawnCalls = 0;
+  const recover = () => recoverDeadStructuredConversation({
+    path: artifactPath,
+    conversationId: conversation.id,
+  }, {
+    registry,
+    transport: () => "structured",
+    spawn: async () => {
+      spawnCalls += 1;
+      throw new Error("a host held on an unknown reset must not be replaced");
+    },
+  });
+
+  const held = await recover();
+
+  /* Not publish-ready: the caller is handed a hold, so nothing is enqueued into
+     an account that cannot start a turn. Not an open-ended wait either: the
+     hold names a recheck ahead of now, and says the reset is unknown. */
+  expect(held).toMatchObject({
+    target: null,
+    path: artifactPath,
+    conversationId: conversation.id,
+    spawned: false,
+    hold: { reason: "quota_exhausted", accountId: "spent-account", resetKnown: false },
+  });
+  const until = Date.parse(held!.hold!.until);
+  expect(until).toBeGreaterThan(Date.parse(observedAt));
+  expect(until).toBeLessThanOrEqual(Date.parse(observedAt) + UNKNOWN_RESET_RECHECK_MS + 1);
+  /* Everything the caller came back for survives the hold: the process, the
+     claim, and the transcript generation the continuation lives in. */
+  expect(spawnCalls).toBe(0);
+  expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    claimOwner: "structured-host:spent",
+    structuredHost: { endpoint: "stdio:spent", writerClaimEpoch: 2 },
+  });
+
+  /* Usable state arrives — the same host, the same claim, now publishable. */
+  recordObservation(12, null, new Date().toISOString());
+
+  expect(await recover()).toEqual({
+    target: null,
+    path: artifactPath,
+    conversationId: conversation.id,
+    spawned: false,
+  });
   expect(spawnCalls).toBe(0);
 });
 

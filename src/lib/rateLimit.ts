@@ -1,6 +1,6 @@
 import type { DurableQuotaObservation } from "@/lib/accounts/migration/contracts";
 import { effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
-import type { Flow } from "@/lib/flows/types";
+import type { Flow, FlowBlock } from "@/lib/flows/types";
 import { SESSION_WINDOW_MINUTES, WEEKLY_WINDOW_MINUTES } from "@/lib/limitWindows";
 import { providerThrottleState, type ProviderThrottleState } from "@/lib/limitsThrottle";
 import type { Engine, EngineLimits, FileEntry, LimitsProvenance, LimitWindow, LimitWindowSource, RateLimitState } from "@/lib/types";
@@ -285,6 +285,33 @@ export function projectRateLimitReadModel(
   const implementerStates = new Set<Flow["state"]>(["waiting_ready", "relaying", "fixing"]);
   const projectedFlows = flows.map((flow) => {
     const implementer = filesByPath.get(flow.implementerPath);
+    const conversationId = implementer?.conversationId ?? flow.implementerConversationId ?? null;
+    /* A relay the engine withheld because the provider parked the implementer's
+       account (#611). It is projected FIRST and from the flow's own durable
+       hold: the wait is a fact about the account, not about whether this
+       scanner pass happened to attribute a quota reading to the implementer's
+       transcript, and a held relay that showed nothing is what let three of
+       these pass unnoticed. */
+    const held = flow.state === "relaying" ? flow.rounds.at(-1)?.relayHold : null;
+    if (held) {
+      const until = Date.parse(held.until);
+      const seconds = Number.isFinite(until) ? Math.floor(until / 1_000) : null;
+      /* A hold the provider gave no reset for carries a recheck rather than a
+         reset, and is projected as one: the strip then says the reset is
+         unknown instead of showing the recheck as the time the account comes
+         back. */
+      const resetKnown = held.resetKnown !== false;
+      return {
+        ...flow,
+        block: {
+          reason: "rate_limited" as const,
+          conversationId,
+          accountId: held.accountId,
+          resetAt: resetKnown ? seconds : null,
+          ...(resetKnown ? {} : { recheckAt: seconds }),
+        } satisfies FlowBlock,
+      };
+    }
     const rateLimit = implementer?.rateLimit;
     if (!rateLimit || !implementerStates.has(flow.state)) {
       return flow.block ? { ...flow, block: null } : flow;
@@ -293,7 +320,7 @@ export function projectRateLimitReadModel(
       ...flow,
       block: {
         reason: "rate_limited" as const,
-        conversationId: implementer.conversationId ?? flow.implementerConversationId ?? null,
+        conversationId,
         accountId: rateLimit.accountId,
         resetAt: rateLimit.resetAt,
       },

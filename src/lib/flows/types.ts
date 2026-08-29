@@ -52,6 +52,32 @@ export type FlowBlock = {
   /** Exhausted account. A successor action can exclude it from targets. */
   accountId: string | null;
   resetAt: number | null;
+  /** Set instead of `resetAt` when the provider reported the window spent but
+      named no reset (#611): the wait is a bounded recheck at this instant, and
+      the surface says the reset is unknown rather than dressing the recheck up
+      as a reset time. */
+  recheckAt?: number | null;
+};
+
+/** A relay withheld from a live implementer host whose account the provider
+    has parked (#611). The verdict is UNDELIVERED and nothing is queued: the
+    relay re-attempts at `until` — the provider's own deadline, or, when it
+    named none, the bounded recheck the park reports instead. */
+export type RelayProviderHold = {
+  reason: "provider_throttled" | "quota_exhausted";
+  /** Engine account the provider parked. */
+  accountId: string;
+  /** ISO instant the park lapses at, and the relay is re-attempted. */
+  until: string;
+  /** When the hold was first recorded, so a surface can age it. Kept across a
+      moving recheck: the same account parked for the same reason is one wait,
+      however many times its deadline is renewed. */
+  since: string;
+  /** False when the provider named no reset and `until` is the recheck the
+      park bounded itself with (#611). Surfaces must then say the reset is
+      unknown; a relay held on an unknown reset that showed a reset time would
+      be the invisible wait this hold exists to prevent. */
+  resetKnown: boolean;
 };
 
 export type FlowMergeEvidence = {
@@ -140,6 +166,11 @@ export type Round = {
       past the settlement window the bounded relay retry re-sends under the same
       idempotent client-message identity. */
   relayPendingSettlement?: { path: string; since: string } | null;
+  /** The provider limit this relay is waiting on (#611). While this is set the
+      round is UNDELIVERED and the relay has been withheld rather than queued
+      into a host that cannot start a turn; `relayRetryAt` carries the same
+      deadline, so the ordinary relay tick resumes delivery when it lapses. */
+  relayHold?: RelayProviderHold | null;
   reviewedAt: string | null; // verdict detected
   /** Reviewer process reached a verdict or terminal error. */
   terminalAt?: string | null;

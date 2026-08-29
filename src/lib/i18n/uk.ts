@@ -1356,6 +1356,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "flowState.blocked_rate_limited": "заблоковано: вичерпано ліміт",
   "flowState.rate_limit_until": "скинеться о {time}",
   "flowState.rate_limit_wait": "чекає на скидання ліміту",
+  "flowState.rate_limit_reset_unknown": "скидання невідоме — перевірка о {time}",
   "flowModel.failed": "не вдалося ({status})",
 
   "wfState.provisioning": "готую worktree",
