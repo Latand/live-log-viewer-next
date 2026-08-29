@@ -62,19 +62,25 @@ guarantees for the 1.x series.
   burning CPU is working however long the gap between messages; a host that has
   written nothing and burned none since its own launch, under a turn it
   inherited, is severed. Everything else answers `unknown`, and `unknown`
-  authorises nothing: a transcript whose tail cannot be parsed leaves the turn
-  unknown rather than borrowing the word the registry row happens to carry — a
-  stale `busy` used to be enough to call a turn severed and a stale `terminal`
-  enough to call it settled, neither with an event behind it — and a pid whose
+  authorises nothing. A transcript that cannot be read — corrupt, truncated,
+  missing, or growing under the read — is answered before anything else is
+  looked at, the recorded process included: a pid that is gone proves that pid
+  is not running, which is just as true of a turn that finished hours ago under
+  a row nobody updated as of one cut off mid-work, and only the transcript tells
+  those apart. The cost of guessing is not symmetric — a kill lands the same way
+  either way, but a retry re-runs work that may already be complete and a
+  continuation nudge re-prompts a seat about a turn that is over — so the
+  reading stops there and consumers are handed `unknown`. The registry's own
+  `busy` or `terminal` word is never borrowed to fill the gap, and a pid whose
   recorded start identity cannot be revalidated is not evidence about the
-  process the row was written about. Three consequences follow. A pipeline
-  stage whose host is proven severed leaves `running`, so `retry-stage` works
-  without closing the pipeline. A kill on a host no delivery controller owns
-  reaps the recorded process — fenced on its start identity, and only once the
-  evidence says severed — so the registry row can retire instead of refusing
-  forever and blocking every message queued behind it; an interrupt in the same
-  state settles rather than holding its conversation's drain open. And a Viewer
-  restart no longer reports `proc: running` for a pid that is gone.
+  process the row was written about either. Two consequences follow. A pipeline stage whose host
+  is proven severed leaves `running`, so `retry-stage` works without closing the
+  pipeline — and a stage whose evidence is unreadable keeps its attempt instead.
+  A kill on a host no delivery controller owns reaps the recorded process —
+  fenced on its start identity, and only once the evidence says severed — so the
+  registry row can retire instead of refusing forever and blocking every message
+  queued behind it; an interrupt in the same state settles rather than holding
+  its conversation's drain open.
 - A Viewer restart messages only the orchestrator seats whose own turn was
   severed (#1276). The predicate was `live` or `idle`, and `idle` meant every
   dormant project was re-hosted and spent a paid turn answering "no change" on
@@ -85,6 +91,16 @@ guarantees for the 1.x series.
   no process. The message no longer asks the seat to "re-arm any scheduled
   work": since #1245 the Viewer owns the clock, and a durable agent-managed
   monitor record is tracked in #1280.
+- A boot that cannot read a transcript starts nothing and retires nothing for it
+  (#1281). A tail read that comes back uncertain makes no observation, so the
+  conversation kept the turn word the last writer left on the row — and that
+  word launched a CLI process for the turn and, on Codex, spent a paid
+  continuation telling the seat to resume it, for a turn that may have ended
+  long ago. Such a row is now left exactly as it is: no host is launched from
+  it, no continuation is sent, and it is held out of the demotion that retires
+  skipped hosts, so whatever can read the artifact next is what decides. Work
+  that is owed regardless still boots its host — a held delivery or a pending
+  runtime operation is evidence of its own.
 - Startup launches no structured host it cannot hand to a delivery controller
   (#1282). A pass with no runtime client has no publication to claim what it
   starts, and the check that catches an unclaimed host was behind that same
