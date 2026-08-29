@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { seatTickProposalRef } from "./cards";
-import { seatTickProposalMessage, seatTickWakeMessage } from "./report";
+import { SEAT_TICK_CONTRACT, seatTickProposalMessage, seatTickWakeMessage } from "./report";
 
 /**
  * The seat tick's two briefs (#1245), rendered by the module that already
@@ -129,4 +129,86 @@ test("the proposal slot carries the prompt too, and without one is unchanged", (
   expect(text.indexOf(HEADING)).toBeLessThan(text.indexOf("Contract:"));
   expect(proposal()).not.toContain(HEADING);
   expect(proposal(null)).toBe(proposal());
+});
+
+/* ------------------------------------------------------------------------- *
+ * The contract the limit used to eat (#1280).
+ *
+ * A production-shaped five-item wake runs to just under 2,900 characters and
+ * carries every contract clause. Adding a prompt of the full thousand the
+ * settings writer accepts landed the joined message on exactly the 4,000-
+ * character limit, and the clamp took the closing clause off the end — the one
+ * that says not to wait on the operator — with nothing in the message to say
+ * anything had gone. The contract is what tells a seat not to schedule itself
+ * and what its stop is, so it is reserved and the agenda is what gives way.
+ * ------------------------------------------------------------------------- */
+
+const MAX_PROMPT = "check the digest, then the deploy ledger, then the review queue — in that order, every tick. "
+  .repeat(11)
+  .slice(0, 1000);
+
+function fullAgenda(monitorPrompt?: string) {
+  const detail = " and the rest of the sentence a real board card carries".repeat(5);
+  return {
+    project: PROJECT,
+    reasons: [
+      { kind: "lane-event" as const, detail: `pipeline pipeline_a1 stage review recorded a verdict${detail}` },
+      { kind: "stalled" as const, detail: `pipeline pipeline_b2 has not moved for three hours${detail}` },
+      { kind: "interval" as const, detail: "the wake interval elapsed while work is open" },
+    ],
+    items: [
+      { kind: "pipeline" as const, id: "pipeline_a1", label: `ship the exporter — parked at review${detail}` },
+      { kind: "pipeline" as const, id: "pipeline_b2", label: `the digest connector — running, stage build${detail}` },
+      { kind: "task" as const, id: "task_c3", label: `the card asking for the worktree census${detail}` },
+      { kind: "task" as const, id: "task_d4", label: `the deploy ledger surface nobody has read${detail}` },
+      { kind: "pipeline" as const, id: "pipeline_e5", label: `the settings lane — waiting on a reviewer${detail}` },
+    ],
+    deferred: 3,
+    signals: [
+      { id: "deploy", label: `the last deployment ended rolled-back${detail}` },
+      { id: "limits", label: `one account is inside its five-hour limit window${detail}` },
+    ],
+    ...(monitorPrompt === undefined ? {} : { monitorPrompt }),
+  };
+}
+
+test("a maximum-length prompt on a full agenda keeps every contract clause, and shortens the agenda instead", () => {
+  expect(MAX_PROMPT).toHaveLength(1_000);
+  const agenda = seatTickWakeMessage(fullAgenda());
+  /* The fixture is genuinely over budget: without the reservation the prompt
+     could only be fitted by eating the foot of the message. */
+  expect(agenda.length + MAX_PROMPT.length).toBeGreaterThan(4_000);
+
+  const text = seatTickWakeMessage(fullAgenda(MAX_PROMPT));
+  expect(text.length).toBeLessThanOrEqual(4_000);
+  /* Every clause, including the ones a hand-written list would miss — and the
+     last of them is the last thing the seat reads, so nothing was lopped off. */
+  for (const clause of SEAT_TICK_CONTRACT) expect(text).toContain(clause);
+  expect(text.endsWith(`- ${SEAT_TICK_CONTRACT.at(-1)}`)).toBe(true);
+  /* The prompt is reserved whole too: half an instruction is its own hazard. */
+  expect(text).toContain(MAX_PROMPT);
+  /* And the agenda is what gave way, with the ellipsis that says so. */
+  expect(text).toContain("…");
+});
+
+test("a long issue list cannot cost the proposal its ref line, its prompt or its contract", () => {
+  const text = seatTickProposalMessage({
+    project: PROJECT,
+    issues: Array.from({ length: 200 }, (_unused, index) => ({
+      number: 1_000 + index,
+      title: "an issue with a title of roughly the length the backlog actually carries",
+      labels: ["design", "monitor"],
+      updatedAt: null,
+    })),
+    signals: [],
+    items: 5,
+    slot: "20693",
+    monitorPrompt: MAX_PROMPT,
+  });
+  expect(text.length).toBeLessThanOrEqual(4_000);
+  /* The ref line is what the next tick reads to recognize the card it already
+     asked for; losing it to a long backlog would mint a second proposal. */
+  expect(text).toContain(`monitor-ref: ${seatTickProposalRef("20693")}`);
+  expect(text).toContain(MAX_PROMPT);
+  for (const clause of SEAT_TICK_CONTRACT) expect(text).toContain(clause);
 });

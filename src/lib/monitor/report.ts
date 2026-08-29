@@ -1,6 +1,6 @@
 import { MONITOR_REF_PREFIX, seatTickProposalRef, stateLabel } from "./cards";
 import type { ProposalIssue } from "./githubEvidence";
-import { redactBounded } from "./redact";
+import { redactMonitorText } from "./redact";
 import { MONITOR_MARKER } from "./requests";
 import type {
   ClassifiedRequest,
@@ -93,7 +93,53 @@ export function renderMonitorReport(input: ReportInput): string {
 
 const SEAT_TICK_MESSAGE_LIMIT = 4_000;
 
-const SEAT_TICK_CONTRACT = [
+/**
+ * The least the agenda is left, whatever the reserved half costs.
+ *
+ * The subtraction in {@link boundedSeatTickMessage} cannot reach this today:
+ * the reserved half is a constant contract plus a prompt the settings writer
+ * caps at a thousand characters, which together are well under half the limit.
+ * It is here so a future growth of either can only shorten the
+ * agenda, never produce a nonsense budget. And it floors the agenda while
+ * leaving the total free, deliberately: a wake missing part of its contract is
+ * the failure this change exists to end, and holding the limit is worth less.
+ */
+const SEAT_TICK_DYNAMIC_FLOOR = 1_000;
+
+/**
+ * Bound the wake without ever bounding what the wake MEANS (#1280).
+ *
+ * The message has two halves. The dynamic one — the reasons, the items, the
+ * signals, the open issues — is derived from a board of no fixed size, so it is
+ * the half the limit exists to hold down. The reserved one is the project's own
+ * monitor prompt, the instructions the slot turns on, and the contract; all
+ * three are bounded already, and all three sit at the foot of the message.
+ *
+ * Clamping the joined text therefore clamped the reserved half first. A
+ * maximum-length prompt on a full five-item agenda landed on exactly the limit
+ * and took the closing contract clause off the end — the clause telling the
+ * seat not to wait on the operator — with nothing in the message to say
+ * anything had been dropped. A wake that arrives without its stop is worse than
+ * a wake whose agenda is a line shorter, so the reserved half is subtracted
+ * from the budget before the dynamic half is bounded, and the dynamic half is
+ * what gives way, with an ellipsis where it was cut so the message says so.
+ *
+ * Both halves pass through the redactor complete, before either is bounded, so
+ * "a truncation can never split a secret" is the same rule it always was — and
+ * a message that fits comes out byte for byte the message it was: the leading
+ * newline below is the break the single join supplied, and the `trimStart` and
+ * `trimEnd` are between them the one `trim` that join's result was given.
+ */
+function boundedSeatTickMessage(dynamic: readonly string[], reserved: readonly string[]): string {
+  const tail = `\n${redactMonitorText(reserved.join("\n")).trimEnd()}`;
+  const budget = Math.max(SEAT_TICK_MESSAGE_LIMIT - tail.length, SEAT_TICK_DYNAMIC_FLOOR);
+  const head = redactMonitorText(dynamic.join("\n")).trimStart();
+  return head.length <= budget ? `${head}${tail}` : `${head.slice(0, budget - 1).trimEnd()}…${tail}`;
+}
+
+/** Exported so a regression can assert EVERY clause survived a bounded wake,
+    including the ones a hand-written list would miss. */
+export const SEAT_TICK_CONTRACT = [
   "Act on the listed items only, and nothing else this turn.",
   "Record every outcome where it belongs — on the board card or on the pipeline — not only in this conversation.",
   "If an item cannot be done, mark its task blocked with the reason. That is the stop, and it is the only one.",
@@ -154,9 +200,12 @@ export function seatTickWakeMessage(input: {
   if (input.signals.length > 0) {
     lines.push("", "Signals:", ...input.signals.map((signal) => `- ${signal.label}`));
   }
-  lines.push(...seatTickPromptSection(input.monitorPrompt));
-  lines.push("", "Contract:", ...SEAT_TICK_CONTRACT.map((clause) => `- ${clause}`));
-  return redactBounded(lines.join("\n"), SEAT_TICK_MESSAGE_LIMIT);
+  return boundedSeatTickMessage(lines, [
+    ...seatTickPromptSection(input.monitorPrompt),
+    "",
+    "Contract:",
+    ...SEAT_TICK_CONTRACT.map((clause) => `- ${clause}`),
+  ]);
 }
 
 /**
@@ -192,7 +241,11 @@ export function seatTickProposalMessage(input: {
   if (input.signals.length > 0) {
     lines.push("", "Signals:", ...input.signals.map((signal) => `- ${signal.label}`));
   }
-  lines.push(
+  /* The issue list is the half that grows with the repository; everything from
+     the instructions down is fixed-size and load-bearing — the ref line is what
+     the next tick reads to recognize the card it already asked for, so losing
+     it to a long issue list would mint a second proposal card. */
+  return boundedSeatTickMessage(lines, [
     "",
     `Produce ONE ranked list of at most ${input.items} actions, each with the evidence behind it, and post it as a single board card in inbox for this project.`,
     "Rank by what actually matters now: what is blocking, what is cheap and finishes something, what has been waiting longest.",
@@ -202,6 +255,5 @@ export function seatTickProposalMessage(input: {
     "",
     "Contract:",
     ...SEAT_TICK_CONTRACT.map((clause) => `- ${clause}`),
-  );
-  return redactBounded(lines.join("\n"), SEAT_TICK_MESSAGE_LIMIT);
+  ]);
 }
