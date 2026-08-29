@@ -69,9 +69,9 @@ test("the packaged stdio host publishes and invokes the expanded read surface", 
   }
 });
 
-test("an already-running packaged MCP channel retries through a same-port Viewer restart", async () => {
+test("an already-running packaged MCP channel retries through a same-port Viewer restart and fails loudly when recovery exhausts", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-viewer-restart-"));
-  let releaseBlockedRequest: ((response: Response) => void) | null = null;
+  const blockedRequest = { release: null as ((response: Response) => void) | null };
   let markBlockedRequestReached: (() => void) | null = null;
   const blockedRequestReached = new Promise<void>((resolve) => { markBlockedRequestReached = resolve; });
   let requests = 0;
@@ -82,7 +82,7 @@ test("an already-running packaged MCP channel retries through a same-port Viewer
       requests += 1;
       if (requests === 1) return spawnResult("before_restart");
       markBlockedRequestReached?.();
-      return new Promise<Response>((resolve) => { releaseBlockedRequest = resolve; });
+      return new Promise<Response>((resolve) => { blockedRequest.release = resolve; });
     },
   });
   const viewerPort = firstViewer.port;
@@ -103,6 +103,7 @@ test("an already-running packaged MCP channel retries through a same-port Viewer
   transport.stderr?.on("data", (chunk) => { mcpStderr += String(chunk); });
   let restartedViewer: ReturnType<typeof Bun.serve> | null = null;
   let restartedRequests = 0;
+  let transientProxyFailures = 0;
   try {
     await client.connect(transport);
     expect((await callSpawn(client, "restart-before")).structuredContent)
@@ -116,6 +117,10 @@ test("an already-running packaged MCP channel retries through a same-port Viewer
       port: viewerPort,
       fetch: () => {
         restartedRequests += 1;
+        if (transientProxyFailures > 0) {
+          transientProxyFailures -= 1;
+          return new Response(null, { status: 503 });
+        }
         return spawnResult("after_restart");
       },
     });
@@ -129,8 +134,23 @@ test("an already-running packaged MCP channel retries through a same-port Viewer
     expect(landed.structuredContent)
       .toMatchObject({ ok: true, conversationId: "conversation_after_restart" });
     expect(restartedRequests).toBe(2);
+
+    transientProxyFailures = 1;
+    expect((await callSpawn(client, "restart-proxy-gap")).structuredContent)
+      .toMatchObject({ ok: true, conversationId: "conversation_after_restart" });
+    expect(restartedRequests).toBe(4);
+
+    await restartedViewer.stop(true);
+    restartedViewer = null;
+    const unavailable = await callSpawn(client, "restart-unavailable");
+    expect(unavailable.isError).toBe(true);
+    expect(unavailable.structuredContent).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("Viewer control did not reconnect after"),
+    });
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("spawn_agent");
   } finally {
-    releaseBlockedRequest?.(Response.json({ error: "retired Viewer generation" }, { status: 503 }));
+    blockedRequest.release?.(Response.json({ error: "retired Viewer generation" }, { status: 503 }));
     await Promise.race([
       Promise.all([
         transport.close().catch(() => {}),
@@ -141,4 +161,4 @@ test("an already-running packaged MCP channel retries through a same-port Viewer
     ]);
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
-}, 15_000);
+}, 20_000);
