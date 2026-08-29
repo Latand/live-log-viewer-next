@@ -69,3 +69,64 @@ test("an unreadable gh leaves the slot working from the board rather than failin
 test("the proposal ref stays inside what the card marker can read back", () => {
   expect(seatTickProposalRef("20693")).toMatch(/^[A-Za-z0-9_-]{4,64}$/);
 });
+
+/* ------------------------------------------------------------------------- *
+ * The project's own monitor prompt (#1280).
+ * ------------------------------------------------------------------------- */
+
+const HEADING = "Standing monitor note for this project";
+
+function wake(prompt?: string | null): string {
+  return seatTickWakeMessage({
+    project: PROJECT,
+    reasons: [{ kind: "interval", detail: "the wake interval elapsed while work is open" }],
+    items: [{ kind: "pipeline", id: "pipeline_a1", label: "ship the exporter — running" }],
+    deferred: 0,
+    signals: [{ id: "deploy", label: "the last deployment ended rolled-back" }],
+    ...(prompt === undefined ? {} : { monitorPrompt: prompt }),
+  });
+}
+
+test("a wake carries the project's own monitor prompt beside what the tick derived, above an untouched contract", () => {
+  const text = wake("before anything else, check whether the nightly digest actually sent");
+  expect(text).toContain(HEADING);
+  expect(text).toContain("before anything else, check whether the nightly digest actually sent");
+  /* Appended, never a substitution: the reasons, the items, the signals and
+     every clause of the contract are still exactly where they were. */
+  expect(text).toContain("interval: the wake interval elapsed while work is open");
+  expect(text).toContain("[pipeline] pipeline_a1 — ship the exporter — running");
+  expect(text).toContain("the last deployment ended rolled-back");
+  expect(text).toContain("Act on the listed items only");
+  expect(text).toContain("Do not schedule yourself");
+  expect(text).toContain("Do not wait on the operator inside this turn");
+  /* And the contract has the last word, so a prompt cannot read as the thing
+     that governs what the turn may do. */
+  expect(text.indexOf(HEADING)).toBeLessThan(text.indexOf("Contract:"));
+});
+
+test("a project with no prompt gets exactly the wake it got before the field existed", () => {
+  const before = wake();
+  expect(before).not.toContain(HEADING);
+  /* Absent, empty and explicitly cleared are one behaviour: the unchanged
+     message, byte for byte. */
+  expect(wake(null)).toBe(before);
+  expect(wake("")).toBe(before);
+});
+
+test("the proposal slot carries the prompt too, and without one is unchanged", () => {
+  const proposal = (prompt?: string | null) => seatTickProposalMessage({
+    project: PROJECT,
+    issues: [],
+    signals: [],
+    items: 5,
+    slot: "20693",
+    ...(prompt === undefined ? {} : { monitorPrompt: prompt }),
+  });
+  const text = proposal("rank the deploy-blocking issues first; I keep missing them");
+  expect(text).toContain(HEADING);
+  expect(text).toContain("rank the deploy-blocking issues first; I keep missing them");
+  expect(text).toContain("ONE ranked list of at most 5 actions");
+  expect(text.indexOf(HEADING)).toBeLessThan(text.indexOf("Contract:"));
+  expect(proposal()).not.toContain(HEADING);
+  expect(proposal(null)).toBe(proposal());
+});

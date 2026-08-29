@@ -106,12 +106,38 @@ function seatTickBullet(item: SeatTickItem): string {
   return `- [${item.kind}] ${item.id} — ${item.label}`;
 }
 
+/**
+ * The project's own monitor prompt (#1280), in the seat's own words.
+ *
+ * It is APPENDED — never a substitution. The reasons and items above it are
+ * what the tick derived, the contract below it is the same contract every wake
+ * has carried, and this sits between them saying what to look at within them.
+ * The framing line is there because the wake is read by a session that did not
+ * write the prompt: a rotation's successor has to be able to tell an
+ * instruction its predecessor left standing from the operator's words this
+ * turn, and to know where to go to replace or withdraw it.
+ *
+ * With no prompt on the row this contributes nothing at all, so a project that
+ * never set one gets the wake exactly as it was.
+ */
+function seatTickPromptSection(monitorPrompt: string | null | undefined): string[] {
+  if (!monitorPrompt) return [];
+  return [
+    "",
+    "Standing monitor note for this project, in the seat's own words (seat_tick_settings sets, replaces and clears it). "
+      + "It shapes what you look at; the contract below still governs what you do:",
+    monitorPrompt,
+  ];
+}
+
 export function seatTickWakeMessage(input: {
   project: string;
   reasons: readonly SeatTickWakeReason[];
   items: readonly SeatTickItem[];
   deferred: number;
   signals: readonly SeatTickSignalInput[];
+  /** The project's own monitor prompt (#1280), or nothing. */
+  monitorPrompt?: string | null;
 }): string {
   const lines = [
     `Seat tick — ${input.project}.`,
@@ -128,6 +154,7 @@ export function seatTickWakeMessage(input: {
   if (input.signals.length > 0) {
     lines.push("", "Signals:", ...input.signals.map((signal) => `- ${signal.label}`));
   }
+  lines.push(...seatTickPromptSection(input.monitorPrompt));
   lines.push("", "Contract:", ...SEAT_TICK_CONTRACT.map((clause) => `- ${clause}`));
   return redactBounded(lines.join("\n"), SEAT_TICK_MESSAGE_LIMIT);
 }
@@ -147,6 +174,12 @@ export function seatTickProposalMessage(input: {
   signals: readonly SeatTickSignalInput[];
   items: number;
   slot: string;
+  /** The project's own monitor prompt (#1280), or nothing. The proposal slot is
+      a scheduler-fired wake like any other, so a note about what this project's
+      monitor should look at is owed here too — a prompt that silently went
+      missing on the one tick that asks the seat to rank the whole board would
+      be the same gap in a smaller place. */
+  monitorPrompt?: string | null;
 }): string {
   const lines = [
     `Seat tick — ${input.project}. No lane is open and no board task is waiting, and the proposal slot is due.`,
@@ -165,6 +198,7 @@ export function seatTickProposalMessage(input: {
     "Rank by what actually matters now: what is blocking, what is cheap and finishes something, what has been waiting longest.",
     `Put this exact line at the foot of the card so the next tick recognizes it: ${MONITOR_REF_PREFIX} ${seatTickProposalRef(input.slot)}`,
     "Open no GitHub issue and start no pipeline from this — the operator moves a card to assigned when they want it, and the next tick starts it.",
+    ...seatTickPromptSection(input.monitorPrompt),
     "",
     "Contract:",
     ...SEAT_TICK_CONTRACT.map((clause) => `- ${clause}`),

@@ -1676,6 +1676,13 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
  * The one thing required is a REASON whenever the settings leave the default.
  * A tick that has gone quiet with nothing saying why is indistinguishable from
  * a tick that broke, which is the worse of the two failures.
+ *
+ * `monitorPrompt` (#1280) is the fourth field and the only one that is not a schedule:
+ * the seat's own words about what its monitor should look at, appended to every
+ * later scheduler-fired wake. It is bounded and redacted like the reason,
+ * replaced by the next one sent and cleared with `monitorPrompt: null`. Because it
+ * cannot change whether or when a wake is sent, it needs no reason and leaves
+ * the project on the default tick.
  */
 function seatTickSettingsTool(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpToolPayload {
   const attribution = attributionOf(dependencies);
@@ -1699,6 +1706,7 @@ function seatTickSettingsTool(args: McpToolArgs, dependencies: ViewerMcpDomainDe
   if (args.enabled !== undefined) change.enabled = args.enabled as boolean;
   if (args.wakeIntervalMinutes !== undefined) change.wakeIntervalMinutes = args.wakeIntervalMinutes as number | null;
   if (args.reason !== undefined) change.reason = args.reason as string | null;
+  if (args.monitorPrompt !== undefined) change.monitorPrompt = args.monitorPrompt as string | null;
   if (args.untilMinutes !== undefined) {
     const minutes = args.untilMinutes as number | null;
     if (minutes === null) change.until = null;
@@ -1739,6 +1747,11 @@ function seatTickSettingsTool(args: McpToolArgs, dependencies: ViewerMcpDomainDe
       enabled: effective.enabled,
       wakeIntervalMinutes: Math.round(effective.wakeIntervalMs / 60_000),
       reason: effective.reason,
+      /* What the next scheduler-fired wake will carry (#1280). Returned on
+         both a read and a change, because the record read back — not the echo
+         of what was sent — is what tells a caller its prompt landed, was
+         replaced, or is gone. */
+      monitorPrompt: effective.monitorPrompt,
       until: effective.until,
       isDefault: effective.isDefault,
     },

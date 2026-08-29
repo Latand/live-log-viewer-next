@@ -2148,7 +2148,7 @@ function tickSettingsBindings(options: {
       : [{ conversationId: TICK_SEAT, path: null, project: options.callerProject ?? "viewer" }]),
     callerProject: () => options.callerProject ?? "viewer",
     readTickSettings: (project: string) => (store.get(project) as never) ?? {
-      project, enabled: true, wakeIntervalMinutes: null, reason: null, until: null, updatedAt: null, setBy: null,
+      project, enabled: true, wakeIntervalMinutes: null, reason: null, monitorPrompt: null, until: null, updatedAt: null, setBy: null,
     },
     writeTickSettings: (project: string, settings: unknown) => { store.set(project, settings); },
   } as never);
@@ -2240,6 +2240,51 @@ test("seat_tick_settings refuses only the change that would leave no reason behi
     .rejects.toThrow("a reason is required");
   expect(store.size).toBe(0);
   await expect(bindings.seat_tick_settings({ clientRequestId: "tick-empty" })).resolves.toMatchObject({ changed: false });
+});
+
+test("seat_tick_settings sets, replaces and clears the monitor prompt, and the record read back is what says so (#1280)", async () => {
+  const { bindings, store } = tickSettingsBindings();
+  const set = await bindings.seat_tick_settings({
+    clientRequestId: "tick-prompt-set",
+    monitorPrompt: "before the items, check whether last night's digest actually sent",
+  });
+  expect(set).toMatchObject({
+    changed: true,
+    effective: { monitorPrompt: "before the items, check whether last night's digest actually sent" },
+  });
+
+  /* Read back through a second call, which is what the tick itself does at its
+     next check — the echo of the write proves nothing about the record. */
+  const readBack = await bindings.seat_tick_settings({ clientRequestId: "tick-prompt-read" });
+  expect(readBack).toMatchObject({
+    changed: false,
+    effective: { monitorPrompt: "before the items, check whether last night's digest actually sent" },
+  });
+
+  await bindings.seat_tick_settings({ clientRequestId: "tick-prompt-replace", monitorPrompt: "the digest is fixed; watch the review rounds instead" });
+  expect(await bindings.seat_tick_settings({ clientRequestId: "tick-prompt-read-2" }))
+    .toMatchObject({ changed: false, effective: { monitorPrompt: "the digest is fixed; watch the review rounds instead" } });
+
+  await bindings.seat_tick_settings({ clientRequestId: "tick-prompt-clear", monitorPrompt: null });
+  expect(store.get("viewer")).toMatchObject({ monitorPrompt: null });
+  expect(await bindings.seat_tick_settings({ clientRequestId: "tick-prompt-read-3" }))
+    .toMatchObject({ changed: false, effective: { monitorPrompt: null } });
+});
+
+test("a monitor prompt needs no reason and leaves the tick on its default (#1280)", async () => {
+  const { bindings, store } = tickSettingsBindings();
+  /* The reason answers for a tick that has gone quiet. A prompt quiets
+     nothing — it changes what a wake says, never whether or when one is sent —
+     so there is nothing here for a reason to explain. */
+  const applied = await bindings.seat_tick_settings({
+    clientRequestId: "tick-prompt-no-reason",
+    monitorPrompt: "start from the oldest blocked card",
+  });
+  expect(applied).toMatchObject({
+    changed: true,
+    effective: { enabled: true, wakeIntervalMinutes: 60, isDefault: true, reason: null, monitorPrompt: "start from the oldest blocked card" },
+  });
+  expect(store.get("viewer")).toMatchObject({ enabled: true, wakeIntervalMinutes: null, reason: null, until: null });
 });
 
 test("seat_tick_settings is callable by a session that holds no seat at all", async () => {

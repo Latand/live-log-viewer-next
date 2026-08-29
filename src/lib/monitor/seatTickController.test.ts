@@ -257,6 +257,23 @@ test("a tick setting that reached its expiry is written back to the default by t
   expect(rig.cards[0]!.card).toMatchObject({ state: "resolved" });
 });
 
+test("the lapse ends the setting that expired and keeps the monitor prompt it never covered (#1280)", async () => {
+  const settings = offSettings({ until: new Date(NOW - MINUTE).toISOString(), monitorPrompt: MONITOR_PROMPT });
+  const persisted: SeatTickSettings[] = [];
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  await runSeatTickCheck(PROJECT, { ...rig.deps, writeSettings: (_project, row) => { persisted.push(row); } });
+  /* The expiry was set on the on/off, so that is what it ended. The words the
+     seat left for its own wakes were not part of it, and the wake this very
+     check sent still carries them. */
+  expect(persisted).toEqual([{
+    ...defaultSeatTickSettings(PROJECT),
+    monitorPrompt: MONITOR_PROMPT,
+    updatedAt: settings.updatedAt,
+    setBy: settings.setBy,
+  }]);
+  expect(rig.sent[0]!.text).toContain(MONITOR_PROMPT);
+});
+
 test("the board card for a quiet tick is written, kept in step, and closed when the tick comes back (#1275)", async () => {
   const project = `card-lifecycle-${crypto.randomUUID().slice(0, 8)}`;
   const tasksFile = path.join(SANDBOX, "state", "tasks.json");
@@ -769,4 +786,81 @@ test("a check that outran its interval drops the next tick rather than queueing 
   await Promise.resolve();
   fire();
   expect(sweeps).toBe(2);
+});
+
+
+/* ------------------------------------------------------------------------- *
+ * The agent-authored monitor prompt on the wake the scheduler fires (#1280).
+ *
+ * The seat cannot schedule itself — that is settled, and stays settled. What
+ * it can do is say what the schedule the Viewer arms for it should look at,
+ * and these cases are about that instruction surviving the two boundaries a
+ * session-scheduled prompt never survived: the next check, and a rotation.
+ * ------------------------------------------------------------------------- */
+
+const MONITOR_PROMPT = "before the items, check whether last night's digest actually sent";
+const PROMPT_HEADING = "Standing monitor note for this project";
+
+function promptSettings(): SeatTickSettings {
+  return {
+    ...defaultSeatTickSettings(PROJECT),
+    monitorPrompt: MONITOR_PROMPT,
+    updatedAt: "2026-08-28T11:00:00.000Z",
+    setBy: { kind: "manager", conversationId: CONVERSATION, project: PROJECT, seatEpoch: 7 },
+  };
+}
+
+test("the wake the scheduler fires carries the project's own monitor prompt, check after check (#1280)", async () => {
+  const settings = promptSettings();
+  const first = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  const firstRecord = await runSeatTickCheck(PROJECT, first.deps);
+  expect(firstRecord).toMatchObject({ verdict: "wake" });
+  expect(first.sent[0]!.text).toContain(MONITOR_PROMPT);
+  /* Beside what the tick derived, not instead of it, and the contract still
+     has the last word. */
+  expect(first.sent[0]!.text).toContain("Items:");
+  expect(first.sent[0]!.text).toContain("Act on the listed items only");
+
+  /* The next check reads the same row rather than any memory of the last wake,
+     so an hour later the instruction is still on the wake. A prompt the seat
+     re-typed into a schedule it made for itself lasted exactly one turn; this
+     is the difference. */
+  const second = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  await runSeatTickCheck(PROJECT, second.deps);
+  expect(second.sent[0]!.text).toContain(MONITOR_PROMPT);
+});
+
+test("a rotation hands the monitor prompt on: the successor's first wake carries it (#1280)", async () => {
+  const settings = promptSettings();
+  const before = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  await runSeatTickCheck(PROJECT, before.deps);
+  expect(before.sent[0]!.conversationId).toBe(CONVERSATION);
+
+  /* A different seat, a later epoch: the row is the PROJECT's, so what the
+     retired seat asked its monitor to watch is what the successor is woken
+     with, rather than dying with the session that wrote it. */
+  const after = harness({
+    seat: { conversationId: SUCCESSOR, seatEpoch: 8, path: null },
+    pipelines: OPEN_LANE,
+    state: OVERDUE,
+    settings,
+  });
+  await runSeatTickCheck(PROJECT, after.deps);
+  expect(after.sent[0]!.conversationId).toBe(SUCCESSOR);
+  expect(after.sent[0]!.text).toContain(MONITOR_PROMPT);
+});
+
+test("a project with no monitor prompt is woken with exactly the message it was woken with before (#1280)", async () => {
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE });
+  await runSeatTickCheck(PROJECT, rig.deps);
+  expect(rig.sent[0]!.text).not.toContain(PROMPT_HEADING);
+  /* And a row that exists but carries no prompt is the same silence: an empty
+     field is not a section with nothing in it. */
+  const configured = harness({
+    pipelines: OPEN_LANE,
+    state: OVERDUE,
+    settings: { ...promptSettings(), monitorPrompt: null },
+  });
+  await runSeatTickCheck(PROJECT, configured.deps);
+  expect(configured.sent[0]!.text).toBe(rig.sent[0]!.text);
 });

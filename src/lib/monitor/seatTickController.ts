@@ -15,7 +15,7 @@ import { appendSeatTickRecord } from "./journalStore";
 import { redactMonitorText } from "./redact";
 import { seatTickProposalMessage, seatTickWakeMessage } from "./report";
 import { seatTickDecision, seatTickPolicy, seatTickWakeCommit, seatTickWakeCommitPlan } from "./seatTick";
-import { defaultSeatTickSettings, writeSeatTickSettings } from "./seatTickSettings";
+import { seatTickSettingsAfterLapse, writeSeatTickSettings } from "./seatTickSettings";
 import { readSeatTickState, seatTickStateForEpoch, writeSeatTickState } from "./seatTickState";
 import {
   defaultSeatTickSources,
@@ -484,7 +484,7 @@ async function check(
      off the board at the worst possible moment. */
   if (input.settings.lapsed) {
     try {
-      (dependencies.writeSettings ?? writeSeatTickSettings)(input.project, defaultSeatTickSettings(input.project));
+      (dependencies.writeSettings ?? writeSeatTickSettings)(input.project, seatTickSettingsAfterLapse(input.project, input.settings));
     } catch (error) {
       console.error("[seat tick] lapsed settings could not be persisted", error instanceof Error ? error.name : "unknown");
     }
@@ -514,6 +514,7 @@ async function check(
         items: verdict.items,
         deferred: verdict.deferred,
         signals: input.signals,
+        monitorPrompt: input.settings.monitorPrompt,
       })
       : seatTickProposalMessage({
         project: input.project,
@@ -521,9 +522,16 @@ async function check(
         signals: input.signals,
         items: policy.itemsPerWake,
         slot: String(Math.floor(input.now / policy.proposalIntervalMs)),
+        monitorPrompt: input.settings.monitorPrompt,
       });
 
-    /* The seat epoch is re-read here, one step before the send, for the same
+    /* The prompt above came off the settings row this check read, not out of
+       anything the controller carries between checks or between seats: the row
+       is the project's, so an instruction a seat left for its own monitor is
+       still on the next check's wake, and still on the wake the successor gets
+       after a rotation retires the seat that wrote it. (#1280)
+
+       The seat epoch is re-read here, one step before the send, for the same
        reason the retirement sweep re-checks: a rotation that landed while this
        check was gathering must not have its predecessor woken. */
     const current = sources.seatFor(input.project).active;
