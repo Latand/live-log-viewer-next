@@ -169,6 +169,24 @@ test("a deleted codex worktree still groups under its parent repo project", () =
   expect(projectForCwd(dead)).toBe(projectForCwd(liveRepo));
 });
 
+test("a Claude worktree keeps its parent project after the checkout is removed", () => {
+  useStateDirectory("deleted-claude-state");
+  const repo = path.join(SANDBOX, "deleted-claude-main");
+  const identity = createRepository(repo);
+  const worktree = path.join(repo, ".claude", "worktrees", "topic");
+  fs.mkdirSync(worktree, { recursive: true });
+
+  const live = projectInfoFromCwd(worktree);
+  expect(live).toMatchObject({ project: identity.project, worktree: "topic", repo });
+
+  fs.rmSync(worktree, { recursive: true, force: true });
+  globalCache("project-info-cwd-v2").clear();
+  globalCache("worktree-git").clear();
+  expect(fs.existsSync(worktree)).toBe(false);
+  expect(projectInfoFromCwd(worktree)).toEqual(live);
+  expect(projectForCwd(worktree)).toBe(projectForCwd(repo));
+});
+
 test("a deleted nested checkout inside a Codex worktree groups under the main repo", () => {
   const state = useStateDirectory("deleted-nested-codex-state");
   const identity = createRepository(path.join(SANDBOX, "deleted-nested-codex-main"));
