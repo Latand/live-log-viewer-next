@@ -36,7 +36,7 @@ Runs with `bun dev` (dev) / `bun run build && bun start` on **127.0.0.1:8898**.
 
 ## Stack (verified 2026-07-03)
 
-Next.js 16.2.10 (LTS, App Router, Turbopack), React 19.2, Tailwind CSS 4.3
+Next.js 16.3.2 (LTS, App Router, Turbopack), React 19.2, Tailwind CSS 4.3
 (CSS-first `@theme` config — tokens already defined in `src/app/globals.css`),
 TypeScript 5 strict, bun.
 

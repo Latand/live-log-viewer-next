@@ -17,6 +17,10 @@ interface Script {
   socket?: boolean[];
   /** Which poll the successor process dies on, counted from one. */
   diesAtPoll?: number;
+  /** The clock reading at which the successor process is gone. The clock here
+      only moves in `sleep`, so this kills it between two polls rather than on
+      one — with the hold window, inside the hold's own final sleep. */
+  diesAtClockMs?: number;
 }
 
 interface Recorded {
@@ -55,7 +59,10 @@ function harness(script: Script): { ports: RuntimeHostRehearsalPorts; recorded: 
         return answer(script.socket ?? [true], socketPolls - 1);
       },
       now: () => clock,
-      sleep: async (milliseconds) => { clock += milliseconds; },
+      sleep: async (milliseconds) => {
+        clock += milliseconds;
+        if (script.diesAtClockMs !== undefined && clock >= script.diesAtClockMs) successorExited = true;
+      },
     },
   };
 }
@@ -135,6 +142,36 @@ test("a host that exits mid-hold fails even while its endpoints still answer", a
 
   expect(report.ok).toBe(false);
   expect(report.detail).toContain("exited during the");
+});
+
+test("a host that dies in the hold's final sleep fails the rehearsal", async () => {
+  /* #1248: the loop polls and then sleeps, and the window ends inside that
+     sleep. Nothing used to look again afterwards, so a successor that died in
+     that last interval was reported as a clean hold — the one case this gate
+     exists to catch. Both endpoints keep answering here, so only a look at the
+     process after the window can see it. */
+  const { ports } = harness({ listener: [true], diesAtClockMs: 2_000 });
+
+  const report = await rehearseRuntimeHost(ports, options);
+
+  expect(report.ok).toBe(false);
+  // Named as the tail it is, and distinct from a death seen inside the window.
+  expect(report.detail).toContain("exited in the final 500ms of the 2s hold");
+  expect(report.succession.completed).toBe(true);
+  expect(report.log).toEqual(["successor: line one"]);
+});
+
+test("an endpoint that has gone once the hold window elapsed fails the rehearsal", async () => {
+  // Every poll inside the window answers; the one after the final sleep is the
+  // first that does not, and a caller that reads its answer in full asks it.
+  const { ports } = harness({ listener: [true], socket: [true, true, true, true, false] });
+
+  const report = await rehearseRuntimeHost(ports, options);
+
+  expect(report.ok).toBe(false);
+  expect(report.detail).toContain("the runtime socket stopped answering at the end of a 2s hold");
+  // Four polls in a 2s window at 500ms, and the fifth is the check after it.
+  expect(report.socket.polls).toBe(5);
 });
 
 test("every generation is stopped even when the rehearsal fails", async () => {

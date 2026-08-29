@@ -92,11 +92,16 @@ beforeAll(async () => {
   const stateDir = path.join(sandbox, "state");
   const port = await freePort();
   origin = `http://127.0.0.1:${port}`;
-  /* The SAME command `package.json` starts the viewer with. `bunx next start`
-     hands the server to node, where the instrumentation hook dies on "SQLite
-     state stores require the Bun runtime" — every request 500s and the
-     assertions below read that error page instead of a served payload. */
-  server = Bun.spawn(["bun", "--bun", "node_modules/.bin/next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
+  /* The SAME command `package.json` starts the viewer with, under the SAME Bun
+     this file runs on. `bunx next start` hands the server to node, where the
+     instrumentation hook dies on "SQLite state stores require the Bun runtime"
+     — every request 500s and the assertions below read that error page instead
+     of a served payload. A bare `bun` off PATH does the same thing whenever it
+     is older than the image's pin, because the compiled app-page runtime does
+     not load below Bun 1.4.0. `process.execPath` is the interpreter under
+     test, which is the one whose answers this file is reading. */
+  const runtime = process.versions.bun ? process.execPath : "bun";
+  server = Bun.spawn([runtime, "--bun", "node_modules/.bin/next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -174,6 +179,11 @@ test("an anonymously fetched document carries no credential and asks for none", 
   const response = await fetch(origin, { headers: { accept: "text/html" } });
   const html = await response.text();
 
+  /* Status first, and this is the third version of the mistake in the header: an
+     error page contains none of the ceremony below either, so a server that 500s
+     every route passes every assertion in this file. It says nothing about a
+     credential — it says the document was never served. */
+  expect(response.status).toBe(200);
   expect(html.length).toBeGreaterThan(0);
   /* The round-7 fragment name, the round-8 storage key, the round-9 prop, and the
      header an agent identifies itself with: a served document that mentions any of
