@@ -1402,6 +1402,7 @@ export const en = {
   "flowState.blocked_rate_limited": "blocked: rate-limited",
   "flowState.rate_limit_until": "resets at {time}",
   "flowState.rate_limit_wait": "waiting for the quota reset",
+  "flowState.rate_limit_reset_unknown": "reset unknown — rechecking at {time}",
   "flowModel.failed": "failed ({status})",
 
   "wfState.provisioning": "provisioning the worktree",

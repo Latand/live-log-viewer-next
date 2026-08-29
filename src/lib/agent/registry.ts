@@ -5275,12 +5275,31 @@ export class AgentRegistry {
           adoptedSuccessorPath = true;
           refreshResumeReceiptIndex();
         }
-        if (!resumeInventoryFenced && (!exactOwner || adoptedSuccessorPath) && nativeOwner && nativeId) {
-          const generation = nativeOwner.generations.find((candidate) => candidate.id === nativeId);
-          if (generation && generation.path !== observation.path) {
+        const nativeGeneration = nativeOwner && nativeId
+          ? nativeOwner.generations.find((candidate) => candidate.id === nativeId)
+          : undefined;
+        /* Claude worktree removal moves the transcript after recording its new
+           location as continuity. Exact ownership normally keeps continuity
+           artifacts from replacing the current generation; once that current
+           file is gone, the surviving same-session artifact is the relocation
+           target and must become current. */
+        const relocatedContinuityPath = exactOwner?.id === nativeOwner?.id
+          && nativeGeneration !== undefined
+          && nativeGeneration.path !== observation.path
+          && !fs.existsSync(nativeGeneration.path)
+          && fs.existsSync(observation.path);
+        if (!resumeInventoryFenced
+          && (!exactOwner || adoptedSuccessorPath || relocatedContinuityPath)
+          && nativeOwner
+          && nativeGeneration) {
+          const generation = nativeGeneration;
+          if (generation.path !== observation.path) {
             if (firstObservedPath === undefined || firstObservedPath === observation.path) {
               if (!nativeOwner.continuityPaths.includes(generation.path)) nativeOwner.continuityPaths.push(generation.path);
               generation.path = observation.path;
+              nativeOwner.continuityPaths = nativeOwner.continuityPaths.filter((pathname) => pathname !== generation.path);
+              nativeOwner.abandonedContinuityPaths = nativeOwner.abandonedContinuityPaths.filter((pathname) => pathname !== generation.path);
+              nativeOwner.providerForkPaths = nativeOwner.providerForkPaths.filter((pathname) => pathname !== generation.path);
             } else if (!nativeOwner.continuityPaths.includes(observation.path)) {
               nativeOwner.continuityPaths.push(observation.path);
             }
