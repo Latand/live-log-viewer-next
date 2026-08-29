@@ -167,7 +167,12 @@ test("a stale terminal turn word no longer settles a stage whose host is gone an
 test("a stale busy turn word does not make a live stage host retryable", async () => {
   /* The mirror case: the row says a turn is in flight, the recorded process is
      there, and the transcript says nothing. No retry is authorised by the word
-     alone — the stage keeps its attempt. */
+     alone — the stage keeps its attempt. Unlike the terminal case above, this
+     one pins the shape rather than the defect it was written against: a busy
+     word only ever reached a verdict past the 90s observation window, which a
+     pid this young cannot be on the far side of, so the stale-`busy` cases that
+     go red without the fix are the decision itself and the kill and nudge
+     seams. What this one guards is a shortcut that reads the word earlier. */
   const identity = procBackend.processIdentity(process.pid);
   const { conversationId } = stageConversation(
     "stale-busy",
