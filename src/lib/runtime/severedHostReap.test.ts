@@ -74,13 +74,13 @@ function seat(
   name: string,
   process: { pid: number; startIdentity: string },
   lastWrite: Date,
-  body: string = OPEN_TURN_TRANSCRIPT,
+  options: { body?: string; recordedTurn?: "busy" | "terminal" } = {},
 ) {
   const directory = fs.mkdtempSync(path.join(isolated, `${name}-`));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   const sessionId = crypto.randomUUID();
   const transcript = path.join(directory, `${sessionId}.jsonl`);
-  fs.writeFileSync(transcript, body);
+  fs.writeFileSync(transcript, options.body ?? OPEN_TURN_TRANSCRIPT);
   fs.utimesSync(transcript, lastWrite, lastWrite);
   const begun = beginLegacySpawnFixture(registry, { engine: "claude", cwd: directory, transport: "structured", accountId: null });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
@@ -115,7 +115,11 @@ function seat(
     path: transcript,
     accountId: null,
     launchProfile: settled.conversation.generations.at(-1)!.launchProfile,
-    turn: { state: "busy", source: "lifecycle", terminalAt: null },
+    turn: {
+      state: options.recordedTurn ?? "busy",
+      source: "lifecycle",
+      terminalAt: options.recordedTurn === "terminal" ? lastWrite.toISOString() : null,
+    },
     observedAt: new Date(lastWrite.getTime() + 60_000).toISOString(),
   }]);
   return { registry, conversationId: settled.conversation.id, key: { engine: "claude" as const, sessionId }, directory };
@@ -183,24 +187,59 @@ test("a pid the registry no longer owns is reported severed but never signalled"
 });
 
 
-test("a live host whose transcript cannot be read is never reaped on the row's own turn word", async () => {
-  const child = childProcess();
-  /* Every other fact matches the specimen reaped above — a live child, nothing
-     written since its launch, 4.7 s of CPU in 34 minutes — and the row reads
-     `busy`. The one difference is that the transcript says nothing, and that is
-     the whole difference: unreadable evidence authorises no kill (#1281). */
-  const { registry, conversationId, key } = seat("unreadable", child, AN_HOUR_AGO, UNREADABLE_TRANSCRIPT);
-  try {
-    const outcome = await reapSeveredStructuredHost(registry, conversationId, key, {
-      ...later,
-      processCpuMs: () => 4_700,
+test.each(["busy", "terminal"] as const)(
+  "a live host whose transcript cannot be read is never reaped on a stale %s turn word",
+  async (recordedTurn) => {
+    const child = childProcess();
+    /* Every other fact matches the specimen reaped above — a live child, nothing
+       written since its launch, 4.7 s of CPU in 34 minutes — and one more is
+       added on top: a delivery this conversation has been waiting on since
+       before the recorded launch. That was the second route to a kill, and it
+       reached one with the transcript in exactly this state. The row's word is
+       varied across both cases because it is not consulted either way: the
+       transcript says nothing, and unreadable evidence authorises no kill
+       (#1281). */
+    const { registry, conversationId, key } = seat(`unreadable-${recordedTurn}`, child, AN_HOUR_AGO, {
+      body: UNREADABLE_TRANSCRIPT,
+      recordedTurn,
     });
+    registry.holdDelivery(conversationId, "a message queued behind this turn");
+    try {
+      const outcome = await reapSeveredStructuredHost(registry, conversationId, key, {
+        ...later,
+        processCpuMs: () => 4_700,
+      });
+
+      expect(outcome).toBeNull();
+      expect(procBackend.pidAlive(child.pid)).toBe(true);
+      expect(registry.readOnlySnapshot().entries[`claude:${key.sessionId}`]).toMatchObject({ status: "live" });
+    } finally {
+      child.kill();
+      await settles(() => !procBackend.pidAlive(child.pid), "fixture child exit");
+    }
+  },
+);
+
+test.each(["busy", "terminal"] as const)(
+  "a gone process and a stale %s turn word authorise no kill when the transcript cannot be read",
+  async (recordedTurn) => {
+    /* The row names a pid that no longer exists — the shape a redeploy leaves —
+       over a transcript nobody can parse. The absence is real, and it is
+       evidence about the pid, not about the turn: a turn severed mid-work and a
+       turn that finished hours ago under a row nobody updated both look exactly
+       like this. So the reaper is handed nothing to act on, and the row it would
+       have retired is left where it is. */
+    const { registry, conversationId, key } = seat(`gone-${recordedTurn}`, {
+      pid: 2_000_000_004,
+      startIdentity: "pre-restart-host",
+    }, AN_HOUR_AGO, { body: UNREADABLE_TRANSCRIPT, recordedTurn });
+
+    const outcome = await reapSeveredStructuredHost(registry, conversationId, key, later);
 
     expect(outcome).toBeNull();
-    expect(procBackend.pidAlive(child.pid)).toBe(true);
-    expect(registry.readOnlySnapshot().entries[`claude:${key.sessionId}`]).toMatchObject({ status: "live" });
-  } finally {
-    child.kill();
-    await settles(() => !procBackend.pidAlive(child.pid), "fixture child exit");
-  }
-});
+    expect(registry.readOnlySnapshot().entries[`claude:${key.sessionId}`]).toMatchObject({
+      status: "live",
+      structuredHost: { process: { pid: 2_000_000_004 } },
+    });
+  },
+);

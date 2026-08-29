@@ -148,34 +148,41 @@ test("a row already retired keeps reporting its own retirement stamp", async () 
   expect(unavailableSince).toBe(registry.readOnlySnapshot().entries[`claude:${entry.key.sessionId}`]!.updatedAt);
 });
 
-test("a stale terminal turn word no longer settles a stage whose host is gone and whose transcript cannot be read", async () => {
-  /* The row says the turn finished, the process is gone, and the transcript
-     that would say either way cannot be parsed. Reading the word made this
-     stage `settled` — nothing to retry — on evidence nobody had (#1281). */
-  const { conversationId } = stageConversation(
-    "stale-terminal",
-    { pid: 2_000_000_003, startIdentity: "pre-restart-host" },
-    new Date(TOOL_RESULT_AT),
-    { body: UNREADABLE_TRANSCRIPT, recordedTurn: "terminal" },
-  );
+test.each(["terminal", "busy"] as const)(
+  "a stage whose host is gone and whose transcript cannot be read is not retryable on a stale %s turn word",
+  async (recordedTurn) => {
+    /* The redeploy leftover, both ways round: the row still reads `live`, the
+       recorded process is gone, the transcript that would say what the turn was
+       doing cannot be parsed, and the word on the row says either that a turn is
+       in flight or that one finished.
 
-  const unavailableSince = await defaultPipelinePorts().conversationHostUnavailableSince!(conversationId);
+       The missing process is what used to decide this — it is definitive about
+       the pid and silent about the turn, since a turn cut off mid-work and a
+       turn that ended hours ago under a row nobody updated both leave a pid that
+       is gone. Retrying the first is recovery; retrying the second re-runs
+       finished work. With nothing separating them, the stage keeps its attempt
+       and reports no moment of unavailability at all (#1281). The word is varied
+       across both cases because it is not read either way. */
+    const { conversationId } = stageConversation(
+      `stale-${recordedTurn}`,
+      { pid: recordedTurn === "terminal" ? 2_000_000_003 : 2_000_000_004, startIdentity: "pre-restart-host" },
+      new Date(TOOL_RESULT_AT),
+      { body: UNREADABLE_TRANSCRIPT, recordedTurn },
+    );
 
-  expect(unavailableSince).not.toBeNull();
-});
+    const unavailableSince = await defaultPipelinePorts().conversationHostUnavailableSince!(conversationId);
 
-test("a stale busy turn word does not make a live stage host retryable", async () => {
-  /* The mirror case: the row says a turn is in flight, the recorded process is
-     there, and the transcript says nothing. No retry is authorised by the word
-     alone — the stage keeps its attempt. Unlike the terminal case above, this
-     one pins the shape rather than the defect it was written against: a busy
-     word only ever reached a verdict past the 90s observation window, which a
-     pid this young cannot be on the far side of, so the stale-`busy` cases that
-     go red without the fix are the decision itself and the kill and nudge
-     seams. What this one guards is a shortcut that reads the word earlier. */
+    expect(unavailableSince).toBeNull();
+  },
+);
+
+test("a live stage host whose transcript cannot be read keeps its attempt", async () => {
+  /* The same refusal with the process still there and a turn word claiming work
+     is in flight: nothing about an unreadable transcript becomes actionable
+     because the pid answers. */
   const identity = procBackend.processIdentity(process.pid);
   const { conversationId } = stageConversation(
-    "stale-busy",
+    "stale-busy-live",
     { pid: process.pid, startIdentity: identity },
     new Date(TOOL_RESULT_AT),
     { body: UNREADABLE_TRANSCRIPT, recordedTurn: "busy" },

@@ -78,26 +78,40 @@ async function settles(assertion: () => boolean, what: string): Promise<void> {
   throw new Error(`${what} did not settle`);
 }
 
+const OPEN_TURN_TRANSCRIPT = [
+  JSON.stringify({ type: "assistant", timestamp: TOOL_CALL_AT, message: { content: [{ type: "tool_use", id: "t1", name: "Bash" }] } }),
+  JSON.stringify({ type: "user", timestamp: TOOL_RESULT_AT, message: { content: [{ type: "tool_result", tool_use_id: "t1" }] } }),
+  "",
+].join("\n");
+
+/** A tail no reader can parse: the record is cut off mid-object. */
+const UNREADABLE_TRANSCRIPT = '{"type":"assistant","timestamp":"2026-08-29T03:24:0';
+
 /**
  * A stage whose structured host is the incident's specimen: a live process that
  * has written nothing since its own launch, over a transcript whose last event
  * is an unanswered tool call from before that launch.
+ *
+ * `hostProcess` replaces that live child with a pid the row still names and the
+ * machine no longer runs, and `body` replaces the transcript — together, the
+ * shape a redeploy leaves behind when the artifact is also unreadable.
  */
-function severedStage() {
+function severedStage(
+  options: { body?: string; recordedTurn?: "busy" | "terminal"; hostProcess?: { pid: number; startIdentity: string } } = {},
+) {
   const directory = fs.mkdtempSync(path.join(isolated, "stage-"));
   const worktreeDir = path.join(directory, "worktree");
   fs.mkdirSync(worktreeDir, { recursive: true });
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
-  const child = Bun.spawn(["sleep", "300"], { stdout: "ignore", stderr: "ignore" });
-  const startIdentity = procBackend.processIdentity(child.pid);
-  if (!startIdentity) throw new Error("the fixture child has no start identity to fence on");
+  const child = options.hostProcess ? null : Bun.spawn(["sleep", "300"], { stdout: "ignore", stderr: "ignore" });
+  const hostProcess = options.hostProcess ?? {
+    pid: child!.pid,
+    startIdentity: procBackend.processIdentity(child!.pid)!,
+  };
+  if (!hostProcess.startIdentity) throw new Error("the fixture host has no start identity to fence on");
   const sessionId = crypto.randomUUID();
   const transcript = path.join(directory, `${sessionId}.jsonl`);
-  fs.writeFileSync(transcript, [
-    JSON.stringify({ type: "assistant", timestamp: TOOL_CALL_AT, message: { content: [{ type: "tool_use", id: "t1", name: "Bash" }] } }),
-    JSON.stringify({ type: "user", timestamp: TOOL_RESULT_AT, message: { content: [{ type: "tool_result", tool_use_id: "t1" }] } }),
-    "",
-  ].join("\n"));
+  fs.writeFileSync(transcript, options.body ?? OPEN_TURN_TRANSCRIPT);
   const anHourAgo = new Date(Date.now() - 60 * 60_000);
   fs.utimesSync(transcript, anHourAgo, anHourAgo);
   const begun = beginLegacySpawnFixture(registry, { engine: "claude", cwd: worktreeDir, transport: "structured", accountId: null });
@@ -111,8 +125,8 @@ function severedStage() {
     host: null,
     structuredHost: {
       kind: "claude-broker",
-      endpoint: `stdio:${child.pid}`,
-      process: { pid: child.pid, startIdentity },
+      endpoint: `stdio:${hostProcess.pid}`,
+      process: hostProcess,
       eventCursor: 0,
       protocolVersion: "test",
       writerClaimEpoch: 1,
@@ -125,6 +139,23 @@ function severedStage() {
     pendingAction: null,
   });
   if (settled.kind !== "settled") throw new Error("structured conversation was unavailable");
+  if (options.recordedTurn) {
+    /* The turn word the durable record carries, inherited from whoever wrote it
+       last. No retry is ever decided on it (#1281), and a case that means to
+       prove that has to put the word there. */
+    registry.reconcileConversations([{
+      engine: "claude",
+      path: transcript,
+      accountId: null,
+      launchProfile: settled.conversation.generations.at(-1)!.launchProfile,
+      turn: {
+        state: options.recordedTurn,
+        source: "lifecycle",
+        terminalAt: options.recordedTurn === "terminal" ? TOOL_RESULT_AT : null,
+      },
+      observedAt: "2026-08-29T03:30:00.000Z",
+    }]);
+  }
   setAgentRegistryForTests(registry);
   return {
     registry,
@@ -133,7 +164,7 @@ function severedStage() {
     launchId: begun.receipt.launchId,
     key: { engine: "claude" as const, sessionId },
     conversationId: settled.conversation.id,
-    child: { pid: child.pid, kill: () => { try { child.kill("SIGKILL"); } catch { /* gone */ } } },
+    child: { pid: hostProcess.pid, kill: () => { try { child?.kill("SIGKILL"); } catch { /* gone */ } } },
   };
 }
 
@@ -302,3 +333,55 @@ test("a live severed stage host is killed, retired, and its stage retried once, 
     journal.close();
   }
 });
+
+test.each(["busy", "terminal"] as const)(
+  "a stage whose host is gone and whose transcript cannot be read is never retried on a stale %s turn word",
+  async (recordedTurn) => {
+    /* The same seams as the sequence above, with one fact removed: the
+       transcript cannot be parsed. What remains is a row that still reads
+       `live`, a pid the machine no longer runs, and a word claiming a turn is
+       in flight or finished. Under the reading this replaced, the missing pid
+       alone answered `severed`, the tick spent the dead-host grace and failed
+       the attempt, and `retry-stage` re-ran a step that may have completed
+       before the process ever went away. Nothing separates that from a turn cut
+       off mid-work, so nothing happens: the attempt keeps running and no
+       replacement is spawned (#1281). */
+    const stage = severedStage({
+      body: UNREADABLE_TRANSCRIPT,
+      recordedTurn,
+      hostProcess: { pid: 2_000_000_005, startIdentity: "pre-restart-host" },
+    });
+    const spawns: string[] = [];
+    const ports = stagePorts(stage, spawns) as PipelinePorts & { advanceWallClock(ms: number): void };
+
+    savePipelines([]);
+    const created = await createPipelineFromRequest({
+      task: "Ship the unreadable stage",
+      spec: "AC1",
+      repoDir: stage.worktreeDir,
+      src: stage.transcript,
+      stages: [{
+        id: "build",
+        kind: "run",
+        role: { roleId: "builder" },
+        access: "read-write",
+        ["prompt"]: "Build the scoped change",
+        next: null,
+      }],
+    } as never, ports);
+    if (!created.pipeline) throw new Error(created.error ?? "pipeline creation was unavailable");
+    await tickPipelines([], ports);
+    await tickPipelines([], ports);
+    expect(loadPipelines()[0]!.runs[0]!.attempts[0]).toMatchObject({ state: "running" });
+
+    /* Well past the grace a genuinely dead host is failed after. */
+    ports.advanceWallClock(6 * 60_000);
+    await tickPipelines([], ports);
+
+    const held = loadPipelines()[0]!;
+    expect(held.runs[0]!.attempts[0]).toMatchObject({ state: "running" });
+    expect(held.runs[0]!.attempts).toHaveLength(1);
+    expect(held.state).not.toBe("needs_decision");
+    expect(spawns).toHaveLength(1);
+  },
+);
