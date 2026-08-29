@@ -2687,6 +2687,7 @@ test("a relocated Claude worktree transcript remains the readable parent card", 
   const relocated = registry.conversation(parent.id)!;
   expect(relocated.generations.at(-1)?.path).toBe(newParentPath);
   expect(relocated.continuityPaths).toContain(oldParentPath);
+  expect(relocated.continuityPaths).not.toContain(newParentPath);
   expect(registry.canonicalPath(oldParentPath)).toBe(newParentPath);
   const archived = (realModules.get("@/lib/scanner") as {
     archivedTranscriptPaths(): ReadonlySet<string>;

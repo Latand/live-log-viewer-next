@@ -5297,6 +5297,9 @@ export class AgentRegistry {
             if (firstObservedPath === undefined || firstObservedPath === observation.path) {
               if (!nativeOwner.continuityPaths.includes(generation.path)) nativeOwner.continuityPaths.push(generation.path);
               generation.path = observation.path;
+              nativeOwner.continuityPaths = nativeOwner.continuityPaths.filter((pathname) => pathname !== generation.path);
+              nativeOwner.abandonedContinuityPaths = nativeOwner.abandonedContinuityPaths.filter((pathname) => pathname !== generation.path);
+              nativeOwner.providerForkPaths = nativeOwner.providerForkPaths.filter((pathname) => pathname !== generation.path);
             } else if (!nativeOwner.continuityPaths.includes(observation.path)) {
               nativeOwner.continuityPaths.push(observation.path);
             }
