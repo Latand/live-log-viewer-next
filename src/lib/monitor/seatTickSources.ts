@@ -228,8 +228,20 @@ export function defaultSeatTickSources(): SeatTickSources {
   };
 }
 
+/**
+ * A lane the seat could still act on.
+ *
+ * `hiddenAt` is part of the predicate because hiding something and then
+ * reporting it as work is a contradiction on its own terms (#1274). A draft the
+ * operator discarded before this fix landed carries `hiddenAt` with `state:
+ * "draft"` and `closedAt: null`, and read as open it was parked by the stall
+ * rule at every check — an hourly wake carrying a lane whose only exit verb was
+ * the one the operator had just refused to press. Records written from now on
+ * settle properly (`discardDraft`); this clause is what retires the ones
+ * already on disk.
+ */
 function isOpen(pipeline: Pipeline): boolean {
-  return !pipeline.closedAt && pipeline.state !== "completed" && pipeline.state !== "closed";
+  return !pipeline.closedAt && !pipeline.hiddenAt && pipeline.state !== "completed" && pipeline.state !== "closed";
 }
 
 /** The projection `evidence.ts` correlates on, built in-process rather than

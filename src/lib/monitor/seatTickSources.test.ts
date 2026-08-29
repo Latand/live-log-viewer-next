@@ -286,6 +286,29 @@ test("a closed lane is not gathered at all, so it can neither stall nor fill a w
   expect(input.pipelines).toEqual([]);
 });
 
+/* #1274. The record as it was found on disk: discarded, so `hiddenAt` is set,
+   but written before a discard settled anything — `state` still `draft` and
+   `closedAt` still null. Read as an open lane it was parked by the stall rule
+   at every check, and the wake it produced named the one verb the operator had
+   refused to press. */
+test("a hidden lane is not gathered, whatever its state says (#1274)", async () => {
+  const discarded = lane({ id: "pipeline_hidden", state: "draft", closedAt: null, hiddenAt: "2026-08-28T15:01:15.000Z", cursor: null, runs: [] });
+  const input = await gather({ pipelines: [discarded] });
+  expect(input.pipelines).toEqual([]);
+  const decision = seatTickDecision(input);
+  expect(decision.verdict.kind).not.toBe("wake");
+});
+
+test("a project whose only lane is hidden is not a project the tick checks (#1274)", () => {
+  const projects = seatTickProjects({
+    ...sources({}),
+    activeSeats: () => [],
+    pipelines: () => [lane({ project: "discarded-draft-only", state: "draft", closedAt: null, hiddenAt: "2026-08-28T15:01:15.000Z" })] as never,
+    tasks: () => [] as never,
+  });
+  expect(projects).toEqual([]);
+});
+
 test("the fingerprint moves when a lane or a card moves, and only then", async () => {
   const base = await gather({});
   const same = await gather({});

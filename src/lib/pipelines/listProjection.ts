@@ -153,6 +153,11 @@ export function selectPipelineListRecords(
     if (project && pipeline.project !== project) continue;
     if (state && pipeline.state !== state) continue;
     if (!includeClosed && pipeline.state === "closed") continue;
+    /* Hidden is settled for listing purposes (#1274): a lane the operator
+       discarded is not in flight, and a listing that reported it as active
+       showed it to every project's seat, not only its owner's. `includeClosed`
+       still returns it, which is where a settled record belongs. */
+    if (!includeClosed && pipeline.hiddenAt) continue;
     selected.push(pipeline);
     if (selected.length >= limit) break;
   }
