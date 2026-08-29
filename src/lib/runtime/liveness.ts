@@ -302,9 +302,26 @@ export function decideTurnLiveness(evidence: TurnLivenessEvidence): TurnLiveness
       since: severedSince ?? now,
     };
   }
-  if (host.expected.startIdentity !== null
-    && host.observedIdentity !== null
-    && host.observedIdentity !== host.expected.startIdentity) {
+  /* An identity that cannot be revalidated is not evidence about this process.
+     The pid exists, but nothing here proves it is still the process the row was
+     written about: the kernel did not answer, or the row never recorded a start
+     identity to compare against. Every verdict below reads the recorded launch
+     clock as this pid's own history, and the mismatch branch can only speak when
+     both tokens are in hand. An unverifiable identity therefore answers
+     `unknown`, which authorises no kill, no retry and no restart nudge on a pid
+     that may by now belong to somebody else entirely (#1281). */
+  if (host.observedIdentity === null || host.expected.startIdentity === null) {
+    return {
+      ...context,
+      state: "unknown",
+      reason: `pid ${host.expected.pid} exists, but ${host.expected.startIdentity === null
+        ? "the registry recorded no start identity for it"
+        : "the platform did not report its start identity"},`
+        + " so nothing proves it is still the process this turn was handed to",
+      since: null,
+    };
+  }
+  if (host.observedIdentity !== host.expected.startIdentity) {
     return {
       ...context,
       state: "severed",
@@ -404,10 +421,6 @@ export interface TurnLivenessInput {
   transcriptPath: string;
   process: ProcessIdentity | null;
   deliveryOutstandingSince?: number | null;
-  /** The turn axis the durable conversation record already carries. Used only
-      when the transcript tail cannot speak for itself — that record is the same
-      evidence, read earlier. */
-  recordedTurn?: "busy" | "terminal" | "idle" | "unknown";
 }
 
 export interface TurnLivenessDependencies extends HostProcessEvidenceDependencies {
@@ -419,16 +432,17 @@ export async function readTurnLiveness(
   dependencies: TurnLivenessDependencies = {},
 ): Promise<TurnLivenessDecision> {
   const now = (dependencies.now ?? Date.now)();
-  const read = await (dependencies.readTranscript ?? readTranscriptEvidence)(
+  /* Whatever this read says is the whole of the transcript evidence. A tail that
+     could not be parsed leaves the turn `unknown`, and `unknown` is the answer —
+     substituting the turn word a registry row carries would put the status word
+     this decision exists to stop trusting back at the centre of it (#1281). A
+     row inherits `busy` from whoever wrote it last, so an unreadable transcript
+     plus a stale row was enough to call a turn severed, and a stale terminal one
+     was enough to call it settled. */
+  const transcript = await (dependencies.readTranscript ?? readTranscriptEvidence)(
     input.engine,
     input.transcriptPath,
   );
-  const recorded = input.recordedTurn === "busy" || input.recordedTurn === "terminal"
-    ? input.recordedTurn
-    : "unknown";
-  const transcript = read.turn === "unknown" && recorded !== "unknown"
-    ? { ...read, turn: recorded }
-    : read;
   return decideTurnLiveness({
     now,
     transcriptTail: transcript,
@@ -483,7 +497,6 @@ export async function conversationTurnLiveness(
     transcriptPath: generation.path,
     process: entry.structuredHost.process ?? null,
     deliveryOutstandingSince: outstandingDeliverySince(snapshot, conversation.id),
-    recordedTurn: conversation.turn.state,
   }, dependencies);
   return {
     ...decision,

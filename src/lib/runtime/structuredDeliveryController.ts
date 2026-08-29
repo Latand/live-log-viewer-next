@@ -10,7 +10,7 @@ import type { EngineHost, HostState } from "./engineHost";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { applyStructuredReconfigure } from "./structuredReconfigure";
 import { projectEngineHostEvent } from "./engineHostEvents";
-import { conversationTurnLiveness } from "./liveness";
+import { conversationTurnLiveness, type TurnLivenessDependencies } from "./liveness";
 import { reapSeveredStructuredHost } from "./registry";
 import { publishFilesRevision } from "./filesRevision";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
@@ -317,6 +317,10 @@ export async function bindStructuredDeliveryQueue(
     client?: RuntimeHostClient | null;
     recover?: StructuredConversationRecovery;
     deferStartupWork?: boolean;
+    /** Process and transcript readers behind the severed-turn evidence, so a
+        test can drive this seam against a real process and a real transcript
+        on a clock it controls. */
+    liveness?: TurnLivenessDependencies;
   } = {},
 ): Promise<void> {
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
@@ -380,6 +384,7 @@ export async function bindStructuredDeliveryQueue(
         registry,
         conversationId as `conversation_${string}`,
         expectedKey,
+        dependencies.liveness ?? {},
       );
       if (reaped) {
         console.error("[structured delivery] reaped a severed structured host nothing owned", {
@@ -419,7 +424,7 @@ export async function bindStructuredDeliveryQueue(
       ownsOperation: ownership.isCurrent,
     }),
     async (conversationId) => {
-      const liveness = await conversationTurnLiveness(registry, conversationId);
+      const liveness = await conversationTurnLiveness(registry, conversationId, dependencies.liveness ?? {});
       return liveness?.state === "severed" ? liveness.reason : null;
     },
   );

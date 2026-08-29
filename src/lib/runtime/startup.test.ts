@@ -1015,6 +1015,26 @@ test("fresh-journal startup projects a live tmux registry row for composer fallb
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
+/** The transcript a seat with a turn in flight leaves behind: an unanswered
+    tool call. The registry's turn word is not evidence and no longer reaches
+    the liveness decision (#1281), so a fixture that means "this turn was in
+    flight when the restart cut it off" has to write the events that say so. */
+function openTurnRecords(engine: "codex" | "claude"): Record<string, unknown>[] {
+  return engine === "codex"
+    ? [
+      { payload: { type: "user_message" }, timestamp: "2026-07-15T05:59:00.000Z" },
+      { payload: { type: "function_call", call_id: "c1" }, timestamp: "2026-07-15T05:59:30.000Z" },
+    ]
+    : [
+      { type: "user", timestamp: "2026-07-15T05:59:00.000Z", message: { content: "go" } },
+      {
+        type: "assistant",
+        timestamp: "2026-07-15T05:59:30.000Z",
+        message: { content: [{ type: "tool_use", id: "t1", name: "Bash" }] },
+      },
+    ];
+}
+
 function addStructuredRestartConversation(
   registry: AgentRegistry,
   directory: string,
@@ -1075,9 +1095,17 @@ function addStructuredRestartConversation(
   return { artifactPath, conversation };
 }
 
+/**
+ * Which rows a startup pass would adopt.
+ *
+ * The pass runs with a runtime client because adoption itself does: a pass with
+ * no client launches nothing at all, since nothing would claim what it started
+ * (#1282). The client is a journal of its own, so what these cases exercise is
+ * the adoption filter against the registry, with no runtime signals in it.
+ */
 async function startupAdoptionAttempts(
   registry: AgentRegistry,
-  client: RuntimeHostClient | null = null,
+  client?: RuntimeHostClient,
 ): Promise<string[]> {
   const attempts: string[] = [];
   const select = (
@@ -1091,18 +1119,26 @@ async function startupAdoptionAttempts(
         && shouldAdopt(entry)) attempts.push(`${entry.key.engine}:${entry.key.sessionId}`);
     }
   };
-  await adoptStructuredHostsAtStartup({
-    registry,
-    client,
-    adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
-      select("codex", received, shouldAdopt);
-      return [];
-    },
-    adoptClaude: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
-      select("claude", received, shouldAdopt);
-      return [];
-    },
-  });
+  const directory = client ? null : fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-attempts-"));
+  const journal = directory ? new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true }) : null;
+  try {
+    await adoptStructuredHostsAtStartup({
+      registry,
+      client: client ?? runtimeJournalClient(journal!),
+      adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+        select("codex", received, shouldAdopt);
+        return [];
+      },
+      adoptClaude: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+        select("claude", received, shouldAdopt);
+        return [];
+      },
+    });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal?.close();
+    if (directory) fs.rmSync(directory, { recursive: true, force: true });
+  }
   return attempts;
 }
 
@@ -1186,6 +1222,7 @@ test("startup publishes per-host progress across the serial provider adoption lo
     status: "live",
     turn: "busy",
   });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const progress: unknown[] = [];
   const capture = () => {
     progress.push(structuredStartupStatus({ LLV_STRUCTURED_HOSTS: "1" }));
@@ -1193,7 +1230,7 @@ test("startup publishes per-host progress across the serial provider adoption lo
   try {
     await adoptStructuredHostsAtStartup({
       registry,
-      client: null,
+      client: runtimeJournalClient(journal),
       refreshTranscriptState: async () => undefined,
       adopt: async (received, _optionsFor, _env, shouldAdopt = () => true, processed) => {
         for (const entry of Object.values(received.snapshot().entries)) {
@@ -1234,6 +1271,7 @@ test("startup publishes per-host progress across the serial provider adoption lo
     });
   } finally {
     await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -1376,6 +1414,7 @@ test("viewer boot re-hosts the orchestrator seats whose own turn was severed and
       sessionId,
       status,
       turn,
+      ...(turn === "busy" ? { transcriptRecords: openTurnRecords(engine), transcriptSuffix: "\n" } : {}),
     });
     if (status !== "dead") {
       const entry = registry.readOnlySnapshot().entries[`${engine}:${sessionId}`]!;
@@ -1700,8 +1739,79 @@ test("a seat whose host is still working through a long step is left alone at bo
   }
 });
 
-test("viewer boot durably holds the orchestrator recovery nudge until the runtime client is available", async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-orchestrator-held-recovery-"));
+test("a seat whose transcript cannot be read is owed no nudge, whatever turn word its row carries", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-orchestrator-unreadable-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const sessionId = "25300000-0000-0000-0000-000000000033";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "idle",
+    turn: "busy",
+    /* A record cut off mid-object: the tail read is `uncertain`, so there is no
+       last event, no kind and no turn to be had from the transcript. */
+    transcriptRecords: [],
+    transcriptSuffix: '{"payload":{"type":"function_call","call_id":"c',
+  });
+  const originalEntry = registry.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+  registry.upsert({
+    ...originalEntry,
+    structuredHost: {
+      ...originalEntry.structuredHost!,
+      process: { pid: 2_000_000_033, startIdentity: "pre-restart-seat" },
+    },
+  });
+  const seat = activeSeat("seat-unreadable", 33, conversation.id, artifactPath);
+  const ledger = createFakeDeliveryLedger();
+  const host = Object.assign(new FakeEngineHost(ledger), { onStateChange: () => () => {} });
+  /* An idle row is adopted only because a severed seat is owed a host, so a
+     launch here means a recovery target was produced. */
+  let launches = 0;
+
+  try {
+    await adoptStructuredHostsAtStartup({
+      registry,
+      client,
+      orchestratorSeats: () => [seat],
+      refreshTranscriptState: async () => {},
+      adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+        const entry = received.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+        if (!shouldAdopt(entry)) return [];
+        launches += 1;
+        const processIdentity = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+        const claimed = received.claimStructuredHost(entry.key, processIdentity, { allowUnhosted: true });
+        if (!claimed?.structuredHost || !claimed.claimOwner) throw new Error("seat host claim was unavailable");
+        const persisted = received.setStructuredHostClaimed(entry.key, {
+          ...claimed.structuredHost,
+          endpoint: "fake:unreadable-seat",
+          process: processIdentity,
+        }, "idle", claimed.claimOwner, claimed.claimEpoch);
+        if (!persisted) throw new Error("seat host claim was lost");
+        return [{ key: entry.key, host: host as never }];
+      },
+      adoptClaude: async () => [],
+    });
+
+    /* The row says a turn is in flight and the process that owned it is gone.
+       That word is not evidence of a turn (#1281), and a nudge is a paid turn:
+       nothing here knows what to tell this seat to resume, so no host is started
+       for it and no message is sent. */
+    expect(launches).toBe(0);
+    expect(ledger.writes).toEqual([]);
+    expect(registry.pendingDeliveries(conversation.id).filter((delivery) =>
+      delivery.clientMessageId?.startsWith("orchestrator-restart-recovery-") === true)).toHaveLength(0);
+    expect(journal.snapshot().recentOperations.filter((receipt) =>
+      receipt.idempotencyKey.startsWith("orchestrator-restart-recovery-"))).toEqual([]);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("viewer boot launches no host it cannot hand to a delivery controller, and adopts one once it can (#1282)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-unclaimable-adoption-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeJournalClient(journal);
@@ -1710,6 +1820,8 @@ test("viewer boot durably holds the orchestrator recovery nudge until the runtim
     sessionId,
     status: "idle",
     turn: "busy",
+    transcriptRecords: openTurnRecords("codex"),
+    transcriptSuffix: "\n",
   });
   const originalEntry = registry.readOnlySnapshot().entries[`codex:${sessionId}`]!;
   registry.upsert({
@@ -1723,62 +1835,70 @@ test("viewer boot durably holds the orchestrator recovery nudge until the runtim
   const key = { engine: "codex" as const, sessionId };
   const ledger = createFakeDeliveryLedger();
   const host = Object.assign(new FakeEngineHost(ledger), { onStateChange: () => () => {} });
+  let launches = 0;
+  const adopt: StructuredStartupDependencies["adopt"] = async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+    const entry = received.readOnlySnapshot().entries[`codex:${sessionId}`]!;
+    if (!shouldAdopt(entry)) return [];
+    /* Standing in for starting the CLI: what must not happen while nothing can
+       claim the result. */
+    launches += 1;
+    const processIdentity = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+    const claimed = received.claimStructuredHost(entry.key, processIdentity, { allowUnhosted: true });
+    if (!claimed?.structuredHost || !claimed.claimOwner) throw new Error("seat host claim was unavailable");
+    const persisted = received.setStructuredHostClaimed(entry.key, {
+      ...claimed.structuredHost,
+      endpoint: "fake:held-recovery-seat",
+      process: processIdentity,
+    }, "idle", claimed.claimOwner, claimed.claimEpoch);
+    if (!persisted) throw new Error("seat host claim was lost");
+    return [{ key, host: host as never }];
+  };
 
   try {
-    const adopted = await adoptStructuredHostsAtStartup({
+    /* A pass with no runtime client has no publication to claim what it starts,
+       and the claim assertion that would have caught an unclaimed host is behind
+       the same condition — so the pass defers instead of adopting. */
+    await expect(adoptStructuredHostsAtStartup({
       registry,
       client: null,
       orchestratorSeats: () => [seat],
       refreshTranscriptState: async () => {},
-      adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
-        const entry = received.readOnlySnapshot().entries[`codex:${sessionId}`]!;
-        if (!shouldAdopt(entry)) return [];
-        const processIdentity = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
-        const claimed = received.claimStructuredHost(entry.key, processIdentity, { allowUnhosted: true });
-        if (!claimed?.structuredHost || !claimed.claimOwner) throw new Error("seat host claim was unavailable");
-        const persisted = received.setStructuredHostClaimed(entry.key, {
-          ...claimed.structuredHost,
-          endpoint: "fake:held-recovery-seat",
-          process: processIdentity,
-        }, "idle", claimed.claimOwner, claimed.claimEpoch);
-        if (!persisted) throw new Error("seat host claim was lost");
-        return [{ key, host: host as never }];
-      },
+      adopt,
+      adoptClaude: async () => [],
+    })).rejects.toThrow("structured delivery controller is unavailable");
+
+    expect(launches).toBe(0);
+    expect(hasStructuredDeliveryHost(key)).toBe(false);
+    expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+      claimOwner: null,
+      structuredHost: { endpoint: "stdio:retained", process: { pid: 2_000_000_005 } },
+    });
+    /* Nothing is owed a message either: the nudge belongs to a seat this boot
+       actually re-hosted. */
+    expect(registry.pendingDeliveries(conversation.id).filter((delivery) =>
+      delivery.clientMessageId?.startsWith("orchestrator-restart-recovery-") === true)).toHaveLength(0);
+    expect(ledger.writes).toEqual([]);
+
+    /* The retry the startup loop runs once a client exists: one launch, claimed
+       by the controller, and the severed seat's single nudge. */
+    const adopted = await adoptStructuredHostsAtStartup({
+      registry,
+      client,
+      orchestratorSeats: () => [seat],
+      refreshTranscriptState: async () => {},
+      adopt,
       adoptClaude: async () => [],
     });
 
+    expect(launches).toBe(1);
     expect(adopted).toMatchObject([{ key, host }]);
-    const recoveryDeliveries = registry.pendingDeliveries(conversation.id).filter((delivery) =>
-      delivery.clientMessageId?.startsWith("orchestrator-restart-recovery-") === true);
-    expect(recoveryDeliveries).toMatchObject([{
-      state: expect.stringMatching(/^(held|assigned)$/),
-      text: expect.stringContaining("Viewer restarted"),
-    }]);
-    expect(ledger.writes).toEqual([]);
-
-    await bindStructuredDeliveryQueue(adopted, { registry, client });
-    await drainHeldDeliveries(conversation.id, {
-      deliver: async ({ delivery, path: deliveryPath, clientMessageId }) =>
-        await deliverHeldStructuredMessage({
-          conversationId: conversation.id,
-          path: deliveryPath,
-          deliveryId: delivery.id,
-          clientMessageId,
-          text: delivery.text,
-          command: delivery.command,
-        }, {
-          enabled: () => true,
-          client: () => client,
-          registry: () => registry,
-        }) ?? "delivery-uncertain",
-    }, registry);
+    expect(hasStructuredDeliveryHost(key)).toBe(true);
+    await waitFor(() => ledger.writes.length === 1, 500);
     expect(ledger.writes).toEqual([expect.objectContaining({
-      id: recoveryDeliveries[0]!.command.operationId,
       text: expect.stringContaining("Viewer restarted"),
     })]);
-    expect(journal.operationResult(recoveryDeliveries[0]!.command.operationId)?.receipt.status).toBe("delivered");
-    expect(registry.pendingDeliveries(conversation.id).filter((delivery) =>
-      delivery.clientMessageId?.startsWith("orchestrator-restart-recovery-") === true)).toHaveLength(0);
+    expect(journal.snapshot().recentOperations.filter((receipt) =>
+      receipt.idempotencyKey.startsWith("orchestrator-restart-recovery-"))).toHaveLength(1);
   } finally {
     await bindStructuredDeliveryQueue([], { registry, client: null });
     journal.close();
@@ -1796,6 +1916,8 @@ test("startup retry admits one orchestrator recovery nudge after the first runti
     sessionId,
     status: "idle",
     turn: "busy",
+    transcriptRecords: openTurnRecords("codex"),
+    transcriptSuffix: "\n",
   });
   const originalEntry = registry.readOnlySnapshot().entries[`codex:${sessionId}`]!;
   registry.upsert({
@@ -1908,6 +2030,8 @@ test.each(["dead", "unhosted", "rotated"] as const)(
       sessionId,
       status: "idle",
       turn: "busy",
+      transcriptRecords: openTurnRecords("codex"),
+      transcriptSuffix: "\n",
     });
     const originalEntry = registry.readOnlySnapshot().entries[`codex:${sessionId}`]!;
     registry.upsert({

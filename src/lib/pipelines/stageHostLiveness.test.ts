@@ -41,21 +41,31 @@ afterAll(() => {
 const TOOL_CALL_AT = "2026-08-29T03:24:00.000Z";
 const TOOL_RESULT_AT = "2026-08-29T03:24:05.000Z";
 
+const OPEN_TURN_TRANSCRIPT = [
+  JSON.stringify({ type: "assistant", timestamp: TOOL_CALL_AT, message: { content: [{ type: "tool_use", id: "t1", name: "Bash" }] } }),
+  JSON.stringify({ type: "user", timestamp: TOOL_RESULT_AT, message: { content: [{ type: "tool_result", tool_use_id: "t1" }] } }),
+  "",
+].join("\n");
+
+/** A tail no reader can parse: the record is cut off mid-object. */
+const UNREADABLE_TRANSCRIPT = '{"type":"assistant","timestamp":"2026-08-29T03:24:0';
+
 /**
  * A structured stage conversation whose host row names `process`, with the
  * transcript's last write placed at `lastWrite` — before the host's launch for
  * a severed turn, after it for one that is working.
  */
-function stageConversation(name: string, process: { pid: number; startIdentity: string | null }, lastWrite: Date) {
+function stageConversation(
+  name: string,
+  process: { pid: number; startIdentity: string | null },
+  lastWrite: Date,
+  options: { body?: string; recordedTurn?: "busy" | "terminal" } = {},
+) {
   const directory = fs.mkdtempSync(path.join(isolated, `${name}-`));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   const sessionId = crypto.randomUUID();
   const transcript = path.join(directory, `${sessionId}.jsonl`);
-  fs.writeFileSync(transcript, [
-    JSON.stringify({ type: "assistant", timestamp: TOOL_CALL_AT, message: { content: [{ type: "tool_use", id: "t1", name: "Bash" }] } }),
-    JSON.stringify({ type: "user", timestamp: TOOL_RESULT_AT, message: { content: [{ type: "tool_result", tool_use_id: "t1" }] } }),
-    "",
-  ].join("\n"));
+  fs.writeFileSync(transcript, options.body ?? OPEN_TURN_TRANSCRIPT);
   fs.utimesSync(transcript, lastWrite, lastWrite);
   const begun = beginLegacySpawnFixture(registry, { engine: "claude", cwd: directory, transport: "structured", accountId: null });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
@@ -82,6 +92,23 @@ function stageConversation(name: string, process: { pid: number; startIdentity: 
     pendingAction: null,
   });
   if (settled.kind !== "settled") throw new Error("structured conversation was unavailable");
+  if (options.recordedTurn) {
+    /* The turn word the durable record carries, inherited from whoever wrote it
+       last. A stage retry is never decided on it (#1281), and a case that means
+       to prove that has to put the word there. */
+    registry.reconcileConversations([{
+      engine: "claude",
+      path: transcript,
+      accountId: null,
+      launchProfile: settled.conversation.generations.at(-1)!.launchProfile,
+      turn: {
+        state: options.recordedTurn,
+        source: "lifecycle",
+        terminalAt: options.recordedTurn === "terminal" ? TOOL_RESULT_AT : null,
+      },
+      observedAt: "2026-08-29T03:30:00.000Z",
+    }]);
+  }
   setAgentRegistryForTests(registry);
   return { registry, conversationId: settled.conversation.id, transcript };
 }
@@ -119,4 +146,37 @@ test("a row already retired keeps reporting its own retirement stamp", async () 
   const unavailableSince = await defaultPipelinePorts().conversationHostUnavailableSince!(conversationId);
 
   expect(unavailableSince).toBe(registry.readOnlySnapshot().entries[`claude:${entry.key.sessionId}`]!.updatedAt);
+});
+
+test("a stale terminal turn word no longer settles a stage whose host is gone and whose transcript cannot be read", async () => {
+  /* The row says the turn finished, the process is gone, and the transcript
+     that would say either way cannot be parsed. Reading the word made this
+     stage `settled` — nothing to retry — on evidence nobody had (#1281). */
+  const { conversationId } = stageConversation(
+    "stale-terminal",
+    { pid: 2_000_000_003, startIdentity: "pre-restart-host" },
+    new Date(TOOL_RESULT_AT),
+    { body: UNREADABLE_TRANSCRIPT, recordedTurn: "terminal" },
+  );
+
+  const unavailableSince = await defaultPipelinePorts().conversationHostUnavailableSince!(conversationId);
+
+  expect(unavailableSince).not.toBeNull();
+});
+
+test("a stale busy turn word does not make a live stage host retryable", async () => {
+  /* The mirror case: the row says a turn is in flight, the recorded process is
+     there, and the transcript says nothing. No retry is authorised by the word
+     alone — the stage keeps its attempt. */
+  const identity = procBackend.processIdentity(process.pid);
+  const { conversationId } = stageConversation(
+    "stale-busy",
+    { pid: process.pid, startIdentity: identity },
+    new Date(TOOL_RESULT_AT),
+    { body: UNREADABLE_TRANSCRIPT, recordedTurn: "busy" },
+  );
+
+  const unavailableSince = await defaultPipelinePorts().conversationHostUnavailableSince!(conversationId);
+
+  expect(unavailableSince).toBeNull();
 });

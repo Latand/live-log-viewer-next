@@ -39,6 +39,9 @@ import { markStructuredHostStartupProgress, type StructuredHostStartupPhase } fr
 type AdoptedStructuredHost = AdoptedCodexHost | AdoptedClaudeHost;
 let adoptedHosts: AdoptedStructuredHost[] = [];
 let retryAdoptedHosts: AdoptedStructuredHost[] = [];
+/* The startup retry loop re-enters every second at its ceiling, and a Viewer
+   with no runtime socket defers on every pass; one line per boot says it. */
+let deferredAdoptionLogged = false;
 
 function retainAdoptedHosts(
   retained: readonly AdoptedStructuredHost[],
@@ -687,6 +690,27 @@ export async function adoptStructuredHostsAtStartup(
   );
   const adoptionCandidates = Object.values(registry.readOnlySnapshot().entries).filter((entry) =>
     entry.structuredHost && shouldAdopt(entry));
+  /* Nothing is launched that this pass cannot hand to a delivery controller.
+     `controllerBoundEarly` is exactly "this pass has a runtime client", and it
+     is also the condition on the claim assertion below — so without one, the
+     loops that follow would start CLI processes, no publication would claim
+     them, and the pass would still answer "adopted" because the only check that
+     would have caught it is behind the same condition (#1282). So this pass
+     defers its adoption: nothing is launched, the boot's own recovery evidence
+     and retained hosts are kept for the next attempt, and the startup retry
+     loop runs the pass again once a client exists. */
+  if (!controllerBoundEarly && adoptionCandidates.length > 0) {
+    retryAdoptedHosts = nextAdoptedHosts;
+    retryOrchestratorRecoveries = [...orchestratorRecoveries];
+    const keys = adoptionCandidates.map((entry) => sessionKeyId(entry.key));
+    if (!deferredAdoptionLogged) {
+      deferredAdoptionLogged = true;
+      console.error("[structured hosts] deferring adoption until a delivery controller can claim it", { keys });
+    }
+    throw new RuntimeHostUnavailableError(
+      `structured delivery controller is unavailable; deferred adoption of ${keys.length} host(s): ${keys.join(", ")}`,
+    );
+  }
   const codexCandidateCount = adoptionCandidates.filter((entry) => entry.key.engine === "codex").length;
   const claudeCandidateCount = adoptionCandidates.length - codexCandidateCount;
   let totalHosts = adoptionCandidates.length;

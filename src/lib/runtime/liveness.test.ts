@@ -116,6 +116,36 @@ test("a pid the registry no longer owns is severed", () => {
   expect(decision.reason).toContain("no longer the process the registry recorded");
 });
 
+test("a present pid whose identity cannot be revalidated proves nothing about it", () => {
+  /* The kernel did not answer for a pid that is there. The mismatch branch
+     cannot speak, so before #1281 the reading fell through to the branches
+     below it and an outstanding delivery was enough to call the turn severed —
+     on a pid that may by then belong to somebody else entirely. */
+  const unreadableIdentity = decideTurnLiveness(evidence({
+    transcriptTail: { lastEventAt: NOW - 38 * MINUTE, lastWriteAt: NOW - 38 * MINUTE, kind: "tool-result", turn: "busy" },
+    host: { present: true, observedIdentity: null, cpuMs: null, launchedAt: NOW - 34 * MINUTE },
+    delivery: { outstandingSince: NOW - 30 * MINUTE },
+  }));
+  expect(unreadableIdentity.state).toBe("unknown");
+  expect(unreadableIdentity.reason).toContain("did not report its start identity");
+  expect(unreadableIdentity.since).toBeNull();
+
+  /* Same for a row that never recorded one: there is nothing to revalidate
+     against, so the pid is not evidence that this host is the recorded host. */
+  const unrecordedIdentity = decideTurnLiveness(evidence({
+    transcriptTail: { lastEventAt: NOW - 38 * MINUTE, lastWriteAt: NOW - 38 * MINUTE, kind: "tool-result", turn: "busy" },
+    host: {
+      expected: { pid: 4242, startIdentity: null },
+      present: true,
+      observedIdentity: "4242:900",
+      cpuMs: 4_700,
+      launchedAt: NOW - 34 * MINUTE,
+    },
+  }));
+  expect(unrecordedIdentity.state).toBe("unknown");
+  expect(unrecordedIdentity.reason).toContain("recorded no start identity");
+});
+
 test("a host too young to have written anything answers unknown", () => {
   const decision = decideTurnLiveness(evidence({
     transcriptTail: { lastEventAt: NOW - 38 * MINUTE, lastWriteAt: NOW - 38 * MINUTE, kind: "tool-result", turn: "busy" },
@@ -293,3 +323,87 @@ test("conversation liveness reads the registry row and its outstanding delivery"
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test.each(["busy", "terminal"] as const)(
+  "a recorded %s turn buys nothing when the transcript cannot be read",
+  async (recordedTurn) => {
+    const { AgentRegistry } = await import("@/lib/agent/registry");
+    const { beginLegacySpawnFixture } = await import("@/lib/agent/registryTestFixtures");
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-liveness-stale-turn-"));
+    try {
+      const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+      const sessionId = crypto.randomUUID();
+      const transcript = path.join(directory, `${sessionId}.jsonl`);
+      /* A tail that cannot be parsed: the read is `uncertain`, so the transcript
+         has no turn, no last event and no kind to give. */
+      fs.writeFileSync(transcript, '{"type":"assistant","timestamp":"2026-08-29T03:24:0');
+      const lastWrite = new Date("2026-08-29T03:24:05.000Z");
+      fs.utimesSync(transcript, lastWrite, lastWrite);
+      const begun = beginLegacySpawnFixture(registry, {
+        engine: "claude",
+        cwd: directory,
+        transport: "structured",
+        accountId: null,
+      });
+      if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+      const settled = registry.settleSpawn(begun.receipt.launchId, {
+        key: { engine: "claude", sessionId },
+        artifactPath: transcript,
+        cwd: directory,
+        accountId: null,
+        status: "live",
+        host: null,
+        structuredHost: {
+          kind: "claude-broker",
+          endpoint: "stdio:4242",
+          process: { pid: 4242, startIdentity: "4242:900" },
+          eventCursor: 0,
+          protocolVersion: "test",
+          writerClaimEpoch: 1,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        },
+        claimEpoch: 1,
+        claimOwner: "structured-host:test",
+        pendingAction: null,
+      });
+      if (settled.kind !== "settled") throw new Error("structured conversation was unavailable");
+      /* The status word the row carries, inherited from whoever wrote it last. */
+      registry.reconcileConversations([{
+        engine: "claude",
+        path: transcript,
+        accountId: null,
+        launchProfile: settled.conversation.generations.at(-1)!.launchProfile,
+        turn: {
+          state: recordedTurn,
+          source: "lifecycle",
+          terminalAt: recordedTurn === "terminal" ? "2026-08-29T03:24:05.000Z" : null,
+        },
+        observedAt: "2026-08-29T03:30:00.000Z",
+      }]);
+      expect(registry.readOnlySnapshot().conversations[settled.conversation.id]!.turn.state).toBe(recordedTurn);
+
+      const decision = await conversationTurnLiveness(registry, settled.conversation.id, {
+        now: () => NOW,
+        pidAlive: () => true,
+        processIdentity: () => "4242:900",
+        processCpuMs: () => 4_700,
+        /* The same 34-minute-old launch as the severed specimen: everything
+           except the transcript is identical to the reading that is severed. */
+        uptimeSeconds: () => (NOW - Date.parse("2026-08-29T03:28:15.000Z")) / 1_000 + 9,
+      });
+
+      /* Before this, an unreadable transcript borrowed the row's own word: a
+         stale `busy` produced `severed` and a stale `terminal` produced
+         `settled`, both with no event and no kind behind them. Neither is
+         evidence, and `unknown` authorises nothing (#1281). */
+      expect(decision?.state).toBe("unknown");
+      expect(decision?.turn).toBe("unknown");
+      expect(decision?.lastEvent).toEqual({ kind: null, at: null });
+      expect(decision?.since).toBeNull();
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);

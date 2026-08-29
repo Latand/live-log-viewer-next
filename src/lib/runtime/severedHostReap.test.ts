@@ -61,16 +61,26 @@ async function settles(assertion: () => boolean, what: string): Promise<void> {
   throw new Error(`${what} did not settle`);
 }
 
-function seat(name: string, process: { pid: number; startIdentity: string }, lastWrite: Date) {
+const OPEN_TURN_TRANSCRIPT = [
+  JSON.stringify({ type: "assistant", timestamp: "2026-08-29T03:24:00.000Z", message: { content: [{ type: "tool_use", id: "t1", name: "Bash" }] } }),
+  JSON.stringify({ type: "user", timestamp: "2026-08-29T03:24:05.000Z", message: { content: [{ type: "tool_result", tool_use_id: "t1" }] } }),
+  "",
+].join("\n");
+
+/** A tail no reader can parse: the record is cut off mid-object. */
+const UNREADABLE_TRANSCRIPT = '{"type":"assistant","timestamp":"2026-08-29T03:24:0';
+
+function seat(
+  name: string,
+  process: { pid: number; startIdentity: string },
+  lastWrite: Date,
+  body: string = OPEN_TURN_TRANSCRIPT,
+) {
   const directory = fs.mkdtempSync(path.join(isolated, `${name}-`));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
   const sessionId = crypto.randomUUID();
   const transcript = path.join(directory, `${sessionId}.jsonl`);
-  fs.writeFileSync(transcript, [
-    JSON.stringify({ type: "assistant", timestamp: "2026-08-29T03:24:00.000Z", message: { content: [{ type: "tool_use", id: "t1", name: "Bash" }] } }),
-    JSON.stringify({ type: "user", timestamp: "2026-08-29T03:24:05.000Z", message: { content: [{ type: "tool_result", tool_use_id: "t1" }] } }),
-    "",
-  ].join("\n"));
+  fs.writeFileSync(transcript, body);
   fs.utimesSync(transcript, lastWrite, lastWrite);
   const begun = beginLegacySpawnFixture(registry, { engine: "claude", cwd: directory, transport: "structured", accountId: null });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
@@ -97,6 +107,17 @@ function seat(name: string, process: { pid: number; startIdentity: string }, las
     pendingAction: null,
   });
   if (settled.kind !== "settled") throw new Error("structured conversation was unavailable");
+  /* The turn word the row carries. It is inherited from whoever wrote it last
+     and is never what a kill is decided on (#1281); a case that means to prove
+     that has to put the word there. */
+  registry.reconcileConversations([{
+    engine: "claude",
+    path: transcript,
+    accountId: null,
+    launchProfile: settled.conversation.generations.at(-1)!.launchProfile,
+    turn: { state: "busy", source: "lifecycle", terminalAt: null },
+    observedAt: new Date(lastWrite.getTime() + 60_000).toISOString(),
+  }]);
   return { registry, conversationId: settled.conversation.id, key: { engine: "claude" as const, sessionId }, directory };
 }
 
@@ -151,6 +172,29 @@ test("a pid the registry no longer owns is reported severed but never signalled"
     expect(outcome).toMatchObject({ reaped: false });
     expect(outcome?.reason).toContain("no longer the process the registry recorded");
     expect(procBackend.pidAlive(child.pid)).toBe(true);
+  } finally {
+    child.kill();
+    await settles(() => !procBackend.pidAlive(child.pid), "fixture child exit");
+  }
+});
+
+
+test("a live host whose transcript cannot be read is never reaped on the row's own turn word", async () => {
+  const child = childProcess();
+  /* Every other fact matches the specimen reaped above — a live child, nothing
+     written since its launch, 4.7 s of CPU in 34 minutes — and the row reads
+     `busy`. The one difference is that the transcript says nothing, and that is
+     the whole difference: unreadable evidence authorises no kill (#1281). */
+  const { registry, conversationId, key } = seat("unreadable", child, AN_HOUR_AGO, UNREADABLE_TRANSCRIPT);
+  try {
+    const outcome = await reapSeveredStructuredHost(registry, conversationId, key, {
+      ...later,
+      processCpuMs: () => 4_700,
+    });
+
+    expect(outcome).toBeNull();
+    expect(procBackend.pidAlive(child.pid)).toBe(true);
+    expect(registry.readOnlySnapshot().entries[`claude:${key.sessionId}`]).toMatchObject({ status: "live" });
   } finally {
     child.kill();
     await settles(() => !procBackend.pidAlive(child.pid), "fixture child exit");

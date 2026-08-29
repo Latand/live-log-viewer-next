@@ -61,13 +61,19 @@ guarantees for the 1.x series.
   launch, and how long a delivery has been outstanding for it. A host writing or
   burning CPU is working however long the gap between messages; a host that has
   written nothing and burned none since its own launch, under a turn it
-  inherited, is severed. Three consequences follow. A pipeline stage whose host
-  is proven severed leaves `running`, so `retry-stage` works without closing the
-  pipeline. A kill on a host no delivery controller owns reaps the recorded
-  process — fenced on its start identity, and only once the evidence says
-  severed — so the registry row can retire instead of refusing forever and
-  blocking every message queued behind it; an interrupt in the same state
-  settles rather than holding its conversation's drain open. And a Viewer
+  inherited, is severed. Everything else answers `unknown`, and `unknown`
+  authorises nothing: a transcript whose tail cannot be parsed leaves the turn
+  unknown rather than borrowing the word the registry row happens to carry — a
+  stale `busy` used to be enough to call a turn severed and a stale `terminal`
+  enough to call it settled, neither with an event behind it — and a pid whose
+  recorded start identity cannot be revalidated is not evidence about the
+  process the row was written about. Three consequences follow. A pipeline
+  stage whose host is proven severed leaves `running`, so `retry-stage` works
+  without closing the pipeline. A kill on a host no delivery controller owns
+  reaps the recorded process — fenced on its start identity, and only once the
+  evidence says severed — so the registry row can retire instead of refusing
+  forever and blocking every message queued behind it; an interrupt in the same
+  state settles rather than holding its conversation's drain open. And a Viewer
   restart no longer reports `proc: running` for a pid that is gone.
 - A Viewer restart messages only the orchestrator seats whose own turn was
   severed (#1276). The predicate was `live` or `idle`, and `idle` meant every
@@ -79,12 +85,19 @@ guarantees for the 1.x series.
   no process. The message no longer asks the seat to "re-arm any scheduled
   work": since #1245 the Viewer owns the clock, and a durable agent-managed
   monitor record is tracked in #1280.
-- A structured host adopted at boot that the delivery controller never claimed
-  fails the startup pass instead of being left running with no owner (#1282). A
-  startup completion that resumes inside a generation the publication has
-  already left now hands its hosts to the successor; it used to answer "done"
-  and register nothing, which is how a launched host ends up parked in
-  `epoll_wait` for half an hour while every recovery verb is refused.
+- Startup launches no structured host it cannot hand to a delivery controller
+  (#1282). A pass with no runtime client has no publication to claim what it
+  starts, and the check that catches an unclaimed host was behind that same
+  condition, so such a pass adopted hosts and reported success while nothing
+  owned them. Such a pass now defers its adoption: nothing is launched, the
+  boot's own recovery evidence is kept, and the startup retry loop runs the pass
+  again once a client exists. A host adopted by a pass that did
+  have one, but which the controller never claimed, still fails the pass instead
+  of being left running with no owner. And a startup completion that resumes
+  inside a generation the publication has already left now hands its hosts to
+  the successor; it used to answer "done" and register nothing, which is how a
+  launched host ends up parked in `epoll_wait` for half an hour while every
+  recovery verb is refused.
 
 ### Removed
 - The conversation monitor's standalone CLI driver, its HTTP client and its
