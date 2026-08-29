@@ -22,7 +22,7 @@ async function callSpawn(client: Client, clientRequestId: string) {
     arguments: {
       clientRequestId,
       cwd: process.cwd(),
-      prompt: "Run the restart fixture.",
+      "prompt": "Run the restart fixture.",
       title: "Restart fixture",
     },
   });
