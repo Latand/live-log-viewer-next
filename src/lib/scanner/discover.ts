@@ -2,7 +2,6 @@ import fs from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { procBackend } from "../proc";
 import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
 import { forEachCooperatively, mapCooperatively } from "../cooperative";
 import { sessionProjectProjection } from "../session/titleProjection";
@@ -356,25 +355,6 @@ function resourceActivity(previous: FileEntry | undefined, mtime: number, size: 
     before any of its bytes have been read. */
 const ENGINE_LABEL = { codex: "Codex", claude: "Claude", openclaw: "OpenClaw" } as const;
 
-/**
- * The process state a resource-scope entry may carry over from the last full
- * scan.
- *
- * `proc` and `pid` are the one pair here that names something outside the
- * snapshot, and a name outlives what it named: after a structured host was
- * killed the Viewer went on reporting `proc: running` against a pid that no
- * longer existed (#1282), which is the same mistake in miniature as reading a
- * status word for liveness. Carrying the pid is fine; carrying "running" is
- * only fine while that process is still there.
- */
-function carriedProcessState(previous: FileEntry | undefined): Pick<FileEntry, "proc" | "pid"> {
-  const pid = previous?.pid ?? null;
-  if (previous?.proc !== "running") return { proc: previous?.proc ?? null, pid };
-  return pid !== null && procBackend.pidAlive(pid)
-    ? { proc: "running", pid }
-    : { proc: "done", pid: null };
-}
-
 function resourceScopeFromPaths(raw: RawPath[], baseline?: ResourceScopeSnapshot): ResourceScopeSnapshot {
   const previousByPath = new Map((baseline?.files ?? []).map((entry) => [entry.path, entry] as const));
   const conversations = raw.filter((entry) => entry.rootName !== "claude-tasks" && entry.path.endsWith(".jsonl"));
@@ -408,7 +388,8 @@ function resourceScopeFromPaths(raw: RawPath[], baseline?: ResourceScopeSnapshot
       mtime,
       size,
       ...activity,
-      ...carriedProcessState(previous),
+      proc: previous?.proc ?? null,
+      pid: previous?.pid ?? null,
       model: null,
       pendingQuestion: null,
       waitingInput: null,
