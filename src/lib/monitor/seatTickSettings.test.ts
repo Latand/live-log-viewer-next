@@ -112,7 +112,17 @@ test("a change that leaves the default without a reason is refused; restoring it
   const off = (change(defaultSeatTickSettings(PROJECT), { enabled: false, reason: "nothing here for me" }) as { settings: SeatTickSettings }).settings;
   const back = change(off, { enabled: true });
   expect(back.ok).toBe(true);
-  expect((back as { settings: SeatTickSettings }).settings).toMatchObject({ enabled: true, until: null });
+  /* And the record it restores keeps nothing of the setting it ended: a reason
+     left standing beside a tick that is ticking again is the same disagreement
+     between record and behaviour as a row that still says "off". Who restored
+     it, and when, stays. */
+  expect((back as { settings: SeatTickSettings }).settings).toMatchObject({
+    enabled: true,
+    wakeIntervalMinutes: null,
+    reason: null,
+    until: null,
+    setBy: SEAT,
+  });
 });
 
 test("an empty change, a nonsense interval and a nonsense expiry are each named", () => {

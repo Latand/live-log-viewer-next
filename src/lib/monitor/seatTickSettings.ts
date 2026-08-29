@@ -315,11 +315,13 @@ export function applySeatTickSettingsChange(
   if (!seatTickSettingsAreDefault(next) && !next.reason) {
     return { ok: false, error: "a reason is required when the tick is disabled or its wake interval is changed; a quiet tick with no recorded reason is indistinguishable from a broken one" };
   }
-  /* Back at the defaults, the record keeps nothing: an expiry and a reason
-     that describe a setting nobody holds any more are debris the board would
-     go on showing. */
+  /* Back at the defaults, the record keeps nothing of the setting it replaced:
+     an interval, an expiry and a reason that describe a state nobody holds any
+     more are the same disagreement between record and behaviour the lapsed
+     write exists to close. Who restored it, and when, is on the row either
+     way — `setBy` and `updatedAt` outlive the setting they ended. */
   if (seatTickSettingsAreDefault(next)) {
-    return { ok: true, settings: { ...next, wakeIntervalMinutes: null, reason: next.reason, until: null } };
+    return { ok: true, settings: { ...next, wakeIntervalMinutes: null, reason: null, until: null } };
   }
   return { ok: true, settings: next };
 }
