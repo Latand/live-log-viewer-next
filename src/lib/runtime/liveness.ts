@@ -26,10 +26,12 @@ import { recordValue, recordsValue, stringValue } from "@/lib/scanner/json";
  *   essentially none and written nothing since its own launch never started;
  * - whether a delivery has been outstanding for it, and for how long.
  *
- * The asymmetry is deliberate. `working` needs one positive sign and is given
- * on any of them; `severed` needs positive evidence of absence and is refused
- * whenever the platform cannot supply it. Everything else answers `unknown`,
- * which every consumer treats as "do not act".
+ * The first fact gates the rest: with no readable turn there is nothing for the
+ * others to be facts about, so an unreadable tail ends the reading immediately.
+ * Past that gate the asymmetry is deliberate — `working` needs one positive
+ * sign and is given on any of them; `severed` needs positive evidence of
+ * absence and is refused whenever the platform cannot supply it. Everything
+ * else answers `unknown`, which every consumer treats as "do not act".
  */
 
 /** What the newest transcript record is. The kind is load-bearing: a turn
@@ -259,11 +261,12 @@ export async function readTranscriptEvidence(
 /**
  * The whole decision, from evidence alone.
  *
- * Reading order matters: a closed turn first (there is nothing to sever), then
- * process identity (a pid that is gone, or is now somebody else's process,
- * settles it), then writes since this host's own launch, then CPU, then how
- * long a delivery has waited. Nothing here reads `live`, `idle` or `busy` off
- * a row.
+ * Reading order matters: the transcript's own readability first (a turn nobody
+ * can read is a turn nothing can be said about), then a closed turn (there is
+ * nothing to sever), then process identity (a pid that is gone, or is now
+ * somebody else's process, settles it), then writes since this host's own
+ * launch, then CPU, then how long a delivery has waited. Nothing here reads
+ * `live`, `idle` or `busy` off a row.
  */
 export function decideTurnLiveness(evidence: TurnLivenessEvidence): TurnLivenessDecision {
   const { now, transcriptTail: transcript, host, delivery } = evidence;
@@ -271,6 +274,29 @@ export function decideTurnLiveness(evidence: TurnLivenessEvidence): TurnLiveness
     turn: transcript.turn,
     lastEvent: { kind: transcript.kind, at: transcript.lastEventAt },
   };
+  /* Unreadable, corrupt, truncated or empty transcript evidence stops here.
+     Every branch below sits behind this one, the four that reach `severed`
+     included — a process that is gone, a pid that is now somebody else's, a
+     host burning no CPU since its launch, a delivery that has waited (#1281).
+     The reading that tempts the other way is that a missing process is
+     definitive. It is definitive about the pid: that pid is not running. It
+     says nothing about the turn, because a turn severed mid-work and a turn
+     that finished long ago under a row nobody updated leave exactly this
+     observation, and the transcript is the only thing that tells them apart.
+     The costs are not symmetric either. A kill lands the same way in both
+     readings, but a retry re-runs work that may already be complete, and a
+     continuation nudge re-prompts a seat about a turn that is over. So the
+     answer consumers get is `unknown`, which authorises none of it, rather than
+     a verdict they are entitled to act on. */
+  if (transcript.turn === "unknown") {
+    return {
+      ...context,
+      state: "unknown",
+      reason: "the transcript leaves no readable turn"
+        + ` (last written ${when(transcript.lastWriteAt)}), so nothing here says whether a turn is in flight`,
+      since: null,
+    };
+  }
   /* Settledness is a property of the turn, so it outranks everything about the
      process: a finished session whose host has since exited has nothing
      severed about it, and a seat in that state is owed no recovery (#1276). */
@@ -363,21 +389,13 @@ export function decideTurnLiveness(evidence: TurnLivenessEvidence): TurnLiveness
   const outstandingSince = delivery.outstandingSince;
   const deliveryStalled = outstandingSince !== null
     && now - outstandingSince >= LIVENESS_OUTSTANDING_DELIVERY_MS;
-  /* "Severed" is a statement about a turn, so there has to be one. A host that
-     inherited an open turn and has written nothing since it launched is the
-     specimen; a freshly launched host whose first prompt simply has not arrived
-     yet inherited nothing, and is only judged once a delivery has been waiting
-     on it long enough to be evidence in its own right. */
-  const inheritedOpenTurn = transcript.turn === "busy";
-  if (!inheritedOpenTurn && !deliveryStalled) {
-    return {
-      ...context,
-      state: "unknown",
-      reason: `pid ${host.expected.pid} has written nothing since its own launch at ${when(host.launchedAt)},`
-        + " but it inherited no open turn and nothing is waiting on it",
-      since: null,
-    };
-  }
+  /* "Severed" is a statement about a turn, and by here there is one: the tail
+     read says this host inherited a turn that is still open, and has written
+     nothing since it launched — the specimen. A host with no turn to inherit
+     never arrives here at all. A freshly launched one still waiting for its
+     first prompt has an empty transcript, and one whose transcript cannot be
+     read has no turn either; both leave `turn: "unknown"`, which the gate at
+     the top of this function answers before any of this runs. */
   const inherited = `it has written nothing since its own launch at ${when(host.launchedAt)};`
     + ` the transcript's last event is ${transcript.kind ?? "unreadable"} at ${when(transcript.lastEventAt)}, before that launch`;
   if (host.cpuMs !== null) {

@@ -54,11 +54,17 @@ test("a ten-minute gap after a tool call this host wrote is still working", () =
   expect(decision.since).toBeNull();
 });
 
-test("a host appending to a transcript whose tail cannot be parsed is still working", () => {
+test("a host appending to a transcript whose tail cannot be parsed is judged either way", () => {
+  /* The file is being written, which used to be enough to answer `working`.
+     It is the same observation a host makes while replaying a transcript it
+     will never answer, and the tail that would separate them is the one thing
+     unreadable here — so the reading stops at the gate with the verdicts that
+     matter: no kill, no retry, no nudge (#1281). */
   const decision = decideTurnLiveness(evidence({
     transcriptTail: { lastEventAt: null, kind: null, lastWriteAt: NOW - 30_000, turn: "unknown" },
   }));
-  expect(decision.state).toBe("working");
+  expect(decision.state).toBe("unknown");
+  expect(decision.since).toBeNull();
 });
 
 test("a host writing normally is working", () => {
@@ -98,6 +104,44 @@ test("a process that no longer exists is severed from the last thing it did", ()
   expect(decision.state).toBe("severed");
   expect(decision.since).toBe(NOW - MINUTE);
   expect(decision.turn).toBe("busy");
+});
+
+test("every reading that reaches severed answers unknown once the turn is unreadable", () => {
+  /* The four routes to `severed`, each handed the process and delivery facts
+     that decide it and a tail that cannot be parsed instead of one that ends on
+     an open turn. None of them may still decide: what separates a turn severed
+     mid-work from a turn that ended long ago under a row nobody updated is the
+     transcript, and that is the missing evidence in all four (#1281). */
+  const unreadable = { lastEventAt: null, kind: null, lastWriteAt: NOW - 38 * MINUTE, turn: "unknown" } as const;
+
+  const gone = decideTurnLiveness(evidence({
+    transcriptTail: unreadable,
+    host: { present: false, observedIdentity: null, cpuMs: null },
+  }));
+  expect(gone.state).toBe("unknown");
+  expect(gone.since).toBeNull();
+
+  const reusedPid = decideTurnLiveness(evidence({
+    transcriptTail: unreadable,
+    host: { observedIdentity: "4242:99999" },
+  }));
+  expect(reusedPid.state).toBe("unknown");
+  expect(reusedPid.since).toBeNull();
+
+  const noCpuSinceLaunch = decideTurnLiveness(evidence({
+    transcriptTail: unreadable,
+    host: { launchedAt: NOW - 34 * MINUTE, cpuMs: 4_700 },
+  }));
+  expect(noCpuSinceLaunch.state).toBe("unknown");
+  expect(noCpuSinceLaunch.since).toBeNull();
+
+  const deliveryWaiting = decideTurnLiveness(evidence({
+    transcriptTail: unreadable,
+    host: { launchedAt: NOW - 34 * MINUTE, cpuMs: null },
+    delivery: { outstandingSince: NOW - 6 * MINUTE },
+  }));
+  expect(deliveryWaiting.state).toBe("unknown");
+  expect(deliveryWaiting.since).toBeNull();
 });
 
 test("a settled turn whose host has since exited reads as settled", () => {
@@ -154,7 +198,7 @@ test("a host too young to have written anything answers unknown", () => {
   expect(decision.state).toBe("unknown");
 });
 
-test("a host waiting for a first prompt it never got is not called severed on CPU alone", () => {
+test("a host waiting for a first prompt it never got is not called severed, however long the wait", () => {
   /* It inherited no turn: the transcript is empty because nothing has been
      delivered to it yet, which is a different fact from a severed turn. */
   const decision = decideTurnLiveness(evidence({
@@ -162,12 +206,18 @@ test("a host waiting for a first prompt it never got is not called severed on CP
     host: { launchedAt: NOW - 20 * MINUTE, cpuMs: 300 },
   }));
   expect(decision.state).toBe("unknown");
+  /* A delivery that has waited says a delivery is stuck. It does not say a turn
+     was cut off mid-work, and on an empty transcript there is no turn to say it
+     about — so the wait no longer buys `severed` here, and the kill and retry it
+     used to authorise stay refused (#1281). The same wait against a transcript
+     that does end on an open turn still decides, two cases below. */
   const waited = decideTurnLiveness(evidence({
     transcriptTail: { lastEventAt: null, lastWriteAt: null, kind: null, turn: "unknown" },
     host: { launchedAt: NOW - 20 * MINUTE, cpuMs: 300 },
     delivery: { outstandingSince: NOW - 6 * MINUTE },
   }));
-  expect(waited.state).toBe("severed");
+  expect(waited.state).toBe("unknown");
+  expect(waited.since).toBeNull();
 });
 
 test("without CPU accounting an idle inherited turn is unknown until a delivery has waited", () => {
