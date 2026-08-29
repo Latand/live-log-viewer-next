@@ -171,26 +171,55 @@ export async function rehearseRuntimeHost(
     const holdStarted = ports.now();
     const elapsed = () => Math.round((ports.now() - holdStarted) / 1_000);
     const window = Math.round(holdWindowMs / 1_000);
-    while (ports.now() - holdStarted < holdWindowMs) {
-      const abandon = listener.polls % 2 === 1;
+    /* One observation of both endpoints, counted, by a caller that either
+       reads the answer or leaves mid-way through it. `where` is asked for only
+       once something has gone, so it names the moment of the failure rather
+       than the moment the poll started. */
+    const observe = async (
+      abandon: boolean,
+      where: () => string,
+    ): Promise<ViewerRuntimeHostHealthEvidence | null> => {
       listener.polls += 1;
       if (abandon) listener.abandoned += 1;
       if (!await ports.probeListener({ abandon })) {
-        return fail(`the stable listener stopped answering ${elapsed()}s into a ${window}s hold under ${options.runtime}`, succession);
+        return fail(`the stable listener stopped answering ${where()} under ${options.runtime}`, succession);
       }
       listener.answered += 1;
       socket.polls += 1;
       if (abandon) socket.abandoned += 1;
       if (!await ports.probeSocket({ abandon })) {
-        return fail(`the runtime socket stopped answering ${elapsed()}s into a ${window}s hold under ${options.runtime}`, succession);
+        return fail(`the runtime socket stopped answering ${where()} under ${options.runtime}`, succession);
       }
       socket.answered += 1;
+      return null;
+    };
+    const insideWindow = () => `${elapsed()}s into a ${window}s hold`;
+    while (ports.now() - holdStarted < holdWindowMs) {
+      const failed = await observe(listener.polls % 2 === 1, insideWindow);
+      if (failed) return failed;
       if (successor.exited()) {
         return fail(`the runtime host exited during the ${window}s hold under ${options.runtime}`, succession);
       }
       await ports.sleep(holdPollMs);
     }
     if (listener.polls === 0) return fail("the hold window observed nothing", succession);
+    /* #1248: the loop ends in a sleep, and nothing looked again after it. A
+       successor that died inside that last interval was never observed, so the
+       rehearsal reported a clean hold in precisely the case this gate exists
+       to catch. Look once more, after the window has elapsed. The process
+       first: a host that is already gone has a name for what happened, and
+       asking its endpoints would only spend the probe timeouts to learn the
+       same thing. Then both endpoints, by a caller that reads its answer in
+       full, because a complete answer is what a host that is gone cannot
+       give — and this last one is what the verdict rests on. */
+    if (successor.exited()) {
+      return fail(
+        `the runtime host exited in the final ${holdPollMs}ms of the ${window}s hold under ${options.runtime}`,
+        succession,
+      );
+    }
+    const afterWindow = await observe(false, () => `at the end of a ${window}s hold`);
+    if (afterWindow) return afterWindow;
     return evidence(options, checkedAt, succession, listener, socket, null);
   } finally {
     await successor?.stop().catch(() => undefined);
