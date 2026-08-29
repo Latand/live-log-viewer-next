@@ -50,6 +50,42 @@ guarantees for the 1.x series.
   protecting work in flight is unchanged: the turn still has to settle,
   questions still have to be answered, the queue still has to drain.
 
+### Fixed
+- Whether a turn is being worked on is decided from evidence, so a redeploy no
+  longer strands a lane nothing can recover (#1281, #1282, #1276). `live`,
+  `idle` and `busy` are inherited words: a turn severed mid-flight kept reading
+  busy forever, and a step that legitimately takes ten minutes read stalled. The
+  decision now names what it read — the last transcript event and its kind, the
+  artifact's own clock, whether the process the registry believes owns the turn
+  still exists and is still that process, the CPU it has consumed since its own
+  launch, and how long a delivery has been outstanding for it. A host writing or
+  burning CPU is working however long the gap between messages; a host that has
+  written nothing and burned none since its own launch, under a turn it
+  inherited, is severed. Three consequences follow. A pipeline stage whose host
+  is proven severed leaves `running`, so `retry-stage` works without closing the
+  pipeline. A kill on a host no delivery controller owns reaps the recorded
+  process — fenced on its start identity, and only once the evidence says
+  severed — so the registry row can retire instead of refusing forever and
+  blocking every message queued behind it; an interrupt in the same state
+  settles rather than holding its conversation's drain open. And a Viewer
+  restart no longer reports `proc: running` for a pid that is gone.
+- A Viewer restart messages only the orchestrator seats whose own turn was
+  severed (#1276). The predicate was `live` or `idle`, and `idle` meant every
+  dormant project was re-hosted and spent a paid turn answering "no change" on
+  every redeploy — eleven seats, eleven hosts, eleven turns, and fresh activity
+  stamped on projects nobody had touched in days. A seat is now nudged only when
+  the evidence says a turn of its own was cut off, the surviving message names
+  that turn by its last transcript event, and an idle seat gets no message and
+  no process. The message no longer asks the seat to "re-arm any scheduled
+  work": since #1245 the Viewer owns the clock, and a durable agent-managed
+  monitor record is tracked in #1280.
+- A structured host adopted at boot that the delivery controller never claimed
+  fails the startup pass instead of being left running with no owner (#1282). A
+  startup completion that resumes inside a generation the publication has
+  already left now hands its hosts to the successor; it used to answer "done"
+  and register nothing, which is how a launched host ends up parked in
+  `epoll_wait` for half an hour while every recovery verb is refused.
+
 ### Removed
 - The conversation monitor's standalone CLI driver, its HTTP client and its
   cross-process lock (#1245): `scripts/conversation-monitor.ts`, `httpViewerApi`

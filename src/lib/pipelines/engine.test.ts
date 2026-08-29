@@ -2145,6 +2145,37 @@ test("an unindexed rollout parks once its structured host is dead past grace (#1
   });
 });
 
+test("a stage whose host is proven dead becomes retryable without closing the pipeline (#1282)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  const unavailableSince = h.ports.now();
+  h.ports.conversationHostUnavailableSince = async () => unavailableSince;
+  h.advanceWallClock(5 * 60_000);
+
+  await tickPipelines([], h.ports);
+
+  /* Before #1282 the stage stayed `running` while its host sat there doing
+     nothing, so retry-stage answered "pipeline does not have a stage awaiting
+     retry" and the only way out was closing the pipeline. */
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  const failedAttempt = parked.runs[0]!.attempts[0]!;
+  h.ports.spawnReceipt = (candidate) => candidate === failedAttempt.launchId ? {
+    state: "completed",
+    launchId: failedAttempt.launchId!,
+    conversationId: failedAttempt.conversationId!,
+    sessionId: failedAttempt.sessionId,
+    "transcript": failedAttempt.agentPath,
+    paneId: failedAttempt.paneId,
+  } : null;
+  const retried = await patchPipeline(parked.id, { action: "retry-stage" }, h.ports);
+
+  expect(retried.error).toBeUndefined();
+  expect(retried.pipeline?.state).not.toBe("closed");
+  expect(loadPipelines()[0]!.state).not.toBe("needs_decision");
+});
+
 test("an exhausted false park ingests its live host's late verdict without a duplicate attempt (#1109)", async () => {
   const h = harness();
   await runningStructuredStage(h);
