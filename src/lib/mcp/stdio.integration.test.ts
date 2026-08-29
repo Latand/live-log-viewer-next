@@ -104,6 +104,7 @@ test("an already-running packaged MCP channel retries through a same-port Viewer
   let restartedViewer: ReturnType<typeof Bun.serve> | null = null;
   let restartedRequests = 0;
   let transientProxyFailures = 0;
+  let breakResponseBody = false;
   try {
     await client.connect(transport);
     expect((await callSpawn(client, "restart-before")).structuredContent)
@@ -120,6 +121,15 @@ test("an already-running packaged MCP channel retries through a same-port Viewer
         if (transientProxyFailures > 0) {
           transientProxyFailures -= 1;
           return new Response(null, { status: 503 });
+        }
+        if (breakResponseBody) {
+          breakResponseBody = false;
+          return new Response(new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"conversationId":'));
+              setTimeout(() => controller.error(new Error("retired Viewer response")), 10);
+            },
+          }), { headers: { "content-type": "application/json" } });
         }
         return spawnResult("after_restart");
       },
@@ -139,6 +149,11 @@ test("an already-running packaged MCP channel retries through a same-port Viewer
     expect((await callSpawn(client, "restart-proxy-gap")).structuredContent)
       .toMatchObject({ ok: true, conversationId: "conversation_after_restart" });
     expect(restartedRequests).toBe(4);
+
+    breakResponseBody = true;
+    expect((await callSpawn(client, "restart-cut-body")).structuredContent)
+      .toMatchObject({ ok: true, conversationId: "conversation_after_restart" });
+    expect(restartedRequests).toBe(6);
 
     await restartedViewer.stop(true);
     restartedViewer = null;

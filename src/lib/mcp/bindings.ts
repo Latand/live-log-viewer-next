@@ -203,13 +203,15 @@ async function requestViewerControl(
           }
           lastFailure = "status 503";
         } catch {
-          if (!attempt.signal.aborted) {
-            if (response.status !== 503 || !retryable) return { response, parsed: null, unreadable: true };
-            lastFailure = "status 503";
-          } else if (!retryable) {
+          if (context.signal?.aborted) throw context.signal.reason;
+          if (!retryable) {
             return { response, parsed: null, unreadable: true };
-          } else {
+          } else if (attempt.signal.aborted) {
             lastFailure = "response body timed out";
+          } else if (response.status === 503) {
+            lastFailure = "status 503";
+          } else {
+            lastFailure = "response body failed";
           }
         }
       }
@@ -279,7 +281,7 @@ async function postViewerControl(
   /* Every control mutation carries its endpoint's idempotency identity
      (clientAttemptId, clientMessageId or clientRequestId). Repeating the same
      request after a lost transport answer therefore asks for its receipt. */
-  const { response, parsed } = await requestViewerControl(pathname, {
+  const { response, parsed, unreadable } = await requestViewerControl(pathname, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -293,6 +295,11 @@ async function postViewerControl(
      later `result.x` throws a TypeError before the status can be classified —
      which is how a 405 from a revision that does not serve the route arrived as
      an uncatchable crash instead of a refusal (#790). */
+  if (unreadable && response.ok) {
+    throw new ViewerControlResponseError(
+      `Viewer control returned an unreadable response with status ${response.status}`,
+    );
+  }
   const result: Record<string, unknown> = parsed && typeof parsed === "object" && !Array.isArray(parsed)
     ? parsed as Record<string, unknown>
     : {};
