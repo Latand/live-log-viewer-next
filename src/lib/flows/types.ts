@@ -54,6 +54,19 @@ export type FlowBlock = {
   resetAt: number | null;
 };
 
+/** A relay withheld from a live implementer host whose account the provider
+    has parked (#611). The verdict is UNDELIVERED and nothing is queued: the
+    relay re-attempts at `until`, which is the provider's own deadline. */
+export type RelayProviderHold = {
+  reason: "provider_throttled" | "quota_exhausted";
+  /** Engine account the provider parked. */
+  accountId: string;
+  /** ISO instant the park lapses at, and the relay is re-attempted. */
+  until: string;
+  /** When the hold was first recorded, so a surface can age it. */
+  since: string;
+};
+
 export type FlowMergeEvidence = {
   repository: string | null;
   headRef: string | null;
@@ -140,6 +153,11 @@ export type Round = {
       past the settlement window the bounded relay retry re-sends under the same
       idempotent client-message identity. */
   relayPendingSettlement?: { path: string; since: string } | null;
+  /** The provider limit this relay is waiting on (#611). While this is set the
+      round is UNDELIVERED and the relay has been withheld rather than queued
+      into a host that cannot start a turn; `relayRetryAt` carries the same
+      deadline, so the ordinary relay tick resumes delivery when it lapses. */
+  relayHold?: RelayProviderHold | null;
   reviewedAt: string | null; // verdict detected
   /** Reviewer process reached a verdict or terminal error. */
   terminalAt?: string | null;

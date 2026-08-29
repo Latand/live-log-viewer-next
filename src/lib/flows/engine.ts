@@ -13,6 +13,7 @@ import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
+import type { AccountPark } from "@/lib/runtime/accountPark";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import { isShellCommand } from "@/lib/status";
 import { cleanTitle, durableSemanticTitle, firstPromptLine, semanticTitle } from "@/lib/title";
@@ -178,6 +179,7 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     relayRetryRequiresIdempotency: false,
     relayDelivery: null,
     relayPendingSettlement: null,
+    relayHold: null,
     reviewedAt: null,
     terminalAt: null,
     relayedAt: null,
@@ -334,10 +336,25 @@ function claimFailureDetail(flow: Flow, detail: string): string {
   return `structured host claim ${flow.hostClaim.sessionKey} on account ${flow.hostClaim.accountRef} failed: ${detail}`;
 }
 
+/** The provider parked the implementer's account, so the relay was withheld
+    instead of enqueued (#611). Carries the deadline the relay resumes at. */
+export class RelayHeldByProviderLimitError extends Error {
+  constructor(readonly hold: AccountPark) {
+    super(`relay is held: the provider parked account ${hold.accountId} (${hold.reason}) until ${hold.until}`);
+    this.name = "RelayHeldByProviderLimitError";
+  }
+}
+
 export interface RelayDeliveryOverrides {
   recover?: typeof recoverDeadStructuredConversation;
   enqueueStructured?: typeof enqueueStructuredMessage;
   deliver?: typeof deliverToTranscriptHost;
+  /** Withhold the message when recovery reports the implementer's host parked
+      behind a provider limit, instead of enqueuing into a host that cannot
+      start the turn. Set by the relay tick, which owns a resume schedule and
+      re-attempts at the deadline; the kickoff has no such schedule, so it
+      keeps the queue behaviour it has always had. */
+  holdWhenParked?: boolean;
   /** Restart recovery uses this fence when the prior process may have sent the
       relay before its durable settlement write. */
   requireIdempotentDelivery?: boolean;
@@ -390,6 +407,10 @@ export async function sendToImplementer(
       throw new Error(claimFailureDetail(flow, detail), { cause: error });
     }
     if (recovered) {
+      /* Before any actuation: nothing is enqueued, no transport is recorded,
+         and the round keeps its durable client-message identity, so the relay
+         that runs after the park lapses is the same one, not a duplicate. */
+      if (overrides.holdWhenParked && recovered.hold) throw new RelayHeldByProviderLimitError(recovered.hold);
       overrides.onTransportSelected?.("structured");
       const structured = await (overrides.enqueueStructured ?? enqueueStructuredMessage)(
         {
@@ -825,6 +846,7 @@ function settleRelay(flow: Flow, round: Round, deliveryPath: string, deliveredAt
   round.relayDelivery = { path: deliveryPath, deliveredAt };
   round.relayedAt = deliveredAt;
   round.relayPendingSettlement = null;
+  round.relayHold = null;
   round.relayRetryAt = null;
   round.relayRetryRequiresIdempotency = false;
   round.error = null;
@@ -841,7 +863,12 @@ async function relayFindings(
   if (!round.findingsPath) throw new Error("round has no findings artifact");
   const findings = fs.readFileSync(round.findingsPath, "utf8");
   flow.state = "relaying";
-  const deliveryPath = await sendRelay(flow, entriesByPath, relayPrompt(round, findings), options);
+  const deliveryPath = await sendRelay(flow, entriesByPath, relayPrompt(round, findings), {
+    ...options,
+    holdWhenParked: true,
+  });
+  /* The park lapsed and the host took the message, so the hold is history. */
+  round.relayHold = null;
   /* Only the structured transport writes a delivery journal, so only it can be
      held to journal corroboration. Legacy tmux delivery has no durable receipt
      at all (that is why its interrupted replays are refused), and keeps the
@@ -869,6 +896,7 @@ function scheduleRelayRetry(
   requireIdempotentDelivery = round.relayRetryRequiresIdempotency ?? false,
 ): boolean {
   round.relayPendingSettlement = null;
+  round.relayHold = null;
   const consumed = round.relayRetryCount ?? 0;
   if (consumed >= MAX_RELAY_DELIVERY_RETRIES) {
     round.error = detail;
@@ -889,6 +917,39 @@ function scheduleRelayRetry(
   flow.pausedState = null;
   flow.stateDetail = `relay delivery failed; retrying automatically (${next}/${MAX_RELAY_DELIVERY_RETRIES}): ${detail}`;
   return true;
+}
+
+/**
+ * Hold the relay until the provider's own deadline (#611).
+ *
+ * A hold is not a delivery failure and not a timeout: the message never left
+ * the Viewer, so the bounded retry budget, the delivery attempt generation and
+ * the idempotent client-message identity are all untouched, and no item is
+ * left sitting `queued` against a host that cannot start a turn. The round
+ * stays in `relaying` and re-attempts at `until`, which the ordinary
+ * `relayRetryAt` gate already enforces; `relayHold` records what it waits on
+ * so the flow record names the wait, and the read model projects it onto the
+ * strip and the loop hub as a block with the deadline.
+ */
+function holdRelayForProviderLimit(flow: Flow, round: Round, hold: AccountPark): void {
+  const previous = round.relayHold;
+  const continuing = previous?.accountId === hold.accountId
+    && previous.reason === hold.reason
+    && previous.until === hold.until;
+  round.relayPendingSettlement = null;
+  round.relayStartedAt = null;
+  round.relayHold = {
+    reason: hold.reason,
+    accountId: hold.accountId,
+    until: hold.until,
+    since: continuing ? previous.since : isoNow(),
+  };
+  round.relayRetryAt = hold.until;
+  round.error = null;
+  flow.state = "relaying";
+  flow.pausedState = null;
+  flow.stateDetail = `relay held: the provider parked account ${hold.accountId} (${hold.reason});`
+    + ` delivery resumes at ${hold.until}`;
 }
 
 function completeRelayTransition(flow: Flow, round: Round): void {
@@ -1149,7 +1210,9 @@ export async function tickFlow(
         persistCheckpoint();
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        if (error instanceof UnsafeInterruptedRelayRetryError || error instanceof TmuxDeliveryUncertainError) {
+        if (error instanceof RelayHeldByProviderLimitError) {
+          holdRelayForProviderLimit(flow, round, error.hold);
+        } else if (error instanceof UnsafeInterruptedRelayRetryError || error instanceof TmuxDeliveryUncertainError) {
           round.error = detail;
           round.relayRetryAt = null;
           markNeedsDecision(flow, detail);

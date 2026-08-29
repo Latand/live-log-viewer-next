@@ -3,11 +3,13 @@ import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import type { ResumeSpec } from "@/lib/agent/cli";
-import { agentRegistry, type AgentRegistry, type ProcessIdentity } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type ProcessIdentity, type RegistryFile } from "@/lib/agent/registry";
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
+import { cachedLimitsProvenance } from "@/lib/limits";
 import { procBackend } from "@/lib/proc";
 import { derivedSpawnTitle, durableSemanticTitle } from "@/lib/title";
 
+import { accountPark, type AccountPark } from "./accountPark";
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import { reconcileDeadStructuredRegistryHost } from "./registry";
 import { spawnStructuredConversation } from "./structuredSpawn";
@@ -23,7 +25,27 @@ export interface StructuredRecoveryResult {
   path: string;
   conversationId: ViewerConversationId;
   spawned: boolean;
+  /** Set when the live host handed back cannot accept a turn yet because the
+      provider has parked its account (#611). The host is healthy and keeps its
+      claim; what it cannot do is start a turn before `hold.until`. A caller
+      that can wait must hold the message rather than enqueue it — a queued
+      item nobody watches is exactly the stall this reports. */
+  hold?: AccountPark | null;
 }
+
+/** Resolves whether the account behind a live host is parked by the provider.
+    Injectable so a test states the provider's answer instead of reaching for
+    the machine's limits cache. */
+export type StructuredHostParkResolver = (
+  engine: "claude" | "codex",
+  accountId: string | null,
+  snapshot: Pick<RegistryFile, "quotaObservations">,
+) => AccountPark | null;
+
+const defaultParkResolver: StructuredHostParkResolver = (engine, accountId, snapshot) => accountPark(engine, accountId, {
+  quotaObservation: (forEngine, id) => snapshot.quotaObservations[forEngine]?.[id],
+  limitsProvenance: cachedLimitsProvenance,
+});
 
 export interface StructuredRecoveryDependencies {
   registry?: AgentRegistry;
@@ -33,6 +55,7 @@ export interface StructuredRecoveryDependencies {
   spawn?: typeof spawnStructuredConversation;
   processIdentity?: () => { pid: number; startIdentity: string | null };
   requestDeliveryDrain?: () => void;
+  park?: StructuredHostParkResolver;
   ownership?: {
     operationId: string;
     revision: number;
@@ -56,6 +79,11 @@ interface RecoveryCandidate {
   accountId: string | null;
   parentConversationId: ViewerConversationId | null;
   spec: ResumeSpec;
+  /** The registered host is process-alive, claim-owned and not terminal. */
+  hostLive: boolean;
+  /** The provider limit parking that live host's account, if any. */
+  park: AccountPark | null;
+  /** A live host the provider has NOT parked: ready to receive a turn. */
   publishReady: boolean;
 }
 
@@ -74,6 +102,7 @@ function candidateFor(
   registry: AgentRegistry,
   request: StructuredRecoveryRequest,
   durableProfileWins = false,
+  park: StructuredHostParkResolver = defaultParkResolver,
 ): RecoveryCandidate | null {
   const conversation = request.conversationId?.startsWith("conversation_")
     ? registry.conversation(request.conversationId as `conversation_${string}`)
@@ -89,10 +118,17 @@ function candidateFor(
      including conversations that predate registry entries. A verified live
      tmux owner returned above keeps ownership until that process exits. */
   const terminal = entry?.status === "dead" || entry?.status === "unhosted";
-  const publishReady = Boolean(structuredHostProcessAlive(entry?.structuredHost?.process ?? null)
+  const hostLive = Boolean(structuredHostProcessAlive(entry?.structuredHost?.process ?? null)
     && entry?.claimOwner
     && entry.pendingAction === null
     && !terminal);
+  /* #611: a process-alive claim-owned host whose account the provider has
+     parked cannot accept a turn, however alive it looks. Readiness says so
+     here, so the enqueue that would sit `queued` past the parked window never
+     happens; the host itself is untouched and keeps its claim. */
+  const hostAccountId = entry?.accountId ?? generation.accountId ?? null;
+  const hostPark = hostLive ? park(conversation.engine, hostAccountId, snapshot) : null;
+  const publishReady = hostLive && !hostPark;
   const inheritedProfile = emptyLaunchProfile(durableProfileWins ? {
     ...(entry?.launchProfile ?? {}),
     ...generation.launchProfile,
@@ -132,7 +168,23 @@ function candidateFor(
       "transcript": generation.path,
       launchProfile: profile,
     },
+    hostLive,
+    park: hostPark,
     publishReady,
+  };
+}
+
+/** The live host as recovery hands it back. A publish-ready host is returned
+    exactly as before; a host that is alive but not publish-ready is returned
+    with the park that makes it unready, so the caller can wait for it instead
+    of enqueuing into a host that cannot start the turn. */
+function liveHostResult(candidate: RecoveryCandidate): StructuredRecoveryResult {
+  return {
+    target: null,
+    path: candidate.path,
+    conversationId: candidate.conversationId,
+    spawned: false,
+    ...(candidate.publishReady ? {} : { hold: candidate.park }),
   };
 }
 
@@ -152,30 +204,28 @@ async function recoverCandidate(
   })))();
   return registry.withOperationLock(candidate.key, owner, async () => {
     await assertOwnership();
-    let current = candidateFor(registry, request, Boolean(ownership));
+    const park = dependencies.park ?? defaultParkResolver;
+    let current = candidateFor(registry, request, Boolean(ownership), park);
     if (!current) return null;
     /* A host wrapper can disappear before its live Viewer writer releases the
        claim. Retire that claim only through the registry's PID/start-identity
        check; a live or unverifiable host remains fenced. */
-    if (!current.publishReady) {
+    if (!current.hostLive) {
       reconcileDeadStructuredRegistryHost(registry, current.conversationId, current.key);
-      current = candidateFor(registry, request, Boolean(ownership));
+      current = candidateFor(registry, request, Boolean(ownership), park);
       if (!current) return null;
     }
-    if (current.publishReady) {
-      if (!ownership) {
-        return {
-          target: null,
-          path: current.path,
-          conversationId: current.conversationId,
-          spawned: false,
-        };
-      }
+    if (current.hostLive) {
+      /* A parked host is reported held, never replaced: the park belongs to the
+         account, so a successor would start parked too, and terminating this
+         one would throw away the very continuation the caller is trying to
+         reach. An explicit ownership takeover still reseats. */
+      if (!ownership) return liveHostResult(current);
       await ownership.releaseHost(current.key);
       await assertOwnership();
       registry.terminateStructuredHost(current.key);
       await assertOwnership();
-      current = candidateFor(registry, request, true);
+      current = candidateFor(registry, request, true, park);
       if (!current) return null;
     }
     const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
@@ -236,21 +286,19 @@ export async function recoverDeadStructuredConversation(
   if (dependencies.ownership && !await dependencies.ownership.owns()) {
     throw new StructuredRecoverySupersededError();
   }
-  const candidate = candidateFor(registry, request, Boolean(dependencies.ownership));
+  const candidate = candidateFor(
+    registry,
+    request,
+    Boolean(dependencies.ownership),
+    dependencies.park ?? defaultParkResolver,
+  );
   if (!candidate) return null;
   const recoveryKey = dependencies.ownership
     ? `${registry.filename}:${candidate.conversationId}:${dependencies.ownership.operationId}:${dependencies.ownership.revision}`
     : `${registry.filename}:${candidate.conversationId}`;
   const pending = recoveries.get(recoveryKey);
   if (pending) return pending;
-  if (candidate.publishReady && !dependencies.ownership) {
-    return {
-      target: null,
-      path: candidate.path,
-      conversationId: candidate.conversationId,
-      spawned: false,
-    };
-  }
+  if (candidate.hostLive && !dependencies.ownership) return liveHostResult(candidate);
   const recovery = recoverCandidate(request, dependencies, registry, candidate);
   recoveries.set(recoveryKey, recovery);
   try {

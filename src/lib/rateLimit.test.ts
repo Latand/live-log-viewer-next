@@ -263,6 +263,37 @@ test("an unknown exhausted-window reset suppresses a misleading badge time", () 
   });
 });
 
+test("issue 611: a relay held on a provider limit blocks its flow with the deadline it waits for", () => {
+  const until = new Date((RESET + 600) * 1_000).toISOString();
+  const relaying = {
+    ...flow(),
+    state: "relaying" as const,
+    rounds: [{
+      relayHold: { reason: "quota_exhausted" as const, accountId: "main", until, since: "2026-07-10T15:59:00.000Z" },
+    }],
+  } as unknown as Flow;
+  /* No quota reading is attributed to the implementer's transcript here: the
+     board must still show the wait, because a held relay nobody can see is
+     what turned this into three manual rescues. */
+  const snapshot = {
+    conversations: {
+      conversation_impl: {
+        id: "conversation_impl",
+        engine: "codex" as const,
+        generations: [{ path: "/sessions/implementer.jsonl", accountId: "main" }],
+      },
+    },
+    quotaObservations: { claude: {}, codex: {} },
+  };
+
+  expect(projectRateLimitReadModel([entry()], [relaying], snapshot, NOW).flows[0]?.block).toEqual({
+    reason: "rate_limited",
+    conversationId: "conversation_impl",
+    accountId: "main",
+    resetAt: RESET + 600,
+  });
+});
+
 test("reviewer-side flow work keeps its own state while the implementer account is exhausted", () => {
   const reviewing = { ...flow(), state: "reviewing" as const };
   const snapshot = {

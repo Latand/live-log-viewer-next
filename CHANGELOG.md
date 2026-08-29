@@ -64,6 +64,25 @@ guarantees for the 1.x series.
 ## [1.0.0] — 2026-07-31
 
 ### Fixed
+- A review relay no longer enqueues a continuation into an implementer whose
+  account the provider has parked (#611). Publish-readiness treated a
+  process-alive, claim-owned structured host as ready to receive a turn without
+  asking whether the provider would take one, so findings relayed to a builder
+  sitting at a quota-warning prompt went to a host that could not start the
+  turn: the item stayed `queued`, the relay stopped, and the lane went on
+  looking alive. Recovering it by hand cost a preserve-commit, a fresh pipeline
+  and a reviewer re-attach, three times in one evening. Readiness now consults
+  the runtime's own account state — the newest limits provenance and the
+  durable quota observation the account controller records, never the
+  transcript's prose — and a live host whose account is parked is handed back
+  held instead of published; it keeps its process and its claim, because the
+  park belongs to the account and a replacement host would start parked too.
+  The relay withholds the verdict rather than queueing it and re-attempts at
+  the provider's own deadline, so nothing is dropped, no timeout is widened, no
+  retry budget is spent, and the message keeps the idempotent identity it would
+  have been sent under. The wait is visible while it lasts: the round records
+  what it waits on and until when, and the board blocks the flow with that
+  deadline instead of drawing a lane that is quietly making no progress.
 - An agent asking for the operator's attention reaches the desktop that is
   actually open, and the automatic focus lands (#688). Three things had to be
   true for that and none of them were. Presence — who is looking at the viewer —

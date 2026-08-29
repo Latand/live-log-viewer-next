@@ -16,6 +16,10 @@ import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { structuredResumeSessionId } from "./structuredSpawn";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-recovery-"));
+/* Publish-readiness now reads the limits cache out of the viewer state dir, so
+   this suite pins that dir inside its own sandbox: no test here may read or
+   write the state directory the running viewer owns. */
+process.env.LLV_STATE_DIR = path.join(sandbox, "state");
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
 test("dead-host reconciliation preserves a replacement spawn staged after observation", () => {
@@ -898,6 +902,99 @@ test("live structured ownership prevents a duplicate recovery host", async () =>
 
   expect(result).toMatchObject({ target: null, conversationId: conversation.id, spawned: false });
   expect(spawnCalls).toBe(0);
+});
+
+test("issue 611: a live host parked behind a provider limit is held, not published and not replaced", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `parked-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "parked-account");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "parked-account",
+    launchProfile: emptyLaunchProfile({ cwd }),
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:parked",
+      process: { pid: process.pid, startIdentity: null },
+      eventCursor: 11,
+      protocolVersion: "v2",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: "structured-host:parked",
+    pendingAction: null,
+  });
+  /* The runtime's own reading of the account, exactly as the quota controller
+     records it — never the transcript prose at the quota-warning prompt. */
+  const now = Date.now();
+  const resetAt = Math.floor(now / 1_000) + 3_600;
+  const observedAt = new Date(now).toISOString();
+  registry.recordQuotaEvaluation({
+    engine: "codex",
+    observations: [{
+      engine: "codex",
+      accountId: "parked-account",
+      authenticated: true,
+      authCheckedAt: observedAt,
+      limits: {
+        session: { usedPercent: 100, resetsAt: resetAt },
+        weekly: { usedPercent: 31, resetsAt: resetAt + 86_400 },
+        plan: "pro",
+        capturedAt: Math.floor(now / 1_000),
+      },
+      provenance: { source: "live", reason: null, staleSince: null },
+      observedAt,
+      bootId: "boot-parked",
+    }],
+    signature: null,
+    bootId: "boot-parked",
+    now: observedAt,
+    minimumGapMs: 60_000,
+  });
+  let spawnCalls = 0;
+
+  const result = await recoverDeadStructuredConversation({
+    path: artifactPath,
+    conversationId: conversation.id,
+  }, {
+    registry,
+    transport: () => "structured",
+    spawn: async () => {
+      spawnCalls += 1;
+      throw new Error("a parked host must not be replaced");
+    },
+  });
+
+  expect(result).toEqual({
+    target: null,
+    path: artifactPath,
+    conversationId: conversation.id,
+    spawned: false,
+    hold: {
+      reason: "quota_exhausted",
+      accountId: "parked-account",
+      until: new Date(resetAt * 1_000).toISOString(),
+    },
+  });
+  /* The park belongs to the account, so the host keeps its process and its
+     claim: terminating it would throw away the continuation the caller wants. */
+  expect(spawnCalls).toBe(0);
+  expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "idle",
+    claimOwner: "structured-host:parked",
+    structuredHost: { endpoint: "stdio:parked" },
+  });
 });
 
 test("a dead structured process cannot masquerade as publish-ready ownership", async () => {

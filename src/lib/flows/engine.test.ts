@@ -1766,6 +1766,111 @@ test("issue 1065: an optimistically accepted structured relay stays undelivered 
   }
 });
 
+test("issue 611: a relay to a provider-parked host is held to the deadline, then delivered", async () => {
+  const registry = agentRegistry();
+  const implementer = writeCodexEntry("relay-parked-implementer.jsonl", {
+    id: ["119f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const conversation = registry.ensureConversation("codex", implementer.path, null);
+  const until = new Date(Date.now() + 3_600_000).toISOString();
+  const sends: string[] = [];
+  let parked = true;
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, entries, text, options) => sendToImplementer(flow, entries, text, {
+    ...options,
+    /* Exactly the shape of the incident: the host is process-alive and
+       claim-owned, so recovery hands it straight back — but the provider has
+       parked the account it runs under, so it cannot start the turn. */
+    recover: async () => ({
+      target: null,
+      path: implementer.path,
+      conversationId: conversation.id,
+      spawned: false,
+      ...(parked ? { hold: { reason: "quota_exhausted" as const, accountId: "parked-account", until } } : {}),
+    }),
+    enqueueStructured: async (request) => {
+      sends.push(request.clientMessageId!);
+      return { ok: true, structured: true, target: null, outcome: "queued", operationId: `op-parked-${sends.length}`, receipt: {} as never };
+    },
+  }));
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-parked-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nHold until the account can take a turn.\n");
+  saveFlows([raceFlow({
+    id: "flow-relay-parked",
+    implementerPath: implementer.path,
+    implementerConversationId: conversation.id,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-20T16:47:51.534Z",
+      terminalAt: "2026-08-20T16:47:51.534Z",
+    }],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+
+    /* Nothing is enqueued into a host that cannot accept it, and the wait is
+       on the record with what it waits on and until when. */
+    expect(sends).toEqual([]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relaying",
+      stateDetail: expect.stringContaining(until),
+      rounds: [{
+        relayHold: { reason: "quota_exhausted", accountId: "parked-account", until, since: expect.any(String) },
+        relayRetryAt: until,
+        relayStartedAt: null,
+        relayDelivery: null,
+        relayedAt: null,
+        /* A hold is not a delivery failure: the bounded retry budget and the
+           delivery identity are untouched, so a long park cannot exhaust the
+           round into needs_decision. */
+        relayRetryCount: 0,
+        relayDeliveryAttempt: 0,
+        error: null,
+      }],
+    });
+    expect(loadFlows()[0]!.stateDetail).toContain("parked account parked-account");
+    const heldSince = loadFlows()[0]!.rounds[0]!.relayHold!.since;
+
+    /* Inside the park the relay waits instead of re-sending or giving up, and
+       the wait keeps the instant it started rather than restarting each tick. */
+    await tickFlows([implementer]);
+    expect(sends).toEqual([]);
+    expect(loadFlows()[0]!.rounds[0]!.relayHold).toEqual({
+      reason: "quota_exhausted",
+      accountId: "parked-account",
+      until,
+      since: heldSince,
+    });
+
+    /* The park lapses: the same relay, under the same client-message identity,
+       delivers without an operator touching anything. */
+    parked = false;
+    const lapsed = loadFlows()[0]!;
+    lapsed.rounds[0]!.relayRetryAt = "2026-08-20T16:48:00.000Z";
+    saveFlows([lapsed]);
+    await tickFlows([implementer]);
+
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatch(/^flow_relay_[0-9a-f]{32}$/);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relaying",
+      rounds: [{
+        relayHold: null,
+        relayDeliveryTransport: "structured",
+        relayPendingSettlement: { path: implementer.path },
+        relayRetryCount: 0,
+      }],
+    });
+  } finally {
+    restoreDelivery();
+  }
+});
+
 test("issue 1065: a structured relay settles from the delivery journal's delivered record", async () => {
   const registry = agentRegistry();
   const implementer = writeCodexEntry("relay-settled-implementer.jsonl", {
