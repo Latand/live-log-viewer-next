@@ -6,6 +6,28 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+function spawnResult(label: string): Response {
+  return Response.json({
+    conversationId: `conversation_${label}`,
+    path: `/fixture/${label}.jsonl`,
+    launchId: `launch_${label}`,
+    state: "running",
+    initialMessage: null,
+  });
+}
+
+async function callSpawn(client: Client, clientRequestId: string) {
+  return client.callTool({
+    name: "spawn_agent",
+    arguments: {
+      clientRequestId,
+      cwd: process.cwd(),
+      prompt: "Run the restart fixture.",
+      title: "Restart fixture",
+    },
+  });
+}
+
 test("the packaged stdio host publishes and invokes the expanded read surface", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-stdio-"));
   const environment = Object.fromEntries(Object.entries(process.env)
@@ -46,3 +68,77 @@ test("the packaged stdio host publishes and invokes the expanded read surface", 
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
+
+test("an already-running packaged MCP channel retries through a same-port Viewer restart", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-viewer-restart-"));
+  let releaseBlockedRequest: ((response: Response) => void) | null = null;
+  let markBlockedRequestReached: (() => void) | null = null;
+  const blockedRequestReached = new Promise<void>((resolve) => { markBlockedRequestReached = resolve; });
+  let requests = 0;
+  const firstViewer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => {
+      requests += 1;
+      if (requests === 1) return spawnResult("before_restart");
+      markBlockedRequestReached?.();
+      return new Promise<Response>((resolve) => { releaseBlockedRequest = resolve; });
+    },
+  });
+  const viewerPort = firstViewer.port;
+  const environment = Object.fromEntries(Object.entries(process.env)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  environment.LLV_STATE_DIR = sandbox;
+  environment.LLV_VIEWER_DEPLOY_TARGET = path.join(sandbox, "viewer-release.json");
+  environment.LLV_VIEWER_CONTROL_URL = firstViewer.url.origin;
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(process.cwd(), "bin", "mcp-server.mjs")],
+    cwd: process.cwd(),
+    env: environment,
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "viewer-restart-integration", version: "1.0.0" });
+  let mcpStderr = "";
+  transport.stderr?.on("data", (chunk) => { mcpStderr += String(chunk); });
+  let restartedViewer: ReturnType<typeof Bun.serve> | null = null;
+  let restartedRequests = 0;
+  try {
+    await client.connect(transport);
+    expect((await callSpawn(client, "restart-before")).structuredContent)
+      .toMatchObject({ ok: true, conversationId: "conversation_before_restart" });
+
+    const inFlight = callSpawn(client, "restart-during");
+    await blockedRequestReached;
+    void firstViewer.stop(false);
+    restartedViewer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: viewerPort,
+      fetch: () => {
+        restartedRequests += 1;
+        return spawnResult("after_restart");
+      },
+    });
+    expect(restartedViewer.port).toBe(viewerPort);
+    expect((await fetch(restartedViewer.url, { method: "POST" })).status).toBe(200);
+
+    const landed = await Promise.race([
+      inFlight,
+      Bun.sleep(7_000).then(() => { throw new Error(`MCP call did not reconnect to the restarted Viewer (new requests: ${restartedRequests})\n${mcpStderr}`); }),
+    ]);
+    expect(landed.structuredContent)
+      .toMatchObject({ ok: true, conversationId: "conversation_after_restart" });
+    expect(restartedRequests).toBe(2);
+  } finally {
+    releaseBlockedRequest?.(Response.json({ error: "retired Viewer generation" }, { status: 503 }));
+    await Promise.race([
+      Promise.all([
+        transport.close().catch(() => {}),
+        Promise.resolve(firstViewer.stop(true)).catch(() => {}),
+        Promise.resolve(restartedViewer?.stop(true)).catch(() => {}),
+      ]),
+      Bun.sleep(1_000),
+    ]);
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}, 15_000);
