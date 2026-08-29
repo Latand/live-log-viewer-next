@@ -890,3 +890,109 @@ test("a project with no monitor prompt is woken with exactly the message it was 
   await runSeatTickCheck(PROJECT, configured.deps);
   expect(configured.sent[0]!.text).toBe(rig.sent[0]!.text);
 });
+
+/* ------------------------------------------------------------------------- *
+ * Replacing and clearing the prompt while a wake is outstanding (#1280).
+ *
+ * The delivery layer's idempotency key is what says which two sends are the
+ * same message, and it refuses a CHANGED payload under a key it is already
+ * holding. The prompt reached the delivered text while the key ignored it, so a
+ * wake carrying one prompt that the layer held, followed by the record being
+ * changed to another, produced the same key with different text at the very
+ * next check — refused, and refused again, until the outstanding wake settled
+ * on its own. Replacing and withdrawing a standing instruction is the ordinary
+ * use of the field, so these cases are the ordinary path.
+ * ------------------------------------------------------------------------- */
+
+const REPLACEMENT_PROMPT = "the digest is fine now; watch the deploy ledger for a rollback that nobody chased";
+
+/** The one rule of the delivery layer these cases turn on: a key it is already
+    holding may be replayed with the SAME text, and is refused different text.
+    One instance spans both checks, the way the layer's reservation does. */
+function reservationLayer(outcome: DeliveryOutcome) {
+  const held = new Map<string, string>();
+  const accepted: ConversationMessage[] = [];
+  const refused: string[] = [];
+  return {
+    accepted,
+    refused,
+    deliver: async (message: ConversationMessage): Promise<DeliveryOutcome> => {
+      const key = message.clientMessageId ?? "";
+      const existing = held.get(key);
+      if (existing !== undefined && existing !== message.text) {
+        refused.push(key);
+        return { ok: false, outcome: "failed", error: "a different payload under a client message id already held", status: 409 };
+      }
+      held.set(key, message.text);
+      accepted.push(message);
+      return outcome;
+    },
+  };
+}
+
+const HELD: DeliveryOutcome = { ok: true, target: null, outcome: "held" };
+
+/** A first check whose wake the layer accepts and keeps, so the second check
+    runs against a wake that is genuinely still outstanding. */
+async function heldWake(layer: ReturnType<typeof reservationLayer>, settings: SeatTickSettings) {
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  const record = await runSeatTickCheck(PROJECT, { ...rig.deps, deliver: layer.deliver });
+  expect(record!.delivery!.outcome).toBe("held");
+  return record!.delivery!.clientMessageId;
+}
+
+/** The next check, with the wake the first one left outstanding on the row. */
+async function nextCheck(layer: ReturnType<typeof reservationLayer>, outstanding: string, settings: SeatTickSettings) {
+  const rig = harness({
+    pipelines: OPEN_LANE,
+    state: { ...OVERDUE, outstandingWake: outstandingWake({ clientMessageId: outstanding }) },
+    settings,
+  });
+  const record = await runSeatTickCheck(PROJECT, { ...rig.deps, deliver: layer.deliver });
+  return record!;
+}
+
+test("a prompt replaced while a wake is outstanding delivers under a key of its own (#1280)", async () => {
+  const layer = reservationLayer(HELD);
+  const outstanding = await heldWake(layer, promptSettings());
+
+  const record = await nextCheck(layer, outstanding, { ...promptSettings(), monitorPrompt: REPLACEMENT_PROMPT });
+  expect(layer.refused).toEqual([]);
+  expect(record.delivery!.clientMessageId).not.toBe(outstanding);
+  expect(record.delivery!.outcome).toBe("held");
+  expect(layer.accepted.at(-1)!.text).toContain(REPLACEMENT_PROMPT);
+});
+
+test("a prompt cleared while a wake is outstanding delivers under the key a promptless wake has (#1280)", async () => {
+  const layer = reservationLayer(HELD);
+  const outstanding = await heldWake(layer, promptSettings());
+
+  const record = await nextCheck(layer, outstanding, { ...promptSettings(), monitorPrompt: null });
+  expect(layer.refused).toEqual([]);
+  expect(record.delivery!.clientMessageId).not.toBe(outstanding);
+  /* Withdrawn means withdrawn: the key is the one this wake would have had if
+     the project had never set a prompt, and the text carries no note. */
+  expect(record.delivery!.clientMessageId).toBe(outstanding.slice(0, outstanding.lastIndexOf(":prompt-")));
+  expect(layer.accepted.at(-1)!.text).not.toContain(PROMPT_HEADING);
+});
+
+test("an outstanding wake whose prompt has not changed re-sends as a replay (#1280)", async () => {
+  const layer = reservationLayer(HELD);
+  const outstanding = await heldWake(layer, promptSettings());
+
+  const record = await nextCheck(layer, outstanding, promptSettings());
+  /* Same words, same key, same text: the layer sees the message it is already
+     holding, and the seat is spared a second copy of one it may yet receive. */
+  expect(layer.refused).toEqual([]);
+  expect(record.delivery!.clientMessageId).toBe(outstanding);
+  expect(layer.accepted.at(-1)!.text).toBe(layer.accepted[0]!.text);
+});
+
+test("a promptless wake keeps the exact client message id it had before the prompt existed (#1280)", async () => {
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  /* Nothing after the fingerprint: a project that never set a prompt is not
+     paying for the field with a changed identity. */
+  expect(record!.delivery!.clientMessageId).toBe(
+    `seat-tick:${PROJECT}:7:${OVERDUE.lastWakeAt}:interval:${rig.written[0]!.lastWakeFingerprint}`);
+});

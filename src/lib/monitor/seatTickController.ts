@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import { statePath } from "@/lib/configDir";
 import { deliverConversationMessage, type DeliveryOutcome } from "@/lib/delivery";
 import { canonicalOrchestratorProject } from "@/lib/orchestrator/seats";
@@ -224,17 +226,50 @@ function verdictDetail(verdict: SeatTickVerdict): string | null {
  *   landed send advances. Without it the hourly wake on an unchanged board
  *   would carry the previous hour's key and be swallowed as a replay: silence
  *   the seat could not tell from a healthy board.
+ *
+ * The project's monitor prompt is part of what the wake says, so it belongs in
+ * the first half — see {@link wakePromptIdentity} for why it is folded in as a
+ * digest and why a promptless wake keeps the key it always had.
  */
 function wakeClientMessageId(
   project: string,
   seatEpoch: number,
   verdict: SeatTickVerdict,
-  context: { fingerprint: string; lastWakeAt: string | null },
+  context: { fingerprint: string; lastWakeAt: string | null; monitorPrompt: string | null },
 ): string {
   const shape = verdict.kind === "wake"
     ? verdict.reasons.map((reason) => reason.kind).sort().join(",")
     : "proposal";
-  return `seat-tick:${project}:${seatEpoch}:${context.lastWakeAt ?? "first"}:${shape}:${context.fingerprint}`;
+  return `seat-tick:${project}:${seatEpoch}:${context.lastWakeAt ?? "first"}:${shape}:${context.fingerprint}`
+    + wakePromptIdentity(context.monitorPrompt);
+}
+
+/**
+ * The prompt's share of the wake's identity (#1280).
+ *
+ * The prompt is text the wake carries, and the delivery layer refuses a CHANGED
+ * payload sent under a key it is already holding. So without this, a wake
+ * carrying one prompt that the layer held or queued, followed by the record
+ * being changed to another, produced the same key with different text at the
+ * very next check: the replacement was refused, over and over, until the
+ * outstanding wake settled on its own. Replacing and clearing a standing
+ * instruction is the ordinary use of the field, so that is the ordinary case.
+ *
+ * A digest, because the key is a durable identifier written into the row, the
+ * journal and the delivery layer's reservation, and a thousand characters of a
+ * project's own prose has no business in any of them. Bounded, and derived from
+ * the prompt alone, so the same prompt is the same identity at every later
+ * check — which is what keeps an unlanded wake a replay the layer recognizes.
+ *
+ * A project with no prompt contributes NOTHING here, not the digest of an empty
+ * string: the promptless key is byte for byte the key it was before the field
+ * existed, so a promptless wake already outstanding still replays under it.
+ * Nothing here decides WHEN a seat is woken; this decides which two sends the
+ * delivery layer is entitled to treat as one message.
+ */
+function wakePromptIdentity(monitorPrompt: string | null): string {
+  if (!monitorPrompt) return "";
+  return `:prompt-${crypto.createHash("sha256").update(monitorPrompt).digest("hex").slice(0, 16)}`;
 }
 
 /**
@@ -516,6 +551,10 @@ async function check(
     const clientMessageId = wakeClientMessageId(input.project, input.seat.seatEpoch, verdict, {
       fingerprint: input.changeFingerprint,
       lastWakeAt: input.state.lastWakeAt,
+      /* The same row the message below reads its prompt from, read once: the
+         identity and the text have to move together or they are exactly the
+         disagreement this key exists to prevent. */
+      monitorPrompt: input.settings.monitorPrompt,
     });
     const text = verdict.kind === "wake"
       ? seatTickWakeMessage({
