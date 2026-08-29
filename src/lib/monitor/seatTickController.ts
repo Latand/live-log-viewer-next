@@ -1,3 +1,4 @@
+import { statePath } from "@/lib/configDir";
 import { deliverConversationMessage, type DeliveryOutcome } from "@/lib/delivery";
 import { canonicalOrchestratorProject } from "@/lib/orchestrator/seats";
 import { createTask, patchTask } from "@/lib/tasks/commands";
@@ -120,6 +121,15 @@ function cardText(project: string, card: SeatTickCard, at: string): string {
  * so a settled state rewrites nothing check after check.
  */
 function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): void {
+  /* The board file is resolved HERE, per call, rather than taken from the
+     module-load default `mutateTasksFile` would otherwise use. That default is
+     frozen the first time `@/lib/tasks/store` is imported anywhere in the
+     process, so which file this writes to would depend on which module got
+     imported first — the same reason `root/store.ts`, `flows/store.ts` and
+     `session/titleStore.ts` each resolve their own path at call time. The tick
+     is the one writer here that runs on a timer against whatever state dir the
+     process is pointed at, so a stale path would put a real board card in
+     someone else's board. In the Viewer both readings are identical. */
   mutateTasksFile<void>((state) => {
     const existing = state.tasks.find((task) =>
       canonicalOrchestratorProject(task.project) === project
@@ -154,7 +164,7 @@ function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): vo
     }, state.recentCreates);
     if (!created.ok || created.replay) return { state: undefined, result: undefined };
     return { state: { tasks: created.tasks, recentCreates: created.recentCreates }, result: undefined };
-  });
+  }, statePath("tasks.json"));
 }
 
 /**

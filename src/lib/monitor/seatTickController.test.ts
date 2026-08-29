@@ -315,6 +315,32 @@ test("the board card for a quiet tick is written, kept in step, and closed when 
   expect(readCards().map((task) => task.status)).toEqual(["done"]);
 });
 
+/* The card writer resolves the board file per call, not once at import.
+   `mutateTasksFile`'s default is frozen the first time `@/lib/tasks/store` is
+   loaded anywhere in the process, so a tick that took it would write to
+   whichever state dir happened to be set THEN — in a suite, another test
+   file's; in a sandboxed run, the real board outside the sandbox. Asserted
+   here by moving the state dir under a running tick, which is the only way the
+   two readings can be told apart within one process. */
+test("a card is written to the state dir the tick is pointed at now, not the one loaded at import", async () => {
+  const project = `card-statedir-${crypto.randomUUID().slice(0, 8)}`;
+  const moved = fs.mkdtempSync(path.join(SANDBOX, "moved-state-"));
+  const previous = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = moved;
+  try {
+    const off = harness({ pipelines: OPEN_LANE, settings: { ...offSettings(), project } });
+    await runSeatTickCheck(project, { ...off.deps, ensureCard: undefined });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+  }
+
+  const written = JSON.parse(fs.readFileSync(path.join(moved, "tasks.json"), "utf8")) as { tasks: { project: string; text: string }[] };
+  const cards = written.tasks.filter((task) => task.project === project);
+  expect(cards).toHaveLength(1);
+  expect(cards[0]!.text).toContain("This project's seat tick is not on its default settings");
+});
+
 test("a wake is delivered by durable conversation id, with an idempotent client message id", async () => {
   const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE });
   const record = await runSeatTickCheck(PROJECT, rig.deps);
