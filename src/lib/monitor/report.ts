@@ -83,6 +83,12 @@ export function renderMonitorReport(input: ReportInput): string {
  * items it was woken for, it left outcomes only in its own transcript, it kept
  * re-running an action that had already failed, it re-armed its own schedule,
  * and it once stopped inside a tick to ask the operator a question.
+ *
+ * The clause about the settings is there because the pair "do not schedule
+ * yourself" and "nothing can quiet the schedule armed for you" is what #1275
+ * was filed about. The first half is still right; the second half is now false,
+ * and the brief says so where the seat reads it, rather than leaving the lever
+ * discoverable only by reading the tool list.
  * ------------------------------------------------------------------------- */
 
 const SEAT_TICK_MESSAGE_LIMIT = 4_000;
@@ -92,6 +98,7 @@ const SEAT_TICK_CONTRACT = [
   "Record every outcome where it belongs — on the board card or on the pipeline — not only in this conversation.",
   "If an item cannot be done, mark its task blocked with the reason. That is the stop, and it is the only one.",
   "Do not schedule yourself. The Viewer ticks this seat; a self-scheduled monitor is refused practice.",
+  "This tick is yours to govern: seat_tick_settings turns it off, changes how often it wakes you, or turns it back on, per project, with a reason that shows on the board.",
   "Do not wait on the operator inside this turn.",
 ];
 

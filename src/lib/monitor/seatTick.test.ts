@@ -11,6 +11,7 @@ import {
   seatTickWakeCommitPlan,
   seatTurnProgressing,
 } from "./seatTick";
+import { defaultSeatTickSettings, effectiveSeatTickSettings, type SeatTickSettings } from "./seatTickSettings";
 import {
   emptySeatTickState,
   type SeatTickCheckInput,
@@ -74,6 +75,9 @@ function input(over: Partial<SeatTickCheckInput> = {}): SeatTickCheckInput {
     changeFingerprint: "fp-1",
     state: emptySeatTickState(),
     policy: DEFAULT_SEAT_TICK_POLICY,
+    /* The default a project nobody configured reads (#1275): every case below
+       that does not say otherwise is the tick exactly as it shipped. */
+    settings: effectiveSeatTickSettings(defaultSeatTickSettings(PROJECT), NOW, SEAT_TICK_WAKE_INTERVAL_MS),
     ...over,
   };
 }
@@ -464,6 +468,136 @@ test("policy defaults are the accepted ones, and each is overridable in the reti
 /* The wake interval is the one number the ADR's cost argument rests on — one
    resume per project per interval — so it is not among the knobs. An
    environment that tries to set it changes nothing. */
+/* ------------------------------------------------------------------------- *
+ * Per-project tick settings (#1275).
+ *
+ * The seat is forbidden from arming its own loop, correctly — and until this
+ * existed it had no way to quiet, slow or stop the one the Viewer arms for it.
+ * The property every case here is arranged around: a project nobody has
+ * configured decides exactly what it decided before the settings existed,
+ * which is what every OTHER test in this file asserts by using the defaults.
+ * ------------------------------------------------------------------------- */
+
+function settings(over: Partial<SeatTickSettings> = {}) {
+  return effectiveSeatTickSettings(
+    { ...defaultSeatTickSettings(PROJECT), ...over },
+    NOW,
+    SEAT_TICK_WAKE_INTERVAL_MS,
+  );
+}
+
+test("a project nobody configured carries no tick-settings card at all (#1275)", () => {
+  const decision = seatTickDecision(input({ pipelines: [lane()] }));
+  expect(decision.cards).toEqual([]);
+});
+
+test("a disabled tick sends no wake, and says on the record why it is quiet (#1275)", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+    settings: settings({ enabled: false, reason: "the only open lane is a draft nothing can discharge", updatedAt: "2026-08-28T11:00:00.000Z" }),
+  }));
+  expect(decision.verdict).toEqual({
+    kind: "quiet",
+    detail: "ticking is off for this project: the only open lane is a draft nothing can discharge",
+  });
+  expect(decision.cards).toEqual([{
+    ref: "seat-tick-settings",
+    kind: "tick-settings",
+    state: "open",
+    settings: { reason: "the only open lane is a draft nothing can discharge", until: null, setBy: null, updatedAt: "2026-08-28T11:00:00.000Z" },
+    detail: "ticking is off for this project: no wake will be sent until it is turned back on",
+  }]);
+});
+
+test("a disabled tick with no expiry stays off however long it has been off (#1275)", () => {
+  const off = settings({ enabled: false, reason: "nothing here for me", updatedAt: "2026-01-01T00:00:00.000Z" });
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 400 * MINUTE).toISOString() }),
+    settings: off,
+  }));
+  expect(decision.verdict.kind).toBe("quiet");
+  expect(off.until).toBeNull();
+});
+
+test("the project's own wake interval is the bound every wake waits out (#1275)", () => {
+  const state = stateWith({ lastWakeAt: new Date(NOW - 20 * MINUTE).toISOString() });
+  /* The default hour holds this wake back … */
+  expect(seatTickDecision(input({ pipelines: [lane()], state })).verdict.kind).toBe("quiet");
+  /* … and a project that asked for a shorter one is woken. */
+  const faster = seatTickDecision(input({
+    pipelines: [lane()],
+    state,
+    settings: settings({ wakeIntervalMinutes: 15, reason: "a release is going out and I want the lane events sooner", updatedAt: "2026-08-28T11:00:00.000Z" }),
+  }));
+  expect(reasonsOf(faster.verdict)).toEqual(["interval"]);
+  /* … and a project that asked for a longer one waits. */
+  const slower = seatTickDecision(input({
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+    settings: settings({ wakeIntervalMinutes: 6 * 60, reason: "nothing moves here faster than half a day", updatedAt: "2026-08-28T11:00:00.000Z" }),
+  }));
+  expect(slower.verdict.kind).toBe("quiet");
+});
+
+test("a slowed but enabled tick still carries its card, saying what it is set to (#1275)", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    settings: settings({ wakeIntervalMinutes: 180, reason: "batching the board into three-hour rounds", updatedAt: "2026-08-28T11:00:00.000Z" }),
+  }));
+  expect(decision.cards[0]).toMatchObject({
+    ref: "seat-tick-settings",
+    state: "open",
+    detail: "wakes for this project are set to one every 180 minute(s)",
+  });
+});
+
+test("settings back at their default resolve the card instead of leaving it standing (#1275)", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    settings: settings({ reason: "the draft is gone, ticking as normal again", updatedAt: "2026-08-28T11:30:00.000Z" }),
+  }));
+  expect(decision.cards).toEqual([{
+    ref: "seat-tick-settings",
+    kind: "tick-settings",
+    state: "resolved",
+    settings: { reason: null, until: null, setBy: null, updatedAt: "2026-08-28T11:30:00.000Z" },
+    detail: "this project is on the default tick settings",
+  }]);
+});
+
+test("a setting that reached its expiry ticks normally again and says so (#1275)", () => {
+  const lapsed = settings({
+    enabled: false,
+    reason: "quiet while the release runs",
+    until: new Date(NOW - MINUTE).toISOString(),
+    updatedAt: "2026-08-28T10:00:00.000Z",
+  });
+  expect(lapsed).toMatchObject({ enabled: true, isDefault: true, lapsed: true });
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+    settings: lapsed,
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["interval"]);
+  expect(decision.cards[0]).toMatchObject({
+    state: "resolved",
+    detail: "the recorded tick setting reached its expiry, so this project is back on the default wake interval",
+  });
+});
+
+test("a disabled tick keeps checking, so its journal line is what a broken tick would not have (#1275)", () => {
+  const first = seatTickDecision(input({
+    pipelines: [lane({ state: "inert" })],
+    settings: settings({ enabled: false, reason: "nothing here for me", updatedAt: "2026-08-28T11:00:00.000Z" }),
+  }));
+  /* The stall memory is still kept while the tick is off, so the check that
+     turns it back on decides from what it has been watching. */
+  expect(first.state.stalledSeen).toEqual(["pipeline_a1"]);
+  expect(first.verdict.kind).toBe("quiet");
+});
+
 test("the wake interval is a constant no environment can set", () => {
   expect(SEAT_TICK_WAKE_INTERVAL_MS).toBe(60 * MINUTE);
   const policy = seatTickPolicy({ LLV_SEAT_TICK_WAKE_MINUTES: "1" });

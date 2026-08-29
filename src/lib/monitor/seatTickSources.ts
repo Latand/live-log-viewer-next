@@ -17,6 +17,8 @@ import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { evidenceFromPipelines, evidenceFromTasks } from "./evidence";
+import { SEAT_TICK_WAKE_INTERVAL_MS } from "./seatTick";
+import { effectiveSeatTickSettings, readSeatTickSettings, type SeatTickSettings } from "./seatTickSettings";
 import type { PipelineSummary, TaskSummary } from "./viewerApi";
 import {
   type SeatTickActivity,
@@ -159,6 +161,10 @@ export interface SeatTickSources {
       sliced off an ordering that has nothing to do with time. */
   latestDeployment: typeof latestLedgerDeployment;
   retirementReport: () => StructuredHostRetirementReport | null;
+  /** The project's own tick settings (#1275), read fresh per check so a change
+      an agent just recorded takes effect at the very next check rather than at
+      the next deploy. A project nobody configured reads the defaults. */
+  settings: (project: string) => SeatTickSettings;
   /** Whether the layer holding a retained wake still has it, and whether the
       seat ever got it. The tick's stamps move on this answer and nothing else. */
   wakeState: (wake: SeatTickOutstandingWake) => Promise<SeatTickWakeState>;
@@ -193,6 +199,7 @@ export function defaultSeatTickSources(): SeatTickSources {
         return null;
       }
     },
+    settings: (project) => readSeatTickSettings(project),
     /* One rule for both halves: ask, and act on, the layer that is actually
        holding the payload. A send the runtime host queued belongs to the runtime
        host — the registry row beside it is a mirror, and settling a mirror stops
@@ -508,6 +515,7 @@ export async function gatherSeatTickInput(
   }));
 
   const { events, terminalPending, cursor } = eventsSince(canonical, state.eventsThrough, sources);
+  const settings = effectiveSeatTickSettings(sources.settings(canonical), now, SEAT_TICK_WAKE_INTERVAL_MS);
 
   return {
     project: canonical,
@@ -524,5 +532,6 @@ export async function gatherSeatTickInput(
        persists where the journal stood when the tick first saw this project. */
     state: { ...state, eventsThrough: cursor },
     policy,
+    settings,
   };
 }

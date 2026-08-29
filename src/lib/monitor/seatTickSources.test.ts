@@ -14,6 +14,7 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 const { gatherSeatTickInput, repoDirForProject, runtimeWakeState, seatTickProjects, withdrawRuntimeWake } = await import("./seatTickSources");
 import type { SeatTickSources } from "./seatTickSources";
 const { DEFAULT_SEAT_TICK_POLICY, seatTickDecision } = await import("./seatTick");
+const { defaultSeatTickSettings } = await import("./seatTickSettings");
 import type { AgentLivenessRecord } from "@/lib/lifecycle/liveness";
 import type { LifecycleEvent, LifecycleJournalFile } from "@/lib/lifecycle/journal";
 import { emptySeatTickState, type SeatTickProjectState } from "./types";
@@ -130,6 +131,7 @@ function sources(over: {
   livenessThrows?: boolean;
   events?: LifecycleEvent[];
   latestDeployment?: ReturnType<SeatTickSources["latestDeployment"]>;
+  settings?: ReturnType<SeatTickSources["settings"]>;
   livenessCalls?: { project?: string; conversationId?: string; stallAfterMs: number }[];
 }): SeatTickSources {
   return {
@@ -153,6 +155,7 @@ function sources(over: {
     lifecycleJournal: () => journal(over.events ?? []),
     latestDeployment: () => over.latestDeployment ?? ({ state: "unreadable", error: "no ledger" }) as never,
     retirementReport: () => null,
+    settings: () => over.settings ?? defaultSeatTickSettings(PROJECT),
     wakeState: async () => "retained",
     withdrawWake: async () => "withdrawn",
     now: () => NOW,
@@ -307,6 +310,32 @@ test("a project whose only lane is hidden is not a project the tick checks (#127
     tasks: () => [] as never,
   });
   expect(projects).toEqual([]);
+});
+
+test("the check carries the project's own tick settings, expiry already applied (#1275)", async () => {
+  const unconfigured = await gather({});
+  expect(unconfigured.settings).toMatchObject({ enabled: true, isDefault: true, configured: false });
+
+  const off = await gather({
+    settings: {
+      ...defaultSeatTickSettings(PROJECT),
+      enabled: false,
+      reason: "nothing here for me",
+      updatedAt: "2026-08-28T11:00:00.000Z",
+    },
+  });
+  expect(off.settings).toMatchObject({ enabled: false, isDefault: false, configured: true, reason: "nothing here for me" });
+
+  const expired = await gather({
+    settings: {
+      ...defaultSeatTickSettings(PROJECT),
+      enabled: false,
+      reason: "quiet while the release runs",
+      until: new Date(NOW - 60_000).toISOString(),
+      updatedAt: "2026-08-28T10:00:00.000Z",
+    },
+  });
+  expect(expired.settings).toMatchObject({ enabled: true, isDefault: true, lapsed: true });
 });
 
 test("the fingerprint moves when a lane or a card moves, and only then", async () => {

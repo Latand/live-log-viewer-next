@@ -71,6 +71,7 @@ export const MCP_TOOL_NAMES = [
   "create_orchestrator",
   "send_message_to_orchestrator",
   "rotate_orchestrator",
+  "seat_tick_settings",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -114,6 +115,11 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
   "create_orchestrator",
   "send_message_to_orchestrator",
   "rotate_orchestrator",
+  /* Writes a project's durable tick settings when it carries a change (#1275).
+     A pure read of the same tool changes nothing, but the receipt has to
+     outlive this process either way: a replayed clientRequestId must answer
+     with what the first call recorded. */
+  "seat_tick_settings",
 ]);
 
 /**
@@ -1687,6 +1693,13 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   get_orchestrator: "Read a project's designated orchestrator: designation, health and activity, model and prompt version, transcript size, message/tool/compaction counts, context usage against its model's configured window (clearly labelled when estimated), predecessor lineage, and a bounded rotation recommendation — STRONGLY_RECOMMEND_ROTATION once usage reaches the configured threshold. Words only: it never rotates, creates, or interrupts anything itself.",
   create_orchestrator: "Create a project's orchestrator or adopt one eligible registered conversation: designate it as the project's selected orchestrator and deliver the approved versioned mandate (editable). Idempotent by clientRequestId.",
   send_message_to_orchestrator: "Deliver a message to the project's selected orchestrator, resolved server-side. A dead selected conversation is resumed; with none designated, one is created first and then delivered to. Idempotent by clientRequestId.",
+  seat_tick_settings: [
+    "Read — and change — one project's seat tick: whether the Viewer wakes that project's seat at all, and how often.",
+    "Called with no change fields it is a read. `project` defaults to your own, and naming another project's is allowed rather than refused; the answer says which of the two you did, and the record, the board card and the tick's journal all carry who changed whose tick.",
+    "`enabled: false` stops every wake for that project until someone turns it back on — indefinitely, if that is the decision. `wakeIntervalMinutes` sets how often a wake may be sent (null restores the default hour); the tick cannot wake more often than it checks, so a value under the check interval simply means every check. `untilMinutes` is an optional expiry after which the setting lapses back to the default — omit it and the setting stands until it is changed.",
+    "A `reason` in your own words is required whenever the settings leave the default, and it is what the board card shows: a tick that has gone quiet with nothing saying why cannot be told apart from a tick that broke. Restoring the default needs no reason.",
+    "A project nobody has configured runs on the defaults, which are exactly the behaviour the tick has always had.",
+  ].join(" "),
   rotate_orchestrator: "Explicitly hand a project's orchestrator seat to a fresh successor: bounded handoff (predecessor transcript reference, open tasks, optional notes), atomic designation switch, manager-authority-only revocation of the predecessor, bidirectional lineage. Never triggered automatically.",
 };
 
@@ -2127,6 +2140,19 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     model: z.string().optional(),
     effort: z.string().optional().describe("Reasoning effort for the successor; round-trips into its spawn like create_orchestrator's."),
     accountId: z.string().optional(),
+  }).passthrough(),
+  seat_tick_settings: z.object({
+    clientRequestId: clientRequestIdSchema,
+    project: z.string().trim().min(1).optional()
+      .describe("Project whose tick to read or change. Defaults to your own; another project's is allowed and is recorded as such."),
+    enabled: z.boolean().optional()
+      .describe("false stops every wake for that project until it is turned back on. There is no expiry unless untilMinutes gives one."),
+    wakeIntervalMinutes: z.number().positive().nullable().optional()
+      .describe("Minutes between wakes for that project; null restores the default hour."),
+    untilMinutes: z.number().positive().nullable().optional()
+      .describe("Optional expiry, in minutes from now, after which the setting lapses back to the default. Omit for a setting that stands until it is changed."),
+    reason: z.string().trim().min(1).nullable().optional()
+      .describe("Why, in your own words. Required whenever the settings leave the default; it is what the board card shows."),
   }).passthrough(),
 };
 

@@ -1,5 +1,7 @@
 import type { LifecycleEventType, LifecycleState, LifecycleTurnState } from "@/lib/lifecycle/vocabulary";
 
+import type { EffectiveSeatTickSettings } from "./seatTickSettings";
+
 /**
  * Domain vocabulary of the recurring conversation monitor (issue #741).
  *
@@ -309,9 +311,10 @@ export interface SeatTickSignalInput {
   label: string;
 }
 
-/** The knobs a deployment may turn. The wake interval is deliberately absent:
-    it is the bound the ADR commits to, so it is a constant with no override
-    (see `SEAT_TICK_WAKE_INTERVAL_MS`) rather than a field something can set. */
+/** The knobs a deployment may turn. The wake interval is deliberately absent
+    HERE: the default lives in `SEAT_TICK_WAKE_INTERVAL_MS` and the only thing
+    that changes it is a project's own recorded settings (#1275), never an
+    environment variable and never a per-deployment default. */
 export interface SeatTickPolicy {
   checkIntervalMs: number;
   /**
@@ -441,14 +444,34 @@ export interface SeatTickCheckInput {
   changeFingerprint: string;
   state: SeatTickProjectState;
   policy: SeatTickPolicy;
+  /** This project's own tick settings, with their expiry already applied
+      (#1275). A project nobody has configured reads the defaults, which are
+      exactly the behaviour that shipped before the settings existed. */
+  settings: EffectiveSeatTickSettings;
 }
 
 /** A card the check owes the board, identified by its `monitor-ref:` value so a
     second check re-finds it instead of minting a twin. */
 export interface SeatTickCard {
   ref: string;
-  kind: "no-seat" | "retry-guard";
+  kind: "no-seat" | "retry-guard" | "tick-settings";
   detail: string;
+  /**
+   * Whether the condition still holds.
+   *
+   * `open` is the default and the only thing the first two kinds ever say: they
+   * describe something that happened, and an operator closes the card. Tick
+   * settings are a STANDING state rather than an event (#1275) — a project
+   * whose tick is off or slowed carries the card while that is true — so the
+   * check that reads the settings back at their default resolves the card
+   * instead of leaving the board claiming a quiet tick that is ticking again.
+   */
+  state?: "open" | "resolved";
+  /** What the card is describing, for its body. Present only on
+      `tick-settings`, and stamped with when the SETTING was recorded rather
+      than when the check ran, so a card that has not changed is not rewritten
+      on every check. */
+  settings?: Pick<EffectiveSeatTickSettings, "reason" | "until" | "setBy" | "updatedAt">;
 }
 
 export interface SeatTickDecision {

@@ -13,6 +13,8 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
 const { reconcileSeatTick, runSeatTickCheck, startSeatTick, stopSeatTick, wakeReached } = await import("./seatTickController");
 const { DEFAULT_SEAT_TICK_POLICY } = await import("./seatTick");
+const { defaultSeatTickSettings } = await import("./seatTickSettings");
+import type { SeatTickSettings } from "./seatTickSettings";
 import type { SeatTickControllerDependencies } from "./seatTickController";
 import type { SeatTickWakeState, SeatTickWithdrawal } from "./seatTickSources";
 import {
@@ -69,6 +71,9 @@ function harness(options: {
   withdrawal?: SeatTickWithdrawal;
   /** The holder cannot be reached at all, for either question. */
   holderThrows?: boolean;
+  /** The project's own tick settings (#1275); the default is the tick as it
+      shipped. */
+  settings?: SeatTickSettings;
 }): Harness {
   const sent: ConversationMessage[] = [];
   const journal: SeatTickRunRecord[] = [];
@@ -146,6 +151,7 @@ function harness(options: {
       lifecycleJournal: () => ({ version: 1, lastSeq: options.events?.at(-1)?.seq ?? 0, events: options.events ?? [], retired: [] }),
       latestDeployment: () => ({ state: "unreadable", error: "no ledger" }) as never,
       retirementReport: () => null,
+      settings: () => options.settings ?? defaultSeatTickSettings(PROJECT),
       wakeState: async () => {
         if (options.holderThrows) throw new Error("the layer holding the wake cannot be read");
         return options.wakeState ?? "retained";
@@ -202,6 +208,94 @@ test("a quiet check writes one journal line, sends nothing, and raises no card",
   expect(rig.journal).toHaveLength(1);
   expect(rig.sent).toEqual([]);
   expect(rig.cards).toEqual([]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * The tick settings a project decides for itself (#1275).
+ * ------------------------------------------------------------------------- */
+
+function offSettings(over: Partial<SeatTickSettings> = {}): SeatTickSettings {
+  return {
+    ...defaultSeatTickSettings(PROJECT),
+    enabled: false,
+    reason: "the only open lane is a draft nothing can discharge",
+    updatedAt: "2026-08-28T11:00:00.000Z",
+    setBy: { kind: "manager", conversationId: CONVERSATION, project: PROJECT, seatEpoch: 7 },
+    ...over,
+  };
+}
+
+test("a project whose tick is off is checked, journaled and never woken (#1275)", async () => {
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings: offSettings() });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(rig.sent).toEqual([]);
+  /* The line is the whole difference between a tick that is off and a tick
+     that broke: one keeps writing, the other stops. */
+  expect(record).toMatchObject({
+    verdict: "quiet",
+    delivery: null,
+    detail: "ticking is off for this project: the only open lane is a draft nothing can discharge",
+  });
+  expect(rig.cards.map((entry) => entry.card)).toEqual([{
+    ref: "seat-tick-settings",
+    kind: "tick-settings",
+    state: "open",
+    settings: { reason: offSettings().reason, until: null, setBy: offSettings().setBy, updatedAt: "2026-08-28T11:00:00.000Z" },
+    detail: "ticking is off for this project: no wake will be sent until it is turned back on",
+  }]);
+});
+
+test("a tick setting that reached its expiry is written back to the default by the check that reads it (#1275)", async () => {
+  const settings = offSettings({ until: new Date(NOW - MINUTE).toISOString() });
+  const persisted: SeatTickSettings[] = [];
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  const record = await runSeatTickCheck(PROJECT, { ...rig.deps, writeSettings: (_project, row) => { persisted.push(row); } });
+  /* The wake goes out — the setting lapsed — and the record on disk stops
+     saying "off" beside a tick that is ticking. */
+  expect(record).toMatchObject({ verdict: "wake" });
+  expect(persisted).toEqual([defaultSeatTickSettings(PROJECT)]);
+  expect(rig.cards[0]!.card).toMatchObject({ state: "resolved" });
+});
+
+test("the board card for a quiet tick is written, kept in step, and closed when the tick comes back (#1275)", async () => {
+  const project = `card-lifecycle-${crypto.randomUUID().slice(0, 8)}`;
+  const tasksFile = path.join(SANDBOX, "state", "tasks.json");
+  const readCards = (): { text: string; status: string }[] => {
+    const raw = fs.existsSync(tasksFile) ? JSON.parse(fs.readFileSync(tasksFile, "utf8")) as { tasks?: { project: string; text: string; status: string }[] } : {};
+    return (raw.tasks ?? []).filter((task) => task.project === project).map((task) => ({ text: task.text, status: task.status }));
+  };
+
+  const off = harness({ pipelines: OPEN_LANE, settings: { ...offSettings(), project } });
+  /* The real card writer, not the harness stub: this is the board surface the
+     issue asks for. */
+  await runSeatTickCheck(project, { ...off.deps, ensureCard: undefined });
+  const raised = readCards();
+  expect(raised).toHaveLength(1);
+  expect(raised[0]!.text).toContain("This project's seat tick is not on its default settings");
+  expect(raised[0]!.text).toContain("the only open lane is a draft nothing can discharge");
+  expect(raised[0]!.status).not.toBe("done");
+
+  /* A check that finds the same setting rewrites nothing … */
+  await runSeatTickCheck(project, { ...off.deps, ensureCard: undefined });
+  expect(readCards()).toEqual(raised);
+
+  /* … a changed setting updates the one card … */
+  const slowed = harness({
+    pipelines: OPEN_LANE,
+    settings: { ...offSettings(), project, enabled: true, wakeIntervalMinutes: 240, reason: "batching this board", updatedAt: "2026-08-28T11:30:00.000Z" },
+  });
+  await runSeatTickCheck(project, { ...slowed.deps, ensureCard: undefined });
+  const updated = readCards();
+  expect(updated).toHaveLength(1);
+  expect(updated[0]!.text).toContain("batching this board");
+
+  /* … and the check that reads the project back on its defaults closes it. */
+  const restored = harness({
+    pipelines: OPEN_LANE,
+    settings: { ...defaultSeatTickSettings(project), project, updatedAt: "2026-08-28T12:00:00.000Z" },
+  });
+  await runSeatTickCheck(project, { ...restored.deps, ensureCard: undefined });
+  expect(readCards().map((task) => task.status)).toEqual(["done"]);
 });
 
 test("a wake is delivered by durable conversation id, with an idempotent client message id", async () => {

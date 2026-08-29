@@ -1,6 +1,6 @@
 import { deliverConversationMessage, type DeliveryOutcome } from "@/lib/delivery";
 import { canonicalOrchestratorProject } from "@/lib/orchestrator/seats";
-import { createTask } from "@/lib/tasks/commands";
+import { createTask, patchTask } from "@/lib/tasks/commands";
 import { mutateTasksFile } from "@/lib/tasks/store";
 
 import {
@@ -8,12 +8,14 @@ import {
   monitorRefIn,
   orchestratorAlertCardText,
   seatTickRetryGuardCardText,
+  seatTickSettingsCardText,
 } from "./cards";
 import { openIssuesForProposal, type ProposalIssue } from "./githubEvidence";
 import { appendSeatTickRecord } from "./journalStore";
 import { redactMonitorText } from "./redact";
 import { seatTickProposalMessage, seatTickWakeMessage } from "./report";
 import { seatTickDecision, seatTickPolicy, seatTickWakeCommit, seatTickWakeCommitPlan } from "./seatTick";
+import { defaultSeatTickSettings, writeSeatTickSettings } from "./seatTickSettings";
 import { readSeatTickState, seatTickStateForEpoch, writeSeatTickState } from "./seatTickState";
 import {
   defaultSeatTickSources,
@@ -75,6 +77,11 @@ export interface SeatTickControllerDependencies {
   policy?: SeatTickPolicy | null;
   readState?: typeof readSeatTickState;
   writeState?: typeof writeSeatTickState;
+  /** Persists a tick setting that reached its expiry (#1275). The reading is
+      already correct without it — the expiry is applied wherever the record is
+      read — so this only makes the record on disk say what the tick is
+      already doing. */
+  writeSettings?: typeof writeSeatTickSettings;
   appendRecord?: typeof appendSeatTickRecord;
   deliver?: typeof deliverConversationMessage;
   ensureCard?: (project: string, card: SeatTickCard, at: string) => void;
@@ -84,15 +91,33 @@ export interface SeatTickControllerDependencies {
 }
 
 function cardText(project: string, card: SeatTickCard, at: string): string {
-  return card.kind === "no-seat"
-    ? orchestratorAlertCardText(card.detail, at)
-    : seatTickRetryGuardCardText(project, card.detail, card.ref, at);
+  if (card.kind === "no-seat") return orchestratorAlertCardText(card.detail, at);
+  if (card.kind === "tick-settings") {
+    return seatTickSettingsCardText({
+      project,
+      detail: card.detail,
+      reason: card.settings?.reason ?? null,
+      until: card.settings?.until ?? null,
+      setBy: card.settings?.setBy ?? null,
+      updatedAt: card.settings?.updatedAt ?? null,
+    });
+  }
+  return seatTickRetryGuardCardText(project, card.detail, card.ref, at);
 }
 
 /**
  * One board card per condition, found by its `monitor-ref:` line rather than by
  * a receipt — so the idempotency survives a restart, and an operator who edits
  * the text above the marker keeps it.
+ *
+ * Two kinds of card meet here. A condition that HAPPENED (no seat, a wake
+ * reason the guard stopped) is written once and left for the operator to
+ * close. A STANDING state — a project's tick settings (#1275) — is instead
+ * kept in step with the state it describes: its text is rewritten when the
+ * setting changes, and the card is closed by the first check that reads the
+ * project back on its defaults, so the board never claims a quiet tick that is
+ * ticking again. The card body is stamped with when the SETTING was recorded,
+ * so a settled state rewrites nothing check after check.
  */
 function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): void {
   mutateTasksFile<void>((state) => {
@@ -100,10 +125,30 @@ function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): vo
       canonicalOrchestratorProject(task.project) === project
       && task.status !== "done"
       && monitorRefIn(task.text) === card.ref);
-    if (existing) return { state: undefined, result: undefined };
+    if (card.state === "resolved") {
+      if (!existing) return { state: undefined, result: undefined };
+      const closed = patchTask(state.tasks, existing.id, { status: "done" });
+      return closed.ok
+        ? { state: { tasks: closed.tasks, recentCreates: state.recentCreates }, result: undefined }
+        : { state: undefined, result: undefined };
+    }
+    const text = cardText(project, card, at);
+    if (existing) {
+      /* A card for something that HAPPENED is left exactly as it stands: its
+         body carries the instant it was observed, so rewriting it would churn
+         the board once per check for as long as the condition holds. Only a
+         card that tracks a standing state — the one kind that declares its
+         `state` — is kept in step with what it describes. */
+      if (card.state !== "open") return { state: undefined, result: undefined };
+      if (existing.text === text) return { state: undefined, result: undefined };
+      const updated = patchTask(state.tasks, existing.id, { text });
+      return updated.ok
+        ? { state: { tasks: updated.tasks, recentCreates: state.recentCreates }, result: undefined }
+        : { state: undefined, result: undefined };
+    }
     const created = createTask(state.tasks, {
       project,
-      text: cardText(project, card, at),
+      text,
       placement: "unplaced",
       clientRequestId: monitorClientRequestId(card.ref),
     }, state.recentCreates);
@@ -431,6 +476,19 @@ async function check(
      unread again at the next check. */
   const input = { ...gathered, state: seatTickStateForEpoch(gathered.state, gathered.seat?.seatEpoch ?? null) };
   const decision = seatTickDecision(input);
+
+  /* An expiry that passed is already reflected in everything above — the
+     reading applies it wherever the record is read — so this write changes no
+     behaviour. What it changes is the RECORD: a row that still says "off"
+     beside a tick that is ticking is the kind of disagreement someone reads
+     off the board at the worst possible moment. */
+  if (input.settings.lapsed) {
+    try {
+      (dependencies.writeSettings ?? writeSeatTickSettings)(input.project, defaultSeatTickSettings(input.project));
+    } catch (error) {
+      console.error("[seat tick] lapsed settings could not be persisted", error instanceof Error ? error.name : "unknown");
+    }
+  }
 
   for (const card of decision.cards) {
     try {

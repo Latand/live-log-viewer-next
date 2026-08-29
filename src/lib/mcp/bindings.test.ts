@@ -2125,3 +2125,130 @@ test("create_pipeline batches every invalid stage model with each engine catalog
   expect(refusal?.message).toContain("valid codex model ids: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna");
   expect(refusal?.message).toContain("valid claude model ids: opus, fable, sonnet, haiku");
 });
+
+/* ------------------------------------------------------------------------- *
+ * seat_tick_settings (#1275): the seat's control over the loop the Viewer arms
+ * for it. Every case here is about what the tool ALLOWS — the one refusal is
+ * the missing reason, because a quiet tick with no reason cannot be told from
+ * a broken one.
+ * ------------------------------------------------------------------------- */
+
+const TICK_SEAT = ["conversation", "0f4c21b7729fbc9e"].join("_");
+
+function tickSettingsBindings(options: {
+  callerProject?: string | null;
+  kind?: "manager" | "agent" | "gateway" | "unidentified";
+  store?: Map<string, unknown>;
+} = {}) {
+  const store = options.store ?? new Map<string, unknown>();
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    callerAttribution: () => ({ kind: options.kind ?? "manager", conversationId: TICK_SEAT, role: "orchestrator" }),
+    authorizedSeats: () => (options.callerProject === null
+      ? []
+      : [{ conversationId: TICK_SEAT, path: null, project: options.callerProject ?? "viewer" }]),
+    callerProject: () => options.callerProject ?? "viewer",
+    readTickSettings: (project: string) => (store.get(project) as never) ?? {
+      project, enabled: true, wakeIntervalMinutes: null, reason: null, until: null, updatedAt: null, setBy: null,
+    },
+    writeTickSettings: (project: string, settings: unknown) => { store.set(project, settings); },
+  } as never);
+  return { bindings, store };
+}
+
+test("seat_tick_settings reads its own project's defaults without changing anything", async () => {
+  const { bindings, store } = tickSettingsBindings();
+  const read = await bindings.seat_tick_settings({ clientRequestId: "tick-read" });
+  expect(read).toMatchObject({
+    project: "viewer",
+    changed: false,
+    scope: "own-project",
+    effective: { enabled: true, wakeIntervalMinutes: 60, isDefault: true },
+  });
+  expect(store.size).toBe(0);
+});
+
+test("seat_tick_settings turns its own project's tick off indefinitely, with the reason on the record", async () => {
+  const { bindings, store } = tickSettingsBindings();
+  const applied = await bindings.seat_tick_settings({
+    clientRequestId: "tick-off",
+    enabled: false,
+    reason: "the only open lane is a draft nothing can discharge",
+  });
+  expect(applied).toMatchObject({
+    changed: true,
+    scope: "own-project",
+    effective: { enabled: false, isDefault: false, until: null, reason: "the only open lane is a draft nothing can discharge" },
+  });
+  expect(store.get("viewer")).toMatchObject({
+    enabled: false,
+    until: null,
+    setBy: { kind: "manager", conversationId: TICK_SEAT, project: "viewer" },
+  });
+
+  /* And it is read back the same way by the next call, which is what the tick
+     itself does at its next check. */
+  const read = await bindings.seat_tick_settings({ clientRequestId: "tick-read-back" });
+  expect(read).toMatchObject({ changed: false, effective: { enabled: false } });
+});
+
+test("seat_tick_settings sets a cadence and restores the default", async () => {
+  const { bindings, store } = tickSettingsBindings();
+  await bindings.seat_tick_settings({
+    clientRequestId: "tick-slower",
+    wakeIntervalMinutes: 240,
+    reason: "batching this board into four-hour rounds",
+  });
+  expect(store.get("viewer")).toMatchObject({ enabled: true, wakeIntervalMinutes: 240 });
+  const restored = await bindings.seat_tick_settings({ clientRequestId: "tick-default", wakeIntervalMinutes: null });
+  expect(restored).toMatchObject({ effective: { wakeIntervalMinutes: 60, isDefault: true } });
+});
+
+test("seat_tick_settings accepts an expiry in minutes and records the instant it lapses", async () => {
+  const { bindings, store } = tickSettingsBindings();
+  const before = Date.now();
+  await bindings.seat_tick_settings({
+    clientRequestId: "tick-until",
+    enabled: false,
+    untilMinutes: 90,
+    reason: "quiet while the release runs",
+  });
+  const until = Date.parse((store.get("viewer") as { until: string }).until);
+  expect(until).toBeGreaterThanOrEqual(before + 89 * 60_000);
+  expect(until).toBeLessThanOrEqual(Date.now() + 91 * 60_000);
+});
+
+test("seat_tick_settings lets one seat set another project's tick, and says whose decision it was", async () => {
+  const { bindings, store } = tickSettingsBindings({ callerProject: "viewer" });
+  const applied = await bindings.seat_tick_settings({
+    clientRequestId: "tick-other-project",
+    project: "another-project",
+    enabled: false,
+    reason: "its seat asked me to quiet it while the migration runs",
+  });
+  /* Allowed rather than refused; what answers for it is attribution. */
+  expect(applied).toMatchObject({ project: "another-project", changed: true, scope: "other-project", callerProject: "viewer" });
+  expect(store.get("another-project")).toMatchObject({
+    enabled: false,
+    setBy: { conversationId: TICK_SEAT, project: "viewer" },
+  });
+  expect(store.has("viewer")).toBe(false);
+});
+
+test("seat_tick_settings refuses only the change that would leave no reason behind", async () => {
+  const { bindings, store } = tickSettingsBindings();
+  await expect(bindings.seat_tick_settings({ clientRequestId: "tick-no-reason", enabled: false }))
+    .rejects.toThrow("a reason is required");
+  expect(store.size).toBe(0);
+  await expect(bindings.seat_tick_settings({ clientRequestId: "tick-empty" })).resolves.toMatchObject({ changed: false });
+});
+
+test("seat_tick_settings is callable by a session that holds no seat at all", async () => {
+  const { bindings, store } = tickSettingsBindings({ kind: "agent", callerProject: "viewer" });
+  const applied = await bindings.seat_tick_settings({
+    clientRequestId: "tick-worker",
+    enabled: false,
+    reason: "my lane is the only thing open here and it is blocked on the operator",
+  });
+  expect(applied).toMatchObject({ changed: true });
+  expect(store.get("viewer")).toMatchObject({ setBy: { kind: "agent", conversationId: TICK_SEAT } });
+});

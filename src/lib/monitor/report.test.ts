@@ -26,6 +26,9 @@ test("a wake says why, lists the items, and carries the contract every clause of
   expect(text).toContain("Act on the listed items only");
   expect(text).toContain("mark its task blocked with the reason");
   expect(text).toContain("Do not schedule yourself");
+  /* #1275: the brief that forbids self-scheduling has to name the lever on the
+     schedule the Viewer arms instead, or the seat has one half of a rule. */
+  expect(text).toContain("seat_tick_settings");
   expect(text).toContain("Do not wait on the operator inside this turn");
 });
 

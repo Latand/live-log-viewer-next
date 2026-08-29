@@ -51,6 +51,16 @@ import { recordBridgeDirectiveAnswer, recordManagerReport } from "@/lib/bridge/s
 import { bridgeDirectiveBody, bridgeDirectiveId, type BridgeTrailer } from "@/lib/bridge/directive";
 import { seatIdentityResolver } from "@/lib/bridge/seatIdentity";
 import { isBridgeReportClass, type CanonicalSeatConversationId } from "@/lib/bridge/types";
+import {
+  applySeatTickSettingsChange,
+  defaultSeatTickSettings,
+  effectiveSeatTickSettings,
+  readSeatTickSettings,
+  writeSeatTickSettings,
+  type SeatTickSettingsActor,
+  type SeatTickSettingsChange,
+} from "@/lib/monitor/seatTickSettings";
+import { SEAT_TICK_WAKE_INTERVAL_MS } from "@/lib/monitor/seatTick";
 import { authorizedManagerSeats, type ManagerAuthoritySources } from "@/lib/orchestrator/authority";
 import { activeOrchestratorSeats, canonicalOrchestratorProject, orchestratorRevocations, orchestratorSeatFor, type OrchestratorSeat } from "@/lib/orchestrator/seats";
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
@@ -304,6 +314,11 @@ export interface ViewerMcpDomainDependencies {
       the two must agree or a rekeyed seat's ask outlives its answer. Optional
       so partial harnesses fall back to the production registry. */
   canonicalSeatConversationId?: CanonicalSeatConversationId;
+  /** The seat tick settings store (#1275). Optional so a partial harness can
+      exercise the tool without a state directory; production reads and writes
+      the durable per-project row. */
+  readTickSettings?: typeof readSeatTickSettings;
+  writeTickSettings?: typeof writeSeatTickSettings;
   /** The calling voice session's CANONICAL PROJECT — production resolves it
       from the caller's conversation cwd through the worktree-grouping path
       (`projectInfoFromCwd`), the same attribution every other surface uses.
@@ -1636,6 +1651,104 @@ async function getOrchestrator(args: McpToolArgs, dependencies: ViewerMcpDomainD
   });
 }
 
+/**
+ * seat_tick_settings: read, and change, one project's seat tick (#1275).
+ *
+ * The tick arms a loop the seat cannot arm for itself — deliberately, because a
+ * session-scheduled monitor dies with its session. Until this existed there was
+ * no lever on the other side either: a seat woken hourly on something it could
+ * not discharge (#1274) had no way to say so, and only the operator could
+ * intervene by hand.
+ *
+ * Three decisions worth stating, because each is a refusal that is NOT made:
+ *
+ * - **A project nobody configures is untouched.** No row means the defaults,
+ *   which are the hour the tick has always used. Nothing has to be set up.
+ * - **Off means off, for as long as the caller says.** `untilMinutes` is a
+ *   convenience for whoever reads the board later, never a leash: omit it and
+ *   the setting stands until someone changes it back.
+ * - **Another project's tick may be set from here.** A seat ordinarily governs
+ *   its own — that is the default when `project` is omitted — but naming
+ *   another project is allowed rather than refused. What answers for it is
+ *   attribution: who changed whose tick is on the row, on the board card and
+ *   in the tick's own journal.
+ *
+ * The one thing required is a REASON whenever the settings leave the default.
+ * A tick that has gone quiet with nothing saying why is indistinguishable from
+ * a tick that broke, which is the worse of the two failures.
+ */
+function seatTickSettingsTool(args: McpToolArgs, dependencies: ViewerMcpDomainDependencies): McpToolPayload {
+  const attribution = attributionOf(dependencies);
+  const seats = dependencies.authorizedSeats?.() ?? authorizedManagerSeats(productionManagerAuthoritySources());
+  const callerSeat = attribution.conversationId
+    ? seats.find((candidate) => candidate.conversationId === attribution.conversationId)
+    : undefined;
+  const callerProject = callerSeat?.project
+    ?? (dependencies.callerProject ? dependencies.callerProject() : productionCallerProject());
+  const requested = text(args.project) || callerProject;
+  if (!requested) {
+    throw new Error("project is required: this session's own project could not be resolved, so name the project whose tick to read or change");
+  }
+  const project = canonicalOrchestratorProject(requested);
+
+  const readSettings = dependencies.readTickSettings ?? readSeatTickSettings;
+  const writeSettings = dependencies.writeTickSettings ?? writeSeatTickSettings;
+  const current = readSettings(project);
+
+  const change: SeatTickSettingsChange = {};
+  if (args.enabled !== undefined) change.enabled = args.enabled as boolean;
+  if (args.wakeIntervalMinutes !== undefined) change.wakeIntervalMinutes = args.wakeIntervalMinutes as number | null;
+  if (args.reason !== undefined) change.reason = args.reason as string | null;
+  if (args.untilMinutes !== undefined) {
+    const minutes = args.untilMinutes as number | null;
+    if (minutes === null) change.until = null;
+    else if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) {
+      throw new Error("untilMinutes must be a positive number of minutes, or null for a setting that stands until it is changed");
+    } else {
+      change.until = new Date(Date.now() + minutes * 60_000).toISOString();
+    }
+  }
+
+  const own = callerProject ? canonicalOrchestratorProject(callerProject) : null;
+  let settings = current;
+  let changed = false;
+  if (Object.keys(change).length > 0) {
+    const actor: SeatTickSettingsActor = {
+      kind: attribution.kind,
+      conversationId: attribution.conversationId,
+      project: own,
+      seatEpoch: own === project ? orchestratorSeatFor(project).active?.seatEpoch ?? null : null,
+    };
+    const applied = applySeatTickSettingsChange(current, change, { at: new Date().toISOString(), actor });
+    if (!applied.ok) throw new Error(applied.error);
+    writeSettings(project, applied.settings);
+    settings = applied.settings;
+    changed = true;
+  }
+
+  const effective = effectiveSeatTickSettings(settings, Date.now(), SEAT_TICK_WAKE_INTERVAL_MS);
+  return redactPayload({
+    project,
+    changed,
+    /* Named rather than implied: a change to a project that is not the
+       caller's own is allowed, and the answer says so out loud. */
+    callerProject: own,
+    scope: own === project ? "own-project" : "other-project",
+    settings,
+    effective: {
+      enabled: effective.enabled,
+      wakeIntervalMinutes: Math.round(effective.wakeIntervalMs / 60_000),
+      reason: effective.reason,
+      until: effective.until,
+      isDefault: effective.isDefault,
+    },
+    /* What a project that has never been configured runs on, so a caller can
+       see what it is restoring before it restores it. */
+    defaults: defaultSeatTickSettings(project),
+    defaultWakeIntervalMinutes: Math.round(SEAT_TICK_WAKE_INTERVAL_MS / 60_000),
+  });
+}
+
 /** create_orchestrator: atomically create, designate and deliver the ONE
     approved versioned default mandate (or the caller's edited text based on
     it). The seat route owns the durable intent, so a retry replays. */
@@ -2952,6 +3065,10 @@ export function viewerMcpBindings(
     bridge_report: (args) => Promise.resolve(bridgeReport(args, domainDependencies)),
     bridge_directive: (args) => bridgeDirective(args, controlDependencies, domainDependencies),
     get_orchestrator: (args) => getOrchestrator(args, domainDependencies),
+    /* `async` rather than `Promise.resolve(...)`: this binding refuses by
+       throwing, and a synchronous throw out of a binding call is not the
+       rejected promise every caller here handles. */
+    seat_tick_settings: async (args) => seatTickSettingsTool(args, domainDependencies),
     create_orchestrator: (args) => createOrchestrator(args, controlDependencies),
     send_message_to_orchestrator: (args) => sendMessageToOrchestrator(args, controlDependencies, domainDependencies),
     rotate_orchestrator: (args) => rotateOrchestrator(args, controlDependencies),
