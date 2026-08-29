@@ -384,3 +384,29 @@ test("a quota-blocked flow presents the transient block and suppresses its pendi
     pending: null,
   });
 });
+
+test("issue 611: a block the provider gave no reset for says so and names its recheck", () => {
+  const unknownReset = flow({
+    implementerPath: "/implementer",
+    reviewerPath: "/reviewer",
+    state: "relaying",
+    block: {
+      reason: "rate_limited",
+      conversationId: "conversation_impl",
+      accountId: "main",
+      resetAt: null,
+      recheckAt: 1_800_003_300,
+    },
+  });
+  const t = (key: string) => key;
+
+  /* The strip names the wait exactly: the reset is unknown, and the account is
+     looked at again at the recheck. A reset time nobody gave would be worse
+     than the bare "waiting" copy it replaces. */
+  expect(flowPresentation(t as never, unknownReset, "en")).toEqual({
+    label: "flowState.blocked_rate_limited",
+    detail: "flowState.rate_limit_reset_unknown",
+    attention: true,
+    pending: null,
+  });
+});
