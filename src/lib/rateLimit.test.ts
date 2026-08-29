@@ -269,7 +269,7 @@ test("issue 611: a relay held on a provider limit blocks its flow with the deadl
     ...flow(),
     state: "relaying" as const,
     rounds: [{
-      relayHold: { reason: "quota_exhausted" as const, accountId: "main", until, since: "2026-07-10T15:59:00.000Z" },
+      relayHold: { reason: "quota_exhausted" as const, accountId: "main", until, since: "2026-07-10T15:59:00.000Z", resetKnown: true },
     }],
   } as unknown as Flow;
   /* No quota reading is attributed to the implementer's transcript here: the
@@ -291,6 +291,44 @@ test("issue 611: a relay held on a provider limit blocks its flow with the deadl
     conversationId: "conversation_impl",
     accountId: "main",
     resetAt: RESET + 600,
+  });
+});
+
+test("issue 611: a hold with no provider reset shows its recheck, never a reset time nobody gave", () => {
+  const recheck = new Date((RESET + 600) * 1_000).toISOString();
+  const relaying = {
+    ...flow(),
+    state: "relaying" as const,
+    rounds: [{
+      relayHold: {
+        reason: "quota_exhausted" as const,
+        accountId: "main",
+        until: recheck,
+        since: "2026-07-10T15:59:00.000Z",
+        resetKnown: false,
+      },
+    }],
+  } as unknown as Flow;
+  const snapshot = {
+    conversations: {
+      conversation_impl: {
+        id: "conversation_impl",
+        engine: "codex" as const,
+        generations: [{ path: "/sessions/implementer.jsonl", accountId: "main" }],
+      },
+    },
+    quotaObservations: { claude: {}, codex: {} },
+  };
+
+  /* The block still shows the wait — but as the bounded recheck it is, because
+     projecting the recheck as `resetAt` would put a reset time on the board
+     that the provider never named. */
+  expect(projectRateLimitReadModel([entry()], [relaying], snapshot, NOW).flows[0]?.block).toEqual({
+    reason: "rate_limited",
+    conversationId: "conversation_impl",
+    accountId: "main",
+    resetAt: null,
+    recheckAt: RESET + 600,
   });
 });
 

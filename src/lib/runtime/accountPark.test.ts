@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 
 import type { DurableQuotaObservation } from "@/lib/accounts/migration/contracts";
+import { PROVIDER_THROTTLE_GRACE_MS, providerThrottleState } from "@/lib/limitsThrottle";
 import { LIMITS_RATE_LIMITED_REASON } from "@/lib/types";
 
-import { accountPark } from "./accountPark";
+import { accountPark, UNKNOWN_RESET_RECHECK_MS } from "./accountPark";
 
 const NOW = new Date("2026-08-20T12:00:00.000Z").getTime();
 const RESET = Math.floor(NOW / 1_000) + 3_600;
@@ -44,6 +45,7 @@ test("a spent quota window parks the account until the provider resets it", () =
     reason: "quota_exhausted",
     accountId: "builder-account",
     until: new Date(RESET * 1_000).toISOString(),
+    resetKnown: true,
   });
 });
 
@@ -52,18 +54,55 @@ test("a provider rejection parks the account until the deadline it asked for", (
 
   expect(accountPark("claude", "builder-account", sources({
     limitsProvenance: () => ({ source: "cache", reason: LIMITS_RATE_LIMITED_REASON, staleSince: null, retryAt }),
-  }))).toEqual({ reason: "provider_throttled", accountId: "builder-account", until: retryAt });
+  }))).toEqual({ reason: "provider_throttled", accountId: "builder-account", until: retryAt, resetKnown: true });
 });
 
-test("an exhaustion with no knowable reset is not a park", () => {
-  /* Nothing can say when this one lapses, and a wait nobody can time out is
-     the unwatched stall the park predicate exists to prevent. Callers fall
-     back to their ordinary behaviour instead. */
+/** The spent window the provider named no reset for: the reading is live and
+    30s old, so it is evidence right now and stops being evidence a freshness
+    horizon later. */
+function unknownResetObservation(): DurableQuotaObservation {
   const limits = observation().limits!;
+  return observation({
+    limits: { ...limits, session: { usedPercent: 100, resetsAt: null }, weekly: null },
+  });
+}
+
+const UNKNOWN_RESET_RECHECK = new Date(NOW - 30_000 + UNKNOWN_RESET_RECHECK_MS + 1).toISOString();
+
+test("issue 611: an exhaustion with no knowable reset withholds work on a bounded recheck", () => {
+  /* The third answer the two earlier readings both missed. Reporting nothing
+     would hand back a live host whose account is spent — the incident — and
+     reporting a park with no end would be the unwatched wait wearing a
+     different coat. What this is: a park the caller must withhold work for,
+     whose deadline is the instant its own evidence expires, and which says the
+     provider named no reset. */
+  const park = accountPark("codex", "builder-account", sources({
+    quotaObservation: unknownResetObservation,
+  }));
+
+  expect(park).toEqual({
+    reason: "quota_exhausted",
+    accountId: "builder-account",
+    until: UNKNOWN_RESET_RECHECK,
+    resetKnown: false,
+  });
+  /* Bounded in both senses: the wait is ahead of the caller rather than an
+     already-spent deadline it would re-decide every tick, and it is at most one
+     freshness horizon long. */
+  expect(Date.parse(park!.until)).toBeGreaterThan(NOW);
+  expect(Date.parse(park!.until) - NOW).toBeLessThanOrEqual(UNKNOWN_RESET_RECHECK_MS);
+});
+
+test("issue 611: the unknown-reset wait ends at its own recheck, with no fresher reading and nobody's help", () => {
+  /* This is what makes it a recheck rather than a hold nobody can time out:
+     the very same reading stops being evidence at the instant the park named,
+     so the wait lapses on its own. A reading the account controller renews
+     re-parks it — against fresh evidence, and with a fresh deadline. */
+  const stuck = unknownResetObservation();
+
   expect(accountPark("codex", "builder-account", sources({
-    quotaObservation: () => observation({
-      limits: { ...limits, session: { usedPercent: 100, resetsAt: null }, weekly: null },
-    }),
+    quotaObservation: () => stuck,
+    now: Date.parse(UNKNOWN_RESET_RECHECK),
   }))).toBeNull();
 });
 
@@ -88,4 +127,42 @@ test("a lapsed retry deadline and a healthy account are both unparked", () => {
     }),
   }))).toBeNull();
   expect(accountPark("codex", null, sources())).toBeNull();
+});
+
+test("issue 611: publish readiness resumes at the provider's deadline, while liveness keeps its grace", () => {
+  const retryAtMs = NOW + 120_000;
+  const retryAt = new Date(retryAtMs).toISOString();
+  const provenance = {
+    source: "cache" as const,
+    reason: LIMITS_RATE_LIMITED_REASON,
+    staleSince: null,
+    retryAt,
+  };
+  const parkAt = (now: number) => accountPark("claude", "builder-account", sources({
+    limitsProvenance: () => provenance,
+    now,
+  }));
+
+  /* Before the deadline: parked, with the deadline the provider named. */
+  expect(parkAt(retryAtMs - 1)).toEqual({
+    reason: "provider_throttled",
+    accountId: "builder-account",
+    until: retryAt,
+    resetKnown: true,
+  });
+  /* At it and past it: ready. Inheriting the liveness grace here returned a
+     park whose `until` was already in the past, so every probe inside the
+     grace re-decided the same withholding against a spent deadline. */
+  expect(parkAt(retryAtMs)).toBeNull();
+  expect(parkAt(retryAtMs + 1)).toBeNull();
+  expect(parkAt(retryAtMs + PROVIDER_THROTTLE_GRACE_MS)).toBeNull();
+
+  /* The grace itself is untouched — it still explains a quiet host for one
+     refresh cadence, which is the liveness question it was written for. */
+  expect(providerThrottleState(provenance, retryAtMs + 1)).toEqual({ reason: "provider_throttled", retryAt });
+  expect(providerThrottleState(provenance, retryAtMs + PROVIDER_THROTTLE_GRACE_MS)).toEqual({
+    reason: "provider_throttled",
+    retryAt,
+  });
+  expect(providerThrottleState(provenance, retryAtMs + PROVIDER_THROTTLE_GRACE_MS + 1)).toBeNull();
 });

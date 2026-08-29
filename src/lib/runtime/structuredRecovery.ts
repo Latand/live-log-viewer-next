@@ -29,7 +29,10 @@ export interface StructuredRecoveryResult {
       provider has parked its account (#611). The host is healthy and keeps its
       claim; what it cannot do is start a turn before `hold.until`. A caller
       that can wait must hold the message rather than enqueue it — a queued
-      item nobody watches is exactly the stall this reports. */
+      item nobody watches is exactly the stall this reports. When
+      `hold.resetKnown` is false the provider named no reset, so `until` is the
+      bounded recheck the park reports instead of a deadline: the caller waits
+      the same way, and says the reset is unknown while it does. */
   hold?: AccountPark | null;
 }
 
@@ -125,7 +128,10 @@ function candidateFor(
   /* #611: a process-alive claim-owned host whose account the provider has
      parked cannot accept a turn, however alive it looks. Readiness says so
      here, so the enqueue that would sit `queued` past the parked window never
-     happens; the host itself is untouched and keeps its claim. */
+     happens; the host itself is untouched and keeps its claim. An exhaustion
+     the provider named no reset for withholds publication the same way: it is
+     reported with the bounded recheck the park carries, so the caller waits a
+     wait that ends rather than enqueuing into a spent account. */
   const hostAccountId = entry?.accountId ?? generation.accountId ?? null;
   const hostPark = hostLive ? park(conversation.engine, hostAccountId, snapshot) : null;
   const publishReady = hostLive && !hostPark;

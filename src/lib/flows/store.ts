@@ -257,6 +257,14 @@ export function loadFlowsForTick(): Flow[] {
   return flowStore().snapshotForController();
 }
 
+/** A relay hold persisted before `resetKnown` existed always carried the
+    provider's own deadline in `until`, so it reads back as a known reset
+    (#611). Without this, an in-flight hold written by the previous process
+    would come back looking like an unknown reset and be surfaced as one. */
+function normalizeRelayHold(hold: Round["relayHold"]): Round["relayHold"] {
+  return hold ? { ...hold, resetKnown: hold.resetKnown ?? true } : null;
+}
+
 function parseFlowsFromDisk(): Flow[] {
   const raw = readFlowStateJson();
   if (raw === null) return [];
@@ -304,7 +312,7 @@ function parseFlowsFromDisk(): Flow[] {
       relayRetryRequiresIdempotency: round.relayRetryRequiresIdempotency ?? false,
       relayDelivery: round.relayDelivery ?? null,
       relayPendingSettlement: round.relayPendingSettlement ?? null,
-      relayHold: round.relayHold ?? null,
+      relayHold: normalizeRelayHold(round.relayHold),
       terminalAt: round.terminalAt ?? null,
       error: round.error ?? null,
     })),
@@ -352,7 +360,7 @@ function decodeFlow(value: unknown): Flow | null {
       relayRetryRequiresIdempotency: round.relayRetryRequiresIdempotency ?? false,
       relayDelivery: round.relayDelivery ?? null,
       relayPendingSettlement: round.relayPendingSettlement ?? null,
-      relayHold: round.relayHold ?? null,
+      relayHold: normalizeRelayHold(round.relayHold),
       terminalAt: round.terminalAt ?? null,
       error: round.error ?? null,
     })),

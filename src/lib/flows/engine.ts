@@ -340,7 +340,10 @@ function claimFailureDetail(flow: Flow, detail: string): string {
     instead of enqueued (#611). Carries the deadline the relay resumes at. */
 export class RelayHeldByProviderLimitError extends Error {
   constructor(readonly hold: AccountPark) {
-    super(`relay is held: the provider parked account ${hold.accountId} (${hold.reason}) until ${hold.until}`);
+    super(hold.resetKnown
+      ? `relay is held: the provider parked account ${hold.accountId} (${hold.reason}) until ${hold.until}`
+      : `relay is held: account ${hold.accountId} has spent its quota window and the provider named no reset;`
+        + ` the account is rechecked at ${hold.until}`);
     this.name = "RelayHeldByProviderLimitError";
   }
 }
@@ -920,7 +923,8 @@ function scheduleRelayRetry(
 }
 
 /**
- * Hold the relay until the provider's own deadline (#611).
+ * Hold the relay until the provider's own deadline, or — when the provider
+ * named none — until the recheck the park bounded itself with (#611).
  *
  * A hold is not a delivery failure and not a timeout: the message never left
  * the Viewer, so the bounded retry budget, the delivery attempt generation and
@@ -929,13 +933,20 @@ function scheduleRelayRetry(
  * stays in `relaying` and re-attempts at `until`, which the ordinary
  * `relayRetryAt` gate already enforces; `relayHold` records what it waits on
  * so the flow record names the wait, and the read model projects it onto the
- * strip and the loop hub as a block with the deadline.
+ * strip and the loop hub as a block with the deadline — or, for an unknown
+ * reset, as a wait that says the reset is unknown and names its recheck.
+ * Either way the wait ends by itself: the exhaustion reading behind an unknown
+ * reset stops being evidence at that recheck unless a fresh one renews it.
  */
 function holdRelayForProviderLimit(flow: Flow, round: Round, hold: AccountPark): void {
   const previous = round.relayHold;
+  /* One wait, however often its deadline is renewed: an unknown-reset park
+     bounds itself with a recheck that moves forward every time a fresh reading
+     confirms the exhaustion, and restarting `since` on each renewal would hide
+     how long the relay has actually been waiting. */
   const continuing = previous?.accountId === hold.accountId
     && previous.reason === hold.reason
-    && previous.until === hold.until;
+    && (previous.resetKnown ?? true) === hold.resetKnown;
   round.relayPendingSettlement = null;
   round.relayStartedAt = null;
   round.relayHold = {
@@ -943,13 +954,17 @@ function holdRelayForProviderLimit(flow: Flow, round: Round, hold: AccountPark):
     accountId: hold.accountId,
     until: hold.until,
     since: continuing ? previous.since : isoNow(),
+    resetKnown: hold.resetKnown,
   };
   round.relayRetryAt = hold.until;
   round.error = null;
   flow.state = "relaying";
   flow.pausedState = null;
-  flow.stateDetail = `relay held: the provider parked account ${hold.accountId} (${hold.reason});`
-    + ` delivery resumes at ${hold.until}`;
+  flow.stateDetail = hold.resetKnown
+    ? `relay held: the provider parked account ${hold.accountId} (${hold.reason});`
+      + ` delivery resumes at ${hold.until}`
+    : `relay held: account ${hold.accountId} has spent its quota window and the provider named no reset;`
+      + ` nothing is queued, and the account is rechecked at ${hold.until}`;
 }
 
 function completeRelayTransition(flow: Flow, round: Round): void {

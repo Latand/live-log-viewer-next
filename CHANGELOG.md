@@ -61,6 +61,27 @@ guarantees for the 1.x series.
   kept in the tree, undriven, and now requires a caller to supply its own
   single-flight admission. `GET /api/monitor/runs` is unchanged.
 
+### Fixed
+- A review relay held on a provider limit now waits a wait that ends, and stops
+  waiting when the provider said to retry (#611). Two gaps were left by the
+  first fix. An account whose window reads spent with no reset the provider
+  named was reported as no park at all, so recovery handed the live owned host
+  back publish-ready and the relay enqueued into an account that could not start
+  the turn — the original incident, reproduced by the one reading nobody can put
+  a clock on. It is now reported as a park in its own right: nothing is
+  enqueued, nothing is dropped, no retry budget is spent, the host keeps its
+  process and its claim and the relay keeps the identity it would have been sent
+  under — and the wait is bounded by the evidence that justified it. The reading
+  only speaks for one freshness horizon, so the park names that instant as its
+  recheck and lapses there on its own unless a fresher reading renews it against
+  new evidence. The board says which account it waits on, that the reset is
+  unknown, and when the account is looked at again, instead of showing a reset
+  time nobody gave. And publish readiness no longer borrows the sixty-second
+  grace that exists for liveness classification: it resumes at the provider's
+  own deadline, where before a probe one millisecond past it was answered with a
+  hold whose deadline had already passed, and every tick for the next minute
+  re-decided the same hold.
+
 ## [1.0.0] — 2026-07-31
 
 ### Fixed

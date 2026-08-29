@@ -295,13 +295,20 @@ export function projectRateLimitReadModel(
     const held = flow.state === "relaying" ? flow.rounds.at(-1)?.relayHold : null;
     if (held) {
       const until = Date.parse(held.until);
+      const seconds = Number.isFinite(until) ? Math.floor(until / 1_000) : null;
+      /* A hold the provider gave no reset for carries a recheck rather than a
+         reset, and is projected as one: the strip then says the reset is
+         unknown instead of showing the recheck as the time the account comes
+         back. */
+      const resetKnown = held.resetKnown !== false;
       return {
         ...flow,
         block: {
           reason: "rate_limited" as const,
           conversationId,
           accountId: held.accountId,
-          resetAt: Number.isFinite(until) ? Math.floor(until / 1_000) : null,
+          resetAt: resetKnown ? seconds : null,
+          ...(resetKnown ? {} : { recheckAt: seconds }),
         } satisfies FlowBlock,
       };
     }
