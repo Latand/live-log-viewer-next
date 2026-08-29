@@ -91,9 +91,9 @@ guarantees for the 1.x series.
   condition, so such a pass adopted hosts and reported success while nothing
   owned them. Such a pass now defers its adoption: nothing is launched, the
   boot's own recovery evidence is kept, and the startup retry loop runs the pass
-  again once a client exists. A host adopted by a pass that did
-  have one, but which the controller never claimed, still fails the pass instead
-  of being left running with no owner. And a startup completion that resumes
+  again once a client exists. A host adopted by a pass that did have one, but
+  which the controller never claimed, still fails the pass instead of being left
+  running with no owner. And a startup completion that resumes
   inside a generation the publication has already left now hands its hosts to
   the successor; it used to answer "done" and register nothing, which is how a
   launched host ends up parked in `epoll_wait` for half an hour while every

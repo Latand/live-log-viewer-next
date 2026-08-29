@@ -121,6 +121,10 @@ function seat(
   return { registry, conversationId: settled.conversation.id, key: { engine: "claude" as const, sessionId }, directory };
 }
 
+/* The reaper on its own, against a real child process. The kill that reaches it
+   in production — admitted as a runtime operation, executed by the delivery
+   controller, followed by the registry retirement and the stage retry — runs
+   end to end in `src/lib/pipelines/severedStageRetry.test.ts`. */
 test("a kill on a severed host nothing owns reaps the process so its row can retire", async () => {
   const child = childProcess();
   const { registry, conversationId, key } = seat("severed", child, AN_HOUR_AGO);

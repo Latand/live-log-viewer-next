@@ -1739,7 +1739,7 @@ test("a seat whose host is still working through a long step is left alone at bo
   }
 });
 
-test("a seat whose transcript cannot be read is owed no nudge, whatever turn word its row carries", async () => {
+test("a seat whose row reads busy is owed no nudge when its transcript cannot be read", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-orchestrator-unreadable-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
@@ -1796,7 +1796,9 @@ test("a seat whose transcript cannot be read is owed no nudge, whatever turn wor
     /* The row says a turn is in flight and the process that owned it is gone.
        That word is not evidence of a turn (#1281), and a nudge is a paid turn:
        nothing here knows what to tell this seat to resume, so no host is started
-       for it and no message is sent. */
+       for it and no message is sent. `busy` is the only word that discriminates
+       here — a stale `terminal` settled the turn before this change too, and a
+       settled turn was never owed a nudge. */
     expect(launches).toBe(0);
     expect(ledger.writes).toEqual([]);
     expect(registry.pendingDeliveries(conversation.id).filter((delivery) =>

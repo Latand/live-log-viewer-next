@@ -2157,7 +2157,14 @@ test("a stage whose host is proven dead becomes retryable without closing the pi
 
   /* Before #1282 the stage stayed `running` while its host sat there doing
      nothing, so retry-stage answered "pipeline does not have a stage awaiting
-     retry" and the only way out was closing the pipeline. */
+     retry" and the only way out was closing the pipeline.
+
+     What this case pins is the engine's own behaviour once a host is proven
+     dead: the liveness port is stubbed here, so it says nothing about whether
+     that port ever reports the incident's host. The whole sequence — a live but
+     severed child, the runtime kill, the registry retirement, this tick and
+     `retry-stage` — runs through the production seams in
+     `src/lib/pipelines/severedStageRetry.test.ts`. */
   const parked = loadPipelines()[0]!;
   expect(parked.state).toBe("needs_decision");
   const failedAttempt = parked.runs[0]!.attempts[0]!;
