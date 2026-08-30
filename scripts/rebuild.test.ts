@@ -67,7 +67,7 @@ function runRebuild(
   idempotencyKey: string,
   setup: ReturnType<typeof fixture>,
   revision?: string,
-  options: { lsRemote?: string | null } = {},
+  options: { lsRemote?: string | null; deployRevision?: string } = {},
 ) {
   const lsRemote = options.lsRemote === undefined ? `${MAIN_TIP}\trefs/heads/main\n` : options.lsRemote;
   return Bun.spawnSync(["bash", rebuildScript, ...(revision ? [revision] : [])], {
@@ -83,6 +83,7 @@ function runRebuild(
       LLV_TEST_GIT_ARGS: setup.gitArgs,
       LLV_VIEWER_CANONICAL_REMOTE: CANONICAL_REMOTE,
       ...(lsRemote === null ? { LLV_TEST_LS_REMOTE_FAILS: "1" } : { LLV_TEST_LS_REMOTE: lsRemote }),
+      ...(options.deployRevision === undefined ? {} : { LLV_DEPLOY_REVISION: options.deployRevision }),
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -187,6 +188,31 @@ for (const [name, lsRemote] of [
     expect(fs.existsSync(setup.capture)).toBe(false);
   });
 }
+
+/* #1309 — `LLV_DEPLOY_REVISION` names the same thing the positional argument
+   names, so it is held to the same contract: a full lowercase SHA is deployed
+   as a pin, and anything the endpoint would refuse is refused here first. */
+test("LLV_DEPLOY_REVISION pins a SHA deploy without consulting the remote", () => {
+  const setup = fixture();
+  const revision = "d".repeat(40);
+  const result = runRebuild("env-pinned-sha", setup, undefined, { deployRevision: revision });
+
+  expect(result.exitCode).toBe(0);
+  expect(fs.existsSync(setup.gitArgs)).toBe(false);
+  expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({ revision, idempotencyKey: "env-pinned-sha" });
+});
+
+test("LLV_DEPLOY_REVISION is validated like the argument", () => {
+  const setup = fixture();
+  const result = runRebuild("env-invalid-revision", setup, undefined, { deployRevision: "origin/main" });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain("full lowercase 40-character commit SHA");
+  expect(result.stdout.toString()).not.toContain("deployment key");
+  expect(result.stdout.toString()).not.toContain("deployment admitted");
+  expect(fs.existsSync(setup.gitArgs)).toBe(false);
+  expect(fs.existsSync(setup.capture)).toBe(false);
+});
 
 test("rebuild rejects an idempotency key above the coordinator limit", () => {
   const setup = fixture();
