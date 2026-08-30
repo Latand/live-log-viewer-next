@@ -158,6 +158,29 @@ test("Codex message twins collapse when their representations straddle a page bo
   expect(walked).toEqual(["newer", "older"]);
 });
 
+test("distinct repeated Codex messages each survive twin collapse across cursor pages", () => {
+  const pathname = fixture([
+    { type: "response_item", timestamp: times[0], payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "same answer" }] } },
+    { type: "event_msg", timestamp: times[0], payload: { type: "agent_message", message: "same answer" } },
+    { type: "response_item", timestamp: times[1], payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "same answer" }] } },
+    { type: "event_msg", timestamp: times[1], payload: { type: "agent_message", message: "same answer" } },
+  ], "codex-repeated-twins.jsonl");
+  const walked: string[] = [];
+  let cursor: MessagesPageCursor | null = null;
+  for (;;) {
+    const current = page(pathname, "codex", {
+      kinds: new Set(["message"]),
+      roles: ALL_ROLES,
+      limit: 1,
+      cursor,
+    });
+    walked.push(...current.records.map((record) => record.text));
+    if (!current.hasMore) break;
+    cursor = current.cursor;
+  }
+  expect(walked).toEqual(["same answer", "same answer"]);
+});
+
 test("multiple records from one line resume at the exact part", () => {
   const pathname = fixture([{
     type: "assistant",

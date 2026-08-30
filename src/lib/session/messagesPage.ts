@@ -255,8 +255,13 @@ export function readMessagesPage(source: MessagesPageSource, query: MessagesPage
     const twin = recent.some((prior) => prior.h === hash
       && prior.e !== representation
       && (timestamp !== null && prior.t !== null ? Math.abs(prior.t - timestamp) <= 2_000 : true));
-    recent.unshift({ h: hash, t: timestamp, e: representation });
-    if (recent.length > MAX_RECENT_MESSAGES) recent.pop();
+    /* Keep one representative of a doubled Codex message. Remembering the
+       discarded twin would make an immediately repeated, distinct message
+       match that opposite representation and disappear as well. */
+    if (!twin) {
+      recent.unshift({ h: hash, t: timestamp, e: representation });
+      if (recent.length > MAX_RECENT_MESSAGES) recent.pop();
+    }
     return twin;
   };
 
