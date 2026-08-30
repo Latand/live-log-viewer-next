@@ -5,7 +5,8 @@ import type { ApiError } from "@/lib/types";
 /**
  * CSRF gate for mutating API routes. The server binds to localhost, but any
  * web page open in the user's browser can still fire a drive-by fetch at
- * 127.0.0.1 and reach /api/proc (kill) or /api/tmux (send-keys). Browsers
+ * 127.0.0.1 and reach /api/proc (kill) or /api/conversation-host (deliver a
+ * message to a conversation, resuming or respawning its host). Browsers
  * attach Origin and Sec-Fetch-Site to such requests, so a cross-origin caller
  * is rejected here; non-browser clients (curl, scripts) send neither header
  * and pass through.
