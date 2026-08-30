@@ -50,6 +50,16 @@ export interface ProcBackend {
   processIdentity(pid: number): string | null;
 
   /**
+   * CPU (user + system) a live process has consumed since it launched, in
+   * milliseconds; null when the pid is gone or the platform cannot account for
+   * it. macOS has no cheap per-pid CPU read without a subprocess, so the
+   * portable backend answers null and callers must treat that as "no evidence"
+   * rather than as zero — an evidence-based liveness verdict (#1281) refuses to
+   * call a host severed on a reading it never got.
+   */
+  processCpuMs(pid: number): number | null;
+
+  /**
    * Value of an environment variable for a live pid. Reading another
    * process's environment needs root without `/proc`, so the portable
    * backend always returns null here — see its comment for what degrades.
