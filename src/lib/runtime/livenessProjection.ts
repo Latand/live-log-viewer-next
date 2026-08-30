@@ -53,10 +53,15 @@ export async function projectStructuredFileLiveness(
         && host.present
         && expected.startIdentity !== null
         && host.observedIdentity === expected.startIdentity;
+      const replaced = expected !== null
+        && host.present
+        && expected.startIdentity !== null
+        && host.observedIdentity !== null
+        && host.observedIdentity !== expected.startIdentity;
       if (verified && expected) {
         file.pid = expected.pid;
         file.proc = "running";
-      } else if (expected !== null) {
+      } else if (expected !== null && (!host.present || replaced)) {
         file.pid = null;
         file.proc = "killed";
       } else {

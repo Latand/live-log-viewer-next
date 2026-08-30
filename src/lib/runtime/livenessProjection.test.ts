@@ -16,7 +16,7 @@ const LAST_WRITE = new Date(NOW - 5 * 60_000);
 function structuredFile(
   registry: AgentRegistry,
   directory: string,
-  process: { pid: number; startIdentity: string },
+  process: { pid: number; startIdentity: string | null },
 ): FileEntry {
   const sessionId = crypto.randomUUID();
   const transcript = path.join(directory, `${sessionId}.jsonl`);
@@ -118,11 +118,34 @@ test("a structured pid that has exited never projects running", async () => {
   }
 });
 
+test.each([
+  { name: "platform identity is unavailable", recorded: "73:1000", observed: null },
+  { name: "registry recorded no start identity", recorded: null, observed: "73:1000" },
+] as const)("an existing pid clears its process readout when the $name", async ({ recorded, observed }) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-liveness-projection-unverified-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const file = structuredFile(registry, directory, { pid: 73, startIdentity: recorded });
+
+    await projectStructuredFileLiveness([file], registry, registry.readOnlySnapshot(), {
+      now: () => NOW,
+      uptimeSeconds: () => 250,
+      pidAlive: () => true,
+      processIdentity: () => observed,
+      processCpuMs: () => 1_700,
+    });
+
+    expect(file).toMatchObject({ activity: "recent", activityReason: "turn_evidence_unknown", proc: null, pid: null });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("unreadable turn evidence removes a stale live activity word", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-liveness-projection-unknown-"));
   try {
     const registry = new AgentRegistry(path.join(directory, "registry.json"), undefined, undefined, { sqliteMode: "off" });
-    const file = structuredFile(registry, directory, { pid: 73, startIdentity: "73:1000" });
+    const file = structuredFile(registry, directory, { pid: 76, startIdentity: "76:1000" });
     fs.writeFileSync(file.path, '{"type":"assistant"');
     fs.utimesSync(file.path, LAST_WRITE, LAST_WRITE);
 
@@ -130,7 +153,7 @@ test("unreadable turn evidence removes a stale live activity word", async () => 
       now: () => NOW,
       uptimeSeconds: () => 250,
       pidAlive: () => true,
-      processIdentity: () => "73:1000",
+      processIdentity: () => "76:1000",
       processCpuMs: () => 1_700,
       observeCpuProgress: () => ({ consumedMs: 0, observedMs: 100_000 }),
     });
@@ -139,7 +162,7 @@ test("unreadable turn evidence removes a stale live activity word", async () => 
       activity: "recent",
       activityReason: "turn_evidence_unknown",
       proc: "running",
-      pid: 73,
+      pid: 76,
     });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
