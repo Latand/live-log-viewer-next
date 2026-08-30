@@ -2,6 +2,8 @@ import { resumeEligibility, resumeSpecFor } from "@/lib/agent/cli";
 import type { AgentReconfiguration } from "@/lib/agent/reconfigure";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type RegistryConversation, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { accountManager } from "@/lib/accounts/manager";
+import { conversationProjectKey } from "@/lib/accounts/conversationProject";
+import { allowedAccountIdsForProject, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
@@ -114,6 +116,23 @@ export async function reconfigureConversation(
   const generation = conversation?.generations.at(-1);
   if (config.accountId && (!conversation || !generation)) return failure("conversation identity is unavailable for an account switch", 409);
   if (config.accountId && conversation && generation && config.accountId !== generation.accountId) {
+    /* #1279: switching a conversation's account is a pin on that conversation's
+       project's work, so a named account the project does not allow is refused
+       here for the same reason the spawn path refuses one. An unbound project
+       answers null and reaches the identical code below. */
+    const project = conversationProjectKey(conversation.projectOwnership, generation.launchProfile, {
+      /* An adopted conversation carries no launch profile, and the scanner's
+         project for this transcript is what the board already groups it under. */
+      project: entry.project,
+    });
+    const allowedAccountIds = allowedAccountIdsForProject(project, entry.engine);
+    if (allowedAccountIds !== null && !allowedAccountIds.includes(config.accountId)) {
+      return failure(projectAccountRefusalDetail(
+        { kind: "not_allowed", accountId: config.accountId, allowedAccountIds },
+        entry.engine,
+        project ?? "",
+      ), 409);
+    }
     const previousProfile = generation.launchProfile;
     let profileUpdated = false;
     try {

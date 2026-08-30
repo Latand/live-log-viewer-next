@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
+import { conversationProjectKey } from "@/lib/accounts/conversationProject";
 import {
   accountProjectRows,
   carryingAccountIds,
@@ -18,7 +19,6 @@ import {
 import { agentRegistry } from "@/lib/agent/registry";
 import { canonicalProject, projectAliasSnapshot } from "@/lib/projects/aliases";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { projectForCwd } from "@/lib/scanner/describe";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,22 +32,17 @@ function accountsFor(engine: BindingEngine): BoundAccount[] {
 }
 
 /**
- * Every registered conversation reduced to the carrier shape. The project is
- * read from the durable ownership record first and the launch profile after it,
- * falling back to the generation's cwd — the same order every other projection
- * of a conversation's project uses.
+ * Every registered conversation reduced to the carrier shape, each one keyed to
+ * its project by the same resolution the reseat fence uses.
  */
 function carrierConversations(): CarrierConversation[] {
   const snapshot = agentRegistry().readOnlySnapshot();
   return Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
     if (!generation) return [];
-    const project = conversation.projectOwnership?.project
-      ?? generation.launchProfile.project
-      ?? (generation.launchProfile.cwd ? projectForCwd(generation.launchProfile.cwd) : null);
     return [{
       engine: conversation.engine,
-      project: project ? canonicalProject(project) : null,
+      project: conversationProjectKey(conversation.projectOwnership, generation.launchProfile),
       accountId: generation.accountId,
       busy: conversation.turn.state === "busy",
     }];

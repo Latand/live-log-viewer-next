@@ -1,7 +1,10 @@
 import { agentRegistry } from "@/lib/agent/registry";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
-import { chooseReseatTarget } from "@/lib/accounts/reseat";
+import { conversationProjectKey } from "@/lib/accounts/conversationProject";
+import { allowedAccountIdsForProject, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
+import { chooseProjectReseatTarget } from "@/lib/accounts/reseat";
+import { headCwd } from "@/lib/agent/transcript";
 
 import { advanceConversationMigration, drainHeldDeliveries } from "./coordinator";
 import { createMigrationDeliveryPort } from "./deliveryPort";
@@ -58,10 +61,41 @@ export async function applyConversationMigration(
       return { status: 200, body: { reseat: "already-migrating", phase: conversation.migration.phase, conversation } };
     }
     const accounts = conversation.engine === "claude" ? listClaudeAccounts() : listCodexAccounts();
-    const target = chooseReseatTarget(source.accountId, registry.quotaObservations(conversation.engine), accounts);
-    if (!target) {
+    /* #1279: a reseat is a selection for this conversation's project's work, so
+       it obeys the project's binding like every launch does. An unbound project
+       answers null here and every branch below is what it always was; a bound
+       project whose allowed accounts all lack headroom is REPORTED rather than
+       reseated onto the idle account it forbids. */
+    const project = conversationProjectKey(conversation.projectOwnership, source.launchProfile, {
+      /* Same reason as the reconfigure seam: an adopted conversation has an
+         empty profile, and its transcript head still names the cwd it runs in. */
+      cwd: headCwd(source.path),
+    });
+    const allowedAccountIds = allowedAccountIdsForProject(project, conversation.engine);
+    const selection = chooseProjectReseatTarget(
+      source.accountId,
+      registry.quotaObservations(conversation.engine),
+      accounts,
+      allowedAccountIds,
+    );
+    if (selection.kind === "none") {
       return { status: 409, body: { error: "no healthy account with fresh quota headroom is available" } };
     }
+    if (selection.kind === "fenced") {
+      return {
+        status: 409,
+        body: {
+          error: projectAccountRefusalDetail(
+            { kind: "exhausted", resetsAt: null, allowedAccountIds: selection.allowedAccountIds },
+            conversation.engine,
+            project ?? "",
+          ),
+          project,
+          allowedAccountIds: selection.allowedAccountIds,
+        },
+      };
+    }
+    const target = selection.target;
     const requested = registry.requestConversationReseat(conversationId, target.accountId);
     let final = requested;
     if (requested.migration) {
