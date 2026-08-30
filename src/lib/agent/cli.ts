@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from "@/lib/accounts/codex";
 import { claudeSettingsPath, claudeTranscriptOwnership, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
+import { homeDirectory } from "@/lib/platformHome";
 import { isUnderClaudeSubagentsDir } from "@/lib/scanner/claudeNative";
 import { telegramSessionReaderPath } from "@/lib/telegram/packaging";
 import { TELEGRAM_CONNECTOR_TOKEN_ENV, telegramSessionPath } from "@/lib/telegram/sessionStore";
@@ -28,8 +29,39 @@ export { ENGINE_EFFORTS, isEngineEffort } from "./efforts";
 
 export type AgentEngine = "claude" | "codex";
 
+/**
+ * Candidate absolute paths for an agent CLI on Windows, in probe order.
+ *
+ * The native Claude Code installer puts `claude.exe` under
+ * `%USERPROFILE%\.local\bin`; a Bun global install puts it under
+ * `%USERPROFILE%\.bun\bin`. Only `.exe` is probed. An npm install of Claude
+ * Code exposes `claude.cmd`, and `spawn` without a shell cannot run a `.cmd`
+ * (Node raises EINVAL), so finding one and returning it would produce a spawn
+ * failure instead of a clean "not installed" — the README says to use the
+ * native installer. `CreateProcess` searching PATH appends `.exe` and `.com`
+ * and never `.cmd`, so the bare-name fallback has the same property.
+ *
+ * Pure over `home`, so the order is asserted without a Windows filesystem.
+ */
+export function windowsBinaryCandidates(home: string, name: string): string[] {
+  return [
+    path.join(home, ".local", "bin", `${name}.exe`),
+    path.join(home, ".bun", "bin", `${name}.exe`),
+    path.join(home, "AppData", "Local", "Programs", name, `${name}.exe`),
+  ];
+}
+
 /** Absolute path of an agent CLI when we can find one; bare name otherwise. */
 export function resolveBinary(name: string): string {
+  if (process.platform === "win32") {
+    /* `X_OK` is meaningless on Windows — `fs.access` there answers existence —
+       so the probe says what it means. `homeDirectory()` rather than
+       `os.homedir()` so an isolated `USERPROFILE` is honoured under Bun. */
+    for (const candidate of windowsBinaryCandidates(homeDirectory(), name)) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
+    return name;
+  }
   const home = os.homedir();
   if (process.env.LLV_DOCKER_NSENTER_SHIMS === "1" && (name === "claude" || name === "codex")) {
     const shim = "/usr/local/bin/" + name;

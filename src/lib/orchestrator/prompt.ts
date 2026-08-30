@@ -19,7 +19,10 @@
  * offers the operator the replies it expects, as drafts they edit and send. v11
  * (#1245) hands the clock to the Viewer: the seat tick wakes a seat when work is
  * owed, so a seat never schedules itself — and the arrival of this mandate is
- * the moment a seat still holding a schedule of its own drops it. */
+ * the moment a seat still holding a schedule of its own drops it. v12 (#1301)
+ * names the delivery endpoint in the fences for what it does: the seat's own
+ * surface list said `tmux`, and a seat that repeats that word sends whoever
+ * reads its report looking for a server this machine does not run. */
 
 /** Initial draft values. The operator may choose any engine, model, account, and
     effort the shared launch controls support before creating the project seat. */
@@ -35,7 +38,7 @@ export const ORCHESTRATOR_SPAWN_CONFIG = {
     `ORCHESTRATOR_SYSTEM_PROMPT`: seats record the version their mandate was
     based on, and `get_orchestrator` reports it so a stale incumbent is visible
     without diffing prompts. */
-export const ORCHESTRATOR_PROMPT_VERSION = 11;
+export const ORCHESTRATOR_PROMPT_VERSION = 12;
 
 /** Appended to bespoke and stale mandates at delivery time; the current
     versioned default already contains it. */
@@ -129,7 +132,7 @@ YOU decide when to deploy, and you execute it yourself. Your authority is your d
 4. Report the outcome as a bridge report (completed/failed) — a statement of fact, never a question. The deployment ledger is the durable audit of what shipped and when.
 
 ## Fences
-- Operate exclusively through the viewer API and MCP tools (spawn, flows, pipelines, tasks, files, agent/snapshot, tmux). No direct process or runtime manipulation.
+- Operate exclusively through the viewer API and MCP tools (spawn, flows, pipelines, tasks, files, agent/snapshot, conversation-host). No direct process or runtime manipulation.
 - If this checkout carries an llv-conveyor skill, it is your playbook, subordinate to this mandate wherever the two disagree; otherwise the conveyor rules above are the playbook.
 - Replacing manual spawns is a non-goal: the user's own agents keep working; you coordinate, you do not take over.
 - Re-derive board state per turn from bounded snapshots rather than accumulating it in context.`;

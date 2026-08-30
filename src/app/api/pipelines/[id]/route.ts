@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
-import { patchPipeline, type PipelineCloseReport } from "@/lib/pipelines/engine";
+import { getPipeline, patchPipeline, type PipelineCloseReport } from "@/lib/pipelines/engine";
 import { PIPELINE_ACTIONS, type PatchPipelineRequest, type Pipeline, type PipelineAction, type PipelineRepoPreflightErrorCode } from "@/lib/pipelines/types";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
@@ -20,6 +20,20 @@ type PipelineApiError = ApiError & {
   /** Present when a close was refused: the hosts it stopped and the one it could not. */
   close?: PipelineCloseReport;
 };
+
+export async function GET(
+  _req: NextRequest,
+  ctx: { params: Promise<{ id: string }> },
+): Promise<NextResponse<{ ok: true; pipeline: Pipeline } | ApiError>> {
+  const { id } = await ctx.params;
+  try {
+    const pipeline = getPipeline(id);
+    if (!pipeline) return NextResponse.json({ error: "pipeline not found" }, { status: 404 });
+    return NextResponse.json({ ok: true, pipeline });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "pipeline registry unreadable" }, { status: 500 });
+  }
+}
 
 export async function PATCH(
   req: NextRequest,

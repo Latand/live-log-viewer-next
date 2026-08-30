@@ -13,7 +13,7 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
 const { gatherSeatTickInput, repoDirForProject, runtimeWakeState, seatTickProjects, withdrawRuntimeWake } = await import("./seatTickSources");
 import type { SeatTickSources } from "./seatTickSources";
-const { DEFAULT_SEAT_TICK_POLICY, seatTickDecision } = await import("./seatTick");
+const { DEFAULT_SEAT_TICK_POLICY, seatTickBoardMoved, seatTickDecision, seatTickWakeCommit } = await import("./seatTick");
 const { defaultSeatTickSettings } = await import("./seatTickSettings");
 import type { AgentLivenessRecord } from "@/lib/lifecycle/liveness";
 import type { OpenPullRequest, OpenPullRequestsUnavailable } from "./githubEvidence";
@@ -870,6 +870,226 @@ test("a check that asks GitHub nothing reports no gap", async () => {
   expect(input.pullRequestsUnavailable).toBeNull();
 });
 
+/* ------------------------------------------------------------------------- *
+ * The run of failures the row remembers (#1298).
+ *
+ * A source that has been unreadable since the feature shipped is a different
+ * fact from one that just missed a call, and the check could not tell them
+ * apart: it reported the same journal line every five minutes for four hours
+ * and put nothing anywhere an operator reads.
+ * ------------------------------------------------------------------------- */
+
+test("a failed read starts a run of failures on the row", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed" },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.state.pullRequestGap).toEqual({
+    gap: "command-failed",
+    since: new Date(NOW).toISOString(),
+    lastAttemptAt: new Date(NOW).toISOString(),
+    attempts: 1,
+    reported: false,
+  });
+});
+
+/* Inside the first interval the source is asked at every check: a transient
+   failure has to recover at the check interval, not an hour later. */
+test("a run younger than the wake interval is asked again at every check", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const young = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 10 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 5 * 60_000).toISOString(),
+    attempts: 2,
+    reported: false,
+  };
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "timed-out", pullRequestCalls: calls },
+    withCursor(0, { ...OVERDUE, pullRequestGap: young }),
+  );
+  expect(calls).toHaveLength(1);
+  /* The run keeps its own beginning, so "how long has this been broken" is not
+     reset by every failure inside it. */
+  expect(input.state.pullRequestGap).toMatchObject({ gap: "timed-out", since: young.since, attempts: 3 });
+});
+
+/* Past that point the subprocess is paid for once per wake interval — and the
+   gap it already established is replayed, so the check in between still
+   refuses to call this quiet. Slowing the read may never buy a silence. */
+test("a standing run is asked once per wake interval, and the gap is replayed in between", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const standing = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed", pullRequestCalls: calls },
+    withCursor(0, { ...OVERDUE, pullRequestGap: standing }),
+  );
+  expect(calls).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBe("command-failed");
+  expect(input.state.pullRequestGap).toEqual(standing);
+  /* And the decision it feeds is the decision a fresh failed read would have
+     produced: no wake from the unreadable source, and no quiet either. */
+  expect(seatTickDecision(input).verdict.kind).toBe("error");
+
+  const due: { cwd: string; limit: number }[] = [];
+  const asked = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed", pullRequestCalls: due },
+    withCursor(0, { ...OVERDUE, pullRequestGap: { ...standing, lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString() } }),
+  );
+  expect(due).toHaveLength(1);
+  expect(asked.state.pullRequestGap).toMatchObject({ attempts: 24, reported: true });
+});
+
+/* The replay is bounded by the question it answers. A check with no finished
+   lane to correlate never asks the source at all, and a fresh read on it
+   reports no gap — so the backoff must not hand one back and refuse a quiet
+   this check's own evidence allows. */
+test("a standing run is not replayed onto a check that had nothing to ask", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const standing = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const input = await gather(
+    { pipelines: [], pullRequestsUnavailable: "command-failed", pullRequestCalls: calls },
+    withCursor(0, { ...OVERDUE, pullRequestGap: standing }),
+  );
+  /* The subprocess the backoff exists to save is still saved. */
+  expect(calls).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBeNull();
+  /* And the run is left standing, because this check learned nothing about
+     whether the source can be read. */
+  expect(input.state.pullRequestGap).toEqual(standing);
+  expect(seatTickDecision(input).verdict.kind).not.toBe("error");
+});
+
+/* An answer ends the run, whatever it says — which is what makes the next
+   outage a fresh run with a report of its own. */
+test("an answer clears the run of failures", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [] },
+    withCursor(0, {
+      ...OVERDUE,
+      pullRequestGap: {
+        gap: "command-failed",
+        since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+        lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString(),
+        attempts: 23,
+        reported: true,
+      },
+    }),
+  );
+  expect(input.pullRequestsUnavailable).toBeNull();
+  expect(input.state.pullRequestGap).toBeNull();
+});
+
+/* A gate says nothing about whether the source can be read, so it leaves the
+   run exactly as it stands — and reports no gap of its own, because this check
+   asked nothing. */
+test("a check that asks GitHub nothing leaves the run untouched", async () => {
+  const standing = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsThrow: true },
+    withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString(), pullRequestGap: standing }),
+  );
+  expect(input.pullRequestsUnavailable).toBeNull();
+  expect(input.state.pullRequestGap).toEqual(standing);
+});
+
+/* The lane store is a source too, and its own permanent failure has to be
+   bounded by the same backoff (#1298). It is read above the gates that skip
+   `gh`, so a lane store that can never be read paid a cold-storage read every
+   five-minute check for as long as no delivered wake moved the hourly stamp —
+   the unbounded retry, one source over. */
+test("a lane store that can never be read is asked once per wake interval too", async () => {
+  const standing = {
+    gap: "lanes-unreadable" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const held: number[] = [];
+  const input = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, archiveCalls: held },
+    withCursor(0, { ...OVERDUE, pullRequestGap: standing }),
+  );
+  /* Zero reads inside the interval … */
+  expect(held).toEqual([]);
+  /* … and the gap they already established is replayed, so this check still
+     refuses to call the source readable or the project quiet. */
+  expect(input.pullRequestsUnavailable).toBe("lanes-unreadable");
+  expect(input.state.pullRequestGap).toEqual(standing);
+  expect(seatTickDecision(input).verdict.kind).toBe("error");
+
+  const due: number[] = [];
+  const asked = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, archiveCalls: due },
+    withCursor(0, { ...OVERDUE, pullRequestGap: { ...standing, lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString() } }),
+  );
+  /* … and exactly one after it. */
+  expect(due).toEqual([1]);
+  expect(asked.state.pullRequestGap).toMatchObject({ gap: "lanes-unreadable", attempts: 24, since: standing.since });
+});
+
+/* The bound it must not grow into: a lane store that has only just stopped
+   answering is weather, and weather has to recover at the check interval. */
+test("a lane store failing inside the first interval is still asked at every check", async () => {
+  const young: number[] = [];
+  const input = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, archiveCalls: young },
+    withCursor(0, {
+      ...OVERDUE,
+      pullRequestGap: {
+        gap: "lanes-unreadable",
+        since: new Date(NOW - 10 * 60_000).toISOString(),
+        lastAttemptAt: new Date(NOW - 5 * 60_000).toISOString(),
+        attempts: 2,
+        reported: false,
+      },
+    }),
+  );
+  expect(young).toEqual([1]);
+  expect(input.state.pullRequestGap).toMatchObject({ gap: "lanes-unreadable", attempts: 3 });
+});
+
+/* And the backoff belongs to the source that failed. A standing `gh` outage
+   says nothing about the archive, so the archive is still read — the gates
+   below it are read OUT of the archive, and skipping it would hand a check
+   with nothing to ask a gap it could not have produced. */
+test("a standing gh outage does not stop the lane store being read", async () => {
+  const reads: number[] = [];
+  await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed", archiveCalls: reads },
+    withCursor(0, {
+      ...OVERDUE,
+      pullRequestGap: {
+        gap: "command-failed",
+        since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+        lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+        attempts: 23,
+        reported: true,
+      },
+    }),
+  );
+  expect(reads).toEqual([1]);
+});
+
 /* The guard half, the same shape #1262 established for a card's movement: the
    fingerprint has to carry what the reason is decided from, or a guard keyed on
    it goes on suppressing the reason while a second pull request piles up. */
@@ -886,6 +1106,68 @@ test("a second unmerged pull request moves the fingerprint", async () => {
     withCursor(0, OVERDUE),
   );
   expect(two.changeFingerprint).not.toBe(one.changeFingerprint);
+});
+
+/* The other half of that, and the trap the wake-through-a-gap opened (#1298).
+   An unreadable source contributes exactly the rows a merged pull request
+   contributes — none — so a single digest over whatever was readable makes a
+   failing `gh` look like an operator clearing the board. Wakes now go out under
+   a gap, so that reading would reach the guard: a source failing every other
+   check would alternate the digest and reset the count on every wake, and the
+   reason would be re-sent for ever. The guard has to see the board standing
+   still through the flap. */
+test("a source that flaps does not look like a board that moved", async () => {
+  const readable = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  const blind = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "timed-out" },
+    withCursor(0, OVERDUE),
+  );
+  expect(blind.changeFingerprint).not.toBe(readable.changeFingerprint);
+  expect(seatTickBoardMoved(readable.changeFingerprint, blind.changeFingerprint)).toBe(false);
+  expect(seatTickBoardMoved(blind.changeFingerprint, readable.changeFingerprint)).toBe(false);
+
+  /* So a guard that has run out of patience on a parked lane stays out of
+     patience across the flap, rather than being handed a fresh count by it. */
+  const spent = { wakesWithoutChange: { stalled: DEFAULT_SEAT_TICK_POLICY.retryGuard } };
+  const held = seatTickDecision({
+    ...blind,
+    state: { ...blind.state, ...spent, lastWakeFingerprint: readable.changeFingerprint },
+  });
+  expect(reasonsOf(held)).toEqual([]);
+
+  /* And a board that DID move is still seen to have moved while the source is
+     blind: the half both checks could read is the half that answers. */
+  const movedBlind = await gather(
+    {
+      pipelines: [finishedLane(), lane({ id: "pipe_second" })],
+      pullRequestsUnavailable: "timed-out",
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(seatTickBoardMoved(readable.changeFingerprint, movedBlind.changeFingerprint)).toBe(true);
+});
+
+/* An unreadable half cannot postpone the guard either. A wake that went out
+   over a blind source and changed nothing counts as a wake that changed
+   nothing, so the count still climbs toward the bound. */
+test("a wake sent under a blind source still counts against the retry guard", async () => {
+  const blind = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "timed-out" },
+    withCursor(0, OVERDUE),
+  );
+  const readable = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  const committed = seatTickWakeCommit(
+    { ...blind.state, lastWakeFingerprint: readable.changeFingerprint, wakesWithoutChange: { stalled: 1 } },
+    { fingerprint: blind.changeFingerprint, reasons: ["stalled"], eventsThrough: 0, proposal: false },
+    NOW,
+  );
+  expect(committed.wakesWithoutChange.stalled).toBe(2);
 });
 
 test("another project's events are not this project's", async () => {

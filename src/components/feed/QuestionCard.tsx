@@ -319,7 +319,10 @@ export function QuestionCard({ file }: { file: FileEntry }) {
         setMessage(t("question.openFailed"));
         return;
       }
-      setMessage(t("question.opened", { target: json.target ?? "tmux" }));
+      /* A structured resume answers with no target; naming the transport in
+         its place told the operator a tmux session had opened when none had
+         (#1301). */
+      setMessage(json.target ? t("question.opened", { target: json.target }) : t("question.openedUnnamed"));
     } catch {
       setMessage(t("common.serverUnavailable"));
     } finally {

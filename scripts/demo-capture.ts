@@ -12,6 +12,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { en } from "@/lib/i18n/en";
+
 export const DEMO_FIXED_ISO = "2100-01-02T12:00:00.000Z";
 export const DEMO_TOKEN = "__DEMO_HOME__";
 export const PUPPETEER_IMAGE = "mcp/puppeteer@sha256:c1e2bda6d92d400e900e497b743552a670a33631799c0a6478e91096e389bd27";
@@ -20,7 +22,7 @@ export const PUPPETEER_IMAGE = "mcp/puppeteer@sha256:c1e2bda6d92d400e900e497b743
    out (as scripts/demo-capture.test.ts already does): it is a fixed address
    belonging to nobody, but a literal private address in a published file reads
    to the publication gate exactly like a host lifted from a live machine. */
-const DOCKER_BRIDGE_HOST = ["172", "17", "0", "1"].join(".");
+export const DOCKER_BRIDGE_HOST = ["172", "17", "0", "1"].join(".");
 const UNRESOLVED_TOKEN = /__[A-Z0-9_]*DEMO[A-Z0-9_]*__/;
 const DEFAULT_PORT = 3028;
 
@@ -258,7 +260,11 @@ export const SHOTS: DemoShot[] = [
         { selector: "#question button", text: "Balanced board", minWidth: 420, minHeight: 36 },
         { selector: "#question button", text: "Overview first", minWidth: 420, minHeight: 36 },
       ],
-      absentText: ["tmux pane unavailable"],
+      /* The no-pane note must not be in the shot. Read from the dictionary, not
+         copied out of it: this literal was "tmux pane unavailable" and went on
+         passing after #1301 renamed the string, asserting the absence of text
+         that no longer existed anywhere. */
+      absentText: [en["question.noPane"] as string],
       pixels: FRAME_PIXELS,
     },
   },

@@ -19,6 +19,18 @@ import {
   searchTextForTranscript,
 } from "./describe";
 
+/* The recognisers are written over `path.sep`, so a hard-coded POSIX literal
+   here would assert nothing on the `windows-latest` leg of
+   `platform-tests.yml`. `abs` builds the same shape for the platform under
+   test; `POSIX_ONLY` marks the cases whose behaviour Windows deliberately does
+   not have, each of which has a Windows counterpart below stating what it
+   becomes instead. */
+const DRIVE = process.platform === "win32" ? "C:" : "";
+const abs = (...segments: string[]): string => DRIVE + path.sep + segments.join(path.sep);
+const POSIX_ONLY = process.platform !== "win32";
+const WINDOWS_ONLY = process.platform === "win32";
+const CLAUDE_TASK_CONTAINER = `claude-${process.getuid?.() ?? 1000}`;
+
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-describe-test-"));
 const REAL_STATE = process.env.LLV_STATE_DIR;
 const REAL_HOME = process.env.HOME;
@@ -54,26 +66,42 @@ afterAll(() => {
 });
 
 test("parseWorktreeGitdir resolves an absolute gitdir into repo + worktree name", () => {
+  /* Git for Windows writes the pointer with forward slashes and a drive letter
+     (`gitdir: C:/repo/.git/worktrees/<name>`); `path.resolve` normalises it
+     before the split, which is why the recogniser needs no Windows form. */
+  const pointer = WINDOWS_ONLY
+    ? "C:/home/user/.agents/tools/live-log-viewer-next/.git/worktrees/live-log-viewer-attention-queue"
+    : "/home/user/.agents/tools/live-log-viewer-next/.git/worktrees/live-log-viewer-attention-queue";
   const info = parseWorktreeGitdir(
-    "/home/user/.agents/tools/live-log-viewer-attention-queue",
-    "gitdir: /home/user/.agents/tools/live-log-viewer-next/.git/worktrees/live-log-viewer-attention-queue\n",
+    abs("home", "user", ".agents", "tools", "live-log-viewer-attention-queue"),
+    `gitdir: ${pointer}\n`,
   );
   expect(info).toEqual({
-    repo: "/home/user/.agents/tools/live-log-viewer-next",
+    repo: abs("home", "user", ".agents", "tools", "live-log-viewer-next"),
     worktree: "live-log-viewer-attention-queue",
   });
 });
 
 test("parseWorktreeGitdir resolves a relative gitdir against the checkout cwd", () => {
-  const info = parseWorktreeGitdir("/home/user/wt", "gitdir: ../main/.git/worktrees/wt");
-  expect(info).toEqual({ repo: "/home/user/main", worktree: "wt" });
+  const info = parseWorktreeGitdir(abs("home", "user", "wt"), "gitdir: ../main/.git/worktrees/wt");
+  expect(info).toEqual({ repo: abs("home", "user", "main"), worktree: "wt" });
 });
 
 test("parseWorktreeGitdir rejects gitdirs that are not linked worktrees", () => {
-  expect(parseWorktreeGitdir("/home/user/sub", "gitdir: /home/user/main/.git")).toBeNull();
-  expect(parseWorktreeGitdir("/home/user/sub", "not a git file")).toBeNull();
+  const sub = abs("home", "user", "sub");
+  expect(parseWorktreeGitdir(sub, `gitdir: ${abs("home", "user", "main", ".git")}`)).toBeNull();
+  expect(parseWorktreeGitdir(sub, "not a git file")).toBeNull();
   /* "worktrees" segment without a .git parent is another repo layout, not a linked checkout */
-  expect(parseWorktreeGitdir("/home/user/sub", "gitdir: /home/user/worktrees/x")).toBeNull();
+  expect(parseWorktreeGitdir(sub, `gitdir: ${abs("home", "user", "worktrees", "x")}`)).toBeNull();
+});
+
+test("a repository at the filesystem root keeps a usable root path", () => {
+  /* The recognisers rebuild the repo by rejoining a `path.sep` split. On POSIX
+     the empty prefix is the root; on Windows the same slice leaves a bare `C:`,
+     which means "the current directory on C:" and is not `C:\` — the repo would
+     then name a different, cwd-dependent place each time it was read. */
+  expect(parseWorktreeGitdir(abs("wt"), `gitdir: ${abs(".git", "worktrees", "wt")}`))
+    .toEqual({ repo: WINDOWS_ONLY ? "C:\\" : "/", worktree: "wt" });
 });
 
 test("an absent cwd cannot inherit the Viewer process project", () => {
@@ -206,38 +234,38 @@ test("a deleted nested checkout inside a Codex worktree groups under the main re
   expect(projectForCwd(dead)).toBe(identity.project);
 });
 
-test("a deleted worktree scratchpad cwd groups under the encoded parent repo", () => {
+test.if(POSIX_ONLY)("a deleted worktree scratchpad cwd groups under the encoded parent repo", () => {
   const repo = path.join(SANDBOX, "scratchpad-worktree-repository");
   createRepository(repo);
   const worktree = path.join(repo, ".worktrees", "runtime-host-spike");
   const slug = worktree.replace(/[^a-zA-Z0-9]/g, "-");
-  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
+  const dead = path.join(os.tmpdir(), CLAUDE_TASK_CONTAINER, slug, "deleted-session", "scratchpad", "probes");
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
   expect(projectRootForCwd(dead)).toBe(repo);
 });
 
-test("a main-checkout scratchpad cwd groups under its encoded project", () => {
+test.if(POSIX_ONLY)("a main-checkout scratchpad cwd groups under its encoded project", () => {
   const repo = path.join(SANDBOX, "scratchpad-main-repository");
   createRepository(repo);
   const slug = repo.replace(/[^a-zA-Z0-9]/g, "-");
-  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
+  const dead = path.join(os.tmpdir(), CLAUDE_TASK_CONTAINER, slug, "deleted-session", "scratchpad", "probes");
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
 });
 
-test("a deleted scratchpad encoded from an external repository keeps its canonical root", () => {
+test.if(POSIX_ONLY)("a deleted scratchpad encoded from an external repository keeps its canonical root", () => {
   const repo = path.join(SANDBOX, "external-root", "repo.with-hyphen");
   createRepository(repo);
   const slug = repo.replace(/[^a-zA-Z0-9]/g, "-");
-  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
+  const dead = path.join(os.tmpdir(), CLAUDE_TASK_CONTAINER, slug, "deleted-session", "scratchpad", "probes");
 
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
   expect(projectRootForCwd(dead)).toBe(repo);
 
   const missingSlug = path.join(SANDBOX, "removed-external-repo").replace(/[^a-zA-Z0-9]/g, "-");
-  const missing = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, missingSlug, "deleted-session", "scratchpad");
+  const missing = path.join(os.tmpdir(), CLAUDE_TASK_CONTAINER, missingSlug, "deleted-session", "scratchpad");
   expect(projectRootForCwd(missing)).toBeUndefined();
 });
 
@@ -249,12 +277,12 @@ test("the outer nested worktree wins over a later specialized container", () => 
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
 });
 
-test("a scratchpad encoded from nested worktrees keeps the outer project", () => {
+test.if(POSIX_ONLY)("a scratchpad encoded from nested worktrees keeps the outer project", () => {
   const repo = path.join(SANDBOX, "nested-scratchpad-repository");
   createRepository(repo);
   const nested = path.join(repo, ".worktrees", "outer", ".claude", "worktrees", "inner");
   const slug = nested.replace(/[^a-zA-Z0-9]/g, "-");
-  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad");
+  const dead = path.join(os.tmpdir(), CLAUDE_TASK_CONTAINER, slug, "deleted-session", "scratchpad");
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
   const root = path.join(SANDBOX, "nested-scratchpad-transcripts");
@@ -267,7 +295,7 @@ test("a scratchpad encoded from nested worktrees keeps the outer project", () =>
   });
 });
 
-test("a scratchpad encoded from a deleted Codex worktree keeps the repo project", () => {
+test.if(POSIX_ONLY)("a scratchpad encoded from a deleted Codex worktree keeps the repo project", () => {
   const state = useStateDirectory("deleted-codex-scratchpad-state");
   const identity = createRepository(path.join(SANDBOX, "deleted-codex-scratchpad-main"));
   expect(persistProjectAliases([
@@ -283,9 +311,59 @@ test("a scratchpad encoded from a deleted Codex worktree keeps the repo project"
     "inner",
   );
   const slug = codexWorktree.replace(/[^a-zA-Z0-9]/g, "-");
-  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad");
+  const dead = path.join(os.tmpdir(), CLAUDE_TASK_CONTAINER, slug, "deleted-session", "scratchpad");
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(identity.project);
+});
+
+/* The Windows counterparts of the five scratchpad cases above. Recogniser #1
+   (`projectInfoFromClaudeTaskCwd`) and the slug walk it leans on
+   (`repoPathFromSlug`) are the two pieces of the grouping algorithm that
+   Windows does not get in phase 1, and AGENTS.md is explicit that a recogniser
+   must not be allowed to stop matching quietly. These say out loud what they
+   become: the container is still recognised and the key is still stable, but it
+   is the slug's key rather than the repository's, because the frontier walk
+   that recovers a repository path from a slug starts at the POSIX root and a
+   Windows slug starts at a drive letter. Nothing in the design claims to know
+   what Claude Code names that container on Windows — the layout has never been
+   observed — so the case that would settle it is listed as deferred, not
+   asserted here. */
+test.if(WINDOWS_ONLY)("a Windows scratchpad slug lands in Unresolved rather than under its repository", () => {
+  /* Measured on the Windows leg, and worse than "it groups by its slug": with
+     no repository path recovered there is no canonical project id either, and
+     `aliasedProjectInfo` answers Unresolved for a bare slug. Every scratchpad
+     session on Windows therefore pools together instead of grouping per
+     repository. That is the honest degrade until the slug walk learns drive
+     roots; the README says so. */
+  const repo = path.join(SANDBOX, "windows-scratchpad-repository");
+  createRepository(repo);
+  const slug = repo.replace(/[^a-zA-Z0-9]/g, "-");
+  // A Windows slug opens with a drive letter, and the slug walk starts at the
+  // POSIX root, which is precisely why it recovers nothing.
+  expect(slug.startsWith("-")).toBe(false);
+  expect(slug).toMatch(/^[A-Za-z]--/);
+  const dead = path.join(os.tmpdir(), CLAUDE_TASK_CONTAINER, slug, "deleted-session", "scratchpad", "probes");
+
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectInfoFromCwd(dead)).toMatchObject({ unresolved: true });
+  expect(projectRootForCwd(dead)).toBeUndefined();
+  expect(projectForCwd(dead)).not.toBe(projectForCwd(repo));
+  // Still stable across reads, which is the part that must not regress.
+  expect(projectForCwd(dead)).toBe(projectForCwd(dead));
+});
+
+test.if(WINDOWS_ONLY)("a Windows worktree slug still names its worktree", () => {
+  /* `worktreeFromSlug` is pure string work over the encoded `--worktrees-`
+     marker, so it keeps working; only the repository-path recovery beneath it
+     goes away. */
+  const repo = path.join(SANDBOX, "windows-scratchpad-worktree-repo");
+  createRepository(repo);
+  const worktree = path.join(repo, ".worktrees", "runtime-host-spike");
+  const slug = worktree.replace(/[^a-zA-Z0-9]/g, "-");
+  const dead = path.join(os.tmpdir(), CLAUDE_TASK_CONTAINER, slug, "deleted-session", "scratchpad", "probes");
+
+  expect(projectInfoFromCwd(dead)?.worktree).toBe("runtime-host-spike");
+  expect(projectRootForCwd(dead)).toBeUndefined();
 });
 
 test("a deleted nested worktree (repo/worktrees/<name>) still groups under its parent repo", () => {
@@ -294,9 +372,10 @@ test("a deleted nested worktree (repo/worktrees/<name>) still groups under its p
      path even after the checkout is deleted, no on-disk `.git` required. */
   const repo = path.join(SANDBOX, "deleted-nested-worktree-main");
   const identity = createRepository(repo);
-  const nested = `${repo}/worktrees/memory-ui-redesign`;
-  const nestedDotted = `${repo}/.worktrees/some-branch`;
-  const deepNested = `${repo}/worktrees/issue-1424/worktrees/pr-tools`; // worktree of a worktree
+  const nested = path.join(repo, "worktrees", "memory-ui-redesign");
+  const nestedDotted = path.join(repo, ".worktrees", "some-branch");
+  // worktree of a worktree
+  const deepNested = path.join(repo, "worktrees", "issue-1424", "worktrees", "pr-tools");
   expect(fs.existsSync(nested)).toBe(false);
   expect(projectForCwd(nested)).toBe(projectForCwd(repo));
   expect(projectForCwd(nestedDotted)).toBe(projectForCwd(repo));
@@ -321,7 +400,7 @@ test("conversation metadata carries the exact cwd and its canonical project root
 
 test("conversation metadata marks an unresolved deleted scratchpad root explicitly", () => {
   const missingSlug = path.join(SANDBOX, "removed-external-repo").replace(/[^a-zA-Z0-9]/g, "-");
-  const cwd = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, missingSlug, "deleted-session", "scratchpad");
+  const cwd = path.join(os.tmpdir(), CLAUDE_TASK_CONTAINER, missingSlug, "deleted-session", "scratchpad");
   const root = path.join(SANDBOX, "unresolved-scratchpad-transcripts");
   const transcript = path.join(root, "removed-external-repo", "session.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
@@ -416,7 +495,7 @@ test("a nested `worktrees` segment under .claude/.codex is left to its own recog
   expect(persistProjectAliases([
     { source: "shared-repository", target: identity.project, displayName: identity.displayName },
   ])).toBe(true);
-  const codex = `${state}/.codex/worktrees/2d25/shared-repository`;
+  const codex = path.join(state, ".codex", "worktrees", "2d25", "shared-repository");
   expect(projectForCwd(codex)).toBe(identity.project);
 });
 
@@ -669,7 +748,11 @@ test("the OpenClaw workspace keeps one project identity before and after deletio
   expect(withOpenclawStateDir(link, () => projectRootForCwd(workspace))).toBeUndefined();
 
   fs.rmSync(state, { recursive: true, force: true });
-  fs.rmSync(link, { force: true });
+  /* A directory symlink on Windows is removed with rmdir, not unlink; Bun's
+     `rm` answers EFAULT for one. The recogniser under test is platform-neutral,
+     so only its teardown forks. */
+  if (WINDOWS_ONLY) fs.rmdirSync(link);
+  else fs.rmSync(link, { force: true });
   expect(fs.existsSync(workspace)).toBe(false);
 
   const dead = withOpenclawStateDir(link, () => projectInfoFromCwd(workspace, "openclaw-dead"));

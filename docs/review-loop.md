@@ -1,7 +1,7 @@
 # Review loops
 
 The viewer can orchestrate an implement→review cycle for any conversation it
-tracks: one long-lived **implementer** agent writes code in a tmux pane, a
+tracks: one long-lived **implementer** agent writes the code, a
 fresh **reviewer** session audits the full diff each round, findings flow back
 to the implementer automatically, and the cycle repeats until the reviewer
 approves. Every round gets a brand-new reviewer with no memory of earlier
