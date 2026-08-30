@@ -238,6 +238,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "projectAccounts.carryingAria": "{label} веде роботу цього проєкту",
   "projectAccounts.outsidePool": "поза набором",
   "accounts.switchedOutsidePool": "Перемкнено на акаунт поза набором цього проєкту — записано як ваш вибір",
+  "accounts.switchedOutsidePoolUnrecorded": "Перемкнено на акаунт поза набором цього проєкту — запис не вдалося зберегти, тож акаунти проєкту не покажуть цей вибір",
   "projectAccounts.chosenByOperator": "{label} обрано для цього проєкту поза його набором акаунтів вами, {at}",
   "projectAccounts.chosenByAgent": "{label} обрано для цього проєкту поза його набором акаунтів агентом, {at}",
   "accounts.copyCli": "Копіювати CLI",

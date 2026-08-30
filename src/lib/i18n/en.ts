@@ -237,6 +237,7 @@ export const en = {
   "projectAccounts.carryingAria": "{label} is carrying this project's work",
   "projectAccounts.outsidePool": "outside the pool",
   "accounts.switchedOutsidePool": "Switched to an account outside this project's set — recorded as your choice",
+  "accounts.switchedOutsidePoolUnrecorded": "Switched to an account outside this project's set — the record could not be written, so this project's accounts will not show the choice",
   "projectAccounts.chosenByOperator": "{label} was chosen for this project from outside its accounts by you, {at}",
   "projectAccounts.chosenByAgent": "{label} was chosen for this project from outside its accounts by an agent, {at}",
   "accounts.copyCli": "Copy CLI",
