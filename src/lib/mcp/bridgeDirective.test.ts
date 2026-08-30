@@ -287,6 +287,63 @@ test("a queued directive settles its ask once its own send is delivered, and nev
   }
 });
 
+test("a delivery record that cannot be read clears no ask, here or in any other project (#1131)", async () => {
+  /* The last failable read on this surface and the only SYNCHRONOUS one, which
+     is how it outlived the sweep that made the rest tri-state. The parked answer
+     asks the durable delivery record whether the directive's send arrived; a
+     record that could not be read has not said it did, so the ask stays exactly
+     where a dropped send leaves it.
+     Letting the read throw was its own conversion, and the worst-shaped one
+     here: the exception left the whole projection for its fail-closed catch, so
+     ONE unreadable record answered "no open asks" for every seat in every
+     project — retiring, in the operator's view, decision requests nobody had
+     answered. The second project below never parked anything and is what makes
+     that blast radius visible. */
+  sandbox();
+  seatProject("proj-second", "conversation_second_manager");
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  try {
+    const tools = bindings("proj-voice", undefined, "queued");
+    const asked = recordManagerReport({
+      key: "lane-12-blocked",
+      class: "blocked",
+      at: new Date().toISOString(),
+      project: "proj-voice",
+      targetSeatConversationId: "conversation_manager",
+      body: "cannot proceed: pick a base branch",
+    });
+    recordManagerReport({
+      key: "lane-13-blocked",
+      class: "blocked",
+      at: new Date().toISOString(),
+      project: "proj-second",
+      targetSeatConversationId: "conversation_second_manager",
+      body: "cannot proceed: name a release window",
+    });
+    await tools.bridge_directive({
+      clientRequestId: "d-unreadable",
+      rootTurnId: "turn_unreadable",
+      utterance: 0,
+      instruction: "cut it from main",
+      project: "proj-voice",
+      ref: asked!.seq,
+    });
+    expect(bridgeAsksForSeats().size).toBe(2);
+
+    /* The record goes unreadable AFTER the answer is parked — the outage this
+       fence exists for arrives between the acceptance and the question. */
+    const unreadable = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "agent-registry.json"));
+    unreadable.readOnlySnapshot = () => { throw new Error("agent registry is unavailable"); };
+    setAgentRegistryForTests(unreadable);
+
+    expect([...bridgeAsksForSeats().keys()].sort())
+      .toEqual(["conversation_manager", "conversation_second_manager"]);
+  } finally {
+    setAgentRegistryForTests(null);
+  }
+});
+
 test("a seat rekeyed since it asked is still the seat this directive settles (#1168 final review, HIGH 1)", async () => {
   /* The relay knows the seat only by the identity the seat authority hands it.
      The LOG knows it by whatever it was called when the report was routed, and

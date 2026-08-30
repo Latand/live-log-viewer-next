@@ -3,6 +3,7 @@ import {
   planBridgeReportDelivery,
   type BridgeDeliveryPlan,
 } from "@/lib/runtime/bridgeDelivery";
+import { readEvidenceSync, type Evidence } from "@/lib/runtime/evidence";
 import { sendReceiptFor } from "@/lib/runtime/sendSettlement";
 import { rootIdentity as readRootIdentity } from "@/lib/root/store";
 
@@ -92,13 +93,27 @@ export function bridgeAsksForSeats(
      that send ever arrived. Read here rather than in the pure projection, and
      read fresh on each call, because the answer to "did it arrive" changes
      without the log changing — once per call and only if the log has a parked
-     answer to resolve. */
-  let deliveries: RegistryFile | null = null;
+     answer to resolve.
+
+     Failable like every other fence in this path, and the only one of them that
+     is synchronous — which is exactly how it got missed. Letting it throw was a
+     conversion too, and the worst-shaped one on this surface: the exception
+     escaped the whole projection into the fail-closed catch below, so ONE
+     unreadable delivery record answered `no open asks` for every seat in every
+     project, retiring decision requests nobody had answered. Only `delivered`
+     may clear an ask, so an unreadable record leaves it standing exactly as a
+     dropped send does — and the memo keeps a failed read failed for the rest of
+     the call rather than re-reading a store that is down once per parked ref. */
+  let deliveries: Evidence<RegistryFile> | null = null;
   try {
     return openBridgeAsks(readBridgeReportLog(), {
       deliveredOperation: (operationId) => {
-        deliveries ??= agentRegistry().readOnlySnapshot();
-        return sendReceiptFor(deliveries, operationId)?.state === "delivered";
+        deliveries ??= readEvidenceSync(
+          () => agentRegistry().readOnlySnapshot(),
+          "the durable delivery record is unavailable",
+        );
+        return deliveries.readable
+          && sendReceiptFor(deliveries.value, operationId)?.state === "delivered";
       },
       ...options,
       now: options.now ?? new Date(),

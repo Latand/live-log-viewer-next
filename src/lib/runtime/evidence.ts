@@ -63,6 +63,26 @@ export async function readEvidence<T>(
 }
 
 /**
+ * The same read where the caller cannot await one.
+ *
+ * A synchronous read is failable in exactly the same way, and letting one throw
+ * is its own conversion: the exception travels up to whatever catch-all is
+ * nearest, and that handler answers for the WHOLE call rather than for the one
+ * fence that could not be read. A projection that clears one row on delivery
+ * evidence lost every row it was holding that way.
+ */
+export function readEvidenceSync<T>(
+  read: () => T,
+  fallbackReason = "evidence could not be read",
+): Evidence<T> {
+  try {
+    return { readable: true, value: read() };
+  } catch (error) {
+    return { readable: false, reason: unreadableReason(error, fallbackReason) };
+  }
+}
+
+/**
  * The same read where the SOURCE itself is optional.
  *
  * An optional port method can be passed straight in: an absent source answers
