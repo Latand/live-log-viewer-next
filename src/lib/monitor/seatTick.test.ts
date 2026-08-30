@@ -642,16 +642,44 @@ test("a source unreadable for longer than the wake interval is put on the board,
   const raised = decision.cards.find((entry) => entry.kind === "source-unreadable");
   expect(raised?.ref).toBe("seat-tick-source-pull-requests");
   expect(raised?.detail).toContain("command-failed, 12 attempt(s)");
-  /* And the row remembers having said it, so the next check does not say it
-     again — the whole difference between one report and one every five
-     minutes. */
-  expect(decision.state.pullRequestGap?.reported).toBe(true);
+  /* The outage's own start rides on the card, so its create receipt is this
+     outage's and not the condition's — the next outage is a card of its own. */
+  expect(raised?.instance).toBe(state.pullRequestGap!.since);
 
+  /* The row to remember AFTER the report exists travels apart from the row this
+     check writes, and the row this check writes still says unreported: the
+     board write has not happened yet, and a decision may not claim it did. */
+  expect(decision.reportedSourceGap).toEqual({ ...state.pullRequestGap!, reported: true });
+  expect(decision.state.pullRequestGap?.reported).toBe(false);
+
+  /* Once that row IS the state — the controller wrote it because the card
+     landed — the next check does not say it again, which is the whole
+     difference between one report and one every five minutes. */
   const after = seatTickDecision(input({
     pullRequestsUnavailable: "command-failed",
     state: { ...state, pullRequestGap: sourceGap(70, { reported: true }) },
   }));
   expect(after.cards.filter((entry) => entry.kind === "source-unreadable")).toEqual([]);
+  expect(after.reportedSourceGap).toBeNull();
+});
+
+/* The other half of the same rule, in the decision: a check whose card write
+   fails leaves the row unreported, so the check after it composes the SAME
+   card and the same row again. Nothing about the report is spent by an attempt
+   at it. */
+test("an unreported outage is carded again on every check until the row says otherwise", () => {
+  const state = stateWith({
+    lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+    pullRequestGap: sourceGap(70),
+  });
+  const first = seatTickDecision(input({ pullRequestsUnavailable: "command-failed", state }));
+  const again = seatTickDecision(input({
+    pullRequestsUnavailable: "command-failed",
+    /* The row the failed check wrote: its own state, reported still false. */
+    state: { ...state, pullRequestGap: first.state.pullRequestGap },
+  }));
+  expect(again.cards.filter((entry) => entry.kind === "source-unreadable")).toHaveLength(1);
+  expect(again.reportedSourceGap).toEqual({ ...state.pullRequestGap!, reported: true });
 });
 
 /* A single failure is weather. Reporting it would teach the operator to ignore

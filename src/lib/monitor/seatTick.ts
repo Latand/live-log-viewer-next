@@ -480,6 +480,17 @@ function evidenceGaps(input: SeatTickCheckInput): SeatTickEvidenceGap[] {
  * memory of having said it, so closing the card does not summon it again five
  * minutes later. The row clears when the source answers, which is what makes
  * the next outage a new card rather than a silent one.
+ *
+ * The row it returns is what to remember AFTER the report exists, and it is
+ * deliberately not folded into {@link SeatTickDecision.state}: `reported` is a
+ * claim about the board, the board write can fail, and a decision that records
+ * the claim anyway suppresses the one report this whole mechanism owes the
+ * operator, permanently. The controller writes it once the card is there.
+ *
+ * `since` is the outage's own identity, which is why it travels on the card as
+ * {@link SeatTickCard.instance}: every outage of this source shares one `ref`,
+ * so the create receipt of the first card would replay for the second one and
+ * put nothing on a board the first card has since been completed off.
  */
 function sourceGapReport(
   input: SeatTickCheckInput,
@@ -492,6 +503,7 @@ function sourceGapReport(
     card: {
       ref: seatTickSourceGapRef("pull-requests"),
       kind: "source-unreadable",
+      instance: gap.since,
       detail: `The open pull requests of this project's finished lanes have not been readable since `
         + `${gap.since.slice(0, 16).replace("T", " ")} UTC (${gap.gap}, ${gap.attempts} attempt(s))`,
     },
@@ -665,7 +677,15 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
   const gaps = evidenceGaps(input);
   const gapReport = sourceGapReport(input, gaps);
   if (gapReport) cards.push(gapReport.card);
-  const state = gapReport ? { ...observed, pullRequestGap: gapReport.gap } : observed;
+  /* The row this check writes says the outage is UNREPORTED, and it says so
+     even while the card for it is being raised. Marking it reported here is a
+     claim about a board write that has not happened yet and that the controller
+     catches when it fails — after which the tick remembers having told the
+     operator something nobody was ever told, and the report is suppressed for
+     the rest of the outage. So the reported row leaves separately and the
+     controller writes it once the card is confirmed on the board. */
+  const state = observed;
+  const reportedSourceGap = gapReport?.gap ?? null;
 
   /* The wake goes FIRST, and it goes out while a source is unreadable (#1298).
      Every reason it carries was decided from evidence this check did read, and
@@ -689,6 +709,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
       },
       state,
       cards,
+      reportedSourceGap,
     };
   }
 
@@ -706,6 +727,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
       },
       state,
       cards,
+      reportedSourceGap,
     };
   }
 

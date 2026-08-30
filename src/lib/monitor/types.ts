@@ -649,6 +649,22 @@ export interface SeatTickCard {
       than when the check ran, so a card that has not changed is not rewritten
       on every check. */
   settings?: Pick<EffectiveSeatTickSettings, "reason" | "until" | "setBy" | "updatedAt">;
+  /**
+   * What distinguishes this OCCURRENCE of the condition from the last one, for
+   * the create receipt (#1298).
+   *
+   * The `ref` is the condition and is deliberately stable, because it is what
+   * re-finds a standing card instead of minting a twin. That made every outage
+   * of one source share a create id: once the first card was completed, the
+   * second outage replayed the first one's receipt, created nothing, and left a
+   * board that says the source is fine. A per-occurrence component — the
+   * outage's own start instant — makes the next outage its own card while the
+   * `ref` still collapses the checks within one.
+   *
+   * Absent means the condition is its own occurrence: a project has one seat,
+   * one tick-settings state, and one guard per reason kind.
+   */
+  instance?: string;
 }
 
 export interface SeatTickDecision {
@@ -656,6 +672,20 @@ export interface SeatTickDecision {
   /** The row to persist for this check, whatever the delivery does next. */
   state: SeatTickProjectState;
   cards: SeatTickCard[];
+  /**
+   * The source-gap row to persist INSTEAD, once the operator report in
+   * {@link SeatTickDecision.cards} is a fact rather than an intention (#1298).
+   *
+   * `reported` is the tick's memory of having told the operator, and it is the
+   * whole reason the outage is raised once. Writing it beside a decision made
+   * it a memory of having INTENDED to: the controller catches a failed card
+   * write, the row still said reported, and the report the state exists to
+   * guarantee was suppressed for the rest of the outage. So it travels apart
+   * from {@link SeatTickDecision.state} and is written only after the card
+   * reached the board — a check whose write fails leaves the row unreported and
+   * the next check raises the same card again.
+   */
+  reportedSourceGap?: SeatTickSourceGap | null;
 }
 
 /** What one check recorded. Four kinds are journal-only: `refused` is a sweep
