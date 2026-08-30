@@ -3318,7 +3318,7 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
   const reviewRepo = path.join(process.env.LLV_STATE_DIR!, "retry-review-repo");
   fs.mkdirSync(reviewRepo, { recursive: true });
   expect(spawnSync("git", ["init", "-b", "main"], { cwd: reviewRepo }).status).toBe(0);
-  expect(spawnSync("git", ["config", "user.email", "flow@example.com"], { cwd: reviewRepo }).status).toBe(0);
+  expect(spawnSync("git", ["config", "user.email", "noreply"], { cwd: reviewRepo }).status).toBe(0);
   expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd: reviewRepo }).status).toBe(0);
   fs.writeFileSync(path.join(reviewRepo, "repair.txt"), "repair\n");
   expect(spawnSync("git", ["add", "repair.txt"], { cwd: reviewRepo }).status).toBe(0);
