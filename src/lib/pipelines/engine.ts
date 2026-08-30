@@ -127,6 +127,7 @@ export type PipelineCloseReport = {
 export type PipelineStageLaunchReservation = Pick<PipelineStageSpawn, "launchId" | "conversationId">;
 export type PipelineSpawnReceipt = PipelineStageSpawn & {
   state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
+  error?: string | null;
 };
 
 export interface PipelinePorts {
@@ -618,6 +619,7 @@ export function defaultPipelinePorts(): PipelinePorts {
         sessionId: receipt.key?.sessionId ?? null,
         "transcript": receipt.artifactPath,
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
+        error: receipt.error,
       };
     },
     claimSpawnRetry: (launchId, claimId) => {
@@ -1772,7 +1774,7 @@ async function tickRunStage(
       attempt.agentPath = receipt.transcript;
       attempt.paneId = receipt.paneId;
       if (receipt.state === "failed" || receipt.state === "conflicted" || (receipt.state === "starting" && !receipt.paneId && !receipt.transcript)) {
-        park(pipeline, `stage spawn cannot recover from receipt state ${receipt.state}`, attempt);
+        park(pipeline, receipt.error ?? `stage spawn cannot recover from receipt state ${receipt.state}`, attempt);
         return;
       }
     }
@@ -1783,8 +1785,23 @@ async function tickRunStage(
   const structuredActive = !attempt.paneId && attempt.conversationId
     ? await ports.conversationAgentActive(attempt.conversationId)
     : null;
+  const spawnReceipt = attempt.launchId ? ports.spawnReceipt(attempt.launchId) : null;
+  const terminalSpawnFailure = spawnReceipt
+    && (spawnReceipt.state === "failed" || spawnReceipt.state === "conflicted")
+    ? spawnReceipt.error ?? `stage spawn cannot recover from receipt state ${spawnReceipt.state}`
+    : null;
+  /* A terminal spawn receipt is durable evidence; only an affirmatively
+     active agent outranks it. A runtime-host outage answers null, and that
+     unknown must not hide the real drain cause behind a later
+     transcript-unreadable park (#1314). */
+  if (!attempt.paneId && attempt.conversationId && structuredActive !== true && terminalSpawnFailure) {
+    park(pipeline, terminalSpawnFailure, attempt);
+    return;
+  }
   if (!attempt.agentPath) {
-    if (structuredActive === false) park(pipeline, "structured stage ended before its session was discovered", attempt);
+    if (structuredActive === false) {
+      park(pipeline, "structured stage ended before its session was discovered", attempt);
+    }
     else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited before its session was discovered", attempt);
     return;
   }

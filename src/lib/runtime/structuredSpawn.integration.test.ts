@@ -688,12 +688,13 @@ test.each(["hosted", "recovering"] as const)("a matching %s session fails its qu
   const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
     now: () => admittedAt + STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS,
     releaseHost: async () => { released += 1; return true; },
+    drainError: () => "runtime host request timed out",
   });
 
   expect(reconciled).toMatchObject({
     state: "failed",
     initialMessage: "failed",
-    error: `structured spawn durable setup remained incomplete for ${STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS}ms`,
+    error: "first message never drained: runtime host request timed out",
   });
   expect(released).toBe(1);
 });
