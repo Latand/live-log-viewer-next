@@ -105,6 +105,43 @@ Five limits travel with the decision and are not separable from it:
 
 #741's rule stands unchanged for #741's own runs; nothing here edits it.
 
+## Amendment (2026-08-29, issue #1275): limit 4 is a default, and the project sets it
+
+Limit 4 above says the 60-minute bound has "no environment override". That
+sentence also says a reason allowed to jump the bound "would be a decision to
+reopen this ADR, not an implementation detail". This is that decision, and it
+was the operator's.
+
+What limit 4 was defending is intact: nothing in a deployment, an environment
+variable or a wake reason can change how often a project is woken. What changes
+is that the project itself can. A durable per-project settings row
+(`state/seat-tick-settings.json`) carries whether the tick wakes that project at
+all and, when it does, the interval it waits out. A project with no row runs on
+the 60 minutes above — every project did, until someone decided otherwise — so
+nothing has to be configured for the tick to work, which is the property the
+original "no configuration" wording was protecting and the only one it was
+protecting.
+
+Three things keep the amendment from turning the cost argument below into "it
+depends":
+
+- **A change is an explicit act with a reason on it.** The reason is required
+  whenever the settings leave the default, it is stored on the row, and it is
+  shown on a board card for as long as the setting stands. A tick that has gone
+  quiet with nothing saying why is indistinguishable from a tick that broke.
+- **A quiet tick keeps checking.** Only the WAKE is suppressed. The check runs,
+  reads the board and writes its journal line, so the difference between "off"
+  and "broken" is legible in the artifact that outlives every process.
+- **Nothing else moved.** No exempt reason kind, no environment override, no
+  reset on rotation, and the stamp still belongs to the project. The bound the
+  cost argument uses is now the project's own number rather than a constant, and
+  the number is on the record with the name of whoever set it.
+
+Cross-project reach is deliberately NOT refused: a seat may set another
+project's tick, and what answers for that is attribution — the row, the card and
+the journal all name who changed whose tick — rather than a validation that
+decides in advance which uses are legitimate.
+
 ## Consequences
 
 The cost is real and bounded. A wake can boot a host that the retirement sweep

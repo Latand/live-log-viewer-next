@@ -724,9 +724,10 @@ export function loadArchivedPipelines(): Pipeline[] {
 }
 
 function pipelineSettledForArchive(pipeline: Pipeline, nowMs: number): boolean {
-  /* Closed records archive on closedAt; hidden drafts never close, so their
-     hiddenAt stands in. Anything still actionable (running, needs_decision,
-     visible drafts) stays hot. */
+  /* Closed records archive on closedAt. A discarded draft now closes like
+     anything else (#1274), but records discarded before that fix are hidden
+     with no closedAt at all, so their hiddenAt still stands in. Anything still
+     actionable (running, needs_decision, visible drafts) stays hot. */
   const settledAt = pipeline.closedAt ?? (pipeline.state === "draft" ? pipeline.hiddenAt : null);
   if (!settledAt) return false;
   const parsed = Date.parse(settledAt);

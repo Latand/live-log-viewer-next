@@ -448,6 +448,24 @@ export function describeMcpCall(
     };
   }
 
+  if (toolName === "seat_tick_settings") {
+    /* The operator's own line for a change to how often a project is woken —
+       so a tick that goes quiet is legible here as well as on the board. */
+    const project = string(result.project) || string(args.project);
+    const changed = result.changed === true;
+    const off = args.enabled === false;
+    const interval = typeof args.wakeIntervalMinutes === "number" ? `${args.wakeIntervalMinutes} min` : "";
+    return {
+      icon: "tool",
+      verb: changed ? "Setting" : "Reading",
+      title: changed
+        ? `${off ? "Turning off" : "Setting"} the seat tick${project ? ` for ${compact(project)}` : ""}${off ? "" : interval ? `: one wake per ${interval}` : ""}`
+        : `Reading seat tick settings${project ? `: ${compact(project)}` : ""}`,
+      subtitle: replaySubtitle(result, compact(string(args.reason))),
+      links: [],
+    };
+  }
+
   return {
     icon: "tool",
     verb: "Running",

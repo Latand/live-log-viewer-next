@@ -1,6 +1,6 @@
 import { isTerminalHighSignalEvent } from "@/lib/lifecycle/vocabulary";
 
-import { seatTickRetryGuardRef, ORCHESTRATOR_ALERT_REF } from "./cards";
+import { seatTickRetryGuardRef, ORCHESTRATOR_ALERT_REF, SEAT_TICK_SETTINGS_REF } from "./cards";
 import { evidenceStallReason } from "./classify";
 import {
   SEAT_TICK_WAKE_REASON_KINDS,
@@ -41,11 +41,14 @@ import {
  *   plane cannot answer for at all — is not a turn the tick may wait behind
  *   forever, because the seat's own dead host is exactly the condition a wake
  *   exists to clear.
- * - **Every wake waits out the wake interval.** One project-scoped hour, with
- *   no exception and no override: a terminal lane event is the FIRST thing the
- *   next wake carries, never a reason to raise one early. The bound is what the
- *   ADR's cost argument rests on — one resume per project per interval — so a
- *   reason allowed to jump it would make the ADR describe a different system.
+ * - **Every wake waits out the project's wake interval.** One hour by default,
+ *   with no exception and no reason allowed to jump it: a terminal lane event
+ *   is the FIRST thing the next wake carries, never a reason to raise one
+ *   early. The bound is what the ADR's cost argument rests on — one resume per
+ *   project per interval. What sets the interval is the project's own recorded
+ *   settings (#1275, and the ADR amendment it carries): the seat governs its
+ *   own tick, deliberately and with the reason on the record, and a project
+ *   nobody configured runs on the default hour exactly as before.
  * - **Nothing here creates, wakes or acknowledges anything.** The decision names
  *   what is owed; the controller sends it, re-reads the seat epoch before it
  *   does, and only a delivered send advances a stamp or a cursor.
@@ -54,16 +57,20 @@ import {
 const MINUTE_MS = 60_000;
 
 /**
- * The bound, and the only one that is not a policy field.
+ * The default bound, and the only one that is not a policy field.
  *
  * A project is woken at most once an hour while work is open. That is the
  * commitment in `docs/adr/0001-seat-tick-wake-resumes-a-dead-seat-host.md`,
  * and the whole cost argument for reversing #741's delivery rule rests on it:
  * a wake may resume a host the retirement sweep reclaimed, so "how often can
- * the two trade a host" is answered by this number and nothing else. An
- * environment override, an exempt reason kind or a stamp a rotation cleared
- * would each turn that answer into "it depends", so there is no override, no
- * exemption, and the stamp belongs to the project rather than to the seat.
+ * the two trade a host" is answered by this number.
+ *
+ * There is still no environment override, no exempt reason kind and no reset
+ * when the seat rotates — the three ways the answer would silently become "it
+ * depends". What #1275 added is the one deliberate way: a project's own
+ * settings row, written by an explicit act with a reason on it and shown on
+ * the board while it stands. A project nobody has configured is woken on this
+ * number, and every project was, before anyone chose otherwise.
  */
 export const SEAT_TICK_WAKE_INTERVAL_MS = 60 * MINUTE_MS;
 
@@ -216,7 +223,59 @@ function guardCount(state: SeatTickProjectState, kind: SeatTickWakeReasonKind, f
   return state.wakesWithoutChange[kind] ?? 0;
 }
 
+/**
+ * The board card that says a project's tick is deliberately off or slowed
+ * (#1275), or that it is back on the default.
+ *
+ * A tick that has gone quiet with nothing anywhere saying why is
+ * indistinguishable from a tick that broke, and that is the worse failure of
+ * the two. So while the settings depart from the default the board carries the
+ * setting, its reason and who set it; when they are back at the default the
+ * same card is resolved rather than left standing over a tick that is ticking.
+ *
+ * A project nobody has ever configured emits nothing at all — no card to raise
+ * and none to resolve — so it costs exactly what it cost before this existed.
+ */
+function settingsCards(input: SeatTickCheckInput): SeatTickCard[] {
+  const settings = input.settings;
+  if (!settings.configured) return [];
+  const context = { reason: settings.reason, until: settings.until, setBy: settings.setBy, updatedAt: settings.updatedAt };
+  if (settings.isDefault) {
+    return [{
+      ref: SEAT_TICK_SETTINGS_REF,
+      kind: "tick-settings",
+      state: "resolved",
+      settings: context,
+      detail: settings.lapsed
+        ? "the recorded tick setting reached its expiry, so this project is back on the default wake interval"
+        : "this project is on the default tick settings",
+    }];
+  }
+  return [{
+    ref: SEAT_TICK_SETTINGS_REF,
+    kind: "tick-settings",
+    state: "open",
+    settings: context,
+    detail: settings.enabled
+      ? `wakes for this project are set to one every ${Math.round(settings.wakeIntervalMs / MINUTE_MS)} minute(s)`
+      : "ticking is off for this project: no wake will be sent until it is turned back on",
+  }];
+}
+
+/**
+ * One check's decision, plus the standing tick-settings card.
+ *
+ * The card is composed here rather than inside each branch because it is not a
+ * conclusion about the board at all: it is what the settings say, and it is
+ * owed identically whether the check woke the seat, skipped it or found
+ * nothing.
+ */
 export function seatTickDecision(input: SeatTickCheckInput): SeatTickDecision {
+  const decision = decide(input);
+  return { ...decision, cards: [...decision.cards, ...settingsCards(input)] };
+}
+
+function decide(input: SeatTickCheckInput): SeatTickDecision {
   const at = new Date(input.now).toISOString();
   const unchanged = { ...input.state, lastCheckAt: at };
 
@@ -252,10 +311,32 @@ export function seatTickDecision(input: SeatTickCheckInput): SeatTickDecision {
   const openWork = hasOpenWork(input);
   /* The one gate every wake passes. It reads `lastWakeAt`, which the project
      keeps across a rotation, so an incoming seat inherits the bound rather than
-     a clean slate the predecessor's wake is missing from. */
-  const wakeDue = elapsed(input.state.lastWakeAt, input.now, SEAT_TICK_WAKE_INTERVAL_MS);
+     a clean slate the predecessor's wake is missing from — and the interval is
+     the project's own (#1275), which is the default hour until someone records
+     something else. */
+  const wakeDue = elapsed(input.state.lastWakeAt, input.now, input.settings.wakeIntervalMs);
 
   const state: SeatTickProjectState = { ...base, stalledSeen: stalledNow };
+
+  /* Ticking is off for this project, so no wake and no proposal — and the
+     check still runs, still reads the board and still writes its journal line.
+     That is the difference the operator has to be able to see: a tick that is
+     off keeps saying so every check, while a tick that broke says nothing at
+     all. The stall memory above is kept fresh for the same reason: when the
+     tick is turned back on it decides from what it has been watching rather
+     than from a blank row. */
+  if (!input.settings.enabled) {
+    return {
+      verdict: {
+        kind: "quiet",
+        detail: input.settings.reason
+          ? `ticking is off for this project: ${input.settings.reason}`
+          : "ticking is off for this project",
+      },
+      state: quiet(state, at),
+      cards: [],
+    };
+  }
 
   const laneEvents = input.events.filter((event) => isTerminalHighSignalEvent(event.type));
   const candidates: SeatTickWakeReason[] = [];
