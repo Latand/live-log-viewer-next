@@ -285,3 +285,54 @@ test("a damaged binding record parks the stage instead of launching it on any ac
     fs.rmSync(record, { force: true });
   }
 });
+
+test("a damaged binding record answers create and override with the same conflict the launch gives", async () => {
+  /* The read throws so nothing can mistake a damaged record for an unbound
+     project, and here that throw has to become an ANSWER. Propagated, it is a
+     500 on a request nothing is wrong with; the state is what needs repair, so
+     it is the same 409 — with the same wording — the launch, the reseat and the
+     binding route give, and one repair clears all of them. */
+  const record = path.join(process.env.LLV_STATE_DIR!, "account-project-bindings.json");
+  const realPorts: PipelinePorts = {
+    ...defaultPipelinePorts(),
+    preflightRepo: () => ({ ok: true, repoDir: REPO, gitCommonDir: path.join(REPO, ".git"), worktreeParent: sandbox }),
+    projectForCwd: () => ATLAS,
+  };
+
+  /* Stored while the record is readable, so the override below has a draft. */
+  const stored = await createPipelineFromRequest(draft(RESERVED), portsAllowing(null), {
+    allowOperatorDraftWithoutLineage: true,
+  });
+  expect(stored.pipeline).toBeDefined();
+
+  fs.writeFileSync(record, '{"schemaVersion":1,"bindings":[{"engine":"claude"', "utf8");
+  try {
+    const created = await createPipelineFromRequest(draft(RESERVED), realPorts, {
+      allowOperatorDraftWithoutLineage: true,
+    });
+    expect(created.status).toBe(409);
+    expect(created.error).toMatch(/account-project-bindings\.json is unreadable/);
+    expect(created.pipeline).toBeUndefined();
+
+    const overridden = await patchPipeline(stored.pipeline!.id, {
+      action: "override-stage",
+      stageId: "build",
+      account: SPARE,
+    }, realPorts);
+    expect(overridden.status).toBe(409);
+    expect(overridden.error).toMatch(/account-project-bindings\.json is unreadable/);
+    /* Refused means unchanged: the pin the draft already carries is still the
+       one on record. */
+    expect(overridden.pipeline?.stages[0]?.account ?? stored.pipeline!.stages[0]?.account).toBe(RESERVED);
+
+    /* A plan that names no account never reads the record at all, so a damaged
+       one cannot block work that was never fenced by it. */
+    const unpinned = await createPipelineFromRequest(draft(), realPorts, {
+      allowOperatorDraftWithoutLineage: true,
+    });
+    expect(unpinned.error).toBeUndefined();
+    expect(unpinned.pipeline).toBeDefined();
+  } finally {
+    fs.rmSync(record, { force: true });
+  }
+});

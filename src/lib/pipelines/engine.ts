@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { accountManager } from "@/lib/accounts/manager";
-import { allowedAccountIdsForProject, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
+import { AccountProjectBindingsUnreadableError, allowedAccountIdsForProject, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import { mirroredClaudeTranscriptPath } from "@/lib/accounts/claude";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
@@ -213,21 +213,54 @@ export interface PipelinePorts {
   now(): string;
 }
 
+/** A refusal a caller returns verbatim, or null when the stages are acceptable. */
+type StageAccountRefusal = {
+  error: string;
+  status: number;
+  violations?: PipelineValidationViolation[];
+};
+
+/**
+ * The pool that governs `project`'s launches, or a refusal when the record that
+ * defines it cannot be read.
+ *
+ * The read throws so no caller can mistake a damaged record for an unbound
+ * project. Here that has to become an ANSWER: a well-formed request against a
+ * record that needs the operator is a conflict, and the same conflict — same
+ * wording, same status — the launch, the reseat and the binding route all give,
+ * so one repair clears every one of them. Left to propagate it is a 500 on a
+ * request nothing is wrong with.
+ */
+function stageAccountPool(
+  ports: PipelinePorts,
+  project: string,
+  engine: FlowEngine,
+): { pool: string[] | null } | { refusal: StageAccountRefusal } {
+  try {
+    return { pool: ports.allowedAccountIds?.(project, engine) ?? null };
+  } catch (error) {
+    if (!(error instanceof AccountProjectBindingsUnreadableError)) throw error;
+    return { refusal: { error: error.message, status: 409 } };
+  }
+}
+
 /** Create/override-time reading of #1279's rule, over stages already
     normalized. The launch re-reads it at the seam; this is what keeps a plan
     that could never run from being stored in the first place. */
-function stageAccountViolations(
+function stageAccountRefusal(
   stages: readonly PipelineStage[],
   project: string,
   ports: PipelinePorts,
-): PipelineValidationViolation[] {
-  if (!ports.allowedAccountIds) return [];
+): StageAccountRefusal | null {
+  if (!ports.allowedAccountIds) return null;
   const violations: PipelineValidationViolation[] = [];
   for (const [index, stage] of stages.entries()) {
     const requested = stage.account?.trim();
     if (!requested) continue;
     const engine = stage.effectiveRole.engine;
-    const allowed = ports.allowedAccountIds(project, engine);
+    const read = stageAccountPool(ports, project, engine);
+    if ("refusal" in read) return read.refusal;
+    const allowed = read.pool;
     if (allowed === null || allowed.includes(requested)) continue;
     violations.push({
       field: `stages[${index}].account`,
@@ -237,7 +270,9 @@ function stageAccountViolations(
       expected: STAGE_ACCOUNT_SHAPE,
     });
   }
-  return violations;
+  return violations.length
+    ? { error: pipelineValidationError(violations), violations, status: 400 }
+    : null;
 }
 
 function engineForTranscript(transcript: string): "claude" | "codex" | null {
@@ -3214,10 +3249,8 @@ export async function createPipelineFromRequest(
      can be read before anything is stored: a stage naming an account the
      project does not allow is refused at create, not discovered at launch. */
   const project = ports.projectForCwd(repoDir) ?? path.basename(repoDir);
-  const accountViolations = stageAccountViolations(normalized.stages, project, ports);
-  if (accountViolations.length) {
-    return { error: pipelineValidationError(accountViolations), violations: accountViolations, status: 400 };
-  }
+  const accountRefusal = stageAccountRefusal(normalized.stages, project, ports);
+  if (accountRefusal) return accountRefusal;
   const base = req.autoStart === false && !explicitBaseRef
     ? null
     : resolvePipelineBase(repoDir, { baseBranch: req.baseBranch, baseRef: explicitBaseRef }, ports.exec);
@@ -3597,10 +3630,8 @@ export async function patchPipeline(
          park, discovered later. Read before any field is assigned, so a
          refusal leaves the draft where it was rather than half-moved. */
       if (project !== pipeline.project) {
-        const movedAccountViolations = stageAccountViolations(pipeline.stages, project, ports);
-        if (movedAccountViolations.length) {
-          return { error: pipelineValidationError(movedAccountViolations), violations: movedAccountViolations, status: 400 };
-        }
+        const movedAccountRefusal = stageAccountRefusal(pipeline.stages, project, ports);
+        if (movedAccountRefusal) return movedAccountRefusal;
       }
       pipeline.task = task;
       if (spec) pipeline.spec = spec;
@@ -3639,10 +3670,8 @@ export async function patchPipeline(
          which allowed set applies — is what role resolution just settled. The
          early return leaves the transaction unpersisted, as every other
          post-mutation refusal in this function does. */
-      const addedAccountViolations = stageAccountViolations(pipeline.stages, pipeline.project, ports);
-      if (addedAccountViolations.length) {
-        return { error: pipelineValidationError(addedAccountViolations), violations: addedAccountViolations, status: 400 };
-      }
+      const addedAccountRefusal = stageAccountRefusal(pipeline.stages, pipeline.project, ports);
+      if (addedAccountRefusal) return addedAccountRefusal;
     } else if (req.action === "remove-stage") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       /* A draft can be emptied entirely on the canvas (#136); the 2-stage floor is
@@ -3978,7 +4007,9 @@ export async function patchPipeline(
         if (!requested) delete target.account;
         else {
           const engine = target.effectiveRole.engine;
-          const allowed = ports.allowedAccountIds?.(pipeline.project, engine) ?? null;
+          const read = stageAccountPool(ports, pipeline.project, engine);
+          if ("refusal" in read) return read.refusal;
+          const allowed = read.pool;
           if (allowed !== null && !allowed.includes(requested)) {
             return {
               error: allowed.length
