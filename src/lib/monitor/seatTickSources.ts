@@ -578,7 +578,10 @@ function eventsSince(
  * than a whole wake interval is asked once per interval rather than once per
  * check. That one saves a subprocess and nothing else — the failure it already
  * established is replayed on every check in between, so no check between two
- * attempts is entitled to a conclusion the attempt would have denied it.
+ * attempts is entitled to a conclusion the attempt would have denied it. The
+ * bound covers BOTH reads below, because either of them can be the one that is
+ * permanently broken; where each is gated is decided in the body, by what a
+ * fresh read of that source on that check would have produced.
  *
  * The lanes come from the hot store AND the archive, because the obligation is
  * the pull request still being open and that outlives the lane's three days of
@@ -635,6 +638,26 @@ async function unmergedPullRequests(context: {
     gap: seatTickSourceGapAfterFailure(context.gap, kind, at),
   });
 
+  /* The archive is an evidence source too, and a permanent failure of it has to
+     be bounded by the same backoff (#1298). A lane store that can never be read
+     — the snapshot is corrupt, its directory is gone — failed on every check
+     five minutes apart for as long as no delivered wake moved the hourly stamp,
+     which is exactly the unbounded retry the backoff below exists to stop.
+     Standing failures of this class are asked at the wake interval, and the
+     fresh failures inside the first interval still retry at every check.
+
+     Its gate is HERE rather than beside the one below, and the difference is
+     what a fresh read would have produced. The gates in between say this check
+     had nothing to ask — no finished lane, no repository — and are themselves
+     read out of the archive, so a check that cannot enumerate the lanes cannot
+     reach any of them: a fresh read fails on this very line and reports the gap
+     unconditionally. Replaying it above them is therefore the same verdict, not
+     a gap outliving its question. */
+  const standing = context.gap;
+  if (standing?.gap === "lanes-unreadable" && !seatTickSourceRetryDue(standing, context.now, context.wakeIntervalMs)) {
+    return { pullRequests: [], unavailable: standing.gap, gap: standing };
+  }
+
   let archived: readonly Pipeline[];
   try {
     archived = context.sources.archivedPipelines();
@@ -649,10 +672,11 @@ async function unmergedPullRequests(context: {
   const cwd = repoDirForProject(context.project, context.sources, archived);
   if (!cwd) return unasked;
 
-  /* A source that has been unreadable for longer than a whole wake interval is
-     asked at that interval and no faster (#1298). The gap it already produced
-     is replayed in between, so every check still refuses to call this quiet —
-     what the backoff saves is the `gh` subprocess, never a conclusion.
+  /* The same bound for the `gh` read: a source that has been unreadable for
+     longer than a whole wake interval is asked at that interval and no faster
+     (#1298). The gap it already produced is replayed in between, so every check
+     still refuses to call this quiet — what the backoff saves is the `gh`
+     subprocess, never a conclusion.
 
      It sits BELOW the two gates above, because a replayed gap must not outlive
      the question it answers. Each of those gates is this check finding there is
@@ -661,7 +685,7 @@ async function unmergedPullRequests(context: {
      so replaying one above them would name an unreadable source for the rest of
      the backoff window on a check that would have succeeded trivially, and would
      refuse a quiet the evidence allows. Everything between the gates and here is
-     a local read; the subprocess below is the only thing the backoff ever saved. */
+     a local read; the subprocess below is the only thing THIS gate saves. */
   if (context.gap && !seatTickSourceRetryDue(context.gap, context.now, context.wakeIntervalMs)) {
     return { pullRequests: [], unavailable: context.gap.gap, gap: context.gap };
   }

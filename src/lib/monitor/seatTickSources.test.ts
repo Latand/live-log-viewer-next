@@ -1011,6 +1011,85 @@ test("a check that asks GitHub nothing leaves the run untouched", async () => {
   expect(input.state.pullRequestGap).toEqual(standing);
 });
 
+/* The lane store is a source too, and its own permanent failure has to be
+   bounded by the same backoff (#1298). It is read above the gates that skip
+   `gh`, so a lane store that can never be read paid a cold-storage read every
+   five-minute check for as long as no delivered wake moved the hourly stamp —
+   the unbounded retry, one source over. */
+test("a lane store that can never be read is asked once per wake interval too", async () => {
+  const standing = {
+    gap: "lanes-unreadable" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const held: number[] = [];
+  const input = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, archiveCalls: held },
+    withCursor(0, { ...OVERDUE, pullRequestGap: standing }),
+  );
+  /* Zero reads inside the interval … */
+  expect(held).toEqual([]);
+  /* … and the gap they already established is replayed, so this check still
+     refuses to call the source readable or the project quiet. */
+  expect(input.pullRequestsUnavailable).toBe("lanes-unreadable");
+  expect(input.state.pullRequestGap).toEqual(standing);
+  expect(seatTickDecision(input).verdict.kind).toBe("error");
+
+  const due: number[] = [];
+  const asked = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, archiveCalls: due },
+    withCursor(0, { ...OVERDUE, pullRequestGap: { ...standing, lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString() } }),
+  );
+  /* … and exactly one after it. */
+  expect(due).toEqual([1]);
+  expect(asked.state.pullRequestGap).toMatchObject({ gap: "lanes-unreadable", attempts: 24, since: standing.since });
+});
+
+/* The bound it must not grow into: a lane store that has only just stopped
+   answering is weather, and weather has to recover at the check interval. */
+test("a lane store failing inside the first interval is still asked at every check", async () => {
+  const young: number[] = [];
+  const input = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, archiveCalls: young },
+    withCursor(0, {
+      ...OVERDUE,
+      pullRequestGap: {
+        gap: "lanes-unreadable",
+        since: new Date(NOW - 10 * 60_000).toISOString(),
+        lastAttemptAt: new Date(NOW - 5 * 60_000).toISOString(),
+        attempts: 2,
+        reported: false,
+      },
+    }),
+  );
+  expect(young).toEqual([1]);
+  expect(input.state.pullRequestGap).toMatchObject({ gap: "lanes-unreadable", attempts: 3 });
+});
+
+/* And the backoff belongs to the source that failed. A standing `gh` outage
+   says nothing about the archive, so the archive is still read — the gates
+   below it are read OUT of the archive, and skipping it would hand a check
+   with nothing to ask a gap it could not have produced. */
+test("a standing gh outage does not stop the lane store being read", async () => {
+  const reads: number[] = [];
+  await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed", archiveCalls: reads },
+    withCursor(0, {
+      ...OVERDUE,
+      pullRequestGap: {
+        gap: "command-failed",
+        since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+        lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+        attempts: 23,
+        reported: true,
+      },
+    }),
+  );
+  expect(reads).toEqual([1]);
+});
+
 /* The guard half, the same shape #1262 established for a card's movement: the
    fingerprint has to carry what the reason is decided from, or a guard keyed on
    it goes on suppressing the reason while a second pull request piles up. */
