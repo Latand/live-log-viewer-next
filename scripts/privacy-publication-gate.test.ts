@@ -3310,14 +3310,14 @@ describe("mergeBoundaryReview", () => {
   /* The commit the "Update branch" button composes: the base merged into the
      branch, authored by the account that pressed it and committed by the
      forge. */
-  function mergeAsForge(repo: string, base: string, branch: string): void {
+  function mergeAsForge(repo: string, base: string, branch: string, author = canonicalIdentity): void {
     const result = Bun.spawnSync({
       cmd: ["git", "merge", "--quiet", "--no-ff", "-m", `Merge branch '${base}' into ${branch}`, base],
       cwd: repo,
       env: {
         ...process.env,
-        GIT_AUTHOR_EMAIL: canonicalIdentity.email,
-        GIT_AUTHOR_NAME: canonicalIdentity.name,
+        GIT_AUTHOR_EMAIL: author.email,
+        GIT_AUTHOR_NAME: author.name,
         GIT_COMMITTER_EMAIL: forgeWebFlowIdentity.email,
         GIT_COMMITTER_NAME: forgeWebFlowIdentity.name,
       },
@@ -3444,11 +3444,26 @@ describe("mergeBoundaryReview", () => {
     expect(review.findings.get("email_address")).toBe(1);
   });
 
-  test("reports an unreadable range rather than passing it", () => {
+  test("reports an unreadable range rather than passing it, and names which read failed", () => {
     const repo = gitRepo();
     const review = mergeBoundaryReview(repo, "no-such-base");
 
     expect(review.findings.get("inspection_error")).toBe(1);
+    expect(review.notices).toEqual(["merge_boundary: range unreadable"]);
+  });
+
+  test("both commit reads name themselves when the base cannot be resolved", () => {
+    /* One flag runs two reads over the commits. `inspection_error: 2` with no
+       notice under it says only that something the gate could not read exists
+       somewhere. */
+    const repo = gitRepo();
+    commit(repo, "feat: something", canonicalIdentity);
+
+    const result = runGateArguments(["--base", "no-such-base", "--check-commits"], {}, repo);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toContain("commit_message: range unreadable");
+    expect(result.stdout.toString()).toContain("merge_boundary: range unreadable");
   });
 
   test("the gate reads the merge boundary under --check-commits and withholds the address", () => {
@@ -3484,10 +3499,11 @@ describe("mergeBoundaryReview", () => {
   test("a forge-composed 'Update branch' merge commit passes every field the gate reads", () => {
     /* #1315 read this commit as the one that failed. It is clean on all three
        surfaces, and this pins that: the AUTHOR is an account on the forge's
-       no-reply host, the COMMITTER is the forge's own web-flow identity, and
-       the MESSAGE the forge writes carries no address at all. The finding on
-       that pull request came from a commit already on the base, which the
-       range above no longer reads. */
+       no-reply host, the COMMITTER is the forge's own web-flow identity — now
+       exempt as an identity of the forge's, where before it passed only as
+       some vendor's no-reply mailbox — and the MESSAGE the forge writes
+       carries no address at all. The finding on that pull request came from a
+       commit already on the base, which the range above no longer reads. */
     const repo = gitRepo();
     commit(repo, "feat: the branch's own work", canonicalIdentity);
     runGit(repo, ["checkout", "--quiet", "main"]);
@@ -3529,5 +3545,30 @@ describe("mergeBoundaryReview", () => {
       `PRIVACY GATE: FAIL\nemail_address: 1\ncommit_message: ${flagged.slice(0, 12)} message email_address\n`,
     );
     expect(output).not.toContain(personal);
+  });
+
+  test("the forge's own committer is exempt while the author of the same commit is still read", () => {
+    /* The exemption is the committer field of a commit the forge composed, and
+       it covers that field only. The account that pressed the button is the
+       author, and a merge whose author is a person publishes that person the
+       moment the branch is squashed — so the finding survives the exemption
+       and names which of the two fields it came from. */
+    const repo = gitRepo();
+    const personal = ["someone", "personal.dev"].join("@");
+    commit(repo, "feat: the branch's own work", canonicalIdentity);
+    runGit(repo, ["checkout", "--quiet", "main"]);
+    commit(repo, "chore: the base moves on", canonicalIdentity);
+    runGit(repo, ["checkout", "--quiet", "feature"]);
+    mergeAsForge(repo, "main", "feature", { email: personal, name: "Someone" });
+
+    expect(identityField(repo, "%ce")).toBe(forgeWebFlowIdentity.email);
+    const review = mergeBoundaryReview(repo, "main");
+
+    expect(review.findings.get("email_address")).toBe(1);
+    expect(review.notices).toHaveLength(1);
+    expect(review.notices[0]).toContain(head(repo).slice(0, 12));
+    expect(review.notices[0]).toContain("author");
+    expect(review.notices[0]).not.toContain("committer");
+    expect(review.notices[0]).not.toContain(personal);
   });
 });

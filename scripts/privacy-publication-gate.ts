@@ -1514,6 +1514,25 @@ function isForgeAccountAddress(address: string): boolean {
   return address.slice(separator + 1).toLowerCase() === FORGE_ACCOUNT_DOMAIN;
 }
 
+/* The mailbox the forge writes as COMMITTER on a commit it composes itself —
+   the "Update branch" button, a merge run from the pull request page, an edit
+   made in the web editor. It is the forge's own web-flow identity: it names
+   the forge, it is the same address on every repository, and it identifies
+   nobody. The account that pressed the button is the AUTHOR, and the rule
+   above already reads that field.
+   Stated here rather than left to the message rules: the merge boundary is the
+   identity path, and an identity question is answered by identity rules. The
+   machine-attribution mailbox rule reaches the same verdict on this address
+   through the trailer the review composes below, so the gate's verdict on a
+   forge-composed merge is what it was — but it was reached by a rule about
+   MESSAGES, and narrowing that rule would have silently taken the forge's own
+   merges with it. */
+const FORGE_COMPOSER_ADDRESS = ["noreply", FORGE_DOMAIN].join("@");
+
+function isForgeComposerIdentity(identity: CommitIdentity): boolean {
+  return identity.field === "committer" && identity.address.toLowerCase() === FORGE_COMPOSER_ADDRESS;
+}
+
 /** Every identity git recorded on the commits the merge will squash. */
 function branchIdentities(repository: string, base: string): CommitIdentity[] | undefined {
   const result = Bun.spawnSync({
@@ -1555,11 +1574,12 @@ function composedAttributionMessage(identity: CommitIdentity): string {
  *
  * Git records an author and a committer on every commit and a commit cannot be
  * made without them, so the question is never whether an identity publishes but
- * whose. Two answers publish nobody: an account on the forge's no-reply host,
+ * whose. Three answers publish nobody: an account on the forge's no-reply host,
  * which the forge issues so that the account's own address is not what its
- * commits carry, and the machine-attribution mailboxes the trailer rule already
- * names. Every other identity is a person, and is reported exactly as an
- * address in a file is.
+ * commits carry; the forge's own web-flow mailbox where the forge committed a
+ * commit it composed; and the machine-attribution mailboxes the trailer rule
+ * already names. Every other identity is a person, and is reported exactly as
+ * an address in a file is.
  *
  * The no-reply host is read only here, on the identities the merge composes.
  * A commit message that writes such an address into a trailer by hand, or into
@@ -1572,9 +1592,14 @@ export function mergeBoundaryReview(repository: string, base: string): MergeBoun
   const identities = branchIdentities(repository, base);
   if (identities === undefined) {
     addFinding(findings, "inspection_error");
+    /* A failure of this check names itself too. It is one of two reads behind
+       one flag, and a bare `inspection_error: 1` said which of them failed only
+       to whoever went and read the source. */
+    notices.push("merge_boundary: range unreadable");
     return { findings, notices };
   }
   for (const identity of identities) {
+    if (isForgeComposerIdentity(identity)) continue;
     const { attributable } = commitMessageAddressReview(composedAttributionMessage(identity));
     const publishes = attributable.some((address) => !isForgeAccountAddress(address));
     if (!publishes) continue;
