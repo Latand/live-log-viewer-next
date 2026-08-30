@@ -20,6 +20,7 @@ import {
   MANAGER_RECORD_REF,
   type BridgeChannelV1,
   type BridgeChannelScope,
+  type BridgePendingAnswerV1,
   type BridgeReportBatch,
   type BridgeReportInput,
   type BridgeReportLogV1,
@@ -175,6 +176,7 @@ function emptyLog(): BridgeReportLogV1 {
     reports: [],
     retired: [],
     answeredRefs: [],
+    pendingAnswers: [],
   };
 }
 
@@ -188,6 +190,33 @@ function normalizeAnsweredRefs(value: unknown): number[] {
     if (Number.isInteger(entry) && (entry as number) > 0) refs.add(entry as number);
   }
   return [...refs].sort((left, right) => left - right).slice(-BRIDGE_ANSWERED_REF_CAPACITY);
+}
+
+/** Parked answers, bounded and de-duplicated by ref. Noise rather than damage
+    for the same reason recorded answers are: a malformed entry can only fail to
+    clear an ask, never invent one. */
+function normalizePendingAnswers(value: unknown, answered: readonly number[]): BridgePendingAnswerV1[] {
+  if (!Array.isArray(value)) return [];
+  const settled = new Set(answered);
+  const pending = new Map<number, BridgePendingAnswerV1>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const candidate = entry as Partial<BridgePendingAnswerV1>;
+    if (!Number.isInteger(candidate.ref) || (candidate.ref as number) < 1) continue;
+    if (typeof candidate.operationId !== "string" || !candidate.operationId) continue;
+    if (typeof candidate.project !== "string" || !candidate.project) continue;
+    if (typeof candidate.seatConversationId !== "string" || !candidate.seatConversationId) continue;
+    /* A ref already recorded as answered needs no pending row: whichever
+       directive got there first settled it, and once is the contract. */
+    if (settled.has(candidate.ref as number)) continue;
+    pending.set(candidate.ref as number, {
+      ref: candidate.ref as number,
+      operationId: candidate.operationId,
+      project: candidate.project,
+      seatConversationId: candidate.seatConversationId,
+    });
+  }
+  return [...pending.values()].sort((left, right) => left.ref - right.ref).slice(-BRIDGE_ANSWERED_REF_CAPACITY);
 }
 
 /** Every recorded row must survive the round trip. A row that does not is
@@ -213,6 +242,7 @@ function normalizeLog(value: unknown, target: string): BridgeReportLogV1 {
   const highest = reports.at(-1)?.seq ?? 0;
   const oldest = reports[0]?.seq ?? 0;
   const recordedTrim = Number.isInteger(file.trimmedThroughSeq) ? file.trimmedThroughSeq as number : 0;
+  const answeredRefs = normalizeAnsweredRefs(file.answeredRefs);
   return {
     schemaVersion: BRIDGE_REPORT_LOG_SCHEMA_VERSION,
     lastSeq: Math.max(Number.isInteger(file.lastSeq) ? file.lastSeq as number : 0, highest),
@@ -228,7 +258,8 @@ function normalizeLog(value: unknown, target: string): BridgeReportLogV1 {
       : {},
     reports,
     retired: Array.isArray(file.retired) ? file.retired.filter((id): id is string => typeof id === "string") : [],
-    answeredRefs: normalizeAnsweredRefs(file.answeredRefs),
+    answeredRefs,
+    pendingAnswers: normalizePendingAnswers(file.pendingAnswers, answeredRefs),
   };
 }
 
@@ -509,17 +540,65 @@ export function recordBridgeDirectiveAnswer(
   if (!Number.isInteger(ref) || ref < 1) return;
   withFileTransactionSync(bridgeReportLogPath(), BRIDGE_LOG_BUSY, () => {
     const file = readLog();
-    const answered = file.reports.find((report) => report.seq === ref);
-    if (!answered || !isBridgeDecisionRequestClass(answered.class)) return;
-    if (answered.project !== scope.project) return;
-    const recordedSeat = answered.targetSeatConversationId;
-    /* An unrouted row is the log's quarantine: it opened no ask, so there is
-       nothing here for a directive to settle. */
-    if (!recordedSeat) return;
-    if (canonicalSeatConversationId(recordedSeat) !== canonicalSeatConversationId(scope.seatConversationId)) return;
+    if (!directiveMayAnswer(file, ref, scope, canonicalSeatConversationId)) return;
     const refs = file.answeredRefs ?? [];
     if (refs.includes(ref)) return;
     file.answeredRefs = normalizeAnsweredRefs([...refs, ref]);
+    /* The parked row has served its purpose the moment the answer is recorded
+       for real; leaving it would keep a settled ref waiting on a delivery. */
+    file.pendingAnswers = (file.pendingAnswers ?? []).filter((entry) => entry.ref !== ref);
+    writeJsonDurably(bridgeReportLogPath(), file);
+  });
+}
+
+/** The fence both recorded and parked answers pass, resolved INSIDE the write
+    transaction against the log itself — see {@link recordBridgeDirectiveAnswer}
+    for why a log-global seq may never be taken at face value. */
+function directiveMayAnswer(
+  file: BridgeReportLogV1,
+  ref: number,
+  scope: BridgeChannelScope,
+  canonicalSeatConversationId: CanonicalSeatConversationId,
+): boolean {
+  const answered = file.reports.find((report) => report.seq === ref);
+  if (!answered || !isBridgeDecisionRequestClass(answered.class)) return false;
+  if (answered.project !== scope.project) return false;
+  const recordedSeat = answered.targetSeatConversationId;
+  /* An unrouted row is the log's quarantine: it opened no ask, so there is
+     nothing here for a directive to settle. */
+  if (!recordedSeat) return false;
+  return canonicalSeatConversationId(recordedSeat) === canonicalSeatConversationId(scope.seatConversationId);
+}
+
+/**
+ * Park an answer against the send that still has to arrive (#1131).
+ *
+ * A directive the runtime merely ACCEPTED has reached nobody: the manager is
+ * mid-turn and the message is queued behind it. Recording the answer then would
+ * clear a decision request the manager never read, and a delivery that is then
+ * dropped leaves the operator with no ask and no instruction. So the ref waits
+ * here on the operation id the send returned, and the ask projection clears it
+ * once the durable delivery record says that operation was delivered — which
+ * also means a send that ends `failed` leaves the ask standing.
+ *
+ * The same fence as a recorded answer, so a parked ref can no more pre-answer
+ * another project's report than a recorded one can. Idempotent by ref.
+ */
+export function recordBridgeDirectivePendingAnswer(
+  ref: number,
+  scope: BridgeChannelScope,
+  operationId: string,
+  canonicalSeatConversationId: CanonicalSeatConversationId,
+): void {
+  if (!Number.isInteger(ref) || ref < 1 || !operationId) return;
+  withFileTransactionSync(bridgeReportLogPath(), BRIDGE_LOG_BUSY, () => {
+    const file = readLog();
+    if (!directiveMayAnswer(file, ref, scope, canonicalSeatConversationId)) return;
+    if ((file.answeredRefs ?? []).includes(ref)) return;
+    file.pendingAnswers = normalizePendingAnswers([
+      ...(file.pendingAnswers ?? []).filter((entry) => entry.ref !== ref),
+      { ref, operationId, project: scope.project, seatConversationId: scope.seatConversationId },
+    ], file.answeredRefs ?? []);
     writeJsonDurably(bridgeReportLogPath(), file);
   });
 }

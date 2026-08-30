@@ -1,6 +1,8 @@
 /**
  * Process-introspection backend contract. Linux reads `/proc` directly
- * (`linux.ts`); every other platform shells out to `ps`/`lsof` (`portable.ts`).
+ * (`linux.ts`); Windows reads one `Win32_Process` snapshot plus two kernel
+ * values through FFI (`windows.ts`); every other platform shells out to
+ * `ps`/`lsof` (`portable.ts`).
  * Callers never depend on which backend is active — see `scanner/process.ts`
  * and `tmux.ts`, which hold the platform-independent logic (engine matching,
  * memoization, ppid-chain walks) on top of these primitives.
@@ -39,7 +41,7 @@ export interface ProcSnapshotEntry {
 }
 
 export interface ProcBackend {
-  readonly name: "linux" | "portable";
+  readonly name: "linux" | "portable" | "windows";
 
   pidAlive(pid: number): boolean;
 
@@ -48,6 +50,16 @@ export interface ProcBackend {
   readPpid(pid: number): number | null;
   /** PID plus a kernel start-time token where the platform exposes one. */
   processIdentity(pid: number): string | null;
+
+  /**
+   * CPU (user + system) a live process has consumed since it launched, in
+   * milliseconds; null when the pid is gone or the platform cannot account for
+   * it. macOS has no cheap per-pid CPU read without a subprocess, so the
+   * portable backend answers null and callers must treat that as "no evidence"
+   * rather than as zero — an evidence-based liveness verdict (#1281) refuses to
+   * call a host severed on a reading it never got.
+   */
+  processCpuMs(pid: number): number | null;
 
   /**
    * Value of an environment variable for a live pid. Reading another

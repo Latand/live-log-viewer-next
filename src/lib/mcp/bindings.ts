@@ -57,7 +57,7 @@ import {
 } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
-import { recordBridgeDirectiveAnswer, recordManagerReport } from "@/lib/bridge/service";
+import { recordBridgeDirectiveAnswer, recordBridgeDirectivePendingAnswer, recordManagerReport } from "@/lib/bridge/service";
 import { bridgeDirectiveBody, bridgeDirectiveId, type BridgeTrailer } from "@/lib/bridge/directive";
 import { seatIdentityResolver } from "@/lib/bridge/seatIdentity";
 import { isBridgeReportClass, type CanonicalSeatConversationId } from "@/lib/bridge/types";
@@ -76,12 +76,12 @@ import { activeOrchestratorSeats, canonicalOrchestratorProject, orchestratorRevo
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import { contextReading, readOrchestratorTranscriptFacts, rotationRecommendation } from "@/lib/orchestrator/health";
 import { contextWindowPolicyFor } from "@/lib/orchestrator/contextPolicy";
-import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
+import { createPipelineFromRequest, getPipeline as getPipelineRecord, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import { PIPELINE_LIST_DEFAULT_LIMIT, projectPipelineListRows } from "@/lib/pipelines/listProjection";
-import { findPipelineRecord, loadPipelinesForList } from "@/lib/pipelines/store";
+import { loadPipelinesForList } from "@/lib/pipelines/store";
 import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
 import type { PauseResumeActor } from "@/lib/pauseResumeActor";
 import { listFiles } from "@/lib/scanner";
@@ -95,12 +95,26 @@ import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { messageOriginRole, type MessageOrigin } from "@/lib/runtime/messageOrigin";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
+import { resolveSendReceipt } from "@/lib/runtime/sendSettlement";
 import {
   SELECTED_TAIL_MAX_BYTES,
   SELECTED_TAIL_MAX_LINES,
   type BoundedTranscriptTail,
 } from "@/lib/selection/resolve";
-import { readSession, type SessionReadResult } from "@/lib/session/reader";
+import {
+  readSession,
+  type SessionReadResult,
+  type SessionRecord,
+  type SessionRecordKind,
+} from "@/lib/session/reader";
+import {
+  decodeMessagesCursor,
+  encodeMessagesCursor,
+  InvalidMessagesCursorError,
+  messagesCursorScope,
+  readMessagesPage,
+  StaleMessagesCursorError,
+} from "@/lib/session/messagesPage";
 import { resolveProjectAttribution } from "@/lib/session/projectResolution";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { recordReplySuggestions } from "@/lib/suggestions/store";
@@ -120,6 +134,7 @@ import {
   productionSelectedContextDependencies,
   resolveSelectedContext,
   selectedContextEcho,
+  selectedConversationTarget,
   selectedConversationTail,
   type SelectedContextTargetDependencies,
 } from "./selectedContextTarget";
@@ -324,7 +339,22 @@ async function postViewerControl(
     ? parsed as Record<string, unknown>
     : {};
   if (result.error || (!response.ok && result.state !== "busy")) {
-    throw new Error(text(result.error) || `Viewer control request failed with status ${response.status}`);
+    const message = text(result.error) || `Viewer control request failed with status ${response.status}`;
+    /* #1131: a refusal that names an ACCEPTED send is not just prose. The send
+       began actuating and nothing could confirm it, so the caller needs the id
+       it was accepted under — `message_receipt` answers what became of it — and
+       the guidance that repeating the instruction may deliver it twice.
+       Flattening those into a message is what left an ambiguous legacy send
+       with nothing to ask about and no warning against sending it again. */
+    const operationId = text(result.operationId);
+    if (operationId) {
+      throw new McpToolRefusal(message, {
+        operationId,
+        ...(text(result.resend) ? { resend: text(result.resend) } : {}),
+        ...(result.actuation === "started" ? { actuation: "started" } : {}),
+      });
+    }
+    throw new Error(message);
   }
   return result;
 }
@@ -362,6 +392,8 @@ interface TargetedConversationOptions extends McpToolCallContext {
 export interface ViewerMcpDomainDependencies {
   listFiles(options?: Parameters<typeof listFiles>[0]): Promise<FileEntry[]>;
   targetedFileEntry?(pathname: string, options?: TargetedConversationOptions): Promise<TargetedConversationRead | FileEntry | undefined>;
+  /** Descriptor-pinned transcript read used by conversation_messages. */
+  pinnedTranscript?(pathname: string): PinnedTranscript | undefined;
   /** #844 §6/§7: the bounded selected-card path — one keyed identity lookup and
       an explicit tail read, reaching no scan. Optional so partial test
       harnesses fall back to the production resolver. */
@@ -620,6 +652,7 @@ function attentionCallerSources(): AttentionCallerSources {
 export const productionDomainDependencies: ViewerMcpDomainDependencies = {
   listFiles,
   targetedFileEntry: targetedFileEntry,
+  pinnedTranscript: openPinnedTranscript,
   selectedContext: productionSelectedContextDependencies,
   completedFileScan,
   registrySnapshot: () => agentRegistry().readOnlySnapshot(),
@@ -838,12 +871,44 @@ async function sendMessage(
   const conversation = conversationId
     ? lookup.conversation(conversationId as `conversation_${string}`)
     : lookup.conversationForPath(transcriptPath);
+  const settledOutcome = outcome.outcome ?? "delivered";
   return {
     conversationId: (conversation?.id ?? conversationId) || null,
     transcriptPath: (conversation?.generations.at(-1)?.path ?? transcriptPath) || null,
     operationId: outcome.operationId ?? (outcome.receipt as { operationId?: unknown } | undefined)?.operationId ?? null,
-    outcome: outcome.outcome ?? "delivered",
+    outcome: settledOutcome,
+    /* #1131: acceptance is not arrival. A `queued` send is admitted and not yet
+       settled, and saying so on the answer itself is what stops a caller from
+       reading the send-time guess as the end of the story — `message_receipt`
+       over the operation id is where the end of the story lives. */
+    settled: settledOutcome === "delivered",
   };
+}
+
+/**
+ * What became of one accepted send (#1131).
+ *
+ * The answer is read from the durable delivery record, so it survives the
+ * process that made the send, the runtime host that took it, and the
+ * reservation itself once compaction has retired it — and a record that is
+ * still in flight is reconciled against the delivery journal's CURRENT answer
+ * before it is reported, because a caller asking what became of a send is
+ * asking about now, not about whatever last updated the projection — and past
+ * the settlement deadline this query is also what ENDS an accepted send, so
+ * `queued` is never the last thing anyone can be told about it. An id nothing
+ * ever admitted is refused rather than answered with an invented in-flight
+ * state.
+ */
+async function messageReceipt(args: McpToolArgs): Promise<McpToolPayload> {
+  const operationId = required(args, "operationId");
+  const receipt = await resolveSendReceipt(operationId);
+  if (!receipt) {
+    throw new McpToolRefusal(
+      "no accepted send is recorded under that operationId",
+      { code: "OPERATION_UNKNOWN" },
+    );
+  }
+  return { ...receipt };
 }
 
 async function createBoardTask(args: McpToolArgs): Promise<McpToolPayload> {
@@ -986,6 +1051,14 @@ export interface TargetedConversationDependencies {
   afterOpen?(): void;
 }
 
+export interface PinnedTranscript {
+  descriptor: number;
+  stat: fs.Stats;
+  rootName: ReturnType<typeof scanRootEntries>[number][0];
+  root: string;
+  sameIdentity(): boolean;
+}
+
 function sameOpenedTranscript(
   pathname: string,
   root: string,
@@ -1004,6 +1077,42 @@ function sameOpenedTranscript(
       && contained(canonicalRoot, canonicalPath);
   } catch {
     return false;
+  }
+}
+
+/** Open one caller-selected transcript once, without following the leaf, and
+    prove that descriptor still names the regular file inside a scanner root. */
+export function openPinnedTranscript(
+  pathname: string,
+  injectedDependencies?: TargetedConversationDependencies,
+): PinnedTranscript | undefined {
+  const dependencies = injectedDependencies ?? { roots: scanRootEntries(), pathAllowed };
+  if (!dependencies.pathAllowed(pathname)) return undefined;
+  const rooted = rootForTranscript(pathname, dependencies.roots);
+  if (!rooted) return undefined;
+  const [rootName, root] = rooted;
+  let descriptor: number | null = null;
+  try {
+    descriptor = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile()) return undefined;
+    dependencies.afterOpen?.();
+    if (!sameOpenedTranscript(pathname, root, stat, dependencies.pathAllowed)) return undefined;
+    const openedDescriptor = descriptor;
+    descriptor = null;
+    return {
+      descriptor: openedDescriptor,
+      stat,
+      rootName,
+      root,
+      sameIdentity: () => sameOpenedTranscript(pathname, root, stat, dependencies.pathAllowed),
+    };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP" || code === "EACCES") return undefined;
+    throw error;
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
   }
 }
 
@@ -1049,27 +1158,19 @@ export async function targetedConversationAtPath(
 ): Promise<TargetedConversationRead | undefined> {
   const dependencies = injectedDependencies ?? { roots: scanRootEntries(), pathAllowed };
   throwIfCallEnded(context);
-  if (!dependencies.pathAllowed(pathname)) return undefined;
-  const rooted = rootForTranscript(pathname, dependencies.roots);
-  if (!rooted) return undefined;
-  const [rootName, root] = rooted;
+  const pinned = openPinnedTranscript(pathname, dependencies);
+  if (!pinned || pinned.stat.size === 0) {
+    if (pinned) fs.closeSync(pinned.descriptor);
+    return undefined;
+  }
+  const { rootName, root, stat } = pinned;
   let descriptor: number | null = null;
   let sidecarDescriptor: number | null = null;
   let sidecarPath: string | null = null;
   let sidecarStat: fs.Stats | null = null;
   let stableDirectory: string | null = null;
+  descriptor = pinned.descriptor;
   try {
-    descriptor = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP" || code === "EACCES") return undefined;
-    throw error;
-  }
-  try {
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.size === 0) return undefined;
-    dependencies.afterOpen?.();
-    if (!sameOpenedTranscript(pathname, root, stat, dependencies.pathAllowed)) return undefined;
     throwIfCallEnded(context);
 
     if (rootName === "claude-projects" && path.basename(pathname).startsWith("agent-") && pathname.endsWith(".jsonl")) {
@@ -1138,7 +1239,7 @@ export async function targetedConversationAtPath(
       : boundedTailFromDescriptor(descriptor, pathname, stat, context.tailLines);
     const partialAtDeadline = callDeadlineExceeded(context);
     if (!partialAtDeadline) throwIfCallEnded(context);
-    if (!sameOpenedTranscript(pathname, root, stat, dependencies.pathAllowed)) return undefined;
+    if (!pinned.sameIdentity()) return undefined;
     if (sidecarDescriptor !== null && sidecarPath !== null && sidecarStat !== null
       && !sameOpenedTranscript(sidecarPath, root, sidecarStat, dependencies.pathAllowed)) return undefined;
     return {
@@ -1419,6 +1520,145 @@ async function getConversation(
   });
 }
 
+const CONVERSATION_MESSAGE_KINDS = ["message", "reasoning", "tool_call", "tool_result", "trace"] as const;
+const CONVERSATION_MESSAGE_ROLES = ["user", "assistant", "system", "tool"] as const;
+
+function conversationEngineForRoot(rootName: PinnedTranscript["rootName"]): "claude" | "codex" | null {
+  if (rootName === "codex-sessions") return "codex";
+  if (rootName === "claude-projects") return "claude";
+  return null;
+}
+
+function conversationMessageSet<T extends string>(
+  value: unknown,
+  fallback: readonly T[],
+  allowed: readonly T[],
+  field: string,
+): Set<T> {
+  if (value === undefined) return new Set(fallback);
+  if (!Array.isArray(value) || value.length === 0 || value.some((candidate) => !allowed.includes(candidate as T))) {
+    throw new McpToolRefusal(`${field} must be a non-empty subset of ${allowed.join(" | ")}.`, {
+      code: `conversation_messages_${field}_invalid`,
+    });
+  }
+  return new Set(value as T[]);
+}
+
+function conversationMessagesSince(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string"
+    || !/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/u.test(value)
+    || !Number.isFinite(Date.parse(value))) {
+    throw new McpToolRefusal("since must be an ISO-8601 timestamp with a UTC designator or numeric offset.", {
+      code: "conversation_messages_since_invalid",
+    });
+  }
+  return value;
+}
+
+async function conversationMessages(
+  args: McpToolArgs,
+  dependencies: Pick<ViewerMcpDomainDependencies, "pinnedTranscript" | "selectedContext">,
+  context: McpToolCallContext = {},
+): Promise<McpToolPayload> {
+  throwIfCallEnded(context);
+  const selectedDependencies = dependencies.selectedContext ?? productionSelectedContextDependencies;
+  const selected = resolveSelectedContext(args, text(args.conversationId), selectedDependencies);
+  const requestedId = selected.conversationId;
+  const requestedPath = text(args.transcriptPath) || text(args.path);
+  if (!requestedId && !requestedPath) {
+    throw new Error("conversationId, transcriptPath or selectedContext is required");
+  }
+
+  let transcriptPath = requestedPath;
+  let conversationId: string | null = null;
+  let engine: "claude" | "codex" | null = null;
+  if (requestedId) {
+    const target = selectedConversationTarget({ conversationId: requestedId }, selectedDependencies);
+    transcriptPath = target.path!;
+    conversationId = target.conversationId;
+    engine = target.engine;
+  }
+
+  const pinned = (dependencies.pinnedTranscript ?? openPinnedTranscript)(transcriptPath);
+  if (!pinned) {
+    throw new McpToolRefusal("the conversation transcript is unavailable or outside the Viewer's scanner roots.", {
+      code: "conversation_messages_transcript_unavailable",
+      ...(conversationId ? { conversationId } : {}),
+    });
+  }
+  try {
+    if (!engine) {
+      engine = conversationEngineForRoot(pinned.rootName);
+      if (!engine) {
+        throw new McpToolRefusal("conversation_messages supports Claude and Codex transcripts only.", {
+          code: "conversation_messages_engine_unsupported",
+        });
+      }
+      conversationId = agentRegistry().conversationForPath(transcriptPath)?.id ?? null;
+    }
+
+    const kinds = conversationMessageSet<SessionRecordKind>(
+      args.kinds,
+      ["message"],
+      CONVERSATION_MESSAGE_KINDS,
+      "kinds",
+    );
+    const roles = conversationMessageSet<SessionRecord["role"]>(
+      args.roles,
+      CONVERSATION_MESSAGE_ROLES,
+      CONVERSATION_MESSAGE_ROLES,
+      "roles",
+    );
+    const since = conversationMessagesSince(args.since);
+    const limit = Math.max(1, Math.min(200, integer(args.limit, 20)));
+    const maxChars = Math.max(1, Math.min(16_000, integer(args.maxChars, 4_000)));
+    const scope = messagesCursorScope(transcriptPath, kinds, roles, since);
+    let cursor;
+    try {
+      cursor = args.cursor === undefined ? null : decodeMessagesCursor(text(args.cursor), scope);
+    } catch (error) {
+      if (error instanceof InvalidMessagesCursorError) {
+        throw new McpToolRefusal(error.message, { code: "conversation_messages_cursor_invalid" });
+      }
+      throw error;
+    }
+
+    let page;
+    try {
+      page = readMessagesPage({
+        descriptor: pinned.descriptor,
+        size: pinned.stat.size,
+        engine,
+      }, { kinds, roles, since, limit, maxChars, cursor });
+    } catch (error) {
+      if (error instanceof StaleMessagesCursorError) {
+        throw new McpToolRefusal(error.message, { code: "conversation_messages_cursor_stale" });
+      }
+      throw error;
+    }
+    throwIfCallEnded(context);
+    if (!pinned.sameIdentity()) {
+      throw new McpToolRefusal("the conversation transcript changed identity during the read.", {
+        code: "conversation_messages_transcript_changed",
+      });
+    }
+    return redactPayload({
+      conversationId,
+      transcriptPath,
+      engine,
+      lastRecordAt: page.lastRecordAt,
+      records: page.records,
+      hasMore: page.hasMore,
+      cursor: page.cursor ? encodeMessagesCursor(page.cursor, scope) : null,
+      scanned: page.scanned,
+      ...selectedContextEcho(selected.target),
+    });
+  } finally {
+    fs.closeSync(pinned.descriptor);
+  }
+}
+
 async function deployExactSha(
   args: McpToolArgs,
   control: ViewerControlDependencies,
@@ -1600,10 +1840,21 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
        names the gateway (or attributed caller role), never the operator. */
     origin: mcpSenderOrigin(dependencies),
   }, callerCapabilityHeaders());
+  const settledOutcome = outcome.outcome ?? "delivered";
+  const operationId = typeof outcome.operationId === "string" ? outcome.operationId : null;
   /* The trailer is the ONLY thing that says a report was answered — the drain
      cursor says only that it was read aloud — so it is recorded the moment the
-     answer actually reaches the manager (#1168). Scoped by the project and seat
-     this directive was just routed to, because a report seq is log-global: the
+     answer actually reaches the manager (#1168), and NOT before: an accepted
+     directive that is still `queued` has not reached anyone, and recording it
+     then would clear a pending decision that a dropped delivery means nobody
+     ever saw (#1131).
+     An acceptance is not the end of it either. The ref is PARKED against the
+     operation id the send returned, so the ask clears itself the moment that
+     send is recorded delivered, and stays standing if it is recorded failed —
+     which is what stops a queued directive from leaving the manager's decision
+     request open forever after the message did arrive.
+     Both are scoped by the project and seat this directive was just routed to,
+     because a report seq is log-global: the
      store settles the ref only if it names a decision request THIS seat filed,
      so a ref that names nothing yet cannot pre-answer a later report and a
      directive cannot clear another project's ask. The seat identity travels in
@@ -1614,17 +1865,19 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
      visible and unanswerable. Idempotent, so a directive retry under the same
      derived id settles the same seq once. */
   if (trailer) {
-    recordBridgeDirectiveAnswer(
-      trailer.ref,
-      { project, seatConversationId: manager.conversationId },
-      dependencies.canonicalSeatConversationId ?? productionCanonicalSeatConversationId,
-    );
+    const scope = { project, seatConversationId: manager.conversationId };
+    const canonical = dependencies.canonicalSeatConversationId ?? productionCanonicalSeatConversationId;
+    if (settledOutcome === "delivered") recordBridgeDirectiveAnswer(trailer.ref, scope, canonical);
+    else if (operationId) recordBridgeDirectivePendingAnswer(trailer.ref, scope, operationId, canonical);
   }
   return {
     directiveId: deliveryId,
     managerConversationId: manager.conversationId,
-    operationId: outcome.operationId ?? null,
-    outcome: outcome.outcome ?? "delivered",
+    operationId,
+    outcome: settledOutcome,
+    /* #1131: the same contract `send_message` answers with — acceptance is not
+       arrival, and `message_receipt` over the operation id is what says which. */
+    settled: settledOutcome === "delivered",
   };
 }
 
@@ -2032,6 +2285,10 @@ async function sendMessageToOrchestrator(
     predecessorConversationId: seat.predecessorConversationId,
     operationId: outcome.operationId ?? (outcome.receipt as { operationId?: unknown } | undefined)?.operationId ?? null,
     outcome: outcome.outcome ?? "delivered",
+    /* #1131: the same control path as `send_message`, so the same contract —
+       acceptance is not arrival, and `message_receipt` over the operation id is
+       what says which. */
+    settled: (outcome.outcome ?? "delivered") === "delivered",
   });
 }
 
@@ -2058,7 +2315,7 @@ async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDepen
 
 async function getPipeline(args: McpToolArgs): Promise<McpToolPayload> {
   const pipelineId = required(args, "pipelineId");
-  const pipeline = findPipelineRecord(pipelineId);
+  const pipeline = getPipelineRecord(pipelineId);
   if (!pipeline) throw new Error("pipeline not found");
   return redactPayload({ pipelineId, pipeline });
 }
@@ -3245,6 +3502,7 @@ export function viewerMcpBindings(
   return {
     spawn_agent: (args, context) => spawnAgent(args, viewerControlForCall(controlDependencies, context)),
     send_message: (args, context) => sendMessage(args, viewerControlForCall(controlDependencies, context), domainDependencies),
+    message_receipt: (args) => messageReceipt(args),
     create_task: createBoardTask,
     update_task: updateBoardTask,
     create_pipeline: createPipeline,
@@ -3253,6 +3511,7 @@ export function viewerMcpBindings(
     list_conversations: (args, context) => listConversations(args, viewerControlForCall(controlDependencies, context)),
     search_transcripts: (args, context) => searchTranscripts(args, viewerControlForCall(controlDependencies, context)),
     get_conversation: (args, context) => getConversation(args, domainDependencies, context),
+    conversation_messages: (args, context) => conversationMessages(args, domainDependencies, context),
     deploy_exact_sha: (args, context) => deployExactSha(args, viewerControlForCall(controlDependencies, context), domainDependencies),
     get_pipeline: getPipeline,
     board_snapshot: (args) => boardSnapshot(args, domainDependencies),

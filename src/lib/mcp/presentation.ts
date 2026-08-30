@@ -100,6 +100,21 @@ export function describeMcpCall(
     };
   }
 
+  if (toolName === "message_receipt") {
+    const operationId = string(result.operationId) || string(args.operationId);
+    const state = string(result.state) || "unknown";
+    const conversationId = string(result.conversationId);
+    return {
+      icon: "message",
+      verb: "Checking",
+      title: `Checking delivery of ${operationId || "a send"}: ${state}`,
+      subtitle: string(result.reason),
+      links: conversationId
+        ? [{ kind: "conversation", id: conversationId, label: "Open conversation", href: `#c=${encodeURIComponent(conversationId)}` }]
+        : [],
+    };
+  }
+
   if (toolName === "create_task") {
     const id = entityId(result, "task");
     return {
@@ -200,6 +215,21 @@ export function describeMcpCall(
       icon: "conversation",
       verb: "Opening",
       title: `Opening conversation: ${conversationId || transcriptPath || "conversation"}`,
+      subtitle: replaySubtitle(result, transcriptPath),
+      links,
+    };
+  }
+
+  if (toolName === "conversation_messages") {
+    const conversationId = string(result.conversationId) || string(args.conversationId);
+    const transcriptPath = string(result.transcriptPath) || string(args.transcriptPath);
+    const links = conversationId
+      ? [{ kind: "conversation" as const, id: conversationId, label: "Open conversation", href: `#c=${encodeURIComponent(conversationId)}` }]
+      : [];
+    return {
+      icon: "conversation",
+      verb: "Reading",
+      title: `Reading messages: ${conversationId || transcriptPath || "conversation"}`,
       subtitle: replaySubtitle(result, transcriptPath),
       links,
     };

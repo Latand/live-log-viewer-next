@@ -213,6 +213,22 @@ export interface BridgeReportLogV1 {
       log-global, and because the attention queue must read ONE file to know
       whether a report is still asking. */
   answeredRefs?: number[];
+  /** Answers waiting on their own delivery (#1131). `bridge_directive` may be
+      ACCEPTED rather than delivered — the manager is mid-turn and the send is
+      queued — and recording the answer then would clear a decision request
+      nobody has read yet. The ref is parked here against the operation id the
+      send returned, and the ask projection clears it once the durable delivery
+      record says that operation was delivered. A send that failed leaves the
+      ask standing, which is the safe end of the trade. */
+  pendingAnswers?: BridgePendingAnswerV1[];
+}
+
+export interface BridgePendingAnswerV1 {
+  ref: number;
+  /** The accepted send that must arrive before the ref counts as answered. */
+  operationId: string;
+  project: string;
+  seatConversationId: string;
 }
 
 export interface BridgeChannelV1 {

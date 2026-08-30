@@ -3,11 +3,10 @@ import fs from "node:fs";
 
 import { agentRegistry } from "@/lib/agent/registry";
 import { statePath } from "@/lib/configDir";
-import { pageFromEvents, readLifecycleJournal, someMatchingEvent } from "@/lib/lifecycle/journal";
+import { pageFromEvents, readLifecycleJournal } from "@/lib/lifecycle/journal";
 import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessRecord } from "@/lib/lifecycle/liveness";
-import { isTerminalHighSignalEvent } from "@/lib/lifecycle/vocabulary";
 import { canonicalOrchestratorProject, activeOrchestratorSeats, orchestratorSeatFor } from "@/lib/orchestrator/seats";
-import { loadPipelinesForList } from "@/lib/pipelines/store";
+import { loadArchivedPipelines, loadPipelinesForList } from "@/lib/pipelines/store";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
@@ -17,7 +16,16 @@ import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { evidenceFromPipelines, evidenceFromTasks } from "./evidence";
-import { SEAT_TICK_WAKE_INTERVAL_MS } from "./seatTick";
+import { openPullRequestsForRepo, type OpenPullRequestsResult } from "./githubEvidence";
+import { redactBounded } from "./redact";
+import {
+  FINGERPRINT_UNREAD,
+  SEAT_TICK_WAKE_INTERVAL_MS,
+  seatTickSourceGapAfterFailure,
+  seatTickSourceRetryDue,
+  seatTickWakeDue,
+  seatTurnProgressing,
+} from "./seatTick";
 import { effectiveSeatTickSettings, readSeatTickSettings, type SeatTickSettings } from "./seatTickSettings";
 import type { PipelineSummary, TaskSummary } from "./viewerApi";
 import {
@@ -28,8 +36,11 @@ import {
   type SeatTickPipelineInput,
   type SeatTickPolicy,
   type SeatTickProjectState,
+  type SeatTickPullRequestGap,
+  type SeatTickPullRequestInput,
   type SeatTickSeatInput,
   type SeatTickSignalInput,
+  type SeatTickSourceGap,
   type SeatTickTaskInput,
 } from "./types";
 
@@ -44,10 +55,16 @@ import {
  * which is where the answer to "is this turn still moving?" already lives.
  */
 
-/** How much of the lifecycle journal one check carries. The reason a terminal
-    event is never buried by a backlog is {@link SeatTickCheckInput.terminalPending},
-    which is asked over the whole pending range rather than this page. */
+/** How much of the lifecycle journal one check carries. A backlog can no longer
+    bury a live event behind this bound: the history in front of it is sealed
+    away by the check that read it (#1285), so the pages advance at the check
+    interval and cost nothing, rather than at one paid wake apiece. */
 const EVENT_PAGE = 200;
+/** Open pull requests one check reads. Bounds the `gh` answer, not the lanes:
+    a project with more open pull requests than this has other problems. */
+const PULL_REQUEST_LIMIT = 60;
+/** Bounded pull request title carried into a wake item. */
+const PULL_REQUEST_TITLE_LIMIT = 120;
 /** Liveness rows one project's check asks for. */
 const LIVENESS_LIMIT = 60;
 
@@ -148,6 +165,11 @@ export interface SeatTickSources {
   /** Projects that currently hold an active seat. */
   activeSeats: () => string[];
   pipelines: () => readonly Pipeline[];
+  /** Settled lanes the hot store has already let go of (#1289). Cold storage,
+      so it is read only once a check has decided it would pay for a `gh`
+      subprocess anyway — and it has to be read at all because the obligation a
+      finished lane leaves behind outlives the lane's three days of residence. */
+  archivedPipelines: () => readonly Pipeline[];
   tasks: () => BoardTask[];
   registry: () => ReturnType<typeof agentRegistry>;
   /** The registry's own activity verdict — `agent_activity`'s answer, which is
@@ -165,6 +187,14 @@ export interface SeatTickSources {
       an agent just recorded takes effect at the very next check rather than at
       the next deploy. A project nobody configured reads the defaults. */
   settings: (project: string) => SeatTickSettings;
+  /** Open pull requests in the project's repository (#1289), through the same
+      `gh` seam as the proposal source. Read at most once per wake interval, and
+      only for a project that has a finished lane to attribute one to: a
+      subprocess per project per five-minute check would be a cost the tick's
+      whole design is arranged to avoid. Answers with a result rather than a
+      list, because "no pull request is open" and "nobody could be asked" are
+      the two facts this reason must never confuse. */
+  openPullRequests: (options: { cwd: string; limit: number }) => Promise<OpenPullRequestsResult>;
   /** Whether the layer holding a retained wake still has it, and whether the
       seat ever got it. The tick's stamps move on this answer and nothing else. */
   wakeState: (wake: SeatTickOutstandingWake) => Promise<SeatTickWakeState>;
@@ -179,6 +209,7 @@ export function defaultSeatTickSources(): SeatTickSources {
     seatFor: orchestratorSeatFor,
     activeSeats: () => activeOrchestratorSeats().map((seat) => seat.project),
     pipelines: () => loadPipelinesForList(),
+    archivedPipelines: () => loadArchivedPipelines(),
     tasks: () => loadTasks(),
     registry: () => agentRegistry(),
     liveness: async (request) => {
@@ -200,6 +231,7 @@ export function defaultSeatTickSources(): SeatTickSources {
       }
     },
     settings: (project) => readSeatTickSettings(project),
+    openPullRequests: (options) => openPullRequestsForRepo(options),
     /* One rule for both halves: ask, and act on, the layer that is actually
        holding the payload. A send the runtime host queued belongs to the runtime
        host — the registry row beside it is a mirror, and settling a mirror stops
@@ -249,6 +281,18 @@ export function defaultSeatTickSources(): SeatTickSources {
  */
 function isOpen(pipeline: Pipeline): boolean {
   return !pipeline.closedAt && !pipeline.hiddenAt && pipeline.state !== "completed" && pipeline.state !== "closed";
+}
+
+/**
+ * A lane that RAN and reached the end, which is the only kind whose pull
+ * request is an obligation (#1289).
+ *
+ * A hidden record is excluded on the same reasoning as {@link isOpen}: a
+ * discarded draft never ran, so nothing it names was ever published and there
+ * is nothing for it to have left behind.
+ */
+function isFinished(pipeline: Pipeline): boolean {
+  return !pipeline.hiddenAt && (!!pipeline.closedAt || pipeline.state === "completed" || pipeline.state === "closed");
 }
 
 /** The projection `evidence.ts` correlates on, built in-process rather than
@@ -391,9 +435,18 @@ function seatStalled(activity: SeatTickActivity): boolean {
 
 /** The repository a project's `gh` reads run in: the newest pipeline that named
     one. Null when nothing ever did, and the proposal then ranks the board alone. */
-export function repoDirForProject(project: string, sources: SeatTickSources): string | null {
+export function repoDirForProject(
+  project: string,
+  sources: SeatTickSources,
+  /** Lanes the caller has already read out of cold storage. A project whose
+      every lane has been archived still has a repository, and asking `gh`
+      nothing because the hot store happens to be empty is the same silence
+      read off a different shelf (#1289). Never read here on its own: the
+      caller pays for the archive when it has already decided to. */
+  archived: readonly Pipeline[] = [],
+): string | null {
   const canonical = canonicalOrchestratorProject(project);
-  const named = sources.pipelines()
+  const named = [...sources.pipelines(), ...archived]
     .filter((pipeline) => pipeline.repoDir && canonicalOrchestratorProject(pipeline.project) === canonical)
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
   return named[0]?.repoDir ?? null;
@@ -411,11 +464,31 @@ export function repoDirForProject(project: string, sources: SeatTickSources): st
  * reason back, and while it was missing from here the guard held the reason
  * suppressed with the card's movement invisible to it.
  */
-function changeFingerprint(pipelines: readonly SeatTickPipelineInput[], tasks: readonly SeatTickTaskInput[]): string {
-  const parts = [
+function changeFingerprint(
+  pipelines: readonly SeatTickPipelineInput[],
+  tasks: readonly SeatTickTaskInput[],
+  pullRequests: readonly SeatTickPullRequestInput[],
+  pullRequestsUnavailable: SeatTickPullRequestGap | null,
+): string {
+  const board = [
     ...pipelines.map((pipeline) => `p:${pipeline.id}:${pipeline.state}:${pipeline.updatedAt ?? ""}`),
     ...tasks.map((task) => `t:${task.id}:${task.status}:${task.owned}:${task.updatedAt ?? ""}`),
   ].sort();
+  /* The set of unmerged pull requests, for the same reason the card's movement
+     instant is in the half above: it decides a wake reason, so a guard keyed on
+     less than it would hold the reason suppressed while a SECOND pull request
+     went unmerged behind the first. A merge or a close removes the row, which is
+     what lets the guard reset the moment the seat acts.
+
+     Its own half, because a read that FAILED contributes the same nothing a
+     merge does and the guard must not read one as the other (#1298). An
+     unreadable source says `unread` here and the guard declines to conclude
+     anything from this half at all. */
+  const open = pullRequests.map((pullRequest) => `pr:${pullRequest.number}:${pullRequest.pipelineId}`).sort();
+  return `${digest(board)}.${pullRequestsUnavailable ? FINGERPRINT_UNREAD : digest(open)}`;
+}
+
+function digest(parts: readonly string[]): string {
   return crypto.createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32);
 }
 
@@ -449,8 +522,9 @@ export function seatTickProjects(sources: SeatTickSources): string[] {
 function eventsSince(
   project: string,
   cursor: number | null,
+  openPipelineIds: ReadonlySet<string>,
   sources: SeatTickSources,
-): { events: SeatTickEventInput[]; terminalPending: boolean; cursor: number } {
+): { events: SeatTickEventInput[]; cursor: number } {
   const journal = sources.lifecycleJournal();
   /* `lastSeq` is the head the journal maintains; the newest event's seq is the
      same number written a second way, and taking the larger keeps a head that
@@ -463,9 +537,8 @@ function eventsSince(
      records — four-day-old merges listed as work, with ninety-three more items
      held back. The seal is written once and only once; from then on the cursor
      is the seat's, and it moves only when a wake lands. */
-  if (cursor === null) return { events: [], terminalPending: false, cursor: head };
-  const query = { project, afterSeq: cursor };
-  const page = pageFromEvents(journal, { ...query, limit: EVENT_PAGE });
+  if (cursor === null) return { events: [], cursor: head };
+  const page = pageFromEvents(journal, { project, afterSeq: cursor, limit: EVENT_PAGE });
   return {
     events: page.events.map((event) => ({
       seq: event.seq,
@@ -473,10 +546,184 @@ function eventsSince(
       type: event.type,
       summary: event.summary,
       pipelineId: event.pipelineId,
+      /* An open lane is always in the hot store; the archive only ever takes
+         SETTLED records. So a pipeline id the store no longer lists names a
+         lane that ended long enough ago to have been archived, and reading it
+         as terminal is the same answer arrived at from the other side. An event
+         that names no pipeline is never terminal here — nothing about a deploy
+         outcome or a held delivery has finished (#1285). */
+      pipelineTerminal: event.pipelineId !== null && !openPipelineIds.has(event.pipelineId),
     })),
-    terminalPending: someMatchingEvent(journal, query, (event) => isTerminalHighSignalEvent(event.type)),
     cursor,
   };
+}
+
+/**
+ * Pull requests the project's finished lanes left open (#1289).
+ *
+ * The correlation is the lane's own branch against the pull request's head
+ * ref — durable on both sides, and the only tie that survives the lane being
+ * closed, its worktree being removed and its host being reaped.
+ *
+ * The bounds keep it cheap and keep it from becoming a route around the hourly
+ * wake. It is read only when a wake could actually be raised from it — the tick
+ * is on for this project, the interval has elapsed, there is a seat to wake and
+ * its turn is not already moving — only when the project has a finished lane to
+ * attribute one to, and only when some pipeline named a repository to ask in.
+ * Each of those is an answer: this check would raise no wake from this reason
+ * whatever GitHub said. A read that FAILED is not an answer, and leaves with
+ * {@link SeatTickPullRequestGap} rather than an empty list.
+ *
+ * One more bound joined them (#1298): a source that has been failing for longer
+ * than a whole wake interval is asked once per interval rather than once per
+ * check. That one saves a subprocess and nothing else — the failure it already
+ * established is replayed on every check in between, so no check between two
+ * attempts is entitled to a conclusion the attempt would have denied it. The
+ * bound covers BOTH reads below, because either of them can be the one that is
+ * permanently broken; where each is gated is decided in the body, by what a
+ * fresh read of that source on that check would have produced.
+ *
+ * The lanes come from the hot store AND the archive, because the obligation is
+ * the pull request still being open and that outlives the lane's three days of
+ * residence. Reading only the hot store made the reason decay on a timer: a
+ * tick switched off, a seat busy for days, or a `gh` unreachable until the lane
+ * settled out all arrive at the first eligible check with nothing to attribute
+ * a pull request to, and report quiet over one still sitting open — the same
+ * twelve-hour silence #1289 exists to end, taken slowly. The retry guard does
+ * not cover the gap either: it counts wakes that changed nothing, and a wake
+ * that was never sent has nothing to count. The archive is cold storage, so it
+ * is read only after every cheap gate above has passed, at which point the
+ * check has already committed to a `gh` subprocess and a snapshot read is the
+ * cheaper half of the pair.
+ */
+interface PullRequestEvidence {
+  pullRequests: SeatTickPullRequestInput[];
+  /** Null means the question was answered — including answered with nothing
+      open, which is what the tick is entitled to go quiet on. */
+  unavailable: SeatTickPullRequestGap | null;
+  /** The source's run of failures as this check leaves it (#1298). Carried on
+      the row so the next check knows whether this is weather or configuration,
+      and so a standing outage is reported once rather than every five minutes. */
+  gap: SeatTickSourceGap | null;
+}
+
+async function unmergedPullRequests(context: {
+  project: string;
+  seat: SeatTickSeatInput | null;
+  wakeDue: boolean;
+  enabled: boolean;
+  now: number;
+  wakeIntervalMs: number;
+  /** What the previous checks made of this source. */
+  gap: SeatTickSourceGap | null;
+  sources: SeatTickSources;
+}): Promise<PullRequestEvidence> {
+  /* Nothing was asked, so nothing is concluded — and the run of failures is
+     left exactly as it stands. A gate is a statement about this check, never
+     about whether the source can be read. */
+  const unasked: PullRequestEvidence = { pullRequests: [], unavailable: null, gap: context.gap };
+  if (!context.wakeDue || !context.enabled) return unasked;
+  /* The other two ways a check can be unable to raise any reason at all: a
+     project with nobody to wake ends in `no-seat`, and a seat whose turn is
+     genuinely moving ends in `skipped`, both before a wake reason is composed.
+     Without this clause a seat that stays busy for hours pays a `gh` subprocess
+     every five minutes for the whole turn, to answer a question that check was
+     never going to ask. */
+  if (!context.seat || seatTurnProgressing(context.seat)) return unasked;
+
+  const at = new Date(context.now).toISOString();
+  const failed = (kind: SeatTickPullRequestGap): PullRequestEvidence => ({
+    pullRequests: [],
+    unavailable: kind,
+    gap: seatTickSourceGapAfterFailure(context.gap, kind, at),
+  });
+
+  /* The archive is an evidence source too, and a permanent failure of it has to
+     be bounded by the same backoff (#1298). A lane store that can never be read
+     — the snapshot is corrupt, its directory is gone — failed on every check
+     five minutes apart for as long as no delivered wake moved the hourly stamp,
+     which is exactly the unbounded retry the backoff below exists to stop.
+     Standing failures of this class are asked at the wake interval, and the
+     fresh failures inside the first interval still retry at every check.
+
+     Its gate is HERE rather than beside the one below, and the difference is
+     what a fresh read would have produced. The gates in between say this check
+     had nothing to ask — no finished lane, no repository — and are themselves
+     read out of the archive, so a check that cannot enumerate the lanes cannot
+     reach any of them: a fresh read fails on this very line and reports the gap
+     unconditionally. Replaying it above them is therefore the same verdict, not
+     a gap outliving its question. */
+  const standing = context.gap;
+  if (standing?.gap === "lanes-unreadable" && !seatTickSourceRetryDue(standing, context.now, context.wakeIntervalMs)) {
+    return { pullRequests: [], unavailable: standing.gap, gap: standing };
+  }
+
+  let archived: readonly Pipeline[];
+  try {
+    archived = context.sources.archivedPipelines();
+  } catch {
+    /* Lanes half-read are obligations half-seen, and an obligation that cannot
+       be seen is exactly what gets reported as quiet. */
+    return failed("lanes-unreadable");
+  }
+  const finished = [...context.sources.pipelines(), ...archived]
+    .filter((pipeline) => canonicalOrchestratorProject(pipeline.project) === context.project && isFinished(pipeline));
+  if (finished.length === 0) return unasked;
+  const cwd = repoDirForProject(context.project, context.sources, archived);
+  if (!cwd) return unasked;
+
+  /* The same bound for the `gh` read: a source that has been unreadable for
+     longer than a whole wake interval is asked at that interval and no faster
+     (#1298). The gap it already produced is replayed in between, so every check
+     still refuses to call this quiet — what the backoff saves is the `gh`
+     subprocess, never a conclusion.
+
+     It sits BELOW the two gates above, because a replayed gap must not outlive
+     the question it answers. Each of those gates is this check finding there is
+     nothing to ask: no finished lane left anything open, or the project has no
+     repository to ask about. A fresh read on such a check reports no gap at all,
+     so replaying one above them would name an unreadable source for the rest of
+     the backoff window on a check that would have succeeded trivially, and would
+     refuse a quiet the evidence allows. Everything between the gates and here is
+     a local read; the subprocess below is the only thing THIS gate saves. */
+  if (context.gap && !seatTickSourceRetryDue(context.gap, context.now, context.wakeIntervalMs)) {
+    return { pullRequests: [], unavailable: context.gap.gap, gap: context.gap };
+  }
+
+  let result: OpenPullRequestsResult;
+  try {
+    /* The seam answers with a result; a seam that throws instead is the same
+       fact arriving by exception, and neither is an empty list. */
+    result = await context.sources.openPullRequests({ cwd, limit: PULL_REQUEST_LIMIT });
+  } catch {
+    result = { ok: false, unavailable: "command-failed" };
+  }
+  if (!result.ok) return failed(result.unavailable);
+  const open = result.pullRequests;
+  const byBranch = new Map<string, Pipeline>();
+  for (const pipeline of finished) {
+    if (!pipeline.branch) continue;
+    /* Two lanes on one branch is a relaunch: the newest is the one whose
+       finishing left the pull request open. */
+    const held = byBranch.get(pipeline.branch);
+    if (!held || Date.parse(pipeline.createdAt) > Date.parse(held.createdAt)) byBranch.set(pipeline.branch, pipeline);
+  }
+  const found: SeatTickPullRequestInput[] = [];
+  for (const pullRequest of open) {
+    const lane = byBranch.get(pullRequest.headRefName);
+    if (!lane) continue;
+    found.push({
+      number: pullRequest.number,
+      title: redactBounded(pullRequest.title, PULL_REQUEST_TITLE_LIMIT),
+      pipelineId: lane.id,
+      pipelineTitle: redactBounded(lane.task.split("\n")[0] ?? "", PULL_REQUEST_TITLE_LIMIT),
+      updatedAt: pullRequest.updatedAt,
+    });
+  }
+  /* An answer, so the run of failures is over: the source spoke, whatever it
+     said. This is the only thing that clears the row, which is what makes the
+     next outage a fresh run with its own report. */
+  return { pullRequests: found.sort((left, right) => left.number - right.number), unavailable: null, gap: null };
 }
 
 export async function gatherSeatTickInput(
@@ -487,6 +734,7 @@ export async function gatherSeatTickInput(
 ): Promise<SeatTickCheckInput> {
   const now = sources.now();
   const canonical = canonicalOrchestratorProject(project);
+  const settings = effectiveSeatTickSettings(sources.settings(canonical), now, SEAT_TICK_WAKE_INTERVAL_MS);
   const seat = await seatInput(canonical, policy, sources);
 
   const openLanes = sources.pipelines().filter((pipeline) => isOpen(pipeline) && canonicalOrchestratorProject(pipeline.project) === canonical);
@@ -514,8 +762,26 @@ export async function gatherSeatTickInput(
     updatedAt: task.updatedAt ?? null,
   }));
 
-  const { events, terminalPending, cursor } = eventsSince(canonical, state.eventsThrough, sources);
-  const settings = effectiveSeatTickSettings(sources.settings(canonical), now, SEAT_TICK_WAKE_INTERVAL_MS);
+  /* The open set spans EVERY project, not this one's lanes: an event is history
+     because its own lane finished, and reading a lane from another project as
+     terminal because it is not in this project's slice would be the same claim
+     made about the wrong pipeline. */
+  const openPipelineIds = new Set(sources.pipelines().filter(isOpen).map((pipeline) => pipeline.id));
+  const { events, cursor } = eventsSince(canonical, state.eventsThrough, openPipelineIds, sources);
+  const { pullRequests, unavailable: pullRequestsUnavailable, gap: pullRequestGap } = await unmergedPullRequests({
+    project: canonical,
+    seat,
+    /* The same clause the decision applies, asked here because the read behind
+       it is a subprocess: a reason that cannot be raised this check is a reason
+       whose evidence is not worth fetching. The decision applies the bound
+       again on its own terms — this is a cost gate, never the bound itself. */
+    wakeDue: seatTickWakeDue(state.lastWakeAt, now, settings.wakeIntervalMs),
+    enabled: settings.enabled,
+    now,
+    wakeIntervalMs: settings.wakeIntervalMs,
+    gap: state.pullRequestGap,
+    sources,
+  });
 
   return {
     project: canonical,
@@ -524,13 +790,18 @@ export async function gatherSeatTickInput(
     pipelines,
     tasks,
     events,
-    terminalPending,
+    pullRequests,
+    pullRequestsUnavailable,
     signals: signals(canonical, seat, sources),
-    changeFingerprint: changeFingerprint(pipelines, tasks),
+    changeFingerprint: changeFingerprint(pipelines, tasks, pullRequests, pullRequestsUnavailable),
     /* The sealed cursor travels on the state the decision carries forward, so a
        check of any verdict — a skip included, which remembers nothing else —
-       persists where the journal stood when the tick first saw this project. */
-    state: { ...state, eventsThrough: cursor },
+       persists where the journal stood when the tick first saw this project.
+       The source's run of failures rides out the same way (#1298): the gather
+       is what attempted the read, so the gather is what records what became of
+       it, and the decision reads that row to know whether this is the outage
+       worth putting on the board. */
+    state: { ...state, eventsThrough: cursor, pullRequestGap },
     policy,
     settings,
   };

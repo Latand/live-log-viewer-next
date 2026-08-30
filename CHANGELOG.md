@@ -8,6 +8,40 @@ guarantees for the 1.x series.
 ## [Unreleased]
 
 ### Added
+- The Viewer installs and runs on native Windows, with the process backend,
+  paths, termination and CLI that requires (#1201, phase 1 of the merged
+  `docs/design/windows-support.md`). The `os` field no longer refuses a Windows
+  install. Process discovery gets a third backend beside `/proc` and
+  `ps`/`lsof`: one `Get-CimInstance Win32_Process` snapshot per five seconds for
+  pids, lineage, command lines and working set, and two values read from the
+  kernel through FFI — the process creation time, which is the identity token,
+  and each agent's working directory, read out of its own process parameters
+  because Windows has no other route to it and a process with no known working
+  directory is not shown at all. Identity is what pid reuse makes load-bearing
+  here, and Windows reuses a pid within seconds, so it comes from
+  `GetProcessTimes` rather than from anything that merely differs between two
+  processes. Termination replaces the process-group signal with a walk of the
+  parent tree, descendants first, each member's identity re-checked immediately
+  before it is killed; a parent link whose parent started after its own child is
+  dropped as the stale link it is. The runtime host listens on a named pipe
+  instead of a Unix socket, and its singleton fence keeps its file and its
+  kernel-released lock by way of `LockFileEx`. `HOME` is ignored on Windows,
+  where it is not a Windows variable and a Git Bash value resolves to nothing.
+  The CLI opens a browser through `rundll32` with no shell in the way.
+
+  Nobody working on this repository has a Windows machine, so none of the above
+  is a claim: a new `platform-tests.yml` runs the process backend, the endpoint,
+  the fence, the tree kill, the path handling and the launcher on
+  `windows-latest`, refuses a runner that is not Windows, and fails when any
+  kernel reader returns nothing — the same shape as the `macos-identity` job
+  that exists because nobody here has a Mac. Its Ubuntu leg runs the identical
+  file list, which is what makes "Linux is unchanged" witnessed rather than
+  asserted. What Windows does not get in this phase is written down in the
+  README, including the two grouping recognisers that stop resolving a
+  repository there and what they resolve to instead. The job earned its keep
+  immediately: it caught the fence refusing to create its own file on a fresh
+  machine, a process identity that outlived the process it named, and a CLI that
+  could not find its own server from a checkout.
 - The Viewer ticks the orchestrator seat, so a rotation stops dropping the
   monitor (#1245). The monitor that had been driving orchestrator sessions was
   never a feature: it was a schedule an agent armed inside its own session, so
@@ -49,6 +83,99 @@ guarantees for the 1.x series.
   re-designation nor a migrated id leaves a revoked seat protected. Everything
   protecting work in flight is unchanged: the turn still has to settle,
   questions still have to be answered, the queue still has to drain.
+
+### Fixed
+- The documented release path works as written (#1309). The deploy protocol
+  named a wrapper command that is not installed on this machine and a
+  fast-forward-only pull before the release, and the pull was wrong in its own
+  right: `scripts/rebuild.sh` reads nothing from the working tree — it posts a
+  revision, and the runtime host builds that revision from its own canonical Git
+  mirror — so the pull only disturbed whatever branch the operator had checked
+  out. Every place that documents the release now names the plain
+  `scripts/rebuild.sh` invocation from any checkout, a worktree included, and
+  says where the revision is built from. The script itself advertised, defaulted
+  to and validated `origin/main` as a CLI sentinel, then resolved it before
+  posting because `POST /api/runtime/deployments` accepts no such `revision`
+  value. It now takes a full commit SHA in either case or, when no argument or
+  `LLV_DEPLOY_REVISION` override is present, resolves the canonical
+  `refs/heads/main` tip. Explicit SHAs are posted lowercase, and `git ls-remote`
+  fetches nothing into the checkout and moves no ref in it. The refusal also used
+  to arrive underneath `deployment key: …`, so a request that deployed nothing
+  read like a deployment that had started: nothing that reads as a started
+  deployment is printed now until the endpoint has returned a valid receipt, and
+  a refused request prints its error and exits non-zero.
+- Whether a turn is being worked on is decided from evidence, so a redeploy no
+  longer strands a lane nothing can recover (#1281, #1282, #1276). `live`,
+  `idle` and `busy` are inherited words: a turn severed mid-flight kept reading
+  busy forever, and a step that legitimately takes ten minutes read stalled. The
+  decision now names what it read — the last transcript event and its kind, the
+  artifact's own clock, whether the process the registry believes owns the turn
+  still exists and is still that process, the CPU it has consumed since its own
+  launch, and how long a delivery has been outstanding for it. A host writing or
+  burning CPU is working however long the gap between messages; a host that has
+  written nothing and burned none since its own launch, under a turn it
+  inherited, is severed. Everything else answers `unknown`, and `unknown`
+  authorises nothing. A transcript that cannot be read — corrupt, truncated,
+  missing, or growing under the read — is answered before anything else is
+  looked at, the recorded process included: a pid that is gone proves that pid
+  is not running, which is just as true of a turn that finished hours ago under
+  a row nobody updated as of one cut off mid-work, and only the transcript tells
+  those apart. The cost of guessing is not symmetric — a kill lands the same way
+  either way, but a retry re-runs work that may already be complete and a
+  continuation nudge re-prompts a seat about a turn that is over — so the
+  reading stops there and consumers are handed `unknown`. The registry's own
+  `busy` or `terminal` word is never borrowed to fill the gap, and a pid whose
+  recorded start identity cannot be revalidated is not evidence about the
+  process the row was written about either. Two consequences follow. A pipeline stage whose host
+  is proven severed leaves `running`, so `retry-stage` works without closing the
+  pipeline — and a stage whose evidence is unreadable keeps its attempt instead.
+  A kill on a host no delivery controller owns reaps the recorded process —
+  fenced on its start identity, and only once the evidence says severed — so the
+  registry row can retire instead of refusing forever and blocking every message
+  queued behind it; an interrupt in the same state settles rather than holding
+  its conversation's drain open.
+- A Viewer restart messages only the orchestrator seats whose own turn was
+  severed (#1276). The predicate was `live` or `idle`, and `idle` meant every
+  dormant project was re-hosted and spent a paid turn answering "no change" on
+  every redeploy — eleven seats, eleven hosts, eleven turns, and fresh activity
+  stamped on projects nobody had touched in days. A seat is now nudged only when
+  the evidence says a turn of its own was cut off, the surviving message names
+  that turn by its last transcript event, and an idle seat gets no message and
+  no process. The message no longer asks the seat to "re-arm any scheduled
+  work": since #1245 the Viewer owns the clock, and a durable agent-managed
+  monitor record is tracked in #1280.
+- A boot that cannot read a transcript starts nothing and retires nothing for it
+  (#1281). A tail read that comes back uncertain makes no observation, so the
+  conversation kept the turn word the last writer left on the row — and that
+  word launched a CLI process for the turn and, on Codex, spent a paid
+  continuation telling the seat to resume it, for a turn that may have ended
+  long ago. Such a row is now left exactly as it is: no host is launched from
+  it, no continuation is sent, and it is held out of the demotion that retires
+  skipped hosts, so whatever can read the artifact next is what decides. Work
+  that is owed regardless still boots its host — a held delivery or a pending
+  runtime operation is evidence of its own.
+- Startup launches no structured host it cannot hand to a delivery controller
+  (#1282). A pass with no runtime client has no publication to claim what it
+  starts, and the check that catches an unclaimed host was behind that same
+  condition, so such a pass adopted hosts and reported success while nothing
+  owned them. Such a pass now defers its adoption: nothing is launched, the
+  boot's own recovery evidence is kept, and the startup retry loop runs the pass
+  again once a client exists. A host adopted by a pass that did have one, but
+  which the controller never claimed, still fails the pass instead of being left
+  running with no owner. And a startup completion that resumes
+  inside a generation the publication has already left now hands its hosts to
+  the successor; it used to answer "done" and register nothing, which is how a
+  launched host ends up parked in `epoll_wait` for half an hour while every
+  recovery verb is refused.
+- The macOS argv reader's live-child test waits for the child to announce its
+  exec before it reads. A pid exists before the image it will run does, and
+  until the exec lands the kernel has no argument record for that image to hand
+  back — the window the Claude login fence already polls through. The test read
+  the moment `spawn` returned, so it asserted the result of a race, and one CI
+  attempt lost it while the next attempt on the identical commit won: a red the
+  tree could not explain. The read now happens after a byte only the executed
+  script can have written. What the test requires is unchanged — one read, the
+  exact exec-time argv of a live child, and `null` once that child is gone.
 
 ### Removed
 - The conversation monitor's standalone CLI driver, its HTTP client and its

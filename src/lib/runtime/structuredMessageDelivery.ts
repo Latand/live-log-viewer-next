@@ -61,7 +61,11 @@ export interface StructuredMessageRequest {
 
 export type StructuredMessageResult =
   | { ok: true; structured: true; target: string | null; outcome: "queued" | "delivering" | "delivered"; operationId: string; receipt: RuntimeOperationReceipt; spawned?: boolean }
-  | { ok: true; structured: true; target: string | null; outcome: "held"; spawned?: boolean }
+  /* #1131: `held` is an ACCEPTED send — it has a durable reservation and an
+     operation id — so it answers with that id like every other accepted send.
+     Without it a hold was the one acceptance a caller could never ask about
+     afterwards, which put `queued` back at the end of the story. */
+  | { ok: true; structured: true; target: string | null; outcome: "held"; operationId: string; spawned?: boolean }
   | { ok: false; structured: true; outcome: "failed"; error: string; status: number; operationId?: string; receipt?: RuntimeOperationReceipt; successorConversationId?: string; transportUncertain?: true };
 
 export interface StructuredMessageDependencies {
@@ -324,6 +328,7 @@ function holdDuringRuntimeSynchronization(
       structured: true,
       target: conversation.id,
       outcome: "held",
+      operationId: reservation.command.operationId,
     };
   } catch (error) {
     return deliveryFailure(error);
@@ -822,6 +827,7 @@ export async function enqueueStructuredMessage(
         structured: true,
         target: recoveredHost ? null : conversation.id,
         outcome: "held",
+        operationId: reservation.command.operationId,
         ...(recoveredHost ? { spawned: true } : {}),
       };
     }
@@ -840,6 +846,7 @@ export async function enqueueStructuredMessage(
         structured: true,
         target: conversation.id,
         outcome: "held",
+        operationId: reservation.command.operationId,
       };
     }
     if (reservation.state === "assigned" && reservation.generationId) {
@@ -852,6 +859,7 @@ export async function enqueueStructuredMessage(
           structured: true,
           target: recoveredHost ? null : conversation.id,
           outcome: "held",
+          operationId: reservation.command.operationId,
           ...(recoveredHost ? { spawned: true } : {}),
         };
       }

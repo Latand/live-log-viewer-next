@@ -11,7 +11,7 @@ process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
 process.env.TMPDIR = path.join(SANDBOX, "tmp");
 fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
-const { githubEvidenceSource, openIssuesForProposal } = await import("./githubEvidence");
+const { githubEvidenceSource, openIssuesForProposal, openPullRequestsForRepo } = await import("./githubEvidence");
 const { evidenceFromGithub } = await import("./evidence");
 
 afterAll(() => {
@@ -81,6 +81,93 @@ describe("open issues for the proactive slot", () => {
     expect(await openIssuesForProposal({ cwd: "/srv/repo", run: async () => { throw new Error("gh: command not found"); } })).toEqual([]);
     expect(await openIssuesForProposal({ cwd: "/srv/repo", run: async () => "not json" })).toEqual([]);
     expect(await openIssuesForProposal({ cwd: "/srv/repo", run: async () => "{}" })).toEqual([]);
+  });
+
+  test("open pull requests are read with the head branch that ties one to a lane (#1289)", async () => {
+    const calls: string[][] = [];
+    const pullRequests = await openPullRequestsForRepo({
+      cwd: "/srv/repo",
+      run: async (args) => {
+        calls.push(args);
+        return JSON.stringify([
+          { number: 1289, title: "wake on a merge that is waiting", headRefName: "topic-merge-queue", updatedAt: "2026-08-29T10:00:00Z" },
+          { number: 1285, title: "stop replaying closed lanes", headRefName: "topic-closed-lanes", updatedAt: null },
+        ]);
+      },
+    });
+    expect(calls[0]).toEqual(["pr", "list", "--state", "open", "--limit", "60", "--json", "number,title,headRefName,updatedAt"]);
+    expect(pullRequests).toEqual({
+      ok: true,
+      pullRequests: [
+        { number: 1289, title: "wake on a merge that is waiting", headRefName: "topic-merge-queue", updatedAt: "2026-08-29T10:00:00Z" },
+        { number: 1285, title: "stop replaying closed lanes", headRefName: "topic-closed-lanes", updatedAt: null },
+      ],
+    });
+    /* Read-only, like every other question asked of this seam. */
+    expect(calls.flat()).not.toContain("merge");
+  });
+
+  /* Dropping the unusable row was the same collapse by a shorter route: one
+     row nobody can attribute to a lane turned a nonempty answer into an empty
+     one, and an empty one is the claim that everything merged. */
+  test("a single row with no head branch is malformed output, never a repository with nothing open", async () => {
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => JSON.stringify([{ number: 1289 }]) }))
+      .toEqual({ ok: false, unavailable: "malformed-output" });
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => JSON.stringify([{ title: "no number", headRefName: "topic" }]) }))
+      .toEqual({ ok: false, unavailable: "malformed-output" });
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => JSON.stringify(["a string"]) }))
+      .toEqual({ ok: false, unavailable: "malformed-output" });
+  });
+
+  /* And the mixed array, which is the case the skip hid best: the valid rows
+     make the answer look like a real one while the dropped row is exactly the
+     pull request that might still be open. */
+  test("one unusable row among valid ones fails the whole read rather than shortening it", async () => {
+    const mixed = JSON.stringify([
+      { number: 1289, title: "kept", headRefName: "topic-merge-queue" },
+      { number: 1290, title: "no head" },
+    ]);
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => mixed }))
+      .toEqual({ ok: false, unavailable: "malformed-output" });
+  });
+
+  /* The other edge of the same rule, so refusing the unusable row does not
+     grow into refusing a usable one: the number and the head branch are what
+     attribute a pull request to a lane, and a row carrying both is read even
+     with the two decorative fields missing. A read that failed over a missing
+     title would be a `gh` outage invented out of a complete answer. */
+  test("a row with a number and a head branch is read even with no title and no timestamp", async () => {
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => JSON.stringify([{ number: 1289, headRefName: "topic" }]) }))
+      .toEqual({ ok: true, pullRequests: [{ number: 1289, title: "", headRefName: "topic", updatedAt: null }] });
+  });
+
+  /* The distinction the whole reason rests on: a repository with everything
+     merged answers, and answering is what makes the tick's silence mean
+     something. An empty ANSWER is still an answer. */
+  test("a repository with nothing open answers, rather than failing to answer", async () => {
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => "[]" })).toEqual({ ok: true, pullRequests: [] });
+  });
+
+  /* And its mirror image: none of these establishes that a pull request
+     merged, so none of them may be handed on as the empty list that says so. */
+  test("a gh that cannot answer is carried as a failure, never as an empty list", async () => {
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => { throw new Error("gh: command not found"); } }))
+      .toEqual({ ok: false, unavailable: "command-failed" });
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => "not json" }))
+      .toEqual({ ok: false, unavailable: "malformed-output" });
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => "{}" }))
+      .toEqual({ ok: false, unavailable: "malformed-output" });
+  });
+
+  /* `execFile` reports the timeout it enforces as a killed child, and an
+     outage reads differently from a misconfiguration to whoever is holding the
+     journal line. */
+  test("a gh killed at its timeout is named as a timeout", async () => {
+    const killed = Object.assign(new Error("Command failed"), { killed: true, signal: "SIGTERM" });
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => { throw killed; } }))
+      .toEqual({ ok: false, unavailable: "timed-out" });
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => { throw Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }); } }))
+      .toEqual({ ok: false, unavailable: "timed-out" });
   });
 
   test("a row without a usable number is dropped rather than ranked as issue zero", async () => {

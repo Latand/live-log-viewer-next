@@ -13,9 +13,10 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
 const { gatherSeatTickInput, repoDirForProject, runtimeWakeState, seatTickProjects, withdrawRuntimeWake } = await import("./seatTickSources");
 import type { SeatTickSources } from "./seatTickSources";
-const { DEFAULT_SEAT_TICK_POLICY, seatTickDecision } = await import("./seatTick");
+const { DEFAULT_SEAT_TICK_POLICY, seatTickBoardMoved, seatTickDecision, seatTickWakeCommit } = await import("./seatTick");
 const { defaultSeatTickSettings } = await import("./seatTickSettings");
 import type { AgentLivenessRecord } from "@/lib/lifecycle/liveness";
+import type { OpenPullRequest, OpenPullRequestsUnavailable } from "./githubEvidence";
 import type { LifecycleEvent, LifecycleJournalFile } from "@/lib/lifecycle/journal";
 import { emptySeatTickState, type SeatTickProjectState } from "./types";
 
@@ -133,11 +134,28 @@ function sources(over: {
   latestDeployment?: ReturnType<SeatTickSources["latestDeployment"]>;
   settings?: ReturnType<SeatTickSources["settings"]>;
   livenessCalls?: { project?: string; conversationId?: string; stallAfterMs: number }[];
+  openPullRequests?: OpenPullRequest[];
+  pullRequestCalls?: { cwd: string; limit: number }[];
+  pullRequestsThrow?: boolean;
+  pullRequestsUnavailable?: OpenPullRequestsUnavailable;
+  archivedPipelines?: Record<string, unknown>[];
+  archiveCalls?: number[];
+  archiveThrows?: boolean;
+  noSeat?: boolean;
 }): SeatTickSources {
   return {
-    seatFor: () => ({ active: { conversationId: CONVERSATION, seatEpoch: 7, path: null } as never, pending: null, history: [] }),
+    seatFor: () => ({
+      active: over.noSeat ? null : { conversationId: CONVERSATION, seatEpoch: 7, path: null } as never,
+      pending: null,
+      history: [],
+    }),
     activeSeats: () => [PROJECT],
     pipelines: () => (over.pipelines ?? [lane()]) as never,
+    archivedPipelines: () => {
+      over.archiveCalls?.push(1);
+      if (over.archiveThrows) throw new Error("the archive is unreadable");
+      return (over.archivedPipelines ?? []) as never;
+    },
     tasks: () => (over.tasks ?? []) as never,
     registry: () => ({
       conversation: () => ({ turn: { state: over.seatTurn ?? "idle" } }),
@@ -156,6 +174,12 @@ function sources(over: {
     latestDeployment: () => over.latestDeployment ?? ({ state: "unreadable", error: "no ledger" }) as never,
     retirementReport: () => null,
     settings: () => over.settings ?? defaultSeatTickSettings(PROJECT),
+    openPullRequests: async (options) => {
+      over.pullRequestCalls?.push(options);
+      if (over.pullRequestsThrow) throw new Error("gh is not authenticated");
+      if (over.pullRequestsUnavailable) return { ok: false, unavailable: over.pullRequestsUnavailable };
+      return { ok: true, pullRequests: over.openPullRequests ?? [] };
+    },
     wakeState: async () => "retained",
     withdrawWake: async () => "withdrawn",
     now: () => NOW,
@@ -353,7 +377,7 @@ test("events are read past the tick's own cursor, and reading acknowledges nothi
   const events = [event(10), event(11, { type: "review_verdict", summary: "the round passed" }), event(12)];
   const input = await gather({ events }, withCursor(10));
   expect(input.events.map((entry) => entry.seq)).toEqual([11, 12]);
-  expect(input.terminalPending).toBe(true);
+  expect(input.events.some((entry) => entry.type === "review_verdict")).toBe(true);
   /* Same cursor, same answer: a second read of the same state re-offers them. */
   const again = await gather({ events }, withCursor(10));
   expect(again.events.map((entry) => entry.seq)).toEqual([11, 12]);
@@ -379,7 +403,6 @@ test("a seat with no cursor yet starts at the present, so its first check carrie
   ];
   const input = await gather({ events: history });
   expect(input.events).toEqual([]);
-  expect(input.terminalPending).toBe(false);
   /* And the seal is written down, so the next check pages from it rather than
      re-deciding where the present was. */
   expect(input.state.eventsThrough).toBe(9853);
@@ -391,7 +414,6 @@ test("the seal is the journal head, so everything after the tick began is still 
   const later = [...history, event(9849, { type: "stage_blocked", summary: "the review round is parked" })];
   const second = await gather({ events: later }, first.state);
   expect(second.events.map((entry) => entry.seq)).toEqual([9849]);
-  expect(second.terminalPending).toBe(true);
 });
 
 /* The over-correction the fix must not make. A cursor a previous wake earned is
@@ -446,7 +468,6 @@ test("under a journal the cursor has already passed, only a card that recently m
   /* The journal is full and the check carries none of it, which is the whole
      point of the fixture: what wakes the seat here can only be the board. */
   expect(input.events).toEqual([]);
-  expect(input.terminalPending).toBe(false);
 
   const decision = seatTickDecision(input);
   expect(reasonsOf(decision)).toEqual(["unstarted-task"]);
@@ -514,16 +535,644 @@ test("the deployment signal reports the latest deployment, and stays silent when
   expect(running.signals).toEqual([]);
 });
 
-test("only terminal high-signal events count as pending; routine progress does not", async () => {
-  const input = await gather({ events: [event(10), event(11)] }, withCursor(0));
-  expect(input.events).toHaveLength(2);
-  expect(input.terminalPending).toBe(false);
+/* ------------------------------------------------------------------------- *
+ * #1285: an event whose lane is over, and a backlog of them.
+ * ------------------------------------------------------------------------- */
+
+/** A lane that ran and reached the end, which is what the tick's own store no
+    longer lists as open. */
+function finishedLane(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return lane({
+    id: "pipeline_z9",
+    task: "publish the merge queue",
+    branch: "topic-merge-queue",
+    state: "completed",
+    cursor: null,
+    runs: [],
+    closedAt: new Date(NOW - 14 * 60 * 60_000).toISOString(),
+    ...over,
+  });
+}
+
+test("an event is marked history exactly when its own lane is no longer open", async () => {
+  const input = await gather({
+    pipelines: [lane(), finishedLane()],
+    events: [
+      event(10, { type: "stage_completed", pipelineId: "pipeline_a1", summary: "the builder finished" }),
+      event(11, { type: "stage_completed", pipelineId: "pipeline_z9", summary: "the builder finished" }),
+      /* Archived out of the hot store, which only ever takes settled records. */
+      event(12, { type: "review_verdict", pipelineId: "pipeline_gone", summary: "the round passed" }),
+      /* A deploy outcome names no pipeline, and nothing about it has finished. */
+      event(13, { type: "deploy_failed", pipelineId: null, summary: "the release rolled back" }),
+    ],
+  }, withCursor(9));
+  expect(input.events.map((entry) => entry.pipelineTerminal)).toEqual([false, true, true, false]);
+});
+
+/* The report, end to end: a wake whose every item named a pipeline that had
+   reached a terminal state the day before, and whose entire cost was
+   establishing that nothing was owed on any of them. */
+test("a project whose only pending events belong to finished lanes is quiet, and the look discharges them", async () => {
+  const history = Array.from({ length: 50 }, (_, index) => event(9900 + index, {
+    type: "stage_completed",
+    pipelineId: "pipeline_z9",
+    summary: "the builder finished",
+  }));
+  const input = await gather(
+    { pipelines: [finishedLane()], tasks: [boardCard({ status: "inbox" })], events: history },
+    withCursor(9899, OVERDUE),
+  );
+  expect(input.events).toHaveLength(50);
+
+  const decision = seatTickDecision(input);
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+  /* And no second wake is owed for the same backlog: the cursor is past all
+     fifty on the strength of the one look that read them. */
+  expect(decision.state.eventsThrough).toBe(9949);
+});
+
+/* ------------------------------------------------------------------------- *
+ * #1289: a lane that finished and left its pull request open.
+ * ------------------------------------------------------------------------- */
+
+function openPullRequest(over: Partial<OpenPullRequest> = {}): OpenPullRequest {
+  return {
+    number: 1289,
+    title: "wake on a merge that is waiting",
+    headRefName: "topic-merge-queue",
+    updatedAt: new Date(NOW - 30 * 60_000).toISOString(),
+    ...over,
+  };
+}
+
+test("a finished lane whose branch still has an open pull request is carried, named by its lane", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([{
+    number: 1289,
+    title: "wake on a merge that is waiting",
+    pipelineId: "pipeline_z9",
+    pipelineTitle: "publish the merge queue",
+    updatedAt: new Date(NOW - 30 * 60_000).toISOString(),
+  }]);
+  expect(reasonsOf(seatTickDecision(input))).toEqual(["unmerged-pr"]);
+});
+
+test("a pull request no finished lane produced is not this seat's obligation", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest({ headRefName: "someone-elses-branch" })] },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([]);
+});
+
+/* An open lane's pull request is the lane's business; the lane is already open
+   work and the tick already carries it. The reason is about FINISHING. */
+test("an open lane's pull request raises nothing", async () => {
+  const input = await gather(
+    { pipelines: [lane({ branch: "topic-merge-queue" })], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([]);
+});
+
+/* A discarded draft never ran, so it published nothing and left nothing behind
+   (#1274 draws the same line for open lanes). */
+test("a hidden lane leaves no pull request behind it", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const input = await gather(
+    {
+      pipelines: [finishedLane({ hiddenAt: new Date(NOW - 60_000).toISOString(), state: "closed" })],
+      openPullRequests: [openPullRequest()],
+      pullRequestCalls: calls,
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([]);
+  expect(calls).toEqual([]);
+});
+
+/* The read is a subprocess, so it happens only where a wake could come of it. */
+test("the pull request read is skipped entirely until the wake interval has elapsed", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const early = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()], pullRequestCalls: calls },
+    withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString() }),
+  );
+  expect(calls).toEqual([]);
+  expect(early.pullRequests).toEqual([]);
+
+  await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()], pullRequestCalls: calls },
+    withCursor(0, OVERDUE),
+  );
+  expect(calls).toEqual([{ cwd: "/srv/repo", limit: 60 }]);
+});
+
+/* The same rule as the clause above, applied to the other two ways a check
+   ends before any wake reason is composed. A seat mid-turn is the expensive
+   one: a turn that runs for hours would otherwise pay a subprocess at every
+   five-minute check for its whole length. */
+test("a check whose seat is already mid-turn asks GitHub nothing", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const input = await gather(
+    {
+      pipelines: [finishedLane()],
+      openPullRequests: [openPullRequest()],
+      pullRequestCalls: calls,
+      seatTurn: "busy",
+      seatRows: [livenessRow({ lifecycle: "running", reason: "host_alive_turn_active" })],
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(calls).toEqual([]);
+  expect(input.pullRequests).toEqual([]);
+});
+
+test("a project with no seat to wake asks GitHub nothing", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()], pullRequestCalls: calls, noSeat: true },
+    withCursor(0, OVERDUE),
+  );
+  expect(calls).toEqual([]);
+  expect(input.pullRequests).toEqual([]);
+});
+
+test("a project whose tick is off asks GitHub nothing", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const input = await gather(
+    {
+      pipelines: [finishedLane()],
+      openPullRequests: [openPullRequest()],
+      pullRequestCalls: calls,
+      settings: { ...defaultSeatTickSettings(PROJECT), enabled: false, configured: true } as never,
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(calls).toEqual([]);
+  expect(input.pullRequests).toEqual([]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * The obligation outlives the lane's residence in the hot store.
+ *
+ * Settled lanes are archived after three days. Reading only the hot store put
+ * the reason on a timer nothing about the pull request knows: a tick switched
+ * off, a seat busy for days, or a `gh` unreachable until archival all reach
+ * their first eligible check with no lane to attribute anything to, and go
+ * quiet over a pull request still sitting open.
+ * ------------------------------------------------------------------------- */
+
+/** The same lane, three days later: out of the hot store, into cold storage,
+    and its pull request still unmerged. */
+function archivedLane(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return finishedLane({ closedAt: new Date(NOW - 5 * DAY_MS).toISOString(), ...over });
+}
+
+test("a lane that has been archived still owes its open pull request", async () => {
+  const input = await gather(
+    { pipelines: [], archivedPipelines: [archivedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([{
+    number: 1289,
+    title: "wake on a merge that is waiting",
+    pipelineId: "pipeline_z9",
+    pipelineTitle: "publish the merge queue",
+    updatedAt: new Date(NOW - 30 * 60_000).toISOString(),
+  }]);
+  expect(reasonsOf(seatTickDecision(input))).toEqual(["unmerged-pr"]);
+});
+
+/* The repository is asked for in the archived record too, because a project
+   whose every lane has settled out still has one — and a `gh` never run is the
+   same silence read off a different shelf. */
+test("an archived lane names the repository the pull requests are read from", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  await gather(
+    { pipelines: [], archivedPipelines: [archivedLane()], openPullRequests: [openPullRequest()], pullRequestCalls: calls },
+    withCursor(0, OVERDUE),
+  );
+  expect(calls).toEqual([{ cwd: "/srv/repo", limit: 60 }]);
+});
+
+/* And it discharges itself the same way a hot lane's does: the source reads
+   OPEN pull requests, so a merge or a close simply stops returning the row. */
+test("once that pull request merges the same project is quiet again", async () => {
+  const input = await gather(
+    { pipelines: [], archivedPipelines: [archivedLane()], openPullRequests: [] },
+    withCursor(0, { ...OVERDUE, lastProposalAt: new Date(NOW - 60_000).toISOString() }),
+  );
+  expect(input.pullRequests).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBeNull();
+  expect(seatTickDecision(input).verdict).toEqual({
+    kind: "quiet",
+    detail: "the board is done and the proposal slot is not due",
+  });
+});
+
+/* Cold storage is read only where the check has already committed to a
+   subprocess, so the gates that skip `gh` skip the archive with it. */
+test("the archive is not read by a check that could raise no wake from it", async () => {
+  const early: number[] = [];
+  await gather(
+    { pipelines: [finishedLane()], archiveCalls: early },
+    withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString() }),
+  );
+  expect(early).toEqual([]);
+
+  const seated: number[] = [];
+  await gather({ pipelines: [finishedLane()], archiveCalls: seated, noSeat: true }, withCursor(0, OVERDUE));
+  expect(seated).toEqual([]);
+
+  const off: number[] = [];
+  await gather(
+    {
+      pipelines: [finishedLane()],
+      archiveCalls: off,
+      settings: { ...defaultSeatTickSettings(PROJECT), enabled: false, configured: true } as never,
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(off).toEqual([]);
+
+  const due: number[] = [];
+  await gather({ pipelines: [finishedLane()], archiveCalls: due }, withCursor(0, OVERDUE));
+  expect(due).toEqual([1]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * A read that failed is not a pull request that merged.
+ *
+ * Every failure below used to arrive as an empty list, which the decision then
+ * read as "nothing open" — `quiet — nothing owed` published on the strength of
+ * a `gh` nobody could run. The gap travels out of the gather instead.
+ * ------------------------------------------------------------------------- */
+
+test("a gh that throws is carried out of the gather as a gap, not as no pull requests", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsThrow: true },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBe("command-failed");
+  /* The rest of the check is untouched: one unreadable evidence source is not
+     a failed check. */
+  expect(input.tasks).toEqual([]);
+});
+
+test("each way gh can fail keeps its own name", async () => {
+  for (const unavailable of ["command-failed", "timed-out", "malformed-output"] as const) {
+    const input = await gather(
+      { pipelines: [finishedLane()], pullRequestsUnavailable: unavailable },
+      withCursor(0, OVERDUE),
+    );
+    expect(input.pullRequestsUnavailable).toBe(unavailable);
+    expect(input.pullRequests).toEqual([]);
+  }
+});
+
+/* The lanes are half of the correlation, so lanes that cannot be read leave
+   the same question unanswered — and asking `gh` about lanes nobody could
+   enumerate would answer it wrongly rather than not at all. */
+test("lanes that cannot be read are a gap of their own, and gh is not asked", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const input = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, openPullRequests: [openPullRequest()], pullRequestCalls: calls },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequestsUnavailable).toBe("lanes-unreadable");
+  expect(input.pullRequests).toEqual([]);
+  expect(calls).toEqual([]);
+});
+
+/* The successful empty answer is what a gap must stay distinguishable from:
+   here GitHub was asked and said nothing is open, and quiet is earned. */
+test("a successful empty answer leaves no gap behind it", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [] },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBeNull();
+});
+
+/* A check that was never going to ask has no gap either — it reports nothing
+   because nothing was owed from this reason, not because something failed. */
+test("a check that asks GitHub nothing reports no gap", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsThrow: true },
+    withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString() }),
+  );
+  expect(input.pullRequestsUnavailable).toBeNull();
+});
+
+/* ------------------------------------------------------------------------- *
+ * The run of failures the row remembers (#1298).
+ *
+ * A source that has been unreadable since the feature shipped is a different
+ * fact from one that just missed a call, and the check could not tell them
+ * apart: it reported the same journal line every five minutes for four hours
+ * and put nothing anywhere an operator reads.
+ * ------------------------------------------------------------------------- */
+
+test("a failed read starts a run of failures on the row", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed" },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.state.pullRequestGap).toEqual({
+    gap: "command-failed",
+    since: new Date(NOW).toISOString(),
+    lastAttemptAt: new Date(NOW).toISOString(),
+    attempts: 1,
+    reported: false,
+  });
+});
+
+/* Inside the first interval the source is asked at every check: a transient
+   failure has to recover at the check interval, not an hour later. */
+test("a run younger than the wake interval is asked again at every check", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const young = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 10 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 5 * 60_000).toISOString(),
+    attempts: 2,
+    reported: false,
+  };
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "timed-out", pullRequestCalls: calls },
+    withCursor(0, { ...OVERDUE, pullRequestGap: young }),
+  );
+  expect(calls).toHaveLength(1);
+  /* The run keeps its own beginning, so "how long has this been broken" is not
+     reset by every failure inside it. */
+  expect(input.state.pullRequestGap).toMatchObject({ gap: "timed-out", since: young.since, attempts: 3 });
+});
+
+/* Past that point the subprocess is paid for once per wake interval — and the
+   gap it already established is replayed, so the check in between still
+   refuses to call this quiet. Slowing the read may never buy a silence. */
+test("a standing run is asked once per wake interval, and the gap is replayed in between", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const standing = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed", pullRequestCalls: calls },
+    withCursor(0, { ...OVERDUE, pullRequestGap: standing }),
+  );
+  expect(calls).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBe("command-failed");
+  expect(input.state.pullRequestGap).toEqual(standing);
+  /* And the decision it feeds is the decision a fresh failed read would have
+     produced: no wake from the unreadable source, and no quiet either. */
+  expect(seatTickDecision(input).verdict.kind).toBe("error");
+
+  const due: { cwd: string; limit: number }[] = [];
+  const asked = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed", pullRequestCalls: due },
+    withCursor(0, { ...OVERDUE, pullRequestGap: { ...standing, lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString() } }),
+  );
+  expect(due).toHaveLength(1);
+  expect(asked.state.pullRequestGap).toMatchObject({ attempts: 24, reported: true });
+});
+
+/* The replay is bounded by the question it answers. A check with no finished
+   lane to correlate never asks the source at all, and a fresh read on it
+   reports no gap — so the backoff must not hand one back and refuse a quiet
+   this check's own evidence allows. */
+test("a standing run is not replayed onto a check that had nothing to ask", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const standing = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const input = await gather(
+    { pipelines: [], pullRequestsUnavailable: "command-failed", pullRequestCalls: calls },
+    withCursor(0, { ...OVERDUE, pullRequestGap: standing }),
+  );
+  /* The subprocess the backoff exists to save is still saved. */
+  expect(calls).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBeNull();
+  /* And the run is left standing, because this check learned nothing about
+     whether the source can be read. */
+  expect(input.state.pullRequestGap).toEqual(standing);
+  expect(seatTickDecision(input).verdict.kind).not.toBe("error");
+});
+
+/* An answer ends the run, whatever it says — which is what makes the next
+   outage a fresh run with a report of its own. */
+test("an answer clears the run of failures", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [] },
+    withCursor(0, {
+      ...OVERDUE,
+      pullRequestGap: {
+        gap: "command-failed",
+        since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+        lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString(),
+        attempts: 23,
+        reported: true,
+      },
+    }),
+  );
+  expect(input.pullRequestsUnavailable).toBeNull();
+  expect(input.state.pullRequestGap).toBeNull();
+});
+
+/* A gate says nothing about whether the source can be read, so it leaves the
+   run exactly as it stands — and reports no gap of its own, because this check
+   asked nothing. */
+test("a check that asks GitHub nothing leaves the run untouched", async () => {
+  const standing = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsThrow: true },
+    withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString(), pullRequestGap: standing }),
+  );
+  expect(input.pullRequestsUnavailable).toBeNull();
+  expect(input.state.pullRequestGap).toEqual(standing);
+});
+
+/* The lane store is a source too, and its own permanent failure has to be
+   bounded by the same backoff (#1298). It is read above the gates that skip
+   `gh`, so a lane store that can never be read paid a cold-storage read every
+   five-minute check for as long as no delivered wake moved the hourly stamp —
+   the unbounded retry, one source over. */
+test("a lane store that can never be read is asked once per wake interval too", async () => {
+  const standing = {
+    gap: "lanes-unreadable" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const held: number[] = [];
+  const input = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, archiveCalls: held },
+    withCursor(0, { ...OVERDUE, pullRequestGap: standing }),
+  );
+  /* Zero reads inside the interval … */
+  expect(held).toEqual([]);
+  /* … and the gap they already established is replayed, so this check still
+     refuses to call the source readable or the project quiet. */
+  expect(input.pullRequestsUnavailable).toBe("lanes-unreadable");
+  expect(input.state.pullRequestGap).toEqual(standing);
+  expect(seatTickDecision(input).verdict.kind).toBe("error");
+
+  const due: number[] = [];
+  const asked = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, archiveCalls: due },
+    withCursor(0, { ...OVERDUE, pullRequestGap: { ...standing, lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString() } }),
+  );
+  /* … and exactly one after it. */
+  expect(due).toEqual([1]);
+  expect(asked.state.pullRequestGap).toMatchObject({ gap: "lanes-unreadable", attempts: 24, since: standing.since });
+});
+
+/* The bound it must not grow into: a lane store that has only just stopped
+   answering is weather, and weather has to recover at the check interval. */
+test("a lane store failing inside the first interval is still asked at every check", async () => {
+  const young: number[] = [];
+  const input = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, archiveCalls: young },
+    withCursor(0, {
+      ...OVERDUE,
+      pullRequestGap: {
+        gap: "lanes-unreadable",
+        since: new Date(NOW - 10 * 60_000).toISOString(),
+        lastAttemptAt: new Date(NOW - 5 * 60_000).toISOString(),
+        attempts: 2,
+        reported: false,
+      },
+    }),
+  );
+  expect(young).toEqual([1]);
+  expect(input.state.pullRequestGap).toMatchObject({ gap: "lanes-unreadable", attempts: 3 });
+});
+
+/* And the backoff belongs to the source that failed. A standing `gh` outage
+   says nothing about the archive, so the archive is still read — the gates
+   below it are read OUT of the archive, and skipping it would hand a check
+   with nothing to ask a gap it could not have produced. */
+test("a standing gh outage does not stop the lane store being read", async () => {
+  const reads: number[] = [];
+  await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed", archiveCalls: reads },
+    withCursor(0, {
+      ...OVERDUE,
+      pullRequestGap: {
+        gap: "command-failed",
+        since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+        lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+        attempts: 23,
+        reported: true,
+      },
+    }),
+  );
+  expect(reads).toEqual([1]);
+});
+
+/* The guard half, the same shape #1262 established for a card's movement: the
+   fingerprint has to carry what the reason is decided from, or a guard keyed on
+   it goes on suppressing the reason while a second pull request piles up. */
+test("a second unmerged pull request moves the fingerprint", async () => {
+  const one = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  const two = await gather(
+    {
+      pipelines: [finishedLane()],
+      openPullRequests: [openPullRequest(), openPullRequest({ number: 1290, headRefName: "topic-merge-queue" })],
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(two.changeFingerprint).not.toBe(one.changeFingerprint);
+});
+
+/* The other half of that, and the trap the wake-through-a-gap opened (#1298).
+   An unreadable source contributes exactly the rows a merged pull request
+   contributes — none — so a single digest over whatever was readable makes a
+   failing `gh` look like an operator clearing the board. Wakes now go out under
+   a gap, so that reading would reach the guard: a source failing every other
+   check would alternate the digest and reset the count on every wake, and the
+   reason would be re-sent for ever. The guard has to see the board standing
+   still through the flap. */
+test("a source that flaps does not look like a board that moved", async () => {
+  const readable = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  const blind = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "timed-out" },
+    withCursor(0, OVERDUE),
+  );
+  expect(blind.changeFingerprint).not.toBe(readable.changeFingerprint);
+  expect(seatTickBoardMoved(readable.changeFingerprint, blind.changeFingerprint)).toBe(false);
+  expect(seatTickBoardMoved(blind.changeFingerprint, readable.changeFingerprint)).toBe(false);
+
+  /* So a guard that has run out of patience on a parked lane stays out of
+     patience across the flap, rather than being handed a fresh count by it. */
+  const spent = { wakesWithoutChange: { stalled: DEFAULT_SEAT_TICK_POLICY.retryGuard } };
+  const held = seatTickDecision({
+    ...blind,
+    state: { ...blind.state, ...spent, lastWakeFingerprint: readable.changeFingerprint },
+  });
+  expect(reasonsOf(held)).toEqual([]);
+
+  /* And a board that DID move is still seen to have moved while the source is
+     blind: the half both checks could read is the half that answers. */
+  const movedBlind = await gather(
+    {
+      pipelines: [finishedLane(), lane({ id: "pipe_second" })],
+      pullRequestsUnavailable: "timed-out",
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(seatTickBoardMoved(readable.changeFingerprint, movedBlind.changeFingerprint)).toBe(true);
+});
+
+/* An unreadable half cannot postpone the guard either. A wake that went out
+   over a blind source and changed nothing counts as a wake that changed
+   nothing, so the count still climbs toward the bound. */
+test("a wake sent under a blind source still counts against the retry guard", async () => {
+  const blind = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "timed-out" },
+    withCursor(0, OVERDUE),
+  );
+  const readable = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  const committed = seatTickWakeCommit(
+    { ...blind.state, lastWakeFingerprint: readable.changeFingerprint, wakesWithoutChange: { stalled: 1 } },
+    { fingerprint: blind.changeFingerprint, reasons: ["stalled"], eventsThrough: 0, proposal: false },
+    NOW,
+  );
+  expect(committed.wakesWithoutChange.stalled).toBe(2);
 });
 
 test("another project's events are not this project's", async () => {
   const input = await gather({ events: [event(10, { project: "other", type: "review_verdict" })] }, withCursor(0));
   expect(input.events).toEqual([]);
-  expect(input.terminalPending).toBe(false);
 });
 
 test("the projects worth checking are the seated ones plus anything with work and nobody on it", async () => {

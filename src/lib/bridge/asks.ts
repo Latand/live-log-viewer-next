@@ -84,6 +84,12 @@ export interface OpenBridgeAskOptions {
       one side canonicalizing while the other compares raw ids is how a rekeyed
       seat's ask outlives the directive that answered it. */
   canonicalConversationId?: CanonicalSeatConversationId;
+  /** Whether an accepted directive's send has since been DELIVERED (#1131).
+      A directive the runtime only admitted has reached nobody, so its answer
+      waits in the log against the operation id that send returned; this is what
+      turns that parked ref into a cleared ask, and what leaves a dropped one
+      standing. Absent, only recorded answers clear an ask. */
+  deliveredOperation?: (operationId: string) => boolean;
 }
 
 /**
@@ -92,7 +98,9 @@ export interface OpenBridgeAskOptions {
  *
  * Only rows in the manager's own voice qualify (see {@link isManagerVoice}),
  * and one qualifies while all three clearing signals stay silent:
- * - **answered** — a directive carried `[bridge ref=<seq>]` for it;
+ * - **answered** — a directive carried `[bridge ref=<seq>]` for it AND that
+ *   directive reached the manager; one the runtime merely accepted clears the
+ *   ask only once its send is recorded delivered (#1131);
  * - **superseded** — the project's manager has filed ANY newer report since;
  * - **expired** — it aged past {@link BRIDGE_ASK_TTL_SECONDS}.
  *
@@ -106,6 +114,12 @@ export function openBridgeAsks(
   const canonical = options.canonicalConversationId ?? ((id: string) => id);
   const ttlMs = (options.ttlSeconds ?? BRIDGE_ASK_TTL_SECONDS) * 1000;
   const answered = new Set(log.answeredRefs ?? []);
+  const delivered = options.deliveredOperation;
+  if (delivered) {
+    for (const pending of log.pendingAnswers ?? []) {
+      if (delivered(pending.operationId)) answered.add(pending.ref);
+    }
+  }
 
   /* The project's LAST WORD from its manager, whatever class it was and
      whichever seat filed it — supersedence is "the manager has spoken since",

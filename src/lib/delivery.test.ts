@@ -11,6 +11,7 @@ import { cleanupFailedImageDelivery, deliverConversationMessage, killConversatio
 import type { RuntimeHostClient } from "./runtime/client";
 import { heldDeliveryOccurrences } from "./runtime/deliveredMessageOccurrences";
 import { messageTextDigest } from "./runtime/messageTextDigest";
+import { resolveSendReceipt, sendReceiptFor } from "./runtime/sendSettlement";
 import { recoverDeadStructuredConversation } from "./runtime/structuredRecovery";
 import type { FileEntry } from "./types";
 import { TmuxDeliveryUncertainError } from "./tmux";
@@ -914,7 +915,14 @@ test("pre-actuation payload failure discards the reservation for retry", async (
   expect(Object.values(registry.snapshot().heldDeliveries)).toHaveLength(0);
 });
 
-test("ambiguous actuation keeps images and retries only after the same client request returns", async () => {
+test("ambiguous actuation is absorbing: the same client request is answered, never typed a second time", async () => {
+  /* #1131: the legacy path has no delivery journal, so the reservation left by
+     an actuation nobody heard back from is the ONLY record that the message may
+     already be in the pane. This request used to be re-delivered here — one
+     client retry putting the same instruction in front of an agent twice, on
+     the channel that carries deployment control. It is answered from the
+     uncertainty instead: one host write, an operation id to ask about, and
+     `verify-first`. */
   const registry = new AgentRegistry(path.join(SANDBOX, "ambiguous-actuation-registry.json"));
   setAgentRegistryForTests(registry);
   const conversation = registry.ensureConversation("codex", "", "default");
@@ -929,18 +937,55 @@ test("ambiguous actuation keeps images and retries only after the same client re
     sendText: async () => { sends += 1; throw new TmuxDeliveryUncertainError(new Error("transport lost")); },
   });
 
-  expect(outcome).toMatchObject({ ok: false, error: "transport lost" });
+  /* Captured off the FIRST answer, which is all a caller ever holds: reading it
+     out of registry state is something no caller can do, and an id it cannot
+     see is an id it cannot ask `message_receipt` about. */
+  const operationId = (outcome as { operationId?: string }).operationId ?? "";
+  expect(outcome).toMatchObject({
+    ok: false,
+    error: "transport lost",
+    actuation: "started",
+    resend: "verify-first",
+  });
+  expect(operationId).not.toBe("");
+  /* The bytes stay: a message that may have been delivered keeps the paths it
+     named, so the agent can still open what it was handed. */
   expect(fs.existsSync(imagePath)).toBe(true);
   expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "delivery-uncertain" }]);
   expect(() => registry.requeueHeldDelivery(registry.pendingDeliveries(conversation.id)[0]!.id)).toThrow("explicit client retry");
-  const replay = await deliverConversationMessage(message, {
-    targetForKnownPid: async () => "%1",
-    buildImagePayload: () => { throw new Error("retained image should be reused"); },
-    sendText: async (_target, payload) => { sends += 1; expect(payload).toBe(imagePath); },
+  /* And that id answers: no journal ever held this send, so past the deadline
+     the receipt ends it unverified rather than leaving the caller at "failed,
+     and now what". */
+  expect(await resolveSendReceipt(operationId, {
+    registry,
+    client: null,
+    now: () => Date.now() + 11 * 60_000,
+  })).toMatchObject({ operationId, state: "failed", duplicateRisk: true, resend: "verify-first" });
+  for (let replayed = 0; replayed < 2; replayed += 1) {
+    const replay = await deliverConversationMessage(message, {
+      targetForKnownPid: async () => "%1",
+      buildImagePayload: () => ({ payload: imagePath, imagePaths: [imagePath] }),
+      sendText: async () => { sends += 1; },
+    });
+    expect(replay).toMatchObject({
+      ok: false,
+      status: 409,
+      actuation: "started",
+      operationId,
+      resend: "verify-first",
+    });
+    /* Absorbing: the answer does not change however often the client asks, and
+       nothing was typed on either replay. */
+    expect(sends).toBe(1);
+  }
+  /* And the send is still queryable rather than discarded — the settled record
+     is what a receipt reads to say the fate is unknown, and what keeps every
+     later replay of this request absorbing rather than reviving it. */
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "failed" }]);
+  expect(sendReceiptFor(registry.readOnlySnapshot(), operationId)).toMatchObject({
+    state: "failed",
+    resend: "verify-first",
   });
-  expect(replay.ok).toBe(true);
-  expect(sends).toBe(2);
-  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
 });
 
 test("reserved delivery reports uncertainty when direct tmux send fails after actuation starts", async () => {

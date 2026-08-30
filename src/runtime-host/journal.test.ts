@@ -1100,6 +1100,44 @@ test("structured send receipts advance through the durable delivery lifecycle", 
   journal.close();
 });
 
+test("effectBatch omits an uncertain operation even when its outbox row remains pending", () => {
+  const dir = sandbox("terminal-effect-filter");
+  const filename = path.join(dir, "events.sqlite");
+  const journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-terminal"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-terminal",
+      sessionKey: { engine: "codex", sessionId: "thread-terminal" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-terminal",
+    idempotencyKey: "key-terminal",
+    conversationId: "conv-terminal",
+    text: "settle once",
+    policy: "queue",
+  });
+  const payload = journal.effectBatch()[0]!.payload;
+  journal.transitionOperation("op-terminal", "uncertain", { reason: "delivery outcome is unverified" });
+  journal.close();
+
+  const database = new Database(filename);
+  database.query("UPDATE outbox SET state = 'pending', payload_json = ? WHERE id = ?")
+    .run(JSON.stringify(payload), "effect:op-terminal");
+  database.close();
+
+  const reopened = new RuntimeJournal(filename, { structuredHosts: true });
+  expect(reopened.effectBatch()).toEqual([]);
+  reopened.close();
+});
+
 test("a terminal structured send retries from its full journaled request", () => {
   const dir = sandbox("structured-delivery-retry");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });

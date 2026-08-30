@@ -66,8 +66,8 @@ function ActionButton({
  * canvas (camera frames never touch it) with the broadcast composer, the bulk
  * actions with eligible counts, inline confirms for the two destructive ones,
  * and the per-node fan-out report with a failed-only retry. Deliveries run
- * strictly sequentially — a broadcast can boot tmux resume windows, and those
- * must never spawn in parallel. Memoized: camera frames re-render the board,
+ * strictly sequentially — a broadcast can boot resume hosts, and those must
+ * never spawn in parallel. Memoized: camera frames re-render the board,
  * and the bar's props stay identity-stable through them.
  */
 export const BulkActionBar = memo(function BulkActionBar({

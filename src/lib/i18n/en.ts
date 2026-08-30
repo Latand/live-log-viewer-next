@@ -341,7 +341,12 @@ export const en = {
   // TmuxComposer
   "composer.imagesCount": { one: "{count} image", other: "{count} images" },
   "composer.attachmentsCount": { one: "{count} attachment", other: "{count} attachments" },
-  "composer.spawned": "launched agent in tmux {target}",
+  /* A send that had to bring the host back reports `spawned`/`resumed` for
+     both transports, and the structured one answers with a conversation id
+     or no target at all — so this line names the target it got and no
+     transport (#1301). */
+  "composer.spawned": "launched agent — {target}",
+  "composer.spawnedUnnamed": "launched agent",
   "composer.sentPaths": "sent {count} path(s)",
   "composer.failedInterrupt": "couldn't interrupt",
   "composer.escapeSent": "sent Escape — agent interrupted",
@@ -377,7 +382,6 @@ export const en = {
   "composer.imageCapabilityError": "Image capability could not be loaded.",
   "composer.imageCapabilityRetry": "Retry image check",
   "composer.attachTerminal": "Attach terminal viewer",
-  "composer.attachTerminalReady": "terminal viewer ready in tmux {target}",
   "composer.attachTerminalFailed": "couldn't create the terminal viewer",
   "composer.receiptHeld": "held",
   "composer.receiptQueued": "queued",
@@ -974,9 +978,15 @@ export const en = {
   "question.alreadyAnswered": "answer already recorded",
   "question.openFailed": "couldn't open the session",
   "question.opened": "opened {target}",
+  /* A resume that brought a structured host back names no target, and the
+     card used to fill that hole with the word "tmux" (#1301). */
+  "question.openedUnnamed": "opened the session",
   "question.answered": "Answered: {text}",
   "question.answeredElsewhere": "Answered elsewhere: {text}",
-  "question.noPane": "tmux pane unavailable",
+  /* Rendered whenever the question resolved no pane target, which is every
+     structured host — so it states what is missing and names no transport
+     (#1301). */
+  "question.noPane": "no terminal to key the answer into",
   "question.openSession": "open session",
   "question.rejectComment": "Rejection comment…",
   "question.approved": "approved",
@@ -1820,7 +1830,7 @@ export const en = {
   "attach.copiedReadonly": "read-only command copied",
   "attach.stale": "This pane changed or closed. Refresh and try again.",
   "attach.restarted": "The tmux server restarted. Refresh and try again.",
-  "attach.unavailable": "The tmux endpoint is unavailable. Refresh and try again.",
+  "attach.unavailable": "The tmux server is unavailable. Refresh and try again.",
   "attach.badRequest": "Can’t resolve this pane — refresh the list.",
   "attach.network": "Network error — try again.",
   "attach.clipboard": "Couldn’t copy — check clipboard permissions.",
@@ -2182,7 +2192,6 @@ export const en = {
   "tasks.pickerSend": "Send ({count})",
   "tasks.sendOk": "Delivered {delivered} of {total}",
   "tasks.sendFailPart": "✗ “{title}”: {error}",
-  "tasks.spawnOk": "agent started in tmux {target}",
   "tasks.composerToggle": "create a task",
   "tasks.composerToggleTitle": "On — the text becomes a tracked task card assigned to the selection; off — a plain broadcast with no trace",
   "tasks.composerNeedsText": "a task needs text",

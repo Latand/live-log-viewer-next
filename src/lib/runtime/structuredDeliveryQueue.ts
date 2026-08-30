@@ -2,9 +2,9 @@ import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selectio
 
 import { parseMessageOrigin, type MessageOrigin } from "./messageOrigin";
 import type { RuntimeSendSettings } from "./contracts";
-import type { CompactCapableHost, DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
+import { evidenceAgrees, readEvidence, readOptionalEvidence, type Evidence } from "./evidence";
+import type { CompactCapableHost, DeliveryReceipt, EngineHost, HostState, QueueEntry } from "./engineHost";
 import { hostSupportsCompact, StructuredCompactError } from "./engineHost";
-import type { RuntimeHostClient } from "./client";
 import {
   parseStructuredImageRefs,
   structuredContent,
@@ -29,8 +29,26 @@ export interface StructuredDeliveryQueuePort {
   ): Promise<void>;
   /** The durable receipt state, when the port can read it. The compact control
       needs it to tell a control it must issue from one an earlier executor
-      already issued and never settled (#862). */
-  status?(operationId: string): Promise<{ status: string } | null>;
+      already issued and never settled (#862), and the message path reads the
+      ownership its own `delivering` write recorded back off the reason.
+
+      Every one of the three reads below is FAILABLE — as is the live host's
+      own state, read through the same type — and none of them may be converted
+      into a definite answer when it fails. An unreadable fence is not an open
+      one: it blocks this pass instead of authorising it (#1131). */
+  status?(operationId: string): Promise<{ status: string; reason?: string | null } | null>;
+  /** Whether the durable DELIVERY RECORD has already ended this send (#1131).
+      The journal cannot answer that during the outage in which it is written,
+      which is exactly when it has to be honoured. */
+  settled?(operationId: string): boolean | Promise<boolean>;
+  /** The writer claim that currently owns this conversation's structured host —
+      the durable answer to "who may write to the engine right now" (#1131).
+      Recorded when a send enters delivery and compared when one is found still
+      there, so a `delivering` row is called abandoned on evidence that
+      ownership CHANGED rather than on its mere existence. Absent port, absent
+      claim, or a read that throws: no evidence either way, which leaves the row
+      with the executor that holds it rather than ending its send. */
+  hostClaim?(conversationId: string): string | null | Promise<string | null>;
 }
 
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
@@ -38,16 +56,17 @@ export type StructuredHostRecovery = (conversationId: string) => Promise<boolean
 
 const STRUCTURED_DELIVERY_BATCH_SIZE = 100;
 const THREAD_READ_ATTEMPTS = 2;
-
-export function runtimeClientDeliveryPort(client: RuntimeHostClient): StructuredDeliveryQueuePort {
-  return {
-    effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
-    transition: async (operationId, status, details) => {
-      await client.transitionOperation(operationId, status, details);
-    },
-    status: async (operationId) => (await client.operationStatus(operationId))?.receipt ?? null,
-  };
-}
+const TERMINAL_DELIVERY_STATUSES = new Set([
+  "turn-started",
+  "steered",
+  "delivered",
+  "applied",
+  "interrupted",
+  "answered",
+  "rejected",
+  "failed",
+  "uncertain",
+]);
 
 interface SendEffect {
   operationId: string;
@@ -280,6 +299,110 @@ function successfulKillBoundary(effect: StructuredDeliveryEffect): SuccessfulKil
   return { operationId, conversationId, eventSeq: effect.eventSeq };
 }
 
+/**
+ * Written when a send was handed to the engine and the executor could not learn
+ * what became of it. Both say the same thing to a reader and to the receipt:
+ * actuation started, the outcome is unknown, and re-sending the same
+ * instruction may deliver it twice.
+ *
+ * They are also what makes the journal's own words exact for a message effect:
+ * `failed` is written only where the send never reached the engine, and
+ * `uncertain` wherever it may have. Settlement reads that distinction back —
+ * it is the difference between telling a caller a resend is safe and telling
+ * them to verify the recipient first.
+ */
+export const DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR =
+  "delivery was started by an earlier executor; whether it reached the recipient is unverified";
+export const DELIVERY_UNVERIFIED_AFTER_ACTUATION =
+  "delivery was started and the structured host did not answer; whether it reached the recipient is unverified";
+/**
+ * Written when the durable delivery record has already ended this send.
+ *
+ * That happens while the runtime host is unreachable: a caller asks what became
+ * of an accepted send, the settlement cannot ask the journal, and past the
+ * deadline it answers `failed` rather than leaving `queued` as the last word.
+ * Delivering the effect once the socket comes back would put the instruction in
+ * front of the recipient long after the sender was told it had not arrived, so
+ * the settled record fences it here (#1131).
+ */
+export const DELIVERY_FENCED_BY_SETTLEMENT =
+  "delivery was settled before this executor reached it; whether it reached the recipient is unverified";
+
+/**
+ * Who took a send into delivery, written where the durable row can carry it.
+ *
+ * A `delivering` row is the fence that stops a send from being written to the
+ * engine twice, and it used to be read as proof of an ABANDONED executor on its
+ * own. It is not: a send another executor is actuating right now looks exactly
+ * the same, and terminalizing it drops work that is still going somewhere —
+ * during a release succession, where two executors are briefly alive over one
+ * journal, that is the ordinary case rather than the rare one.
+ *
+ * So the executor stamps itself and the writer claim it is delivering under
+ * onto the transition, and a later executor calls the row abandoned only when
+ * that ownership has actually CHANGED: a different executor whose claim on the
+ * host is no longer the current one can no longer write to the engine at all,
+ * so nothing is left to settle the row but this pass. The receipt reason is the
+ * carrier — the journal already persists it per transition, and inventing a
+ * durable column for one token would be a schema for a fact one string holds.
+ *
+ * The comparison has three outcomes, not two, and the third is the one that
+ * bites: a claim that cannot be READ is not a claim that has moved. A transient
+ * gap in the projection used to read as a handover and terminalize a send
+ * another executor was actuating at that moment, so only an explicitly named
+ * differing claim proves abandonment now; unreadable evidence leaves the row
+ * where it is.
+ *
+ * That has to hold at the WRITE too, and it is where the rule was still
+ * escaping: the stamp used to be omitted whenever the claim could not be read,
+ * so a claim projection that was unavailable for the one moment this row was
+ * written produced a row carrying no ownership at all — and an unstamped row
+ * read as abandoned, which is the same unreadable evidence deciding the same
+ * question, one step earlier. The executor identity is always recorded now, and
+ * the claim beside it is recorded as UNKNOWN when it could not be read. An
+ * unknown recorded claim is nothing to compare against, so it leaves the row
+ * with its executor exactly as an unreadable current claim does.
+ *
+ * The absorbing rule is untouched by any of it: no branch here sends anything
+ * again and no branch returns the row to `queued`. Ownership only decides
+ * whether this pass ends the send as unverified or leaves it to its owner —
+ * and a send left to an owner that never comes back is still ended by the
+ * settlement deadline a receipt query applies, so leaving it can delay an
+ * answer but can never withhold one.
+ */
+const DELIVERING_OWNERSHIP_PREFIX = "delivering-owner:";
+
+/** The recorded claim of a row whose writer could not read one. Not a claim any
+    projection can ever produce — claims are `<owner>:<epoch>` — so it can never
+    be mistaken for one that matches or one that differs. */
+const UNKNOWN_HOST_CLAIM = "?";
+
+interface DeliveringOwnership {
+  executorId: string;
+  /** The claim the row was written under, or null when it was unreadable then. */
+  hostClaim: string | null;
+}
+
+function deliveringOwnershipReason(executorId: string, hostClaim: Evidence<string | null>): string {
+  const recorded = hostClaim.readable ? hostClaim.value ?? UNKNOWN_HOST_CLAIM : UNKNOWN_HOST_CLAIM;
+  return `${DELIVERING_OWNERSHIP_PREFIX}${executorId}@${recorded}`;
+}
+
+/** Ownership off a durable reason, or null where the row carries none — a row
+    written before this evidence existed, or by a path that recorded none. */
+function deliveringOwnership(reason: string | null | undefined): DeliveringOwnership | null {
+  if (typeof reason !== "string" || !reason.startsWith(DELIVERING_OWNERSHIP_PREFIX)) return null;
+  const recorded = reason.slice(DELIVERING_OWNERSHIP_PREFIX.length);
+  const separator = recorded.indexOf("@");
+  if (separator < 1) return null;
+  const hostClaim = recorded.slice(separator + 1);
+  if (!hostClaim) return null;
+  return {
+    executorId: recorded.slice(0, separator),
+    hostClaim: hostClaim === UNKNOWN_HOST_CLAIM ? null : hostClaim,
+  };
+}
+
 function failureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return (message.trim() || "structured host delivery failed").slice(0, 240);
@@ -303,6 +426,13 @@ async function sendWithReadRetry(host: EngineHost, entry: QueueEntry): Promise<D
 export class StructuredDeliveryQueue {
   private activeDrain: Promise<void> | null = null;
   private rerun = false;
+  private readonly targetErrors = new Map<string, string>();
+  private lastPassError: string | null = null;
+  /** This executor's identity, minted per instance and never persisted beyond
+      the `delivering` rows it writes. A successor instance — in this process or
+      in the one that replaced it — is a different executor by construction,
+      which is what a recovered row has to be able to tell (#1131). */
+  private readonly executorId = crypto.randomUUID();
   private readonly interruptAcknowledged = new Set<string>();
   private readonly successfulKillBoundaries = new Map<string, SuccessfulKillBoundary>();
   /** Compactions whose engine control is issued and whose evidence has not
@@ -326,6 +456,12 @@ export class StructuredDeliveryQueue {
     private readonly reconfigure: StructuredReconfigureHandler = async () => {
       throw new Error("structured host reconfigure is unavailable");
     },
+    /** Why this conversation's turn is severed, when evidence says it is
+        (#1281). Null means "not shown to be severed", which is what every
+        caller here treats as a reason to keep waiting — and so is a read that
+        could not be made at all, which {@link readSeveredHostReason} keeps
+        separate rather than letting it out as a thrown drain pass (#1131). */
+    private readonly severedHostReason: (conversationId: string) => Promise<string | null> = async () => null,
   ) {}
 
   drain(): Promise<void> {
@@ -337,6 +473,10 @@ export class StructuredDeliveryQueue {
       this.activeDrain = null;
     });
     return this.activeDrain;
+  }
+
+  lastTargetError(conversationId: string): string | null {
+    return this.targetErrors.get(conversationId) ?? this.lastPassError;
   }
 
   /** Guarantees a drain pass whose journal read starts after this request. */
@@ -351,7 +491,12 @@ export class StructuredDeliveryQueue {
   private async drainUntilSettled(): Promise<void> {
     do {
       this.rerun = false;
-      await this.drainPass();
+      try {
+        await this.drainPass();
+      } catch (error) {
+        this.lastPassError = failureReason(error);
+        throw error;
+      }
     } while (this.rerun);
   }
 
@@ -374,11 +519,25 @@ export class StructuredDeliveryQueue {
     }
     if (rawEffects.length === 0) return;
     const grouped = new Map<string, DeliveryEffect[]>();
+    const targetPreparations = new Map<string, Array<() => Promise<void>>>();
+    const prepareTarget = (conversationId: string, prepare: () => Promise<void>) => {
+      const preparations = targetPreparations.get(conversationId) ?? [];
+      preparations.push(prepare);
+      targetPreparations.set(conversationId, preparations);
+    };
     const effects: DeliveryEffect[] = [];
     for (const rawEffect of rawEffects) {
       if (rawEffect.kind === "runtime.kill-boundary") {
         const boundary = successfulKillBoundary(rawEffect);
-        if (!boundary) throw new Error(`structured kill boundary ${rawEffect.eventSeq} is invalid`);
+        if (!boundary) {
+          const conversationId = typeof rawEffect.payload.conversationId === "string"
+            ? rawEffect.payload.conversationId
+            : `effect-${rawEffect.eventSeq}`;
+          prepareTarget(conversationId, async () => {
+            throw new Error(`structured kill boundary ${rawEffect.eventSeq} is invalid`);
+          });
+          continue;
+        }
         const current = this.successfulKillBoundaries.get(boundary.conversationId);
         if (!current || boundary.eventSeq > current.eventSeq) {
           this.successfulKillBoundaries.set(boundary.conversationId, boundary);
@@ -391,8 +550,13 @@ export class StructuredDeliveryQueue {
         continue;
       }
       const operationId = typeof rawEffect.payload.operationId === "string" ? rawEffect.payload.operationId : "";
-      if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
-      await this.port.transition(operationId, "failed", { reason: "structured delivery effect is invalid" });
+      const conversationId = typeof rawEffect.payload.conversationId === "string"
+        ? rawEffect.payload.conversationId
+        : `effect-${rawEffect.eventSeq}`;
+      prepareTarget(conversationId, async () => {
+        if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
+        await this.transitionUnlessSettled(operationId, "failed", { reason: "structured delivery effect is invalid" });
+      });
     }
     effects.sort((left, right) => {
       const leftControl = isControlEffect(left);
@@ -410,10 +574,55 @@ export class StructuredDeliveryQueue {
       target.push(effect);
       grouped.set(effect.conversationId, target);
     }
-    await Promise.all([...grouped.values()].map((target) => this.drainTarget(target)));
+    const conversationIds = new Set([...grouped.keys(), ...targetPreparations.keys()]);
+    const targets: Array<[string, () => Promise<boolean>]> = [...conversationIds].map((conversationId) => [
+      conversationId,
+      async () => {
+        for (const prepare of targetPreparations.get(conversationId) ?? []) await prepare();
+        return this.drainTarget(grouped.get(conversationId) ?? []);
+      },
+    ]);
+    const outcomes = await Promise.allSettled(
+      targets.map(async ([conversationId, drain]) => {
+        try {
+          return await drain();
+        } catch (error) {
+          this.targetErrors.set(conversationId, failureReason(error));
+          console.error("[structured delivery] conversation drain failed", {
+            conversationId,
+            error: failureReason(error),
+          });
+          throw error;
+        }
+      }),
+    );
+    outcomes.forEach((outcome, index) => {
+      if (outcome.status === "fulfilled" && outcome.value === false) {
+        this.targetErrors.delete(targets[index]![0]);
+      }
+    });
+    const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+    if (failures.length === outcomes.length && failures.length > 0) {
+      const reason = failures.at(-1)!.reason;
+      throw new AggregateError(
+        failures.map((failure) => failure.reason),
+        `structured delivery failed for every target: ${failureReason(reason)}`,
+      );
+    }
+    if (failures.length > 0) this.retrySoon();
   }
 
   private async drainTarget(effects: DeliveryEffect[]): Promise<boolean> {
+    const openEffects: DeliveryEffect[] = [];
+    const durableStatuses = new Map<string, { status: string; reason?: string | null } | null>();
+    for (const effect of effects) {
+      const durable = await this.readStatus(effect.operationId);
+      if (!durable.readable) return this.fenceUnavailable();
+      if (durable.value && TERMINAL_DELIVERY_STATUSES.has(durable.value.status)) continue;
+      durableStatuses.set(effect.operationId, durable.value);
+      openEffects.push(effect);
+    }
+    effects = openEffects;
     const killedGenerations = new Set<string>();
     const reconfigures = effects.filter(isReconfigureEffect);
     const currentReconfigure = reconfigures.reduce<StructuredReconfigureEffect | null>(
@@ -422,7 +631,7 @@ export class StructuredDeliveryQueue {
     );
     for (const effect of reconfigures) {
       if (effect !== currentReconfigure) {
-        await this.port.transition(effect.operationId, "failed", { reason: "superseded" });
+        await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "superseded" });
       }
     }
     for (const effect of effects) {
@@ -438,7 +647,7 @@ export class StructuredDeliveryQueue {
         if (effect.sessionKey
           ? killedGenerations.has(`${effect.sessionKey.engine}:${effect.sessionKey.sessionId}`)
           : killedGenerations.size > 0) {
-          await this.port.transition(effect.operationId, "failed", { reason: "conversation-killed" });
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "conversation-killed" });
           continue;
         }
         const blocked = await this.drainReconfigure(effect);
@@ -467,20 +676,65 @@ export class StructuredDeliveryQueue {
       }
       const killBoundary = this.successfulKillBoundaries.get(effect.conversationId);
       if (killBoundary && effect.eventSeq <= killBoundary.eventSeq) {
-        await this.port.transition(effect.operationId, "failed", {
+        await this.transitionUnlessSettled(effect.operationId, "failed", {
           reason: "structured host was intentionally terminated; retry the operation",
         });
         continue;
       }
+      /* An executor already handed this effect to the engine. Delivering it
+         again would be a SECOND instruction on a channel that carries
+         deployment control, so this pass never writes it — the durable
+         `delivering` row IS the fence, and it holds across a Viewer restart, a
+         runtime-host restart, and a socket that was gone for hours.
+         What it settles depends on WHO holds it, and that is a question with
+         THREE answers rather than two. An executor that still owns the writer
+         claim on this host can answer for the send, so its row is left where it
+         is. One whose claim has explicitly moved on cannot write to the engine
+         and cannot settle the row either, so this pass ends it unverified. And
+         where the claim cannot be read at all the row is left alone too: a gap
+         in the claim projection says nothing about who is delivering, and the
+         receipt deadline ends the send anyway if its owner never comes back.
+
+         The fence itself is a failable read, and a fence that could not be read
+         is not an open one. It used to become `null` here and fall straight
+         through to the engine call, so a send an executor was already
+         delivering could be delivered a SECOND time by whichever pass caught
+         the journal at a bad moment. */
+      const durable = durableStatuses.get(effect.operationId) ?? null;
+      if (durable?.status === "delivering") {
+        if (await this.deliveringOwnerDisposition(effect.conversationId, durable.reason) !== "abandoned") continue;
+        await this.terminalizeUnverified(effect.operationId, DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR);
+        continue;
+      }
+      /* And the same fence from the other store: a receipt query already ended
+         this send — the only answer available while the runtime host was
+         unreachable — so actuating it now would deliver an instruction the
+         sender was told had not arrived (#1131). Asked under the effect's OWN
+         operation id, which is what makes a deliberate retry a different send:
+         it is admitted as a new operation, so the settled record of the attempt
+         it replaces does not fence it. Unreadable for the same reason as above:
+         a record that cannot be read has not said this send is unsettled. */
+      const settled = await this.readSettled(effect.operationId);
+      if (!settled.readable) return this.fenceUnavailable();
+      if (settled.value) {
+        await this.terminalizeUnverified(effect.operationId, DELIVERY_FENCED_BY_SETTLEMENT);
+        continue;
+      }
       const host = this.resolveHost(effect.conversationId);
       if (!host) {
-        await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+        if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) continue;
         await this.recoverUnavailableHost(effect);
         return true;
       }
-      const health = await host.health();
+      /* The live host's state, and the fence that decides whether this message
+         may be handed over at all. Unreadable is not idle and not dead: it
+         proves neither that the host can take the message nor that recovery is
+         owed one, so the pass writes nothing and comes back. */
+      const state = await this.readHealth(host);
+      if (!state.readable) return this.fenceUnavailable();
+      const health = state.value;
       if (health.status === "dead" || health.status === "unhosted") {
-        await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+        if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) continue;
         await this.recoverUnavailableHost(effect);
         return true;
       }
@@ -512,11 +766,18 @@ export class StructuredDeliveryQueue {
         ...(effect.selectedContext ? { selectedContext: effect.selectedContext } : {}),
         ...(effect.origin ? { origin: effect.origin } : {}),
       };
-      await this.port.transition(
+      /* Always stamped, claim or no claim: the executor identity is what tells
+         a row this instance is actuating right now from one it dropped, and
+         omitting the whole stamp because the claim read failed produced an
+         unstamped row that a later pass read as abandonment. An unreadable
+         claim is recorded as unknown instead, which proves nothing to anybody
+         and is exactly what it should prove. */
+      const claim = await this.readHostClaim(effect.conversationId);
+      if (!await this.transitionUnlessSettled(
         effect.operationId,
         "delivering",
-        { turnId: deliveryFence },
-      );
+        { turnId: deliveryFence, reason: deliveringOwnershipReason(this.executorId, claim) },
+      )) continue;
       if (shouldInterrupt) {
         try {
           await host.interrupt(health.activeTurnRef!);
@@ -524,23 +785,37 @@ export class StructuredDeliveryQueue {
         } catch (error) {
           this.interruptAcknowledged.delete(effect.operationId);
           const reason = failureReason(error);
-          const afterFailure = await host.health().catch(() => null);
-          if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
-            await this.port.transition(effect.operationId, "queued", { reason });
+          /* Nothing was handed to the engine yet — the interrupt that would
+             have cleared the way for it is what failed — so both branches only
+             put the message back in the queue it came from, and an unreadable
+             state is grouped with the one that waits rather than retries. No
+             branch here converts it into a claim about the host. */
+          const afterFailure = await this.readHealth(host);
+          if (!afterFailure.readable
+            || afterFailure.value.status === "dead"
+            || afterFailure.value.status === "unhosted") {
+            await this.transitionUnlessSettled(effect.operationId, "queued", { reason });
             return true;
           }
-          await this.port.transition(effect.operationId, "queued", { reason: "interrupt-auto-retry" });
+          await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "interrupt-auto-retry" });
           this.retrySoon();
           return true;
         }
-        const afterInterrupt = await host.health();
+        /* The interrupt was issued; whether the turn it ended left the host
+           idle is the question this read answers. Unreadable answers nothing,
+           so the message is not handed over on it: the row stays `delivering`
+           and this instance's own next pass ends it as unverified rather than
+           sending after an interrupt whose outcome nothing established. */
+        const afterInterruptState = await this.readHealth(host);
+        if (!afterInterruptState.readable) return this.fenceUnavailable();
+        const afterInterrupt = afterInterruptState.value;
         if (afterInterrupt.status === "dead" || afterInterrupt.status === "unhosted") {
           this.interruptAcknowledged.delete(effect.operationId);
-          await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+          if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) continue;
           return true;
         }
         if (afterInterrupt.status !== "idle") {
-          await this.port.transition(effect.operationId, "queued", { reason: "interrupt-requested" });
+          await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "interrupt-requested" });
           return true;
         }
         this.interruptAcknowledged.delete(effect.operationId);
@@ -550,32 +825,61 @@ export class StructuredDeliveryQueue {
         receipt = await sendWithReadRetry(host, entry);
       } catch (error) {
         const reason = failureReason(error);
-        const afterFailure = await host.health().catch(() => null);
-        if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
-          await this.port.transition(effect.operationId, "queued", { reason });
-          return true;
-        }
-        if (isThreadReadTimeout(error)) {
-          await this.port.transition(effect.operationId, "queued", { reason: "delivery-auto-retry" });
+        /* The one resend below is allowed only where the host is READ to be
+           alive, so an unreadable state is grouped with the host being gone:
+           the grouping that resends nothing. It costs a drain pass on a
+           conversation whose host may be fine, and buys never issuing a second
+           delivery on evidence nobody could read. */
+        const afterFailure = await this.readHealth(host);
+        const hostIsGone = !afterFailure.readable
+          || afterFailure.value.status === "dead"
+          || afterFailure.value.status === "unhosted";
+        if (!hostIsGone && isThreadReadTimeout(error)) {
+          /* The one resend this path issues, and the host dedupes it by
+             queue-entry id: it reads the thread back and returns the confirmed
+             receipt rather than writing a second message. Its own operation is
+             retried, so this is the one failure after actuation that may go
+             back to `queued`. */
+          await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "delivery-auto-retry" });
           this.retrySoon();
           return true;
         }
-        await this.port.transition(effect.operationId, "failed", { reason });
+        /* The message was handed to the engine and the engine did not answer.
+           It may have been taken — whether the host then died or is still
+           standing, the only thing that could say is the confirmed-delivery
+           record this call failed to get — so it must not go back to `queued`,
+           which says the send was never executed and is what let a later resend
+           look safe on a send the recipient had already received (#1131), and
+           it must not settle `failed`, which the receipt reads as fenced and
+           answers `resend: "safe"`. A resend is issued under a NEW request id,
+           so nothing on the host side would dedupe it against this attempt.
+           `uncertain` is absorbing — the journal refuses every transition out
+           of it and clears the outbox row in the same transaction — so no
+           drain and no fresh request can produce a second delivery, and the
+           receipt says the fate is unknown instead of inventing one. That is
+           what keeps `failed` on a message effect meaning "never reached the
+           engine": the distinction settlement reads to decide whether a resend
+           is safe. The cost is that a precondition the host refused by throwing
+           reads as unverified too; one verification is the cheaper error. */
+        await this.terminalizeUnverified(effect.operationId, `${DELIVERY_UNVERIFIED_AFTER_ACTUATION}: ${reason}`);
+        /* A host that is gone takes the rest of this conversation's queue with
+           it; a live one keeps draining behind the send it could not answer. */
+        if (hostIsGone) return true;
         continue;
       }
       if (receipt.outcome === "rejected") {
         if (receipt.reason === "stale-turn") {
           if (effect.kind === "send" && effect.policy !== "steer-if-active") {
-            await this.port.transition(effect.operationId, "queued", { reason: receipt.reason });
+            await this.transitionUnlessSettled(effect.operationId, "queued", { reason: receipt.reason });
             return true;
           }
-          await this.port.transition(effect.operationId, "failed", { reason: receipt.reason });
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: receipt.reason });
           continue;
         }
-        await this.port.transition(effect.operationId, "queued", { reason: receipt.reason });
+        await this.transitionUnlessSettled(effect.operationId, "queued", { reason: receipt.reason });
         return true;
       }
-      await this.port.transition(effect.operationId, "delivered", { turnId: receipt.turnId });
+      await this.transitionUnlessSettled(effect.operationId, "delivered", { turnId: receipt.turnId });
     }
     return false;
   }
@@ -603,10 +907,17 @@ export class StructuredDeliveryQueue {
        fired when the first settles brings this effect back. Holding it does not
        block the group: kill must still get through. */
     if (this.compactingConversations.has(effect.conversationId)) return { blocked: false, terminated: false };
-    /* An unreadable receipt is not evidence of anything. Treat it as unknown
-       and fall through to the host checks rather than aborting a drain pass
-       that other conversations share. */
-    const durable = await this.port.status?.(effect.operationId).catch(() => null);
+    /* An unreadable receipt is not evidence of anything, and this control is a
+       second COMPACTION if the row it cannot read is already `delivering` — the
+       same duplicate actuation the message path is fenced against. The pass
+       issues nothing and comes back; the group is not reported blocked, because
+       a kill sorted behind this effect must still run. */
+    const status = await this.readStatus(effect.operationId);
+    if (!status.readable) {
+      this.retrySoon();
+      return { blocked: false, terminated: false };
+    }
+    const durable = status.value;
     if (durable?.status === "delivering") {
       /* An earlier executor issued this control and never settled it — a Viewer
          restart, or a terminal transition that never landed. This process
@@ -625,7 +936,7 @@ export class StructuredDeliveryQueue {
        host purely to run this control. Sends are fenced the same way. */
     const killBoundary = this.successfulKillBoundaries.get(effect.conversationId);
     if (killBoundary && effect.eventSeq <= killBoundary.eventSeq) {
-      await this.port.transition(effect.operationId, "failed", {
+      await this.transitionUnlessSettled(effect.operationId, "failed", {
         reason: "structured host was intentionally terminated; retry the operation",
       });
       return { blocked: false, terminated: false };
@@ -638,30 +949,44 @@ export class StructuredDeliveryQueue {
        asynchronous, and a kill behind this effect must not wait a whole pass
        for it. */
     if (!host) {
-      await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+      if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) {
+        return { blocked: false, terminated: false };
+      }
       await this.recoverUnavailableHost(effect);
       return { blocked: false, terminated: false };
     }
     if (!hostSupportsCompact(host)) {
-      await this.port.transition(effect.operationId, "failed", { reason: "unsupported-capability" });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "unsupported-capability" });
       return { blocked: false, terminated: false };
     }
-    const health = await host.health();
+    /* Same fence as the message path, and the same answer to an unreadable
+       one: a compaction is issued against a host this pass could read as idle,
+       never against one it could not read at all. */
+    const state = await this.readHealth(host);
+    if (!state.readable) {
+      this.retrySoon();
+      return { blocked: false, terminated: false };
+    }
+    const health = state.value;
     if (health.status === "dead" || health.status === "unhosted") {
-      await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+      if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) {
+        return { blocked: false, terminated: false };
+      }
       await this.recoverUnavailableHost(effect);
       return { blocked: false, terminated: false };
     }
     /* Admission fenced the durable turn axis; this re-reads the live host, so a
        turn that started in between fails the control instead of racing it. */
     if (health.status !== "idle" || health.activeTurnRef) {
-      await this.port.transition(effect.operationId, "failed", { reason: "busy-turn" });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "busy-turn" });
       return { blocked: false, terminated: false };
     }
     /* Durable marker first: a restart that finds the receipt in `delivering`
        knows the control may already have reached the engine and terminalizes it
        as unverified instead of compacting the thread a second time. */
-    await this.port.transition(effect.operationId, "delivering");
+    if (!await this.transitionUnlessSettled(effect.operationId, "delivering")) {
+      return { blocked: false, terminated: false };
+    }
     /* Marked before the run exists: a compaction that settles immediately would
        otherwise clear the barrier before it was ever raised. */
     this.compactingConversations.add(effect.conversationId);
@@ -683,7 +1008,7 @@ export class StructuredDeliveryQueue {
       });
       /* The receipt records which compaction closed it: the only durable place
          the lifecycle evidence survives alongside the operation. */
-      await this.port.transition(effect.operationId, "delivered", {
+      await this.transitionUnlessSettled(effect.operationId, "delivered", {
         reason: outcome.compactionId ? `compaction:${outcome.compactionId}` : null,
       });
     } catch (error) {
@@ -691,43 +1016,183 @@ export class StructuredDeliveryQueue {
         await this.terminalizeUnverified(effect.operationId, failureReason(error));
         return;
       }
-      await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: failureReason(error) });
     }
   }
 
   /**
-   * Terminalizes a compaction whose outcome nothing proved. `uncertain` is a
+   * The five failable reads this queue decides on, each keeping whether it
+   * could be read at all.
+   *
+   * A port method that is not wired answers as a completed read: the fence does
+   * not exist in that deployment, which is a fact about the configuration. Only
+   * an attempted read that threw is unreadable, and the callers above never let
+   * one of those authorise anything.
+   */
+  private readStatus(operationId: string): Promise<Evidence<{ status: string; reason?: string | null } | null>> {
+    const read = this.port.status?.bind(this.port);
+    return readOptionalEvidence(read && (() => read(operationId)), null, "delivery journal status is unavailable");
+  }
+
+  private readSettled(operationId: string): Promise<Evidence<boolean>> {
+    const read = this.port.settled?.bind(this.port);
+    return readOptionalEvidence(read && (() => read(operationId)), false, "durable delivery record is unavailable");
+  }
+
+  private async transitionUnlessSettled(
+    operationId: string,
+    status: StructuredDeliveryTransition,
+    details?: { turnId?: string | null; reason?: string | null },
+  ): Promise<boolean> {
+    try {
+      await this.port.transition(operationId, status, details);
+      return true;
+    } catch (error) {
+      const durable = await this.readStatus(operationId);
+      if (durable.readable && durable.value && TERMINAL_DELIVERY_STATUSES.has(durable.value.status)) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  private readHostClaim(conversationId: string): Promise<Evidence<string | null>> {
+    const read = this.port.hostClaim?.bind(this.port);
+    return readOptionalEvidence(read && (() => read(conversationId)), null, "host claim projection is unavailable");
+  }
+
+  /**
+   * The live host's own state, which is a read like any other.
+   *
+   * It decides whether a message may be handed over at all, whether a control
+   * may be issued, and — after an actuation that threw — whether the host is
+   * gone. It used to be read bare, so a throw took the whole pass down with it,
+   * or converted at the call site with `.catch(() => null)` into the host being
+   * GONE, which is a fact nothing read. Being gone is what lets a control be
+   * issued a second time, so that conversion was the same duplicate-actuation
+   * hazard as an unreadable journal fence one step further along.
+   */
+  private readHealth(host: EngineHost): Promise<Evidence<HostState>> {
+    return readEvidence(() => host.health(), "structured host state is unavailable");
+  }
+
+  /**
+   * Whether the evidence says this conversation's turn is severed, when a
+   * control has no host left to resolve (#1281).
+   *
+   * The liveness decision behind it already refuses to answer `severed` from
+   * anything it could not read — that is the whole of what it is for — so a
+   * null here means only "not shown to be severed". The read reaching it can
+   * still fail, though: it goes to the registry snapshot and to a transcript on
+   * disk, and letting that failure out would abort the drain pass for every
+   * other conversation sharing it. Unreadable joins `unknown` on the side that
+   * settles nothing, which is the same answer both this fence and the liveness
+   * decision give the question separately.
+   */
+  private readSeveredHostReason(conversationId: string): Promise<Evidence<string | null>> {
+    return readEvidence(
+      () => this.severedHostReason(conversationId),
+      "structured host liveness evidence is unavailable",
+    );
+  }
+
+  /**
+   * What the drain does with a fence it could not read: nothing, and again
+   * shortly.
+   *
+   * Reporting the group blocked leaves the effect exactly as it was — no
+   * transition, no engine write, nothing durable to undo — and the scheduled
+   * retry brings the pass back once the store answers. A send whose executor
+   * never returns is ended by the receipt deadline meanwhile, so a fence that
+   * stays unreadable delays an answer without ever withholding one.
+   */
+  private fenceUnavailable(): boolean {
+    this.retrySoon();
+    return true;
+  }
+
+  /**
+   * What a `delivering` row's recorded ownership proves about its executor.
+   *
+   * Three answers, because two were one too few. The row says actuation began;
+   * whether the executor that began it is still there is a separate question,
+   * and an unreadable answer to that question is not a `no`.
+   *
+   * - `live`: a DIFFERENT executor wrote the row and the writer claim it wrote
+   *   under is still the claim that owns the host. It can still write to the
+   *   engine, so the row is its to settle.
+   * - `abandoned`: the host is owned by a DIFFERENT, explicitly named claim, so
+   *   the recorded executor can no longer write to the engine and nothing but
+   *   this pass is left to end the row. A row this executor wrote itself is
+   *   abandoned too: no other pass of this instance can be actuating it, so
+   *   finding it here means an earlier pass of ours dropped it.
+   * - `unproven`: the two claims could not be COMPARED — the row carries no
+   *   ownership at all, it was written under a claim its writer could not read,
+   *   or the claim now cannot be read. That is a gap in the evidence and not a
+   *   handover, so the row stays with the executor that holds it. Nothing is
+   *   withheld by waiting: an owner that never comes back leaves the send to
+   *   the receipt deadline, which ends it from the durable record alone, and no
+   *   branch here sends anything again.
+   *
+   * A row carrying no ownership used to be `abandoned` — every row looked like
+   * that before this evidence existed, and terminalizing them was how the
+   * evidence was rolled out. It is `unproven` now, because the only rows that
+   * can still look like that are ones whose writer could not read the claim,
+   * which is the projection gap this fence exists for.
+   */
+  private async deliveringOwnerDisposition(
+    conversationId: string,
+    reason: string | null | undefined,
+  ): Promise<"live" | "abandoned" | "unproven"> {
+    const owner = deliveringOwnership(reason);
+    if (!owner) return "unproven";
+    if (owner.executorId === this.executorId) return "abandoned";
+    switch (evidenceAgrees(await this.readHostClaim(conversationId), owner.hostClaim)) {
+      case "matches": return "live";
+      case "differs": return "abandoned";
+      default: return "unproven";
+    }
+  }
+
+  /**
+   * Terminalizes an operation whose outcome nothing proved — a send an executor
+   * took and could not answer for, a compaction an earlier one issued. `uncertain` is a
    * newer transition than the rest of this channel, so a runtime-host from
    * before #862 rejects it; the operation must still settle rather than wedge
    * the conversation's queue behind a receipt no pass can ever clear.
    */
   private async terminalizeUnverified(operationId: string, reason: string): Promise<void> {
     try {
-      await this.port.transition(operationId, "uncertain", { reason });
+      await this.transitionUnlessSettled(operationId, "uncertain", { reason });
     } catch {
-      await this.port.transition(operationId, "failed", { reason });
+      await this.transitionUnlessSettled(operationId, "failed", { reason });
     }
   }
 
   private async drainReconfigure(effect: StructuredReconfigureEffect): Promise<boolean> {
     const host = this.resolveHost(effect.conversationId);
     if (host) {
-      const health = await host.health();
+      /* A switch is applied at a turn boundary, and an unreadable state is not
+         one: it cannot show the host busy, and treating it as idle would apply
+         the switch across a turn that may be running. */
+      const state = await this.readHealth(host);
+      if (!state.readable) { this.retrySoon(); return true; }
+      const health = state.value;
       if (health.status === "active" || health.status === "attention" || health.activeTurnRef) return true;
     }
-    await this.port.transition(effect.operationId, "applying");
+    if (!await this.transitionUnlessSettled(effect.operationId, "applying")) return false;
     try {
       const outcome = await this.reconfigure(effect, {
         isCurrent: () => this.isCurrentReconfigure(effect),
       });
       if (outcome === "pending") {
-        await this.port.transition(effect.operationId, "queued", { reason: "turn-boundary" });
+        await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "turn-boundary" });
         this.retrySoon();
         return true;
       }
-      await this.port.transition(effect.operationId, "applied");
+      await this.transitionUnlessSettled(effect.operationId, "applied");
     } catch (error) {
-      await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: failureReason(error) });
     }
     return false;
   }
@@ -760,12 +1225,12 @@ export class StructuredDeliveryQueue {
         this.rerun = true;
         return;
       }
-      await this.port.transition(effect.operationId, "failed", {
+      await this.transitionUnlessSettled(effect.operationId, "failed", {
         reason: "structured host recovery did not start; retry the operation",
       });
     } catch (error) {
       const reason = `structured host recovery failed: ${failureReason(error)}`.slice(0, 240);
-      await this.port.transition(effect.operationId, "failed", { reason });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason });
     }
   }
 
@@ -773,7 +1238,7 @@ export class StructuredDeliveryQueue {
     const host = this.resolveHost(effect.conversationId);
     if (effect.kind === "kill") {
       if (!effect.sessionKey) {
-        await this.port.transition(effect.operationId, "failed", { reason: "structured host termination target is unavailable" });
+        await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "structured host termination target is unavailable" });
         return { blocked: false, terminated: false };
       }
       if (!host) {
@@ -781,58 +1246,99 @@ export class StructuredDeliveryQueue {
           if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) {
             return { blocked: true, terminated: false };
           }
-          await this.port.transition(effect.operationId, "delivering");
-          await this.port.transition(effect.operationId, "delivered");
+          if (!await this.transitionUnlessSettled(effect.operationId, "delivering")) {
+            return { blocked: false, terminated: true };
+          }
+          await this.transitionUnlessSettled(effect.operationId, "delivered");
           return { blocked: false, terminated: true };
         } catch (error) {
-          await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
+          await this.transitionUnlessSettled(effect.operationId, "queued", { reason: failureReason(error) });
           throw error;
         }
       }
-      await this.port.transition(effect.operationId, "delivering");
+      if (!await this.transitionUnlessSettled(effect.operationId, "delivering")) {
+        return { blocked: false, terminated: false };
+      }
       try {
         if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) {
-          await this.port.transition(effect.operationId, "failed", { reason: "structured host termination is unavailable" });
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "structured host termination is unavailable" });
           return { blocked: false, terminated: false };
         }
-        await this.port.transition(effect.operationId, "delivered");
+        await this.transitionUnlessSettled(effect.operationId, "delivered");
         return { blocked: false, terminated: true };
       } catch (error) {
-        await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
+        await this.transitionUnlessSettled(effect.operationId, "queued", { reason: failureReason(error) });
         throw error;
       }
     }
-    if (!host) return { blocked: true, terminated: false };
-    const health = await host.health();
-    if (health.status === "dead" || health.status === "unhosted") {
-      await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+    if (!host) {
+      /* Holding the control was right while a host might still come back to
+         answer it, and wrong once nothing can: the effect stays pending, the
+         group never drains, and every message queued behind it waits on a turn
+         no process is running (#1281). Evidence of a severed turn settles it
+         instead — an interrupt has nothing left to interrupt, and an attention
+         nothing left to answer. Evidence is also all it is: `unknown` and a
+         read that could not be made both leave the control held, which is what
+         this queue does with every other unreadable fence (#1131). */
+      const severed = await this.readSeveredHostReason(effect.conversationId);
+      if (!severed.readable) {
+        this.retrySoon();
+        return { blocked: true, terminated: false };
+      }
+      if (!severed.value) return { blocked: true, terminated: false };
+      await this.transitionUnlessSettled(
+        effect.operationId,
+        effect.kind === "interrupt" ? "interrupted" : "failed",
+        { reason: `structured host is severed: ${severed.value}`.slice(0, 240) },
+      );
+      return { blocked: false, terminated: false };
+    }
+    /* An answer and an interrupt are engine writes like a message, so the same
+       rule holds one step earlier: a state that could not be read authorises
+       neither the control nor the `dead-host` requeue that would reissue it. */
+    const state = await this.readHealth(host);
+    if (!state.readable) {
+      this.retrySoon();
       return { blocked: true, terminated: false };
     }
-    await this.port.transition(effect.operationId, "delivering", {
+    const health = state.value;
+    if (health.status === "dead" || health.status === "unhosted") {
+      await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" });
+      return { blocked: true, terminated: false };
+    }
+    if (!await this.transitionUnlessSettled(effect.operationId, "delivering", {
       ...(effect.kind === "interrupt" ? { turnId: effect.turnId ?? health.activeTurnRef } : {}),
-    });
+    })) return { blocked: false, terminated: false };
     try {
       if (effect.kind === "answer") {
         await host.answer(effect.attentionId!, effect.resolution);
-        await this.port.transition(effect.operationId, "answered");
+        await this.transitionUnlessSettled(effect.operationId, "answered");
       } else {
         const turnId = effect.turnId ?? health.activeTurnRef;
         if (!turnId || (health.activeTurnRef && health.activeTurnRef !== turnId)) {
-          await this.port.transition(effect.operationId, "failed", { reason: "stale-turn" });
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "stale-turn" });
           return { blocked: false, terminated: false };
         }
         await host.interrupt(turnId);
-        await this.port.transition(effect.operationId, "interrupted", { turnId });
+        await this.transitionUnlessSettled(effect.operationId, "interrupted", { turnId });
       }
       return { blocked: false, terminated: false };
     } catch (error) {
       const reason = failureReason(error);
-      const afterFailure = await host.health().catch(() => null);
-      if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
-        await this.port.transition(effect.operationId, "queued", { reason });
+      /* The control was issued and threw. `queued` here says it never reached
+         the engine and hands it to a later pass to issue AGAIN, which is only
+         honest where the host is read to be gone — a departed host answered
+         nothing and kept nothing. An unreadable state is not that proof, and
+         converting it into one let an answer or an interrupt be delivered a
+         second time to a host that was alive the whole time. It settles like
+         any other control this host refused instead. */
+      const afterFailure = await this.readHealth(host);
+      if (afterFailure.readable
+        && (afterFailure.value.status === "dead" || afterFailure.value.status === "unhosted")) {
+        await this.transitionUnlessSettled(effect.operationId, "queued", { reason });
         return { blocked: true, terminated: false };
       }
-      await this.port.transition(effect.operationId, "failed", { reason });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason });
       return { blocked: false, terminated: false };
     }
   }

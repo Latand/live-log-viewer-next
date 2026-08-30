@@ -13,7 +13,9 @@ import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorAct
 import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { parseRuntimeCommand } from "./commands";
 import { runtimePresentationReceipt, type RuntimeOperationKind } from "./contracts";
-import { runtimeEventsEnabled, structuredHostsEnabled } from "./flags";
+import { runtimeEventsEnabled, runtimeEventsRolledBack, structuredHostsEnabled, RUNTIME_PLANE_ABSENT } from "./flags";
+import { readEvidence, type Evidence } from "./evidence";
+import { journalVerdict, resolveSendReceipt, runtimeReceiptForSend, type SendReceipt } from "./sendSettlement";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -49,6 +51,12 @@ export interface RuntimeRetryHttpDependencies extends RuntimeHttpDependencies {
   kick(): void;
   recover?: typeof recoverDeadStructuredConversation;
   republish?(conversationId: string): Promise<boolean>;
+  /** Gives the id this route is about to hand back a durable record of its own
+      (#1131), so the caller holding it can be answered during a runtime outage
+      and the settlement deadline can end it. Defaulted at the call site rather
+      than in the dependency literal, because a caller that supplies its own
+      dependencies must not silently opt the settlement record out. */
+  recordRetryAttempt?(previousOperationId: string, retryOperationId: string): boolean;
 }
 
 async function republishStructuredConversation(conversationId: string): Promise<boolean> {
@@ -66,8 +74,29 @@ const DEFAULT_RETRY_DEPENDENCIES: RuntimeRetryHttpDependencies = {
   republish: republishStructuredConversation,
 };
 
+function recordDeliveryRetryAttempt(previousOperationId: string, retryOperationId: string): boolean {
+  return agentRegistry().recordDeliveryRetryAttempt(previousOperationId, retryOperationId);
+}
+
 function terminalRetryIdempotencyKey(operationId: string): string {
   return `retry_${createHash("sha256").update(operationId).digest("hex")}`;
+}
+
+/**
+ * The refusal that keeps a retry id from leaving this process without a durable
+ * row behind it (#1131).
+ *
+ * Retryable, and honestly so: the attempt is admitted under its own idempotency
+ * key, so the next call converges on the same leaf rather than admitting a
+ * second one, and it persists the row this one could not.
+ */
+const RETRY_RECORD_UNAVAILABLE = "retry attempt could not be recorded durably";
+
+function retryRecordUnavailable(recorded: Evidence<boolean>): NextResponse {
+  return NextResponse.json({
+    error: recorded.readable ? RETRY_RECORD_UNAVAILABLE : recorded.reason,
+    retryable: true,
+  }, { status: 503 });
 }
 
 /**
@@ -222,13 +251,30 @@ async function dispatchRuntimeCommand(
             ...(admitted.receipt ? { receipt: admitted.receipt } : {}),
           }, { status: admitted.status });
         }
-        if (admitted.outcome === "held") return NextResponse.json({ held: true }, { status: 202 });
+        /* #1131: a hold is an ACCEPTED send with a durable reservation behind
+           it, so it answers with that reservation's operation id like every
+           other acceptance. Without it this was the one admission a caller
+           could never ask `message_receipt` about afterwards, which put
+           `queued` back at the end of the story on the composer's own path. */
+        if (admitted.outcome === "held") {
+          return NextResponse.json({ held: true, operationId: admitted.operationId }, { status: 202 });
+        }
         const status = admitted.receipt.status === "pending" || admitted.receipt.status === "queued" ? 202 : 200;
         return NextResponse.json({ operationId: admitted.operationId, receipt: admitted.receipt }, { status });
       }
-      /* No structured ownership: nothing was delivered here, and the direct
-         command below owns the fate from now on. */
+      /* No structured ownership. The direct command below used to own the fate
+         from here, and for a SEND that is `queued` as a final answer by another
+         road (#1131): the operation is admitted straight into the journal with
+         no durable reservation behind it, so no receipt query can settle it and
+         a lasting outage leaves it unqueryable as well as unexecuted. A send
+         nothing owns is refused instead — the caller learns now, rather than
+         holding an id that never becomes an answer. Controls are untouched:
+         they carry no message and reserve nothing. */
       attachments.outcome = "refused";
+      return NextResponse.json(
+        { error: "structured delivery ownership is unavailable for this conversation" },
+        { status: 503 },
+      );
     }
     if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
     /* Same fence as the queue above: the command is on the wire, so its fate is
@@ -271,6 +317,116 @@ export async function handleRuntimeCommand(
   return response;
 }
 
+export interface RuntimeOperationQueryDependencies {
+  client(): RuntimeHostClient | null;
+  rolledBack(): boolean;
+  /** The durable settlement for this id, read through the same client the
+      journal half uses so both halves describe one runtime. */
+  settle(operationId: string, client: RuntimeHostClient | null): Promise<SendReceipt | null>;
+}
+
+const DEFAULT_OPERATION_QUERY_DEPENDENCIES: RuntimeOperationQueryDependencies = {
+  client: runtimeHostClient,
+  rolledBack: () => runtimeEventsRolledBack(),
+  settle: (operationId, client) => resolveSendReceipt(operationId, { client }),
+};
+
+/**
+ * What became of one operation, from the two stores that can answer.
+ *
+ * #1131: this used to report the delivery journal's raw state and nothing else,
+ * so an accepted send answered `queued` for as long as the outage lasted and
+ * 503 once the socket was gone. It settles the durable record first now — and
+ * settling first is also what stopped the two answers from being written in the
+ * wrong order.
+ *
+ * ── THE CONSISTENCY RULE ──────────────────────────────────────────────────
+ *
+ * **A terminal durable settlement is authoritative once it is written.** The
+ * journal is preferred everywhere else: while the send is still in flight, and
+ * for every operation kind the durable record knows nothing about.
+ *
+ * It needs a rule because the two stores can be terminal in one and open in the
+ * other, by design. Settlement deliberately writes the record when the journal
+ * READ succeeds and the fence WRITE fails — a host whose reads work and whose
+ * writes do not must not make `queued` permanent — and in that supported half
+ * outage the journal still holds the operation open. Preferring the journal
+ * unconditionally answered `send: failed` beside `receipt: queued`: one query,
+ * two contradictory answers, and the caller left to guess which one is safe to
+ * act on. Once an answer has been settled and handed out it has to stay the
+ * answer, so the settled record wins and the journal's open status is not
+ * reported beside it. Nothing is lost by that: the delivery queue reads the
+ * same record before it actuates anything, so the operation the journal still
+ * shows as open will not be delivered later either.
+ */
+export async function handleRuntimeOperationQuery(
+  operationId: string,
+  dependencies: RuntimeOperationQueryDependencies = DEFAULT_OPERATION_QUERY_DEPENDENCIES,
+): Promise<NextResponse> {
+  if (dependencies.rolledBack()) {
+    return NextResponse.json(
+      { error: "runtime events are disabled", code: RUNTIME_PLANE_ABSENT },
+      { status: 503 },
+    );
+  }
+  if (!operationId || operationId.includes(":") || /\s/.test(operationId)) {
+    return NextResponse.json({ error: "operationId is invalid" }, { status: 400 });
+  }
+  const client = dependencies.client();
+  /* The authoritative store, and a FAILABLE read of it. A settlement that could
+     not be read is not a send that was never settled: answering the journal's
+     still-open status from here would re-open an answer this endpoint may
+     already have handed out as terminal, so an unreadable record ends the query
+     rather than being converted into `queued`. */
+  const settlement = await readEvidence(
+    () => dependencies.settle(operationId, client),
+    "delivery settlement is unavailable",
+  );
+  const send = settlement.readable ? settlement.value : null;
+  /* The rule above, applied before anything can contradict it. */
+  if (send && send.state !== "in-flight") {
+    return NextResponse.json({ operationId, receipt: runtimeReceiptForSend(send), send });
+  }
+  /* An absent plane and an unreachable one stay distinct answers: only the
+     first carries the code, and reporting a dead socket as a rolled-back plane
+     is what makes an outage look like a configuration. */
+  let unreachable: string | null = null;
+  if (client) {
+    try {
+      const result = await client.operationStatus(operationId);
+      /* A journal answer that is itself TERMINAL is proof on its own, and the
+         record is projected from it, so the two cannot disagree about it. An
+         open one can, which is exactly the case the unreadable record has to
+         stop. */
+      if (result && (settlement.readable || journalVerdict(result.receipt.status))) {
+        return NextResponse.json({
+          operationId: result.operationId,
+          receipt: result.receipt,
+          ...(send ? { send } : {}),
+        });
+      }
+    } catch (error) {
+      unreachable = error instanceof Error ? error.message : "runtime host is unavailable";
+    }
+  }
+  /* The journal could not answer. The durable delivery record still can, and
+     for an accepted send that is the whole point of settling it there. */
+  if (send) return NextResponse.json({ operationId, receipt: runtimeReceiptForSend(send), send });
+  if (!settlement.readable) {
+    /* Neither store gave a usable answer, and one of them was never read. That
+       is not an operation nobody admitted, so it must not be answered as one. */
+    return NextResponse.json({ error: settlement.reason, retryable: true }, { status: 503 });
+  }
+  if (unreachable) return NextResponse.json({ error: unreachable }, { status: 503 });
+  if (!client) {
+    return NextResponse.json(
+      { error: "runtime host socket is unavailable", code: RUNTIME_PLANE_ABSENT },
+      { status: 503 },
+    );
+  }
+  return NextResponse.json({ error: "operation not found" }, { status: 404 });
+}
+
 export async function handleRuntimeRetry(
   request: NextRequest,
   operationId: string,
@@ -308,13 +464,37 @@ export async function handleRuntimeRetry(
         nextIdempotencyKey = value.idempotencyKey;
       }
     }
-    const previous = await client.operationStatus(operationId, { currentRetryLeaf: true });
+    const recordRetryAttempt = dependencies.recordRetryAttempt ?? recordDeliveryRetryAttempt;
+    /* The attempt this call is about, and a FAILABLE read of it. Only a read
+       that COMPLETED and found nothing may answer `operation not found`: the
+       catch below classifies by message, and an outage whose message happens to
+       carry the journal's word for a missing operation would otherwise tell a
+       caller its send never existed. Unreadable ends the call retryably. */
+    const status = await readEvidence(
+      () => client.operationStatus(operationId, { currentRetryLeaf: true }),
+      "runtime operation status is unavailable",
+    );
+    if (!status.readable) return NextResponse.json({ error: status.reason, retryable: true }, { status: 503 });
+    const previous = status.value;
     if (!previous) return NextResponse.json({ error: "operation not found" }, { status: 404 });
     if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
       return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
     }
     if (previous.receipt.status !== "failed" && previous.receipt.status !== "rejected") {
       if (previous.operationId !== operationId) {
+        /* The network replay: an earlier call's response was lost, and the
+           journal converges this one onto the SAME attempt. The id is still an
+           id this response is handing out, so it needs the same durable row the
+           fresh admission needs — this path used to return the leaf without
+           persisting anything at all, so a lost response was enough to leave a
+           caller holding an id no query and no deadline could ever settle. The
+           record is idempotent: the row an earlier call wrote is the row this
+           one finds. */
+        const recorded = await readEvidence(
+          () => recordRetryAttempt(previous.receipt.presentationOperationId ?? operationId, previous.operationId),
+          RETRY_RECORD_UNAVAILABLE,
+        );
+        if (!recorded.readable || !recorded.value) return retryRecordUnavailable(recorded);
         const status = previous.receipt.status === "pending"
           || previous.receipt.status === "queued"
           || previous.receipt.status === "delivering"
@@ -360,6 +540,28 @@ export async function handleRuntimeRetry(
       await dependencies.republish?.(previous.receipt.conversationId);
       result = await retry();
     }
+    /* Before the queue is kicked, and before the id leaves this process: the
+       attempt gets a durable record keyed by the id the caller is handed
+       (#1131). Without it that id named nothing — a query during a runtime
+       outage found no record to answer from, no deadline could end it, and the
+       delivery queue's own fence, which reads this record, had nothing to read.
+       It starts non-terminal, so the attempt keeps its intended eligibility for
+       one fresh execution; once the deadline settles it, the same fence is what
+       stops a late recovery from delivering it after the caller was told it had
+       not arrived.
+
+       The write is failable and its result was ignored, which made the record
+       best-effort and the id in the caller's hand an orphan whenever it did not
+       land. A row that was not written and a row whose write could not be read
+       are the same answer here: the id does not leave this process. The attempt
+       itself is idempotent under its own key, so a caller that retries after
+       this refusal converges on the same leaf through the replay path above and
+       gets the id once the row exists. */
+    const recorded = await readEvidence(
+      () => recordRetryAttempt(previous.receipt.presentationOperationId ?? previous.operationId, result.operationId),
+      RETRY_RECORD_UNAVAILABLE,
+    );
+    if (!recorded.readable || !recorded.value) return retryRecordUnavailable(recorded);
     dependencies.kick();
     return NextResponse.json({
       operationId: result.operationId,

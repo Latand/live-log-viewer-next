@@ -101,12 +101,12 @@ function selectedRef(overrides: Partial<SelectedContextRef> = {}): SelectedConte
 interface Harness {
   injected: never;
   actions: Array<Record<string, unknown>>;
-  counts: { identityLookups: number; pathLookups: number };
+  counts: { identityLookups: number; pathLookups: number; resolverCreations: number };
 }
 
 function harness(options: { known?: Record<string, RegistryConversation>; pathAllowed?: boolean } = {}): Harness {
   const known = options.known ?? { [SELECTED_ID]: conversation(SELECTED_ID, transcriptPath) };
-  const counts = { identityLookups: 0, pathLookups: 0 };
+  const counts = { identityLookups: 0, pathLookups: 0, resolverCreations: 0 };
   const actions: Array<Record<string, unknown>> = [];
   const lookup: ConversationLookup = {
     conversation: (id) => {
@@ -124,7 +124,10 @@ function harness(options: { known?: Record<string, RegistryConversation>; pathAl
     actions,
     injected: {
       selectedContext: {
-        selectedConversation: () => selectedConversationResolver(lookup),
+        selectedConversation: () => {
+          counts.resolverCreations += 1;
+          return selectedConversationResolver(lookup);
+        },
         pathAllowed: () => options.pathAllowed ?? true,
       },
       applyConversationAction: async (request: Record<string, unknown>) => {
@@ -298,6 +301,7 @@ test("get_conversation reads a bounded tail of the selected card while every sca
   expect(result.tail.lines).toEqual(['{"n":26}', '{"n":27}', '{"n":28}', '{"n":29}']);
   expect(result.tail.truncated).toBe(true);
   expect(counts.pathLookups).toBe(0);
+  expect(counts.resolverCreations).toBe(2);
 });
 
 test("the tail bound is the server's, however many lines the caller asks for", async () => {

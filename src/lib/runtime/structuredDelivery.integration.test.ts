@@ -13,7 +13,8 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import type { EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
-import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
+import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructuredDeliveryHost, releaseStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
+import { resolveSendReceipt, sendReceiptFor } from "./sendSettlement";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -23,13 +24,24 @@ import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-delivery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
-function journalPort(journal: RuntimeJournal, failDelivered = false): StructuredDeliveryQueuePort {
+function journalPort(
+  journal: RuntimeJournal,
+  failDelivered = false,
+  hostClaim: (() => string | null) | null = null,
+): StructuredDeliveryQueuePort {
   return {
     effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
     transition: async (operationId, status, details) => {
       if (failDelivered && status === "delivered") throw new Error("runtime stopped before confirmation commit");
       journal.transitionOperation(operationId, status, details);
     },
+    /* Wired exactly as the controller wires it, so the durable receipt these
+       tests recover through is the one production reads (#1131). */
+    status: async (operationId) => journal.operationResult(operationId)?.receipt ?? null,
+    /* The controller wires this from the registry's own claim owner. A fixture
+       that leaves it out is a deployment where no ownership evidence exists at
+       all, which is a legitimate state and proves nothing either way. */
+    ...(hostClaim ? { hostClaim } : {}),
   };
 }
 
@@ -369,6 +381,113 @@ test("the controller republishes a live host into a restarted runtime journal", 
       sessionKey: key,
     });
   } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
+test("one host whose state cannot be read costs no other host its republish (#1131)", async () => {
+  const directory = path.join(sandbox, "controller-unreadable-host-state");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  /* Assembled rather than written out: a session-id-shaped literal is a
+     resource identifier the publication gate refuses. */
+  const unreadableSessionId = `4c1a90fe-71b3-4${"e"}0d-9a55-2b6d41f7cc0${1}`;
+  const readableSessionId = `6d2b81af-05c4-4${"a"}1b-8f37-9e0c53d8bb1${2}`;
+  const hosts = [
+    { sessionId: unreadableSessionId, name: "unreadable" },
+    { sessionId: readableSessionId, name: "readable" },
+  ].map(({ sessionId, name }) => {
+    const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+    return { sessionId, name, artifactPath, key: { engine: "claude" as const, sessionId } };
+  });
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations(hosts.map(({ artifactPath }) => ({
+    engine: "claude" as const,
+    path: artifactPath,
+    accountId: "unreadable-state-account",
+    launchProfile: profile,
+    turn: { state: "idle" as const, source: "assistant" as const, terminalAt: null },
+    observedAt: "2026-08-30T09:00:00.000Z",
+  })));
+  for (const { key, artifactPath } of hosts) {
+    registry.upsert({
+      key,
+      artifactPath,
+      cwd: directory,
+      accountId: "unreadable-state-account",
+      launchProfile: profile,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "claude-broker",
+        endpoint: `fake:${key.sessionId}`,
+        process: null,
+        eventCursor: 3,
+        protocolVersion: "fake-v1",
+        writerClaimEpoch: 0,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+  }
+  const conversations = hosts.map(({ artifactPath }) => registry.conversationForPath(artifactPath)!);
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = {
+    snapshot: async () => journal.snapshot(),
+    append: async (event: Parameters<RuntimeHostClient["append"]>[0]) => journal.append(event),
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => journal.executeOperation(command),
+    operationStatus: async (operationId: string) => journal.operationResult(operationId),
+    producerCursor: async (producerKind: string, eventKeyPrefix: string) => journal.producerCursor(producerKind, eventKeyPrefix),
+    effectBatch: async (kinds?: readonly string[], afterEventSeq?: number) => journal.effectBatch(100, kinds, afterEventSeq),
+    transitionOperation: async (operationId: string, status: Parameters<RuntimeHostClient["transitionOperation"]>[1], details?: Parameters<RuntimeHostClient["transitionOperation"]>[2]) => journal.transitionOperation(operationId, status, details),
+  } as RuntimeHostClient;
+  /* Healthy while it is adopted, unreadable afterwards: the outage this covers
+     opens after the host is already registered and published. */
+  let stateReadFails = false;
+  const unreadableBase = new FakeEngineHost(createFakeDeliveryLedger());
+  const readUnreadableHealth = unreadableBase.health.bind(unreadableBase);
+  const unreadableHost = Object.assign(unreadableBase, {
+    health: async (): Promise<HostState> => {
+      if (stateReadFails) throw new Error("structured host state read timed out");
+      return readUnreadableHealth();
+    },
+    onStateChange: () => () => {},
+  });
+  const readableHost = observableFakeHost(new FakeEngineHost(createFakeDeliveryLedger()));
+  const publishedHost = (conversationId: string) =>
+    journal.snapshot().sessions.find((session) => session.conversationId === conversationId)?.host;
+
+  try {
+    await bindStructuredDeliveryQueue(
+      [{ key: hosts[0].key, host: unreadableHost }, { key: hosts[1].key, host: readableHost }],
+      { registry, client },
+    );
+    expect(publishedHost(conversations[0].id)).toBe("hosted");
+    expect(publishedHost(conversations[1].id)).toBe("hosted");
+
+    stateReadFails = true;
+    /* Its own republish answers honestly that nothing was published, and the
+       projection it could not read is left exactly as it stands rather than
+       being replaced by a derived one that would call a live host unhosted. */
+    expect(await republishStructuredDeliveryHost(hosts[0].key)).toBeFalse();
+    expect(publishedHost(conversations[0].id)).toBe("hosted");
+    /* And the host that CAN be read still republishes: an unreadable state
+       answers for its own host and for nothing else. */
+    expect(await republishStructuredDeliveryHost(hosts[1].key)).toBeTrue();
+    expect(publishedHost(conversations[1].id)).toBe("hosted");
+
+    /* The whole-loop version of the same rule: releasing the readable host
+       walks every remaining registration, and the unreadable one used to take
+       that walk — and its caller — down with it. */
+    expect(await releaseStructuredDeliveryHost(hosts[1].key)).toBeTrue();
+    expect(publishedHost(conversations[0].id)).toBe("hosted");
+    expect(publishedHost(conversations[1].id)).toBe("unhosted");
+  } finally {
+    stateReadFails = false;
     await bindStructuredDeliveryQueue([], { registry, client: null });
     journal.close();
   }
@@ -1210,7 +1329,7 @@ test("a failed kill projection retries through the coalesced drain and terminali
   }
 });
 
-test("a delivering entry resumes after restart through the host ledger without a second engine write", async () => {
+test("a delivering entry left by a dead executor settles unverified instead of being written again", async () => {
   const filename = path.join(sandbox, "events.sqlite");
   const ledger = createFakeDeliveryLedger();
   const firstJournal = new RuntimeJournal(filename, { structuredHosts: true });
@@ -1237,7 +1356,10 @@ test("a delivering entry resumes after restart through the host ledger without a
     policy: "queue",
   });
   const firstHost = new FakeEngineHost(ledger);
-  const firstQueue = new StructuredDeliveryQueue(journalPort(firstJournal, true), () => firstHost);
+  const firstQueue = new StructuredDeliveryQueue(
+    journalPort(firstJournal, true, () => "claim-first:1"),
+    () => firstHost,
+  );
 
   await expect(firstQueue.drain()).rejects.toThrow("runtime stopped before confirmation commit");
   expect(firstJournal.operationResult("operation-one")?.receipt.status).toBe("delivering");
@@ -1245,18 +1367,95 @@ test("a delivering entry resumes after restart through the host ledger without a
   expect(ledger.writes).toMatchObject([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   firstJournal.close();
 
+  /* The executor died between the engine write and the transition that would
+     have recorded it, so the durable receipt is stuck at `delivering` with the
+     effect still in the outbox. It used to be re-issued here and deduped by the
+     host's own ledger — which works only while a host that can read the thread
+     back is standing, and writes the message a second time when it is not. The
+     durable row is the fence instead (#1131): the recovered queue hands the
+     engine nothing and terminalizes the receipt unverified, so recovery after
+     an outage of any length produces one terminal answer and zero late
+     deliveries.
+
+     The host is re-adopted on the way back, so the claim the dead executor
+     stamped is explicitly no longer the current one. That is what ends the row
+     HERE rather than at the receipt deadline: the successor can prove the
+     writer lost the host, not merely that it went quiet. */
   const reopenedJournal = new RuntimeJournal(filename, { structuredHosts: true });
   const recoveredHost = new FakeEngineHost(ledger);
-  const recoveredQueue = new StructuredDeliveryQueue(journalPort(reopenedJournal), () => recoveredHost);
+  const recoveredQueue = new StructuredDeliveryQueue(
+    journalPort(reopenedJournal, false, () => "claim-recovered:2"),
+    () => recoveredHost,
+  );
   await recoveredQueue.drain();
 
   expect(reopenedJournal.operationResult("operation-one")?.receipt).toMatchObject({
-    status: "delivered",
-    turnId: "turn:operation-one",
+    status: "uncertain",
+    reason: "delivery was started by an earlier executor; whether it reached the recipient is unverified",
   });
   expect(reopenedJournal.effectBatch()).toEqual([]);
   expect(ledger.writes).toMatchObject([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   reopenedJournal.close();
+});
+
+test("a delivering entry whose claim was unreadable when it was written is not stolen from its executor", async () => {
+  /* The same crash, one condition different: the claim projection was down at
+     the moment the first executor wrote its `delivering` row. That used to
+     produce a row with no ownership on it at all, and the next executor read
+     the absence as a handover — terminalizing a send that a live executor was
+     actuating during exactly the projection gap this fence exists for.
+
+     The row records the executor either way now and records the claim as
+     unknown, so a successor whose own claim read works perfectly still cannot
+     prove anything: it writes nothing, sends nothing, and leaves the effect for
+     the owner. The receipt deadline is what ends a send whose owner never comes
+     back, and it needs none of this to be healthy. */
+  const filename = path.join(sandbox, "unreadable-claim.sqlite");
+  const ledger = createFakeDeliveryLedger();
+  const firstJournal = new RuntimeJournal(filename, { structuredHosts: true });
+  firstJournal.append({
+    scope: { type: "session", id: "conversation-unreadable-claim" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-unreadable-claim",
+      sessionKey: { engine: "codex", sessionId: "session-unreadable-claim" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/unreadable-claim.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  firstJournal.executeOperation({
+    kind: "send",
+    operationId: "operation-unreadable-claim",
+    idempotencyKey: "message-unreadable-claim",
+    conversationId: "conversation-unreadable-claim",
+    text: "hold the cutover until I say go",
+    policy: "queue",
+  });
+  const firstQueue = new StructuredDeliveryQueue(
+    journalPort(firstJournal, true, () => { throw new Error("claim projection is unavailable"); }),
+    () => new FakeEngineHost(ledger),
+  );
+
+  await expect(firstQueue.drain()).rejects.toThrow("runtime stopped before confirmation commit");
+  expect(firstJournal.operationResult("operation-unreadable-claim")?.receipt.status).toBe("delivering");
+  expect(ledger.writes).toMatchObject([{ id: "operation-unreadable-claim" }]);
+  firstJournal.close();
+
+  const reopened = new RuntimeJournal(filename, { structuredHosts: true });
+  const successorLedger = createFakeDeliveryLedger();
+  await new StructuredDeliveryQueue(
+    journalPort(reopened, false, () => "claim-successor:7"),
+    () => new FakeEngineHost(successorLedger),
+  ).drain();
+
+  expect(successorLedger.writes).toEqual([]);
+  expect(reopened.operationResult("operation-unreadable-claim")?.receipt.status).toBe("delivering");
+  expect(reopened.effectBatch()).toHaveLength(1);
+  reopened.close();
 });
 
 test("an applying reconfigure recovers before its queued message after journal restart", async () => {
@@ -2110,6 +2309,118 @@ test("queue binding settles an uncertain reservation from a terminal journal rec
     error: null,
   });
   await bindStructuredDeliveryQueue([], { registry, client: null });
+});
+
+test("a send its host could not answer for settles the reservation without waiting for a sweep", async () => {
+  /* #1131: the queue writes `uncertain` for a send that was handed to the
+     engine and never answered for. The reservation has to settle on that write
+     rather than resting `delivery-uncertain` until someone asks for a receipt —
+     terminality that needs nothing to be healthy beats terminality that needs a
+     runtime client and a tick. The record keeps WHY, so the receipt says the
+     fate is unknown instead of offering a resend that could deliver the
+     instruction a second time. */
+  const sessionId = "badc0ffe-1111-\x34111-8111-111111111111";
+  const directory = path.join(sandbox, "controller-unanswered-send-settles");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "unanswered-send-account",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-30T09:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "unanswered-send-account",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:unanswered-send-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const text = "hold the cutover until I say go";
+  const operationId = "operation-unanswered-send";
+  const held = registry.holdDelivery(
+    conversation.id,
+    text,
+    "unanswered-send-key",
+    "text",
+    [],
+    structuredContentDigest({ text, images: [] }),
+    { operationId, kind: "send", policy: "queue", turnId: null },
+  );
+  expect(registry.beginDeliveryAttempt(held.id, held.generationId!)?.state).toBe("delivery-uncertain");
+  const journal = new RuntimeJournal(path.join(directory, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId,
+    idempotencyKey: "unanswered-send-key",
+    conversationId: conversation.id,
+    text,
+    policy: "queue",
+  });
+  const client = runtimeJournalClient(journal);
+  /* Alive throughout: the host takes the instruction and the call that would
+     have confirmed it fails. Nothing out here can tell that from a refusal. */
+  const taken: string[] = [];
+  const host = new FakeEngineHost();
+  host.send = async (entry: QueueEntry) => {
+    taken.push(entry.text ?? "");
+    throw new Error("engine answer never arrived");
+  };
+
+  try {
+    await bindStructuredDeliveryQueue([{ key, host: observableFakeHost(host) }], { registry, client });
+    await waitForCondition(() => journal.operationResult(operationId)?.receipt.status === "uncertain");
+
+    expect(taken).toEqual([text]);
+    expect(journal.effectBatch()).toEqual([]);
+    /* Settled at the moment of the write, by the projection alone — no sweep
+       has run in this test and no runtime recovery was needed. */
+    const settled = registry.snapshot().heldDeliveries[held.id];
+    expect(settled?.state).toBe("failed");
+    expect(settled?.error).toContain("whether it reached the recipient is unverified");
+    const receipt = sendReceiptFor(registry.readOnlySnapshot(), operationId);
+    expect(receipt?.state).toBe("failed");
+    expect(receipt?.duplicateRisk).toBe(true);
+    expect(receipt?.resend).toBe("verify-first");
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
 });
 
 test("production backlog reconciliation publishes the controller before a historical status read settles", async () => {
@@ -3689,4 +4000,212 @@ test("late discarded-successor cleanup republishes the committed retarget host",
   await unregisterCommitted();
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
+});
+
+test("a send admitted while the runtime is unavailable settles without the runtime coming back", async () => {
+  /* #1131, the bug this fix had rebuilt inside itself: with no runtime client
+     the send is still ACCEPTED — a durable reservation, an operation id handed
+     back — but no journal operation exists for it, so nothing the journal could
+     ever say would end it. It rested `assigned` until a drain that only runs
+     while the runtime is healthy picked it up, which is the one condition a
+     lost send does not meet. The deadline now covers that reservation too: the
+     receipt query ends it from the durable record alone, and because the record
+     is terminal the recovered runtime hands the engine nothing. */
+  const sessionId = "0ff1ce11-2222-\x34222-8222-222222222222";
+  const directory = path.join(sandbox, "runtime-unavailable-admission");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "outage-account",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-30T09:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "outage-account",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:outage-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  const admitted = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "outage-window-message",
+    text: "hold the cutover until I say go",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+    startupFailed: () => false,
+  });
+  expect(admitted).toMatchObject({ ok: true, outcome: "held" });
+  const operationId = (admitted as { operationId: string }).operationId;
+  expect(operationId).toBeTruthy();
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "assigned" }]);
+
+  /* Inside the window the answer is still honest about being in flight: the
+     recipient may simply be mid-turn, and ending it here would cancel a message
+     that is about to be delivered. */
+  const inFlight = await resolveSendReceipt(operationId, { registry, client: null });
+  expect(inFlight).toMatchObject({ state: "in-flight", resend: null });
+
+  const pastDeadline = await resolveSendReceipt(operationId, {
+    registry,
+    client: null,
+    now: () => Date.now() + 11 * 60_000,
+  });
+  expect(pastDeadline).toMatchObject({
+    operationId,
+    state: "failed",
+    duplicateRisk: true,
+    resend: "verify-first",
+    /* Nothing was asked of the journal, so nothing is credited to it. */
+    evidence: "delivery-record",
+  });
+  expect(pastDeadline?.reason).toContain("could not give it a terminal answer");
+  /* Asking again is idempotent: one terminal answer, not a fresh one per read. */
+  expect(await resolveSendReceipt(operationId, { registry, client: null })).toMatchObject({
+    state: "failed",
+    resend: "verify-first",
+  });
+
+  const ledger = createFakeDeliveryLedger();
+  const journal = new RuntimeJournal(path.join(directory, "events.sqlite"), { structuredHosts: true });
+  try {
+    /* The runtime comes back. The settled reservation is not eligible for the
+       drain that would have delivered it, so the recipient is handed nothing —
+       the answer the sender already has stays true. */
+    const client = runtimeJournalClient(journal);
+    await bindStructuredDeliveryQueue([{ key, host: observableFakeHost(new FakeEngineHost(ledger)) }], { registry, client });
+    let delivered = 0;
+    await drainHeldDeliveries(conversation.id, {
+      async deliver() {
+        delivered += 1;
+        return "delivered";
+      },
+    }, registry);
+    expect(delivered).toBe(0);
+    expect(ledger.writes).toEqual([]);
+    expect(sendReceiptFor(registry.readOnlySnapshot(), operationId)).toMatchObject({ state: "failed" });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
+test("a real executor killed after the engine write leaves one actuation and an absorbing receipt", async () => {
+  /* #1131 at the boundary the incident happened on, rather than a stub of it.
+     "A delivering entry left by a dead executor settles unverified instead of
+     being written again" above proves the recovery logic with an injected
+     transition failure; the death it models is a process that handed the
+     message to the engine and was killed before the journal learned of it. Here
+     that process is real: a second interpreter runs the production queue over
+     the production journal, records its engine write in a file this one can
+     count, and is terminated in the gap. What must hold across the two is
+     arithmetic — ONE engine write in total, however many executors recover. */
+  const directory = path.join(sandbox, "crash-boundary");
+  fs.mkdirSync(directory, { recursive: true });
+  const journalPath = path.join(directory, "events.sqlite");
+  const ledgerPath = path.join(directory, "engine-writes.log");
+  fs.writeFileSync(ledgerPath, "");
+  const operationId = "operation-crash-boundary";
+
+  const journal = new RuntimeJournal(journalPath, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: "conversation-crash" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-crash",
+      sessionKey: { engine: "codex", sessionId: "session-crash" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: path.join(directory, "crash.jsonl"),
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId,
+    idempotencyKey: "crash-boundary-key",
+    conversationId: "conversation-crash",
+    text: "hold the cutover until I say go",
+    policy: "queue",
+  });
+  journal.close();
+
+  const child = Bun.spawn([
+    process.execPath,
+    path.join(import.meta.dir, "structuredDelivery.crashChild.ts"),
+    journalPath,
+    ledgerPath,
+    "claim-crashed:1",
+  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+
+  try {
+    const deadline = Date.now() + 30_000;
+    while (fs.readFileSync(ledgerPath, "utf8").trim() === "") {
+      if (Date.now() > deadline) throw new Error("the executor never reached the engine");
+      if (child.exitCode !== null) throw new Error(await new Response(child.stderr).text());
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    /* Killed with the send outstanding: no terminal transition, no unwinding,
+       nothing this process arranged inside the executor. */
+    child.kill("SIGKILL");
+    await child.exited;
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+
+  expect(fs.readFileSync(ledgerPath, "utf8").trim().split("\n")).toEqual([operationId]);
+
+  const reopened = new RuntimeJournal(journalPath, { structuredHosts: true });
+  try {
+    expect(reopened.operationResult(operationId)?.receipt.status).toBe("delivering");
+    /* The successor: a live executor, its own identity, and the writer claim
+       re-adopted after the crash — the ownership that says the row's writer can
+       no longer answer for it. */
+    const recoveredLedger = createFakeDeliveryLedger();
+    const recovered = new StructuredDeliveryQueue({
+      ...journalPort(reopened),
+      hostClaim: () => "claim-recovered:2",
+    }, () => observableFakeHost(new FakeEngineHost(recoveredLedger)));
+    await recovered.drain();
+    expect(recoveredLedger.writes).toEqual([]);
+
+    expect(reopened.operationResult(operationId)?.receipt).toMatchObject({
+      status: "uncertain",
+      reason: "delivery was started by an earlier executor; whether it reached the recipient is unverified",
+    });
+    expect(reopened.effectBatch()).toEqual([]);
+    expect(fs.readFileSync(ledgerPath, "utf8").trim().split("\n")).toEqual([operationId]);
+  } finally {
+    reopened.close();
+  }
 });

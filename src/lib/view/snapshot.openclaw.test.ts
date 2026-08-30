@@ -1,8 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { FileEntry } from "@/lib/types";
 
+import { compactText } from "./compactText";
 import { resetPresenceForTest, upsertPresence } from "./presenceStore";
 import { composeSnapshot } from "./snapshot";
 import type { PresencePayloadV1 } from "./types";
@@ -22,6 +25,8 @@ import type { PresencePayloadV1 } from "./types";
  */
 
 afterEach(() => resetPresenceForTest());
+
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-view-openclaw-"));
 
 const OPENCLAW_PATH = "/openclaw/agents/primary/sessions/oc-session-alpha.jsonl";
 
@@ -96,4 +101,84 @@ test("an OpenClaw path with no scan entry is still omitted", async () => {
 
   expect(result.conversations).toEqual([]);
   expect(result.scope).toMatchObject({ omittedCount: 1, truncated: true });
+});
+
+/* The snapshot's text body is the other half of admitting the entry: a path
+   that resolves and then reports no messages tells an agent the conversation
+   is empty. Every record below is invented. */
+function seedTranscript(name: string): string {
+  const pathname = path.join(sandbox, name);
+  fs.writeFileSync(pathname, [
+    JSON.stringify({
+      type: "message",
+      timestamp: "2026-08-01T00:00:00.000Z",
+      message: { role: "user", content: "Invented OpenClaw request" },
+    }),
+    JSON.stringify({
+      type: "message",
+      timestamp: "2026-08-01T00:00:05.000Z",
+      message: {
+        role: "assistant",
+        provider: "invented-provider",
+        model: "demo-model",
+        content: [
+          { type: "thinking", thinking: "Invented private reasoning" },
+          { type: "text", text: "Invented OpenClaw answer" },
+          { type: "toolCall", id: "call-alpha", name: "read", arguments: { path: "/invented/file" } },
+        ],
+      },
+    }),
+    JSON.stringify({
+      type: "message",
+      timestamp: "2026-08-01T00:00:06.000Z",
+      message: {
+        role: "toolResult",
+        toolCallId: "call-alpha",
+        toolName: "read",
+        content: [{ type: "text", text: "Invented tool output" }],
+      },
+    }),
+    "",
+  ].join("\n"));
+  return pathname;
+}
+
+test("an OpenClaw transcript contributes its prompts and prose to the snapshot text", () => {
+  const pathname = seedTranscript("oc-session-text.jsonl");
+
+  const value = compactText(file(pathname), 6, 4000, 4000);
+
+  expect(value.messages).toEqual([
+    { role: "user", at: "2026-08-01T00:00:00.000Z", text: "Invented OpenClaw request" },
+    { role: "assistant", at: "2026-08-01T00:00:05.000Z", text: "Invented OpenClaw answer" },
+  ]);
+  expect(value.error).toBeUndefined();
+});
+
+test("the snapshot text drops OpenClaw thinking, tool calls and tool results", () => {
+  const pathname = seedTranscript("oc-session-nonprose.jsonl");
+
+  const serialized = JSON.stringify(compactText(file(pathname), 6, 4000, 4000));
+
+  expect(serialized).not.toContain("Invented private reasoning");
+  expect(serialized).not.toContain("Invented tool output");
+  expect(serialized).not.toContain("call-alpha");
+});
+
+test("a selected OpenClaw path carries its text through composeSnapshot", async () => {
+  const pathname = seedTranscript("oc-session-selected.jsonl");
+  upsertPresence(presence({ focusedPath: pathname, visiblePaths: [pathname] }), 1000);
+
+  const result = await composeSnapshot({
+    request: { schemaVersion: 1 },
+    files: [file(pathname)],
+    siblings: { selfResolution: "omitted", agents: [] },
+    scannerDurationMs: 0,
+    now: 2000,
+  });
+
+  expect(result.conversations[0]?.text?.messages.map((message) => message.text)).toEqual([
+    "Invented OpenClaw request",
+    "Invented OpenClaw answer",
+  ]);
 });

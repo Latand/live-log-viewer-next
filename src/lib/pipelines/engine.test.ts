@@ -145,6 +145,183 @@ test("a pipeline stage keeps its reserved account through a routing change befor
   }
 });
 
+test("a concurrent pipeline replay and its recovery projections withhold staged identity (#1123)", async () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "pipeline-phantom-replay-registry.json"));
+  const cwd = process.env.LLV_STATE_DIR!;
+  setAgentRegistryForTests(registry);
+  const resolveSpawn = spyOn(accountManager, "resolveSpawn").mockImplementation(() => ({
+    engine: "codex",
+    accountId: "pipeline-account",
+    kind: "managed",
+    home: cwd,
+    transcriptRoot: cwd,
+    env: { NODE_ENV: "test" },
+  }));
+  const input: Parameters<PipelinePorts["spawnAgent"]>[0] = {
+    role: {
+      roleId: "builder",
+      engine: "codex" as const,
+      model: "gpt-5.6-sol",
+      effort: "xhigh",
+      access: "read-write" as const,
+      promptScaffold: "Builder guidance",
+    },
+    cwd,
+    title: "Build scoped change",
+    "prompt": "Build the scoped change",
+    parentPath: null,
+    clientAttemptId: "pipeline_phantom_replay_attempt",
+    membership: {
+      kind: "pipeline" as const,
+      containerId: "pipeline-phantom-replay",
+      role: "builder",
+      slot: "build:1",
+      stageId: "build",
+      stageOrder: 0,
+      round: 1,
+      parentConversationId: null,
+    },
+    creatorConversationId: null,
+  };
+  const reservations: Array<{ launchId: string; conversationId: string }> = [];
+
+  try {
+    const ports = defaultPipelinePorts();
+    await expect(ports.spawnAgent(input, (created) => {
+      reservations.push(created);
+      throw new Error("reservation captured");
+    })).rejects.toThrow("reservation captured");
+    const reservation = reservations[0];
+    if (!reservation) throw new Error("pipeline reservation was not captured");
+    const receipt = registry.snapshot().receipts[reservation.launchId]!;
+    const stagedPath = path.join(cwd, "provisional-stage.jsonl");
+    registry.stageStructuredSpawn(receipt.launchId, {
+      key: { engine: "codex", sessionId: "provisional-session" },
+      artifactPath: stagedPath,
+      cwd,
+      accountId: "pipeline-account",
+      launchProfile: receipt.launchProfile,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:provisional-session",
+        process: { pid: process.pid, startIdentity: "provisional-session-host" },
+        eventCursor: 0,
+        protocolVersion: null,
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: "structured-host:provisional-session-host",
+      pendingAction: "spawn",
+    });
+    const parent = registry.ensureConversation("codex", path.join(cwd, "parent.jsonl"), "pipeline-account");
+    registry.rememberMembership(receipt.conversationId, {
+      kind: "pipeline",
+      containerId: "pipeline-phantom-replay",
+      role: "builder",
+      slot: "adopt:build:1",
+      stageId: "build",
+      stageOrder: 0,
+      round: 1,
+      parentConversationId: parent.id,
+    });
+
+    const replay = await ports.spawnAgent(input, () => {});
+    expect(replay).toMatchObject({
+      launchId: receipt.launchId,
+      conversationId: receipt.conversationId,
+      sessionId: null,
+      "transcript": null,
+    });
+    expect(ports.spawnReceipt(receipt.launchId)).toMatchObject({
+      sessionId: null,
+      "transcript": null,
+    });
+    expect(ports.pathForConversation(receipt.conversationId)).toBeNull();
+    expect(ports.conversationIdForPath(stagedPath)).toBeNull();
+    expect(ports.pipelineAdoptionCandidates("pipeline-phantom-replay")).toEqual([]);
+
+    registry.finalizeStructuredSpawn(receipt.launchId);
+    const completedPorts = defaultPipelinePorts();
+    expect(completedPorts.spawnReceipt(receipt.launchId)).toMatchObject({
+      sessionId: "provisional-session",
+      "transcript": stagedPath,
+    });
+    expect(completedPorts.pathForConversation(receipt.conversationId)).toBe(stagedPath);
+    expect(completedPorts.conversationIdForPath(stagedPath)).toBe(receipt.conversationId);
+    expect(completedPorts.pipelineAdoptionCandidates("pipeline-phantom-replay")).toEqual([
+      expect.objectContaining({
+        sessionId: "provisional-session",
+        agentPath: stagedPath,
+      }),
+    ]);
+  } finally {
+    resolveSpawn.mockRestore();
+    setAgentRegistryForTests(null);
+  }
+});
+
+test("a staged resume cannot hide its already-published transcript (#1123)", () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "pipeline-staged-resume-registry.json"));
+  const cwd = process.env.LLV_STATE_DIR!;
+  const sessionId = crypto.randomUUID();
+  const transcript = path.join(cwd, `${sessionId}.jsonl`);
+  fs.writeFileSync(transcript, `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`);
+  const conversation = registry.ensureConversation("codex", transcript, "pipeline-account");
+  setAgentRegistryForTests(registry);
+
+  try {
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd,
+      transport: "structured",
+      accountId: "pipeline-account",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+      launchProfile: { title: "Resume published session" },
+    });
+    if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+    const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId },
+      artifactPath: transcript,
+      cwd,
+      accountId: "pipeline-account",
+      launchProfile: begun.receipt.launchProfile,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: `stdio:${sessionId}`,
+        process: { pid: process.pid, startIdentity: "staged-resume-host" },
+        eventCursor: 0,
+        protocolVersion: null,
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: "structured-host:staged-resume-host",
+      pendingAction: "spawn",
+    });
+    if (staged.kind !== "settled") throw new Error("resume staging conflicted");
+
+    const ports = defaultPipelinePorts();
+    expect(ports.spawnReceipt(begun.receipt.launchId)).toMatchObject({
+      sessionId: null,
+      "transcript": null,
+    });
+    expect(ports.pathForConversation(conversation.id)).toBe(transcript);
+    expect(ports.conversationIdForPath(transcript)).toBe(conversation.id);
+  } finally {
+    setAgentRegistryForTests(null);
+  }
+});
+
 const RUN_STAGES = [
   { id: "plan", kind: "run", role: { roleId: "architect" }, access: "read-only", prompt: "Plan {{task}}", next: "build" },
   { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Build from {{prev.output}}", next: null },
@@ -2026,6 +2203,75 @@ test("durable conversation identity never adopts a competing cwd session", async
   expect(loadPipelines()[0]!.cursor?.stageId).toBe("plan");
 });
 
+test("a stage with an unwritten transcript parks on its first-message drain failure", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  h.ports.spawnAgent = async (_input, onReserved) => {
+    onReserved({ launchId: "launch-drain-timeout", conversationId: "conversation_drain_timeout" });
+    return {
+      launchId: "launch-drain-timeout",
+      conversationId: "conversation_drain_timeout",
+      sessionId: "session-drain-timeout",
+      "transcript": "/codex/unwritten-stage.jsonl",
+      paneId: null,
+    };
+  };
+  await tickPipelines([], h.ports);
+  h.setConversationActive(false);
+  const reason = "first message never drained: runtime host request timed out";
+  h.ports.spawnReceipt = () => ({
+    state: "failed",
+    launchId: "launch-drain-timeout",
+    conversationId: "conversation_drain_timeout",
+    sessionId: "session-drain-timeout",
+    "transcript": "/codex/unwritten-stage.jsonl",
+    paneId: null,
+    error: reason,
+  });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({ state: "needs_decision", stateDetail: reason });
+  expect(parked.runs[0]!.attempts[0]!.error).toBe(reason);
+});
+
+test("a runtime-host outage does not hide a terminal spawn receipt's drain cause (#1314)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  h.ports.spawnAgent = async (_input, onReserved) => {
+    onReserved({ launchId: "launch-drain-outage", conversationId: "conversation_drain_outage" });
+    return {
+      launchId: "launch-drain-outage",
+      conversationId: "conversation_drain_outage",
+      sessionId: "session-drain-outage",
+      "transcript": "/codex/unwritten-outage-stage.jsonl",
+      paneId: null,
+    };
+  };
+  await tickPipelines([], h.ports);
+  /* The runtime host is unreachable: liveness answers null, not false. */
+  h.setConversationActive(null);
+  const reason = "first message never drained: runtime host request timed out";
+  h.ports.spawnReceipt = () => ({
+    state: "failed",
+    launchId: "launch-drain-outage",
+    conversationId: "conversation_drain_outage",
+    sessionId: "session-drain-outage",
+    "transcript": "/codex/unwritten-outage-stage.jsonl",
+    paneId: null,
+    error: reason,
+  });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({ state: "needs_decision", stateDetail: reason });
+  expect(parked.runs[0]!.attempts[0]!.error).toBe(reason);
+});
+
 test("a worker that dies after transcript discovery enters bounded verdict recovery", async () => {
   const h = harness();
   await create(h.ports);
@@ -2148,6 +2394,44 @@ test("an unindexed rollout parks once its structured host is dead past grace (#1
     verdict: null,
     error: "historical attempt completed without a valid final JSON verdict",
   });
+});
+
+test("a stage whose host is proven dead becomes retryable without closing the pipeline (#1282)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(false);
+  const unavailableSince = h.ports.now();
+  h.ports.conversationHostUnavailableSince = async () => unavailableSince;
+  h.advanceWallClock(5 * 60_000);
+
+  await tickPipelines([], h.ports);
+
+  /* Before #1282 the stage stayed `running` while its host sat there doing
+     nothing, so retry-stage answered "pipeline does not have a stage awaiting
+     retry" and the only way out was closing the pipeline.
+
+     What this case pins is the engine's own behaviour once a host is proven
+     dead: the liveness port is stubbed here, so it says nothing about whether
+     that port ever reports the incident's host. The whole sequence — a live but
+     severed child, the runtime kill, the registry retirement, this tick and
+     `retry-stage` — runs through the production seams in
+     `src/lib/pipelines/severedStageRetry.test.ts`. */
+  const parked = loadPipelines()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  const failedAttempt = parked.runs[0]!.attempts[0]!;
+  h.ports.spawnReceipt = (candidate) => candidate === failedAttempt.launchId ? {
+    state: "completed",
+    launchId: failedAttempt.launchId!,
+    conversationId: failedAttempt.conversationId!,
+    sessionId: failedAttempt.sessionId,
+    "transcript": failedAttempt.agentPath,
+    paneId: failedAttempt.paneId,
+  } : null;
+  const retried = await patchPipeline(parked.id, { action: "retry-stage" }, h.ports);
+
+  expect(retried.error).toBeUndefined();
+  expect(retried.pipeline?.state).not.toBe("closed");
+  expect(loadPipelines()[0]!.state).not.toBe("needs_decision");
 });
 
 test("an exhausted false park ingests its live host's late verdict without a duplicate attempt (#1109)", async () => {
@@ -3251,7 +3535,7 @@ test("retrying a parked review-loop fast-forwards to the pushed repair and recor
   const reviewRepo = path.join(process.env.LLV_STATE_DIR!, "retry-review-repo");
   fs.mkdirSync(reviewRepo, { recursive: true });
   expect(spawnSync("git", ["init", "-b", "main"], { cwd: reviewRepo }).status).toBe(0);
-  expect(spawnSync("git", ["config", "user.email", "flow@example.com"], { cwd: reviewRepo }).status).toBe(0);
+  expect(spawnSync("git", ["config", "user.email", "noreply"], { cwd: reviewRepo }).status).toBe(0);
   expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd: reviewRepo }).status).toBe(0);
   fs.writeFileSync(path.join(reviewRepo, "repair.txt"), "repair\n");
   expect(spawnSync("git", ["add", "repair.txt"], { cwd: reviewRepo }).status).toBe(0);

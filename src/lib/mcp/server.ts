@@ -39,6 +39,7 @@ export const MCP_SERVER_NAME = "viewer";
 export const MCP_TOOL_NAMES = [
   "spawn_agent",
   "send_message",
+  "message_receipt",
   "create_task",
   "update_task",
   "create_pipeline",
@@ -47,6 +48,7 @@ export const MCP_TOOL_NAMES = [
   "list_conversations",
   "search_transcripts",
   "get_conversation",
+  "conversation_messages",
   "deploy_exact_sha",
   "get_pipeline",
   "board_snapshot",
@@ -202,6 +204,10 @@ export const MCP_BOUNDED_NUMERIC_ARGS: Partial<Record<McpToolName, readonly McpB
   get_conversation: [
     { path: ["maxRecords"], min: 1, max: 500, fallback: 100 },
     { path: ["tailLines"], min: 1, max: SELECTED_TAIL_MAX_LINES, fallback: 1 },
+  ],
+  conversation_messages: [
+    { path: ["limit"], min: 1, max: 200, fallback: 20 },
+    { path: ["maxChars"], min: 1, max: 16_000, fallback: 4_000 },
   ],
   board_snapshot: [
     { path: ["limit"], min: 1, max: 200, fallback: 100 },
@@ -1648,7 +1654,16 @@ export function createMcpToolService(
 
 const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   spawn_agent: "Create a Viewer-managed agent conversation and return its durable conversation and launch ids.",
-  send_message: "Deliver a message to a Viewer conversation through its registered runtime host.",
+  send_message: [
+    "Deliver a message to a Viewer conversation through its registered runtime host.",
+    "The answer reports acceptance, not arrival: `outcome` is `queued` or `delivering` until the delivery record settles, and `settled` says which. Hold `operationId` and ask `message_receipt` what became of it — never treat `queued` as a terminal answer, and never re-send an unsettled operation, because a send whose fate is unknown can be delivered twice.",
+  ].join(" "),
+  message_receipt: [
+    "Answer what became of one accepted send, by the `operationId` `send_message` returned.",
+    "`state` is `delivered`, `failed` or `in-flight`, read from the durable delivery record and reconciled against the delivery journal's current answer rather than from what the send call reported at the time. Asking is also what ENDS an accepted send that was dropped: `in-flight` means it is still progressing — the recipient may be mid-turn — and asking again later reaches `delivered` or `failed`.",
+    "`resend` says what is safe to do next: `not-needed` (it arrived), `safe` (the record proves it never executed and it is fenced, so the same instruction may be sent again), or `verify-first` (`duplicateRisk` is true — delivery began, or nothing proves it did not, so check the recipient before sending again).",
+    "A resend is a NEW `send_message` under a NEW `clientRequestId`: the settled operation is fenced, so repeating the original `clientRequestId` replays that settled answer instead of delivering anything.",
+  ].join(" "),
   create_task: "Create a durable board task.",
   update_task: "Update a durable board task.",
   create_pipeline: [
@@ -1664,7 +1679,8 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
   search_transcripts: "Search indexed user and assistant message bodies across every scanned transcript store. Returns match snippets with speaker, timestamp, transcript path and byte offset; project is optional, and empty pages include corpus statistics. Queries never read transcript files.",
-  get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan.",
+  get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan. For normalized, filtered, paged messages use conversation_messages.",
+  conversation_messages: "Read one conversation newest-first as engine-normalized records; Claude and Codex return the same shape, while hook attachments and usage envelopes are omitted. Identity accepts conversationId, transcriptPath, or selectedContext and resolves through the same bounded paths as get_conversation. kinds is a non-empty subset of message | reasoning | tool_call | tool_result | trace (default message). roles is a non-empty subset of user | assistant | system | tool (default all). since is an inclusive ISO timestamp lower bound. limit clamps to 1..200 (default 20); maxChars clamps to 1..16000 (default 4000), and truncated marks cut text after secret redaction. Records are newest-first. Pass the opaque cursor unchanged with a fresh clientRequestId for each next-older page while hasMore is true; cursors are bound to the transcript and filters. A normal empty page returns records: []. File work is bounded by the page, so a 100 MB rollout is never parsed in full.",
   deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
   board_snapshot: "Read a bounded, redacted snapshot of the Viewer board, durable placement, and the selected project's hidden conversation count.",
@@ -1697,7 +1713,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
   get_orchestrator: "Read a project's designated orchestrator: designation, health and activity, model and prompt version, transcript size, message/tool/compaction counts, context usage against its model's configured window (clearly labelled when estimated), predecessor lineage, and a bounded rotation recommendation — STRONGLY_RECOMMEND_ROTATION once usage reaches the configured threshold. Words only: it never rotates, creates, or interrupts anything itself.",
   create_orchestrator: "Create a project's orchestrator or adopt one eligible registered conversation: designate it as the project's selected orchestrator and deliver the approved versioned mandate (editable). Idempotent by clientRequestId.",
-  send_message_to_orchestrator: "Deliver a message to the project's selected orchestrator, resolved server-side. A dead selected conversation is resumed; with none designated, one is created first and then delivered to. Idempotent by clientRequestId.",
+  send_message_to_orchestrator: "Deliver a message to the project's selected orchestrator, resolved server-side. A dead selected conversation is resumed; with none designated, one is created first and then delivered to. Idempotent by clientRequestId. Like send_message, the answer reports acceptance rather than arrival: ask message_receipt what became of the operationId.",
   seat_tick_settings: [
     "Read — and change — one project's seat tick: whether the Viewer wakes that project's seat at all, how often, and what your own monitor prompt tells the wake to look at.",
     "Called with no change fields it is a read. `project` defaults to your own, and naming another project's is allowed rather than refused; the answer says which of the two you did, and the record, the board card and the tick's journal all carry who changed whose tick.",
@@ -1894,6 +1910,10 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     transcriptPath: z.string().optional(),
     text: z.string().min(1),
   }).passthrough(),
+  message_receipt: z.object({
+    clientRequestId: clientRequestIdSchema,
+    operationId: z.string().min(1).describe("The operationId a send_message call returned."),
+  }).passthrough(),
   create_task: z.object({
     clientRequestId: clientRequestIdSchema,
     project: z.string().min(1),
@@ -1957,6 +1977,26 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     selectedContext: selectedContextSchema,
     tailLines: boundedNumericInput("get_conversation", "tailLines")
       .describe("Read this many trailing transcript lines instead of the scanned summary. Use conversationId or selectedContext for the bounded identity path, or transcriptPath for the validated pinned reader; all alternatives keep answering while corpus scans are degraded."),
+  }).passthrough(),
+  conversation_messages: z.object({
+    clientRequestId: clientRequestIdSchema,
+    conversationId: z.string().min(1).optional()
+      .describe("Durable Viewer conversation id. Supply this, transcriptPath, or selectedContext."),
+    transcriptPath: z.string().min(1).optional()
+      .describe("Transcript under a registered scanner root. Supply this, conversationId, or selectedContext."),
+    selectedContext: selectedContextSchema,
+    kinds: z.array(z.enum(["message", "reasoning", "tool_call", "tool_result", "trace"])).min(1).optional()
+      .describe("Record kinds to return: message, reasoning, tool_call, tool_result, trace. Defaults to message; duplicates are ignored."),
+    roles: z.array(z.enum(["user", "assistant", "system", "tool"])).min(1).optional()
+      .describe("Record roles to return: user, assistant, system, tool. Defaults to all four; duplicates are ignored."),
+    since: z.string().min(1).optional()
+      .describe("Inclusive ISO-8601 timestamp lower bound with Z or a numeric offset."),
+    limit: boundedNumericInput("conversation_messages", "limit")
+      .describe("Newest-first records per page. Integer 1..200, default 20; numeric strings coerce and out-of-range values clamp."),
+    maxChars: boundedNumericInput("conversation_messages", "maxChars")
+      .describe("Characters retained per record after secret redaction. Integer 1..16000, default 4000; truncated is true when text was cut."),
+    cursor: z.string().min(1).optional()
+      .describe("Opaque cursor from the preceding page. Pass it unchanged with a fresh clientRequestId for the next-older page while hasMore is true."),
   }).passthrough(),
   deploy_exact_sha: z.object({
     clientRequestId: clientRequestIdSchema,

@@ -23,17 +23,18 @@ function fixture() {
   fs.writeFileSync(path.join(home, ".config", "agent-log-viewer", "service.env"), "");
   /* The canonical main tip is read machine-to-machine (#1033); the stub stands
      in for the network so the test asserts what the script posts. */
-  const git = path.join(bin, "git");
-  fs.writeFileSync(git, `#!/usr/bin/env bash
+  const gitStub = `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >> "$LLV_TEST_GIT_ARGS"
 if [ -n "\${LLV_TEST_LS_REMOTE_FAILS:-}" ]; then exit 128; fi
 printf '%s' "\${LLV_TEST_LS_REMOTE:-}"
-`, { mode: 0o755 });
+`;
+  fs.writeFileSync(path.join(bin, "git"), gitStub, { mode: 0o755 });
   const curl = path.join(bin, "curl");
   fs.writeFileSync(curl, `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >> "$LLV_TEST_ARGS"
+if [ -n "\${LLV_TEST_CURL_FAILS:-}" ]; then exit 28; fi
 body=""
 has_write=0
 while [ "$#" -gt 0 ]; do
@@ -47,7 +48,7 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$has_write" = 1 ]; then
   printf '%s' "$body" > "$LLV_TEST_CAPTURE"
-  printf '{"state":"accepted","deploymentId":"deploy_test"}\\n202'
+  printf '%s\\n%s' "$LLV_TEST_ADMISSION_BODY" "$LLV_TEST_ADMISSION_STATUS"
 else
   printf '{"phase":"succeeded","terminal":true}'
 fi
@@ -62,10 +63,16 @@ function runRebuild(
   idempotencyKey: string,
   setup: ReturnType<typeof fixture>,
   revision?: string,
-  options: { lsRemote?: string | null } = {},
+  options: {
+    lsRemote?: string | null;
+    deployRevision?: string;
+    admissionStatus?: number;
+    admissionBody?: unknown;
+    curlFails?: boolean;
+  } = {},
 ) {
   const lsRemote = options.lsRemote === undefined ? `${MAIN_TIP}\trefs/heads/main\n` : options.lsRemote;
-  return Bun.spawnSync(["bash", rebuildScript, ...(revision ? [revision] : [])], {
+  return Bun.spawnSync(["bash", rebuildScript, ...(revision === undefined ? [] : [revision])], {
     cwd: setup.root,
     env: {
       ...process.env,
@@ -76,32 +83,39 @@ function runRebuild(
       LLV_TEST_CAPTURE: setup.capture,
       LLV_TEST_ARGS: setup.args,
       LLV_TEST_GIT_ARGS: setup.gitArgs,
+      LLV_TEST_ADMISSION_STATUS: String(options.admissionStatus ?? 202),
+      LLV_TEST_ADMISSION_BODY: JSON.stringify(
+        options.admissionBody ?? { state: "accepted", deploymentId: "deploy_test" },
+      ),
+      ...(options.curlFails ? { LLV_TEST_CURL_FAILS: "1" } : {}),
       LLV_VIEWER_CANONICAL_REMOTE: CANONICAL_REMOTE,
       ...(lsRemote === null ? { LLV_TEST_LS_REMOTE_FAILS: "1" } : { LLV_TEST_LS_REMOTE: lsRemote }),
+      ...(options.deployRevision === undefined ? {} : { LLV_DEPLOY_REVISION: options.deployRevision }),
     },
     stdout: "pipe",
     stderr: "pipe",
   });
 }
 
-test("rebuild accepts an exact revision as its positional argument", () => {
+test("rebuild accepts a mixed-case positional revision and posts it lowercase", () => {
   const setup = fixture();
-  const revision = "a".repeat(40);
+  const revision = "aB".repeat(20);
   const result = runRebuild("exact-revision", setup, revision);
 
   expect(result.exitCode).toBe(0);
   expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({
-    revision,
+    revision: revision.toLowerCase(),
     idempotencyKey: "exact-revision",
   });
 });
 
 for (const [name, revision] of [
+  ["an empty argument", ""],
   ["39 lowercase hex characters", "a".repeat(39)],
   ["41 lowercase hex characters", "a".repeat(41)],
-  ["uppercase hex", "A".repeat(40)],
   ["embedded whitespace", `${"a".repeat(20)} ${"b".repeat(19)}`],
   ["a ref-like value", "refs/heads/main"],
+  ["the origin/main alias the endpoint refuses", "origin/main"],
   ["an embedded newline", `${"a".repeat(20)}\n${"b".repeat(20)}`],
   ["an embedded carriage return", `${"a".repeat(20)}\r${"b".repeat(20)}`],
 ] as const) {
@@ -111,6 +125,8 @@ for (const [name, revision] of [
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr.toString()).toContain("invalid revision");
+    expect(result.stdout.toString()).not.toContain("deployment key");
+    expect(result.stdout.toString()).not.toContain("deployment admitted");
     expect(fs.existsSync(setup.capture)).toBe(false);
   });
 }
@@ -126,6 +142,18 @@ test("rebuild serializes a quoted 200-character idempotency key as JSON", () => 
     revision: MAIN_TIP,
     idempotencyKey,
   });
+});
+
+test("a timed-out request prints a shell-safe idempotency-key retry", () => {
+  const setup = fixture();
+  const idempotencyKey = `retry key 'quoted' $(touch should-not-run);`;
+  const result = runRebuild(idempotencyKey, setup, undefined, { curlFails: true });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain(
+    `LLV_DEPLOY_IDEMPOTENCY_KEY=retry\\ key\\ \\'quoted\\'\\ \\$\\(touch\\ should-not-run\\)\\; scripts/rebuild.sh ${MAIN_TIP}`,
+  );
+  expect(result.stdout.toString()).not.toContain("deployment key");
 });
 
 test("a bare rebuild reads the canonical main tip itself and posts the resolved SHA", () => {
@@ -145,15 +173,14 @@ test("a bare rebuild reads the canonical main tip itself and posts the resolved 
   expect(result.stdout.toString()).toContain(`resolved refs/heads/main at ${CANONICAL_REMOTE}: ${MAIN_TIP}`);
 });
 
-test("an explicit origin/main argument resolves the same way as a bare invocation", () => {
+test("a refused origin/main argument never reaches the remote or the endpoint", () => {
   const setup = fixture();
   const result = runRebuild("explicit-origin-main", setup, "origin/main");
 
-  expect(result.exitCode).toBe(0);
-  expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({
-    revision: MAIN_TIP,
-    idempotencyKey: "explicit-origin-main",
-  });
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain("full 40-character hexadecimal commit SHA");
+  expect(fs.existsSync(setup.gitArgs)).toBe(false);
+  expect(fs.existsSync(setup.capture)).toBe(false);
 });
 
 test("a pinned SHA deploy never consults the remote", () => {
@@ -181,6 +208,34 @@ for (const [name, lsRemote] of [
   });
 }
 
+/* #1309 — `LLV_DEPLOY_REVISION` names the same thing the positional argument
+   names, so it is held to the same case-insensitive contract and normalized
+   before posting. Anything the endpoint would refuse is refused here first. */
+test("LLV_DEPLOY_REVISION pins an uppercase SHA and posts it lowercase", () => {
+  const setup = fixture();
+  const revision = "D4".repeat(20);
+  const result = runRebuild("env-pinned-sha", setup, undefined, { deployRevision: revision });
+
+  expect(result.exitCode).toBe(0);
+  expect(fs.existsSync(setup.gitArgs)).toBe(false);
+  expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({
+    revision: revision.toLowerCase(),
+    idempotencyKey: "env-pinned-sha",
+  });
+});
+
+test("LLV_DEPLOY_REVISION is validated like the argument", () => {
+  const setup = fixture();
+  const result = runRebuild("env-invalid-revision", setup, undefined, { deployRevision: "origin/main" });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain("full 40-character hexadecimal commit SHA");
+  expect(result.stdout.toString()).not.toContain("deployment key");
+  expect(result.stdout.toString()).not.toContain("deployment admitted");
+  expect(fs.existsSync(setup.gitArgs)).toBe(false);
+  expect(fs.existsSync(setup.capture)).toBe(false);
+});
+
 test("rebuild rejects an idempotency key above the coordinator limit", () => {
   const setup = fixture();
   const result = runRebuild("x".repeat(201), setup);
@@ -203,4 +258,50 @@ test("rebuild keeps the Viewer credential out of loopback request arguments", ()
   expect(args).not.toContain("?k=");
   expect(args).toContain("http://127.0.0.1:18898/api/runtime/deployments");
   expect(args).toContain("http://127.0.0.1:18898/api/runtime/deployments/deploy_test");
+});
+
+test("a request the deployment endpoint refuses prints no started-deployment line", () => {
+  const setup = fixture();
+  const result = runRebuild("stub-refused", setup, undefined, {
+    admissionStatus: 400,
+    admissionBody: { error: "revision must be a full 40-character commit SHA", reason: "revision_invalid" },
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain("deployment request failed (HTTP 400)");
+  expect(result.stderr.toString()).toContain("revision_invalid");
+  expect(result.stdout.toString()).not.toContain("deployment key");
+  expect(result.stdout.toString()).not.toContain("deployment admitted");
+  /* Everything the refusal left on stdout: the commit it would have deployed. */
+  expect(result.stdout.toString().trim().split("\n")).toEqual([
+    `resolved refs/heads/main at ${CANONICAL_REMOTE}: ${MAIN_TIP}`,
+  ]);
+});
+
+test("a busy 409 receipt prints its deployment key and exits 2", () => {
+  const setup = fixture();
+  const result = runRebuild("stub-busy", setup, undefined, {
+    admissionStatus: 409,
+    admissionBody: { state: "busy", deploymentId: "deploy_busy" },
+  });
+
+  expect(result.exitCode).toBe(2);
+  expect(result.stdout.toString()).toContain("deployment key: stub-busy");
+  expect(result.stdout.toString()).toContain("deployment busy: deploy_busy");
+  expect(result.stdout.toString()).not.toContain("deployment admitted");
+});
+
+test("an error 409 prints the server error without a started-deployment line", () => {
+  const setup = fixture();
+  const result = runRebuild("stub-conflict", setup, undefined, {
+    admissionStatus: 409,
+    admissionBody: { error: "idempotency key already belongs to another deployment" },
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain("deployment request failed (HTTP 409)");
+  expect(result.stderr.toString()).toContain("idempotency key already belongs to another deployment");
+  expect(result.stdout.toString()).not.toContain("deployment key");
+  expect(result.stdout.toString()).not.toContain("deployment admitted");
+  expect(result.stdout.toString()).not.toContain("deployment busy");
 });

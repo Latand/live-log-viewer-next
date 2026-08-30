@@ -915,7 +915,9 @@ export async function executeSpawnRequest(
           deferStructuredSpawn(receipt, runtimeClient, imageRefs);
         }
       }
-      if (receipt.artifactPath) await adoptMaterializedAttempt(receipt, receipt.artifactPath);
+      if (receipt.state === "completed" && receipt.artifactPath) {
+        await adoptMaterializedAttempt(receipt, receipt.artifactPath);
+      }
       const response = spawnResponseForReceipt(receipt, receipt.artifactPath, {
         structured,
         initialMessage: queuedUntil ? "queued" : initialMessage,

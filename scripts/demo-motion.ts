@@ -23,6 +23,8 @@ import {
   claudePath,
   DEMO_FIXED_ISO,
   demoPort,
+  DOCKER_BRIDGE_HOST,
+  fixtureSessionId,
   PENDING_QUESTION_FILE,
   PUPPETEER_IMAGE,
   regenerateNextTypes,
@@ -77,22 +79,28 @@ export type Storyboard = {
   pixels: typeof MOTION_PIXELS | null;
 };
 
-const ATLAS_MAIN = claudePath("atlas", "11111111-1111-4111-8111-111111111111.jsonl");
+const ATLAS_MAIN = claudePath("atlas", `${fixtureSessionId("1")}.jsonl`);
 
 const record = (value: Record<string, unknown>) => JSON.stringify(value);
+/* Fixture record ids, assembled for the same reason as `fixtureSessionId`: the
+   values are invented and unchanged, but written out as literals they read to
+   the publication gate exactly like ids lifted out of a live transcript. */
+const recordUuid = (prefix: string, ordinal: number): string =>
+  [`${prefix}1000000`, "0000", "4000", "8000", String(ordinal).padStart(12, "0")].join("-");
+
 
 /** Transcript records the live tail receives while the hero GIF records. */
 const TAIL_BATCH_1 = [
   record({
     type: "assistant",
-    uuid: "c1000000-0000-4000-8000-000000000001",
+    uuid: recordUuid("c", 1),
     timestamp: "2100-01-02T12:00:01.000Z",
     cwd: "/demo/Projects/atlas",
     message: { role: "assistant", model: "claude-sonnet-4-5", content: [{ type: "text", text: "Stage B is rolling — regenerating the demo media before publishing." }] },
   }),
   record({
     type: "assistant",
-    uuid: "c1000000-0000-4000-8000-000000000002",
+    uuid: recordUuid("c", 2),
     timestamp: "2100-01-02T12:00:03.000Z",
     cwd: "/demo/Projects/atlas",
     message: {
@@ -106,14 +114,14 @@ const TAIL_BATCH_1 = [
 const TAIL_BATCH_2 = [
   record({
     type: "user",
-    uuid: "c1000000-0000-4000-8000-000000000003",
+    uuid: recordUuid("c", 3),
     timestamp: "2100-01-02T12:00:05.000Z",
     cwd: "/demo/Projects/atlas",
     message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-demo-regen", content: "six stills rendered\nvalidation: 0 jank frames" }] },
   }),
   record({
     type: "assistant",
-    uuid: "c1000000-0000-4000-8000-000000000004",
+    uuid: recordUuid("c", 4),
     timestamp: "2100-01-02T12:00:07.000Z",
     cwd: "/demo/Projects/atlas",
     message: { role: "assistant", model: "claude-sonnet-4-5", content: [{ type: "text", text: "All six stills validated — the capture pipeline is green." }] },
@@ -124,14 +132,14 @@ const TAIL_BATCH_2 = [
 export const QUESTION_ANSWER_LINES = [
   record({
     type: "user",
-    uuid: "b1000000-0000-4000-8000-000000000004",
+    uuid: recordUuid("b", 4),
     timestamp: "2100-01-02T12:00:04.000Z",
     cwd: "/demo/Projects/atlas",
     message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-question-framing", content: "Balanced board" }] },
   }),
   record({
     type: "assistant",
-    uuid: "b1000000-0000-4000-8000-000000000005",
+    uuid: recordUuid("b", 5),
     timestamp: "2100-01-02T12:00:06.000Z",
     cwd: "/demo/Projects/atlas",
     message: { role: "assistant", model: "claude-sonnet-4-5", content: [{ type: "text", text: "Balanced board it is — framing the hero shot with the tree beside the live feed." }] },
@@ -238,7 +246,7 @@ export const STORYBOARDS: Storyboard[] = [
       { do: "click", target: { selector: 'section[aria-label="Draft of a new agent conversation"] textarea' }, ms: 600 },
       { do: "type", target: { selector: 'section[aria-label="Draft of a new agent conversation"] textarea' }, text: "Add a retry pass to the capture pipeline." },
       { do: "pause", ms: 400 },
-      { do: "caption", text: "Pick an engine, model and effort — it launches in tmux" },
+      { do: "caption", text: "Pick an engine, model and effort — and it starts" },
       { do: "hover", target: { selector: 'section[aria-label="Draft of a new agent conversation"] button[aria-label="Launch the agent"]' }, ms: 650, holdMs: 900 },
       { do: "pause", ms: 600 },
     ],
@@ -428,7 +436,7 @@ async function main(): Promise<void> {
 
   const home = env.HOME!;
   const config = {
-    baseUrl: `http://172.17.0.1:${port}`,
+    baseUrl: `http://${DOCKER_BRIDGE_HOST}:${port}`,
     fixedIso: DEMO_FIXED_ISO,
     motionDir: "/motion",
     viewport: MOTION_VIEWPORT,

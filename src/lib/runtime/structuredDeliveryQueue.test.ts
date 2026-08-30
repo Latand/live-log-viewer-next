@@ -4,6 +4,16 @@ import type { DeliveryReceipt, EngineHost, HostState, QueueEntry, RuntimeEvent }
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContentDigest, type StructuredImageRef } from "./structuredContent";
 
+/**
+ * The ownership stamp every message `delivering` write now carries (#1131).
+ *
+ * The executor identity is minted per instance, and these tests are about what
+ * the transition MEANS rather than which executor wrote it. `@?` is the claim a
+ * port that cannot answer for one records: nothing to compare against, so the
+ * row is never read as abandoned.
+ */
+const deliveringOwner = expect.stringContaining("delivering-owner:");
+
 function idleState(sessionKey = "session-one"): HostState {
   return {
     status: "idle",
@@ -67,6 +77,202 @@ test("structured delivery preserves queue order within one conversation", async 
     ["op-two", "delivering"],
     ["op-two", "delivered"],
   ]);
+});
+
+test("one conversation transition failure does not stop another conversation in the same pass", async () => {
+  const sent: string[] = [];
+  let targetRetryRequests = 0;
+  const port: StructuredDeliveryQueuePort = {
+    effects: async () => [
+      {
+        id: "effect:op-failing",
+        kind: "runtime.send",
+        eventSeq: 1,
+        payload: { operationId: "op-failing", conversationId: "conversation-failing", text: "first", policy: "queue" },
+      },
+      {
+        id: "effect:op-delivered",
+        kind: "runtime.send",
+        eventSeq: 2,
+        payload: { operationId: "op-delivered", conversationId: "conversation-delivered", text: "second", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status) => {
+      if (operationId === "op-failing" && status === "delivering") {
+        throw new Error("transition unavailable");
+      }
+    },
+  };
+  const queue = new StructuredDeliveryQueue(port, () => host(async (entry) => {
+    sent.push(entry.id);
+    return { outcome: "turn-started", turnId: `turn-${entry.id}` };
+  }), undefined, () => {
+    targetRetryRequests += 1;
+  });
+
+  await queue.drain();
+
+  expect(sent).toEqual(["op-delivered"]);
+  expect(queue.lastTargetError("conversation-failing")).toBe("transition unavailable");
+  expect(targetRetryRequests).toBe(1);
+});
+
+test("an all-target failure is left to the pass-level retry path", async () => {
+  let targetRetryRequests = 0;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-failing",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: { operationId: "op-failing", conversationId: "conversation-failing", text: "first", policy: "queue" },
+    }],
+    transition: async () => { throw new Error("transition unavailable"); },
+  }, () => host(async () => ({ outcome: "turn-started", turnId: "turn-unexpected" })), undefined, () => {
+    targetRetryRequests += 1;
+  });
+
+  await expect(queue.drain()).rejects.toThrow("structured delivery failed for every target: transition unavailable");
+
+  expect(targetRetryRequests).toBe(0);
+});
+
+test("one malformed effect transition failure does not stop another conversation", async () => {
+  const sent: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:op-malformed",
+        kind: "runtime.send",
+        eventSeq: 1,
+        payload: {
+          operationId: "op-malformed",
+          conversationId: "conversation-malformed",
+          text: "malformed",
+          contentDigest: "invalid",
+        },
+      },
+      {
+        id: "effect:op-ready",
+        kind: "runtime.send",
+        eventSeq: 2,
+        payload: { operationId: "op-ready", conversationId: "conversation-ready", text: "ready", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status) => {
+      if (operationId === "op-malformed" && status === "failed") throw new Error("transition unavailable");
+    },
+  }, () => host(async (entry) => {
+    sent.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-ready" };
+  }));
+
+  await queue.drain();
+
+  expect(sent).toEqual(["op-ready"]);
+});
+
+test("a malformed effect blocks later delivery only within its conversation", async () => {
+  const sent: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:op-malformed",
+        kind: "runtime.send",
+        eventSeq: 1,
+        payload: {
+          operationId: "op-malformed",
+          conversationId: "conversation-blocked",
+          text: "malformed",
+          contentDigest: "invalid",
+        },
+      },
+      {
+        id: "effect:op-blocked",
+        kind: "runtime.send",
+        eventSeq: 2,
+        payload: { operationId: "op-blocked", conversationId: "conversation-blocked", text: "blocked", policy: "queue" },
+      },
+      {
+        id: "effect:op-ready",
+        kind: "runtime.send",
+        eventSeq: 3,
+        payload: { operationId: "op-ready", conversationId: "conversation-ready", text: "ready", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status) => {
+      if (operationId === "op-malformed" && status === "failed") throw new Error("transition unavailable");
+    },
+  }, () => host(async (entry) => {
+    sent.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-ready" };
+  }));
+
+  await queue.drain();
+
+  expect(sent).toEqual(["op-ready"]);
+});
+
+test("an effect-page failure remains available to a queued conversation deadline", async () => {
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => { throw new Error("runtime host request timed out"); },
+    transition: async () => {},
+  }, () => null);
+
+  await expect(queue.drain()).rejects.toThrow("runtime host request timed out");
+
+  expect(queue.lastTargetError("conversation-pending")).toBe("runtime host request timed out");
+});
+
+test("an uncertain operation already held by a pass is skipped", async () => {
+  const transitions: string[] = [];
+  const sent: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-uncertain",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: { operationId: "op-uncertain", conversationId: "conversation-one", text: "settled", policy: "queue" },
+    }],
+    status: async () => ({ status: "uncertain", reason: "delivery outcome is unverified" }),
+    transition: async (operationId) => {
+      transitions.push(operationId);
+      throw new Error("runtime operation transition is invalid");
+    },
+  }, () => host(async (entry) => {
+    sent.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-unexpected" };
+  }));
+
+  await queue.drain();
+
+  expect(transitions).toEqual([]);
+  expect(sent).toEqual([]);
+});
+
+test("a dead-host requeue refused after terminal settlement does not fail the pass", async () => {
+  let status = "queued";
+  let recoveries = 0;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-settled-during-pass",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: { operationId: "op-settled-during-pass", conversationId: "conversation-one", text: "settled", policy: "queue" },
+    }],
+    status: async () => ({ status, reason: status === "uncertain" ? "delivery outcome is unverified" : null }),
+    transition: async (_operationId, next) => {
+      if (next !== "queued") return;
+      status = "uncertain";
+      throw new Error("runtime operation transition is invalid");
+    },
+  }, () => null, undefined, undefined, async () => {
+    recoveries += 1;
+    return false;
+  });
+
+  await queue.drain();
+
+  expect(recoveries).toBe(0);
 });
 
 test("a busy structured turn keeps reconfigure queued and applies it before later messages", async () => {
@@ -413,7 +619,7 @@ test("a retained successful-kill boundary fences only earlier operations", async
   ]);
 });
 
-test("structured delivery surfaces a host actuation failure", async () => {
+test("a host that cannot answer for a send it was handed settles it unverified", async () => {
   const transitions: Array<[string, string, string | null | undefined]> = [];
   const port: StructuredDeliveryQueuePort = {
     effects: async () => [{
@@ -432,9 +638,15 @@ test("structured delivery surfaces a host actuation failure", async () => {
 
   await queue.drain();
 
+  /* The send was already in the host's hands when the write threw, and a live
+     host proves nothing about it either: the confirmed-delivery record that
+     could have said is the very thing this call failed to get. `failed` is what
+     the receipt reads as fenced and answers `resend: "safe"` — and a resend
+     goes out under a new request id, which nothing on the host side would
+     dedupe against this attempt — so the fate is recorded as unknown (#1131). */
   expect(transitions).toEqual([
-    ["op-failed", "delivering", undefined],
-    ["op-failed", "failed", "engine write failed"],
+    ["op-failed", "delivering", deliveringOwner],
+    ["op-failed", "uncertain", "delivery was started and the structured host did not answer; whether it reached the recipient is unverified: engine write failed"],
   ]);
 });
 
@@ -468,7 +680,7 @@ test("a Codex thread/read timeout retries within the bounded drain", async () =>
 
   expect(attempts).toBe(2);
   expect(transitions).toEqual([
-    ["op-slow-read", "delivering", undefined],
+    ["op-slow-read", "delivering", deliveringOwner],
     ["op-slow-read", "delivered", undefined],
   ]);
 });
@@ -504,12 +716,12 @@ test("an exhausted thread/read budget stays queued for automatic delivery", asyn
   expect(attempts).toBe(2);
   expect(retries).toBe(1);
   expect(transitions).toEqual([
-    ["op-slow-read-retry", "delivering", undefined],
+    ["op-slow-read-retry", "delivering", deliveringOwner],
     ["op-slow-read-retry", "queued", "delivery-auto-retry"],
   ]);
 });
 
-test("a host crash leaves the conversation head queued for recovery", async () => {
+test("a host crash leaves the message it took unverified, never queued as unexecuted", async () => {
   const sent: string[] = [];
   const transitions: Array<[string, string, string | null | undefined]> = [];
   let dead = false;
@@ -541,10 +753,14 @@ test("a host crash leaves the conversation head queued for recovery", async () =
 
   await queue.drain();
 
+  /* The host HAD the instruction before it died — that is what `sent` records —
+     so putting the operation back to `queued` said it was never executed, and a
+     receipt read from that called a resend safe. It is absorbing and uncertain
+     instead (#1131); the effect behind it still waits for recovery. */
   expect(sent).toEqual(["op-crash"]);
   expect(transitions).toEqual([
-    ["op-crash", "delivering", undefined],
-    ["op-crash", "queued", "engine child exited"],
+    ["op-crash", "delivering", deliveringOwner],
+    ["op-crash", "uncertain", "delivery was started and the structured host did not answer; whether it reached the recipient is unverified: engine child exited"],
   ]);
 });
 
@@ -588,7 +804,10 @@ test("a bounded stalled target still delivers another ready conversation", async
   await drain;
 
   expect(transitions).toContainEqual(["op-ready", "delivered"]);
-  expect(transitions).toContainEqual(["op-stalled", "queued"]);
+  /* The stalled target's own send was already in the host's hands when the
+     confirmation timed out and the host died, so it settles as unverified
+     rather than going back to `queued`. */
+  expect(transitions).toContainEqual(["op-stalled", "uncertain"]);
 });
 
 test("an unavailable host keeps the conversation head queued", async () => {
@@ -662,7 +881,7 @@ test("structured delivery preserves ordered image refs and their content digest"
     expectedTurnId: null,
   }]);
   expect(transitions).toEqual([
-    ["op-image", "delivering", undefined],
+    ["op-image", "delivering", deliveringOwner],
     ["op-image", "delivered", undefined],
   ]);
 });
@@ -699,9 +918,15 @@ test("an image effect reaches the host when capability discovery is still pendin
   await queue.drain();
 
   expect(sends).toBe(1);
+  /* A capability the host refused by throwing is indistinguishable, from out
+     here, from a write that reached the engine and could not be confirmed —
+     `host.send` either returns a receipt or does not. So it settles unverified
+     too: one caller verification is the cheaper of the two errors, and the
+     alternative is telling them a resend is safe on a send that may have
+     landed (#1131). */
   expect(transitions).toEqual([
-    ["op-image-probe", "delivering", undefined],
-    ["op-image-probe", "failed", "Codex image capability discovery is temporarily unavailable; retry shortly."],
+    ["op-image-probe", "delivering", deliveringOwner],
+    ["op-image-probe", "uncertain", "delivery was started and the structured host did not answer; whether it reached the recipient is unverified: Codex image capability discovery is temporarily unavailable; retry shortly."],
   ]);
 });
 
@@ -800,7 +1025,7 @@ test("an idle queue admission keeps its null turn fence when a turn starts befor
 
   expect(expectedTurns).toEqual([null]);
   expect(transitions).toEqual([
-    ["op-idle-race", "delivering", null, undefined],
+    ["op-idle-race", "delivering", null, deliveringOwner],
     ["op-idle-race", "queued", undefined, "stale-turn"],
   ]);
 });
@@ -978,12 +1203,49 @@ test("a stale steer never retries as a fresh turn after the host becomes idle", 
 
   expect(expectedTurns).toEqual(["turn-old"]);
   expect(transitions).toEqual([
-    ["op-stale-steer", "delivering", undefined],
+    ["op-stale-steer", "delivering", deliveringOwner],
     ["op-stale-steer", "failed", "stale-turn"],
   ]);
 });
 
-test("an ambiguous steered send keeps its original turn fence after host recovery", async () => {
+test("a send an earlier executor already took is never delivered a second time", async () => {
+  /* The durable receipt is the fence. A process that died between `delivering`
+     and its terminal transition leaves the effect in the outbox, and whoever
+     drains next — this process after a runtime-host restart, a successor
+     release, a Viewer that came back — would otherwise deliver an instruction
+     the recipient may already have. The same guard `drainCompact` applies to a
+     control (#1131).
+
+     What the fence SETTLES is a second question, and a row carrying no
+     ownership at all answers neither of them: it is not proof that its executor
+     is gone, so this pass writes nothing and the receipt deadline is what ends
+     the send. What matters here is the arithmetic — one engine write in total,
+     whatever the row can prove. */
+  const sent: string[] = [];
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-stranded",
+      kind: "runtime.send",
+      eventSeq: 40,
+      payload: { kind: "send", operationId: "op-stranded", conversationId: "conversation-one", text: "roll the release forward", policy: "queue" },
+    }],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+    status: async () => ({ status: "delivering" }),
+  }, () => host(async (entry) => {
+    sent.push(entry.text ?? "");
+    return { outcome: "turn-started", turnId: "turn-stranded" };
+  }));
+
+  await queue.drain();
+
+  expect(sent).toEqual([]);
+  expect(transitions).toEqual([]);
+});
+
+test("a steered send the dying host took is not delivered again when the host returns", async () => {
   const expectedTurns: Array<string | null | undefined> = [];
   const transitions: Array<[string, string, string | null | undefined]> = [];
   const effect = {
@@ -1016,7 +1278,7 @@ test("an ambiguous steered send keeps its original turn fence after host recover
     transition: async (operationId, status, details) => {
       transitions.push([operationId, status, details?.turnId]);
       if (status === "delivering" && details?.turnId !== undefined) effect.payload.turnId = details.turnId;
-      if (status === "failed") pending = false;
+      if (status === "failed" || status === "uncertain") pending = false;
     },
   }, () => recoveredHost);
 
@@ -1024,12 +1286,15 @@ test("an ambiguous steered send keeps its original turn fence after host recover
   recovered = true;
   await queue.drain();
 
-  expect(expectedTurns).toEqual(["turn-old", "turn-old"]);
+  /* The host took this steer under `turn-old` and then died. Re-delivering it
+     when the host came back was a SECOND actuation of an instruction that may
+     already have landed, so the recovered host is handed nothing at all and the
+     receipt says the fate is unknown. The turn fence a live host preserves
+     across attempts is covered by the stale-steer test above. */
+  expect(expectedTurns).toEqual(["turn-old"]);
   expect(transitions.map(([operationId, status]) => [operationId, status])).toEqual([
     ["op-ambiguous-steer", "delivering"],
-    ["op-ambiguous-steer", "queued"],
-    ["op-ambiguous-steer", "delivering"],
-    ["op-ambiguous-steer", "failed"],
+    ["op-ambiguous-steer", "uncertain"],
   ]);
 });
 
@@ -1167,6 +1432,83 @@ test("interrupt actuates a deliberately held fake-host turn", async () => {
     ["interrupt", "delivering"],
     ["interrupt", "interrupted"],
   ]);
+});
+
+test("an interrupt for a conversation with no host settles once the host is proven severed", async () => {
+  const transitions: Array<[string, string, string | undefined]> = [];
+  const effects = [
+    {
+      id: "interrupt-severed",
+      kind: "runtime.interrupt",
+      eventSeq: 3,
+      payload: { operationId: "interrupt-severed", conversationId: "conversation-one", turnId: "turn-inherited" },
+    },
+    {
+      id: "send-behind",
+      kind: "runtime.send",
+      eventSeq: 4,
+      payload: { operationId: "send-behind", conversationId: "conversation-one", text: "are you there", policy: "queue" },
+    },
+  ];
+  const settled = new Set<string>();
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => effects.filter((effect) => !settled.has(String(effect.payload.operationId))),
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason ?? undefined]);
+      if (status !== "queued" && status !== "delivering") settled.add(operationId);
+    },
+  }, () => null, undefined, undefined, async () => false, undefined,
+  async () => "it has written nothing since its own launch");
+
+  await queue.drain();
+
+  /* Holding the control forever is what parked every message behind a turn no
+     process was running (#1281): the group has to drain past it. */
+  expect(transitions[0]).toEqual([
+    "interrupt-severed",
+    "interrupted",
+    "structured host is severed: it has written nothing since its own launch",
+  ]);
+  expect(transitions.map(([operationId]) => operationId)).toContain("send-behind");
+});
+
+test("an interrupt for a conversation with no host waits when the severed evidence cannot be read", async () => {
+  const transitions: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "interrupt-unreadable",
+      kind: "runtime.interrupt",
+      eventSeq: 3,
+      payload: { operationId: "interrupt-unreadable", conversationId: "conversation-one", turnId: "turn-held" },
+    }],
+    transition: async (operationId) => { transitions.push(operationId); },
+  }, () => null, undefined, undefined, async () => false, undefined,
+  async () => { throw new Error("registry snapshot is unavailable"); });
+
+  await queue.drain();
+
+  /* The liveness decision answers `severed` from evidence and `unknown` from
+     anything it could not read (#1281); a read that never completed is the
+     same nothing one step earlier, and settles the control no more than
+     `unknown` does (#1131). */
+  expect(transitions).toEqual([]);
+});
+
+test("an interrupt for a conversation with no host keeps waiting while nothing proves it severed", async () => {
+  const transitions: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "interrupt-unknown",
+      kind: "runtime.interrupt",
+      eventSeq: 3,
+      payload: { operationId: "interrupt-unknown", conversationId: "conversation-one", turnId: "turn-held" },
+    }],
+    transition: async (operationId) => { transitions.push(operationId); },
+  }, () => null);
+
+  await queue.drain();
+
+  expect(transitions).toEqual([]);
 });
 
 test("a control operation behind a full message page still reaches the active host", async () => {
@@ -1330,7 +1672,7 @@ test("a failed kill leaves the queued send eligible for its live host", async ()
   expect(transitions).toEqual([
     ["kill-one", "delivering", undefined],
     ["kill-one", "failed", "structured host termination is unavailable"],
-    ["send-one", "delivering", undefined],
+    ["send-one", "delivering", deliveringOwner],
     ["send-one", "delivered", undefined],
   ]);
 });
@@ -1459,4 +1801,476 @@ test("an active-host kill retries after terminal projection fails", async () => 
     ["kill-active-retry", "delivering", undefined],
     ["kill-active-retry", "delivered", undefined],
   ]);
+});
+
+/**
+ * A durable delivery journal small enough to be read twice, by two executors
+ * (#1131). The receipt keeps whatever reason the transition recorded, because
+ * that is where an executor stamps the claim it is delivering under.
+ */
+function ownershipJournal(claim: () => string | null): {
+  port: StructuredDeliveryQueuePort;
+  receipts: Map<string, { status: string; reason?: string | null }>;
+  writes: string[];
+  pending: Set<string>;
+  transitions: Array<[string, string, string | null]>;
+} {
+  const receipts = new Map<string, { status: string; reason?: string | null }>([
+    ["op-owned", { status: "queued", reason: null }],
+  ]);
+  const pending = new Set(["op-owned"]);
+  const writes: string[] = [];
+  const transitions: Array<[string, string, string | null]> = [];
+  return {
+    receipts,
+    writes,
+    pending,
+    transitions,
+    port: {
+      effects: async () => [...pending].map((operationId) => ({
+        id: `effect:${operationId}`,
+        kind: "runtime.send",
+        eventSeq: 21,
+        payload: { kind: "send", operationId, conversationId: "conversation-one", text: "ship it", idempotencyKey: "owned", policy: "queue" },
+      })),
+      transition: async (operationId, status, details) => {
+        transitions.push([operationId, status, details?.reason ?? null]);
+        receipts.set(operationId, { status, reason: details?.reason ?? null });
+        if (status !== "queued" && status !== "delivering") pending.delete(operationId);
+      },
+      status: async (operationId) => receipts.get(operationId) ?? null,
+      hostClaim: () => claim(),
+    },
+  };
+}
+
+test("a delivering send whose executor still owns the host is left to that executor", async () => {
+  /* The row an executor writes before it calls the engine says only that
+     actuation began; whether it was ABANDONED is a separate question, and the
+     answer used to be assumed. A second executor draining the same journal
+     during a release succession would terminalize a send the first one was
+     still delivering — the durable fence dropping work that was going
+     somewhere. The claim it recorded is the evidence: while it still owns the
+     host, the row is its to settle. */
+  let claim: string | null = "claim-alpha:3";
+  const journal = ownershipJournal(() => claim);
+  const writes: string[] = [];
+  const engine = () => host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started" as const, turnId: "turn-owned" };
+  });
+
+  /* The owner takes it into delivery and does not come back within this pass —
+     the send is on the wire. */
+  const owner = new StructuredDeliveryQueue(journal.port, engine);
+  await owner.drain();
+  expect(writes).toEqual(["op-owned"]);
+  const recorded = journal.transitions.find(([, status]) => status === "delivering")?.[2] ?? null;
+  expect(recorded).toContain("delivering-owner:");
+  journal.receipts.set("op-owned", { status: "delivering", reason: recorded });
+  journal.pending.add("op-owned");
+
+  /* A second executor, drained while the first still holds the claim. */
+  const successor = new StructuredDeliveryQueue(journal.port, engine);
+  await successor.drain();
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({ status: "delivering", reason: recorded });
+
+  /* Ownership actually changes — the host was re-adopted, so the earlier
+     executor can no longer write to the engine and can no longer answer for the
+     send either. NOW it is abandoned, and it ends the only way an actuated send
+     may: unverified, never queued, never written again. */
+  claim = "claim-beta:4";
+  const afterHandover = new StructuredDeliveryQueue(journal.port, engine);
+  await afterHandover.drain();
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({
+    status: "uncertain",
+    reason: "delivery was started by an earlier executor; whether it reached the recipient is unverified",
+  });
+});
+
+test("a delivering send whose ownership evidence cannot be read is left to its executor", async () => {
+  /* The finding this closes: an absent or failing claim read arrived at the
+     comparison as `null` and lost it, so a gap in the claim projection was
+     enough to terminalize a send another executor was actuating right then.
+     Absence of evidence is not evidence of a handover. Both shapes of "cannot
+     read" — a projection with nothing recorded, and one that throws — leave the
+     row where it is; the receipt deadline is what ends a send whose owner never
+     comes back, and it needs none of this to be healthy. */
+  let claim: () => string | null = () => "claim-alpha:3";
+  const journal = ownershipJournal(() => claim());
+  const writes: string[] = [];
+  const engine = () => host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started" as const, turnId: "turn-owned" };
+  });
+
+  const owner = new StructuredDeliveryQueue(journal.port, engine);
+  await owner.drain();
+  const recorded = journal.transitions.find(([, status]) => status === "delivering")?.[2] ?? null;
+  expect(recorded).toContain("delivering-owner:");
+  const stillDelivering = () => {
+    journal.receipts.set("op-owned", { status: "delivering", reason: recorded });
+    journal.pending.add("op-owned");
+  };
+
+  /* Nothing recorded for the conversation. */
+  claim = () => null;
+  stillDelivering();
+  await new StructuredDeliveryQueue(journal.port, engine).drain();
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({ status: "delivering", reason: recorded });
+
+  /* The read itself fails. */
+  claim = () => { throw new Error("claim projection is unavailable"); };
+  stillDelivering();
+  await new StructuredDeliveryQueue(journal.port, engine).drain();
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({ status: "delivering", reason: recorded });
+
+  /* No pass has terminalized it, and none has sent it again either — the row is
+     still exactly where its executor left it. */
+  expect(journal.transitions.filter(([, status]) => status === "uncertain")).toEqual([]);
+
+  /* And an explicitly DIFFERENT claim, which is the only evidence that proves
+     the executor can no longer write to the engine, still ends it. */
+  claim = () => "claim-beta:4";
+  stillDelivering();
+  await new StructuredDeliveryQueue(journal.port, engine).drain();
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({
+    status: "uncertain",
+    reason: "delivery was started by an earlier executor; whether it reached the recipient is unverified",
+  });
+});
+
+test("a delivering send this executor abandoned itself settles unverified rather than waiting on itself", async () => {
+  /* Ownership evidence must never become a way to hang: a row this executor
+     wrote and then lost — a pass that threw between the engine write and the
+     transition — matches the current claim, and there is nobody but this pass
+     to end it. */
+  const journal = ownershipJournal(() => "claim-alpha:3");
+  const writes: string[] = [];
+  const queue = new StructuredDeliveryQueue(journal.port, () => host(async (entry) => {
+    writes.push(entry.id);
+    throw new Error("runtime stopped before confirmation commit");
+  }));
+
+  await queue.drain().catch(() => undefined);
+  expect(journal.receipts.get("op-owned")?.status).toBe("uncertain");
+  /* The pass that threw before its own transition landed: the row is still
+     `delivering`, stamped by this very executor. */
+  journal.receipts.set("op-owned", {
+    status: "delivering",
+    reason: journal.transitions.find(([, status]) => status === "delivering")?.[2] ?? null,
+  });
+  journal.pending.add("op-owned");
+  await queue.drain();
+
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")?.status).toBe("uncertain");
+});
+
+test("a claim unavailable before the delivering write leaves the send to its executor", async () => {
+  /* The gap that survived inside the ownership fix: the claim read failed at
+     the moment the row was WRITTEN, so the row carried no ownership, and the
+     next executor read that absence as a handover and terminalized a send the
+     first one was actuating right then. The same unreadable evidence, one step
+     earlier. The stamp records the executor either way now, with the claim
+     recorded as unknown — nothing to compare against, so nothing is proved. */
+  let claim: () => string | null = () => { throw new Error("claim projection is unavailable"); };
+  const journal = ownershipJournal(() => claim());
+  const writes: string[] = [];
+  const engine = () => host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started" as const, turnId: "turn-owned" };
+  });
+
+  const owner = new StructuredDeliveryQueue(journal.port, engine);
+  await owner.drain();
+  expect(writes).toEqual(["op-owned"]);
+  const recorded = journal.transitions.find(([, status]) => status === "delivering")?.[2] ?? null;
+  expect(recorded).toContain("delivering-owner:");
+  journal.receipts.set("op-owned", { status: "delivering", reason: recorded });
+  journal.pending.add("op-owned");
+
+  /* A second executor drains, and its own claim read works perfectly. It still
+     cannot say the first executor lost the host, because the row never recorded
+     which claim it was delivering under. */
+  claim = () => "claim-beta:4";
+  await new StructuredDeliveryQueue(journal.port, engine).drain();
+
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({ status: "delivering", reason: recorded });
+  expect(journal.transitions.filter(([, status]) => status === "uncertain")).toEqual([]);
+});
+
+test("an unreadable operation status blocks the drain instead of actuating past the fence", async () => {
+  /* The status read is what tells this pass that an executor already handed
+     this send to the engine. Failing it used to arrive as `null` — the same
+     value a send nobody has touched produces — and the pass went on to the
+     engine call, so one unreachable journal read was the whole distance between
+     a send and a SECOND copy of it. */
+  const writes: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  let readable = false;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-status-unreadable",
+      kind: "runtime.send",
+      eventSeq: 50,
+      payload: {
+        kind: "send",
+        operationId: "op-status-unreadable",
+        conversationId: "conversation-one",
+        text: "hold the cutover until I say go",
+        policy: "queue",
+      },
+    }],
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+    status: async () => {
+      if (!readable) throw new Error("runtime host is unavailable");
+      return { status: "delivering", reason: "delivering-owner:another-executor@claim-beta:4" };
+    },
+    /* The host has since been re-adopted, so the recorded owner's claim is
+       explicitly no longer the current one — the one piece of evidence that
+       proves the row's writer can no longer answer for it. */
+    hostClaim: () => "claim-gamma:9",
+  }, () => host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-status" };
+  }));
+
+  await queue.drain();
+
+  expect(writes).toEqual([]);
+  expect(transitions).toEqual([]);
+
+  /* And once the journal answers, the fence it was hiding is applied. */
+  readable = true;
+  await queue.drain();
+
+  expect(writes).toEqual([]);
+  expect(transitions).toEqual([["op-status-unreadable", "uncertain"]]);
+});
+
+test("an unreadable settlement record blocks the drain instead of actuating past the fence", async () => {
+  /* The other fence, from the durable record: a send a receipt query already
+     ended during an outage must not arrive once the socket comes back. An
+     unreadable record used to become `false` — indistinguishable from a record
+     that says the send is still open — and the delivery went out after the
+     sender had been told it had not. */
+  const writes: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  let readable = false;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-record-unreadable",
+      kind: "runtime.send",
+      eventSeq: 51,
+      payload: {
+        kind: "send",
+        operationId: "op-record-unreadable",
+        conversationId: "conversation-one",
+        text: "hold the cutover until I say go",
+        policy: "queue",
+      },
+    }],
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+    settled: () => {
+      if (!readable) throw new Error("delivery record is unavailable");
+      return true;
+    },
+  }, () => host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-record" };
+  }));
+
+  await queue.drain();
+
+  expect(writes).toEqual([]);
+  expect(transitions).toEqual([]);
+
+  readable = true;
+  await queue.drain();
+
+  expect(writes).toEqual([]);
+  expect(transitions).toEqual([["op-record-unreadable", "uncertain"]]);
+});
+
+test("an unreadable status leaves a compaction unissued rather than compacting a thread twice", async () => {
+  /* A control is fenced by the same read, and the duplicate it prevents is a
+     second compaction of a thread an earlier executor may already have
+     compacted (#862). The pass issues nothing and comes back. */
+  const compactions: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  let readable = false;
+  const compactHost = Object.assign(host(async () => ({ outcome: "turn-started" as const, turnId: "unused" })), {
+    compact: async (request: { operationId: string }) => {
+      compactions.push(request.operationId);
+      return { compactionId: "compaction-one" };
+    },
+  });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-compact-unreadable",
+      kind: "runtime.compact",
+      eventSeq: 52,
+      payload: {
+        operationId: "op-compact-unreadable",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "session-one" },
+      },
+    }],
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+    status: async () => {
+      if (!readable) throw new Error("runtime host is unavailable");
+      return { status: "delivering" };
+    },
+  }, () => compactHost);
+
+  await queue.drain();
+
+  expect(compactions).toEqual([]);
+  expect(transitions).toEqual([]);
+
+  readable = true;
+  await queue.drain();
+
+  expect(compactions).toEqual([]);
+  expect(transitions).toEqual([["op-compact-unreadable", "uncertain"]]);
+});
+
+test("an unreadable host state leaves the send unhanded rather than delivering on it", async () => {
+  /* The live host's state is a failable read like the journal fences, and it is
+     the last one before the engine write. It used to be read bare here, so the
+     only thing standing between a message and an unreadable host was an
+     exception thrown out of the whole pass; every other host state — idle,
+     active, dead — decides something, and "could not be read" decides nothing.
+     The pass writes nothing and comes back. */
+  const writes: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  let retries = 0;
+  let readable = false;
+  const target = host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-state" };
+  });
+  target.health = async () => {
+    if (!readable) throw new Error("structured host socket timed out");
+    return idleState();
+  };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => (transitions.some(([, status]) => status === "delivered") ? [] : [{
+      id: "effect:op-state-unreadable",
+      kind: "runtime.send",
+      eventSeq: 60,
+      payload: {
+        kind: "send",
+        operationId: "op-state-unreadable",
+        conversationId: "conversation-one",
+        text: "roll the cutover forward",
+        policy: "queue",
+      },
+    }]),
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+  }, () => target, undefined, () => { retries += 1; });
+
+  await queue.drain();
+
+  expect(writes).toEqual([]);
+  expect(transitions).toEqual([]);
+  expect(retries).toBeGreaterThan(0);
+
+  /* And once the host answers for itself, the same send is delivered once. */
+  readable = true;
+  await queue.drain();
+
+  expect(writes).toEqual(["op-state-unreadable"]);
+  expect(transitions).toEqual([
+    ["op-state-unreadable", "delivering"],
+    ["op-state-unreadable", "delivered"],
+  ]);
+});
+
+test("an unreadable host state after a failed control never issues the control again", async () => {
+  /* `queued` on a control that already reached the engine hands it to a later
+     pass to issue a SECOND time, and that is only honest where the host is read
+     to be GONE. This read used to become `null` on failure and land in exactly
+     that branch, so one unreadable host state was the whole distance between an
+     answer and two of them. */
+  const answers: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  const terminal = new Set<string>();
+  const target = host(async () => ({ outcome: "turn-started", turnId: "turn-unused" }));
+  target.answer = async (attentionId) => {
+    answers.push(attentionId);
+    issued = true;
+    throw new Error("attention answer timed out; outcome is uncertain");
+  };
+  /* Readable while the control is issued — a host that could not be read is
+     never actuated against at all — and unreadable from the moment the answer
+     failed, which is the outage this test is about. */
+  let issued = false;
+  target.health = async () => {
+    if (issued) throw new Error("structured host socket timed out");
+    return idleState();
+  };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => (terminal.has("op-answer-unreadable") ? [] : [{
+      id: "effect:op-answer-unreadable",
+      kind: "runtime.answer",
+      eventSeq: 61,
+      payload: {
+        operationId: "op-answer-unreadable",
+        conversationId: "conversation-one",
+        attentionId: "question-one",
+        resolution: { answer: "yes" },
+      },
+    }]),
+    transition: async (operationId, status) => {
+      transitions.push([operationId, status]);
+      if (status === "failed" || status === "answered" || status === "delivered") terminal.add(operationId);
+    },
+  }, () => target);
+
+  await queue.drain();
+  await queue.drain();
+
+  expect(answers).toEqual(["question-one"]);
+  expect(transitions).toEqual([
+    ["op-answer-unreadable", "delivering"],
+    ["op-answer-unreadable", "failed"],
+  ]);
+});
+
+test("an unreadable host state issues no control at all", async () => {
+  /* The other half of the same call site: an answer and an interrupt are engine
+     writes, so a host whose state could not be read is not written to in the
+     first place, exactly as a message is not handed over on one. */
+  const answers: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  const target = host(async () => ({ outcome: "turn-started", turnId: "turn-unused" }));
+  target.answer = async (attentionId) => { answers.push(attentionId); };
+  target.health = async () => { throw new Error("structured host socket timed out"); };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-answer-unreadable-state",
+      kind: "runtime.answer",
+      eventSeq: 62,
+      payload: {
+        operationId: "op-answer-unreadable-state",
+        conversationId: "conversation-one",
+        attentionId: "question-one",
+        resolution: { answer: "yes" },
+      },
+    }],
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+  }, () => target);
+
+  await queue.drain();
+
+  expect(answers).toEqual([]);
+  expect(transitions).toEqual([]);
 });

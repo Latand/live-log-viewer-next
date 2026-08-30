@@ -1,6 +1,6 @@
 import { resumeEligibility, resumeSpecFor } from "@/lib/agent/cli";
 import type { AgentReconfiguration } from "@/lib/agent/reconfigure";
-import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type RegistryConversation, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { agentRegistry, deliveryMayHaveArrived, type AgentRegistry, type AgentRegistryEntry, type RegistryConversation, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { accountManager, ProjectAccountRefusedError, resolveResumeAccountId } from "@/lib/accounts/manager";
 import { AccountProjectBindingsUnreadableError } from "@/lib/accounts/projectBindings";
 import { conversationProjectKey } from "@/lib/accounts/conversationProject";
@@ -20,6 +20,7 @@ import { procBackend } from "@/lib/proc";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
 import { structuredContent } from "@/lib/runtime/structuredContent";
+import { SEND_UNVERIFIED_REASON, type SendResendGuidance } from "@/lib/runtime/sendSettlement";
 import type { RuntimeOperationReceipt } from "@/lib/runtime/contracts";
 import { detectBlockingGate, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import type { FileEntry } from "@/lib/types";
@@ -52,6 +53,13 @@ export interface DeliveryFailure {
   error: string;
   status: number;
   actuation?: "started";
+  /** #1131: the accepted send this refusal is about, so a caller holding it can
+      ask `message_receipt` what became of it. */
+  operationId?: string;
+  /** #1131: set when the refusal is ABSORBING — an earlier attempt under this
+      same request began actuating and nothing can say whether it arrived, so
+      the instruction must be verified rather than repeated. */
+  resend?: SendResendGuidance;
   /** Set on a superseded-round rejection (issue #383): the live chain end the
       caller should redirect to instead of forking retired work. */
   successorConversationId?: string;
@@ -703,6 +711,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
             outcome: "held",
             spawned: recovered.spawned,
             structured: true,
+            operationId: structured.operationId,
           };
         }
         return {
@@ -721,7 +730,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
   }
   let filePath = conversation?.generations.at(-1)?.path ?? message.path;
   let deliveryId: string | null = null;
-  let retryArtifactPaths: string[] = [];
+  let acceptedOperationId: string | null = null;
   if (conversation && !message.reservedDeliveryId) {
     if (deliveryFence(conversation) === "held" && requestLocalPayload) return failure("request-local delivery waits for migration completion", 409);
     let queued;
@@ -752,9 +761,31 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       return failure(error, 409);
     }
     if (queued.state === "delivered") return { ok: true, target: conversation.id };
-    if (queued.state === "delivery-uncertain") {
-      retryArtifactPaths = queued.artifactPaths;
-      queued = registry.retryUncertainDelivery(queued.id);
+    if (deliveryMayHaveArrived(registry.readOnlySnapshot(), queued)) {
+      /* #1131: an earlier attempt under this same request began typing into the
+         pane and nothing came back. The legacy path has no journal that could
+         say whether the recipient got it, and this reservation is the only
+         record of the attempt — so the same request is answered with that
+         uncertainty rather than actuating a second time. It used to be
+         reassigned and re-delivered here, which is how one client retry could
+         put the same instruction in front of an agent twice on a channel that
+         carries deployment control.
+         Asked of the record rather than of one state name: a receipt query past
+         the settlement deadline ENDS this reservation, and the `failed` it
+         leaves behind means the same thing `delivery-uncertain` did. Reviving
+         that one would have made the settlement itself the thing that
+         re-delivered the message. The images the first attempt saved stay on
+         disk either way, because a message that may have been delivered must
+         keep the paths it named. */
+      return {
+        ok: false,
+        outcome: "failed",
+        error: queued.error || SEND_UNVERIFIED_REASON,
+        status: 409,
+        actuation: "started",
+        operationId: queued.command.operationId,
+        resend: "verify-first",
+      };
     }
     if (queued.state === "held") {
       if (requestLocalPayload) {
@@ -762,7 +793,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
         return failure("request-local delivery waits for migration completion", 409);
       }
       requestAccountMigrationTick();
-      return { ok: true, target: conversation.id, outcome: "held" };
+      return { ok: true, target: conversation.id, outcome: "held", operationId: queued.command.operationId };
     }
     if (queued.state !== "assigned" || !queued.generationId) {
       if (requestLocalPayload) registry.discardDelivery(queued.id);
@@ -776,34 +807,52 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       }
       registry.requeueHeldDelivery(queued.id);
       requestAccountMigrationTick();
-      return { ok: true, target: conversation.id, outcome: "held" };
+      return { ok: true, target: conversation.id, outcome: "held", operationId: queued.command.operationId };
     }
     deliveryId = claimed.id;
+    acceptedOperationId = claimed.command.operationId;
     const claimedConversation = registry.conversation(conversation.id);
     filePath = claimedConversation?.generations.find((generation) => generation.id === claimed.generationId)?.path ?? filePath;
   }
   let actuation: "none" | "started" | "completed" = "none";
+  /**
+   * The answer an ambiguous legacy send must give (#1131).
+   *
+   * Actuation began and nothing came back, so the send is exactly as uncertain
+   * as one the structured path could not confirm — and the caller needs the
+   * same two things it gets there: the id its send was accepted under, so
+   * `message_receipt` can be asked what became of it, and the fact that
+   * repeating the instruction may deliver it twice. Without them a caller held
+   * a prose message and no way to ask anything, which is how the reasonable
+   * next move became "send it again".
+   */
+  const absorbing = (outcome: DeliveryOutcome): DeliveryOutcome =>
+    !outcome.ok && outcome.actuation === "started" && acceptedOperationId
+      ? { ...outcome, operationId: acceptedOperationId, resend: "verify-first" as const }
+      : outcome;
   const settle = (outcome: DeliveryOutcome): DeliveryOutcome => {
     try {
       if (deliveryId) {
-        if (outcome.ok) registry.recordDeliveryOutcome(deliveryId, "delivered");
+        /* An actuated write stays `delivery-uncertain` on purpose, and stays
+           there: the legacy path has no journal operation that could ever prove
+           the message did not arrive, so the record has to keep saying that a
+           send under this request may already be in the pane. It is absorbing —
+           a replay of the same request is answered from it rather than typed
+           again — and a receipt query past the settlement window ends it as an
+           unverified failure (#1131). */
+        if (outcome.ok) registry.recordDeliveryOutcome(deliveryId, "delivered", null, "delivered");
         else if (outcome.actuation !== "started") registry.discardDelivery(deliveryId);
       }
-      return outcome;
+      return absorbing(outcome);
     } catch (error) {
-      return failure(error, 500, actuation === "none" ? undefined : "started");
+      return absorbing(failure(error, 500, actuation === "none" ? undefined : "started"));
     }
   };
 
   /* Saved paths stay visible to the catch-all: a delivery that fails after
      the images hit disk deletes them so a retry cannot duplicate files. */
   let imagePaths: string[] = [];
-  const materializePayload = () => {
-    if (retryArtifactPaths.length > 0) {
-      return { payload: [text, ...retryArtifactPaths].filter(Boolean).join("\n"), imagePaths: retryArtifactPaths };
-    }
-    return (overrides.buildImagePayload ?? buildImagePayload)(text, images);
-  };
+  const materializePayload = () => (overrides.buildImagePayload ?? buildImagePayload)(text, images);
   const recordArtifacts = () => {
     if (deliveryId && imagePaths.length > 0) registry.recordDeliveryArtifacts(deliveryId, imagePaths);
   };
@@ -911,6 +960,6 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       if (deliveryId) try { registry.discardDelivery(deliveryId); } catch { /* the original registry failure remains actionable */ }
       deleteInboxImages(imagePaths);
     }
-    return failure(error, 500, uncertain ? "started" : undefined);
+    return absorbing(failure(error, 500, uncertain ? "started" : undefined));
   }
 }

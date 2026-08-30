@@ -612,6 +612,16 @@ engine; `SnapshotConversation["engine"]` at
 `launch.engine` at `src/lib/view/types.ts:103` stays two-membered, because it
 describes a spawn and phase 1 creates none.
 
+The entry the widened filter admits also has to carry text. `tailMessages` in
+`src/lib/view/compactText.ts` produces `SnapshotConversation["text"]` from a
+two-arm dispatch: Claude, or a Codex `payload` shape as the fallback. OpenClaw
+records have no `payload`, so a path that now resolves would report zero
+messages and read to an agent as an empty conversation — the same shape as the
+timeline gap in item 9, one surface further along. A third arm reads the
+`message` envelope and keeps `toolResult`, a role of its own in OpenClaw rather
+than a content block inside a user record, out of the prose the way both other
+engines' tool records already are.
+
 **9. Project timeline.** `fileEvents` in `src/lib/timeline.ts` dispatches on
 `fmt` and returns no events for anything it does not recognize, so the
 Switchboard's recent-actions list would stay empty for an OpenClaw project.
@@ -666,6 +676,27 @@ path; `bun scripts/privacy-publication-gate.ts --base <merge-base>
 recognition, spawn path, registry entry, delivery controller, model selector,
 or effort selector. It displays recorded model, provider, and effort values.
 The repository-wide hostability predicate also stays out of phase 1.
+
+Three viewing-adjacent surfaces stay two-engine as well, named here so their
+absence is a recorded boundary rather than an oversight:
+
+- `readSession` in `src/lib/session/reader.ts` is typed
+  `Extract<Engine, "claude" | "codex">`, so the MCP `get_conversation` binding
+  refuses an OpenClaw path with `conversation not found` and `/api/session`
+  answers `400 unsupported session path`. The operator's own conversation view
+  uses neither — it renders through the feed — so this costs an agent reader,
+  not the Viewer. A fourth record parser there is hosting-phase work, and both
+  refusals are explicit rather than silent.
+- `lastTurnFor` and `lastAssistantMessageAtFor` in
+  `src/lib/scanner/turnDuration.ts` gate on `claude-projects` and
+  `codex-sessions`, so an OpenClaw card shows no turn duration. It reports
+  nothing rather than something wrong; turn *state*, which phase 1 does own,
+  comes from `turnStateFromRecords` and is correct.
+- The full-text transcript index constrains its `engine` column to
+  `('claude','codex')` in SQL, so `transcriptIndexFeed` and the worker feed in
+  `fileScanWorker.ts` exclude OpenClaw sources. Catalog list and search still
+  match OpenClaw titles and first prompts; matches inside message bodies wait
+  on that index's own schema migration.
 
 ---
 

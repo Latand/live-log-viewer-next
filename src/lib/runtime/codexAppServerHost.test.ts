@@ -15,6 +15,7 @@ import { CodexAppServerHost, redactCodexHostDiagnostic } from "./codexAppServerH
 import { encodeCodexStructuredUserText } from "./codexStructuredUserText";
 import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import type { HostState, RuntimeEvent } from "./engineHost";
+import { appendRuntimeLiveTurnDelta, runtimeLiveTurnItems, type RuntimeLiveTurn } from "./liveTurn";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
 import { STRUCTURED_IMAGE_CAPABILITY, structuredContent, type StructuredImageRef } from "./structuredContent";
 import { materializeStructuredHostAccess, READ_ONLY_STAGE_PERMISSION_PROFILE } from "./structuredSpawn";
@@ -1833,6 +1834,90 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("fails materialization only after the confirmed first turn ends without a session", async () => {
+    const server = new FakeAppServer("failed-materialization-thread");
+    server.readError = "thread failed-materialization-thread is not materialized yet; includeTurns is unavailable before first user message";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-materialization", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "turn-1",
+    });
+    await expect(host.sessionMaterializationEvidence("operation-materialization")).resolves.toEqual({
+      state: "absent",
+      reason: "Codex app-server has not materialized the confirmed first message yet",
+    });
+
+    server.notify("turn/completed", {
+      threadId: "failed-materialization-thread",
+      turn: { id: "turn-1", status: "completed" },
+    });
+    await expect(host.sessionMaterializationEvidence("operation-materialization")).resolves.toEqual({
+      state: "failed",
+      reason: "Codex app-server completed the confirmed first turn without materializing its session",
+    });
+    await host.release();
+  });
+
+  test("classifies a terminal thread/read rejection as failed materialization evidence", async () => {
+    const server = new FakeAppServer("rejected-materialization-thread");
+    server.readError = "thread rejected-materialization-thread not found";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    await expect(host.sessionMaterializationEvidence("operation-rejected")).resolves.toMatchObject({
+      state: "failed",
+      reason: expect.stringContaining("thread rejected-materialization-thread not found"),
+    });
+    await host.release();
+  });
+
+  test("keeps a transient thread/read rejection inconclusive", async () => {
+    const server = new FakeAppServer("transient-materialization-thread");
+    server.readError = "service temporarily unavailable";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    await expect(host.sessionMaterializationEvidence("operation-transient")).resolves.toMatchObject({
+      state: "unavailable",
+      reason: expect.stringContaining("service temporarily unavailable"),
+    });
+    await host.release();
+  });
+
+  test("confirms the persisted first message from thread/read materialization evidence", async () => {
+    const server = new FakeAppServer("materialized-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-materialized", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "turn-1",
+    });
+    server.readTurns = [{
+      id: "turn-1",
+      status: "inProgress",
+      items: [{ type: "userMessage", clientId: "operation-materialized", content: [{ type: "text", text: "hello" }] }],
+    }];
+    await expect(host.sessionMaterializationEvidence("operation-materialized")).resolves.toEqual({
+      state: "materialized",
+    });
+    await host.release();
+  });
+
   test("closes an unresolved ledger turn when resume reports idle", async () => {
     const eventStore = new MemoryEventStore();
     eventStore.append("crashed-turn", { kind: "turn-started", turnId: "turn-active", seq: 1 });
@@ -2351,6 +2436,145 @@ describe("CodexAppServerHost", () => {
       { kind: "session-status", status: "active", activeFlags: ["running"], seq: 5 },
     ]);
     expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: activeTurnId });
+    await host.release();
+  });
+
+  /* #1284: one app-server connection carries every thread of a session tree, so
+     a native sub-agent's turn streams down the same pipe as its parent's. Left
+     unfiltered, the two turn ids alternate in the parent's ledger and the live
+     projection opens a fresh item on every switch — the parent's answer rendered
+     as a column of mid-sentence fragments. */
+  test("keeps a sibling thread's interleaved turn out of the parent's stream", async () => {
+    const parentThreadId = "parent-thread-stream";
+    const childThreadId = "child-thread-stream";
+    const parentTurnId = "turn-parent-stream";
+    const childTurnId = "turn-child-stream";
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(parentThreadId);
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    server.notify("turn/started", { threadId: parentThreadId, turn: { id: parentTurnId } });
+    server.notify("item/agentMessage/delta", {
+      threadId: parentThreadId,
+      turnId: parentTurnId,
+      itemId: "parent-item",
+      delta: "The parent answer ",
+    });
+    /* The sub-agent's whole lifecycle, interleaved delta by delta. */
+    server.notify("turn/started", { threadId: childThreadId, turn: { id: childTurnId } });
+    server.notify("item/agentMessage/delta", {
+      threadId: childThreadId,
+      turnId: childTurnId,
+      itemId: "child-item",
+      delta: "VERDICT",
+    });
+    server.notify("item/agentMessage/delta", {
+      threadId: parentThreadId,
+      turnId: parentTurnId,
+      itemId: "parent-item",
+      delta: "stays one ",
+    });
+    server.notify("item/agentMessage/delta", {
+      threadId: childThreadId,
+      turnId: childTurnId,
+      itemId: "child-item",
+      delta: "_HELD",
+    });
+    server.notify("item/completed", {
+      threadId: childThreadId,
+      turnId: childTurnId,
+      item: { type: "agentMessage", id: "child-item", text: "VERDICT_HELD" },
+    });
+    server.notify("turn/completed", {
+      threadId: childThreadId,
+      turn: { id: childTurnId, status: "completed" },
+    });
+    server.notify("thread/status/changed", { threadId: childThreadId, status: { type: "idle" } });
+    server.notify("item/agentMessage/delta", {
+      threadId: parentThreadId,
+      turnId: parentTurnId,
+      itemId: "parent-item",
+      delta: "continuous stream.",
+    });
+    await Bun.sleep(0);
+
+    const events = eventStore.load(parentThreadId);
+    expect(events.filter((event) => event.kind !== "session-status")).toEqual([
+      { kind: "turn-started", turnId: parentTurnId, seq: 2 },
+      { kind: "delta", turnId: parentTurnId, text: "The parent answer ", seq: 3 },
+      { kind: "delta", turnId: parentTurnId, text: "stays one ", seq: 4 },
+      { kind: "delta", turnId: parentTurnId, text: "continuous stream.", seq: 5 },
+    ]);
+    /* The parent's own record of the delegation is untouched, and the child's
+       turn neither idles the parent's session nor steals its active turn. */
+    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: parentTurnId });
+
+    const live = events.reduce<RuntimeLiveTurn | null>(
+      (turn, event) => event.kind === "delta"
+        ? appendRuntimeLiveTurnDelta(turn, event.turnId, event.text)
+        : turn,
+      null,
+    );
+    expect(runtimeLiveTurnItems(live).map((item) => item.text))
+      .toEqual(["The parent answer stays one continuous stream."]);
+
+    server.notify("item/completed", {
+      threadId: parentThreadId,
+      turnId: parentTurnId,
+      item: {
+        type: "collabAgentToolCall",
+        id: "collab-1",
+        tool: "spawnAgent",
+        senderThreadId: parentThreadId,
+        receiverThreadIds: [childThreadId],
+        status: "completed",
+        agentsStates: {},
+      },
+    });
+    await Bun.sleep(0);
+    expect(eventStore.load(parentThreadId).findLast((event) => event.kind === "item"))
+      .toMatchObject({ turnId: parentTurnId, item: { type: "collabAgentToolCall" } });
+    await host.release();
+  });
+
+  test("skips a sibling thread's buffered frames when replaying a crash prefix", async () => {
+    const threadId = "buffered-sibling-thread";
+    const siblingThreadId = "buffered-sibling-child";
+    const turnId = "buffered-sibling-turn";
+    const eventStore = new MemoryEventStore();
+    eventStore.append(threadId, { kind: "turn-started", turnId, seq: 1 });
+    eventStore.append(threadId, { kind: "delta", turnId, text: "durable fragment", seq: 2 });
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: turnId,
+      status: "inProgress",
+      items: [],
+    }], { type: "active", activeFlags: ["running"] }, [
+      {
+        method: "item/agentMessage/delta",
+        params: { threadId: siblingThreadId, turnId: "buffered-sibling-child-turn", delta: "sibling fragment" },
+      },
+      { method: "item/agentMessage/delta", params: { threadId, turnId, delta: "durable fragment" } },
+      { method: "item/agentMessage/delta", params: { threadId, turnId, delta: "replayed fragment" } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 2,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    /* The sibling frame is neither replayed nor counted: counting it would put a
+       key at the head of the buffered prefix that replay never emits, breaking
+       the overlap match and re-emitting the durable fragment as a duplicate. */
+    expect(eventStore.load(threadId).filter((event) => event.kind === "delta")).toEqual([
+      { kind: "delta", turnId, text: "durable fragment", seq: 2 },
+      { kind: "delta", turnId, text: "replayed fragment", seq: 3 },
+    ]);
     await host.release();
   });
 

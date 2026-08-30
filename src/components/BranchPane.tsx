@@ -219,7 +219,8 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      and the composer send gate. When the structured host died the banner owns
      recovery and the composer/attention cards stand down; while the runtime
      plane has not yet resolved the host, Send is blocked so a structured/dead
-     conversation is never messaged through the legacy /api/tmux path (finding 1). */
+     conversation is never messaged through the legacy pane-bound delivery
+     path (finding 1). */
   const { caps, runtime } = useAgentCapabilities(file);
   const deadHost = caps.surface === "dead";
   /* A terminally superseded round (issue #383): the banner replaces recovery
