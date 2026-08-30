@@ -71,6 +71,11 @@ export type PipelineStageInput = {
   model?: string | null;
   effort?: string | null;
   access?: PipelineAccess;
+  /** The account this stage runs on (#1279). Omitted, the stage resolves its
+      account the way every unattended launch does — inside whatever set the
+      pipeline's project allows. Named, it is honored only when the project
+      allows it; otherwise the stage is refused, never quietly reseated. */
+  account?: string | null;
   "prompt": string;
   /** Pass edge: the stage activated when this one passes. Schema v3 allows any
       stage id (direct links, merges), constrained to an acyclic pass graph. */
@@ -346,6 +351,10 @@ export type PatchPipelineRequest = {
   /** for override-stage: the not-yet-started run stage's access. Review-loop
       stages stay read-only (the resolver rejects read-write there). */
   access?: PipelineAccess;
+  /** for override-stage: the account the stage runs on (#1279); `null` clears
+      the pin back to the project's ordinary selection. Refused when the
+      project's binding does not allow the named account. */
+  account?: string | null;
   prompt?: string;
   task?: string;
   spec?: string;

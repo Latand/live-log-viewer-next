@@ -766,9 +766,55 @@ test("/api/tmux forwards account-aware structured reconfigure as one durable con
       path: PATHNAME,
       conversationId: "conversation-reconfigure",
       action: "reconfigure",
+      /* #1279: who is switching rides along, because an account named from
+         outside a project's pool is recorded against whoever chose it. A
+         same-origin request with no capability is the operator by
+         construction, the same reading every operator gate here uses. */
+      actor: { kind: "operator" },
       reconfiguration: { model: "gpt-5.6-sol", effort: "high", fast: true, accountId: "work" },
     });
   } finally {
+    structuredControlResult = null;
+    if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous;
+  }
+});
+
+test("/api/tmux carries an agent's own conversation as the actor of its account switch", async () => {
+  const { setCallerConversationResolverForTests } = await import("@/lib/agent/operatorAuthority");
+  const { VIEWER_SPAWN_CAPABILITY_HEADER } = await import("@/lib/agent/spawnPolicy");
+  const previous = process.env.LLV_STRUCTURED_HOSTS;
+  structuredControlCalls = 0;
+  structuredControlRequest = null;
+  structuredControlResult = {
+    status: 202,
+    body: {
+      ok: true,
+      structured: true,
+      target: "conversation-reconfigure",
+      operationId: "reconfigure-agent",
+      receipt: { operationId: "reconfigure-agent", status: "queued" },
+    },
+  };
+  setCallerConversationResolverForTests(() => "conversation_agent");
+  try {
+    process.env.LLV_STRUCTURED_HOSTS = "1";
+    const response = await POST(post({
+      path: PATHNAME,
+      conversationId: "conversation-reconfigure",
+      action: "reconfigure",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      fast: true,
+      accountId: "work",
+    }, { [VIEWER_SPAWN_CAPABILITY_HEADER]: "a".repeat(43) }));
+
+    expect(response.status).toBe(202);
+    expect(structuredControlRequest).toMatchObject({
+      actor: { kind: "agent", conversationId: "conversation_agent" },
+    });
+  } finally {
+    setCallerConversationResolverForTests(null);
     structuredControlResult = null;
     if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
     else process.env.LLV_STRUCTURED_HOSTS = previous;

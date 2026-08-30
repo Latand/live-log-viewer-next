@@ -27,6 +27,7 @@ const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/
 const { setClaudeLoginSupervisorForTests } = await import("@/lib/accounts/claudeLogin");
 const { AgentRegistry, agentRegistry } = await import("@/lib/agent/registry");
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
+const { bindAccountToProject } = await import("@/lib/accounts/projectBindings");
 
 class FakeChild extends EventEmitter {
   authenticated = false;
@@ -575,4 +576,52 @@ test("GET projects the per-engine quick-switch catalog: active id plus secret-fr
   // A signed-out profile stays listed (history preserved) but is marked, so the
   // UI can offer it for sign-in instead of dropping it.
   expect(body.claude.accounts.find((row) => row.id === claudeSpare.id)).toEqual(expect.objectContaining({ label: "Claude Spare", authPresent: false }));
+});
+
+test("a damaged binding record leaves the accounts panel readable, and never claims an account is bound to nothing", async () => {
+  /* The one read of #1279's record on this route throws on damage, which is
+     what every SELECTING caller needs. This route selects nothing, and it is
+     where an operator goes to see their accounts — including on the way to
+     repairing the record — so an unreadable record must not answer it as a
+     server fault. */
+  const claude = createManagedClaudeAccount("Claude Main");
+  authenticateClaude(claude);
+  const codex = createManagedCodexAccount("Codex Work");
+  authenticateCodex(codex);
+  fs.writeFileSync(
+    path.join(process.env.LLV_STATE_DIR!, "account-project-bindings.json"),
+    '{"schemaVersion":1,"bindings":[{"engine":"claude","accountId":"acct-reserved"',
+    "utf8",
+  );
+
+  const response = await GET();
+  expect(response.status).toBe(200);
+  const body = await response.json() as {
+    bindingsUnreadable?: string;
+    claude: { accounts: { id: string; projects?: unknown }[] };
+    codex: { accounts: { id: string; projects?: unknown }[] };
+  };
+
+  /* The answer says what is wrong and names the record to repair. */
+  expect(body.bindingsUnreadable).toContain("account-project-bindings.json");
+  expect(body.bindingsUnreadable).toContain("repaired or removed");
+  /* And it makes no claim about what is bound: an empty list would say "this
+     account is bound to no project", which is the display half of reading a
+     damaged record as "nobody bound anything". */
+  expect(body.claude.accounts.find((row) => row.id === claude.id)?.projects).toBeUndefined();
+  expect(body.codex.accounts.find((row) => row.id === codex.id)?.projects).toBeUndefined();
+});
+
+test("a readable record still carries each account's bound projects, and says nothing about damage", async () => {
+  const claude = createManagedClaudeAccount("Claude Main");
+  authenticateClaude(claude);
+  expect(bindAccountToProject("claude", claude.id, "project-atlas").ok).toBe(true);
+
+  const body = await (await GET()).json() as {
+    bindingsUnreadable?: string;
+    claude: { accounts: { id: string; projects?: { project: string; displayName: string }[] }[] };
+  };
+  expect(body.bindingsUnreadable).toBeUndefined();
+  expect(body.claude.accounts.find((row) => row.id === claude.id)?.projects)
+    .toEqual([{ project: "project-atlas", displayName: "project-atlas" }]);
 });
