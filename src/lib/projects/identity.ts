@@ -160,6 +160,26 @@ function remoteDisplayName(remote: string): string | null {
   return name || null;
 }
 
+function repositoryProjectIdentity(canonical: string): RepositoryProjectIdentity | null {
+  const displayName = remoteDisplayName(canonical);
+  if (!displayName) return null;
+  const digest = crypto.createHash("sha256").update(canonical).digest("hex").slice(0, 32);
+  return {
+    project: `repo-${digest}`,
+    displayName,
+    canonicalRemote: canonical,
+  };
+}
+
+/** Derive the same canonical repository project identity from repository
+    metadata when a packaged release has no `.git` directory of its own. */
+export function projectIdentityFromRemote(remote: string, root: string): RepositoryProjectIdentity | null {
+  const value = remote.trim();
+  if (!value) return null;
+  const canonical = canonicalRemote(value, root);
+  return canonical ? repositoryProjectIdentity(canonical) : null;
+}
+
 export function projectIdentityFromRepositoryRoot(root: string): RepositoryProjectIdentity | null {
   const directory = gitDirectory(root);
   if (!directory) return null;
@@ -178,12 +198,5 @@ export function projectIdentityFromRepositoryRoot(root: string): RepositoryProje
     }
   })();
   const canonical = remote ? canonicalRemote(remote, root) : `local:${localRoot}`;
-  const displayName = canonical ? remoteDisplayName(canonical) : null;
-  if (!canonical || !displayName) return null;
-  const digest = crypto.createHash("sha256").update(canonical).digest("hex").slice(0, 32);
-  return {
-    project: `repo-${digest}`,
-    displayName,
-    canonicalRemote: canonical,
-  };
+  return canonical ? repositoryProjectIdentity(canonical) : null;
 }

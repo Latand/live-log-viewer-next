@@ -74,6 +74,7 @@ import { PIPELINE_LIST_DEFAULT_LIMIT, projectPipelineListRows } from "@/lib/pipe
 import { findPipelineRecord, loadPipelinesForList } from "@/lib/pipelines/store";
 import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
 import type { PauseResumeActor } from "@/lib/pauseResumeActor";
+import { isRepositoryProjectId, projectIdentityFromRemote } from "@/lib/projects/identity";
 import { listFiles } from "@/lib/scanner";
 import { describe, projectForCwd, reprojectFileDescription } from "@/lib/scanner/describe";
 import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
@@ -444,6 +445,10 @@ export interface ViewerMcpDomainDependencies {
       Null means the invariant "a registered session has a canonical project"
       is violated, and unscoped directive routing fails closed diagnostically. */
   callerProject?(): string | null;
+  /** The canonical project of the repository that owns this Viewer. The MCP
+      launcher sets its cwd to the selected Viewer package root, and this
+      resolver returns the repository key used by seats and conversations. */
+  viewerProject(): string | null;
 }
 
 /**
@@ -461,6 +466,29 @@ function productionCallerProject(): string | null {
   if (conversation.projectOwnership?.project) return conversation.projectOwnership.project;
   const cwd = conversation.generations.at(-1)?.launchProfile?.cwd?.trim();
   return cwd ? projectForCwd(cwd) : null;
+}
+
+function viewerRepositoryRemote(repoDir: string): string | null {
+  const manifest = JSON.parse(fs.readFileSync(path.join(repoDir, "package.json"), "utf8")) as unknown;
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return null;
+  const repository = (manifest as { repository?: unknown }).repository;
+  if (typeof repository === "string") return repository.trim() || null;
+  if (!repository || typeof repository !== "object" || Array.isArray(repository)) return null;
+  const url = (repository as { url?: unknown }).url;
+  return typeof url === "string" ? url.trim() || null : null;
+}
+
+/** The launcher runs from the selected Viewer package root. Source checkouts
+    carry `.git`; managed release packages carry the same repository identity in
+    package metadata. Both paths feed the shared project-key derivation. */
+function productionViewerProject(): string | null {
+  const repoDir = process.cwd();
+  const configuredRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE?.trim();
+  if (configuredRemote) return projectIdentityFromRemote(configuredRemote, repoDir)?.project ?? null;
+  const project = projectForCwd(repoDir);
+  if (project && isRepositoryProjectId(project)) return project;
+  const remote = viewerRepositoryRemote(repoDir);
+  return remote ? projectIdentityFromRemote(remote, repoDir)?.project ?? null : null;
 }
 
 /** Server-derived origin of the current caller. Shared by the attention record
@@ -647,6 +675,7 @@ export const productionDomainDependencies: ViewerMcpDomainDependencies = {
     (conversationId) => authorizedManagerSeats(productionManagerAuthoritySources())
       .some((seat) => seat.conversationId === conversationId),
   ),
+  viewerProject: productionViewerProject,
 };
 
 function text(value: unknown): string {
@@ -1489,6 +1518,12 @@ async function deployExactSha(
     throw new McpToolRefusal(
       "a designated orchestrator deploys only as its own project's seat; this session's seat belongs to another project",
       { code: "deploy_cross_project", revision },
+    );
+  }
+  if (seat.project !== dependencies.viewerProject()) {
+    throw new McpToolRefusal(
+      "this tool deploys the Agent Log Viewer application that serves this MCP; it cannot deploy the caller's project, and no Viewer surface deploys other projects",
+      { code: "deploy_foreign_project", revision },
     );
   }
 

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
+import { McpToolRefusal } from "./server";
 
 /**
  * The deploy executor's authority (#795, superseding contract).
@@ -11,7 +12,8 @@ import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
  * authorization row, and never anything parsed out of prose. What this file
  * proves: a non-designated caller never reaches the endpoint, a designated
  * seat acting from another project's context never reaches it, and the
- * designated seat's own call forwards exactly the revision and idempotency key.
+ * designated seat of another project cannot deploy the Viewer, and the Viewer's
+ * designated seat forwards exactly the revision and idempotency key.
  */
 
 const SHA = "4f3c1b9a8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a";
@@ -22,6 +24,7 @@ function bindings(options: {
   kind: "manager" | "agent" | "gateway" | "unidentified";
   conversationId?: string | null;
   callerProject?: string | null;
+  viewerProject?: string | null;
   seats?: { conversationId: string; path: string | null; project: string }[];
 }) {
   posted = [];
@@ -39,13 +42,24 @@ function bindings(options: {
       role: options.kind === "agent" ? "builder" : null,
     }),
     callerProject: () => options.callerProject ?? null,
+    viewerProject: () => options.viewerProject === undefined ? "proj-a" : options.viewerProject,
     authorizedSeats: () => options.seats ?? [
       { conversationId: "conversation_seat", path: null, project: "proj-a" },
     ],
   } as never);
 }
 
-test("the designated seat deploys directly: revision and idempotency key, nothing else", async () => {
+async function refusal(run: Promise<unknown>): Promise<McpToolRefusal> {
+  try {
+    await run;
+    throw new Error("expected deploy refusal");
+  } catch (error) {
+    expect(error).toBeInstanceOf(McpToolRefusal);
+    return error as McpToolRefusal;
+  }
+}
+
+test("the Viewer project's designated seat reaches the deployments POST", async () => {
   const tools = bindings({ kind: "manager", callerProject: "proj-a" });
   const receipt = await tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA });
   expect(receipt).toMatchObject({ revision: SHA, state: "accepted" });
@@ -58,29 +72,48 @@ test("the designated seat deploys directly: revision and idempotency key, nothin
 test("a session attributed as an agent, the gateway, or nobody may not execute a deploy", async () => {
   for (const kind of ["agent", "gateway", "unidentified"] as const) {
     const tools = bindings({ kind, callerProject: "proj-a" });
-    await expect(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA }))
-      .rejects.toThrow(/designated orchestrator/i);
+    const error = await refusal(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA }));
+    expect(error.message).toMatch(/designated orchestrator/i);
+    expect(error.details).toMatchObject({ code: "deploy_caller_not_designated" });
     expect(posted).toEqual([]);
   }
 });
 
 test("a manager-attributed caller with no validated seat is refused", async () => {
   const tools = bindings({ kind: "manager", conversationId: "conversation_impostor", callerProject: "proj-a" });
-  await expect(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA }))
-    .rejects.toThrow(/no validated seat/i);
+  const error = await refusal(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA }));
+  expect(error.message).toMatch(/no validated seat/i);
+  expect(error.details).toMatchObject({ code: "deploy_caller_not_designated" });
   expect(posted).toEqual([]);
 });
 
 test("a designated seat acting from another project's context is refused cross-project", async () => {
   const tools = bindings({ kind: "manager", callerProject: "proj-b" });
-  await expect(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA }))
-    .rejects.toThrow(/own project/i);
+  const error = await refusal(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA }));
+  expect(error.message).toMatch(/own project/i);
+  expect(error.details).toMatchObject({ code: "deploy_cross_project" });
   expect(posted).toEqual([]);
 
   /* The same seat in its own project context deploys. */
   const own = bindings({ kind: "manager", callerProject: "proj-a" });
   await own.deploy_exact_sha({ clientRequestId: "d2", revision: SHA });
   expect(posted).toHaveLength(1);
+});
+
+test("a designated seat of another project is refused before the deployments POST", async () => {
+  const tools = bindings({
+    kind: "manager",
+    callerProject: "another-project",
+    viewerProject: "viewer-project",
+    seats: [{ conversationId: "conversation_seat", path: null, project: "another-project" }],
+  });
+
+  const error = await refusal(tools.deploy_exact_sha({ clientRequestId: "d1", revision: SHA }));
+  expect(error.details).toMatchObject({ code: "deploy_foreign_project", revision: SHA });
+  expect(error.message).toContain("deploys the Agent Log Viewer application that serves this MCP");
+  expect(error.message).toContain("cannot deploy the caller's project");
+  expect(error.message).toContain("no Viewer surface deploys other projects");
+  expect(posted).toEqual([]);
 });
 
 test("an abbreviated SHA is refused before the endpoint is called at all", async () => {

@@ -365,6 +365,7 @@ test("runtime-bound MCP tools use the live Viewer control surface", async () => 
   const designatedSeat = {
     callerAttribution: () => ({ kind: "manager" as const, conversationId: "conversation_seat", role: null }),
     callerProject: () => "proj-a",
+    viewerProject: () => "proj-a",
     authorizedSeats: () => [{ conversationId: "conversation_seat", path: null, project: "proj-a" }],
     /* #845: the send resolves the conversation it names from ONE injected registry
        projection rather than reaching for the registry itself. */

@@ -293,6 +293,19 @@ test("get_conversation listTools publishes every bounded tail target", async () 
   });
 });
 
+test("deploy_exact_sha publishes the Viewer-only deployment target", async () => {
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    const description = listed.tools.find((candidate) => candidate.name === "deploy_exact_sha")?.description;
+
+    expect(description).toContain("Agent Log Viewer application that serves this MCP");
+    expect(description).toContain("never deploys the calling project's code");
+    expect(description).toContain("designated orchestrator decides when to deploy");
+    expect(description).toContain("nobody asks the operator for a confirmation");
+    expect(description).toContain("Idempotent by clientRequestId");
+  });
+});
+
 test("conversation_action publishes full-generation archive outcomes and the 100-target bound", async () => {
   let calls = 0;
   await withProtocolClient(inertBindings({
