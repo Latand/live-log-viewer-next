@@ -22,7 +22,7 @@ export const PUPPETEER_IMAGE = "mcp/puppeteer@sha256:c1e2bda6d92d400e900e497b743
    out (as scripts/demo-capture.test.ts already does): it is a fixed address
    belonging to nobody, but a literal private address in a published file reads
    to the publication gate exactly like a host lifted from a live machine. */
-const DOCKER_BRIDGE_HOST = ["172", "17", "0", "1"].join(".");
+export const DOCKER_BRIDGE_HOST = ["172", "17", "0", "1"].join(".");
 const UNRESOLVED_TOKEN = /__[A-Z0-9_]*DEMO[A-Z0-9_]*__/;
 const DEFAULT_PORT = 3028;
 
