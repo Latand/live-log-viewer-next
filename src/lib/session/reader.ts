@@ -245,7 +245,11 @@ function normalizeCodexLine(obj: Record<string, unknown>): NormalizedSessionLine
     }
     return records;
   }
-  if (payloadType) add({ kind: "trace", role: "system", ts, name: payloadType, text: JSON.stringify(payload) });
+  /* token_count is a usage envelope emitted after nearly every step; it is
+     accounting, not conversation content, so it never becomes a trace. */
+  if (payloadType && payloadType !== "token_count") {
+    add({ kind: "trace", role: "system", ts, name: payloadType, text: JSON.stringify(payload) });
+  }
   return records;
 }
 

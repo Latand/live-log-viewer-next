@@ -66,6 +66,15 @@ describe("readSession", () => {
     expect(result.traces[0]?.name).toBe("turn_complete");
   });
 
+  test("excludes Codex token_count usage envelopes from traces", () => {
+    const pathname = writeJsonl("codex-token-count.jsonl", [
+      { type: "event_msg", timestamp: "t1", payload: { type: "token_count", info: { total_tokens: 128 } } },
+      { type: "event_msg", timestamp: "t2", payload: { type: "turn_complete" } },
+    ]);
+    const result = readSession(pathname, "codex");
+    expect(result.traces.map((item) => item.name)).toEqual(["turn_complete"]);
+  });
+
   test("keeps legacy Codex reasoning events and recognizes agent reasoning events", () => {
     const pathname = writeJsonl("codex-reasoning.jsonl", [
       { type: "event_msg", timestamp: "t1", payload: { type: "reasoning", text: "legacy reasoning" } },
