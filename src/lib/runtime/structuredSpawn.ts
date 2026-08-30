@@ -29,7 +29,7 @@ import { ClaudeStreamBrokerHost } from "./claudeStreamBrokerHost";
 import { CodexAppServerHost } from "./codexAppServerHost";
 import { isRuntimeHostTransportFailure, type RuntimeHostClient } from "./client";
 import { supervisedRuntimeHostUnavailableReason } from "./flags";
-import { StructuredHostAdoptionCleanupError, type EngineHost, type HostState } from "./engineHost";
+import { StructuredHostAdoptionCleanupError, StructuredSessionMaterializationError, type EngineHost, type HostState, type SessionMaterializationEvidence } from "./engineHost";
 import { messageOriginRole, type MessageOrigin } from "./messageOrigin";
 import { runtimeSettingsCapability, type RuntimeOperationResult, type RuntimeSession } from "./contracts";
 import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
@@ -51,6 +51,12 @@ export const INITIAL_MESSAGE_TIMEOUT_MS = 30_000;
 const INITIAL_MESSAGE_POLL_MS = 250;
 export const ADMISSION_RETRY_ATTEMPTS = 3;
 const ADMISSION_RETRY_BACKOFF_MS = 250;
+/**
+ * Operational ownership bound for one synchronous setup generation. It gives
+ * host start, binding, first delivery, and publication one five-minute caller
+ * lifetime, then hands cleanup to durable reconciliation. Engine evidence can
+ * establish a concrete failure earlier; this bound supplies no causal claim.
+ */
 export const STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS = 5 * 60_000;
 export const READ_ONLY_STAGE_PERMISSION_PROFILE = "llv-read-only-stage";
 const PINNED_SPAWN_HEALTH_TIMEOUT_MS = 600;
@@ -179,6 +185,79 @@ export class StructuredInitialMessageTimeoutError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "StructuredInitialMessageTimeoutError";
+  }
+}
+
+export class StructuredTranscriptMaterializationError extends Error {
+  constructor(timeoutMs: number) {
+    super(`structured spawn startup reached its ${timeoutMs}ms durable setup bound without a readable transcript`);
+    this.name = "StructuredTranscriptMaterializationError";
+  }
+}
+
+function structuredTranscriptIsReadable(artifactPath: string): boolean {
+  let descriptor: number | null = null;
+  try {
+    const stat = fs.statSync(artifactPath);
+    if (!stat.isFile() || stat.size === 0) return false;
+    descriptor = fs.openSync(artifactPath, "r");
+    const maxValidationBytes = 8 * 1024 * 1024;
+    const length = Math.min(stat.size, maxValidationBytes);
+    const buffer = Buffer.allocUnsafe(length);
+    if (fs.readSync(descriptor, buffer, 0, length, 0) !== length) return false;
+    const text = buffer.toString("utf8");
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line) as unknown;
+        if (record && typeof record === "object" && !Array.isArray(record)) return true;
+      } catch {
+        // The writer may still be appending its first record; the next poll retries it.
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+}
+
+async function waitForStructuredSessionMaterialization(
+  host: SpawnedStructuredHost,
+  artifactPath: string,
+  clientMessageId: string,
+  options: {
+    now: () => number;
+    sleep: (ms: number) => Promise<void>;
+    timeoutMs: number;
+  },
+): Promise<void> {
+  const deadline = options.now() + options.timeoutMs;
+  let lastEvidence: SessionMaterializationEvidence | null = null;
+  for (;;) {
+    const evidence = host.sessionMaterializationEvidence
+      ? await host.sessionMaterializationEvidence(clientMessageId)
+      : { state: "materialized" as const };
+    if (evidence.state === "failed") throw new StructuredSessionMaterializationError(evidence.reason);
+    lastEvidence = evidence;
+    if (evidence.state === "materialized" && structuredTranscriptIsReadable(artifactPath)) return;
+    if (evidence.state === "unavailable" && structuredTranscriptIsReadable(artifactPath)) return;
+    const remaining = deadline - options.now();
+    if (remaining <= 0) {
+      if (lastEvidence.state === "absent") {
+        throw new StructuredSessionMaterializationError(
+          `${lastEvidence.reason}; startup reached its ${options.timeoutMs}ms durable setup bound`,
+        );
+      }
+      if (lastEvidence.state === "unavailable") {
+        throw new StructuredSessionMaterializationError(
+          `structured spawn startup reached its ${options.timeoutMs}ms durable setup bound while session evidence was unavailable: ${lastEvidence.reason}`,
+        );
+      }
+      throw new StructuredTranscriptMaterializationError(options.timeoutMs);
+    }
+    await options.sleep(Math.min(INITIAL_MESSAGE_POLL_MS, remaining));
   }
 }
 
@@ -381,16 +460,21 @@ export async function reconcileStructuredSpawnReplay(
   const runtimeDelivered = Boolean(operation
     && operation.receipt.conversationId === current.conversationId
     && INITIAL_MESSAGE_DELIVERED.has(operation.receipt.status));
-  const transcriptDelivered = Boolean(current.artifactPath
-    && hasUserAuthoredMessage(current.artifactPath, current.engine));
-  if (runtimeDelivered || transcriptDelivered) {
-    const session = runtime?.sessions.find((candidate) => candidate.conversationId === current.conversationId);
-    const sessionMatches = session
-      && session.sessionKey.engine === current.engine
-      && session.cwd === current.cwd
-      && typeof session.artifactPath === "string"
-      ? session
-      : null;
+  const sessionMatches = runtime?.sessions.find((candidate) =>
+    candidate.conversationId === current.conversationId
+    && candidate.sessionKey.engine === current.engine
+    && candidate.cwd === current.cwd
+    && typeof candidate.artifactPath === "string"
+    && (!current.key || sessionKeyId(candidate.sessionKey) === sessionKeyId(current.key))
+    && (!current.artifactPath || candidate.artifactPath === current.artifactPath)) ?? null;
+  const evidencePath = current.artifactPath ?? sessionMatches?.artifactPath ?? null;
+  const transcriptMaterialized = Boolean(evidencePath
+    && structuredTranscriptIsReadable(evidencePath));
+  const transcriptDelivered = Boolean(evidencePath
+    && hasUserAuthoredMessage(evidencePath, current.engine));
+  /* A runtime delivery receipt establishes host acceptance. Session identity
+     publication waits for transcript-backed persistence evidence. */
+  if (transcriptDelivered || (runtimeDelivered && transcriptMaterialized)) {
     const evidence = sessionMatches ? {
       key: sessionMatches.sessionKey,
       artifactPath: sessionMatches.artifactPath!,
@@ -434,19 +518,11 @@ export async function reconcileStructuredSpawnReplay(
   const operationStartedAt = operation ? Date.parse(operation.receipt.at) : Number.NaN;
   const stageStartedAt = Number.isFinite(operationStartedAt) ? operationStartedAt : Date.parse(current.createdAt);
   const ageMs = (options.now ?? Date.now)() - stageStartedAt;
-  /* A delivered spawn operation with no matching live runtime session has no
-     remaining cold-start work, so the established message bound terminalizes
-     its empty placeholder. Registering/hosted/recovering sessions, queued
-     spawn operations, and an unavailable runtime snapshot retain the wider
-     durable-setup bound: each can still be a healthy slow launch. */
-  const deliveredWithoutLiveSession = runtime !== null
-    && spawnOperation?.receipt.conversationId === current.conversationId
-    && spawnOperation.receipt.status === "delivered"
-    && liveRuntimeSession === null;
-  const timeoutMs = options.timeoutMs
-    ?? (deliveredWithoutLiveSession
-      ? INITIAL_MESSAGE_TIMEOUT_MS
-      : STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS);
+  /* The five-minute ceiling is the spawn caller's durable setup contract. It
+     covers host start, first-message delivery, and transcript publication as
+     one bounded operation; the 30-second delivery-status poll is not reused as
+     a session-creation verdict. */
+  const timeoutMs = options.timeoutMs ?? STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS;
   let terminalReason = failedOperationReason(operation, "structured initial message")
     ?? failedOperationReason(spawnOperation, "structured spawn");
   if (!terminalReason && ageMs >= timeoutMs) {
@@ -455,6 +531,8 @@ export async function reconcileStructuredSpawnReplay(
         ?? operation?.receipt.reason
         ?? `no delivery drain error was recorded before the ${timeoutMs}ms deadline`;
       terminalReason = `first message never drained: ${drainError}`;
+    } else if (runtimeDelivered) {
+      terminalReason = `structured spawn startup reached its ${timeoutMs}ms durable setup bound with no readable transcript after confirmed first-message delivery`;
     } else if (liveRuntimeSession) {
       terminalReason = `structured spawn durable setup remained incomplete for ${timeoutMs}ms`;
     } else if (effectHistoryUnavailable) {
@@ -539,10 +617,9 @@ export async function reconcileStructuredSpawnReplay(
   };
 }
 
-/* Foreground setup and the reaper share one five-minute ceiling. Ordinary
-   replay keeps that ceiling while cold-start work is still possible; a
-   delivered spawn with no matching live session uses the established
-   30-second empty-placeholder bound. */
+/* Foreground setup and the reaper share one five-minute ceiling. Transcript
+   publication belongs to that complete startup contract; the shorter
+   first-message status poll has no authority over session materialization. */
 export const STALE_STRUCTURED_SPAWN_TIMEOUT_MS = STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS;
 export const STALE_STRUCTURED_SPAWN_ACTUATION_CAP = 50;
 
@@ -966,6 +1043,8 @@ export interface StructuredSpawnDependencies {
   deliverFirst?(input: StructuredSpawnInput, artifactPath: string): Promise<void | "held">;
   processIdentity?(): { pid: number; startIdentity: string | null };
   durableSetupTimeoutMs?: number;
+  now?(): number;
+  sleep?(ms: number): Promise<void>;
 }
 
 /** Why a queued launch from a previous generation must not be replayed, or
@@ -1188,6 +1267,10 @@ export async function recoverPendingStructuredSpawns(
       continue;
     }
     if (status === "delivered") {
+      /* A prior process may have written the runtime receipt before its
+         registry settlement. Publish that staged identity only when the
+         session artifact still supplies the persistence evidence. */
+      if (!structuredTranscriptIsReadable(receipt.artifactPath)) continue;
       const hostReady = entry?.structuredHost?.process
         && entry.claimOwner
         && entry.status !== "dead"
@@ -1238,6 +1321,9 @@ export async function recoverPendingStructuredSpawns(
         settleInitialMessageReservation(registry, receipt.launchId);
       }
     }
+    /* Delivery acceptance can precede lazy Codex rollout creation. Keep the
+       receipt staged so replay exposes no identity while the host is live. */
+    if (!structuredTranscriptIsReadable(receipt.artifactPath)) continue;
     await client.transitionOperation(receipt.launchId, "delivered");
     const finalized = registry.finalizeStructuredSpawn(receipt.launchId);
     if (finalized.kind === "conflict") throw new Error(`structured spawn recovery conflict: ${finalized.code}`);
@@ -1457,6 +1543,7 @@ export async function spawnStructuredConversation(
     ?? ((key, host, ownsOperation) => publishStructuredDeliveryHost({ key, host }, ownsOperation));
   const deliverFirst = dependencies.deliverFirst ?? defaultDeliverFirst;
   const processIdentity = dependencies.processIdentity ?? (() => ({ pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }));
+  const now = dependencies.now ?? Date.now;
   const operationId = input.receipt.launchId;
   const resumeSessionId = structuredResumeSessionId(input);
   const resumeKey = resumeSessionId ? sessionKey(input.engine, resumeSessionId) : null;
@@ -1468,6 +1555,8 @@ export async function spawnStructuredConversation(
   let adoptionClaimTransferred = false;
   let adoptionClaimContended = false;
   let durableSetupTimedOut = false;
+  let durableSetupDeadline = 0;
+  let materializationPending = false;
   let durableSetupTimer: ReturnType<typeof setTimeout> | null = null;
   let durableSetupTimeout: Promise<never> | null = null;
   const clearDurableSetupTimeout = () => {
@@ -1515,10 +1604,15 @@ export async function spawnStructuredConversation(
     }
     const durableSetupTimeoutMs = dependencies.durableSetupTimeoutMs
       ?? STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS;
+    durableSetupDeadline = now() + durableSetupTimeoutMs;
     durableSetupTimeout = new Promise<never>((_resolve, reject) => {
       durableSetupTimer = setTimeout(() => {
         durableSetupTimedOut = true;
-        reject(new Error(`structured spawn durable host setup timed out after ${durableSetupTimeoutMs}ms`));
+        reject(materializationPending
+          ? new StructuredSessionMaterializationError(
+            `structured spawn startup reached its ${durableSetupTimeoutMs}ms durable setup bound while session materialization was pending`,
+          )
+          : new Error(`structured spawn durable host setup timed out after ${durableSetupTimeoutMs}ms`));
       }, durableSetupTimeoutMs);
       durableSetupTimer.unref?.();
     });
@@ -1607,7 +1701,7 @@ export async function spawnStructuredConversation(
       return {
         ok: true,
         target: null,
-        path: identity.path,
+        path: null,
         ...(input.engine === "claude"
           ? { effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default" }
           : {}),
@@ -1619,6 +1713,47 @@ export async function spawnStructuredConversation(
         state: "path-pending",
         transport: "structured",
       };
+    }
+    if (!content && !structuredTranscriptIsReadable(identity.path)) {
+      clearDurableSetupTimeout();
+      input.registry.releaseStructuredSpawnAdmissionOwner(
+        input.receipt.launchId,
+        input.receipt.admissionOwner ?? processIdentity(),
+      );
+      return {
+        ok: true,
+        target: null,
+        path: null,
+        ...(input.engine === "claude"
+          ? { effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default" }
+          : {}),
+        launchId: input.receipt.launchId,
+        conversationId: input.receipt.conversationId,
+        launched: true,
+        retrySafe: false,
+        initialMessage: "pending",
+        state: "path-pending",
+        transport: "structured",
+      };
+    }
+    if (content) {
+      const sleep = dependencies.sleep
+        ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+      materializationPending = true;
+      try {
+        await withinDurableSetup(waitForStructuredSessionMaterialization(
+          host,
+          identity.path,
+          `spawn_${input.receipt.launchId}`,
+          {
+            now,
+            sleep,
+            timeoutMs: Math.max(0, durableSetupDeadline - now()),
+          },
+        ));
+      } finally {
+        materializationPending = false;
+      }
     }
     await withinDurableSetup(
       withRuntimeAdmissionRetry(() => input.client.transitionOperation(operationId, "delivered")),
@@ -1661,11 +1796,16 @@ export async function spawnStructuredConversation(
         );
       }
     }
+    let cleanupError: unknown = null;
     try {
       await cleanupHost(host, binding);
-    } catch {
-      throw error;
+    } catch (failure) {
+      cleanupError = failure;
     }
+    const transcriptFailureMustSettle = input.receipt.purpose === "launch"
+      && (error instanceof StructuredTranscriptMaterializationError
+        || error instanceof StructuredSessionMaterializationError);
+    if (cleanupError !== null && !transcriptFailureMustSettle) throw error;
     let failedEntry: AgentRegistryEntry | null = null;
     let failedIdentity = resumeIdentity;
     if (key) {
@@ -1683,8 +1823,8 @@ export async function spawnStructuredConversation(
       && failedEntry.structuredHostOperationId !== input.receipt.launchId) {
       failedIdentity = null;
     }
-    let projectionSucceeded = true;
-    if (failedIdentity && !adoptionClaimContended) {
+    let projectionSucceeded = cleanupError === null;
+    if (failedIdentity && !adoptionClaimContended && cleanupError === null) {
       try {
         await projectDeadStructuredSpawn(
           input.client,
@@ -1703,10 +1843,18 @@ export async function spawnStructuredConversation(
     const terminalFreshLaunch = input.receipt.purpose === "launch";
     if (projectionSucceeded || terminalFreshLaunch) {
       if (key) {
-        input.registry.failStructuredSpawn(input.receipt.launchId, failureReason);
+        input.registry.failStructuredSpawn(input.receipt.launchId, failureReason, {
+          retainRegisteredHost: cleanupError !== null,
+        });
       } else {
         input.registry.failSpawn(input.receipt.launchId, failureReason);
       }
+    }
+    if (cleanupError !== null) {
+      console.error("[spawn] failed host cleanup remained unconfirmed", {
+        launchId: input.receipt.launchId,
+        error: structuredSpawnFailureReason(cleanupError),
+      });
     }
     throw error;
   }

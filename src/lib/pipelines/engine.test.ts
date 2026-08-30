@@ -140,6 +140,183 @@ test("a pipeline stage keeps its reserved account through a routing change befor
   }
 });
 
+test("a concurrent pipeline replay and its recovery projections withhold staged identity (#1123)", async () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "pipeline-phantom-replay-registry.json"));
+  const cwd = process.env.LLV_STATE_DIR!;
+  setAgentRegistryForTests(registry);
+  const resolveSpawn = spyOn(accountManager, "resolveSpawn").mockImplementation(() => ({
+    engine: "codex",
+    accountId: "pipeline-account",
+    kind: "managed",
+    home: cwd,
+    transcriptRoot: cwd,
+    env: { NODE_ENV: "test" },
+  }));
+  const input: Parameters<PipelinePorts["spawnAgent"]>[0] = {
+    role: {
+      roleId: "builder",
+      engine: "codex" as const,
+      model: "gpt-5.6-sol",
+      effort: "xhigh",
+      access: "read-write" as const,
+      promptScaffold: "Builder guidance",
+    },
+    cwd,
+    title: "Build scoped change",
+    "prompt": "Build the scoped change",
+    parentPath: null,
+    clientAttemptId: "pipeline_phantom_replay_attempt",
+    membership: {
+      kind: "pipeline" as const,
+      containerId: "pipeline-phantom-replay",
+      role: "builder",
+      slot: "build:1",
+      stageId: "build",
+      stageOrder: 0,
+      round: 1,
+      parentConversationId: null,
+    },
+    creatorConversationId: null,
+  };
+  const reservations: Array<{ launchId: string; conversationId: string }> = [];
+
+  try {
+    const ports = defaultPipelinePorts();
+    await expect(ports.spawnAgent(input, (created) => {
+      reservations.push(created);
+      throw new Error("reservation captured");
+    })).rejects.toThrow("reservation captured");
+    const reservation = reservations[0];
+    if (!reservation) throw new Error("pipeline reservation was not captured");
+    const receipt = registry.snapshot().receipts[reservation.launchId]!;
+    const stagedPath = path.join(cwd, "provisional-stage.jsonl");
+    registry.stageStructuredSpawn(receipt.launchId, {
+      key: { engine: "codex", sessionId: "provisional-session" },
+      artifactPath: stagedPath,
+      cwd,
+      accountId: "pipeline-account",
+      launchProfile: receipt.launchProfile,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:provisional-session",
+        process: { pid: process.pid, startIdentity: "provisional-session-host" },
+        eventCursor: 0,
+        protocolVersion: null,
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: "structured-host:provisional-session-host",
+      pendingAction: "spawn",
+    });
+    const parent = registry.ensureConversation("codex", path.join(cwd, "parent.jsonl"), "pipeline-account");
+    registry.rememberMembership(receipt.conversationId, {
+      kind: "pipeline",
+      containerId: "pipeline-phantom-replay",
+      role: "builder",
+      slot: "adopt:build:1",
+      stageId: "build",
+      stageOrder: 0,
+      round: 1,
+      parentConversationId: parent.id,
+    });
+
+    const replay = await ports.spawnAgent(input, () => {});
+    expect(replay).toMatchObject({
+      launchId: receipt.launchId,
+      conversationId: receipt.conversationId,
+      sessionId: null,
+      "transcript": null,
+    });
+    expect(ports.spawnReceipt(receipt.launchId)).toMatchObject({
+      sessionId: null,
+      "transcript": null,
+    });
+    expect(ports.pathForConversation(receipt.conversationId)).toBeNull();
+    expect(ports.conversationIdForPath(stagedPath)).toBeNull();
+    expect(ports.pipelineAdoptionCandidates("pipeline-phantom-replay")).toEqual([]);
+
+    registry.finalizeStructuredSpawn(receipt.launchId);
+    const completedPorts = defaultPipelinePorts();
+    expect(completedPorts.spawnReceipt(receipt.launchId)).toMatchObject({
+      sessionId: "provisional-session",
+      "transcript": stagedPath,
+    });
+    expect(completedPorts.pathForConversation(receipt.conversationId)).toBe(stagedPath);
+    expect(completedPorts.conversationIdForPath(stagedPath)).toBe(receipt.conversationId);
+    expect(completedPorts.pipelineAdoptionCandidates("pipeline-phantom-replay")).toEqual([
+      expect.objectContaining({
+        sessionId: "provisional-session",
+        agentPath: stagedPath,
+      }),
+    ]);
+  } finally {
+    resolveSpawn.mockRestore();
+    setAgentRegistryForTests(null);
+  }
+});
+
+test("a staged resume cannot hide its already-published transcript (#1123)", () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "pipeline-staged-resume-registry.json"));
+  const cwd = process.env.LLV_STATE_DIR!;
+  const sessionId = crypto.randomUUID();
+  const transcript = path.join(cwd, `${sessionId}.jsonl`);
+  fs.writeFileSync(transcript, `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`);
+  const conversation = registry.ensureConversation("codex", transcript, "pipeline-account");
+  setAgentRegistryForTests(registry);
+
+  try {
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd,
+      transport: "structured",
+      accountId: "pipeline-account",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+      launchProfile: { title: "Resume published session" },
+    });
+    if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+    const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId },
+      artifactPath: transcript,
+      cwd,
+      accountId: "pipeline-account",
+      launchProfile: begun.receipt.launchProfile,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: `stdio:${sessionId}`,
+        process: { pid: process.pid, startIdentity: "staged-resume-host" },
+        eventCursor: 0,
+        protocolVersion: null,
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: "structured-host:staged-resume-host",
+      pendingAction: "spawn",
+    });
+    if (staged.kind !== "settled") throw new Error("resume staging conflicted");
+
+    const ports = defaultPipelinePorts();
+    expect(ports.spawnReceipt(begun.receipt.launchId)).toMatchObject({
+      sessionId: null,
+      "transcript": null,
+    });
+    expect(ports.pathForConversation(conversation.id)).toBe(transcript);
+    expect(ports.conversationIdForPath(transcript)).toBe(conversation.id);
+  } finally {
+    setAgentRegistryForTests(null);
+  }
+});
+
 const RUN_STAGES = [
   { id: "plan", kind: "run", role: { roleId: "architect" }, access: "read-only", prompt: "Plan {{task}}", next: "build" },
   { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Build from {{prev.output}}", next: null },

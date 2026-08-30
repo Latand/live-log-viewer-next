@@ -24,7 +24,7 @@ export function spawnRejectionResponse(error: SpawnAdmissionError): SpawnRejecti
 export interface SpawnResponse {
   ok: true;
   target: string | null;
-  /** Transcript path the fresh session will write, when knowable. */
+  /** Published transcript path. Structured sessions stay null until finalization. */
   path: string | null;
   /** Effective Claude permission mode for pane-less launches. */
   effectivePermissionMode?: string;
@@ -77,10 +77,11 @@ export function spawnResponseForReceipt(
   const launched = (receipt.verifiedHost !== null || (options.structured === true && receipt.state === "completed"))
     && receipt.state !== "failed"
     && receipt.state !== "conflicted";
+  const publishedPath = structured && receipt.state !== "completed" ? null : path;
   return {
     ok: true,
     target: receipt.pane?.paneId ?? receipt.target ?? null,
-    path,
+    path: publishedPath,
     ...(structured && receipt.engine === "claude"
       ? { effectivePermissionMode: receipt.launchProfile.permissionMode ?? "default" }
       : {}),

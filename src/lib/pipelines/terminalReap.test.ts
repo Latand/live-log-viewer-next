@@ -157,6 +157,25 @@ test("completion reaps its finished resident builder hosts exactly once", async 
   expect(h.stops).toHaveLength(2);
 });
 
+test("a completed pipeline with no launched host settles its empty reap", async () => {
+  const h = harness();
+  savePipelines([pipelineRecord({
+    id: "reap-empty",
+    state: "completed",
+    attempts: [],
+  })]);
+
+  await tickPipelines([], h.ports);
+
+  expect(h.stops).toEqual([]);
+  expect(loadPipelines()[0]!.terminalReap).toMatchObject({
+    rounds: 0,
+    stopped: 0,
+    settledAttempts: [],
+    settledAt: expect.any(String),
+  });
+});
+
 test("the creator, a mid-turn attempt, and a runtime-active session are preserved", async () => {
   const h = harness();
   savePipelines([pipelineRecord({
@@ -184,7 +203,7 @@ test("the creator, a mid-turn attempt, and a runtime-active session are preserve
   expect(settled.terminalReap!.settledAt).not.toBeNull();
 });
 
-test("only completed pipelines are swept; closed teardown stays the close action's job", async () => {
+test("a parked terminal attempt is swept while closed teardown stays the close action's job", async () => {
   const h = harness();
   savePipelines([
     pipelineRecord({ id: "reap-closed", state: "closed", attempts: [attempt(1, "conversation_closed", true)] }),
@@ -195,8 +214,55 @@ test("only completed pipelines are swept; closed teardown stays the close action
 
   await tickPipelines([], h.ports);
 
-  expect(h.stops).toEqual([]);
-  expect(loadPipelines().every((pipeline) => pipeline.terminalReap === undefined)).toBe(true);
+  expect(h.stops).toEqual(["implement:1:conversation_parked"]);
+  expect(h.resident.get("conversation_closed")).toBe(true);
+  expect(loadPipelines().find((pipeline) => pipeline.id === "reap-closed")?.terminalReap).toBeUndefined();
+  expect(loadPipelines().find((pipeline) => pipeline.id === "reap-parked")?.terminalReap)
+    .toMatchObject({ rounds: 1, stopped: 1, settledAttempts: ["implement:1"] });
+});
+
+test("finished attempts are swept as the pipeline advances and later rounds reopen the reap", async () => {
+  const h = harness();
+  const record = pipelineRecord({
+    id: "reap-progressive",
+    state: "running",
+    attempts: [attempt(1, "conversation_finished", true), attempt(2, "conversation_running", false)],
+  });
+  record.cursor = { stageId: "implement", state: "running", input: null, activatedBy: null };
+  savePipelines([record]);
+  h.resident.set("conversation_finished", true);
+  h.resident.set("conversation_running", true);
+  h.active.set("conversation_running", true);
+
+  await tickPipelines([], h.ports);
+
+  expect(h.stops).toEqual(["implement:1:conversation_finished"]);
+  expect(loadPipelines()[0]!.terminalReap).toMatchObject({
+    rounds: 1,
+    stopped: 1,
+    settledAttempts: ["implement:1"],
+  });
+
+  const parked = loadPipelines()[0]!;
+  const second = parked.runs[0]!.attempts[1]!;
+  second.state = "needs_decision";
+  second.completedAt = "2026-07-31T00:30:00.000Z";
+  second.verdict = { status: "needs_decision" };
+  parked.state = "needs_decision";
+  h.active.set("conversation_running", false);
+  savePipelines([parked]);
+
+  await tickPipelines([], h.ports);
+
+  expect(h.stops).toEqual([
+    "implement:1:conversation_finished",
+    "implement:2:conversation_running",
+  ]);
+  expect(loadPipelines()[0]!.terminalReap).toMatchObject({
+    rounds: 1,
+    stopped: 2,
+    settledAttempts: ["implement:1", "implement:2"],
+  });
 });
 
 test("a host that will not die is bounded and surfaces as an unconfirmed host", async () => {
