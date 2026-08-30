@@ -229,24 +229,38 @@ interface FeedEntrySummary {
   summary: Record<string, unknown>;
 }
 
+interface SemanticPosition {
+  ordinal: number;
+  sourcePart: number;
+}
+
+type PageBoundary = SemanticPosition | { endAtByte: number };
+
 interface HistoryPage {
   entries: FeedEntrySummary[];
   beforeCursor: string | null;
   hasMore: boolean;
   fileGeneration: string;
+  queryScope: string;
   indexedThroughByte: number;
   byteRange: { start: number; end: number } | null;
+  pageRange: {
+    requestedBefore: PageBoundary;
+    nextBefore: SemanticPosition | null;
+  };
   hiddenServiceCount: number;
   cacheable: boolean;
   edge: PageEdgeState;
 }
 ```
 
-The row limit and byte limit both apply. The server considers rows from newest to oldest and stops before adding a row that would exceed either limit. Service rows excluded by `showSvc` still advance the examined ordinal and contribute to `hiddenServiceCount`. If the first returned row alone exceeds 64 KiB, the server returns that one row and advances the cursor. This single-oversized-row exception prevents a permanently stuck cursor. Preview and summary caps should make the exception rare, while the contract remains safe if a new kind grows.
+The row limit and byte limit both apply. The server scans rows from newest to oldest and tracks the last consumed semantic position. A service row excluded by `showSvc` is consumed, advances that position, and contributes to `hiddenServiceCount`. A visible candidate that would exceed the row limit or byte limit after at least one visible row has been returned is left unconsumed. The next request can return it. If the first visible candidate alone exceeds 64 KiB, the server returns and consumes that one row. This single-oversized-row exception prevents a permanently stuck cursor. Preview and summary caps should make the exception rare, while the contract remains safe if a new kind grows.
 
 `hasMore` is derived from the existence of an older ordinal in the verified projection. A projection in `building` or `invalid` state cannot produce `hasMore: false`.
 
-`cacheable` is true only when every returned entry is settled and both page edges are closed. The client stores cacheable pages in a bounded LRU keyed by `[fileGeneration, byteRange.start:byteRange.end]`. A tail page with an open call, pending duplicate, or active command run stays in current view state and is refetched after progress. Older closed pages are immutable under append.
+`queryScope` is the full SHA-256 digest of a versioned canonical serialization containing the stable conversation scope and every query option that changes the row sequence, including `showSvc` and the normalizer version. `pageRange` records both semantic cursor boundaries with ordinal and `sourcePart`. The initial upper boundary records `endAtByte: indexedThroughByte`, so an append cannot reuse an older newest-page entry. The client stores a cacheable page under `[fileGeneration, queryScope, pageRange.requestedBefore, pageRange.nextBefore, byteRange]`. The key is encoded as one canonical JSON array, which avoids delimiter and field-order aliases. The semantic boundaries distinguish pages that split several entries sharing one source byte range. `queryScope` distinguishes filtered variants with identical source ranges. A tail page with an open call, pending duplicate, or active command run stays in current view state and is refetched after progress. Older closed pages are immutable under append.
+
+`cacheable` is true only when every returned entry is settled and both page edges are closed. Empty source ranges use `byteRange: null`; their semantic boundaries still produce a unique cache identity.
 
 ### Errors
 
@@ -261,9 +275,9 @@ The row limit and byte limit both apply. The server considers rows from newest t
 
 ## Cursor semantics
 
-Ordering uses `ordinal`, never timestamp. Timestamps can be absent, duplicated, or out of source order. A cursor names the next older ordinal after every row examined for the current page. With service rows included, this is immediately before the first returned entry. With service rows omitted, it can also cover skipped service ordinals.
+Ordering uses `ordinal`, never timestamp. Timestamps can be absent, duplicated, or out of source order. A cursor names the exclusive lower boundary after every row consumed for the current page. With service rows included, this normally equals the position of the oldest returned entry. With service rows omitted, it can equal a skipped service position below that entry.
 
-The opaque token carries a version, a hash of the conversation scope, the normalizer version, the next older ordinal, the corresponding source coordinate, and a short digest of source bytes around that coordinate. It carries no path and no SQLite row id. The decoder limits token size, validates every integer, and rejects a scope mismatch.
+The opaque token carries a version, `queryScope`, the normalizer version, the last consumed ordinal and `sourcePart`, the corresponding source coordinate, and a short digest of source bytes around that coordinate. It carries no path and no SQLite row id. The decoder limits token size, validates every integer, and rejects a scope mismatch.
 
 Cursor behavior is:
 
@@ -272,7 +286,7 @@ Cursor behavior is:
 - Rewrite safety: truncation, replacement, or a changed byte digest returns `history_cursor_stale`. The caller starts from the newest page.
 - Normalizer changes: a new normalizer version invalidates older tokens. A semantic rule change can alter entry counts, so automatic reinterpretation would risk gaps or duplicates.
 
-The cursor is exclusive. If an unfiltered page contains ordinals 900 through 1,049, `beforeCursor` addresses ordinal 900 and the next query selects ordinals below 900. The server query always advances when `hasMore` is true.
+The cursor is exclusive. If an unfiltered page consumes ordinals 900 through 1,049, `beforeCursor` addresses ordinal 900 and the next query selects ordinals below 900. If visible ordinal 899 was inspected for size and rejected, it remains unconsumed and is the first eligible row on that next query. In a filtered query, a page can return through visible ordinal 900, consume hidden service ordinals 899 and 898, then reject visible ordinal 897 for size. That page's `beforeCursor` addresses ordinal 898, so the following query can return 897. If 897 alone exceeds 64 KiB, that following query returns and consumes it under the single-oversized-row exception. Every nonterminal response consumes at least one row, and no over-budget visible candidate is skipped.
 
 ## Body on demand
 
@@ -355,7 +369,7 @@ Exit proof: a collapsed large tool result contributes only bounded summary bytes
 
 ### Phase 3: incremental prepend and page cache
 
-- Add the bounded LRU keyed by `[fileGeneration, byteRange]`.
+- Add the bounded LRU keyed by file generation, query scope, semantic page boundaries, and byte range.
 - Persist and return page-edge state for tool pairing, command grouping, user and assistant representation joins, and turn continuity.
 - Reconcile only the added page and its adjoining edge. Remove the old raw-history prepend call from `LogFeed`.
 
@@ -401,6 +415,9 @@ Required tests include:
 - a pending user representation that completes on the next page;
 - a turn larger than the row and byte budgets;
 - row and byte limits together, including the single-oversized-row progress case;
+- two pages split between entries with the same source byte range receiving distinct cache identities;
+- `showSvc` variants with the same byte range receiving distinct cache identities;
+- a visible row rejected after the byte budget remaining eligible on the next page while filtered service rows advance the cursor;
 - index corruption producing a rebuilding response while the JSONL source remains intact;
 - one live row replaced by one durable twin with the same DOM presentation key;
 - stable viewport offset during prepend and live-to-durable replacement;
