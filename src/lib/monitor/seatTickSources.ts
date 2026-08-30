@@ -18,7 +18,13 @@ import type { BoardTask } from "@/lib/tasks/types";
 import { evidenceFromPipelines, evidenceFromTasks } from "./evidence";
 import { openPullRequestsForRepo, type OpenPullRequestsResult } from "./githubEvidence";
 import { redactBounded } from "./redact";
-import { SEAT_TICK_WAKE_INTERVAL_MS, seatTickWakeDue, seatTurnProgressing } from "./seatTick";
+import {
+  SEAT_TICK_WAKE_INTERVAL_MS,
+  seatTickSourceGapAfterFailure,
+  seatTickSourceRetryDue,
+  seatTickWakeDue,
+  seatTurnProgressing,
+} from "./seatTick";
 import { effectiveSeatTickSettings, readSeatTickSettings, type SeatTickSettings } from "./seatTickSettings";
 import type { PipelineSummary, TaskSummary } from "./viewerApi";
 import {
@@ -33,6 +39,7 @@ import {
   type SeatTickPullRequestInput,
   type SeatTickSeatInput,
   type SeatTickSignalInput,
+  type SeatTickSourceGap,
   type SeatTickTaskInput,
 } from "./types";
 
@@ -556,6 +563,12 @@ function eventsSince(
  * whatever GitHub said. A read that FAILED is not an answer, and leaves with
  * {@link SeatTickPullRequestGap} rather than an empty list.
  *
+ * One more bound joined them (#1298): a source that has been failing for longer
+ * than a whole wake interval is asked once per interval rather than once per
+ * check. That one saves a subprocess and nothing else — the failure it already
+ * established is replayed on every check in between, so no check between two
+ * attempts is entitled to a conclusion the attempt would have denied it.
+ *
  * The lanes come from the hot store AND the archive, because the obligation is
  * the pull request still being open and that outlives the lane's three days of
  * residence. Reading only the hot store made the reason decay on a timer: a
@@ -574,12 +587,10 @@ interface PullRequestEvidence {
   /** Null means the question was answered — including answered with nothing
       open, which is what the tick is entitled to go quiet on. */
   unavailable: SeatTickPullRequestGap | null;
-}
-
-/** Asked, and nothing came back that is owed. A fresh row each time: this one
-    travels out on the check input and is never shared between two of them. */
-function none(): PullRequestEvidence {
-  return { pullRequests: [], unavailable: null };
+  /** The source's run of failures as this check leaves it (#1298). Carried on
+      the row so the next check knows whether this is weather or configuration,
+      and so a standing outage is reported once rather than every five minutes. */
+  gap: SeatTickSourceGap | null;
 }
 
 async function unmergedPullRequests(context: {
@@ -587,16 +598,38 @@ async function unmergedPullRequests(context: {
   seat: SeatTickSeatInput | null;
   wakeDue: boolean;
   enabled: boolean;
+  now: number;
+  wakeIntervalMs: number;
+  /** What the previous checks made of this source. */
+  gap: SeatTickSourceGap | null;
   sources: SeatTickSources;
 }): Promise<PullRequestEvidence> {
-  if (!context.wakeDue || !context.enabled) return none();
+  /* Nothing was asked, so nothing is concluded — and the run of failures is
+     left exactly as it stands. A gate is a statement about this check, never
+     about whether the source can be read. */
+  const unasked: PullRequestEvidence = { pullRequests: [], unavailable: null, gap: context.gap };
+  if (!context.wakeDue || !context.enabled) return unasked;
   /* The other two ways a check can be unable to raise any reason at all: a
      project with nobody to wake ends in `no-seat`, and a seat whose turn is
      genuinely moving ends in `skipped`, both before a wake reason is composed.
      Without this clause a seat that stays busy for hours pays a `gh` subprocess
      every five minutes for the whole turn, to answer a question that check was
      never going to ask. */
-  if (!context.seat || seatTurnProgressing(context.seat)) return none();
+  if (!context.seat || seatTurnProgressing(context.seat)) return unasked;
+
+  const at = new Date(context.now).toISOString();
+  const failed = (kind: SeatTickPullRequestGap): PullRequestEvidence => ({
+    pullRequests: [],
+    unavailable: kind,
+    gap: seatTickSourceGapAfterFailure(context.gap, kind, at),
+  });
+  /* A source that has been unreadable for longer than a whole wake interval is
+     asked at that interval and no faster (#1298). The gap it already produced
+     is replayed in between, so every check still refuses to call this quiet —
+     what the backoff saves is the subprocess, never a conclusion. */
+  if (context.gap && !seatTickSourceRetryDue(context.gap, context.now, context.wakeIntervalMs)) {
+    return { pullRequests: [], unavailable: context.gap.gap, gap: context.gap };
+  }
 
   let archived: readonly Pipeline[];
   try {
@@ -604,13 +637,13 @@ async function unmergedPullRequests(context: {
   } catch {
     /* Lanes half-read are obligations half-seen, and an obligation that cannot
        be seen is exactly what gets reported as quiet. */
-    return { pullRequests: [], unavailable: "lanes-unreadable" };
+    return failed("lanes-unreadable");
   }
   const finished = [...context.sources.pipelines(), ...archived]
     .filter((pipeline) => canonicalOrchestratorProject(pipeline.project) === context.project && isFinished(pipeline));
-  if (finished.length === 0) return none();
+  if (finished.length === 0) return unasked;
   const cwd = repoDirForProject(context.project, context.sources, archived);
-  if (!cwd) return none();
+  if (!cwd) return unasked;
 
   let result: OpenPullRequestsResult;
   try {
@@ -620,7 +653,7 @@ async function unmergedPullRequests(context: {
   } catch {
     result = { ok: false, unavailable: "command-failed" };
   }
-  if (!result.ok) return { pullRequests: [], unavailable: result.unavailable };
+  if (!result.ok) return failed(result.unavailable);
   const open = result.pullRequests;
   const byBranch = new Map<string, Pipeline>();
   for (const pipeline of finished) {
@@ -642,7 +675,10 @@ async function unmergedPullRequests(context: {
       updatedAt: pullRequest.updatedAt,
     });
   }
-  return { pullRequests: found.sort((left, right) => left.number - right.number), unavailable: null };
+  /* An answer, so the run of failures is over: the source spoke, whatever it
+     said. This is the only thing that clears the row, which is what makes the
+     next outage a fresh run with its own report. */
+  return { pullRequests: found.sort((left, right) => left.number - right.number), unavailable: null, gap: null };
 }
 
 export async function gatherSeatTickInput(
@@ -687,7 +723,7 @@ export async function gatherSeatTickInput(
      made about the wrong pipeline. */
   const openPipelineIds = new Set(sources.pipelines().filter(isOpen).map((pipeline) => pipeline.id));
   const { events, cursor } = eventsSince(canonical, state.eventsThrough, openPipelineIds, sources);
-  const { pullRequests, unavailable: pullRequestsUnavailable } = await unmergedPullRequests({
+  const { pullRequests, unavailable: pullRequestsUnavailable, gap: pullRequestGap } = await unmergedPullRequests({
     project: canonical,
     seat,
     /* The same clause the decision applies, asked here because the read behind
@@ -696,6 +732,9 @@ export async function gatherSeatTickInput(
        again on its own terms — this is a cost gate, never the bound itself. */
     wakeDue: seatTickWakeDue(state.lastWakeAt, now, settings.wakeIntervalMs),
     enabled: settings.enabled,
+    now,
+    wakeIntervalMs: settings.wakeIntervalMs,
+    gap: state.pullRequestGap,
     sources,
   });
 
@@ -712,8 +751,12 @@ export async function gatherSeatTickInput(
     changeFingerprint: changeFingerprint(pipelines, tasks, pullRequests),
     /* The sealed cursor travels on the state the decision carries forward, so a
        check of any verdict — a skip included, which remembers nothing else —
-       persists where the journal stood when the tick first saw this project. */
-    state: { ...state, eventsThrough: cursor },
+       persists where the journal stood when the tick first saw this project.
+       The source's run of failures rides out the same way (#1298): the gather
+       is what attempted the read, so the gather is what records what became of
+       it, and the decision reads that row to know whether this is the outage
+       worth putting on the board. */
+    state: { ...state, eventsThrough: cursor, pullRequestGap },
     policy,
     settings,
   };

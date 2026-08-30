@@ -12,6 +12,7 @@ import {
   orchestratorAlertCardText,
   seatTickRetryGuardCardText,
   seatTickSettingsCardText,
+  seatTickSourceGapCardText,
 } from "./cards";
 import { openIssuesForProposal, type ProposalIssue } from "./githubEvidence";
 import { appendSeatTickRecord } from "./journalStore";
@@ -95,6 +96,7 @@ export interface SeatTickControllerDependencies {
 
 function cardText(project: string, card: SeatTickCard, at: string): string {
   if (card.kind === "no-seat") return orchestratorAlertCardText(card.detail, at);
+  if (card.kind === "source-unreadable") return seatTickSourceGapCardText(project, card.detail, card.ref, at);
   if (card.kind === "tick-settings") {
     return seatTickSettingsCardText({
       project,
@@ -208,7 +210,13 @@ function deliveryOutcomeLabel(outcome: DeliveryOutcome): string {
 
 function verdictDetail(verdict: SeatTickVerdict): string | null {
   if (verdict.kind === "skipped") return "the seat's turn is progressing; the tick is dropped, never queued";
-  if (verdict.kind === "wake") return verdict.reasons.map((reason) => reason.detail).join("; ");
+  if (verdict.kind === "wake") {
+    /* The gap is journaled beside the reasons, not in place of them (#1298):
+       a wake that went out over an unreadable source has to be readable back
+       as exactly that, or the journal shows a healthy hour where one reason
+       was blind. */
+    return [...verdict.reasons.map((reason) => reason.detail), ...verdict.gaps.map((gap) => gap.detail)].join("; ");
+  }
   return verdict.detail;
 }
 
@@ -563,6 +571,10 @@ async function check(
         items: verdict.items,
         deferred: verdict.deferred,
         signals: input.signals,
+        /* What the check could not read travels with the wake it could still
+           raise (#1298), so the seat acts on the rest knowing what is missing
+           from it. */
+        gaps: verdict.gaps,
         monitorPrompt: input.settings.monitorPrompt,
       })
       : seatTickProposalMessage({

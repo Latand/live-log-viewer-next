@@ -870,6 +870,121 @@ test("a check that asks GitHub nothing reports no gap", async () => {
   expect(input.pullRequestsUnavailable).toBeNull();
 });
 
+/* ------------------------------------------------------------------------- *
+ * The run of failures the row remembers (#1298).
+ *
+ * A source that has been unreadable since the feature shipped is a different
+ * fact from one that just missed a call, and the check could not tell them
+ * apart: it reported the same journal line every five minutes for four hours
+ * and put nothing anywhere an operator reads.
+ * ------------------------------------------------------------------------- */
+
+test("a failed read starts a run of failures on the row", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed" },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.state.pullRequestGap).toEqual({
+    gap: "command-failed",
+    since: new Date(NOW).toISOString(),
+    lastAttemptAt: new Date(NOW).toISOString(),
+    attempts: 1,
+    reported: false,
+  });
+});
+
+/* Inside the first interval the source is asked at every check: a transient
+   failure has to recover at the check interval, not an hour later. */
+test("a run younger than the wake interval is asked again at every check", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const young = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 10 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 5 * 60_000).toISOString(),
+    attempts: 2,
+    reported: false,
+  };
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "timed-out", pullRequestCalls: calls },
+    withCursor(0, { ...OVERDUE, pullRequestGap: young }),
+  );
+  expect(calls).toHaveLength(1);
+  /* The run keeps its own beginning, so "how long has this been broken" is not
+     reset by every failure inside it. */
+  expect(input.state.pullRequestGap).toMatchObject({ gap: "timed-out", since: young.since, attempts: 3 });
+});
+
+/* Past that point the subprocess is paid for once per wake interval — and the
+   gap it already established is replayed, so the check in between still
+   refuses to call this quiet. Slowing the read may never buy a silence. */
+test("a standing run is asked once per wake interval, and the gap is replayed in between", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const standing = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed", pullRequestCalls: calls },
+    withCursor(0, { ...OVERDUE, pullRequestGap: standing }),
+  );
+  expect(calls).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBe("command-failed");
+  expect(input.state.pullRequestGap).toEqual(standing);
+  /* And the decision it feeds is the decision a fresh failed read would have
+     produced: no wake from the unreadable source, and no quiet either. */
+  expect(seatTickDecision(input).verdict.kind).toBe("error");
+
+  const due: { cwd: string; limit: number }[] = [];
+  const asked = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "command-failed", pullRequestCalls: due },
+    withCursor(0, { ...OVERDUE, pullRequestGap: { ...standing, lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString() } }),
+  );
+  expect(due).toHaveLength(1);
+  expect(asked.state.pullRequestGap).toMatchObject({ attempts: 24, reported: true });
+});
+
+/* An answer ends the run, whatever it says — which is what makes the next
+   outage a fresh run with a report of its own. */
+test("an answer clears the run of failures", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [] },
+    withCursor(0, {
+      ...OVERDUE,
+      pullRequestGap: {
+        gap: "command-failed",
+        since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+        lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString(),
+        attempts: 23,
+        reported: true,
+      },
+    }),
+  );
+  expect(input.pullRequestsUnavailable).toBeNull();
+  expect(input.state.pullRequestGap).toBeNull();
+});
+
+/* A gate says nothing about whether the source can be read, so it leaves the
+   run exactly as it stands — and reports no gap of its own, because this check
+   asked nothing. */
+test("a check that asks GitHub nothing leaves the run untouched", async () => {
+  const standing = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 61 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsThrow: true },
+    withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString(), pullRequestGap: standing }),
+  );
+  expect(input.pullRequestsUnavailable).toBeNull();
+  expect(input.state.pullRequestGap).toEqual(standing);
+});
+
 /* The guard half, the same shape #1262 established for a card's movement: the
    fingerprint has to carry what the reason is decided from, or a guard keyed on
    it goes on suppressing the reason while a second pull request piles up. */

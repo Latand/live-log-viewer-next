@@ -844,12 +844,10 @@ test("the check after the failure asks again, and wakes as soon as GitHub answer
   expect(await runSeatTickCheck(PROJECT, recovered.deps)).toMatchObject({ verdict: "wake", reasons: ["unmerged-pr"] });
 });
 
-/* The wake that WOULD have gone out is where the failure used to be paid for.
-   Delivering it stamps `lastWakeAt` and the retry accounting, so the hour it
-   bought was bought by a read that answered nothing. The lane event is held
-   for the next check instead — five minutes, not an hour — and the gap is
-   journaled for as long as it lasts. */
-test("a lane event is held rather than spent while GitHub is unreadable", async () => {
+/* The lane event goes out (#1298), and the wake it goes out on says what the
+   check could not see. Withholding it was the four-hour silence: the event had
+   nothing to do with GitHub, and the seat heard about neither. */
+test("a lane event still wakes the seat while GitHub is unreadable, and the wake names the gap", async () => {
   const rig = harness({
     pipelines: [...OPEN_LANE, ...FINISHED_LANE],
     state: { ...OVERDUE, eventsThrough: 12 },
@@ -857,21 +855,48 @@ test("a lane event is held rather than spent while GitHub is unreadable", async 
     pullRequestsUnavailable: "malformed-output",
   });
   const record = await runSeatTickCheck(PROJECT, rig.deps);
-  expect(record).toMatchObject({ verdict: "error", reasons: [], items: 0 });
+  expect(record).toMatchObject({ verdict: "wake", reasons: ["lane-event"], items: 1 });
+  /* The journal line carries the gap beside the reason, so an hour that ran on
+     one blind source reads back as exactly that. */
   expect(record!.detail).toContain("malformed-output");
-  expect(rig.sent).toEqual([]);
-  expect(rig.written[0]!.lastWakeAt).toBe(OVERDUE.lastWakeAt);
-  expect(rig.written[0]!.wakesWithoutChange).toEqual({});
-  /* And the event cursor stays put too, so the check that can answer still has
-     the event to name. */
-  expect(rig.written[0]!.eventsThrough).toBe(12);
+  expect(rig.sent[0]!.text).toContain("Evidence unavailable:");
+  expect(rig.sent[0]!.text).toContain("pull-requests: the open pull requests of this project's finished lanes could not be read (malformed-output)");
+  /* And the reason that rests on the unreadable source is not among them: an
+     empty answer nobody could read names no pull request. */
+  expect(record!.reasons).not.toContain("unmerged-pr");
+});
+
+/* The acceptance case (#1298), end to end: a parked lane, a pull-request
+   source that cannot be read, and a seat that used to hear nothing at all. */
+test("a parked lane and an unreadable pull-request source produce a wake naming both", async () => {
+  const parked = [{ id: "pipeline_p1", state: "paused", createdAt: "2026-08-28T09:00:00.000Z", movedAt: "2026-08-28T09:30:00.000Z" }];
+  const first = harness({
+    pipelines: [...parked, ...FINISHED_LANE],
+    state: OVERDUE,
+    pullRequestsUnavailable: "command-failed",
+  });
+  /* The first check is the one that establishes the stall; a lane between two
+     attempts is never called stuck, so this one wakes on the interval instead
+     and the parked lane is remembered for the next. */
+  expect(await runSeatTickCheck(PROJECT, first.deps)).toMatchObject({ verdict: "wake" });
+  expect(first.written[0]!.stalledSeen).toEqual(["pipeline_p1"]);
+
+  const rig = harness({
+    pipelines: [...parked, ...FINISHED_LANE],
+    state: { ...first.written[0]!, ...OVERDUE },
+    pullRequestsUnavailable: "command-failed",
+  });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(record).toMatchObject({ verdict: "wake", reasons: ["stalled"] });
+  expect(rig.sent[0]!.text).toContain("pipeline_p1");
+  expect(rig.sent[0]!.text).toContain("Evidence unavailable:");
 });
 
 /* The three ways `gh` itself fails, each carried through the real seam and the
    real parse, each alongside a lane event that would otherwise have woken the
-   seat. None of them may move the stamp, the guard or the cursor, and each
-   must still be asked on the next check. */
-test("a thrown command, a timeout and unusable output each cost nothing and are asked again", async () => {
+   seat. Each wakes on the reason that stands, names the gap it could not read,
+   raises no `unmerged-pr`, and is asked again on the next check. */
+test("a thrown command, a timeout and unusable output each name their gap and are asked again", async () => {
   const killed = Object.assign(new Error("Command failed"), { killed: true, signal: "SIGTERM" });
   const failures: { name: string; gap: string; run: GithubRunner }[] = [
     { name: "thrown command", gap: "command-failed", run: async () => { throw new Error("gh: command not found"); } },
@@ -895,24 +920,59 @@ test("a thrown command, a timeout and unusable output each cost nothing and are 
     });
 
     const record = await runSeatTickCheck(PROJECT, rig.deps);
-    expect(`${failure.name}: ${record!.verdict}`).toBe(`${failure.name}: error`);
+    expect(`${failure.name}: ${record!.verdict}`).toBe(`${failure.name}: wake`);
+    expect(`${failure.name}: ${record!.reasons.join(",")}`).toBe(`${failure.name}: lane-event`);
     expect(record!.detail).toContain(failure.gap);
-    expect(rig.sent).toEqual([]);
-    expect(rig.written[0]!.lastWakeAt).toBe(OVERDUE.lastWakeAt);
-    expect(rig.written[0]!.wakesWithoutChange).toEqual({ "lane-event": 1 });
+    expect(rig.sent[0]!.text).toContain(failure.gap);
     expect(rig.written[0]!.quietSince).toBeNull();
+    /* The run of failures is on the row, and it is a fresh one: a source that
+       has only just stopped answering is retried at every check. */
+    expect(rig.written[0]!.pullRequestGap).toMatchObject({ gap: failure.gap, attempts: 1, reported: false });
     expect(asked).toBe(1);
 
     /* The next check reads the row the failed one wrote and asks `gh` again,
-       rather than waiting out an hour it never spent. */
+       rather than waiting out an hour on one failure. */
     await runSeatTickCheck(PROJECT, harness({
       pipelines: [...OPEN_LANE, ...FINISHED_LANE],
-      state: rig.written[0]!,
+      state: { ...rig.written[0]!, ...OVERDUE },
       events: [terminalEvent(44)],
       githubRun: run,
     }).deps);
     expect(`${failure.name}: asked ${asked}`).toBe(`${failure.name}: asked 2`);
   }
+});
+
+/* The standing outage, put where an operator looks (#1298). Every one of the
+   twenty-three failures was journaled, and the journal is not what anyone was
+   reading — the operator read the board, and the board said nothing. */
+test("a source unreadable since before the wake interval is carded once, and the row remembers", async () => {
+  const gap = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 4 * 60 * MINUTE).toISOString(),
+    lastAttemptAt: new Date(NOW - 61 * MINUTE).toISOString(),
+    attempts: 23,
+    reported: false,
+  };
+  const rig = harness({
+    pipelines: [...OPEN_LANE, ...FINISHED_LANE],
+    state: { ...OVERDUE, pullRequestGap: gap },
+    pullRequestsUnavailable: "command-failed",
+  });
+  await runSeatTickCheck(PROJECT, rig.deps);
+  const carded = rig.cards.find((entry) => entry.card.kind === "source-unreadable");
+  expect(carded?.card.ref).toBe("seat-tick-source-pull-requests");
+  expect(carded?.card.detail).toContain("command-failed, 24 attempt(s)");
+  expect(rig.written[0]!.pullRequestGap).toMatchObject({ reported: true, attempts: 24, since: gap.since });
+
+  /* And the next check says nothing further: one card per outage, whatever the
+     tick then does about it. */
+  const again = harness({
+    pipelines: [...OPEN_LANE, ...FINISHED_LANE],
+    state: { ...rig.written[0]!, ...OVERDUE },
+    pullRequestsUnavailable: "command-failed",
+  });
+  await runSeatTickCheck(PROJECT, again.deps);
+  expect(again.cards.filter((entry) => entry.card.kind === "source-unreadable")).toEqual([]);
 });
 
 /* The other edge of that table, through the same seam. Exactly the empty array

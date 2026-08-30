@@ -120,6 +120,11 @@ export const seatTickRetryGuardRef = (kind: string): string => `seat-tick-stuck-
     settings are a standing state rather than a stream of events. */
 export const SEAT_TICK_SETTINGS_REF = "seat-tick-settings";
 
+/** The ref of the card that says one of the tick's evidence sources cannot be
+    read at all (#1298). One per source, so an outage of the pull-request read
+    is one card however long it lasts, and a different source would be its own. */
+export const seatTickSourceGapRef = (source: string): string => `seat-tick-source-${source}`;
+
 /** The `monitor-ref:` value a proposal card carries. Colon-free, because that
     is what {@link monitorRefIn} will read back. */
 export const seatTickProposalRef = (slot: string): string => `seat-tick-proposal-${slot}`;
@@ -140,6 +145,36 @@ export function seatTickRetryGuardCardText(project: string, detail: string, ref:
       `${detail}.`,
       `Project ${project}. Observed ${at.slice(0, 16).replace("T", " ")} UTC.`,
       "The tick resumes this reason on its own once the board or a pipeline moves.",
+      "",
+      `${MONITOR_REF_PREFIX} ${ref}`,
+    ].join("\n"),
+    CARD_TEXT_LIMIT,
+  );
+}
+
+/**
+ * The card for an evidence source the tick cannot read at all (#1298).
+ *
+ * It has to answer, in this order, what a human reading the board will ask:
+ * what is broken, since when, and what the tick is doing about it meanwhile.
+ * The last one is the point. Wakes continue on every reason that does not
+ * depend on the source, so what the card announces is one reason going blind
+ * while the rest of the tick carries on.
+ *
+ * Raised once per outage, so it says how the tick behaves for as long as it
+ * stands rather than being re-stated every five minutes.
+ */
+export function seatTickSourceGapCardText(project: string, detail: string, ref: string, at: string): string {
+  return redactBounded(
+    [
+      "Seat tick cannot read one of its evidence sources",
+      "",
+      `${detail}.`,
+      "Wakes continue on every reason that does not depend on it, and each one names the missing evidence;"
+        + " an unmerged pull request left by a finished lane is what cannot be seen while this stands.",
+      "The tick keeps asking, at this project's wake interval, and reports nothing further until the source answers"
+        + " — this card is raised once per outage.",
+      `Project ${project}. Observed ${at.slice(0, 16).replace("T", " ")} UTC.`,
       "",
       `${MONITOR_REF_PREFIX} ${ref}`,
     ].join("\n"),

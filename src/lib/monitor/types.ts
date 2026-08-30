@@ -222,20 +222,83 @@ export type SeatTickVerdict =
   | { kind: "skipped"; reason: "seat-busy" }
   /** Nothing owed. One journal line, nothing else — the default. */
   | { kind: "quiet"; detail: string }
-  | { kind: "wake"; reasons: SeatTickWakeReason[]; items: SeatTickItem[]; deferred: number }
+  | {
+    kind: "wake";
+    reasons: SeatTickWakeReason[];
+    items: SeatTickItem[];
+    deferred: number;
+    /** Evidence this check could not read (#1298). The reasons above stand
+        without it; this is what the wake says it could not see. */
+    gaps: SeatTickEvidenceGap[];
+  }
   /** No work, and the proposal slot is due. */
   | { kind: "proactive"; detail: string }
   /**
-   * The check could not establish that nothing is owed.
+   * The check could not establish that nothing is owed, and nothing else was
+   * owed either.
    *
    * Quiet is a conclusion, and a conclusion drawn from evidence that could not
    * be read is the failure this whole mechanism exists to prevent, so the
-   * check says so instead. It moves no stamp and holds no reason back: the
-   * wake interval and the retry guard are exactly where the previous check
-   * left them, and the next check asks again. A failure cannot spend the
-   * hourly budget.
+   * check says so instead. It moves no stamp: the wake interval and the retry
+   * guard are exactly where the previous check left them, and the next check
+   * asks again. A failure cannot spend the hourly budget.
+   *
+   * What it no longer does is hold back the reasons that did NOT depend on the
+   * unreadable source (#1298). Those are carried by a wake that names the gap,
+   * because a check whose whole decision is aborted by one failed read is the
+   * same silence to the operator as the quiet this verdict exists to refuse —
+   * and for four hours, with two lanes parked, that is exactly what it was.
    */
   | { kind: "error"; detail: string };
+
+/**
+ * One evidence source a check could not read (#1298).
+ *
+ * It travels ON the wake rather than instead of it. A failed source withdraws
+ * the reasons that rest on it and nothing else, so the seat is woken by
+ * whatever still stands and told, in the same message, which evidence was
+ * missing from the picture it is being asked to act on.
+ */
+export interface SeatTickEvidenceGap {
+  /** Which evidence is missing. A stable token: it names the card the standing
+      failure is reported under, so two outages of one source are one card. */
+  source: "pull-requests";
+  /** The class of the failure, as the source itself reported it. Machine
+      token, because the journal line carrying it is published. */
+  gap: SeatTickPullRequestGap;
+  /** What the seat loses while it stands, in one publication-safe clause. */
+  detail: string;
+}
+
+/**
+ * An unbroken run of failures of one evidence source, remembered across checks
+ * (#1298).
+ *
+ * The source it describes had been failing on every check for four hours with
+ * nothing anywhere saying so out loud, and before that it had failed on every
+ * check since the feature shipped. Two things follow from remembering the run,
+ * and the row exists for both:
+ *
+ * - A source that cannot be read AT ALL is reported once, on the board, rather
+ *   than only as another journal line every few minutes for ever.
+ * - Past that same point the read itself slows to the project's wake interval.
+ *   It cannot buy silence by slowing down: the gap this row holds is replayed
+ *   on every check in between, so the decision is exactly the decision a fresh
+ *   failed read would have produced.
+ */
+export interface SeatTickSourceGap {
+  /** The class of the newest failure in the run. */
+  gap: SeatTickPullRequestGap;
+  /** The first failure in it — what "how long has this been broken" reads. */
+  since: string;
+  /** The newest attempt, which is what the retry window is measured from. */
+  lastAttemptAt: string;
+  /** Attempts in this run, the newest included. */
+  attempts: number;
+  /** The standing failure is already on the board. Raised once per run, so an
+      operator who closes the card is not handed it again five minutes later. */
+  reported: boolean;
+}
 
 /**
  * The registry's own answer about a turn: the durable activity verdict
@@ -503,6 +566,9 @@ export interface SeatTickProjectState {
       addressed to. Survives a rotation precisely so the successor's first check
       can revoke what is still waiting for the predecessor. */
   outstandingWake: SeatTickOutstandingWake | null;
+  /** The pull-request source's unbroken run of failures (#1298), or null while
+      it is answering. Cleared by an answer and by nothing else. */
+  pullRequestGap: SeatTickSourceGap | null;
 }
 
 export interface SeatTickCheckInput {
@@ -522,13 +588,17 @@ export interface SeatTickCheckInput {
    * Set when the list above could not be established.
    *
    * A check that cannot see what its finished lanes left open has not shown
-   * that nothing is owed, so this ends the check as an `error` the controller
-   * journals and retries — ahead of any wake, because a delivered wake is what
-   * would advance the wake stamp and spend a retry-guard count on a read that
-   * established nothing. Deliberately incapable of costing anything, so a `gh`
-   * outage cannot buy the very silence it would otherwise be mistaken for.
-   * Whatever reason stood on its own waits for the next check instead, which
-   * is one check interval away rather than one wake interval.
+   * that nothing is owed, so it may not go quiet: with nothing else owed the
+   * check ends as an `error` the controller journals and retries, and no stamp
+   * moves. A `gh` outage cannot buy the very silence it would otherwise be
+   * mistaken for.
+   *
+   * What it does NOT do is withdraw the rest of the decision (#1298). Only the
+   * reasons that rest on this evidence are withheld — the pull-request list
+   * above is empty because it could not be read, so no `unmerged-pr` reason is
+   * composed from it. A parked lane, a lane event and an unstarted card have
+   * nothing to do with GitHub, and a wake carrying one of those goes out with
+   * a {@link SeatTickEvidenceGap} naming what was unreadable.
    */
   pullRequestsUnavailable: SeatTickPullRequestGap | null;
   signals: readonly SeatTickSignalInput[];
@@ -547,7 +617,7 @@ export interface SeatTickCheckInput {
     second check re-finds it instead of minting a twin. */
 export interface SeatTickCard {
   ref: string;
-  kind: "no-seat" | "retry-guard" | "tick-settings";
+  kind: "no-seat" | "retry-guard" | "tick-settings" | "source-unreadable";
   detail: string;
   /**
    * Whether the condition still holds.
@@ -626,5 +696,6 @@ export function emptySeatTickState(): SeatTickProjectState {
     lastWakeFingerprint: null,
     eventsThrough: null,
     outstandingWake: null,
+    pullRequestGap: null,
   };
 }

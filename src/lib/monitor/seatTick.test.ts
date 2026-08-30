@@ -7,6 +7,9 @@ import {
   SEAT_TICK_WAKE_INTERVAL_MS,
   seatTickDecision,
   seatTickPolicy,
+  seatTickSourceGapAfterFailure,
+  seatTickSourceGapStanding,
+  seatTickSourceRetryDue,
   seatTickWakeCommit,
   seatTickWakeCommitPlan,
   seatTurnProgressing,
@@ -20,6 +23,7 @@ import {
   type SeatTickProjectState,
   type SeatTickPullRequestInput,
   type SeatTickSeatInput,
+  type SeatTickSourceGap,
   type SeatTickTaskInput,
   type SeatTickVerdict,
   type SeatTickWakeCommit,
@@ -505,29 +509,58 @@ test("a failed read spends neither the wake stamp nor the retry guard", () => {
   expect(decision.state.quietSince).toBeNull();
 });
 
-/* The failed read is refused ahead of the wake, not only ahead of the quiet.
-   A wake delivered here would advance the wake stamp and the retry guard, so
-   the reason that stood on its own would have paid the hour on behalf of the
-   read that answered nothing. It waits for the next check instead — one check
-   interval, not one wake interval — and the gap is journaled meanwhile. */
-test("a wake reason that stands on its own is held rather than spent while GitHub is unreadable", () => {
+/* ------------------------------------------------------------------------- *
+ * ...and a read that failed withdraws ITSELF, not the whole decision (#1298).
+ *
+ * The refusal above was correct and, taken alone, produced the same silence
+ * from the other side: `gh` could not authenticate for four hours, so twenty-
+ * three consecutive checks ended in `error` and two parked lanes were never
+ * mentioned to anyone. The parked lanes had nothing to do with GitHub.
+ * ------------------------------------------------------------------------- */
+
+test("a wake reason that stands on its own still wakes the seat while GitHub is unreadable", () => {
   const decision = seatTickDecision(input({
     pullRequestsUnavailable: "command-failed",
     events: [event({ seq: 60, type: "stage_blocked", summary: "the review round is parked" })],
     state: stateWith({ eventsThrough: 59, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
   }));
-  expect(decision.verdict.kind).toBe("error");
-  expect(reasonsOf(decision.verdict)).toEqual([]);
+  expect(reasonsOf(decision.verdict)).toEqual(["lane-event"]);
+  /* And the wake says what it could not see, so the seat is not acting on a
+     partial picture it has no way of recognizing as partial. */
+  expect(decision.verdict.kind === "wake" && decision.verdict.gaps).toEqual([{
+    source: "pull-requests",
+    gap: "command-failed",
+    detail: "the open pull requests of this project's finished lanes could not be read (command-failed), "
+      + "so a pull request a finished lane left unmerged cannot be named in this wake",
+  }]);
 });
 
-/* Every way the read can fail, against every other reason that could have
-   carried a wake past it. None of them may move the stamp or the counter. */
-test("no candidate reason lets a failed read spend the stamp or the guard", () => {
+/* The acceptance case, in the shape it happened: a parked lane, an unreadable
+   pull-request source, and a seat that heard nothing for four hours. */
+test("a parked lane wakes the seat under an unreadable pull-request source, and is named in the items", () => {
+  const before = stateWith({
+    lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+    stalledSeen: ["pipeline_a1"],
+  });
+  const decision = seatTickDecision(input({
+    pipelines: [lane({ state: "inert", title: "park the review round" })],
+    pullRequestsUnavailable: "command-failed",
+    state: before,
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["stalled"]);
+  expect(decision.verdict.kind === "wake" && decision.verdict.items.map((item) => item.id)).toEqual(["pipeline_a1"]);
+  expect(decision.verdict.kind === "wake" && decision.verdict.gaps.map((gap) => gap.source)).toEqual(["pull-requests"]);
+});
+
+/* Every way the read can fail, against every reason that does not rest on it.
+   None of them is withdrawn, and none of them turns into `unmerged-pr` — the
+   one reason a failed read really does withhold, because the source carries no
+   rows to name. */
+test("every reason independent of the failed read still wakes, and the pull-request reason never does", () => {
   const before = stateWith({
     eventsThrough: 59,
     lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
     lastWakeFingerprint: "fp-0",
-    wakesWithoutChange: { "lane-event": 1 },
     quietSince: null,
   });
   const candidates = {
@@ -544,15 +577,123 @@ test("no candidate reason lets a failed read spend the stamp or the guard", () =
   for (const gap of ["command-failed", "timed-out", "malformed-output"] as const) {
     for (const [name, candidate] of Object.entries(candidates)) {
       const decision = seatTickDecision(input({ state: before, ...candidate, pullRequestsUnavailable: gap }));
-      expect(`${name}/${gap}: ${decision.verdict.kind}`).toBe(`${name}/${gap}: error`);
+      expect(`${name}/${gap}: ${reasonsOf(decision.verdict).join(",")}`).toBe(`${name}/${gap}: ${name}`);
+      expect(decision.verdict.kind === "wake" && decision.verdict.gaps.map((entry) => entry.gap)).toEqual([gap]);
+      /* The decision never moves a stamp of its own — only a landed wake does —
+         so the row leaves here exactly as the previous check left it. */
       expect(decision.state.lastWakeAt).toBe(before.lastWakeAt);
       expect(decision.state.lastWakeFingerprint).toBe(before.lastWakeFingerprint);
-      expect(decision.state.wakesWithoutChange).toEqual({ "lane-event": 1 });
-      /* And no claim of quiet in the row either, so the next check is due
-         exactly as this one was. */
       expect(decision.state.quietSince).toBeNull();
     }
   }
+});
+
+/* The bound the fix must not become a way around, from the other side: a gap
+   is not an agenda. Before the interval has elapsed no reason is composed at
+   all, so an unreadable source raises no wake — it says it could not conclude
+   anything, which is the one thing it is entitled to say. */
+test("an unreadable source raises no wake before the interval has elapsed", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    pullRequestsUnavailable: "command-failed",
+    state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind).toBe("error");
+});
+
+/* And the retry guard bounds it too: a reason the guard has stopped is not
+   revived by a gap beside it, and the check that has nothing left to carry
+   still refuses to call itself quiet. */
+test("a reason the retry guard holds is not revived by an unreadable source", () => {
+  const decision = seatTickDecision(input({
+    pipelines: [lane()],
+    pullRequestsUnavailable: "timed-out",
+    changeFingerprint: "fp-1",
+    state: stateWith({
+      lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+      lastWakeFingerprint: "fp-1",
+      wakesWithoutChange: { interval: 2 },
+    }),
+  }));
+  expect(decision.verdict.kind).toBe("error");
+  expect(decision.cards.map((entry) => entry.ref)).toContain("seat-tick-stuck-interval");
+  expect(decision.state.quietSince).toBeNull();
+});
+
+/* ------------------------------------------------------------------------- *
+ * A source that cannot be read AT ALL says so once (#1298).
+ *
+ * Every one of the twenty-three failures was journaled. Nobody reads a
+ * journal; the operator read the board, and the board said nothing.
+ * ------------------------------------------------------------------------- */
+
+/** A run of failures that started `agoMinutes` ago and has never been reported. */
+function sourceGap(agoMinutes: number, over: Partial<SeatTickSourceGap> = {}): SeatTickSourceGap {
+  const since = new Date(NOW - agoMinutes * MINUTE).toISOString();
+  return { gap: "command-failed", since, lastAttemptAt: new Date(NOW).toISOString(), attempts: 12, reported: false, ...over };
+}
+
+test("a source unreadable for longer than the wake interval is put on the board, once", () => {
+  const state = stateWith({
+    lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+    pullRequestGap: sourceGap(70),
+  });
+  const decision = seatTickDecision(input({ pullRequestsUnavailable: "command-failed", state }));
+  const raised = decision.cards.find((entry) => entry.kind === "source-unreadable");
+  expect(raised?.ref).toBe("seat-tick-source-pull-requests");
+  expect(raised?.detail).toContain("command-failed, 12 attempt(s)");
+  /* And the row remembers having said it, so the next check does not say it
+     again — the whole difference between one report and one every five
+     minutes. */
+  expect(decision.state.pullRequestGap?.reported).toBe(true);
+
+  const after = seatTickDecision(input({
+    pullRequestsUnavailable: "command-failed",
+    state: { ...state, pullRequestGap: sourceGap(70, { reported: true }) },
+  }));
+  expect(after.cards.filter((entry) => entry.kind === "source-unreadable")).toEqual([]);
+});
+
+/* A single failure is weather. Reporting it would teach the operator to ignore
+   the card that matters, so the run has to outlive a whole wake interval. */
+test("a source that has only just failed raises no card", () => {
+  const decision = seatTickDecision(input({
+    pullRequestsUnavailable: "command-failed",
+    state: stateWith({
+      lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+      pullRequestGap: sourceGap(5, { attempts: 1 }),
+    }),
+  }));
+  expect(decision.cards.filter((entry) => entry.kind === "source-unreadable")).toEqual([]);
+});
+
+/* The predicates the gather shares with the decision, so both halves apply one
+   rule rather than two copies of it. */
+test("a standing run is retried at the wake interval and a fresh one at every check", () => {
+  const fresh = sourceGap(5, { lastAttemptAt: new Date(NOW - MINUTE).toISOString() });
+  expect(seatTickSourceGapStanding(fresh, NOW, SEAT_TICK_WAKE_INTERVAL_MS)).toBe(false);
+  expect(seatTickSourceRetryDue(fresh, NOW, SEAT_TICK_WAKE_INTERVAL_MS)).toBe(true);
+
+  const standing = sourceGap(70, { lastAttemptAt: new Date(NOW - MINUTE).toISOString() });
+  expect(seatTickSourceGapStanding(standing, NOW, SEAT_TICK_WAKE_INTERVAL_MS)).toBe(true);
+  expect(seatTickSourceRetryDue(standing, NOW, SEAT_TICK_WAKE_INTERVAL_MS)).toBe(false);
+  expect(seatTickSourceRetryDue(sourceGap(180, { lastAttemptAt: new Date(NOW - 61 * MINUTE).toISOString() }), NOW, SEAT_TICK_WAKE_INTERVAL_MS)).toBe(true);
+  /* Nothing recorded is nothing to back off from. */
+  expect(seatTickSourceRetryDue(null, NOW, SEAT_TICK_WAKE_INTERVAL_MS)).toBe(true);
+});
+
+test("a failure joins the run it belongs to rather than restarting it", () => {
+  const at = new Date(NOW).toISOString();
+  const first = seatTickSourceGapAfterFailure(null, "command-failed", at);
+  expect(first).toEqual({ gap: "command-failed", since: at, lastAttemptAt: at, attempts: 1, reported: false });
+  const later = new Date(NOW + 10 * MINUTE).toISOString();
+  expect(seatTickSourceGapAfterFailure({ ...first, reported: true }, "timed-out", later)).toEqual({
+    gap: "timed-out",
+    since: at,
+    lastAttemptAt: later,
+    attempts: 2,
+    reported: true,
+  });
 });
 
 /* The proposal is the fourth thing a check can spend, and it is spent on the
