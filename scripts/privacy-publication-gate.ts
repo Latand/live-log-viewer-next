@@ -1391,6 +1391,37 @@ export function commitMessageAddressReview(message: string): CommitAddressReview
   return { attributable: [...attributable], exempt: [...exempt] };
 }
 
+/* The commits the branch adds, newest first, one full hash per line. A hash
+   holds no newline, so this read has no boundary to guess at — which is why
+   the messages are fetched one at a time below rather than packed into this
+   same stream. `--no-abbrev-commit` neutralises a checkout that configured
+   `log.abbrevCommit`, and the shape check is what makes each hash safe to
+   hand back to git as an argument. */
+function branchCommitHashes(repository: string, base: string): string[] | undefined {
+  const result = Bun.spawnSync({
+    cmd: ["git", "-C", repository, "log", "--no-abbrev-commit", "--format=%H", `${base}..HEAD`],
+    env: withoutWakatimeCredential(process.env),
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  if (result.exitCode !== 0) return undefined;
+  const hashes = result.stdout.toString().split("\n").filter((line) => line !== "");
+  return hashes.every((hash) => COMMIT_HASH.test(hash)) ? hashes : undefined;
+}
+
+/* One commit's message, the whole of stdout. Asking for exactly one commit is
+   what removes the ambiguity: no delimiter has to survive the message, so no
+   message can be read as anything but a message. */
+function commitMessage(repository: string, commit: string): string | undefined {
+  const result = Bun.spawnSync({
+    cmd: ["git", "-C", repository, "log", "-1", "--format=%B", commit, "--"],
+    env: withoutWakatimeCredential(process.env),
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  return result.exitCode === 0 ? result.stdout.toString() : undefined;
+}
+
 /**
  * The messages this branch publishes when it is pushed.
  *
@@ -1418,29 +1449,25 @@ export function commitMessageFindings(
   notices?: string[],
 ): Map<FindingClass, number> {
   const findings = new Map<FindingClass, number>();
-  const result = Bun.spawnSync({
-    cmd: ["git", "-C", repository, "log", "--format=%H%x00%B%x00", `${base}..HEAD`],
-    env: withoutWakatimeCredential(process.env),
-    stderr: "pipe",
-    stdout: "pipe",
-  });
-  if (result.exitCode !== 0) {
+  const commits = branchCommitHashes(repository, base);
+  if (commits === undefined) {
     addFinding(findings, "inspection_error");
     notices?.push("commit_message: range unreadable");
     return findings;
   }
-  let commit = "";
-  /* Two NUL-separated fields per commit, hash then message. The walk names a
-     chunk by its SHAPE rather than by its position, so a message that somehow
-     carried a NUL splits into two chunks that are both still scanned instead
-     of shifting the pairing and turning half the messages into hashes nobody
-     reads. A message that is nothing but a full hash is read as one and not
-     scanned; it holds no address, path or credential either way. */
-  for (const chunk of result.stdout.toString().split("\0")) {
-    const message = chunk.startsWith("\n") ? chunk.slice(1) : chunk;
-    if (message === "") continue;
-    if (COMMIT_HASH.test(message)) {
-      commit = message;
+  /* The hashes and the messages are read separately on purpose. One stream of
+     `%H%x00%B%x00` carries no length, so the reader has to decide where each
+     message ends, and until this round it decided by SHAPE: a chunk of forty
+     lowercase hex characters was the next hash. A raw commit whose entire
+     message is such a value — git writes one without a terminal newline when
+     it is handed one — was therefore read as a hash and never scanned, and a
+     value the gate knows passed the check. Nothing is inferred now: git is
+     asked for the hashes, and then for each message by its hash. */
+  for (const commit of commits) {
+    const message = commitMessage(repository, commit);
+    if (message === undefined) {
+      addFinding(findings, "inspection_error");
+      notices?.push(`commit_message: ${commit.slice(0, 12)} message unreadable`);
       continue;
     }
     const messageFindings = sensitiveClasses(message);

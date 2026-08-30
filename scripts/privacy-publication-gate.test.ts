@@ -2832,6 +2832,24 @@ describe("commitMessageFindings", () => {
     return result.stdout.toString();
   }
 
+  /* A commit whose message git records EXACTLY as given. `git commit -m` cleans
+     the message up and ends it with a newline; `commit-tree` writes what it is
+     handed, which is how a message with no terminal newline reaches a branch. */
+  function rawCommit(repo: string, message: string): string {
+    const tree = git(repo, "rev-parse", "HEAD^{tree}").trim();
+    const parent = git(repo, "rev-parse", "HEAD").trim();
+    const result = Bun.spawnSync({
+      cmd: ["git", "-C", repo, "commit-tree", tree, "-p", parent],
+      stderr: "pipe",
+      stdin: new TextEncoder().encode(message),
+      stdout: "pipe",
+    });
+    expect(result.exitCode).toBe(0);
+    const commit = result.stdout.toString().trim();
+    runGit(repo, ["update-ref", "refs/heads/feature", commit]);
+    return commit;
+  }
+
   /* The footer `git cherry-pick -x` appends, spelled out where a test needs the
      shape without performing the pick. */
   const cherryPickLine = `(cherry picked from commit ${"0123456789abcdef".repeat(2) + "01234567"})`;
@@ -3209,6 +3227,33 @@ describe("commitMessageFindings", () => {
 
     expect(commitMessageFindings(repo, "no-such-base", notices).get("inspection_error")).toBe(1);
     expect(notices).toEqual(["commit_message: range unreadable"]);
+  });
+
+  test("reads a message that is nothing but a hash-shaped value", () => {
+    /* #1315, second round. The hashes and the messages arrived in one stream
+       that carries no lengths, so the reader decided where a message ended by
+       SHAPE: forty lowercase hex characters were the next commit's hash. A raw
+       commit whose whole message is such a value — and git records one with no
+       terminal newline when it is handed one — was read as a hash and never
+       scanned, so a value the gate knows passed the check. */
+    const repo = gitRepo();
+    const value = `${"fedcba9876543210".repeat(2)}89abcdef`;
+    const flagged = rawCommit(repo, value);
+    /* No terminal newline: the message is the last thing in the object. */
+    expect(git(repo, "cat-file", "commit", flagged).endsWith(value)).toBe(true);
+
+    const result = runGateArguments(
+      ["--base", "main", "--check-commits"],
+      { LLV_PRIVACY_KNOWN_VALUES: value },
+      repo,
+    );
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe(
+      `PRIVACY GATE: FAIL\nknown_value: 1\ncommit_message: ${flagged.slice(0, 12)} message known_value\n`,
+    );
+    expect(output).not.toContain(value);
   });
 });
 
