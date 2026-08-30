@@ -52,7 +52,6 @@ export interface MessagesPageQuery {
 
 export interface ConversationMessage extends SessionRecord {
   seq: number;
-  part?: number;
   truncated?: true;
 }
 
@@ -205,15 +204,12 @@ function newestRecordTimestamp(
 function boundedRecord(
   normalized: NormalizedSessionLine,
   seq: number,
-  part: number,
-  parts: number,
   maxChars: number,
 ): ConversationMessage {
   const redacted = hardenedRedact(normalized.record.text);
   const truncated = redacted.length > maxChars;
   return {
     seq,
-    ...(parts > 1 ? { part } : {}),
     kind: normalized.record.kind,
     role: normalized.record.role,
     ts: normalized.record.ts,
@@ -224,14 +220,19 @@ function boundedRecord(
   };
 }
 
+function boundedPageInteger(value: number, fallback: number, maximum: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.min(maximum, Math.floor(value)));
+}
+
 /**
  * Read one newest-first page from a descriptor that the caller has already
  * pinned and root-validated. The reader walks fixed tail windows and stops at
  * the page or scan ceiling; total work is independent of total file size.
  */
 export function readMessagesPage(source: MessagesPageSource, query: MessagesPageQuery): MessagesPage {
-  const limit = Math.max(1, Math.min(200, Math.floor(query.limit) || 20));
-  const maxChars = Math.max(1, Math.min(16_000, Math.floor(query.maxChars) || 4_000));
+  const limit = boundedPageInteger(query.limit, 20, 200);
+  const maxChars = boundedPageInteger(query.maxChars, 4_000, 16_000);
   const since = query.since ? Date.parse(query.since) : null;
   const cursor = query.cursor ?? null;
   if (cursor && cursor.o > source.size) throw new StaleMessagesCursorError();
@@ -283,7 +284,7 @@ export function readMessagesPage(source: MessagesPageSource, query: MessagesPage
       }
       if (isTwin(candidate)) continue;
       if (!query.kinds.has(candidate.record.kind) || !query.roles.has(candidate.record.role)) continue;
-      records.push(boundedRecord(candidate, offset, part, normalized.length, maxChars));
+      records.push(boundedRecord(candidate, offset, maxChars));
     }
     if (records.length >= limit) {
       hasMore = offset > 0;

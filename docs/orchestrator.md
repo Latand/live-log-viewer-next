@@ -131,12 +131,12 @@ a reason of their own.
 
 Press **Rotate**, and the draft opens prefilled with the incumbent's own
 parameters. The successor receives the mandate plus a handoff the server
-composes: the predecessor's identity and exact `conversation_messages` call, the project's open
-board tasks, your notes, and one compact **Rotation history** section standing
-in for every earlier handoff — so a seat that has rotated a dozen times costs
-exactly what a fresh one costs. The predecessor keeps its conversation, its
-card and ordinary Viewer access; only its manager authority moves. Both cards
-stay linked, and the successor's header links back.
+composes: the predecessor's identity and exact `conversation_messages` call,
+the project's open board tasks, your notes, and one compact **Rotation history**
+section standing in for every earlier handoff — so a seat that has rotated a
+dozen times costs exactly what a fresh one costs. The predecessor keeps its
+conversation, its card and ordinary Viewer access; only its manager authority
+moves. Both cards stay linked, and the successor's header links back.
 
 Nothing rotates by itself. Crossing the threshold changes what the dock says
 and nothing else.

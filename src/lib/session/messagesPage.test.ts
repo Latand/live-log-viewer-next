@@ -87,8 +87,10 @@ test("Claude and Codex produce the same normalized record shapes without envelop
   const codexRecords = page(codex, "codex").records;
   expect(claudeRecords.map((record) => record.kind).sort()).toEqual(codexRecords.map((record) => record.kind).sort());
   expect(claudeRecords.map((record) => record.role).sort()).toEqual(codexRecords.map((record) => record.role).sort());
-  expect(claudeRecords.map((record) => Object.keys(record).filter((key) => key !== "part").sort()))
-    .toEqual(codexRecords.map((record) => Object.keys(record).filter((key) => key !== "part").sort()));
+  expect(claudeRecords.map((record) => Object.keys(record).sort()))
+    .toEqual(codexRecords.map((record) => Object.keys(record).sort()));
+  expect(claudeRecords.every((record) => !("part" in record))).toBe(true);
+  expect(codexRecords.every((record) => !("part" in record))).toBe(true);
   expect(JSON.stringify(claudeRecords)).not.toContain("hook noise");
   expect(JSON.stringify(codexRecords)).not.toContain("synthetic-session");
   expect(codexRecords.filter((record) => record.kind === "message")).toHaveLength(2);
@@ -239,6 +241,11 @@ test("limit and text bounds clamp while full-text redaction runs before truncati
   expect(result.records.every((record) => record.truncated === true)).toBe(true);
   expect(JSON.stringify(result.records)).not.toContain("fixture-value");
   expect(JSON.stringify(result.records)).toContain("[redacted]");
+
+  const lowerBound = page(pathname, "claude", { limit: 0, maxChars: 0 });
+  expect(lowerBound.records).toHaveLength(1);
+  expect(lowerBound.records[0]?.text).toHaveLength(1);
+  expect(lowerBound.records[0]?.truncated).toBe(true);
 });
 
 test("cursor tokens are opaque and scoped to transcript plus filters", () => {

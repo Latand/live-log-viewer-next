@@ -166,7 +166,7 @@ parameters and responses do not change.
   "lastRecordAt": "2026-08-30T10:12:03.000Z" | null,   // newest timestamp in the file, any kind, unfiltered
   "records": [ /* newest first */
     { "seq": 115700123, "kind": "message", "role": "assistant", "ts": "…", "text": "…" },
-    { "seq": 115698871, "part": 1, "kind": "tool_result", "role": "tool", "ts": "…", "text": "…", "truncated": true, "name": "shell" },
+    { "seq": 115698871, "kind": "tool_result", "role": "tool", "ts": "…", "text": "…", "truncated": true, "name": "shell" },
     { "seq": 115690002, "kind": "message", "role": "user", "ts": "…", "text": "…", "phase": "commentary" }
   ],
   "hasMore": true,
@@ -176,14 +176,15 @@ parameters and responses do not change.
 }
 ```
 
-Record shape, identical for both engines: `{ seq, part?, kind, role, ts, text,
-truncated?, name?, phase? }`. `seq` is the byte offset of the record's source
-line and is monotonic within the transcript; `part` is present only when one
-line yields several records (a Claude user record carrying several
-`tool_result` blocks) and orders them within the line. `name` is the tool name
-for `tool_call`/`tool_result` and the trace type for `trace`; `phase` is
-Codex's message phase when the rollout carries one. `ts` is the record's ISO
-timestamp or null. `scanned` is what the call cost, so an empty page with
+Record shape, identical for both engines: `{ seq, kind, role, ts, text,
+truncated?, name?, phase? }`. The originating issue's acceptance shape is
+authoritative here: a source-line part position stays inside the opaque cursor
+and is never emitted as a record field. `seq` is the byte offset of the
+record's source line and is monotonic within the transcript; records from the
+same line retain their newest-first array order. `name` is the tool name for
+`tool_call`/`tool_result` and the trace type for `trace`; `phase` is Codex's
+message phase when the rollout carries one. `ts` is the record's ISO timestamp
+or null. `scanned` is what the call cost, so an empty page with
 `hasMore: true` explains itself (the scan ceiling was hit before a match) and
 so the test can compare the self-report with the bytes actually read.
 
@@ -230,7 +231,7 @@ export interface MessagesPageQuery {
   maxChars: number;
   cursor?: MessagesPageCursor | null;
 }
-export interface ConversationMessage extends SessionRecord { seq: number; part?: number; truncated?: true }
+export interface ConversationMessage extends SessionRecord { seq: number; truncated?: true }
 export interface MessagesPage {
   records: ConversationMessage[];
   cursor: MessagesPageCursor | null;
@@ -402,7 +403,8 @@ and `TMPDIR`; nothing sweeps `src/lib/agent/` or `src/app/api/runtime/`.
   page with no error.
 - Cursor walk with `limit: 1` and with `limit: 7` over a fixture containing a
   Claude user record with three `tool_result` parts: the union of pages equals
-  the forward sequence, no repeats, no gaps, `part` resumes mid-line.
+  the forward sequence with no repeats or gaps, and the opaque cursor resumes
+  mid-line without exposing its part position in a record.
 - `limit` and `maxChars` clamps; `truncated` appears only on cut records.
 - Nothing matches: empty page, `hasMore: true`, `scanned.capped: true`, and
   following the cursor eventually reaches `hasMore: false`.

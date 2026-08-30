@@ -313,7 +313,9 @@ test("conversation_messages publishes identity, filters, clamps, and paging on t
     expect(tool?.description).toContain("maxChars clamps to 1..16000 (default 4000)");
     expect(tool?.description).toContain("next-older page");
     expect(tool?.description).toContain("hasMore");
+    expect(tool?.description).toContain("fresh clientRequestId");
     expect((properties.cursor as { description?: string }).description).toContain("next-older page");
+    expect((properties.cursor as { description?: string }).description).toContain("fresh clientRequestId");
   });
 });
 
