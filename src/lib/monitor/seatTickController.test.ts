@@ -915,6 +915,40 @@ test("a thrown command, a timeout and unusable output each cost nothing and are 
   }
 });
 
+/* The other edge of that table, through the same seam. Exactly the empty array
+   is the answer a check may go quiet on, so the refusal above must not grow
+   into refusing it: a parse that read `[]` as output nobody can attribute
+   would leave every project whose pull requests have all merged in a permanent
+   error, which is the same confusion of an answer with a failure, running the
+   other way. */
+test("the empty array is the one gh answer that still earns quiet", async () => {
+  const rig = harness({
+    pipelines: FINISHED_LANE,
+    tasks: [{ id: "task_b2", status: "inbox" }],
+    state: OVERDUE,
+    githubRun: async () => "[]",
+  });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(record).toMatchObject({ verdict: "quiet", detail: "nothing owed" });
+  expect(rig.sent).toEqual([]);
+  /* And the row records the quiet, which is the claim an error never makes. */
+  expect(rig.written[0]!.quietSince).toBe(new Date(NOW).toISOString());
+
+  /* One usable row beside it, off the same seam and the same parse: the answer
+     that is not empty wakes, so the quiet above came from the answer and not
+     from a seam that had stopped reporting anything. */
+  const open = harness({
+    pipelines: FINISHED_LANE,
+    tasks: [{ id: "task_b2", status: "inbox" }],
+    state: OVERDUE,
+    githubRun: async () => JSON.stringify([
+      { number: 1289, title: "wake on a merge that is waiting", headRefName: "topic-merge-queue", updatedAt: "2026-08-28T11:30:00.000Z" },
+    ]),
+  });
+  expect(await runSeatTickCheck(PROJECT, open.deps)).toMatchObject({ verdict: "wake", reasons: ["unmerged-pr"] });
+  expect(open.sent[0]!.text).toContain("pull request #1289 left open by a lane that finished");
+});
+
 test("a failed delivery leaves the wake stamp where it was, so the next check retries", async () => {
   const rig = harness({
     pipelines: OPEN_LANE,
