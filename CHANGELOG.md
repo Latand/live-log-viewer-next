@@ -50,6 +50,80 @@ guarantees for the 1.x series.
   protecting work in flight is unchanged: the turn still has to settle,
   questions still have to be answered, the queue still has to drain.
 
+### Fixed
+- Whether a turn is being worked on is decided from evidence, so a redeploy no
+  longer strands a lane nothing can recover (#1281, #1282, #1276). `live`,
+  `idle` and `busy` are inherited words: a turn severed mid-flight kept reading
+  busy forever, and a step that legitimately takes ten minutes read stalled. The
+  decision now names what it read — the last transcript event and its kind, the
+  artifact's own clock, whether the process the registry believes owns the turn
+  still exists and is still that process, the CPU it has consumed since its own
+  launch, and how long a delivery has been outstanding for it. A host writing or
+  burning CPU is working however long the gap between messages; a host that has
+  written nothing and burned none since its own launch, under a turn it
+  inherited, is severed. Everything else answers `unknown`, and `unknown`
+  authorises nothing. A transcript that cannot be read — corrupt, truncated,
+  missing, or growing under the read — is answered before anything else is
+  looked at, the recorded process included: a pid that is gone proves that pid
+  is not running, which is just as true of a turn that finished hours ago under
+  a row nobody updated as of one cut off mid-work, and only the transcript tells
+  those apart. The cost of guessing is not symmetric — a kill lands the same way
+  either way, but a retry re-runs work that may already be complete and a
+  continuation nudge re-prompts a seat about a turn that is over — so the
+  reading stops there and consumers are handed `unknown`. The registry's own
+  `busy` or `terminal` word is never borrowed to fill the gap, and a pid whose
+  recorded start identity cannot be revalidated is not evidence about the
+  process the row was written about either. Two consequences follow. A pipeline stage whose host
+  is proven severed leaves `running`, so `retry-stage` works without closing the
+  pipeline — and a stage whose evidence is unreadable keeps its attempt instead.
+  A kill on a host no delivery controller owns reaps the recorded process —
+  fenced on its start identity, and only once the evidence says severed — so the
+  registry row can retire instead of refusing forever and blocking every message
+  queued behind it; an interrupt in the same state settles rather than holding
+  its conversation's drain open.
+- A Viewer restart messages only the orchestrator seats whose own turn was
+  severed (#1276). The predicate was `live` or `idle`, and `idle` meant every
+  dormant project was re-hosted and spent a paid turn answering "no change" on
+  every redeploy — eleven seats, eleven hosts, eleven turns, and fresh activity
+  stamped on projects nobody had touched in days. A seat is now nudged only when
+  the evidence says a turn of its own was cut off, the surviving message names
+  that turn by its last transcript event, and an idle seat gets no message and
+  no process. The message no longer asks the seat to "re-arm any scheduled
+  work": since #1245 the Viewer owns the clock, and a durable agent-managed
+  monitor record is tracked in #1280.
+- A boot that cannot read a transcript starts nothing and retires nothing for it
+  (#1281). A tail read that comes back uncertain makes no observation, so the
+  conversation kept the turn word the last writer left on the row — and that
+  word launched a CLI process for the turn and, on Codex, spent a paid
+  continuation telling the seat to resume it, for a turn that may have ended
+  long ago. Such a row is now left exactly as it is: no host is launched from
+  it, no continuation is sent, and it is held out of the demotion that retires
+  skipped hosts, so whatever can read the artifact next is what decides. Work
+  that is owed regardless still boots its host — a held delivery or a pending
+  runtime operation is evidence of its own.
+- Startup launches no structured host it cannot hand to a delivery controller
+  (#1282). A pass with no runtime client has no publication to claim what it
+  starts, and the check that catches an unclaimed host was behind that same
+  condition, so such a pass adopted hosts and reported success while nothing
+  owned them. Such a pass now defers its adoption: nothing is launched, the
+  boot's own recovery evidence is kept, and the startup retry loop runs the pass
+  again once a client exists. A host adopted by a pass that did have one, but
+  which the controller never claimed, still fails the pass instead of being left
+  running with no owner. And a startup completion that resumes
+  inside a generation the publication has already left now hands its hosts to
+  the successor; it used to answer "done" and register nothing, which is how a
+  launched host ends up parked in `epoll_wait` for half an hour while every
+  recovery verb is refused.
+- The macOS argv reader's live-child test waits for the child to announce its
+  exec before it reads. A pid exists before the image it will run does, and
+  until the exec lands the kernel has no argument record for that image to hand
+  back — the window the Claude login fence already polls through. The test read
+  the moment `spawn` returned, so it asserted the result of a race, and one CI
+  attempt lost it while the next attempt on the identical commit won: a red the
+  tree could not explain. The read now happens after a byte only the executed
+  script can have written. What the test requires is unchanged — one read, the
+  exact exec-time argv of a live child, and `null` once that child is gone.
+
 ### Removed
 - The conversation monitor's standalone CLI driver, its HTTP client and its
   cross-process lock (#1245): `scripts/conversation-monitor.ts`, `httpViewerApi`

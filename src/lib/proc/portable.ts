@@ -182,6 +182,16 @@ function processIdentity(pid: number): string | null {
 }
 
 /**
+ * No per-pid CPU accounting without /proc that does not cost a `ps`
+ * subprocess, and this is read per structured host on a controller tick. The
+ * liveness decision (#1281) treats null as "no evidence" and never as zero, so
+ * losing it here costs a tiebreaker rather than producing a wrong verdict.
+ */
+function processCpuMs(): number | null {
+  return null;
+}
+
+/**
  * No portable route to another process's environment without root (macOS has
  * no /proc, and reading another process's memory needs task_for_pid
  * entitlements this app doesn't have). Lineage resolution that depends on
@@ -278,6 +288,7 @@ export const portableBackend: ProcBackend = {
   readCwd,
   readPpid,
   processIdentity,
+  processCpuMs,
   readEnvVar,
   listProcesses,
   systemMemory,

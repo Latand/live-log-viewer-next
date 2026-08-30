@@ -18,6 +18,7 @@ import {
   type SeatTickEventInput,
   type SeatTickPipelineInput,
   type SeatTickProjectState,
+  type SeatTickPullRequestInput,
   type SeatTickSeatInput,
   type SeatTickTaskInput,
   type SeatTickVerdict,
@@ -59,7 +60,27 @@ function card(over: Partial<SeatTickTaskInput> = {}): SeatTickTaskInput {
 }
 
 function event(over: Partial<SeatTickEventInput> = {}): SeatTickEventInput {
-  return { seq: 42, at: new Date(NOW - MINUTE).toISOString(), type: "stage_blocked", summary: "the review round is parked", pipelineId: "pipeline_a1", ...over };
+  return {
+    seq: 42,
+    at: new Date(NOW - MINUTE).toISOString(),
+    type: "stage_blocked",
+    summary: "the review round is parked",
+    pipelineId: "pipeline_a1",
+    pipelineTerminal: false,
+    ...over,
+  };
+}
+
+/** A pull request a finished lane left open (#1289). */
+function pullRequest(over: Partial<SeatTickPullRequestInput> = {}): SeatTickPullRequestInput {
+  return {
+    number: 1289,
+    title: "wake on a merge that is waiting",
+    pipelineId: "pipeline_a1",
+    pipelineTitle: "ship the exporter",
+    updatedAt: new Date(NOW - 30 * MINUTE).toISOString(),
+    ...over,
+  };
 }
 
 function input(over: Partial<SeatTickCheckInput> = {}): SeatTickCheckInput {
@@ -70,7 +91,8 @@ function input(over: Partial<SeatTickCheckInput> = {}): SeatTickCheckInput {
     pipelines: [],
     tasks: [],
     events: [],
-    terminalPending: false,
+    pullRequests: [],
+    pullRequestsUnavailable: null,
     signals: [],
     changeFingerprint: "fp-1",
     state: emptySeatTickState(),
@@ -238,7 +260,7 @@ test("a lane with no activity verdict at all is never called stalled", () => {
    hourly bound has no exempt reason kind, because a reason allowed to jump it
    would make the ADR's cost argument describe a different system. */
 test("a terminal lane event leads the next wake rather than raising one early", () => {
-  const args = { events: [event()], terminalPending: true, pipelines: [lane()] };
+  const args = { events: [event()], pipelines: [lane()] };
   const early = seatTickDecision(input({ ...args, state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }) }));
   expect(early.verdict.kind).toBe("quiet");
 
@@ -250,25 +272,336 @@ test("a terminal lane event leads the next wake rather than raising one early", 
 test("routine lane events do not wake on their own", () => {
   const decision = seatTickDecision(input({
     events: [event({ type: "stage_started", summary: "builder started" })],
-    terminalPending: false,
     pipelines: [lane()],
     state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
   }));
   expect(decision.verdict.kind).toBe("quiet");
 });
 
-/* A verdict at pending position 401 is as decision-blocking as one at position
-   one, so the pending question is asked over the whole range rather than the
-   page this check happened to read. */
-test("a terminal event buried past the page still wakes, naming that it is further down", () => {
+/* #1285, the first direction. Three consecutive wakes were spent listing events
+   whose pipelines had reached a terminal state the day before — two of them
+   closed by the seat itself earlier in the same session. A lane that is over
+   owes nothing, so an event about it is history and never an agenda. */
+test("events whose lanes have finished are history, and a project holding only those is quiet", () => {
   const decision = seatTickDecision(input({
-    events: [event({ type: "stage_started", summary: "builder started" })],
-    terminalPending: true,
+    events: [
+      event({ seq: 60, type: "stage_completed", summary: "the builder finished", pipelineTerminal: true }),
+      event({ seq: 61, type: "review_verdict", summary: "the round passed", pipelineId: "pipeline_c3", pipelineTerminal: true }),
+    ],
+    /* Open work, so the answer under test is "nothing owed" rather than "the
+       board is done" — and an inbox card is deliberately not an agenda of its
+       own, which leaves the events as the only thing that could wake anyone. */
+    tasks: [card({ status: "inbox" })],
+    state: stateWith({ eventsThrough: 59, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+});
+
+/* And the count beside the reason says how much of it is live. "18 more" over a
+   page that was almost entirely closed lanes described a queue of eighteen
+   things to do that did not exist. */
+test("the lane-event count names only the events that are still owed", () => {
+  const decision = seatTickDecision(input({
+    events: [
+      event({ seq: 60, type: "stage_completed", summary: "yesterday's lane finished", pipelineTerminal: true }),
+      event({ seq: 61, type: "review_verdict", summary: "the round passed" }),
+      event({ seq: 62, type: "stage_failed", summary: "the verifier failed", pipelineTerminal: true }),
+      event({ seq: 63, type: "stage_blocked", summary: "the round is parked" }),
+    ],
     pipelines: [lane()],
-    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+    state: stateWith({ eventsThrough: 59, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
   }));
   expect(reasonsOf(decision.verdict)).toEqual(["lane-event"]);
-  expect(decision.verdict.kind === "wake" && decision.verdict.reasons[0]!.detail).toContain("further down the journal");
+  expect(decision.verdict.kind === "wake" && decision.verdict.reasons[0]!.detail)
+    .toBe("review_verdict since the last delivered wake and 1 more");
+  expect(decision.verdict.kind === "wake" && decision.verdict.items.filter((item) => item.kind === "event"))
+    .toHaveLength(2);
+});
+
+/* The second half of #1285, and the expensive one. A backlog drained at
+   `itemsPerWake` per hourly wake is ten resumed hosts and ten paid turns for
+   fifty events that were history. One look establishes that nothing in front of
+   the cursor is owed, and the cursor moves on that look alone. */
+test("a page of history is discharged by the check that read it, with no wake at all", () => {
+  const history = Array.from({ length: 50 }, (_, index) => event({
+    seq: 100 + index,
+    type: "stage_completed",
+    summary: "a lane that closed yesterday finished",
+    pipelineTerminal: true,
+  }));
+  const decision = seatTickDecision(input({
+    events: history,
+    tasks: [card({ status: "inbox" })],
+    state: stateWith({ eventsThrough: 99, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind).toBe("quiet");
+  expect(decision.state.eventsThrough).toBe(149);
+});
+
+/* The seal is not a licence to acknowledge. It stops dead at the first event
+   that is still owed, so the history in front of one is discharged and the
+   event itself waits for a wake that actually lands. */
+test("the seal stops at the first event that is still owed", () => {
+  const decision = seatTickDecision(input({
+    events: [
+      event({ seq: 60, type: "stage_started", summary: "builder started" }),
+      event({ seq: 61, type: "stage_completed", summary: "a closed lane's stage", pipelineTerminal: true }),
+      event({ seq: 62, type: "review_verdict", summary: "the round passed" }),
+      event({ seq: 63, type: "stage_completed", summary: "another closed lane's stage", pipelineTerminal: true }),
+    ],
+    pipelines: [lane()],
+    state: stateWith({ eventsThrough: 59, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.state.eventsThrough).toBe(61);
+  expect(reasonsOf(decision.verdict)).toEqual(["lane-event"]);
+  /* And only a landing takes the cursor past the live one. */
+  expect(seatTickWakeCommit(decision.state, plan(decision.verdict, "fp-1", 63), NOW).eventsThrough).toBe(63);
+});
+
+/* A skipped check remembers nothing — including this. The turn it landed behind
+   has already superseded the evidence it read. */
+test("a skipped check seals nothing", () => {
+  const decision = seatTickDecision(input({
+    seat: seat({ turn: "busy", activity: { lifecycle: "running", reason: "host_alive_turn_active" } }),
+    events: [event({ seq: 60, type: "stage_completed", summary: "a closed lane's stage", pipelineTerminal: true })],
+    state: stateWith({ eventsThrough: 59 }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "skipped", reason: "seat-busy" });
+  expect(decision.state.eventsThrough).toBe(59);
+});
+
+/* A live event further down the journal than this check reads is NOT announced
+   as "something is waiting". That wake carried no item naming it, so the seat
+   paid a resume to be told to look again — and the pages of history in front of
+   it are now sealed away for free, so the check that reaches it names it. */
+test("a live event past the page waits for the check that can name it, rather than raising an empty wake", () => {
+  const decision = seatTickDecision(input({
+    events: [event({ seq: 60, type: "stage_completed", summary: "a closed lane's stage", pipelineTerminal: true })],
+    tasks: [card({ status: "inbox" })],
+    state: stateWith({ eventsThrough: 59, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+  expect(decision.state.eventsThrough).toBe(60);
+});
+
+/* #1289, the mirror image, and it cost twelve hours. Two lanes finished with
+   clean approvals, three pull requests sat approved and unmerged, and the tick
+   answered "quiet — nothing owed" every five minutes because `hasOpenWork`
+   counts open lanes and board cards and a finished lane is neither. */
+test("a finished lane whose pull request is still open is a wake reason of its own, naming the pull request", () => {
+  const decision = seatTickDecision(input({
+    pullRequests: [pullRequest()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["unmerged-pr"]);
+  expect(decision.verdict.kind === "wake" && decision.verdict.reasons[0]!.detail)
+    .toBe("pull request #1289 left open by a lane that finished");
+  expect(decision.verdict.kind === "wake" && decision.verdict.items[0]).toEqual({
+    kind: "pull-request",
+    id: "#1289",
+    label: "wake on a merge that is waiting — open pull request from ship the exporter, unmerged since that lane finished",
+  });
+});
+
+/* The merge is the discharge, and the only one. The source reads OPEN pull
+   requests, so a merged or closed one is simply absent and the same project
+   goes quiet with no second mechanism silencing anything. */
+test("a merged batch goes quiet on its own", () => {
+  const decision = seatTickDecision(input({
+    pullRequests: [],
+    tasks: [card({ status: "inbox" })],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+});
+
+/* It is a reason, never a route around the bound: the hourly interval applies
+   to it exactly as it applies to a terminal lane event. */
+test("an unmerged pull request waits out the wake interval like every other reason", () => {
+  const decision = seatTickDecision(input({
+    pullRequests: [pullRequest()],
+    state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind).toBe("quiet");
+});
+
+/* And the retry guard applies to it too, so a pull request nobody merges stops
+   costing an hourly wake and becomes one card instead. */
+test("an unmerged pull request that has stopped producing change is held by the retry guard", () => {
+  const decision = seatTickDecision(input({
+    pullRequests: [pullRequest()],
+    state: stateWith({
+      lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+      lastWakeFingerprint: "fp-1",
+      wakesWithoutChange: { "unmerged-pr": 2 },
+    }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "every wake reason is held by the retry guard" });
+  expect(decision.cards.map((card) => card.ref)).toContain("seat-tick-stuck-unmerged-pr");
+});
+
+/* Several at once name the first and count the rest, and every one of them is
+   carried as an item — the seat acts on the list without rediscovering it. */
+test("several unmerged pull requests are counted in the reason and named one by one", () => {
+  const decision = seatTickDecision(input({
+    pullRequests: [pullRequest(), pullRequest({ number: 1290, title: "stop replaying closed lanes" })],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind === "wake" && decision.verdict.reasons[0]!.detail)
+    .toBe("pull request #1289 and 1 more left open by a lane that finished");
+  expect(decision.verdict.kind === "wake" && decision.verdict.items.map((item) => item.id)).toEqual(["#1289", "#1290"]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * A read that failed may not be spent as a silence.
+ *
+ * The empty list a failed `gh` used to return was indistinguishable from every
+ * pull request having merged, and the decision published `quiet — nothing
+ * owed` on the strength of it. Quiet is a conclusion; this is what happens
+ * when the evidence for it could not be read.
+ * ------------------------------------------------------------------------- */
+
+test("a check that could not read the open pull requests reports an error instead of quiet", () => {
+  const decision = seatTickDecision(input({
+    pullRequestsUnavailable: "command-failed",
+    tasks: [card({ status: "inbox" })],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict).toEqual({
+    kind: "error",
+    detail: "the open pull requests of this project's finished lanes could not be read (command-failed), so nothing owed is not established",
+  });
+});
+
+/* Every way the read can fail, and none of them is a merge. */
+test("a timeout and a malformed answer are refused as quiet exactly like a failed command", () => {
+  for (const gap of ["timed-out", "malformed-output", "lanes-unreadable"] as const) {
+    const decision = seatTickDecision(input({
+      pullRequestsUnavailable: gap,
+      tasks: [card({ status: "inbox" })],
+      state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+    }));
+    expect(decision.verdict.kind).toBe("error");
+  }
+});
+
+/* The bound the fix must not become a way around: the error raises no wake, so
+   there is nothing for the stamp or the guard to record, and an hour of `gh`
+   failures leaves the next real wake exactly as due as it was. */
+test("a failed read spends neither the wake stamp nor the retry guard", () => {
+  const before = stateWith({
+    lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+    lastWakeFingerprint: "fp-1",
+    wakesWithoutChange: { "unmerged-pr": 1 },
+    quietSince: null,
+  });
+  const decision = seatTickDecision(input({ pullRequestsUnavailable: "timed-out", state: before }));
+  expect(decision.state.lastWakeAt).toBe(before.lastWakeAt);
+  expect(decision.state.wakesWithoutChange).toEqual({ "unmerged-pr": 1 });
+  expect(decision.state.lastWakeReasons).toEqual(before.lastWakeReasons);
+  /* And it does not record the project as having been quiet since now, which
+     is the same claim in the state row that the verdict just declined to
+     make. */
+  expect(decision.state.quietSince).toBeNull();
+});
+
+/* The failed read is refused ahead of the wake, not only ahead of the quiet.
+   A wake delivered here would advance the wake stamp and the retry guard, so
+   the reason that stood on its own would have paid the hour on behalf of the
+   read that answered nothing. It waits for the next check instead — one check
+   interval, not one wake interval — and the gap is journaled meanwhile. */
+test("a wake reason that stands on its own is held rather than spent while GitHub is unreadable", () => {
+  const decision = seatTickDecision(input({
+    pullRequestsUnavailable: "command-failed",
+    events: [event({ seq: 60, type: "stage_blocked", summary: "the review round is parked" })],
+    state: stateWith({ eventsThrough: 59, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind).toBe("error");
+  expect(reasonsOf(decision.verdict)).toEqual([]);
+});
+
+/* Every way the read can fail, against every other reason that could have
+   carried a wake past it. None of them may move the stamp or the counter. */
+test("no candidate reason lets a failed read spend the stamp or the guard", () => {
+  const before = stateWith({
+    eventsThrough: 59,
+    lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+    lastWakeFingerprint: "fp-0",
+    wakesWithoutChange: { "lane-event": 1 },
+    quietSince: null,
+  });
+  const candidates = {
+    "lane-event": { events: [event({ seq: 60 })] },
+    "unstarted-task": { tasks: [card({ updatedAt: new Date(NOW - 90 * MINUTE).toISOString() })] },
+    /* Carrying its own row, because a stall is only a reason once the memory of
+       the previous check says it survived one. */
+    stalled: {
+      pipelines: [lane({ stageActivity: { lifecycle: "stalled", reason: "host_alive_transcript_silent" } })],
+      state: { ...before, stalledSeen: ["pipeline_a1"] },
+    },
+    interval: { pipelines: [lane()] },
+  } satisfies Record<string, Partial<SeatTickCheckInput>>;
+  for (const gap of ["command-failed", "timed-out", "malformed-output"] as const) {
+    for (const [name, candidate] of Object.entries(candidates)) {
+      const decision = seatTickDecision(input({ state: before, ...candidate, pullRequestsUnavailable: gap }));
+      expect(`${name}/${gap}: ${decision.verdict.kind}`).toBe(`${name}/${gap}: error`);
+      expect(decision.state.lastWakeAt).toBe(before.lastWakeAt);
+      expect(decision.state.lastWakeFingerprint).toBe(before.lastWakeFingerprint);
+      expect(decision.state.wakesWithoutChange).toEqual({ "lane-event": 1 });
+      /* And no claim of quiet in the row either, so the next check is due
+         exactly as this one was. */
+      expect(decision.state.quietSince).toBeNull();
+    }
+  }
+});
+
+/* The proposal is the fourth thing a check can spend, and it is spent on the
+   strength of an idle board — which is the very reading a failed pull-request
+   read leaves unestablished. So it waits with the rest, and its 24-hour slot
+   stays unstamped for the check that can see what the finished lanes left. */
+test("an idle board with the proposal slot due proposes nothing while GitHub is unreadable", () => {
+  const decision = seatTickDecision(input({
+    tasks: [card({ status: "done" })],
+    pullRequestsUnavailable: "lanes-unreadable",
+  }));
+  expect(decision.verdict.kind).toBe("error");
+  expect(decision.state.lastProposalAt).toBeNull();
+  /* And the board is not recorded as idle since now either: an idle board is
+     the same claim about the same evidence. */
+  expect(decision.state.idleSince).toBeNull();
+  expect(decision.state.quietSince).toBeNull();
+});
+
+/* And the interval still bounds it from the other side: a check that was never
+   going to ask GitHub carries no gap, so it goes quiet as it always did. */
+test("a check inside the interval is quiet rather than an error", () => {
+  const decision = seatTickDecision(input({
+    tasks: [card({ status: "inbox" })],
+    state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+});
+
+/* A tick that is off is off; nothing was read, so there is nothing to report
+   as unreadable. */
+test("a project whose tick is off stays quiet rather than reporting an error", () => {
+  const decision = seatTickDecision(input({
+    pullRequestsUnavailable: "command-failed",
+    settings: settings({ enabled: false, reason: "nothing here for me" }),
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind).toBe("quiet");
+});
+
+/* An unmerged pull request is open work, so a board with nothing else on it
+   does not read as idle and the proposal slot does not open under it. */
+test("a finished lane with an open pull request is not an idle board", () => {
+  const decision = seatTickDecision(input({
+    pullRequests: [pullRequest()],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(), lastProposalAt: null }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["unmerged-pr"]);
+  expect(decision.state.idleSince).toBeNull();
 });
 
 test("an assigned task nothing has started wakes the seat once the wake interval has elapsed", () => {
@@ -426,7 +759,6 @@ test("the wake commit records the wake, and only the commit advances lastWakeAt"
 test("no commit means no cursor: the event cursor moves only with a delivered wake", () => {
   const decision = seatTickDecision(input({
     events: [event({ seq: 44 })],
-    terminalPending: true,
     pipelines: [lane()],
     state: stateWith({ eventsThrough: 12, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
   }));
