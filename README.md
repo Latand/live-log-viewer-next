@@ -57,14 +57,14 @@ need any of it.
 Each project is a pannable, zoomable scheme — root conversations on top,
 spawned agents one generation below, arrows colored by engine. Draft a new
 agent right on the board: pick Claude or Codex, a model and reasoning effort,
-type the first prompt, and it launches into tmux.
+type the first prompt, and it launches.
 
 ![Drafting and configuring a new agent on the project board](docs/media/spawn-agent.gif)
 
 ### Run implement → review loops
 
-The viewer orchestrates review cycles: a long-lived implementer in tmux, a
-fresh read-only reviewer each round over the full diff, findings relayed
+The viewer orchestrates review cycles: a long-lived implementer, a fresh
+read-only reviewer each round over the full diff, findings relayed
 automatically, and a verdict deck in the scheme view.
 
 ![A review loop: round 1 requested changes, round 2 re-checks live](docs/media/review-loop.gif)
@@ -72,8 +72,8 @@ automatically, and a verdict deck in the scheme view.
 ### Answer a blocked agent from the browser
 
 When an agent stops on an `AskUserQuestion`, the question surfaces as a card
-with clickable options. The answer is delivered into the agent's tmux pane and
-confirmed against the transcript — the agent just keeps going.
+with clickable options. The answer is delivered to the agent and confirmed
+against the transcript — the agent just keeps going.
 
 ![Answering a pending AskUserQuestion from the feed](docs/media/pending-question.gif)
 
@@ -311,7 +311,7 @@ agent-log-viewer [options]
 
 Linux is the native target: process discovery reads `/proc` directly. macOS is
 supported through a portable backend that shells out to `ps` and `lsof`
-instead — same live-process detection, tmux composer targeting, agent
+instead — same live-process detection, composer host targeting, agent
 spawn/kill and background-task discovery, just a bit more subprocess overhead
 per scan. The backend is chosen automatically by `process.platform` (see
 `src/lib/proc/`); `VIEWER_PROC_BACKEND=portable` forces the portable path on
@@ -320,10 +320,10 @@ Linux too, for testing.
 The package supports Linux and macOS. The package's `os` field blocks Windows
 installs with `EBADPLATFORM`. WSL works as Linux.
 
-`tmux` is optional. Without it, log viewing, the parentage tree, live activity
-and deep links all work; the composer, agent spawn/kill and resume-into-pane
-features need tmux (`brew install tmux` on macOS, or your distro's package on
-Linux).
+`tmux` is optional, and nothing needs it to launch or message an agent —
+agents run on a structured runtime host (see [Spawn transport](#spawn-transport)).
+It is needed only to attach a terminal to a legacy pane that predates that host
+(`brew install tmux` on macOS, or your distro's package on Linux).
 
 ## Language
 
@@ -352,7 +352,7 @@ and troubleshooting.
 ## Review loops
 
 The viewer orchestrates implement→review cycles: a long-lived implementer
-agent in tmux, a fresh read-only reviewer per round over the full diff,
+agent, a fresh read-only reviewer per round over the full diff,
 automatic relay of findings, and a verdict deck in the scheme view. Start one
 from the **Flow** chip above a conversation pane; presets pair engines and
 reasoning efforts per role (e.g. `Terra high → Sol xhigh`). New Codex agents
@@ -391,14 +391,18 @@ runs without `--tailscale`, the button shows a hint to start
 
 Anyone with tailnet access to this URL can read all agent transcripts,
 including any sensitive data that landed in a session, and can execute commands
-through `/api/tmux` and `/api/spawn`. Treat the tailnet URL as a secret — do
-not forward it to anyone else.
+through `/api/conversation-host` and `/api/spawn`. Treat the tailnet URL as a
+secret — do not forward it to anyone else.
 
 ## Security model
 
 The log APIs refuse any path that does not resolve into one of the whitelisted
 log roots (see `src/lib/scanner/roots.ts`). Mutating endpoints exist:
-`/api/tmux` sends keys to tmux sessions and `/api/spawn` starts commands.
+`/api/conversation-host` resumes or respawns a conversation's host and delivers
+a message to it, and `/api/spawn` starts commands. The same handlers are still
+mounted at the legacy path `/api/tmux`; that name is historical and no tmux is
+involved in delivery — the engine is spawned into the host namespace through
+`nsenter` with privileges dropped.
 
 By default the CLI binds to `127.0.0.1`. With `--tailscale`, access is exposed
 inside the tailnet via `tailscale serve` and guarded by the token gate in

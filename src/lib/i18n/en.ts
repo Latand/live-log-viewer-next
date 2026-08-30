@@ -2172,7 +2172,6 @@ export const en = {
   "tasks.pickerSend": "Send ({count})",
   "tasks.sendOk": "Delivered {delivered} of {total}",
   "tasks.sendFailPart": "✗ “{title}”: {error}",
-  "tasks.spawnOk": "agent started in tmux {target}",
   "tasks.composerToggle": "create a task",
   "tasks.composerToggleTitle": "On — the text becomes a tracked task card assigned to the selection; off — a plain broadcast with no trace",
   "tasks.composerNeedsText": "a task needs text",

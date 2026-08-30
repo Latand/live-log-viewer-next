@@ -2109,7 +2109,6 @@ export const uk: Record<keyof typeof en, Message> = {
   "tasks.pickerSend": "Надіслати ({count})",
   "tasks.sendOk": "Доставлено {delivered} з {total}",
   "tasks.sendFailPart": "✗ „{title}“: {error}",
-  "tasks.spawnOk": "агента запущено в tmux {target}",
   "tasks.composerToggle": "створити задачу",
   "tasks.composerToggleTitle": "Увімкнено — текст стає задачею-карткою з призначеннями на вибір; вимкнено — проста розсилка без сліду",
   "tasks.composerNeedsText": "для задачі потрібен текст",
