@@ -265,6 +265,10 @@ async function reconcileTerminalDeliveries(
           disposition: verdict.disposition,
         };
       } catch (error) {
+        /* Scoped to this one delivery on purpose (#1131): a status that could
+           not be read contributes no outcome, so the row keeps the state it
+           has and the next startup asks again. Nothing is terminalized on it,
+           and the other rows in the page are still reconciled. */
         console.error("[structured delivery] terminal receipt reconciliation failed", {
           operationId: delivery.command.operationId,
           conversationId: delivery.conversationId,
@@ -948,6 +952,11 @@ export async function bindStructuredDeliveryQueue(
       if (stopped || state.activeQueue !== queue) return;
       for (const item of items) await register(item);
       const startupSnapshot = registry.readOnlySnapshot();
+      /* Read only to skip republishing a projection that already says what
+         this pass would say. It decides nothing else: the state published
+         below is read off the registry, never off this snapshot, so a read
+         that failed costs one redundant publish and authorises nothing
+         (#1131). */
       const runtimeSnapshot = typeof client.snapshot === "function"
         ? await client.snapshot().catch(() => null)
         : null;
