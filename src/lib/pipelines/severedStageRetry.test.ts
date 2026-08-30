@@ -31,6 +31,7 @@ const { procBackend } = await import("@/lib/proc");
 const { RuntimeJournal } = await import("@/runtime-host/journal");
 const { bindStructuredDeliveryQueue } = await import("@/lib/runtime/structuredDeliveryController");
 const { dispatchStructuredControl } = await import("@/lib/runtime/structuredControls");
+const { conversationTurnLiveness, LIVENESS_CPU_PROGRESS_WINDOW_MS } = await import("@/lib/runtime/liveness");
 const { createPipelineFromRequest, defaultPipelinePorts, patchPipeline, stopPipelineStageAgent, tickPipelines } = await import("./engine");
 const { loadPipelines, savePipelines } = await import("./store");
 const { registerPipelineTick } = await import("./controllerSignal");
@@ -262,10 +263,15 @@ test("a CPU-flat stage autonomously retires its exact child before one replaceme
   const stage = severedStage();
   const journal = new RuntimeJournal(path.join(path.dirname(stage.transcript), "autonomous-runtime.sqlite"), { structuredHosts: true });
   const client = runtimeJournalClient(journal);
+  const livenessStartedAt = Date.now() + LATER_MS;
+  const livenessUptimeAtStart = os.uptime() + LATER_MS / 1_000;
+  let livenessElapsedMs = 0;
   const liveness = {
-    now: () => Date.now() + LATER_MS,
-    uptimeSeconds: () => os.uptime() + LATER_MS / 1_000,
-    processCpuMs: () => 4_700,
+    now: () => livenessStartedAt + livenessElapsedMs,
+    uptimeSeconds: () => livenessUptimeAtStart + livenessElapsedMs / 1_000,
+    /* A one-time resume cost makes lifetime CPU look active. Holding this
+       value flat makes the recent observation window the deciding evidence. */
+    processCpuMs: () => 20_000,
   };
   const spawns: string[] = [];
   const ports = stagePorts(stage, spawns, { liveness, autonomousStopClient: client }) as PipelinePorts & {
@@ -295,8 +301,31 @@ test("a CPU-flat stage autonomously retires its exact child before one replaceme
 
     await bindStructuredDeliveryQueue([], { registry: stage.registry, client, liveness });
     ports.advanceWallClock(6 * 60_000);
+
+    /* The first production liveness read records the baseline. Even with the
+       pipeline grace already spent, no host may retire before the full recent
+       CPU window exists. */
+    await tickPipelines([], ports);
+    livenessElapsedMs = LIVENESS_CPU_PROGRESS_WINDOW_MS - 1;
+    await tickPipelines([], ports);
+    expect(procBackend.pidAlive(stage.child.pid)).toBe(true);
+    expect(stage.registry.readOnlySnapshot().entries[`claude:${stage.key.sessionId}`]).toMatchObject({
+      status: "live",
+      structuredHost: { process: { pid: stage.child.pid } },
+    });
+    expect(loadPipelines()[0]!.runs[0]!.attempts).toHaveLength(1);
+    expect(loadPipelines()[0]!.runs[0]!.attempts[0]).toMatchObject({ state: "running" });
+
+    livenessElapsedMs = LIVENESS_CPU_PROGRESS_WINDOW_MS;
+    const recent = await conversationTurnLiveness(stage.registry, stage.conversationId, liveness);
+    expect(recent).toMatchObject({ state: "severed", hostEvidence: { cpuProgress: {
+      consumedMs: 0,
+      observedMs: LIVENESS_CPU_PROGRESS_WINDOW_MS,
+    } } });
+    expect(recent?.reason).toContain(`latest ${LIVENESS_CPU_PROGRESS_WINDOW_MS / 1_000}s`);
     await tickPipelines([], ports);
 
+    expect(procBackend.pidAlive(stage.child.pid)).toBe(false);
     expect(stage.registry.readOnlySnapshot().entries[`claude:${stage.key.sessionId}`]).toMatchObject({
       status: "dead",
       structuredHost: null,

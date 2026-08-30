@@ -2018,6 +2018,68 @@ test.each(["codex", "claude"] as const)(
       stdout: "pipe",
       stderr: "pipe",
     });
+    const replacements: Array<ReturnType<typeof Bun.spawn>> = [];
+    let replacementAttempts = 0;
+    const adoptReplacement = async () => {
+      replacementAttempts += 1;
+      const replacement = Bun.spawn({ cmd: ["/usr/bin/sleep", "60"], stdout: "ignore", stderr: "ignore" });
+      replacements.push(replacement);
+      const state = {
+        status: "idle" as const,
+        sessionKey: sessionId,
+        endpoint: `stdio:${replacement.pid}`,
+        pid: replacement.pid,
+        processStartIdentity: procBackend.processIdentity(replacement.pid),
+        eventCursor: 0,
+        protocolVersion: "handover-replacement",
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+        account: null,
+      };
+      let released = false;
+      return Object.assign(new FakeEngineHost(createFakeDeliveryLedger(), state), {
+        setWriterFence: () => {},
+        onStateChange: (listener: (value: typeof state) => void) => {
+          listener(state);
+          return () => {};
+        },
+        release: async () => {
+          if (released) return;
+          released = true;
+          replacement.kill("SIGTERM");
+          await replacement.exited;
+        },
+      });
+    };
+    const adoptCodexReplacement: NonNullable<StructuredStartupDependencies["adopt"]> = (
+      received,
+      optionsFor,
+      env,
+      shouldAdopt,
+      processed,
+    ) => adoptCodexRegistryHosts(
+      received,
+      optionsFor,
+      env,
+      shouldAdopt,
+      processed,
+      { adoptHost: adoptReplacement as never },
+    );
+    const adoptClaudeReplacement: NonNullable<StructuredStartupDependencies["adoptClaude"]> = (
+      received,
+      optionsFor,
+      env,
+      shouldAdopt,
+      processed,
+    ) => adoptClaudeRegistryHosts(
+      received,
+      optionsFor,
+      env,
+      shouldAdopt,
+      processed,
+      { adoptHost: adoptReplacement as never },
+    );
     const dependencies: StructuredStartupDependencies = {
       registry,
       client,
@@ -2027,7 +2089,9 @@ test.each(["codex", "claude"] as const)(
       resolveClaudeOwner: () => null,
       ...(engine === "codex" ? { adoptClaude: async () => [] } : { adopt: async () => [] }),
     };
-    const replacements: Array<ReturnType<typeof Bun.spawn>> = [];
+    const scheduledRetries: Array<() => void> = [];
+    const scheduledRetryDelays: number[] = [];
+    const startupLogs: unknown[][] = [];
 
     try {
       await waitFor(() => fs.existsSync(readyPath), 5_000);
@@ -2059,15 +2123,35 @@ test.each(["codex", "claude"] as const)(
          writer claim is considered. */
       fs.writeFileSync(targetPath, "candidate");
       let activations = 0;
-      await expect(activateViewerRuntimeWhenCurrent(async () => {
+      await activateViewerRuntimeWhenCurrent(async () => {
         activations += 1;
-        await adoptStructuredHostsAtStartup(dependencies);
+        await runStructuredHostStartup(
+          () => adoptStructuredHostsAtStartup(dependencies),
+          (...args) => { startupLogs.push(args); },
+          {
+            initialRetryMs: 100,
+            jitterRatio: 0,
+            schedule: (callback, delayMs) => {
+              scheduledRetries.push(callback);
+              scheduledRetryDelays.push(delayMs);
+              return { unref() {} };
+            },
+          },
+        );
       }, () => fs.readFileSync(targetPath, "utf8").trim() === "candidate", {
         schedule: () => ({ unref() {} }),
-      })).rejects.toThrow(
+      });
+      expect(activations).toBe(1);
+      expect(didStructuredHostStartupFail()).toBe(true);
+      expect(scheduledRetries).toHaveLength(1);
+      expect(scheduledRetryDelays).toEqual([100]);
+      expect(replacementAttempts).toBe(0);
+      expect(startupLogs).toHaveLength(1);
+      expect(startupLogs[0]![0]).toBe("[structured hosts] startup adoption failed; retry scheduled");
+      expect(startupLogs[0]![1]).toBeInstanceOf(Error);
+      expect((startupLogs[0]![1] as Error).message).toBe(
         `structured startup left 1 eligible host(s) owned by the incumbent Viewer: ${engine}:${sessionId}`,
       );
-      expect(activations).toBe(1);
       const refused = registry.readOnlySnapshot().entries[`${engine}:${sessionId}`]!;
       expect(refused.structuredHost?.process).toEqual(identities.engine);
       expect(refused.claimOwner).toBe(`structured-host:${JSON.stringify(identities.viewer)}`);
@@ -2084,67 +2168,24 @@ test.each(["codex", "claude"] as const)(
         structuredHost: { endpoint: "stdio:released", process: null },
       });
 
-      let replacementAttempts = 0;
-      const adoptReplacement = async () => {
-        replacementAttempts += 1;
-        const replacement = Bun.spawn({ cmd: ["/usr/bin/sleep", "60"], stdout: "ignore", stderr: "ignore" });
-        replacements.push(replacement);
-        const state = {
-          status: "idle" as const,
-          sessionKey: sessionId,
-          endpoint: `stdio:${replacement.pid}`,
-          pid: replacement.pid,
-          processStartIdentity: procBackend.processIdentity(replacement.pid),
-          eventCursor: 0,
-          protocolVersion: "handover-replacement",
-          activeTurnRef: null,
-          pendingAttention: [],
-          activeFlags: [],
-          account: null,
-        };
-        let released = false;
-        return Object.assign(new FakeEngineHost(createFakeDeliveryLedger(), state), {
-          setWriterFence: () => {},
-          onStateChange: (listener: (value: typeof state) => void) => {
-            listener(state);
-            return () => {};
-          },
-          release: async () => {
-            if (released) return;
-            released = true;
-            replacement.kill("SIGTERM");
-            await replacement.exited;
-          },
-        });
-      };
-      const retryDependencies: StructuredStartupDependencies = {
-        ...dependencies,
-        ...(engine === "codex"
-          ? {
-              adopt: (received, optionsFor, env, shouldAdopt, processed) => adoptCodexRegistryHosts(
-                received,
-                optionsFor,
-                env,
-                shouldAdopt,
-                processed,
-                { adoptHost: adoptReplacement as never },
-              ),
-            }
-          : {
-              adoptClaude: (received, optionsFor, env, shouldAdopt, processed) => adoptClaudeRegistryHosts(
-                received,
-                optionsFor,
-                env,
-                shouldAdopt,
-                processed,
-                { adoptHost: adoptReplacement as never },
-              ),
-            }),
-      };
-      const adopted = await adoptStructuredHostsAtStartup(retryDependencies);
-      expect(adopted.map(({ key }) => key)).toContainEqual({ engine, sessionId });
+      /* Keep the first pass on the production adopter so its unresolved-host
+         assertion proves the refusal. Once the incumbent has released the row,
+         the retry uses the fixture host adapter while the scheduler still owns
+         when the second pass runs. */
+      if (engine === "codex") dependencies.adopt = adoptCodexReplacement;
+      else dependencies.adoptClaude = adoptClaudeReplacement;
+      const retry = scheduledRetries.shift();
+      if (!retry) throw new Error("structured startup retry was not scheduled");
+      retry();
+      await waitFor(() => !didStructuredHostStartupFail() && replacementAttempts === 1);
+
+      expect(scheduledRetries).toEqual([]);
       expect(replacementAttempts).toBe(1);
       expect(replacements).toHaveLength(1);
+      expect(hasStructuredDeliveryHost({ engine, sessionId })).toBe(true);
+      expect(structuredStartupHosts().filter(
+        ({ key }) => key.engine === engine && key.sessionId === sessionId,
+      )).toHaveLength(1);
       expect(registry.readOnlySnapshot().entries[`${engine}:${sessionId}`]).toMatchObject({
         status: "idle",
         structuredHost: { process: { pid: replacements[0]!.pid } },
