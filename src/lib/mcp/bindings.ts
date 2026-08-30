@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import viewerPackageManifest from "../../../package.json";
+
 import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { ENGINE_MODELS, validateLaunchModel } from "@/lib/agent/models";
 import { procBackend } from "@/lib/proc";
@@ -74,6 +76,7 @@ import { PIPELINE_LIST_DEFAULT_LIMIT, projectPipelineListRows } from "@/lib/pipe
 import { loadPipelinesForList } from "@/lib/pipelines/store";
 import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
 import type { PauseResumeActor } from "@/lib/pauseResumeActor";
+import { projectIdentityFromRemote } from "@/lib/projects/identity";
 import { listFiles } from "@/lib/scanner";
 import { describe, projectForCwd, reprojectFileDescription } from "@/lib/scanner/describe";
 import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
@@ -444,6 +447,10 @@ export interface ViewerMcpDomainDependencies {
       Null means the invariant "a registered session has a canonical project"
       is violated, and unscoped directive routing fails closed diagnostically. */
   callerProject?(): string | null;
+  /** The canonical project of the repository that owns this Viewer, derived
+      from the Viewer's package metadata through the repository-key algorithm
+      used by seats and conversations. */
+  viewerProject(): string | null;
 }
 
 /**
@@ -461,6 +468,15 @@ function productionCallerProject(): string | null {
   if (conversation.projectOwnership?.project) return conversation.projectOwnership.project;
   const cwd = conversation.generations.at(-1)?.launchProfile?.cwd?.trim();
   return cwd ? projectForCwd(cwd) : null;
+}
+
+/** MCP clients may launch from the caller's project. Repository metadata bundled
+    with the selected Viewer release keeps this identity anchored to the code
+    this server can deploy. */
+function productionViewerProject(): string | null {
+  const configuredRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE?.trim();
+  const remote = configuredRemote || viewerPackageManifest.repository.url.trim();
+  return remote ? projectIdentityFromRemote(remote, process.cwd())?.project ?? null : null;
 }
 
 /** Server-derived origin of the current caller. Shared by the attention record
@@ -647,6 +663,7 @@ export const productionDomainDependencies: ViewerMcpDomainDependencies = {
     (conversationId) => authorizedManagerSeats(productionManagerAuthoritySources())
       .some((seat) => seat.conversationId === conversationId),
   ),
+  viewerProject: productionViewerProject,
 };
 
 function text(value: unknown): string {
@@ -1489,6 +1506,12 @@ async function deployExactSha(
     throw new McpToolRefusal(
       "a designated orchestrator deploys only as its own project's seat; this session's seat belongs to another project",
       { code: "deploy_cross_project", revision },
+    );
+  }
+  if (seat.project !== dependencies.viewerProject()) {
+    throw new McpToolRefusal(
+      "this tool deploys the Agent Log Viewer application that serves this MCP; it cannot deploy the caller's project, and no Viewer surface deploys other projects",
+      { code: "deploy_foreign_project", revision },
     );
   }
 

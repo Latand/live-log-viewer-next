@@ -4,7 +4,13 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
-import { isCanonicalProjectId, projectIdentityFromDirectory, projectIdentityFromRepositoryRoot, repositoryRootForPath } from "./identity";
+import {
+  isCanonicalProjectId,
+  projectIdentityFromDirectory,
+  projectIdentityFromRemote,
+  projectIdentityFromRepositoryRoot,
+  repositoryRootForPath,
+} from "./identity";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-project-identity-"));
 
@@ -45,6 +51,16 @@ test("scp, ssh, and https clones of one remote resolve to one identity", () => {
   expect(new Set(identities.map((identity) => identity.canonicalRemote)))
     .toEqual(new Set(["example.invalid/team/shared-repository"]));
   expect(identities[0]!.displayName).toBe("shared-repository");
+});
+
+test("packaged repository metadata resolves to the checkout's project identity", () => {
+  const checkout = createRepository("packaged-checkout", "https://example.invalid/team/shared-repository.git");
+  const packaged = projectIdentityFromRemote(
+    "git+https://example.invalid/team/shared-repository.git",
+    SANDBOX,
+  );
+
+  expect(packaged).toEqual(projectIdentityFromRepositoryRoot(checkout));
 });
 
 test("an https remote never parses as an scp host", () => {
