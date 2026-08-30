@@ -519,7 +519,12 @@ export class StructuredDeliveryQueue {
     }
     if (rawEffects.length === 0) return;
     const grouped = new Map<string, DeliveryEffect[]>();
-    const isolatedTargets: Array<[string, () => Promise<boolean>]> = [];
+    const targetPreparations = new Map<string, Array<() => Promise<void>>>();
+    const prepareTarget = (conversationId: string, prepare: () => Promise<void>) => {
+      const preparations = targetPreparations.get(conversationId) ?? [];
+      preparations.push(prepare);
+      targetPreparations.set(conversationId, preparations);
+    };
     const effects: DeliveryEffect[] = [];
     for (const rawEffect of rawEffects) {
       if (rawEffect.kind === "runtime.kill-boundary") {
@@ -528,9 +533,9 @@ export class StructuredDeliveryQueue {
           const conversationId = typeof rawEffect.payload.conversationId === "string"
             ? rawEffect.payload.conversationId
             : `effect-${rawEffect.eventSeq}`;
-          isolatedTargets.push([conversationId, async () => {
+          prepareTarget(conversationId, async () => {
             throw new Error(`structured kill boundary ${rawEffect.eventSeq} is invalid`);
-          }]);
+          });
           continue;
         }
         const current = this.successfulKillBoundaries.get(boundary.conversationId);
@@ -548,11 +553,10 @@ export class StructuredDeliveryQueue {
       const conversationId = typeof rawEffect.payload.conversationId === "string"
         ? rawEffect.payload.conversationId
         : `effect-${rawEffect.eventSeq}`;
-      isolatedTargets.push([conversationId, async () => {
+      prepareTarget(conversationId, async () => {
         if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
         await this.transitionUnlessSettled(operationId, "failed", { reason: "structured delivery effect is invalid" });
-        return false;
-      }]);
+      });
     }
     effects.sort((left, right) => {
       const leftControl = isControlEffect(left);
@@ -570,20 +574,20 @@ export class StructuredDeliveryQueue {
       target.push(effect);
       grouped.set(effect.conversationId, target);
     }
-    const targets: Array<[string, () => Promise<boolean>]> = [
-      ...[...grouped.entries()].map(([conversationId, target]) => [
-        conversationId,
-        () => this.drainTarget(target),
-      ] as [string, () => Promise<boolean>]),
-      ...isolatedTargets,
-    ];
+    const conversationIds = new Set([...grouped.keys(), ...targetPreparations.keys()]);
+    const targets: Array<[string, () => Promise<boolean>]> = [...conversationIds].map((conversationId) => [
+      conversationId,
+      async () => {
+        for (const prepare of targetPreparations.get(conversationId) ?? []) await prepare();
+        return this.drainTarget(grouped.get(conversationId) ?? []);
+      },
+    ]);
     const outcomes = await Promise.allSettled(
       targets.map(async ([conversationId, drain]) => {
         try {
           return await drain();
         } catch (error) {
           this.targetErrors.set(conversationId, failureReason(error));
-          this.retrySoon();
           console.error("[structured delivery] conversation drain failed", {
             conversationId,
             error: failureReason(error),
@@ -605,6 +609,7 @@ export class StructuredDeliveryQueue {
         `structured delivery failed for every target: ${failureReason(reason)}`,
       );
     }
+    if (failures.length > 0) this.retrySoon();
   }
 
   private async drainTarget(effects: DeliveryEffect[]): Promise<boolean> {

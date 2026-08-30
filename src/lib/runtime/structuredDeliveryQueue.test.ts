@@ -81,6 +81,7 @@ test("structured delivery preserves queue order within one conversation", async 
 
 test("one conversation transition failure does not stop another conversation in the same pass", async () => {
   const sent: string[] = [];
+  let targetRetryRequests = 0;
   const port: StructuredDeliveryQueuePort = {
     effects: async () => [
       {
@@ -105,12 +106,34 @@ test("one conversation transition failure does not stop another conversation in 
   const queue = new StructuredDeliveryQueue(port, () => host(async (entry) => {
     sent.push(entry.id);
     return { outcome: "turn-started", turnId: `turn-${entry.id}` };
-  }));
+  }), undefined, () => {
+    targetRetryRequests += 1;
+  });
 
   await queue.drain();
 
   expect(sent).toEqual(["op-delivered"]);
   expect(queue.lastTargetError("conversation-failing")).toBe("transition unavailable");
+  expect(targetRetryRequests).toBe(1);
+});
+
+test("an all-target failure is left to the pass-level retry path", async () => {
+  let targetRetryRequests = 0;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-failing",
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: { operationId: "op-failing", conversationId: "conversation-failing", text: "first", policy: "queue" },
+    }],
+    transition: async () => { throw new Error("transition unavailable"); },
+  }, () => host(async () => ({ outcome: "turn-started", turnId: "turn-unexpected" })), undefined, () => {
+    targetRetryRequests += 1;
+  });
+
+  await expect(queue.drain()).rejects.toThrow("structured delivery failed for every target: transition unavailable");
+
+  expect(targetRetryRequests).toBe(0);
 });
 
 test("one malformed effect transition failure does not stop another conversation", async () => {
@@ -132,6 +155,47 @@ test("one malformed effect transition failure does not stop another conversation
         id: "effect:op-ready",
         kind: "runtime.send",
         eventSeq: 2,
+        payload: { operationId: "op-ready", conversationId: "conversation-ready", text: "ready", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status) => {
+      if (operationId === "op-malformed" && status === "failed") throw new Error("transition unavailable");
+    },
+  }, () => host(async (entry) => {
+    sent.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-ready" };
+  }));
+
+  await queue.drain();
+
+  expect(sent).toEqual(["op-ready"]);
+});
+
+test("a malformed effect blocks later delivery only within its conversation", async () => {
+  const sent: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:op-malformed",
+        kind: "runtime.send",
+        eventSeq: 1,
+        payload: {
+          operationId: "op-malformed",
+          conversationId: "conversation-blocked",
+          text: "malformed",
+          contentDigest: "invalid",
+        },
+      },
+      {
+        id: "effect:op-blocked",
+        kind: "runtime.send",
+        eventSeq: 2,
+        payload: { operationId: "op-blocked", conversationId: "conversation-blocked", text: "blocked", policy: "queue" },
+      },
+      {
+        id: "effect:op-ready",
+        kind: "runtime.send",
+        eventSeq: 3,
         payload: { operationId: "op-ready", conversationId: "conversation-ready", text: "ready", policy: "queue" },
       },
     ],
