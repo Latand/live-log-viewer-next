@@ -15,7 +15,7 @@ import {
 import { procBackend } from "@/lib/proc";
 import { turnStateFromRecords } from "@/lib/scanner/activity";
 import { RuntimeJournal } from "@/runtime-host/journal";
-import { runStructuredHostStartup } from "@/lib/viewerInstrumentation";
+import { activateViewerRuntimeWhenCurrent, runStructuredHostStartup } from "@/lib/viewerInstrumentation";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import {
@@ -1810,6 +1810,165 @@ test("a seat whose host is still working through a long step is left alone at bo
   }
 });
 
+test("an incumbent state write cannot acknowledge its own release hand-off", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-handoff-fence-"));
+  const liveIdentities = new Set(["viewer:101", "engine:102", "viewer:103", "engine:104"]);
+  const registry = new AgentRegistry(
+    path.join(directory, "agent-registry.json"),
+    (identity) => identity.startIdentity !== null && liveIdentities.has(identity.startIdentity),
+    undefined,
+    { sqliteMode: "off" },
+  );
+  const sessionId = "25300000-0000-0000-0000-000000000038";
+  const key = { engine: "codex", sessionId } as const;
+  const incumbentViewer = { pid: 101, startIdentity: "viewer:101" };
+  const incumbentEngine = { pid: 102, startIdentity: "engine:102" };
+  const candidateViewer = { pid: 103, startIdentity: "viewer:103" };
+  const replacementEngine = { pid: 104, startIdentity: "engine:104" };
+
+  try {
+    addStructuredRestartConversation(registry, directory, {
+      sessionId,
+      status: "live",
+      turn: "busy",
+      transcriptRecords: openTurnRecords("codex"),
+      transcriptSuffix: "\n",
+    });
+    const claimed = registry.claimStructuredHost(key, incumbentViewer, { allowUnhosted: true });
+    if (!claimed?.structuredHost || !claimed.claimOwner) throw new Error("incumbent claim was unavailable");
+    expect(registry.setStructuredHostClaimed(key, {
+      ...claimed.structuredHost,
+      process: incumbentEngine,
+    }, "live", claimed.claimOwner, claimed.claimEpoch)).not.toBeNull();
+    expect(registry.markStructuredHostHandoff(key, incumbentEngine)).toBe(true);
+
+    const delayedIncumbentWrite = registry.setStructuredHostClaimed(key, {
+      ...claimed.structuredHost,
+      process: incumbentEngine,
+      eventCursor: claimed.structuredHost.eventCursor + 1,
+    }, "live", claimed.claimOwner, claimed.claimEpoch);
+
+    expect(delayedIncumbentWrite?.pendingAction).toBe("handoff");
+    expect(registry.readOnlySnapshot().entries[`codex:${sessionId}`]!.pendingAction).toBe("handoff");
+
+    const released = registry.setStructuredHostClaimed(key, {
+      ...delayedIncumbentWrite!.structuredHost!,
+      endpoint: "stdio:released",
+      process: null,
+    }, "unhosted", claimed.claimOwner, claimed.claimEpoch, true);
+    expect(released).toMatchObject({ pendingAction: "handoff", claimOwner: null });
+    const replacementClaim = registry.claimStructuredHost(key, candidateViewer, { allowUnhosted: true });
+    if (!replacementClaim?.structuredHost || !replacementClaim.claimOwner) {
+      throw new Error("replacement claim was unavailable");
+    }
+    const replacement = registry.setStructuredHostClaimed(key, {
+      ...replacementClaim.structuredHost,
+      endpoint: "stdio:replacement",
+      process: replacementEngine,
+    }, "idle", replacementClaim.claimOwner, replacementClaim.claimEpoch);
+    expect(replacement).toMatchObject({ pendingAction: null, structuredHost: { process: replacementEngine } });
+    expect(replacement?.structuredHost?.releaseHandoffClaimEpoch).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test.each(["codex", "claude"] as const)(
+  "legacy target-first demotion strands the distinct incumbent %s engine at the Viewer exit boundary",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-legacy-handover-"));
+    const registryPath = path.join(directory, "agent-registry.json");
+    const registry = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
+    const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+    const client = runtimeJournalClient(journal);
+    const targetPath = path.join(directory, "viewer-target");
+    const demotionGate = path.join(directory, "allow-incumbent-demotion");
+    const readyPath = path.join(directory, "incumbent-ready.json");
+    fs.writeFileSync(targetPath, "incumbent");
+    const sessionId = engine === "codex"
+      ? "25300000-0000-0000-0000-000000000036"
+      : "25300000-0000-0000-0000-000000000037";
+    addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      transcriptRecords: openTurnRecords(engine),
+      transcriptSuffix: "\n",
+    });
+    const incumbent = Bun.spawn({
+      cmd: [process.execPath, path.join(import.meta.dir, "fixtures", "releaseHandoverIncumbent.ts")],
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        LLV_HANDOVER_REGISTRY: registryPath,
+        LLV_HANDOVER_JOURNAL: path.join(directory, "incumbent-runtime.sqlite"),
+        LLV_HANDOVER_TARGET: targetPath,
+        LLV_HANDOVER_DEMOTION_GATE: demotionGate,
+        LLV_HANDOVER_READY: readyPath,
+        LLV_HANDOVER_SKIP_HOST_RELEASE: "1",
+        LLV_HANDOVER_ENGINE: engine,
+        LLV_HANDOVER_SESSION_ID: sessionId,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    let engineIdentity: { pid: number; startIdentity: string | null } | null = null;
+
+    try {
+      await waitFor(() => fs.existsSync(readyPath), 5_000);
+      const identities = JSON.parse(fs.readFileSync(readyPath, "utf8")) as {
+        viewer: { pid: number; startIdentity: string | null };
+        engine: { pid: number; startIdentity: string | null };
+      };
+      engineIdentity = identities.engine;
+      expect(new Set([process.pid, identities.viewer.pid, identities.engine.pid]).size).toBe(3);
+
+      fs.writeFileSync(targetPath, "candidate");
+      let activations = 0;
+      await expect(activateViewerRuntimeWhenCurrent(async () => {
+        activations += 1;
+        await adoptStructuredHostsAtStartup({
+          registry,
+          client,
+          orchestratorSeats: () => [],
+          refreshTranscriptState: async () => {},
+          resolveCodexOwner: () => null,
+          resolveClaudeOwner: () => null,
+          ...(engine === "codex" ? { adoptClaude: async () => [] } : { adopt: async () => [] }),
+        });
+      }, () => fs.readFileSync(targetPath, "utf8").trim() === "candidate", {
+        schedule: () => ({ unref() {} }),
+      })).rejects.toThrow(
+        `structured startup left 1 eligible host(s) owned by the incumbent Viewer: ${engine}:${sessionId}`,
+      );
+      expect(activations).toBe(1);
+      expect(procBackend.pidAlive(identities.engine.pid)).toBe(true);
+
+      fs.writeFileSync(demotionGate, "1");
+      expect(await incumbent.exited).toBe(0);
+      expect(procBackend.pidAlive(identities.viewer.pid)).toBe(false);
+      expect(procBackend.pidAlive(identities.engine.pid)).toBe(true);
+      expect(registry.readOnlySnapshot().entries[`${engine}:${sessionId}`]).toMatchObject({
+        status: "live",
+        structuredHost: { process: identities.engine },
+      });
+    } finally {
+      await bindStructuredDeliveryQueue([], { registry, client: null });
+      if (procBackend.pidAlive(incumbent.pid)) incumbent.kill("SIGKILL");
+      await incumbent.exited;
+      if (engineIdentity
+        && engineIdentity.startIdentity !== null
+        && procBackend.processIdentity(engineIdentity.pid) === engineIdentity.startIdentity) {
+        try { process.kill(engineIdentity.pid, "SIGKILL"); } catch { /* fixture process already exited */ }
+        await waitFor(() => !procBackend.pidAlive(engineIdentity!.pid), 5_000);
+      }
+      journal.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
 test.each(["codex", "claude"] as const)(
   "a target-first hand-over releases the incumbent %s engine before one bounded adoption retry",
   async (engine) => {
@@ -1899,9 +2058,16 @@ test.each(["codex", "claude"] as const)(
          child are still alive. The engine guard refuses before the distinct
          writer claim is considered. */
       fs.writeFileSync(targetPath, "candidate");
-      await expect(adoptStructuredHostsAtStartup(dependencies)).rejects.toThrow(
+      let activations = 0;
+      await expect(activateViewerRuntimeWhenCurrent(async () => {
+        activations += 1;
+        await adoptStructuredHostsAtStartup(dependencies);
+      }, () => fs.readFileSync(targetPath, "utf8").trim() === "candidate", {
+        schedule: () => ({ unref() {} }),
+      })).rejects.toThrow(
         `structured startup left 1 eligible host(s) owned by the incumbent Viewer: ${engine}:${sessionId}`,
       );
+      expect(activations).toBe(1);
       const refused = registry.readOnlySnapshot().entries[`${engine}:${sessionId}`]!;
       expect(refused.structuredHost?.process).toEqual(identities.engine);
       expect(refused.claimOwner).toBe(`structured-host:${JSON.stringify(identities.viewer)}`);

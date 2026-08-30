@@ -63,8 +63,12 @@ guarantees for the 1.x series.
   lifecycle, leaving the detached child alive in the host namespace. Demotion
   now records an exact PID/start-identity handoff, releases all registered hosts
   in one bounded window, and leaves the candidate's startup retry to publish one
-  replacement. A CPU-flat stage is likewise terminated and retired through its
-  exact structured identity before the pipeline marks it retryable.
+  replacement. The hand-off marker carries its writer epoch, so a delayed
+  incumbent state update cannot acknowledge its own release. A sliding CPU
+  window also keeps recent work live across ordinary polls until a later full
+  window supersedes that evidence. A CPU-flat stage is likewise terminated and
+  retired through its exact structured identity before the pipeline marks it
+  retryable.
 - Whether a turn is being worked on is decided from evidence, so a redeploy no
   longer strands a lane nothing can recover (#1281, #1282, #1276). `live`,
   `idle` and `busy` are inherited words: a turn severed mid-flight kept reading

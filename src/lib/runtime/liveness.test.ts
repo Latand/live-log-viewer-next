@@ -126,6 +126,28 @@ test("CPU progress sampling keeps the oldest sample that spans the observation w
   });
 });
 
+test("a working CPU window remains evidence on the next ordinary poll", () => {
+  resetHostCpuProgressForTests();
+  const processIdentity = { pid: 78, startIdentity: "78:6000" };
+  const sample = (now: number, cpuMs: number) => observeHostCpuProgress({
+    process: processIdentity,
+    observedIdentity: processIdentity.startIdentity,
+    cpuMs,
+    transcriptLastWriteAt: NOW - 5 * MINUTE,
+    now,
+  });
+
+  expect(sample(NOW, 4_700)).toBeNull();
+  expect(sample(NOW + LIVENESS_CPU_PROGRESS_WINDOW_MS, 5_000)).toEqual({
+    consumedMs: 300,
+    observedMs: LIVENESS_CPU_PROGRESS_WINDOW_MS,
+  });
+  expect(sample(NOW + LIVENESS_CPU_PROGRESS_WINDOW_MS + 10_000, 5_050)).toEqual({
+    consumedMs: 350,
+    observedMs: LIVENESS_CPU_PROGRESS_WINDOW_MS + 10_000,
+  });
+});
+
 test("an inherited turn whose host is burning CPU is working", () => {
   const decision = decideTurnLiveness(evidence({
     transcriptTail: { lastEventAt: NOW - 38 * MINUTE, lastWriteAt: NOW - 38 * MINUTE, kind: "tool-result", turn: "busy" },

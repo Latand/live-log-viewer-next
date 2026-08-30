@@ -39,6 +39,7 @@ const journalPath = required("LLV_HANDOVER_JOURNAL");
 const targetPath = required("LLV_HANDOVER_TARGET");
 const demotionGate = required("LLV_HANDOVER_DEMOTION_GATE");
 const readyPath = required("LLV_HANDOVER_READY");
+const skipHostRelease = process.env.LLV_HANDOVER_SKIP_HOST_RELEASE === "1";
 const engine = required("LLV_HANDOVER_ENGINE") as SessionKey["engine"];
 const sessionId = required("LLV_HANDOVER_SESSION_ID");
 const key = { engine, sessionId } as const;
@@ -112,9 +113,14 @@ const isCurrent = () => {
 };
 await activateViewerRuntimeWhenCurrent(async () => {}, isCurrent, {
   pollMs: 10,
-  onDemoted: () => completeViewerReleaseDemotion(async () => {
-    fs.writeFileSync(path.join(path.dirname(targetPath), "incumbent-checkpointed"), "1");
-    journal.close();
-  }),
+  onDemoted: () => completeViewerReleaseDemotion(
+    async () => {
+      fs.writeFileSync(path.join(path.dirname(targetPath), "incumbent-checkpointed"), "1");
+      journal.close();
+    },
+    undefined,
+    undefined,
+    skipHostRelease ? async () => {} : undefined,
+  ),
 });
 setInterval(() => {}, 1_000);

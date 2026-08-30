@@ -265,11 +265,7 @@ export function observeHostCpuProgress(input: {
   const baseline = samples[0]!;
   const observedMs = input.now - baseline.at;
   if (observedMs < LIVENESS_CPU_PROGRESS_WINDOW_MS) return null;
-  const progress = { consumedMs: Math.max(0, input.cpuMs - baseline.cpuMs), observedMs };
-  if (progress.consumedMs / elapsedMinutes(progress.observedMs) >= LIVENESS_WORKING_CPU_MS_PER_MINUTE) {
-    store.set(key, [{ at: input.now, cpuMs: input.cpuMs, transcriptLastWriteAt: input.transcriptLastWriteAt }]);
-  }
-  return progress;
+  return { consumedMs: Math.max(0, input.cpuMs - baseline.cpuMs), observedMs };
 }
 
 export function resetHostCpuProgressForTests(): void {
