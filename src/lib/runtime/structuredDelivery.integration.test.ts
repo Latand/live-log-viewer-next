@@ -13,7 +13,7 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import type { EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
-import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
+import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructuredDeliveryHost, releaseStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { resolveSendReceipt, sendReceiptFor } from "./sendSettlement";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
@@ -381,6 +381,113 @@ test("the controller republishes a live host into a restarted runtime journal", 
       sessionKey: key,
     });
   } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
+test("one host whose state cannot be read costs no other host its republish (#1131)", async () => {
+  const directory = path.join(sandbox, "controller-unreadable-host-state");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  /* Assembled rather than written out: a session-id-shaped literal is a
+     resource identifier the publication gate refuses. */
+  const unreadableSessionId = `4c1a90fe-71b3-4${"e"}0d-9a55-2b6d41f7cc0${1}`;
+  const readableSessionId = `6d2b81af-05c4-4${"a"}1b-8f37-9e0c53d8bb1${2}`;
+  const hosts = [
+    { sessionId: unreadableSessionId, name: "unreadable" },
+    { sessionId: readableSessionId, name: "readable" },
+  ].map(({ sessionId, name }) => {
+    const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+    return { sessionId, name, artifactPath, key: { engine: "claude" as const, sessionId } };
+  });
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations(hosts.map(({ artifactPath }) => ({
+    engine: "claude" as const,
+    path: artifactPath,
+    accountId: "unreadable-state-account",
+    launchProfile: profile,
+    turn: { state: "idle" as const, source: "assistant" as const, terminalAt: null },
+    observedAt: "2026-08-30T09:00:00.000Z",
+  })));
+  for (const { key, artifactPath } of hosts) {
+    registry.upsert({
+      key,
+      artifactPath,
+      cwd: directory,
+      accountId: "unreadable-state-account",
+      launchProfile: profile,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "claude-broker",
+        endpoint: `fake:${key.sessionId}`,
+        process: null,
+        eventCursor: 3,
+        protocolVersion: "fake-v1",
+        writerClaimEpoch: 0,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+  }
+  const conversations = hosts.map(({ artifactPath }) => registry.conversationForPath(artifactPath)!);
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = {
+    snapshot: async () => journal.snapshot(),
+    append: async (event: Parameters<RuntimeHostClient["append"]>[0]) => journal.append(event),
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => journal.executeOperation(command),
+    operationStatus: async (operationId: string) => journal.operationResult(operationId),
+    producerCursor: async (producerKind: string, eventKeyPrefix: string) => journal.producerCursor(producerKind, eventKeyPrefix),
+    effectBatch: async (kinds?: readonly string[], afterEventSeq?: number) => journal.effectBatch(100, kinds, afterEventSeq),
+    transitionOperation: async (operationId: string, status: Parameters<RuntimeHostClient["transitionOperation"]>[1], details?: Parameters<RuntimeHostClient["transitionOperation"]>[2]) => journal.transitionOperation(operationId, status, details),
+  } as RuntimeHostClient;
+  /* Healthy while it is adopted, unreadable afterwards: the outage this covers
+     opens after the host is already registered and published. */
+  let stateReadFails = false;
+  const unreadableBase = new FakeEngineHost(createFakeDeliveryLedger());
+  const readUnreadableHealth = unreadableBase.health.bind(unreadableBase);
+  const unreadableHost = Object.assign(unreadableBase, {
+    health: async (): Promise<HostState> => {
+      if (stateReadFails) throw new Error("structured host state read timed out");
+      return readUnreadableHealth();
+    },
+    onStateChange: () => () => {},
+  });
+  const readableHost = observableFakeHost(new FakeEngineHost(createFakeDeliveryLedger()));
+  const publishedHost = (conversationId: string) =>
+    journal.snapshot().sessions.find((session) => session.conversationId === conversationId)?.host;
+
+  try {
+    await bindStructuredDeliveryQueue(
+      [{ key: hosts[0].key, host: unreadableHost }, { key: hosts[1].key, host: readableHost }],
+      { registry, client },
+    );
+    expect(publishedHost(conversations[0].id)).toBe("hosted");
+    expect(publishedHost(conversations[1].id)).toBe("hosted");
+
+    stateReadFails = true;
+    /* Its own republish answers honestly that nothing was published, and the
+       projection it could not read is left exactly as it stands rather than
+       being replaced by a derived one that would call a live host unhosted. */
+    expect(await republishStructuredDeliveryHost(hosts[0].key)).toBeFalse();
+    expect(publishedHost(conversations[0].id)).toBe("hosted");
+    /* And the host that CAN be read still republishes: an unreadable state
+       answers for its own host and for nothing else. */
+    expect(await republishStructuredDeliveryHost(hosts[1].key)).toBeTrue();
+    expect(publishedHost(conversations[1].id)).toBe("hosted");
+
+    /* The whole-loop version of the same rule: releasing the readable host
+       walks every remaining registration, and the unreadable one used to take
+       that walk — and its caller — down with it. */
+    expect(await releaseStructuredDeliveryHost(hosts[1].key)).toBeTrue();
+    expect(publishedHost(conversations[0].id)).toBe("hosted");
+    expect(publishedHost(conversations[1].id)).toBe("unhosted");
+  } finally {
+    stateReadFails = false;
     await bindStructuredDeliveryQueue([], { registry, client: null });
     journal.close();
   }

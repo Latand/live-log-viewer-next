@@ -6,6 +6,7 @@ import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { runtimeSettingsCapability, type RuntimeEventInput, type RuntimeSession } from "./contracts";
+import { readEvidence } from "./evidence";
 import type { EngineHost, HostState } from "./engineHost";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { applyStructuredReconfigure } from "./structuredReconfigure";
@@ -496,31 +497,62 @@ export async function bindStructuredDeliveryQueue(
   const publishChains = new Map<string, Promise<void>>();
   const projectionEpoch = crypto.randomUUID();
   let projectionRevision = 0;
+  /**
+   * One registration's republish, and what it proves about its conversation.
+   *
+   * `conversationId` is set whenever this registration IS the conversation's
+   * current host — whether or not a projection was published — because a live
+   * registration speaks for its conversation and the derived fallback below
+   * must not overwrite it. `published` is the narrower answer to "did a
+   * projection actually go out", which is what a single-host republish
+   * reports to its caller.
+   */
   const republishRegistration = async (
     registration: { key: SessionKey; host: ObservableEngineHost },
-  ): Promise<string | null> => {
+  ): Promise<{ conversationId: string | null; published: boolean }> => {
+    const unclaimed = { conversationId: null, published: false } as const;
     const entry = entryForHost(registry, registration);
-    if (!entry) return null;
+    if (!entry) return unclaimed;
     const conversationId = conversationIdForEntry(registry, entry);
-    if (!conversationId) return null;
+    if (!conversationId) return unclaimed;
     const conversation = registry.conversation(conversationId as `conversation_${string}`);
     const generation = conversation?.generations.at(-1);
-    if (!conversation || !generation) return null;
-    if (sessionKeyId({ engine: conversation.engine, sessionId: generation.id }) !== sessionKeyId(registration.key)) return null;
+    if (!conversation || !generation) return unclaimed;
+    if (sessionKeyId({ engine: conversation.engine, sessionId: generation.id }) !== sessionKeyId(registration.key)) return unclaimed;
+    /* The host's own state, kept as evidence like every other read in this
+       path (#1131). Letting it throw was a conversion of the worst shape: the
+       exception answered for the WHOLE loop below, so ONE host that could not
+       be read cost every other host its republish AND failed the caller — a
+       kill whose host this controller had already retired came back reported
+       as un-terminated and was requeued. Unreadable publishes nothing and
+       claims the conversation, which leaves the projection exactly as it
+       stands: a state nobody read is not published, and it does not invite the
+       derived fallback to declare a live host unhosted either. */
+    const hostState = await readEvidence(
+      () => registration.host.health(),
+      "structured host state is unavailable",
+    );
+    if (!hostState.readable) {
+      console.error("[structured delivery] host state unavailable; projection left as published", {
+        conversationId,
+        reason: hostState.reason,
+      });
+      return { conversationId, published: false };
+    }
     projectionRevision += 1;
     await publishHostState(
       client,
       registry,
       registration,
-      await registration.host.health(),
+      hostState.value,
       `projection:${projectionEpoch}:${projectionRevision}`,
     );
-    return conversationId;
+    return { conversationId, published: true };
   };
   const republishCurrentHosts = async (): Promise<Set<string>> => {
     const republished = new Set<string>();
     for (const registration of registrations.values()) {
-      const conversationId = await republishRegistration(registration);
+      const { conversationId } = await republishRegistration(registration);
       if (conversationId) republished.add(conversationId);
     }
     return republished;
@@ -832,7 +864,7 @@ export async function bindStructuredDeliveryQueue(
   state.republishActiveHost = async (key) => {
     const registration = registrations.get(sessionKeyId(key));
     if (!registration) return false;
-    return await republishRegistration(registration) !== null;
+    return (await republishRegistration(registration)).published;
   };
   /* Both paths claim the seat first, so a host carried over at the swap is
      released here exactly like one this generation registered itself — even
