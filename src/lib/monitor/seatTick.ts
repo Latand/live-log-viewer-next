@@ -359,10 +359,51 @@ export function seatTickSourceGapAfterFailure(
   return { ...gap, gap: kind, lastAttemptAt: at, attempts: gap.attempts + 1 };
 }
 
-/** The retry-guard count that applies right now: a fingerprint that moved since
-    the last wake means the board changed, so nothing is being re-sent. */
+/** The token the pull-request half carries when the source could not be read
+    (#1298). Shared with the composer, so the two halves cannot drift apart. */
+export const FINGERPRINT_UNREAD = "unread";
+
+/**
+ * Whether the board moved between two checks — the question the retry guard is
+ * an answer to, and the one place a fingerprint is interpreted rather than
+ * compared.
+ *
+ * Plain inequality answered it until one of the sources behind the digest
+ * could go missing (#1298). An unreadable pull-request source contributes no
+ * rows, which is byte-for-byte what a merged pull request contributes, so a
+ * source failing every other check made the digest alternate between two
+ * values and every wake looked like it had landed on a changed board. The
+ * guard would never have reached its count, and the gap that is supposed to
+ * cost nothing would have bought an unbounded wake for every reason on it.
+ *
+ * So the unreadable half says nothing instead of saying "empty": it can
+ * neither invent movement nor claim stillness, and the answer rests on the
+ * evidence both checks actually read. A digest from before this shape is
+ * compared whole, which reads as one movement on the first check after it
+ * changes and settles from there.
+ */
+export function seatTickBoardMoved(previous: string | null, current: string): boolean {
+  if (previous === null) return true;
+  const before = splitFingerprint(previous);
+  const now = splitFingerprint(current);
+  if (!before || !now) return previous !== current;
+  if (before.board !== now.board) return true;
+  /* The board part matched, so whatever moved has to have moved in the part one
+     of these two checks could not read. Neither of them knows that it did. */
+  if (before.pullRequests === FINGERPRINT_UNREAD || now.pullRequests === FINGERPRINT_UNREAD) return false;
+  return before.pullRequests !== now.pullRequests;
+}
+
+function splitFingerprint(fingerprint: string): { board: string; pullRequests: string } | null {
+  const cut = fingerprint.indexOf(".");
+  if (cut <= 0 || cut === fingerprint.length - 1) return null;
+  return { board: fingerprint.slice(0, cut), pullRequests: fingerprint.slice(cut + 1) };
+}
+
+/** The retry-guard count that applies right now: a board that moved since the
+    last wake means nothing is being re-sent. */
 function guardCount(state: SeatTickProjectState, kind: SeatTickWakeReasonKind, fingerprint: string): number {
-  if (state.lastWakeFingerprint !== fingerprint) return 0;
+  if (seatTickBoardMoved(state.lastWakeFingerprint, fingerprint)) return 0;
   return state.wakesWithoutChange[kind] ?? 0;
 }
 
@@ -793,7 +834,11 @@ export function seatTickWakeCommit(
   }
 
   const carried = commit.reasons;
-  const fruitless = state.lastWakeFingerprint === commit.fingerprint;
+  /* A wake that changed nothing, counted the same way the guard reads it — an
+     hour whose pull-request half was unreadable is an hour that showed no
+     movement, so it accrues rather than resetting (#1298). A blind source
+     cannot postpone the guard any more than it can walk around it. */
+  const fruitless = !seatTickBoardMoved(state.lastWakeFingerprint, commit.fingerprint);
   const wakesWithoutChange: Partial<Record<SeatTickWakeReasonKind, number>> = {};
   for (const kind of SEAT_TICK_WAKE_REASON_KINDS) {
     if (!carried.includes(kind)) continue;

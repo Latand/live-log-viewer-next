@@ -602,8 +602,19 @@ export interface SeatTickCheckInput {
    */
   pullRequestsUnavailable: SeatTickPullRequestGap | null;
   signals: readonly SeatTickSignalInput[];
-  /** Digest of everything a wake could change. Compared against the previous
-      wake's, never interpreted. */
+  /**
+   * Digest of everything a wake could change, in two parts separated by a dot:
+   * the evidence every check reads, then the pull-request evidence.
+   *
+   * Two parts because one of them can be missing (#1298). A single digest over
+   * whatever happened to be readable makes an unreadable source look exactly
+   * like a merged pull request — the rows are gone either way — and the retry
+   * guard reads "the board moved" off that and resets. A source that failed
+   * every other check would then hand every reason an unbounded wake, which is
+   * the guard being walked around by the very gap that was supposed to cost
+   * nothing. So the second part reads `unread` when the source could not be
+   * read, and {@link seatTickBoardMoved} is the only thing that interprets it.
+   */
   changeFingerprint: string;
   state: SeatTickProjectState;
   policy: SeatTickPolicy;

@@ -19,6 +19,7 @@ import { evidenceFromPipelines, evidenceFromTasks } from "./evidence";
 import { openPullRequestsForRepo, type OpenPullRequestsResult } from "./githubEvidence";
 import { redactBounded } from "./redact";
 import {
+  FINGERPRINT_UNREAD,
   SEAT_TICK_WAKE_INTERVAL_MS,
   seatTickSourceGapAfterFailure,
   seatTickSourceRetryDue,
@@ -467,17 +468,27 @@ function changeFingerprint(
   pipelines: readonly SeatTickPipelineInput[],
   tasks: readonly SeatTickTaskInput[],
   pullRequests: readonly SeatTickPullRequestInput[],
+  pullRequestsUnavailable: SeatTickPullRequestGap | null,
 ): string {
-  const parts = [
+  const board = [
     ...pipelines.map((pipeline) => `p:${pipeline.id}:${pipeline.state}:${pipeline.updatedAt ?? ""}`),
     ...tasks.map((task) => `t:${task.id}:${task.status}:${task.owned}:${task.updatedAt ?? ""}`),
-    /* The set of unmerged pull requests, for the same reason the card's
-       movement instant is here: it decides a wake reason, so a guard keyed on
-       less than it would hold the reason suppressed while a SECOND pull request
-       went unmerged behind the first. A merge or a close removes the row, which
-       is what lets the guard reset the moment the seat acts. */
-    ...pullRequests.map((pullRequest) => `pr:${pullRequest.number}:${pullRequest.pipelineId}`),
   ].sort();
+  /* The set of unmerged pull requests, for the same reason the card's movement
+     instant is in the half above: it decides a wake reason, so a guard keyed on
+     less than it would hold the reason suppressed while a SECOND pull request
+     went unmerged behind the first. A merge or a close removes the row, which is
+     what lets the guard reset the moment the seat acts.
+
+     Its own half, because a read that FAILED contributes the same nothing a
+     merge does and the guard must not read one as the other (#1298). An
+     unreadable source says `unread` here and the guard declines to conclude
+     anything from this half at all. */
+  const open = pullRequests.map((pullRequest) => `pr:${pullRequest.number}:${pullRequest.pipelineId}`).sort();
+  return `${digest(board)}.${pullRequestsUnavailable ? FINGERPRINT_UNREAD : digest(open)}`;
+}
+
+function digest(parts: readonly string[]): string {
   return crypto.createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32);
 }
 
@@ -748,7 +759,7 @@ export async function gatherSeatTickInput(
     pullRequests,
     pullRequestsUnavailable,
     signals: signals(canonical, seat, sources),
-    changeFingerprint: changeFingerprint(pipelines, tasks, pullRequests),
+    changeFingerprint: changeFingerprint(pipelines, tasks, pullRequests, pullRequestsUnavailable),
     /* The sealed cursor travels on the state the decision carries forward, so a
        check of any verdict — a skip included, which remembers nothing else —
        persists where the journal stood when the tick first saw this project.

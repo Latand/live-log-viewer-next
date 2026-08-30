@@ -13,7 +13,7 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
 const { gatherSeatTickInput, repoDirForProject, runtimeWakeState, seatTickProjects, withdrawRuntimeWake } = await import("./seatTickSources");
 import type { SeatTickSources } from "./seatTickSources";
-const { DEFAULT_SEAT_TICK_POLICY, seatTickDecision } = await import("./seatTick");
+const { DEFAULT_SEAT_TICK_POLICY, seatTickBoardMoved, seatTickDecision, seatTickWakeCommit } = await import("./seatTick");
 const { defaultSeatTickSettings } = await import("./seatTickSettings");
 import type { AgentLivenessRecord } from "@/lib/lifecycle/liveness";
 import type { OpenPullRequest, OpenPullRequestsUnavailable } from "./githubEvidence";
@@ -1001,6 +1001,68 @@ test("a second unmerged pull request moves the fingerprint", async () => {
     withCursor(0, OVERDUE),
   );
   expect(two.changeFingerprint).not.toBe(one.changeFingerprint);
+});
+
+/* The other half of that, and the trap the wake-through-a-gap opened (#1298).
+   An unreadable source contributes exactly the rows a merged pull request
+   contributes — none — so a single digest over whatever was readable makes a
+   failing `gh` look like an operator clearing the board. Wakes now go out under
+   a gap, so that reading would reach the guard: a source failing every other
+   check would alternate the digest and reset the count on every wake, and the
+   reason would be re-sent for ever. The guard has to see the board standing
+   still through the flap. */
+test("a source that flaps does not look like a board that moved", async () => {
+  const readable = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  const blind = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "timed-out" },
+    withCursor(0, OVERDUE),
+  );
+  expect(blind.changeFingerprint).not.toBe(readable.changeFingerprint);
+  expect(seatTickBoardMoved(readable.changeFingerprint, blind.changeFingerprint)).toBe(false);
+  expect(seatTickBoardMoved(blind.changeFingerprint, readable.changeFingerprint)).toBe(false);
+
+  /* So a guard that has run out of patience on a parked lane stays out of
+     patience across the flap, rather than being handed a fresh count by it. */
+  const spent = { wakesWithoutChange: { stalled: DEFAULT_SEAT_TICK_POLICY.retryGuard } };
+  const held = seatTickDecision({
+    ...blind,
+    state: { ...blind.state, ...spent, lastWakeFingerprint: readable.changeFingerprint },
+  });
+  expect(reasonsOf(held)).toEqual([]);
+
+  /* And a board that DID move is still seen to have moved while the source is
+     blind: the half both checks could read is the half that answers. */
+  const movedBlind = await gather(
+    {
+      pipelines: [finishedLane(), lane({ id: "pipe_second" })],
+      pullRequestsUnavailable: "timed-out",
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(seatTickBoardMoved(readable.changeFingerprint, movedBlind.changeFingerprint)).toBe(true);
+});
+
+/* An unreadable half cannot postpone the guard either. A wake that went out
+   over a blind source and changed nothing counts as a wake that changed
+   nothing, so the count still climbs toward the bound. */
+test("a wake sent under a blind source still counts against the retry guard", async () => {
+  const blind = await gather(
+    { pipelines: [finishedLane()], pullRequestsUnavailable: "timed-out" },
+    withCursor(0, OVERDUE),
+  );
+  const readable = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  const committed = seatTickWakeCommit(
+    { ...blind.state, lastWakeFingerprint: readable.changeFingerprint, wakesWithoutChange: { stalled: 1 } },
+    { fingerprint: blind.changeFingerprint, reasons: ["stalled"], eventsThrough: 0, proposal: false },
+    NOW,
+  );
+  expect(committed.wakesWithoutChange.stalled).toBe(2);
 });
 
 test("another project's events are not this project's", async () => {
