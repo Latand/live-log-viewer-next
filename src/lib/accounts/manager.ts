@@ -2,11 +2,11 @@ import { accountForSpawn, activeCodexAccountId, codexAccountsMutationLocked, cod
 import { activeClaudeAccountId, claudeAccountForSpawn, claudeAccountsMutationLocked, claudeHomeOwningTranscript, claudeManagedEnvironment, CorruptClaudeAccountsError, createManagedClaudeAccount, listClaudeAccounts, setActiveClaudeAccount, UnknownClaudeAccountError } from "./claude";
 import { claudeLoginSupervisor, LIVE_CLAUDE_LOGIN_PHASES } from "./claudeLogin";
 import { managedCodexRuntime } from "./codexRuntime";
-import type { AccountContext, AccountManager, AccountSummary } from "./contracts";
+import type { AccountContext, AccountManager, AccountSummary, ProjectSpawnResolution } from "./contracts";
 import { unavailableLimits } from "./contracts";
 import { withAccountMutationLockAsync } from "./accountMutation";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { accountProjectBindings } from "./projectBindings";
+import { accountProjectBindings, projectAccountRefusalDetail } from "./projectBindings";
 import { selectProjectAccount } from "./projectSelection";
 import { selectHealthyClaudeAccount } from "./spawnHealth";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
@@ -75,6 +75,48 @@ export async function resolveHealthySpawnAccount(
       ? { requestedAdmission: missingRequested }
       : selected.requestedAdmission ? { requestedAdmission: selected.requestedAdmission } : {}),
   };
+}
+
+/**
+ * A launch the project's binding refused (#1279), carrying the resolution that
+ * refused it so a caller can answer with the right status instead of reading a
+ * message. Thrown only by {@link resolveProjectSpawnAccount}, which is the form
+ * every launch path that names NO account of its own resolves through.
+ */
+export class ProjectAccountRefusedError extends Error {
+  constructor(
+    readonly resolution: Exclude<ProjectSpawnResolution, { kind: "available" }>,
+    engine: "claude" | "codex",
+    project: string | null,
+  ) {
+    super(projectAccountRefusalDetail(resolution, engine, project ?? ""));
+    this.name = "ProjectAccountRefusedError";
+  }
+}
+
+/**
+ * The account for a launch the SYSTEM is choosing — the caller passes the
+ * project the work belongs to and, at most, the account an earlier attempt of
+ * the same work already ran on.
+ *
+ * `resolveSpawn` answers with the engine's active account when nothing is
+ * named, which is a choice made without consulting anything; this is the same
+ * call with the project's pool in front of it. An unbound project keeps that
+ * exact behaviour — `selectProjectAccount` answers with the active account and
+ * `contextForSpawn` resolves it, byte for byte what the caller did before. A
+ * bound project draws from its allowed set only, reports when every allowed
+ * account is out of capacity, and refuses when the binding record cannot be
+ * read (that read throws from here, and a caller that cannot see the boundary
+ * does not get to decide there is none).
+ */
+export function resolveProjectSpawnAccount(
+  engine: "claude" | "codex",
+  project: string | null,
+  requestedId?: string | null,
+): AccountContext {
+  const resolution = accountManager.resolveProjectSpawn(engine, { project, requestedId: requestedId ?? null });
+  if (resolution.kind !== "available") throw new ProjectAccountRefusedError(resolution, engine, project);
+  return resolution.account;
 }
 
 function summary(engine: "claude" | "codex", id: string): AccountSummary {

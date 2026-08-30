@@ -38,7 +38,7 @@ import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport
 import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "@/lib/pipelines/engine";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
-import { allowedAccountIdsForProject } from "@/lib/accounts/projectBindings";
+import { AccountProjectBindingsUnreadableError, allowedAccountIdsForProject } from "@/lib/accounts/projectBindings";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { derivedSpawnTitle, durableSemanticTitle, firstPromptLine, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
@@ -612,7 +612,18 @@ export async function executeSpawnRequest(
        refuses an account outside its set outright, rather than degrading the
        pin to a fallback the project forbids. */
     const spawnProject = explicitProject ?? projectForCwd(cwd);
-    const allowedAccountIds = allowedAccountIdsForProject(spawnProject, engine);
+    let allowedAccountIds: string[] | null;
+    try {
+      allowedAccountIds = allowedAccountIdsForProject(spawnProject, engine);
+    } catch (error) {
+      if (!(error instanceof AccountProjectBindingsUnreadableError)) throw error;
+      /* The record needs the operator, and until it gets them this launch
+         selects nothing. A conflict, not a server fault: the request is well
+         formed and the state it addresses is what is wrong — the same answer
+         the reseat, the binding route and the task launch give for the same
+         record, so one repair clears all of them. */
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
     if (requestedAccountId && allowedAccountIds !== null && !allowedAccountIds.includes(requestedAccountId)) {
       return NextResponse.json({
         error: allowedAccountIds.length

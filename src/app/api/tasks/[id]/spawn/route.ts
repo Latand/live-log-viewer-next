@@ -5,7 +5,11 @@ import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { accountManager } from "@/lib/accounts/manager";
+import {
+  ProjectAccountRefusedError,
+  resolveProjectSpawnAccount,
+} from "@/lib/accounts/manager";
+import { AccountProjectBindingsUnreadableError } from "@/lib/accounts/projectBindings";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
@@ -55,7 +59,9 @@ interface TaskSpawnDependencies {
   registry(): AgentRegistry;
   loadTasks: typeof loadTasks;
   mutateTasks: typeof mutateTasks;
-  resolveSpawnAccount(engine: AgentEngine, accountId: string | null): AccountContext;
+  /** #1279: the project the work belongs to is part of the question, because
+      this route names no account of its own — it resolves one. */
+  resolveSpawnAccount(engine: AgentEngine, accountId: string | null, project: string | null): AccountContext;
   spawnAgentWithPrompt: typeof spawnAgentWithPrompt;
   resolveSpawnedTranscriptPath: typeof resolveSpawnedTranscriptPath;
   ensureTaskPipelineForAssignment?: typeof ensureTaskPipelineForAssignment;
@@ -66,7 +72,7 @@ const productionDependencies: TaskSpawnDependencies = {
   registry: agentRegistry,
   loadTasks,
   mutateTasks,
-  resolveSpawnAccount: (engine, accountId) => accountManager.resolveSpawn(engine, accountId),
+  resolveSpawnAccount: (engine, accountId, project) => resolveProjectSpawnAccount(engine, project, accountId),
   spawnAgentWithPrompt,
   resolveSpawnedTranscriptPath,
   ensureTaskPipelineForAssignment,
@@ -245,12 +251,29 @@ async function postTaskSpawn(
   const cwdResult = cwdFromBody(retryOf ? retryOf.cwd : body.cwd);
   if (!cwdResult.cwd) return NextResponse.json({ error: cwdResult.error ?? "invalid working directory" }, { status: cwdResult.status ?? 400 });
 
+  const project = projectInfoFromCwd(cwdResult.cwd)?.project ?? task.project;
   const previous = retryOf?.accountId ?? pinnedAccountId(task.assignments, engine);
   let account: AccountContext;
   try {
-    account = dependencies.resolveSpawnAccount(engine, previous);
+    /* #1279: nothing in this request names an account — the board's spawn and
+       retry buttons send none — so the account is one the Viewer picks, and a
+       pick is exactly what a project's pool binds. Resolved through the
+       project seam: an unbound project takes the branch it always took (the
+       engine's active account, or the one this task already ran on), a bound
+       project draws from its allowed set only, an allowed set with no capacity
+       is REPORTED rather than widened, and a binding record this process
+       cannot read refuses instead of guessing. */
+    account = dependencies.resolveSpawnAccount(engine, previous, project);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
+    /* A refusal on the merits of the project's pool, or a record that needs the
+       operator: the request was well formed and the state it addresses is what
+       is wrong, which is a conflict rather than a bad request. */
+    const fenced = error instanceof ProjectAccountRefusedError
+      || error instanceof AccountProjectBindingsUnreadableError;
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: fenced ? 409 : 400 },
+    );
   }
   const shape = {
     engine,
@@ -273,7 +296,6 @@ async function postTaskSpawn(
     claudeConfigDir: engine === "claude" ? account.home : null,
     claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
   });
-  const project = projectInfoFromCwd(cwdResult.cwd)?.project ?? task.project;
   if (directOperatorActivityAuthority(req).ok) {
     try {
       dependencies.recordOperatorActivity?.({
@@ -476,5 +498,8 @@ async function postTaskSpawn(
 
 export const POST = Object.assign(
   async (req: NextRequest, ctx: TaskRouteContext): Promise<NextResponse<TaskSpawnResponse | ApiError>> => await postTaskSpawn(req, ctx),
-  { withDependencies: postTaskSpawn },
+  /* `productionDependencies` rides along so a test can keep the real account
+     resolution — the one #1279's rule lives in — while substituting the task
+     store and the pane it must never reach. */
+  { withDependencies: postTaskSpawn, productionDependencies },
 );
