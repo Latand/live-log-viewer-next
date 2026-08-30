@@ -49,6 +49,7 @@ export type SpawnedStructuredHost = EngineHost & {
 
 export const INITIAL_MESSAGE_TIMEOUT_MS = 30_000;
 const INITIAL_MESSAGE_POLL_MS = 250;
+export const STRUCTURED_TRANSCRIPT_MATERIALIZATION_TIMEOUT_MS = INITIAL_MESSAGE_TIMEOUT_MS;
 export const ADMISSION_RETRY_ATTEMPTS = 3;
 const ADMISSION_RETRY_BACKOFF_MS = 250;
 export const STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS = 5 * 60_000;
@@ -179,6 +180,67 @@ export class StructuredInitialMessageTimeoutError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "StructuredInitialMessageTimeoutError";
+  }
+}
+
+export class StructuredTranscriptMaterializationError extends Error {
+  constructor(timeoutMs: number) {
+    super(`structured spawn transcript did not become readable within ${timeoutMs}ms`);
+    this.name = "StructuredTranscriptMaterializationError";
+  }
+}
+
+function structuredTranscriptIsReadable(artifactPath: string): boolean {
+  let descriptor: number | null = null;
+  try {
+    const stat = fs.statSync(artifactPath);
+    if (!stat.isFile() || stat.size === 0) return false;
+    descriptor = fs.openSync(artifactPath, "r");
+    const maxValidationBytes = 8 * 1024 * 1024;
+    const length = Math.min(stat.size, maxValidationBytes);
+    const buffer = Buffer.allocUnsafe(length);
+    if (fs.readSync(descriptor, buffer, 0, length, 0) !== length) return false;
+    const text = buffer.toString("utf8");
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line) as unknown;
+        if (record && typeof record === "object" && !Array.isArray(record)) return true;
+      } catch {
+        // The writer may still be appending its first record; the next poll retries it.
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+}
+
+/** Before a structured spawn returns its staged identity, require one complete
+    JSONL record at the path the engine supplied. */
+export async function waitForReadableStructuredTranscript(
+  artifactPath: string,
+  options: {
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    timeoutMs?: number;
+    pollMs?: number;
+    readable?: (artifactPath: string) => boolean;
+  } = {},
+): Promise<void> {
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const timeoutMs = options.timeoutMs ?? STRUCTURED_TRANSCRIPT_MATERIALIZATION_TIMEOUT_MS;
+  const pollMs = options.pollMs ?? INITIAL_MESSAGE_POLL_MS;
+  const readable = options.readable ?? structuredTranscriptIsReadable;
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    if (readable(artifactPath)) return;
+    const remaining = deadline - now();
+    if (remaining <= 0) throw new StructuredTranscriptMaterializationError(timeoutMs);
+    await sleep(Math.min(pollMs, remaining));
   }
 }
 
@@ -960,6 +1022,7 @@ export interface StructuredSpawnDependencies {
   deliverFirst?(input: StructuredSpawnInput, artifactPath: string): Promise<void | "held">;
   processIdentity?(): { pid: number; startIdentity: string | null };
   durableSetupTimeoutMs?: number;
+  transcriptMaterializationTimeoutMs?: number;
 }
 
 /** Why a queued launch from a previous generation must not be replayed, or
@@ -1530,6 +1593,9 @@ export async function spawnStructuredConversation(
     }, () => {});
     host = await withinDurableSetup(startingHost);
     const identity = hostIdentity(input.engine, host, input);
+    const transcriptMaterializationTimeoutMs = dependencies.transcriptMaterializationTimeoutMs
+      ?? STRUCTURED_TRANSCRIPT_MATERIALIZATION_TIMEOUT_MS;
+    const transcriptMaterializationDeadline = Date.now() + transcriptMaterializationTimeoutMs;
     key = identity.key;
     if (resumeKey && sessionKeyId(key) !== sessionKeyId(resumeKey)) {
       throw new Error("structured resume returned a different session identity");
@@ -1591,6 +1657,16 @@ export async function spawnStructuredConversation(
       if (terminal) throw new Error(terminal);
       markInitialMessageTimeout(input.registry, input.receipt.launchId, error);
       initialMessage = "held";
+    }
+    try {
+      await withinDurableSetup(waitForReadableStructuredTranscript(identity.path, {
+        timeoutMs: Math.max(0, transcriptMaterializationDeadline - Date.now()),
+      }));
+    } catch (error) {
+      if (error instanceof StructuredTranscriptMaterializationError) {
+        throw new StructuredTranscriptMaterializationError(transcriptMaterializationTimeoutMs);
+      }
+      throw error;
     }
     if (initialMessage === "held") {
       clearDurableSetupTimeout();
@@ -1655,11 +1731,15 @@ export async function spawnStructuredConversation(
         );
       }
     }
+    let cleanupError: unknown = null;
     try {
       await cleanupHost(host, binding);
-    } catch {
-      throw error;
+    } catch (failure) {
+      cleanupError = failure;
     }
+    const transcriptFailureMustSettle = input.receipt.purpose === "launch"
+      && error instanceof StructuredTranscriptMaterializationError;
+    if (cleanupError !== null && !transcriptFailureMustSettle) throw error;
     let failedEntry: AgentRegistryEntry | null = null;
     let failedIdentity = resumeIdentity;
     if (key) {
@@ -1677,8 +1757,8 @@ export async function spawnStructuredConversation(
       && failedEntry.structuredHostOperationId !== input.receipt.launchId) {
       failedIdentity = null;
     }
-    let projectionSucceeded = true;
-    if (failedIdentity && !adoptionClaimContended) {
+    let projectionSucceeded = cleanupError === null;
+    if (failedIdentity && !adoptionClaimContended && cleanupError === null) {
       try {
         await projectDeadStructuredSpawn(
           input.client,
@@ -1701,6 +1781,12 @@ export async function spawnStructuredConversation(
       } else {
         input.registry.failSpawn(input.receipt.launchId, failureReason);
       }
+    }
+    if (cleanupError !== null) {
+      console.error("[spawn] failed host cleanup remained unconfirmed", {
+        launchId: input.receipt.launchId,
+        error: structuredSpawnFailureReason(cleanupError),
+      });
     }
     throw error;
   }

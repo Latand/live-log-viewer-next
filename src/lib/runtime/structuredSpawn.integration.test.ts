@@ -23,7 +23,7 @@ import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
-import { INITIAL_MESSAGE_TIMEOUT_MS, STALE_STRUCTURED_SPAWN_TIMEOUT_MS, STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudeLaunchForm, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
+import { INITIAL_MESSAGE_TIMEOUT_MS, STALE_STRUCTURED_SPAWN_TIMEOUT_MS, STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudeLaunchForm, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForReadableStructuredTranscript, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
 import { structuredContentDigest } from "./structuredContent";
 import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
@@ -163,6 +163,41 @@ test("initial-message confirmation survives a transient runtime status read", as
 
   expect(polls).toBe(2);
   expect(now).toBe(250);
+});
+
+test("transcript materialization accepts a readable file that appears inside the bound", async () => {
+  const artifactPath = path.join(sandbox, `delayed-transcript-${crypto.randomUUID()}.jsonl`);
+  let now = 0;
+
+  await waitForReadableStructuredTranscript(artifactPath, {
+    now: () => now,
+    timeoutMs: 300,
+    pollMs: 50,
+    sleep: async (ms) => {
+      now += ms;
+      if (now === 100) fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "session_meta" })}\n`);
+    },
+  });
+
+  expect(now).toBe(100);
+});
+
+test.each([
+  { state: "a zero-byte file", contents: "" },
+  { state: "an incomplete JSONL record", contents: "{" },
+])("transcript materialization rejects $state at the bound", async ({ contents }) => {
+  const artifactPath = path.join(sandbox, `empty-transcript-${crypto.randomUUID()}.jsonl`);
+  fs.writeFileSync(artifactPath, contents);
+  let now = 0;
+
+  await expect(waitForReadableStructuredTranscript(artifactPath, {
+    now: () => now,
+    timeoutMs: 100,
+    pollMs: 25,
+    sleep: async (ms) => { now += ms; },
+  })).rejects.toThrow("structured spawn transcript did not become readable within 100ms");
+
+  expect(now).toBe(100);
 });
 
 test("attempt 93c42855 recovers a failed registry receipt from transcript evidence", async () => {
@@ -896,10 +931,34 @@ class RoundTripHost implements SpawnedStructuredHost {
   private activeTurnRef: string | null = null;
   private pendingAttention: string[] = [];
   private released = false;
+  private readonly materializeTranscriptOnHealth: boolean;
   releaseCount = 0;
 
-  constructor(readonly engine: "codex" | "claude", readonly artifactPath: string, sessionId: string) {
+  constructor(
+    readonly engine: "codex" | "claude",
+    readonly artifactPath: string,
+    sessionId: string,
+    options: { materializeTranscript?: boolean } = {},
+  ) {
     this.identity = engine === "codex" ? { threadId: sessionId, path: artifactPath } : { sessionId };
+    this.materializeTranscriptOnHealth = options.materializeTranscript !== false;
+  }
+
+  private materializeTranscript(): void {
+    if (!this.materializeTranscriptOnHealth) return;
+    const transcriptHasContent = (() => {
+      try { return fs.statSync(this.artifactPath).size > 0; }
+      catch { return false; }
+    })();
+    if (transcriptHasContent) return;
+    const sessionId = this.engine === "codex"
+      ? (this.identity as { threadId: string }).threadId
+      : (this.identity as { sessionId: string }).sessionId;
+    const record = this.engine === "codex"
+      ? { type: "session_meta", payload: { id: sessionId } }
+      : { type: "user", message: { role: "user", content: "fixture prompt" } };
+    fs.mkdirSync(path.dirname(this.artifactPath), { recursive: true });
+    fs.writeFileSync(this.artifactPath, `${JSON.stringify(record)}\n`);
   }
 
   setWriterFence(fence: () => boolean): void {
@@ -981,6 +1040,7 @@ class RoundTripHost implements SpawnedStructuredHost {
   }
 
   async health(): Promise<HostState> {
+    this.materializeTranscript();
     return {
       status: this.status,
       sessionKey: this.engine === "codex" ? (this.identity as { threadId: string }).threadId : (this.identity as { sessionId: string }).sessionId,
@@ -1310,6 +1370,78 @@ async function completesWithin<T>(operation: T | PromiseLike<T>, message: string
     if (timer) clearTimeout(timer);
   }
 }
+
+test.each([
+  { engine: "codex" as const, cleanup: "releases its host", releaseResists: false },
+  { engine: "codex" as const, cleanup: "records failure when host release is unconfirmed", releaseResists: true },
+  { engine: "claude" as const, cleanup: "releases its host", releaseResists: false },
+])("a structured $engine spawn $cleanup when its issued transcript path never materializes (#1123)", async ({ engine, releaseResists }) => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `missing-transcript-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const accountId = `${engine}-subscription`;
+  const begun = beginLegacySpawnFixture(registry, {
+    engine,
+    cwd,
+    transport: "structured",
+    accountId,
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const host = releaseResists
+    ? new UnreapableRoundTripHost(engine, artifactPath, id, { materializeTranscript: false })
+    : new RoundTripHost(engine, artifactPath, id, { materializeTranscript: false });
+
+  try {
+    await expect(spawnStructuredConversation({
+      engine,
+      receipt: begun.receipt,
+      spec: { command: engine, cwd, windowName: "missing-transcript", engine, transcript: artifactPath },
+      account: { engine, accountId, kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+      "prompt": "build the scoped change",
+      registry,
+      client,
+    }, {
+      startHost: async () => host,
+      bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+        const state = await runningHost.health();
+        targetRegistry.setStructuredHostClaimed(key, {
+          kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+          endpoint: state.endpoint,
+          process: { pid: process.pid, startIdentity: "missing-transcript-host" },
+          eventCursor: state.eventCursor,
+          protocolVersion: state.protocolVersion,
+          writerClaimEpoch: claimEpoch,
+          activeTurnRef: state.activeTurnRef,
+          pendingAttention: state.pendingAttention,
+          activeFlags: state.activeFlags,
+        }, "idle", claimOwner, claimEpoch);
+        return () => {};
+      },
+      publishHost: async () => async () => {},
+      deliverFirst: async () => "held" as never,
+      processIdentity: () => ({ pid: process.pid, startIdentity: "missing-transcript-host" }),
+      transcriptMaterializationTimeoutMs: 0,
+    })).rejects.toThrow("structured spawn transcript did not become readable");
+
+    expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+      state: "failed",
+      error: expect.stringContaining("structured spawn transcript did not become readable"),
+    });
+    expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
+      status: "dead",
+      structuredHost: null,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    expect(host.releaseCount).toBe(1);
+  } finally {
+    journal.close();
+  }
+});
 
 test("a fresh structured spawn permits an intentionally empty first message", async () => {
   const id = crypto.randomUUID();
@@ -3401,7 +3533,7 @@ test.each(["codex", "claude"] as const)("issue 1074: a %s launch fails when shar
   });
   if (begun.kind !== "created") throw new Error("generic spawn receipt was unavailable");
   expect(begun.receipt.agentRole).toBeNull();
-  const host = new RoundTripHost(engine, artifactPath, id);
+  const host = new RoundTripHost(engine, artifactPath, id, { materializeTranscript: false });
   await bindStructuredDeliveryQueue([], { registry, client, deferStartupWork: true });
 
   const spawning = spawnStructuredConversation({
