@@ -95,7 +95,8 @@ CREATE TABLE history_files (
   complete_line_count    INTEGER NOT NULL,
   next_ordinal           INTEGER NOT NULL,
   normalizer_version     INTEGER NOT NULL,
-  continuity_hash        BLOB NOT NULL,
+  projection_revision    INTEGER NOT NULL,
+  continuity_root        BLOB NOT NULL,
   parser_state_json      TEXT NOT NULL,
   state                  TEXT NOT NULL CHECK(state IN ('ready', 'building', 'invalid')),
   updated_at_ms           INTEGER NOT NULL,
@@ -147,6 +148,7 @@ CREATE TABLE history_checkpoints (
   file_generation       TEXT NOT NULL,
   byte_offset           INTEGER NOT NULL,
   next_ordinal          INTEGER NOT NULL,
+  continuity_root       BLOB NOT NULL,
   state_json            TEXT NOT NULL,
   PRIMARY KEY (file_generation, byte_offset),
   FOREIGN KEY (file_generation) REFERENCES history_files(file_generation) ON DELETE CASCADE
@@ -175,27 +177,31 @@ CREATE TABLE history_source_chunks (
 
 `parser_state_json`, `history_open_calls`, and periodic checkpoints persist the minimum state needed to resume after `indexed_through`: the current turn, pending Codex user representation, adjacent assistant dedupe fingerprint, trailing command run, compaction marker, and other engine state already held by `FeedSession`. Open call identities use their own table because correctness requires retaining every unresolved call.
 
+`continuity_root` is a deterministic Merkle root over fixed-size source chunks in `[0, indexed_through)`. Each leaf hashes its domain tag, byte start, byte length, and exact source bytes. Parent hashes preserve child order and covered length. A partial final chunk is a distinct length-bound leaf. `history_source_chunks` stores the leaves; a projection rebuild recreates the same tree from JSONL.
+
+A cursor freezes a source continuity identity containing the stable conversation scope, its `continuity_length`, and the Merkle root for exactly that prefix. Appending bytes after `continuity_length` leaves this identity unchanged. A truncation or rewrite anywhere inside the prefix changes it. This identity comes from source bytes and survives deletion of the SQLite projection. `file_generation` remains the cache epoch and can rotate during a projection-only rebuild.
+
 ## Incremental indexing contract
 
 1. Resolve the conversation to its current transcript through the catalog and apply the same allowed-root and regular-file requirements used by `/api/log`.
-2. Open one descriptor and take the source stat from that descriptor. Compare its file identity, size, mtime, and the continuity hash immediately before `indexed_through` with `history_files`.
+2. Open one descriptor and take the source stat from that descriptor. Compare its file identity, size, mtime, and source continuity root through `indexed_through` with `history_files`.
 3. For an append, start at `indexed_through`, carry an incomplete final JSONL record across read buffers, and parse each complete record once. Byte spans use the original bytes, so multibyte UTF-8 text cannot skew offsets.
-4. Apply every `ProjectionDelta` and its new parser state in one transaction. Advance `indexed_through` only through the final complete newline committed in that transaction. A crash leaves the previous rows and checkpoint intact.
-5. Keep `file_generation` unchanged for valid appends. Update earlier rows in place when a later source record settles a call, joins a duplicate representation, or completes another open semantic item. Increment `revision`, extend `byte_end`, and mark the row settled when its edge state closes.
+4. Apply every `ProjectionDelta` and its new parser state in one transaction. Advance `indexed_through` only through the final complete newline committed in that transaction. Increment `projection_revision` once when the transaction inserts or updates a semantic row or changes page-edge state exposed to clients. A crash leaves the previous rows, revision, and checkpoint intact.
+5. Keep `file_generation` unchanged for valid appends. Update earlier rows in place when a later source record settles a call, joins a duplicate representation, or completes another open semantic item. Increment the entry `revision`, extend `byte_end`, and mark the row settled when its edge state closes.
 6. Schedule catch-up from the existing catalog refresh. A request also performs bounded suffix catch-up. A missing projection begins a full build. During a long build, the route reports `rebuilding`; the UI keeps its bounded live lane visible and never interprets an incomplete index as an empty conversation.
 
 The common rebuild triggers are:
 
 - source size below `indexed_through`;
 - a changed device or inode identity;
-- a changed continuity hash for already indexed bytes;
+- a changed source continuity root for already indexed bytes;
 - a same-size source with a new mtime;
 - a failed SQLite integrity check, schema-version mismatch, impossible offset, duplicate deterministic identity, or projector invariant failure;
 - an explicit normalizer-version change that has no proven in-place migration.
 
 A replacement or rewrite marks the old generation invalid, deletes its rows and checkpoints in one transaction, creates a new random `file_generation`, and starts at byte zero. Database corruption closes the database, removes the disposable database plus its WAL and shared-memory files, and rebuilds every projection from JSONL. No repair path copies rows out of a suspect projection.
 
-The append fast path verifies the prior suffix before consuming new bytes. A low-priority audit checks stored source-chunk hashes across older regions. If an in-place writer changed an earlier region and then appended, that audit rotates the generation and rebuilds. Until the rebuild finishes, the route reports rebuilding and the live byte lane remains available.
+The append fast path verifies the prior suffix before consuming new bytes. A low-priority audit checks stored source-chunk hashes across older regions. If an in-place writer changed an earlier region and then appended, that audit rotates the generation and rebuilds. Cursor rebinding has a stronger rule: after any `file_generation` mismatch, the server accepts the cursor only after the rebuilt chunk manifest reproduces the cursor's complete source continuity identity. The local coordinate digest alone can never authorize a rebind. Until the rebuild or validation finishes, the route reports rebuilding and the live byte lane remains available.
 
 ## Page contract
 
@@ -241,8 +247,11 @@ interface HistoryPage {
   beforeCursor: string | null;
   hasMore: boolean;
   fileGeneration: string;
+  projectionRevision: number;
   queryScope: string;
+  sourceSize: number;
   indexedThroughByte: number;
+  caughtUp: boolean;
   byteRange: { start: number; end: number } | null;
   pageRange: {
     requestedBefore: PageBoundary;
@@ -250,6 +259,7 @@ interface HistoryPage {
   };
   hiddenServiceCount: number;
   cacheable: boolean;
+  pageEtag: string;
   edge: PageEdgeState;
 }
 ```
@@ -258,9 +268,15 @@ The row limit and byte limit both apply. The server scans rows from newest to ol
 
 `hasMore` is derived from the existence of an older ordinal in the verified projection. A projection in `building` or `invalid` state cannot produce `hasMore: false`.
 
-`queryScope` is the full SHA-256 digest of a versioned canonical serialization containing the stable conversation scope and every query option that changes the row sequence, including `showSvc` and the normalizer version. `pageRange` records both semantic cursor boundaries with ordinal and `sourcePart`. The initial upper boundary records `endAtByte: indexedThroughByte`, so an append cannot reuse an older newest-page entry. The client stores a cacheable page under `[fileGeneration, queryScope, pageRange.requestedBefore, pageRange.nextBefore, byteRange]`. The key is encoded as one canonical JSON array, which avoids delimiter and field-order aliases. The semantic boundaries distinguish pages that split several entries sharing one source byte range. `queryScope` distinguishes filtered variants with identical source ranges. A tail page with an open call, pending duplicate, or active command run stays in current view state and is refetched after progress. Older closed pages are immutable under append.
+`queryScope` is the full SHA-256 digest of a versioned canonical serialization containing the stable conversation scope and every query option that changes the row sequence, including `showSvc` and the normalizer version. `pageRange` records both semantic cursor boundaries with ordinal and `sourcePart`. The initial upper boundary records `endAtByte: indexedThroughByte`, so an append cannot reuse an older newest-page entry. The client stores a cacheable page under `[fileGeneration, queryScope, pageRange.requestedBefore, pageRange.nextBefore, byteRange]`. The key is encoded as one canonical JSON array, which avoids delimiter and field-order aliases. The semantic boundaries distinguish pages that split several entries sharing one source byte range. `queryScope` distinguishes filtered variants with identical source ranges.
 
-`cacheable` is true only when every returned entry is settled and both page edges are closed. Empty source ranges use `byteRange: null`; their semantic boundaries still produce a unique cache identity.
+`cacheable` is true only when every returned entry is settled and both page edges are closed. Older cacheable pages are immutable under append. Empty source ranges use `byteRange: null`; their semantic boundaries still produce a unique cache identity.
+
+Every loaded page with `cacheable: false` retains its original request cursor, `projectionRevision`, and `pageEtag`, regardless of its distance from the tail. The history controller refreshes the newest semantic page whenever `useLogTail.size` advances. It retries while `caughtUp` is false; `caughtUp: true` means the indexer reached the response's `sourceSize` and any remaining bytes form one incomplete JSONL record. A higher `projectionRevision` causes a conditional refetch of every loaded non-cacheable page from its original cursor. The server returns 304 when that page's entries and edge state still match `pageEtag`; otherwise the client replaces the page by stable `entry_id` and its new cache identity. A page enters the LRU after the response marks it cacheable. The loaded-page set is bounded; an evicted page is fetched from the index when the reader returns to it.
+
+Revalidation can change serialized row sizes and therefore move the page's lower semantic boundary. When a replacement's `pageRange.nextBefore` differs from the prior value, the controller invalidates every loaded older descendant in that cursor chain. The next older fetch starts from the replacement's new `beforeCursor`. Stable entry ids and the existing viewport anchor preserve the reader's position while this older chain reloads. This rule prevents a late update from leaving a gap or duplicate at the following page seam.
+
+This revision flow covers long-distance joins. A tool call remains unsettled and keeps its page non-cacheable until its result arrives. A result hundreds of entries later increments both the tool entry revision and `projectionRevision`. Refreshing the newest page observes that revision even after the bounded live lane has evicted the call, then triggers the older page's conditional refetch.
 
 ### Errors
 
@@ -277,13 +293,15 @@ The row limit and byte limit both apply. The server scans rows from newest to ol
 
 Ordering uses `ordinal`, never timestamp. Timestamps can be absent, duplicated, or out of source order. A cursor names the exclusive lower boundary after every row consumed for the current page. With service rows included, this normally equals the position of the oldest returned entry. With service rows omitted, it can equal a skipped service position below that entry.
 
-The opaque token carries a version, `queryScope`, the normalizer version, the last consumed ordinal and `sourcePart`, the corresponding source coordinate, and a short digest of source bytes around that coordinate. It carries no path and no SQLite row id. The decoder limits token size, validates every integer, and rejects a scope mismatch.
+The opaque token carries a version, `queryScope`, the normalizer version, the last consumed ordinal and `sourcePart`, the corresponding source coordinate, a local coordinate digest, and the complete source continuity identity frozen by the first page in this cursor chain. Every descendant cursor inherits the same `continuity_length` and root even when the source appends. It carries no path and no SQLite row id. The decoder limits token size, validates every integer, and rejects a scope mismatch.
+
+Validation opens the current source descriptor and requires its size to reach `continuity_length`. A manifest already verified against that exact source stat revision can supply its fixed-chunk leaves. Any source stat change removes that verification; the server recomputes the frozen prefix root from current JSONL bytes or reports rebuilding before it serves the cursor. The same recomputation is mandatory after a projection rebuild or generation mismatch. For a cursor length inside a later full chunk, the validator hashes that chunk's prefix and combines it with the preceding complete leaves. The result can be cached by source stat revision plus continuity identity, so one cursor chain does not repeat the read. A missing byte, changed leaf, changed covered length, or changed root makes the cursor stale.
 
 Cursor behavior is:
 
-- Append stability: existing ordinals and source coordinates stay fixed, so an older-page cursor remains valid while the file grows.
-- Projection rebuild stability: a rebuild under the same normalizer deterministically recreates ordinals. The server rebinds the cursor to the new `file_generation` after the source-coordinate digest matches.
-- Rewrite safety: truncation, replacement, or a changed byte digest returns `history_cursor_stale`. The caller starts from the newest page.
+- Append stability: existing ordinals and source coordinates stay fixed. The frozen continuity prefix stays byte-identical under append, so an older-page cursor remains valid while the file grows.
+- Projection rebuild stability: a rebuild under the same normalizer deterministically recreates ordinals and the fixed-prefix continuity root. The server rebinds the cursor to the new `file_generation` only after the complete prefix identity matches.
+- Rewrite safety: truncation, replacement, or a changed byte anywhere inside the frozen prefix returns `history_cursor_stale`. A matching local coordinate digest cannot override a failed prefix identity. The caller starts from the newest page.
 - Normalizer changes: a new normalizer version invalidates older tokens. A semantic rule change can alter entry counts, so automatic reinterpretation would risk gaps or duplicates.
 
 The cursor is exclusive. If an unfiltered page consumes ordinals 900 through 1,049, `beforeCursor` addresses ordinal 900 and the next query selects ordinals below 900. If visible ordinal 899 was inspected for size and rejected, it remains unconsumed and is the first eligible row on that next query. In a filtered query, a page can return through visible ordinal 900, consume hidden service ordinals 899 and 898, then reject visible ordinal 897 for size. That page's `beforeCursor` addresses ordinal 898, so the following query can return 897. If 897 alone exceeds 64 KiB, that following query returns and consumes it under the single-oversized-row exception. Every nonterminal response consumes at least one row, and no over-budget visible candidate is skipped.
@@ -312,7 +330,7 @@ When an older page is prepended, the client reconciles the two edge states and t
 | --- | --- |
 | A JSONL record crosses indexer read buffers | Keep raw byte carry until a complete newline arrives. Commit no partial record. The live lane owns the unfinished tail. |
 | One source record emits several cards | Assign deterministic `source_part` values and consecutive ordinals. Every card keeps the same source range and a distinct `entry_id`. |
-| A tool call and result fall in different pages | Index the call once at its original ordinal. The result updates that row by `item_id`, extends its source range, and settles it. Page edge state keeps the call open until this update exists. |
+| A tool call and result fall in different pages | Index the call once at its original ordinal. The result updates that row by `item_id`, extends its source range, settles it, and increments `projectionRevision`. The call's loaded page remains non-cacheable and is conditionally refetched after the newest page observes that revision. |
 | A result has no indexed call | Preserve current parser behavior: expose a bounded service or malformed-record summary only when service rows are enabled. Never invent a tool card. |
 | A command run crosses a page edge | Mark the older page's trailing run and the newer page's leading run with the same run identity. Prepend reconciliation replaces the two partial presentations with one group keyed by the first member. |
 | Adjacent Codex assistant representations cross a page edge | Carry the previous representation, normalized-text digest, timestamp, and shape. Apply the adjacency and time rule used by `sameCodexTextAtTime`; retain one semantic entry and attach the native response identity when it arrives. |
@@ -371,9 +389,10 @@ Exit proof: a collapsed large tool result contributes only bounded summary bytes
 
 - Add the bounded LRU keyed by file generation, query scope, semantic page boundaries, and byte range.
 - Persist and return page-edge state for tool pairing, command grouping, user and assistant representation joins, and turn continuity.
+- Publish `projectionRevision` and conditionally refetch every loaded non-cacheable page after semantic progress, including pages outside the bounded live window.
 - Reconcile only the added page and its adjoining edge. Remove the old raw-history prepend call from `LogFeed`.
 
-Exit proof: prepending a page performs work proportional to that page plus its two edge runs. A test spies on the parser and proves no previously settled page or live window is parsed again.
+Exit proof: prepending a page performs work proportional to that page plus its two edge runs. A test spies on the parser and proves no previously settled page or live window is parsed again. A late result refreshes and settles its loaded call page even when more than 150 semantic entries separate them.
 
 ### Phase 4: viewport virtualization
 
@@ -409,6 +428,7 @@ Required tests include:
 - deterministic ordinals and entry ids across a projection rebuild;
 - cursor stability after append and after a clean rebuild;
 - stale-cursor rejection after truncation, replacement, earlier-byte rewrite, or normalizer-version change;
+- stale-cursor rejection when a projection rebuild follows a rewrite outside the cursor's local coordinate-digest range;
 - byte-accurate indexing across UTF-8 and read-buffer splits;
 - call and result pairing across a page edge;
 - command grouping and Codex prose dedupe across a page edge;
@@ -418,6 +438,8 @@ Required tests include:
 - two pages split between entries with the same source byte range receiving distinct cache identities;
 - `showSvc` variants with the same byte range receiving distinct cache identities;
 - a visible row rejected after the byte budget remaining eligible on the next page while filtered service rows advance the cursor;
+- a tool result more than 150 semantic entries after its call incrementing `projectionRevision` and refreshing the loaded non-tail call page after live-window eviction;
+- a late update that changes a page's byte-budget boundary invalidating and restarting its older cursor chain without gaps or duplicates;
 - index corruption producing a rebuilding response while the JSONL source remains intact;
 - one live row replaced by one durable twin with the same DOM presentation key;
 - stable viewport offset during prepend and live-to-durable replacement;
@@ -426,7 +448,7 @@ Required tests include:
 - compact panes mounting only their bounded latest turn set;
 - a search hit opening the semantic page that contains its ordinal.
 
-Instrumentation should report source bytes read, records parsed, inserted rows, updated rows, page rows, serialized page bytes, rebuild reason, and whether a page came from cache. These are diagnostic counters. They do not become authority for transcript completeness.
+Instrumentation should report source bytes read, records parsed, inserted rows, updated rows, projection revision, page rows, serialized page bytes, non-cacheable page revalidations, rebuild reason, and whether a page came from cache. These are diagnostic counters. They do not become authority for transcript completeness.
 
 ## Non-goals
 
