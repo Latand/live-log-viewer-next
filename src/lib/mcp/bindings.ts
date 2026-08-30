@@ -47,7 +47,7 @@ import {
 } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
-import { recordBridgeDirectiveAnswer, recordManagerReport } from "@/lib/bridge/service";
+import { recordBridgeDirectiveAnswer, recordBridgeDirectivePendingAnswer, recordManagerReport } from "@/lib/bridge/service";
 import { bridgeDirectiveBody, bridgeDirectiveId, type BridgeTrailer } from "@/lib/bridge/directive";
 import { seatIdentityResolver } from "@/lib/bridge/seatIdentity";
 import { isBridgeReportClass, type CanonicalSeatConversationId } from "@/lib/bridge/types";
@@ -842,9 +842,11 @@ async function sendMessage(
  * reservation itself once compaction has retired it — and a record that is
  * still in flight is reconciled against the delivery journal's CURRENT answer
  * before it is reported, because a caller asking what became of a send is
- * asking about now, not about whichever sweep last updated the projection. An
- * id nothing ever admitted is refused rather than answered with an invented
- * in-flight state.
+ * asking about now, not about whatever last updated the projection — and past
+ * the settlement deadline this query is also what ENDS an accepted send, so
+ * `queued` is never the last thing anyone can be told about it. An id nothing
+ * ever admitted is refused rather than answered with an invented in-flight
+ * state.
  */
 async function messageReceipt(args: McpToolArgs): Promise<McpToolPayload> {
   const operationId = required(args, "operationId");
@@ -1613,14 +1615,20 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     origin: mcpSenderOrigin(dependencies),
   }, callerCapabilityHeaders());
   const settledOutcome = outcome.outcome ?? "delivered";
+  const operationId = typeof outcome.operationId === "string" ? outcome.operationId : null;
   /* The trailer is the ONLY thing that says a report was answered — the drain
      cursor says only that it was read aloud — so it is recorded the moment the
      answer actually reaches the manager (#1168), and NOT before: an accepted
      directive that is still `queued` has not reached anyone, and recording it
      then would clear a pending decision that a dropped delivery means nobody
-     ever saw (#1131). A directive that cannot be delivered now leaves the ask
-     standing, which is the safe end of that trade. Scoped by the project and seat
-     this directive was just routed to, because a report seq is log-global: the
+     ever saw (#1131).
+     An acceptance is not the end of it either. The ref is PARKED against the
+     operation id the send returned, so the ask clears itself the moment that
+     send is recorded delivered, and stays standing if it is recorded failed —
+     which is what stops a queued directive from leaving the manager's decision
+     request open forever after the message did arrive.
+     Both are scoped by the project and seat this directive was just routed to,
+     because a report seq is log-global: the
      store settles the ref only if it names a decision request THIS seat filed,
      so a ref that names nothing yet cannot pre-answer a later report and a
      directive cannot clear another project's ask. The seat identity travels in
@@ -1630,17 +1638,16 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
      recorded id the same way, so anything less here leaves a rekeyed seat's ask
      visible and unanswerable. Idempotent, so a directive retry under the same
      derived id settles the same seq once. */
-  if (trailer && settledOutcome === "delivered") {
-    recordBridgeDirectiveAnswer(
-      trailer.ref,
-      { project, seatConversationId: manager.conversationId },
-      dependencies.canonicalSeatConversationId ?? productionCanonicalSeatConversationId,
-    );
+  if (trailer) {
+    const scope = { project, seatConversationId: manager.conversationId };
+    const canonical = dependencies.canonicalSeatConversationId ?? productionCanonicalSeatConversationId;
+    if (settledOutcome === "delivered") recordBridgeDirectiveAnswer(trailer.ref, scope, canonical);
+    else if (operationId) recordBridgeDirectivePendingAnswer(trailer.ref, scope, operationId, canonical);
   }
   return {
     directiveId: deliveryId,
     managerConversationId: manager.conversationId,
-    operationId: outcome.operationId ?? null,
+    operationId,
     outcome: settledOutcome,
     /* #1131: the same contract `send_message` answers with — acceptance is not
        arrival, and `message_receipt` over the operation id is what says which. */

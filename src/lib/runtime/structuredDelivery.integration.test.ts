@@ -31,9 +31,8 @@ function journalPort(journal: RuntimeJournal, failDelivered = false): Structured
       if (failDelivered && status === "delivered") throw new Error("runtime stopped before confirmation commit");
       journal.transitionOperation(operationId, status, details);
     },
-    /* Wired exactly as `runtimeClientDeliveryPort` and the controller wire it,
-       so the durable receipt these tests recover through is the one production
-       reads (#1131). */
+    /* Wired exactly as the controller wires it, so the durable receipt these
+       tests recover through is the one production reads (#1131). */
     status: async (operationId) => journal.operationResult(operationId)?.receipt ?? null,
   };
 }
@@ -2129,7 +2128,7 @@ test("queue binding settles an uncertain reservation from a terminal journal rec
 test("a send its host could not answer for settles the reservation without waiting for a sweep", async () => {
   /* #1131: the queue writes `uncertain` for a send that was handed to the
      engine and never answered for. The reservation has to settle on that write
-     rather than resting `delivery-uncertain` until a settlement sweep notices —
+     rather than resting `delivery-uncertain` until someone asks for a receipt —
      terminality that needs nothing to be healthy beats terminality that needs a
      runtime client and a tick. The record keeps WHY, so the receipt says the
      fate is unknown instead of offering a resend that could deliver the

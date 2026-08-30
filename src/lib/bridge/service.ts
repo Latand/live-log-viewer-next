@@ -1,7 +1,9 @@
+import { agentRegistry, type RegistryFile } from "@/lib/agent/registry";
 import {
   planBridgeReportDelivery,
   type BridgeDeliveryPlan,
 } from "@/lib/runtime/bridgeDelivery";
+import { sendReceiptFor } from "@/lib/runtime/sendSettlement";
 import { rootIdentity as readRootIdentity } from "@/lib/root/store";
 
 import type { BridgeAsk } from "@/lib/types";
@@ -15,6 +17,7 @@ import {
   openBridgeChannel,
   readBridgeReportLog,
   recordBridgeDirectiveAnswer,
+  recordBridgeDirectivePendingAnswer,
   redeemBridgeAckToken,
 } from "./store";
 import {
@@ -70,7 +73,7 @@ export function recordManagerReport(input: BridgeReportInput): BridgeReportV1 | 
  * (#1168). Exported here so the relay path settles an ask through the same
  * service every other bridge write goes through.
  */
-export { recordBridgeDirectiveAnswer };
+export { recordBridgeDirectiveAnswer, recordBridgeDirectivePendingAnswer };
 
 /**
  * The open ask of every orchestrator seat, for the surface that shows the
@@ -84,8 +87,22 @@ export { recordBridgeDirectiveAnswer };
 export function bridgeAsksForSeats(
   options: Omit<OpenBridgeAskOptions, "now"> & { now?: Date } = {},
 ): ReadonlyMap<string, BridgeAsk> {
+  /* #1131: a directive the runtime only ACCEPTED parked its answer against the
+     send's operation id, and the durable delivery record is what says whether
+     that send ever arrived. Read here rather than in the pure projection, and
+     read fresh on each call, because the answer to "did it arrive" changes
+     without the log changing — once per call and only if the log has a parked
+     answer to resolve. */
+  let deliveries: RegistryFile | null = null;
   try {
-    return openBridgeAsks(readBridgeReportLog(), { ...options, now: options.now ?? new Date() });
+    return openBridgeAsks(readBridgeReportLog(), {
+      deliveredOperation: (operationId) => {
+        deliveries ??= agentRegistry().readOnlySnapshot();
+        return sendReceiptFor(deliveries, operationId)?.state === "delivered";
+      },
+      ...options,
+      now: options.now ?? new Date(),
+    });
   } catch {
     return new Map();
   }

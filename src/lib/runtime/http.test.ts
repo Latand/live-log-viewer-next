@@ -389,7 +389,10 @@ test("direct runtime send reaches durable admission while the runtime socket syn
   );
 
   expect(response.status).toBe(202);
-  expect(await response.json()).toEqual({ held: true });
+  /* #1131: the hold's own operation id comes back, so the composer's send is
+     queryable through `message_receipt` like every other acceptance instead of
+     being the one admission nobody could ask about afterwards. */
+  expect(await response.json()).toEqual({ held: true, operationId: "op_sync_window_send" });
   expect(admissions).toMatchObject([{
     conversationId: "conversation_sync_window",
     clientMessageId: "sync-window-send",

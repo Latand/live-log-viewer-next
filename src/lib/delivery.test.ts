@@ -914,7 +914,14 @@ test("pre-actuation payload failure discards the reservation for retry", async (
   expect(Object.values(registry.snapshot().heldDeliveries)).toHaveLength(0);
 });
 
-test("ambiguous actuation keeps images and retries only after the same client request returns", async () => {
+test("ambiguous actuation is absorbing: the same client request is answered, never typed a second time", async () => {
+  /* #1131: the legacy path has no delivery journal, so the reservation left by
+     an actuation nobody heard back from is the ONLY record that the message may
+     already be in the pane. This request used to be re-delivered here — one
+     client retry putting the same instruction in front of an agent twice, on
+     the channel that carries deployment control. It is answered from the
+     uncertainty instead: one host write, an operation id to ask about, and
+     `verify-first`. */
   const registry = new AgentRegistry(path.join(SANDBOX, "ambiguous-actuation-registry.json"));
   setAgentRegistryForTests(registry);
   const conversation = registry.ensureConversation("codex", "", "default");
@@ -930,17 +937,33 @@ test("ambiguous actuation keeps images and retries only after the same client re
   });
 
   expect(outcome).toMatchObject({ ok: false, error: "transport lost" });
+  /* The bytes stay: a message that may have been delivered keeps the paths it
+     named, so the agent can still open what it was handed. */
   expect(fs.existsSync(imagePath)).toBe(true);
   expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "delivery-uncertain" }]);
   expect(() => registry.requeueHeldDelivery(registry.pendingDeliveries(conversation.id)[0]!.id)).toThrow("explicit client retry");
-  const replay = await deliverConversationMessage(message, {
-    targetForKnownPid: async () => "%1",
-    buildImagePayload: () => { throw new Error("retained image should be reused"); },
-    sendText: async (_target, payload) => { sends += 1; expect(payload).toBe(imagePath); },
-  });
-  expect(replay.ok).toBe(true);
-  expect(sends).toBe(2);
-  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+
+  const operationId = registry.pendingDeliveries(conversation.id)[0]!.command.operationId;
+  for (let replayed = 0; replayed < 2; replayed += 1) {
+    const replay = await deliverConversationMessage(message, {
+      targetForKnownPid: async () => "%1",
+      buildImagePayload: () => ({ payload: imagePath, imagePaths: [imagePath] }),
+      sendText: async () => { sends += 1; },
+    });
+    expect(replay).toMatchObject({
+      ok: false,
+      status: 409,
+      actuation: "started",
+      operationId,
+      resend: "verify-first",
+    });
+    /* Absorbing: the answer does not change however often the client asks, and
+       nothing was typed on either replay. */
+    expect(sends).toBe(1);
+  }
+  /* And the send is still queryable rather than discarded — the reservation is
+     what a receipt reads to say the fate is unknown. */
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "delivery-uncertain" }]);
 });
 
 test("reserved delivery reports uncertainty when direct tmux send fails after actuation starts", async () => {

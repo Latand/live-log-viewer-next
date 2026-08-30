@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import { parseBridgeTrailer } from "@/lib/bridge/directive";
 import { bridgeAsksForSeats, recordManagerReport } from "@/lib/bridge/service";
 import { drainBridgeReports, openBridgeChannel } from "@/lib/bridge/store";
@@ -228,6 +229,62 @@ test("a directive that was only accepted leaves the ask standing, and says it is
   expect(receipt).toMatchObject({ outcome: "queued", settled: false, operationId: "op-1" });
   /* Still open, and answerable by the operation id the receipt just returned. */
   expect(bridgeAsksForSeats().size).toBe(1);
+});
+
+test("a queued directive settles its ask once its own send is delivered, and never when it failed", async () => {
+  /* #1131: the other half of the trade above. Leaving a queued directive's ask
+     open forever is its own failure — the manager answered, the operator's card
+     kept asking — so the ref is parked against the operation id the send
+     returned and cleared by the DURABLE DELIVERY RECORD, which is the only
+     thing that knows whether the message ever arrived. Nothing polls: the ask
+     projection joins the two on every read. */
+  for (const settlement of ["delivered", "failed"] as const) {
+    sandbox();
+    const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "agent-registry.json"));
+    setAgentRegistryForTests(registry);
+    try {
+      const tools = bindings("proj-voice", undefined, "queued");
+      const asked = recordManagerReport({
+        key: "lane-11-blocked",
+        class: "blocked",
+        at: new Date().toISOString(),
+        project: "proj-voice",
+        targetSeatConversationId: "conversation_manager",
+        body: "cannot proceed: pick a base branch",
+      });
+      await tools.bridge_directive({
+        clientRequestId: `d-${settlement}`,
+        rootTurnId: `turn_${settlement}`,
+        utterance: 0,
+        instruction: "cut it from main",
+        project: "proj-voice",
+        ref: asked!.seq,
+      });
+      /* Accepted and nothing more: the ask stays open until the send settles. */
+      expect(bridgeAsksForSeats().size).toBe(1);
+
+      const conversation = registry.ensureConversation("codex", "", "default");
+      const held = registry.holdDelivery(conversation.id, "cut it from main", `key-${settlement}`, "text", [], null, {
+        operationId: "op-1",
+        kind: "send",
+        policy: "queue",
+      });
+      registry.recordDeliveryOutcome(
+        held.id,
+        settlement,
+        settlement === "failed" ? "the send was dropped" : null,
+        settlement === "failed" ? "unverified" : "delivered",
+      );
+
+      /* Delivered clears it — and idempotently, because the projection derives
+         the answer rather than racing to write one. A failure leaves it
+         standing, which is the whole reason the answer waited. */
+      expect(bridgeAsksForSeats().size).toBe(settlement === "delivered" ? 0 : 1);
+      expect(bridgeAsksForSeats().size).toBe(settlement === "delivered" ? 0 : 1);
+    } finally {
+      setAgentRegistryForTests(null);
+    }
+  }
 });
 
 test("a seat rekeyed since it asked is still the seat this directive settles (#1168 final review, HIGH 1)", async () => {

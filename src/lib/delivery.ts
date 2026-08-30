@@ -13,6 +13,7 @@ import { procBackend } from "@/lib/proc";
 import { recoverDeadStructuredConversation } from "@/lib/runtime/structuredRecovery";
 import type { MessageOrigin } from "@/lib/runtime/messageOrigin";
 import { structuredContent } from "@/lib/runtime/structuredContent";
+import { SEND_UNVERIFIED_REASON, type SendResendGuidance } from "@/lib/runtime/sendSettlement";
 import type { RuntimeOperationReceipt } from "@/lib/runtime/contracts";
 import { detectBlockingGate, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import type { FileEntry } from "@/lib/types";
@@ -45,6 +46,13 @@ export interface DeliveryFailure {
   error: string;
   status: number;
   actuation?: "started";
+  /** #1131: the accepted send this refusal is about, so a caller holding it can
+      ask `message_receipt` what became of it. */
+  operationId?: string;
+  /** #1131: set when the refusal is ABSORBING — an earlier attempt under this
+      same request began actuating and nothing can say whether it arrived, so
+      the instruction must be verified rather than repeated. */
+  resend?: SendResendGuidance;
   /** Set on a superseded-round rejection (issue #383): the live chain end the
       caller should redirect to instead of forking retired work. */
   successorConversationId?: string;
@@ -625,7 +633,6 @@ export async function deliverConversationMessage(message: ConversationMessage, o
   }
   let filePath = conversation?.generations.at(-1)?.path ?? message.path;
   let deliveryId: string | null = null;
-  let retryArtifactPaths: string[] = [];
   if (conversation && !message.reservedDeliveryId) {
     if (deliveryFence(conversation) === "held" && requestLocalPayload) return failure("request-local delivery waits for migration completion", 409);
     let queued;
@@ -657,8 +664,26 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     }
     if (queued.state === "delivered") return { ok: true, target: conversation.id };
     if (queued.state === "delivery-uncertain") {
-      retryArtifactPaths = queued.artifactPaths;
-      queued = registry.retryUncertainDelivery(queued.id);
+      /* #1131: an earlier attempt under this same request began typing into the
+         pane and nothing came back. The legacy path has no journal that could
+         say whether the recipient got it, and this reservation is the only
+         record of the attempt — so the same request is answered with that
+         uncertainty rather than actuating a second time. It used to be
+         reassigned and re-delivered here, which is how one client retry could
+         put the same instruction in front of an agent twice on a channel that
+         carries deployment control. `delivery-uncertain` is absorbing in the
+         registry, so every later replay of this request lands here and gets the
+         same answer; the images the first attempt saved stay on disk, because
+         a message that may have been delivered must keep the paths it named. */
+      return {
+        ok: false,
+        outcome: "failed",
+        error: SEND_UNVERIFIED_REASON,
+        status: 409,
+        actuation: "started",
+        operationId: queued.command.operationId,
+        resend: "verify-first",
+      };
     }
     if (queued.state === "held") {
       if (requestLocalPayload) {
@@ -690,13 +715,13 @@ export async function deliverConversationMessage(message: ConversationMessage, o
   const settle = (outcome: DeliveryOutcome): DeliveryOutcome => {
     try {
       if (deliveryId) {
-        /* An actuated write stays `delivery-uncertain` on purpose: the client
-           may retry it under the same key and reuse the payload it already
-           uploaded. What must NOT happen is that state resting there forever
-           and then reading as a send that never executed — the settlement sweep
-           ends it as an unverified failure once the retry window has passed,
-           because a legacy write has no journal operation that could ever prove
-           it did not arrive (#1131). */
+        /* An actuated write stays `delivery-uncertain` on purpose, and stays
+           there: the legacy path has no journal operation that could ever prove
+           the message did not arrive, so the record has to keep saying that a
+           send under this request may already be in the pane. It is absorbing —
+           a replay of the same request is answered from it rather than typed
+           again — and a receipt query past the settlement window ends it as an
+           unverified failure (#1131). */
         if (outcome.ok) registry.recordDeliveryOutcome(deliveryId, "delivered", null, "delivered");
         else if (outcome.actuation !== "started") registry.discardDelivery(deliveryId);
       }
@@ -709,12 +734,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
   /* Saved paths stay visible to the catch-all: a delivery that fails after
      the images hit disk deletes them so a retry cannot duplicate files. */
   let imagePaths: string[] = [];
-  const materializePayload = () => {
-    if (retryArtifactPaths.length > 0) {
-      return { payload: [text, ...retryArtifactPaths].filter(Boolean).join("\n"), imagePaths: retryArtifactPaths };
-    }
-    return (overrides.buildImagePayload ?? buildImagePayload)(text, images);
-  };
+  const materializePayload = () => (overrides.buildImagePayload ?? buildImagePayload)(text, images);
   const recordArtifacts = () => {
     if (deliveryId && imagePaths.length > 0) registry.recordDeliveryArtifacts(deliveryId, imagePaths);
   };

@@ -12,7 +12,7 @@ import { applyStructuredReconfigure } from "./structuredReconfigure";
 import { projectEngineHostEvent } from "./engineHostEvents";
 import { publishFilesRevision } from "./filesRevision";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
-import { journalVerdict } from "./sendSettlement";
+import { journalVerdict, sendIsSettled } from "./sendSettlement";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 
@@ -209,7 +209,7 @@ async function reconcileTerminalDeliveries(
       try {
         const result = await client.operationStatus(delivery.command.operationId, { currentRetryLeaf: true });
         if (!result) return null;
-        /* The same classifier the settlement sweep reads the journal through:
+        /* The same classifier the receipt query reads the journal through:
            what a status PROVES about a send is one question with one answer,
            and `uncertain` — the send was handed to the engine and never
            answered for — is the one whose disposition stops a later receipt
@@ -344,17 +344,21 @@ export async function bindStructuredDeliveryQueue(
       effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
       ...(typeof client.events === "function" ? { events: (afterEventSeq: number) => client.events(afterEventSeq) } : {}),
       status: async (operationId: string) => (await client.operationStatus(operationId))?.receipt ?? null,
+      /* The durable delivery record's own fence (#1131): a send a receipt query
+         already ended — the only answer it could give while this socket was
+         unreachable — must not be actuated when the socket comes back. */
+      settled: (operationId: string) => sendIsSettled(registry.readOnlySnapshot(), operationId),
       transition: async (operationId, status, details) => {
         const result = await client.transitionOperation(operationId, status, details);
         /* The three states a held delivery can settle into. `uncertain` — a
            send an executor actuated and could not answer for — settles the
            reservation HERE, at the moment the queue writes it, rather than
-           waiting for the settlement sweep to notice: terminality that needs
-           nothing to be healthy beats terminality that needs a runtime client
-           and a tick (#1131). A compaction transitions the same way and costs
-           nothing, because this projection is keyed on `heldDeliveries`, which
-           only a composer message ever creates, so a compact operation has no
-           row here to settle (#862). */
+           leaving it for the next receipt query: terminality that needs nothing
+           to be healthy beats terminality that has to be asked for. A
+           compaction transitions the same way and costs nothing, because this
+           projection is keyed on `heldDeliveries`, which only a composer
+           message ever creates, so a compact operation has no row here to
+           settle (#862). */
         if (status !== "delivered" && status !== "failed" && status !== "uncertain") return;
         const conversationId = result.receipt.conversationId;
         if (!conversationId?.startsWith("conversation_")) return;

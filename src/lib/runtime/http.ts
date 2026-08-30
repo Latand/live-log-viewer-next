@@ -222,7 +222,14 @@ async function dispatchRuntimeCommand(
             ...(admitted.receipt ? { receipt: admitted.receipt } : {}),
           }, { status: admitted.status });
         }
-        if (admitted.outcome === "held") return NextResponse.json({ held: true }, { status: 202 });
+        /* #1131: a hold is an ACCEPTED send with a durable reservation behind
+           it, so it answers with that reservation's operation id like every
+           other acceptance. Without it this was the one admission a caller
+           could never ask `message_receipt` about afterwards, which put
+           `queued` back at the end of the story on the composer's own path. */
+        if (admitted.outcome === "held") {
+          return NextResponse.json({ held: true, operationId: admitted.operationId }, { status: 202 });
+        }
         const status = admitted.receipt.status === "pending" || admitted.receipt.status === "queued" ? 202 : 200;
         return NextResponse.json({ operationId: admitted.operationId, receipt: admitted.receipt }, { status });
       }

@@ -1,6 +1,5 @@
 import {
   agentRegistry,
-  readOnlyConversationLookupFromSnapshot,
   type AgentRegistry,
   type DeliveryTerminalDisposition,
   type RegistryFile,
@@ -23,21 +22,35 @@ import type { RuntimeReceiptStatus } from "./contracts";
  * A production deployer holding a paused cutover sat idle for forty minutes on
  * exactly this, and the only thing that noticed was the sender's own suspicion.
  *
- * Two things are needed, and this module owns both:
+ * Two rules govern the fix, and the second matters more than the first:
  *
- * - **Every accepted send settles.** {@link settleUnsettledSends} sweeps the
- *   reservations that have not reached a terminal state and ends each one as
- *   `delivered` or `failed`, from the delivery journal's own answer.
- * - **The settlement is queryable by operation id.** {@link resolveSendReceipt}
- *   answers what became of the id `send_message` returned — from the durable
- *   record, reconciled against the journal's CURRENT answer, never from what
- *   the send call guessed at the time.
+ * - **`queued` is never a final answer.** {@link resolveSendReceipt} answers
+ *   what became of the id `send_message` returned, and past the settlement
+ *   deadline it ENDS the send rather than reporting acceptance a second time.
+ * - **An uncertain send stays uncertain.** Once actuation has started the state
+ *   is absorbing: never reclassified as unexecuted, never advertised as safely
+ *   resendable. Delivering a deployment instruction twice is a worse incident
+ *   than the silence this issue is about.
+ *
+ * ── ONE MECHANISM, DRIVEN BY THE CALLER ───────────────────────────────────
+ *
+ * There is no sweep and no timer here, on purpose. A background reconciler
+ * settles a send only while the process that owns it is healthy, which is
+ * exactly when the send was least likely to be lost — a fix for "this can hang
+ * forever" that hangs whenever the runtime does has moved the problem rather
+ * than solved it. So the settlement runs where the question is asked: a caller
+ * holding an operation id asks what became of it, and an accepted send past its
+ * deadline is settled by that read, from whatever evidence exists, including
+ * none.
+ *
+ * The deadline itself is durable — the reservation's own acceptance time — so
+ * it survives every restart on both sides and needs nothing to be running.
  *
  * ── WHY THIS NEVER CALLS A DUPLICATE SAFE ─────────────────────────────────
  *
  * Declaring a send failed is only honest if the send can no longer happen, so
- * the settlement never merely relabels a reservation: it terminalizes the
- * OPERATION in the runtime journal first, and only writes `failed` on the
+ * the settlement never merely relabels a reservation: where the journal can be
+ * reached it terminalizes the OPERATION first, and only writes `failed` on the
  * reservation once that succeeded. Two properties of the journal make that a
  * real fence rather than a hopeful one:
  *
@@ -49,19 +62,25 @@ import type { RuntimeReceiptStatus } from "./contracts";
  *   state — so an executor that had already batched the effect is stopped at
  *   the transition rather than at the send.
  *
+ * Where the journal CANNOT be reached, the settled record is itself the fence:
+ * {@link sendIsSettled} is read by the delivery queue before it actuates a
+ * message effect, so a send this module ended during an outage is not delivered
+ * late when the runtime comes back. An answer a caller already has must stay
+ * true afterwards.
+ *
  * That fence proves non-execution only where the journal still shows the send
  * as unexecuted, and that is the ONLY thing this module will call safe to send
  * again. Everything else it settles is `unverified`: a send the executor took
  * may have reached the recipient, and so may a send whose journal record cannot
- * be found at all — an absent record is not a proof of absence. Being wrong in
- * that direction costs a caller one verification; being wrong in the other
- * direction delivers a deployment instruction twice. Nothing here retries
- * anything on its own — a resend is the caller's decision, made against a
- * receipt that states whether it is safe.
+ * be found or cannot be read at all — an absent record is not a proof of
+ * absence. Being wrong in that direction costs a caller one verification; being
+ * wrong in the other direction delivers a deployment instruction twice. Nothing
+ * here retries anything on its own — a resend is the caller's decision, made
+ * against a receipt that states whether it is safe.
  */
 
-/** The two failure reasons this module writes. The durable record also carries
-    a structured disposition beside them, so the receipt never has to read prose
+/** The failure reasons this module writes. The durable record also carries a
+    structured disposition beside them, so the receipt never has to read prose
     to know whether a resend can duplicate. */
 export const SEND_LOST_REASON =
   "accepted for delivery but never executed; the delivery journal has fenced it, so it cannot arrive and may be sent again";
@@ -72,14 +91,20 @@ export const SEND_UNVERIFIED_REASON =
     unproven either way, so it settles like any other unverified send. */
 export const SEND_UNRECORDED_REASON =
   "delivery was accepted and the delivery journal holds no record of it; whether it reached the recipient is unknown, so sending it again may deliver it twice";
+/** The runtime host could not be asked at all. The send is ended anyway — that
+    is the whole point of a deadline that does not depend on anything being
+    healthy — and ended as unverified, because an outage is a reason to know
+    less, never a proof that nothing executed. */
+export const SEND_UNREACHABLE_REASON =
+  "delivery was accepted and the runtime host could not be reached to say what became of it; it is fenced from being delivered later, but whether it already reached the recipient is unknown";
 
 /**
- * How long an accepted send may rest unsettled before it is settled.
+ * How long an accepted send may rest unsettled before a receipt query ends it.
  *
  * This is a settlement deadline, not a delivery timeout: nothing waits on it,
- * and widening it would only make a dropped send take longer to become an
- * answer. It is generous enough that an ordinary drain, host recovery or
- * reconnection finishes well inside it.
+ * nothing fires when it passes, and widening it would only make a dropped send
+ * take longer to become an answer. It is generous enough that an ordinary
+ * drain, host recovery or reconnection finishes well inside it.
  */
 const SEND_SETTLEMENT_WINDOW_MS = 10 * 60_000;
 
@@ -87,18 +112,12 @@ const SEND_SETTLEMENT_WINDOW_MS = 10 * 60_000;
  * The ceiling on the in-turn exemption below.
  *
  * A send queued behind the recipient's active turn is progressing, not lost, so
- * it is exempt from the window. A host wedged mid-turn would otherwise make
- * that exemption permanent and put `queued` right back where this issue found
- * it, so the exemption ends here.
+ * it is exempt from the window — ending it would cancel a message that is about
+ * to be delivered, which is the ordinary shape of talking to a busy agent. A
+ * host wedged mid-turn would otherwise make that exemption permanent and put
+ * `queued` right back where this issue found it, so the exemption ends here.
  */
 const SEND_SETTLEMENT_IN_TURN_CEILING_MS = 60 * 60_000;
-
-/** How often the release that owns traffic sweeps. */
-const SEND_SETTLEMENT_INTERVAL_MS = 60_000;
-
-/** Settlements attempted per sweep. Each costs one journal round trip; the rest
-    wait for the next tick rather than holding the event loop. */
-const SETTLEMENT_BATCH_CEILING = 20;
 
 /** Receipt statuses that mean the recipient has the message. */
 const DELIVERED_RECEIPT_STATUSES: ReadonlySet<RuntimeReceiptStatus> = new Set<RuntimeReceiptStatus>([
@@ -143,38 +162,6 @@ export interface SendReceipt {
   evidence: "delivery-journal" | "delivery-record";
 }
 
-/** An accepted send the delivery record has not settled. */
-export interface UnsettledSend {
-  operationId: string;
-  deliveryId: string;
-  conversationId: ViewerConversationId;
-  clientMessageId: string | null;
-  acceptedAt: string;
-  unsettledForMs: number;
-  /** Set while the recipient's own turn is what the send is waiting on. */
-  awaitingTurn: boolean;
-}
-
-export interface SendSettlementOutcome {
-  operationId: string;
-  deliveryId: string;
-  conversationId: ViewerConversationId;
-  state: "delivered" | "failed";
-  /** `lost` fenced an unexecuted send; `unverified` ended one whose fate the
-      journal could not prove; `reconciled` copied a terminal journal answer the
-      projection had missed. */
-  disposition: "lost" | "unverified" | "reconciled";
-  duplicateRisk: boolean;
-}
-
-export interface SendSettlementReport {
-  /** Accepted sends past the settlement window this pass considered. */
-  examined: number;
-  settled: SendSettlementOutcome[];
-  /** Sends left alone because the journal could not be asked or answered. */
-  deferred: { operationId: string; reason: string }[];
-}
-
 export interface SendSettlementPorts {
   registry?: AgentRegistry;
   client?: RuntimeHostClient | null;
@@ -192,63 +179,6 @@ function parseTime(value: string | null | undefined): number | null {
 /** The moment the send was accepted for delivery. */
 function acceptedAtOf(delivery: HeldDelivery): string {
   return delivery.assignedAt ?? delivery.createdAt;
-}
-
-/** The turn reference the recipient's current generation is publishing, or null
-    when it publishes none — including when it has no live structured host at
-    all, which is the case a lost send most often sits in. The lookup is built
-    once per pass: it indexes every conversation, so building one per delivery
-    would make a sweep quadratic in a registry that has thousands. */
-function activeTurnOf(
-  file: RegistryFile,
-  lookup: ReturnType<typeof readOnlyConversationLookupFromSnapshot>,
-  conversationId: ViewerConversationId,
-): string | null {
-  const conversation = lookup.conversation(conversationId);
-  const generation = conversation?.generations.at(-1);
-  if (!conversation || !generation) return null;
-  const entry = file.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
-  return entry?.structuredHost?.activeTurnRef ?? null;
-}
-
-/**
- * The accepted sends this snapshot has not settled, oldest first.
- *
- * `delivery-uncertain` is the state a reservation holds from the moment the
- * send path claims its attempt until a terminal transition projects an outcome
- * onto it, so it is exactly "accepted, not settled". `held` is excluded: a
- * parked delivery is waiting on an account migration by design, and settling it
- * here would fight the coordinator that owns it.
- */
-export function unsettledSends(
-  file: RegistryFile,
-  options: { now?: number; windowMs?: number; inTurnCeilingMs?: number } = {},
-): UnsettledSend[] {
-  const now = options.now ?? Date.now();
-  const windowMs = options.windowMs ?? SEND_SETTLEMENT_WINDOW_MS;
-  const ceilingMs = options.inTurnCeilingMs ?? SEND_SETTLEMENT_IN_TURN_CEILING_MS;
-  const unsettled: UnsettledSend[] = [];
-  let lookup: ReturnType<typeof readOnlyConversationLookupFromSnapshot> | null = null;
-  for (const delivery of Object.values(file.heldDeliveries)) {
-    if (delivery.state !== "delivery-uncertain") continue;
-    const acceptedAt = parseTime(acceptedAtOf(delivery));
-    if (acceptedAt === null) continue;
-    const unsettledForMs = now - acceptedAt;
-    if (unsettledForMs < windowMs) continue;
-    lookup ??= readOnlyConversationLookupFromSnapshot(file);
-    const awaitingTurn = activeTurnOf(file, lookup, delivery.conversationId) !== null;
-    if (awaitingTurn && unsettledForMs < ceilingMs) continue;
-    unsettled.push({
-      operationId: delivery.command.operationId,
-      deliveryId: delivery.id,
-      conversationId: delivery.conversationId,
-      clientMessageId: delivery.clientMessageId,
-      acceptedAt: acceptedAtOf(delivery),
-      unsettledForMs,
-      awaitingTurn,
-    });
-  }
-  return unsettled.sort((left, right) => right.unsettledForMs - left.unsettledForMs);
 }
 
 function deliveryForOperation(file: RegistryFile, operationId: string): HeldDelivery | null {
@@ -345,6 +275,19 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
   };
 }
 
+/**
+ * Whether the durable delivery record has already ended this send.
+ *
+ * The delivery queue asks this before it actuates a message effect. A send that
+ * a receipt query settled while the runtime host was unreachable has an answer
+ * out in the world already; delivering it once the socket comes back would make
+ * that answer a lie and put the instruction in front of the recipient long
+ * after the sender was told it had not arrived.
+ */
+export function sendIsSettled(file: RegistryFile, operationId: string): boolean {
+  return sendReceiptFor(file, operationId)?.state === "failed";
+}
+
 /** A terminal answer the journal has already reached, and what it proves. */
 export interface JournalVerdict {
   state: "delivered" | "failed";
@@ -361,9 +304,9 @@ export interface JournalVerdict {
  * called safe without guessing. An open or missing status is not a verdict and
  * returns null; the caller decides what to do about it.
  *
- * The sweep and the controller's startup reconciliation both read the journal
- * for the same question, so they read it through this — one classifier, rather
- * than two that can drift into disagreeing about what a status proves.
+ * The receipt query and the controller's startup reconciliation both read the
+ * journal for the same question, so they read it through this — one classifier,
+ * rather than two that can drift into disagreeing about what a status proves.
  */
 export function journalVerdict(status: RuntimeReceiptStatus | null): JournalVerdict | null {
   if (status === null) return null;
@@ -412,108 +355,122 @@ async function fenceOperation(
 }
 
 /**
- * Settles one accepted send against the delivery journal.
- *
- * The journal is asked first and always wins: a send it already delivered is
- * reconciled rather than failed, which is what keeps a merely-missed projection
- * from being reported as a loss.
+ * The turn reference the recipient's current generation is publishing, or null
+ * when it publishes none — including when it has no live structured host at
+ * all, which is the case a lost send most often sits in.
  */
-async function settleOne(
-  send: UnsettledSend,
+function awaitingRecipientTurn(
   registry: AgentRegistry,
-  client: RuntimeHostClient,
-): Promise<SendSettlementOutcome> {
-  /* The CURRENT attempt, not the one the reservation was born with. A retried
-     operation leaves its ancestor terminal and carries on under a fresh id, so
-     reading the ancestor would report a live attempt as a settled loss — and
-     would then try to fence an operation that is already terminal. */
-  const current = await client.operationStatus(send.operationId, { currentRetryLeaf: true });
-  const status = current?.receipt.status ?? null;
-  const settled = journalVerdict(status);
-  const verdict = settled
-    ? settled
-    /* No journal record at all. The legacy delivery path never creates one, and
-       a record can also be pruned — so this says the fate is unknown, never
-       that the send is provably lost. Claiming the latter is what would let a
-       caller resend an instruction the recipient already has. */
-    : status === null || current === null
-      ? { state: "failed" as const, disposition: "unverified" as const, reason: SEND_UNRECORDED_REASON }
-      : await fenceOperation(client, current.operationId, status);
-  registry.recordDeliveryOutcome(send.deliveryId, verdict.state, verdict.reason, verdict.disposition);
-  return {
-    operationId: send.operationId,
-    deliveryId: send.deliveryId,
-    conversationId: send.conversationId,
-    state: verdict.state,
-    disposition: settled ? "reconciled" : verdict.disposition === "lost" ? "lost" : "unverified",
-    duplicateRisk: verdict.disposition === "unverified",
-  };
+  file: RegistryFile,
+  conversationId: ViewerConversationId,
+): boolean {
+  const conversation = registry.conversation(conversationId);
+  const generation = conversation?.generations.at(-1);
+  if (!conversation || !generation) return false;
+  const entry = file.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+  return Boolean(entry?.structuredHost?.activeTurnRef);
 }
 
 /**
- * One settlement pass.
+ * Whether an accepted send has rested long enough that this read must end it.
  *
- * A send whose journal answer cannot be read is DEFERRED, never settled: an
- * unreachable runtime host is a reason to know less, not a licence to declare a
- * message lost while it may still be sitting in a live outbox. Nothing depends
- * on this pass for terminality — the executor fences what it actuated, at the
- * moment it actuates it — so a deferral costs an answer's timeliness and never
- * its correctness.
+ * `delivery-uncertain` is the state a reservation holds from the moment the
+ * send path claims its attempt until a terminal transition projects an outcome
+ * onto it, so it is exactly "accepted, not settled". `held` is excluded: a
+ * parked delivery is waiting on an account migration by design, and ending it
+ * here would fight the coordinator that owns it.
  */
-export async function settleUnsettledSends(ports: SendSettlementPorts = {}): Promise<SendSettlementReport> {
-  const registry = ports.registry ?? agentRegistry();
-  const client = ports.client === undefined ? runtimeHostClient() : ports.client;
-  const now = ports.now ?? Date.now;
-  const candidates = unsettledSends(registry.readOnlySnapshot(), {
-    now: now(),
-    ...(ports.windowMs !== undefined ? { windowMs: ports.windowMs } : {}),
-    ...(ports.inTurnCeilingMs !== undefined ? { inTurnCeilingMs: ports.inTurnCeilingMs } : {}),
-  });
-  const report: SendSettlementReport = { examined: candidates.length, settled: [], deferred: [] };
-  if (!client) {
-    for (const send of candidates) report.deferred.push({ operationId: send.operationId, reason: "runtime host is unavailable" });
-    return report;
-  }
-  for (const send of candidates.slice(0, SETTLEMENT_BATCH_CEILING)) {
-    try {
-      report.settled.push(await settleOne(send, registry, client));
-    } catch (error) {
-      report.deferred.push({
-        operationId: send.operationId,
-        reason: error instanceof Error ? error.message : "settlement failed",
-      });
-    }
-  }
-  return report;
+function pastSettlementDeadline(
+  registry: AgentRegistry,
+  file: RegistryFile,
+  delivery: HeldDelivery,
+  ports: SendSettlementPorts,
+): boolean {
+  if (delivery.state !== "delivery-uncertain") return false;
+  const acceptedAt = parseTime(acceptedAtOf(delivery));
+  /* An acceptance time that cannot be parsed can never age, and a send nothing
+     can ever end is the silence this issue is about. */
+  if (acceptedAt === null) return true;
+  const restedMs = (ports.now ?? Date.now)() - acceptedAt;
+  if (restedMs < (ports.windowMs ?? SEND_SETTLEMENT_WINDOW_MS)) return false;
+  if (restedMs >= (ports.inTurnCeilingMs ?? SEND_SETTLEMENT_IN_TURN_CEILING_MS)) return true;
+  return !awaitingRecipientTurn(registry, file, delivery.conversationId);
 }
 
 /**
- * What became of one accepted send, reconciled before it is answered.
+ * What became of one accepted send, settled if it is past its deadline.
  *
- * The registry projection can lag the journal by a whole sweep — the queue
+ * The registry projection can lag the journal by a whole drain — the queue
  * terminalizes the operation and the reservation learns about it later — and a
- * caller holding an operation id is asking what is true NOW. So a projection
- * that is still in flight is checked against the journal's current retry leaf,
- * and a terminal answer there settles the reservation on the spot rather than
- * reporting `in-flight` until some sweep gets to it.
+ * caller holding an operation id is asking what is true NOW. So an answer that
+ * is still in flight is checked against the journal's current retry leaf, and a
+ * terminal answer there settles the reservation on the spot.
+ *
+ * Past the deadline this read is also what ENDS the send, from whatever
+ * evidence it could gather: an unexecuted operation is fenced and reported
+ * lost, an actuated one is terminalized unverified, and a journal that cannot
+ * be reached at all still yields a terminal — unverified — answer, because
+ * `queued` may not be the last word during an outage of any length. The
+ * delivery queue reads the record this writes before it actuates anything, so
+ * the answer stays true when the runtime returns.
  */
 export async function resolveSendReceipt(
   operationId: string,
-  ports: Pick<SendSettlementPorts, "registry" | "client"> = {},
+  ports: SendSettlementPorts = {},
 ): Promise<SendReceipt | null> {
   const registry = ports.registry ?? agentRegistry();
   const projected = sendReceiptFor(registry.readOnlySnapshot(), operationId);
   if (!projected || projected.state !== "in-flight") return projected;
   const client = ports.client === undefined ? runtimeHostClient() : ports.client;
-  if (!client) return projected;
-  const current = await client
-    .operationStatus(operationId, { currentRetryLeaf: true })
-    .catch(() => null);
-  const verdict = journalVerdict(current?.receipt.status ?? null);
-  if (!verdict) return projected;
-  /* A reservation still in flight is settled from the journal's answer; one
-     that is already gone leaves the journal's answer to speak for itself. A
-     `held` reservation is the migration coordinator's, and is left alone. */
+  const current = client
+    ? await client.operationStatus(operationId, { currentRetryLeaf: true }).catch(() => "unreachable" as const)
+    : "unreachable" as const;
+  const status = current === "unreachable" ? null : current?.receipt.status ?? null;
+  const verdict = journalVerdict(status);
+  if (verdict) return settleProjection(registry, operationId, projected, verdict);
+
+  const file = registry.readOnlySnapshot();
+  const delivery = deliveryForOperation(file, operationId);
+  if (!delivery || !pastSettlementDeadline(registry, file, delivery, ports)) return projected;
+  /* Past the deadline, and the journal has no terminal answer of its own. What
+     the settlement may CLAIM depends on what it could see. */
+  if (current === "unreachable" || !client) {
+    return settleProjection(registry, operationId, projected, {
+      state: "failed",
+      disposition: "unverified",
+      reason: SEND_UNREACHABLE_REASON,
+    });
+  }
+  if (current === null || status === null) {
+    return settleProjection(registry, operationId, projected, {
+      state: "failed",
+      disposition: "unverified",
+      reason: SEND_UNRECORDED_REASON,
+    });
+  }
+  /* The one path that can prove non-execution: the journal still holds the
+     operation, so terminalizing it now is what makes "never executed" true
+     rather than merely hoped for. A fence that cannot be written leaves the
+     send in flight — an unwritable journal is not a licence to declare a
+     message lost while it may still be sitting in a live outbox. */
+  const fenced = await fenceOperation(client, current.operationId, status).catch(() => null);
+  if (!fenced) return projected;
+  return settleProjection(registry, operationId, projected, fenced);
+}
+
+/**
+ * Writes one verdict onto the durable record and answers from it.
+ *
+ * A reservation still in flight is settled; one that is already gone leaves the
+ * journal's answer to speak for itself. A `held` reservation is the migration
+ * coordinator's, and is left alone.
+ */
+function settleProjection(
+  registry: AgentRegistry,
+  operationId: string,
+  projected: SendReceipt,
+  verdict: JournalVerdict,
+): SendReceipt {
   const delivery = deliveryForOperation(registry.readOnlySnapshot(), operationId);
   if (delivery?.state === "delivery-uncertain") {
     registry.recordDeliveryOutcome(delivery.id, verdict.state, verdict.reason, verdict.disposition);
@@ -530,26 +487,4 @@ export async function resolveSendReceipt(
     ...resendGuidance(verdict.disposition, verdict.reason),
     evidence: "delivery-journal",
   };
-}
-
-const settlementHost = globalThis as typeof globalThis & {
-  __llvSendSettlementTimer?: ReturnType<typeof setInterval>;
-};
-
-/**
- * Starts the sweep in the release that owns traffic.
- *
- * Idempotent per process, and unref'd so it never holds a Viewer open. The
- * sweep is what turns a send nobody ever executed into an answer without the
- * sender running a watchdog; `message_receipt` reads the same record it writes.
- */
-export function startSendSettlement(): void {
-  if (settlementHost.__llvSendSettlementTimer) return;
-  const timer = setInterval(() => {
-    void settleUnsettledSends().catch((error) => {
-      console.error("[send settlement] sweep failed", error instanceof Error ? error.message : "unknown");
-    });
-  }, SEND_SETTLEMENT_INTERVAL_MS);
-  timer.unref?.();
-  settlementHost.__llvSendSettlementTimer = timer;
 }

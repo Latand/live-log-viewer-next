@@ -78,10 +78,6 @@ export interface HotStateCutoverBoundary {
   reimportLegacy: boolean;
 }
 
-/** First and longest gap between attempts to start the settlement sweep. */
-const SEND_SETTLEMENT_START_RETRY_MS = 30_000;
-const SEND_SETTLEMENT_START_RETRY_CEILING_MS = 5 * 60_000;
-
 interface CurrentReleaseControllerLoaders {
   loadFlowPipelineController: () => Promise<{ startFlowPipelineController: () => void }>;
   loadAccountMigrationController: () => Promise<{ startAccountMigrationController: () => Promise<void> }>;
@@ -92,8 +88,6 @@ interface CurrentReleaseControllerLoaders {
   loadTelegramConnectorBoot?: () => Promise<{ provisionTelegramConnectorAtStartup: () => Promise<unknown> }>;
   /** Optional for the same reason. */
   loadStructuredHostRetirement?: () => Promise<{ startStructuredHostRetirement: () => void }>;
-  /** Optional for the same reason. */
-  loadSendSettlement?: () => Promise<{ startSendSettlement: () => void }>;
   /** Optional for the same reason. */
   loadSeatTick?: () => Promise<{ startSeatTick: () => boolean }>;
 }
@@ -341,13 +335,8 @@ export async function startCurrentReleaseControllers(
     loadTelegramReportScheduler: () => import("@/lib/telegram/reportRunner"),
     loadTelegramConnectorBoot: () => import("@/lib/telegram/connectorBoot"),
     loadStructuredHostRetirement: () => import("@/lib/runtime/structuredHostRetirement"),
-    loadSendSettlement: () => import("@/lib/runtime/sendSettlement"),
     loadSeatTick: () => import("@/lib/monitor/seatTickController"),
   },
-  options: {
-    /** Test seam for the settlement start retry below. */
-    scheduleRetry?: (callback: () => void, delayMs: number) => { unref?: () => void };
-  } = {},
 ): Promise<void> {
   const { startFlowPipelineController } = await loaders.loadFlowPipelineController();
   startFlowPipelineController();
@@ -391,34 +380,6 @@ export async function startCurrentReleaseControllers(
   } catch (error) {
     console.error("[host retirement] sweep start failed", error instanceof Error ? error.name : "unknown");
   }
-  /* Send settlement (#1131). An accepted send that the delivery queue never
-     executed used to rest at `queued` forever, with nothing anywhere turning
-     that into an answer; this sweep is what turns one into an answer without
-     the sender running a watchdog. It belongs to the release that owns traffic
-     for the reason retirement does, and it must not take the controllers below
-     down if it fails to start.
-     A failure to start KEEPS RETRYING rather than being logged once: a sweep
-     that never started is the same silence this issue is about, and a start
-     that failed on a module load or a not-yet-ready process is exactly the
-     thing a second attempt fixes. Unref'd and backed off to a five-minute
-     ceiling, so a genuinely broken import costs a log line every five minutes
-     instead of a spinning process — and `startSendSettlement` is idempotent
-     per process, so an attempt that races a successful one does nothing. */
-  const startSettlement = async (attempt: number): Promise<void> => {
-    try {
-      const settlement = await loaders.loadSendSettlement?.();
-      settlement?.startSendSettlement();
-    } catch (error) {
-      console.error("[send settlement] sweep start failed", error instanceof Error ? error.name : "unknown");
-      const delayMs = Math.min(
-        SEND_SETTLEMENT_START_RETRY_CEILING_MS,
-        SEND_SETTLEMENT_START_RETRY_MS * 2 ** (attempt - 1),
-      );
-      const retry = options.scheduleRetry ?? ((callback, waitMs) => setTimeout(callback, waitMs));
-      retry(() => { void startSettlement(attempt + 1); }, delayMs).unref?.();
-    }
-  };
-  await startSettlement(1);
   /* The seat tick (#1245). It belongs here for the reason every controller
      above does — one clock, in the release that owns traffic. Starting here
      makes this the only process that starts a ticker, but not the only one that

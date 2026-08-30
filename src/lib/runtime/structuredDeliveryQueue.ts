@@ -4,7 +4,6 @@ import { parseMessageOrigin, type MessageOrigin } from "./messageOrigin";
 import type { RuntimeSendSettings } from "./contracts";
 import type { CompactCapableHost, DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import { hostSupportsCompact, StructuredCompactError } from "./engineHost";
-import type { RuntimeHostClient } from "./client";
 import {
   parseStructuredImageRefs,
   structuredContent,
@@ -31,6 +30,10 @@ export interface StructuredDeliveryQueuePort {
       needs it to tell a control it must issue from one an earlier executor
       already issued and never settled (#862). */
   status?(operationId: string): Promise<{ status: string } | null>;
+  /** Whether the durable DELIVERY RECORD has already ended this send (#1131).
+      The journal cannot answer that during the outage in which it is written,
+      which is exactly when it has to be honoured. */
+  settled?(operationId: string): boolean | Promise<boolean>;
 }
 
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
@@ -38,16 +41,6 @@ export type StructuredHostRecovery = (conversationId: string) => Promise<boolean
 
 const STRUCTURED_DELIVERY_BATCH_SIZE = 100;
 const THREAD_READ_ATTEMPTS = 2;
-
-export function runtimeClientDeliveryPort(client: RuntimeHostClient): StructuredDeliveryQueuePort {
-  return {
-    effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
-    transition: async (operationId, status, details) => {
-      await client.transitionOperation(operationId, status, details);
-    },
-    status: async (operationId) => (await client.operationStatus(operationId))?.receipt ?? null,
-  };
-}
 
 interface SendEffect {
   operationId: string;
@@ -296,6 +289,18 @@ export const DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR =
   "delivery was started by an earlier executor; whether it reached the recipient is unverified";
 export const DELIVERY_UNVERIFIED_AFTER_ACTUATION =
   "delivery was started and the structured host did not answer; whether it reached the recipient is unverified";
+/**
+ * Written when the durable delivery record has already ended this send.
+ *
+ * That happens while the runtime host is unreachable: a caller asks what became
+ * of an accepted send, the settlement cannot ask the journal, and past the
+ * deadline it answers `failed` rather than leaving `queued` as the last word.
+ * Delivering the effect once the socket comes back would put the instruction in
+ * front of the recipient long after the sender was told it had not arrived, so
+ * the settled record fences it here (#1131).
+ */
+export const DELIVERY_FENCED_BY_SETTLEMENT =
+  "delivery was settled before this executor reached it; whether it reached the recipient is unverified";
 
 function failureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -501,6 +506,17 @@ export class StructuredDeliveryQueue {
       const durable = await this.port.status?.(effect.operationId).catch(() => null);
       if (durable?.status === "delivering") {
         await this.terminalizeUnverified(effect.operationId, DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR);
+        continue;
+      }
+      /* And the same fence from the other store: a receipt query already ended
+         this send — the only answer available while the runtime host was
+         unreachable — so actuating it now would deliver an instruction the
+         sender was told had not arrived (#1131). Asked under the effect's OWN
+         operation id, which is what makes a deliberate retry a different send:
+         it is admitted as a new operation, so the settled record of the attempt
+         it replaces does not fence it. */
+      if (await this.settledByRecord(effect.operationId)) {
+        await this.terminalizeUnverified(effect.operationId, DELIVERY_FENCED_BY_SETTLEMENT);
         continue;
       }
       const host = this.resolveHost(effect.conversationId);
@@ -756,6 +772,17 @@ export class StructuredDeliveryQueue {
    * before #862 rejects it; the operation must still settle rather than wedge
    * the conversation's queue behind a receipt no pass can ever clear.
    */
+  /** The durable delivery record's answer, or `false` when it cannot be read:
+      a fence that fails closed would strand every send behind an unreadable
+      registry, and this one only ever refuses to actuate. */
+  private async settledByRecord(operationId: string): Promise<boolean> {
+    try {
+      return (await this.port.settled?.(operationId)) ?? false;
+    } catch {
+      return false;
+    }
+  }
+
   private async terminalizeUnverified(operationId: string, reason: string): Promise<void> {
     try {
       await this.port.transition(operationId, "uncertain", { reason });

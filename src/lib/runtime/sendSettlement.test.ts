@@ -30,12 +30,12 @@ const { RuntimeJournal } = await import("@/runtime-host/journal");
 const { StructuredDeliveryQueue } = await import("./structuredDeliveryQueue");
 const {
   SEND_LOST_REASON,
+  SEND_UNREACHABLE_REASON,
   SEND_UNRECORDED_REASON,
   SEND_UNVERIFIED_REASON,
   resolveSendReceipt,
+  sendIsSettled,
   sendReceiptFor,
-  settleUnsettledSends,
-  unsettledSends,
 } = await import("./sendSettlement");
 type AgentRegistry = InstanceType<typeof AgentRegistry>;
 type RuntimeJournal = InstanceType<typeof RuntimeJournal>;
@@ -56,8 +56,8 @@ afterAll(() => {
 });
 
 const SETTLEMENT_WINDOW_MS = 10 * 60_000;
-/** Every fixture send is accepted "now"; the sweep is driven from a clock past
-    the window instead of sleeping through it. */
+/** Every fixture send is accepted "now"; the settlement is driven from a clock
+    past the window instead of sleeping through it. */
 const AFTER_THE_WINDOW = () => Date.now() + SETTLEMENT_WINDOW_MS + 60_000;
 
 function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
@@ -258,9 +258,10 @@ function stalePortFor(
     transition: async (id, status, details) => {
       await active.client.transitionOperation(id, status, details);
     },
-    /* Wired exactly as the controller wires it, so the pre-actuation check
-       these tests depend on is the production one and not a stub. */
+    /* Wired exactly as the controller wires them, so the two pre-actuation
+       checks these tests depend on are the production ones and not stubs. */
     status: async (id) => (await active.client.operationStatus(id))?.receipt ?? null,
+    settled: (id) => sendIsSettled(active.registry.readOnlySnapshot(), id),
   };
 }
 
@@ -278,24 +279,22 @@ test("an accepted send that the journal delivered reconciles rather than being r
     active.journal.transitionOperation(operationId, "delivered", { turnId: "turn-1" });
     expect(receiptOf(active, operationId)?.state).toBe("in-flight");
 
-    const report = await settleUnsettledSends({
+    const answered = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
       now: AFTER_THE_WINDOW,
     });
 
-    expect(report.settled).toEqual([{
-      operationId,
-      deliveryId,
-      conversationId: active.conversationId,
-      state: "delivered",
-      disposition: "reconciled",
-      duplicateRisk: false,
-    }]);
+    expect(answered?.state).toBe("delivered");
+    expect(answered?.resend).toBe("not-needed");
+    expect(answered?.duplicateRisk).toBe(false);
+    expect(answered?.evidence).toBe("delivery-journal");
+    /* Reconciled onto the record, so every later reader agrees without asking
+       the journal again. */
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("delivered");
     const receipt = receiptOf(active, operationId);
     expect(receipt?.state).toBe("delivered");
     expect(receipt?.resend).toBe("not-needed");
-    expect(receipt?.duplicateRisk).toBe(false);
     expect(receipt?.evidence).toBe("delivery-record");
   } finally {
     active.close();
@@ -312,24 +311,22 @@ test("a dropped send settles as failed, and the fence stops the queue from deliv
     /* Nothing else happens to it: this is the incident's shape — accepted,
        answered `queued`, and then silence. */
     expect(active.journal.operationResult(operationId)?.receipt.status).toBe("queued");
-    expect(unsettledSends(active.registry.readOnlySnapshot(), { now: AFTER_THE_WINDOW() })).toMatchObject([
-      { operationId, deliveryId, awaitingTurn: false },
-    ]);
+    /* Inside the window it is still in flight: a send that is merely young is
+       not a send that was lost. */
+    expect((await resolveSendReceipt(operationId, {
+      registry: active.registry,
+      client: active.client,
+    }))?.state).toBe("in-flight");
 
-    const report = await settleUnsettledSends({
+    const answered = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
       now: AFTER_THE_WINDOW,
     });
 
-    expect(report.settled).toEqual([{
-      operationId,
-      deliveryId,
-      conversationId: active.conversationId,
-      state: "failed",
-      disposition: "lost",
-      duplicateRisk: false,
-    }]);
+    expect(answered?.state).toBe("failed");
+    expect(answered?.evidence).toBe("delivery-journal");
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
     const receipt = receiptOf(active, operationId);
     expect(receipt?.state).toBe("failed");
     expect(receipt?.reason).toBe(SEND_LOST_REASON);
@@ -374,20 +371,15 @@ test("a send whose first attempt is uncertain settles as failed and refuses to c
        did not receive it, so nothing here may pretend otherwise. */
     active.journal.transitionOperation(operationId, "delivering", { turnId: "turn-7" });
 
-    const report = await settleUnsettledSends({
+    const answered = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
       now: AFTER_THE_WINDOW,
     });
 
-    expect(report.settled).toEqual([{
-      operationId,
-      deliveryId,
-      conversationId: active.conversationId,
-      state: "failed",
-      disposition: "unverified",
-      duplicateRisk: true,
-    }]);
+    expect(answered?.state).toBe("failed");
+    expect(answered?.duplicateRisk).toBe(true);
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
     expect(active.journal.operationResult(operationId)?.receipt.status).toBe("uncertain");
     const receipt = receiptOf(active, operationId);
     expect(receipt?.state).toBe("failed");
@@ -418,21 +410,23 @@ test("a send queued behind the recipient's own turn waits, and stops being exemp
       activeFlags: [],
     });
 
-    const inTurn = await settleUnsettledSends({
+    const inTurn = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
       now: AFTER_THE_WINDOW,
     });
-    expect(inTurn).toMatchObject({ examined: 0, settled: [], deferred: [] });
+    expect(inTurn?.state).toBe("in-flight");
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("queued");
     expect(receiptOf(active, operationId)?.state).toBe("in-flight");
 
     /* A host wedged mid-turn must not make `queued` permanent again. */
-    const pastCeiling = await settleUnsettledSends({
+    const pastCeiling = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
       now: () => Date.now() + 61 * 60_000,
     });
-    expect(pastCeiling.settled).toMatchObject([{ operationId, state: "failed", disposition: "lost" }]);
+    expect(pastCeiling?.state).toBe("failed");
+    expect(pastCeiling?.reason).toBe(SEND_LOST_REASON);
     expect(receiptOf(active, operationId)?.state).toBe("failed");
   } finally {
     active.close();
@@ -453,46 +447,73 @@ test("a retried send is judged by its current attempt, not by the ancestor it re
     active.journal.transitionOperation(retry.operationId, "delivering");
     active.journal.transitionOperation(retry.operationId, "delivered", { turnId: "turn-9" });
 
-    const report = await settleUnsettledSends({
+    const answered = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
       now: AFTER_THE_WINDOW,
     });
 
-    expect(report.settled).toMatchObject([{ operationId, deliveryId, state: "delivered", disposition: "reconciled" }]);
+    expect(answered?.state).toBe("delivered");
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("delivered");
     expect(receiptOf(active, operationId)?.state).toBe("delivered");
   } finally {
     active.close();
   }
 });
 
-test("an unreadable delivery journal defers the send instead of declaring it lost", async () => {
-  const active = fixture("deferred");
+test("a runtime host that cannot be reached still ends the send, and never calls it lost", async () => {
+  /* The outage case, which is the one a background sweep could never answer:
+     nothing is healthy, so nothing can ask the journal what became of the send.
+     `queued` may not be the last word through an outage of any length, so the
+     deadline ends it anyway — as UNVERIFIED, because not being able to look is
+     a reason to know less and never a proof that nothing executed. */
+  const active = fixture("unreachable");
   try {
-    const { operationId } = acceptSend(active, { clientMessageId: "deferred-key" });
+    const { operationId, deliveryId } = acceptSend(active, {
+      clientMessageId: "unreachable-key",
+      text: "resume the cutover",
+    });
+    const unreachable = {
+      ...active.client,
+      operationStatus: async () => { throw new Error("runtime host request timed out"); },
+    } as RuntimeHostClient;
 
-    const withoutHost = await settleUnsettledSends({
+    /* Inside the window nothing is claimed: a send that is merely young during
+       a blip is still in flight. */
+    expect((await resolveSendReceipt(operationId, {
+      registry: active.registry,
+      client: unreachable,
+    }))?.state).toBe("in-flight");
+    expect((await resolveSendReceipt(operationId, {
+      registry: active.registry,
+      client: null,
+    }))?.state).toBe("in-flight");
+
+    const answered = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: null,
       now: AFTER_THE_WINDOW,
     });
-    expect(withoutHost.settled).toEqual([]);
-    expect(withoutHost.deferred).toEqual([{ operationId, reason: "runtime host is unavailable" }]);
+    expect(answered?.state).toBe("failed");
+    expect(answered?.reason).toBe(SEND_UNREACHABLE_REASON);
+    expect(answered?.duplicateRisk).toBe(true);
+    expect(answered?.resend).toBe("verify-first");
 
-    const unreachable = await settleUnsettledSends({
-      registry: active.registry,
-      client: {
-        ...active.client,
-        operationStatus: async () => { throw new Error("runtime host request timed out"); },
-      } as RuntimeHostClient,
-      now: AFTER_THE_WINDOW,
-    });
-    expect(unreachable.settled).toEqual([]);
-    expect(unreachable.deferred).toEqual([{ operationId, reason: "runtime host request timed out" }]);
-    /* Still open, still unfenced: knowing less is never a licence to declare a
-       message lost while it may be sitting in a live outbox. */
-    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("queued");
-    expect(receiptOf(active, operationId)?.state).toBe("in-flight");
+    /* Once, however often it is asked and whichever way the runtime is
+       unreachable: the record is terminal, so every later answer replays it
+       rather than writing a second settlement. */
+    const settledAt = answered?.settledAt;
+    for (const client of [null, unreachable, active.client]) {
+      const again = await resolveSendReceipt(operationId, {
+        registry: active.registry,
+        client,
+        now: AFTER_THE_WINDOW,
+      });
+      expect(again?.state).toBe("failed");
+      expect(again?.reason).toBe(SEND_UNREACHABLE_REASON);
+      expect(again?.settledAt).toBe(settledAt!);
+    }
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
   } finally {
     active.close();
   }
@@ -519,7 +540,7 @@ test("the caller's own replay of a settled loss is answered with the settlement,
       clientMessageId: "replayed-key",
       text: "resume the cutover",
     });
-    await settleUnsettledSends({
+    await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
       now: AFTER_THE_WINDOW,
@@ -602,19 +623,14 @@ test("a send the host took before it died stays uncertain, and no fresh request 
     expect(active.journal.operationResult(operationId)?.receipt.status).toBe("uncertain");
     expect(await active.journal.effectBatch(100, ["runtime.send"])).toEqual([]);
 
-    const report = await settleUnsettledSends({
+    const answered = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
-      now: AFTER_THE_WINDOW,
     });
-    expect(report.settled).toEqual([{
-      operationId,
-      deliveryId,
-      conversationId: active.conversationId,
-      state: "failed",
-      disposition: "reconciled",
-      duplicateRisk: true,
-    }]);
+    expect(answered?.state).toBe("failed");
+    expect(answered?.duplicateRisk).toBe(true);
+    expect(answered?.resend).toBe("verify-first");
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
     const receipt = receiptOf(active, operationId);
     expect(receipt?.state).toBe("failed");
     expect(receipt?.duplicateRisk).toBe(true);
@@ -688,12 +704,13 @@ test("a live host that cannot answer for a send it took is unverified, never saf
     expect(active.journal.operationResult(operationId)?.receipt.status).toBe("uncertain");
     expect(await active.journal.effectBatch(100, ["runtime.send"])).toEqual([]);
 
-    const report = await settleUnsettledSends({
+    const answered = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
-      now: AFTER_THE_WINDOW,
     });
-    expect(report.settled).toMatchObject([{ operationId, deliveryId, state: "failed", duplicateRisk: true }]);
+    expect(answered?.state).toBe("failed");
+    expect(answered?.duplicateRisk).toBe(true);
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
     const receipt = receiptOf(active, operationId);
     expect(receipt?.reason).toBe(SEND_UNVERIFIED_REASON);
     expect(receipt?.duplicateRisk).toBe(true);
@@ -722,27 +739,31 @@ test("a live host that cannot answer for a send it took is unverified, never saf
 });
 
 test("permanent runtime loss then recovery ends in one terminal receipt and no late delivery", async () => {
-  /* The executor was killed after it handed the send to the engine, so the
-     journal is left holding `delivering` and the effect is still in the outbox.
-     Nothing can settle that while the socket is gone — and nothing has to: the
-     fence is the durable row itself, so the first drain after recovery reads it
-     and refuses to deliver rather than delivering it late. */
+  /* The whole of finding 3, end to end. The runtime host is gone for good as
+     far as anyone asking can tell, so the settlement ends the send from the
+     durable record alone — and that record is then the fence: the first drain
+     after recovery reads it and refuses to deliver, rather than putting the
+     instruction in front of the recipient long after the sender was told it had
+     not arrived. Nothing here needs a sweep, a timer or a healthy process. */
   const active = fixture("recovered");
   try {
     const { operationId, deliveryId } = acceptSend(active, {
       clientMessageId: "recovered-key",
       text: "resume the cutover",
     });
-    active.journal.transitionOperation(operationId, "delivering", { turnId: "turn-recovered" });
 
-    const duringOutage = await settleUnsettledSends({
+    const duringOutage = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: null,
       now: AFTER_THE_WINDOW,
     });
-    expect(duringOutage.settled).toEqual([]);
-    expect(duringOutage.deferred).toEqual([{ operationId, reason: "runtime host is unavailable" }]);
-    expect(receiptOf(active, operationId)?.state).toBe("in-flight");
+    expect(duringOutage?.state).toBe("failed");
+    expect(duringOutage?.resend).toBe("verify-first");
+    expect(receiptOf(active, operationId)?.state).toBe("failed");
+    /* Nothing was written to the journal — there was nothing to write to — so
+       the effect is still sitting in the outbox, waiting for an executor. */
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("queued");
+    expect(await active.journal.effectBatch(100, ["runtime.send"])).toMatchObject([{ kind: "runtime.send" }]);
 
     /* Recovery: the runtime is back and the queue drains the effect it left
        behind. The recipient receives NOTHING. */
@@ -755,24 +776,17 @@ test("permanent runtime loss then recovery ends in one terminal receipt and no l
     expect(active.journal.operationResult(operationId)?.receipt.status).toBe("uncertain");
     expect(await active.journal.effectBatch(100, ["runtime.send"])).toEqual([]);
 
-    const settled = await settleUnsettledSends({
+    /* And the answer the caller already holds is still the answer, with the
+       runtime back and able to speak for itself. */
+    const settled = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
       now: AFTER_THE_WINDOW,
     });
-    expect(settled.settled).toMatchObject([{ operationId, deliveryId, state: "failed", duplicateRisk: true }]);
-    const receipt = receiptOf(active, operationId);
-    expect(receipt?.state).toBe("failed");
-    expect(receipt?.resend).toBe("verify-first");
-
-    /* Exactly one: the send is settled, so the next sweep has nothing left to
-       examine and cannot write a second answer. */
-    const again = await settleUnsettledSends({
-      registry: active.registry,
-      client: active.client,
-      now: AFTER_THE_WINDOW,
-    });
-    expect(again).toEqual({ examined: 0, settled: [], deferred: [] });
+    expect(settled?.state).toBe("failed");
+    expect(settled?.duplicateRisk).toBe(true);
+    expect(settled?.resend).toBe("verify-first");
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
   } finally {
     active.close();
   }
@@ -799,20 +813,15 @@ test("a legacy send with no journal record settles unverified rather than provab
     const operationId = reservation.command.operationId;
     expect(active.journal.operationResult(operationId)).toBeNull();
 
-    const report = await settleUnsettledSends({
+    const answered = await resolveSendReceipt(operationId, {
       registry: active.registry,
       client: active.client,
       now: AFTER_THE_WINDOW,
     });
 
-    expect(report.settled).toEqual([{
-      operationId,
-      deliveryId: reservation.id,
-      conversationId: active.conversationId,
-      state: "failed",
-      disposition: "unverified",
-      duplicateRisk: true,
-    }]);
+    expect(answered?.state).toBe("failed");
+    expect(answered?.duplicateRisk).toBe(true);
+    expect(active.registry.readOnlySnapshot().heldDeliveries[reservation.id]?.state).toBe("failed");
     const receipt = receiptOf(active, operationId);
     expect(receipt?.state).toBe("failed");
     expect(receipt?.reason).toBe(SEND_UNRECORDED_REASON);
@@ -823,10 +832,11 @@ test("a legacy send with no journal record settles unverified rather than provab
   }
 });
 
-test("a delivered journal operation answers as delivered before any sweep runs", async () => {
+test("a delivered journal operation answers as delivered before the deadline", async () => {
   /* The receipt is a question about now. The projection can lag the journal by
-     a whole sweep, and answering `in-flight` from it while the journal holds a
-     delivered operation is the send-time guess this issue set out to replace. */
+     a whole drain, and answering `in-flight` from it while the journal holds a
+     delivered operation is the send-time guess this issue set out to replace —
+     and this answer does not wait for any deadline to say so. */
   const active = fixture("current");
   try {
     const { operationId, deliveryId } = acceptSend(active, { clientMessageId: "current-key" });
@@ -850,6 +860,45 @@ test("a delivered journal operation answers as delivered before any sweep runs",
   }
 });
 
+test("an accepted hold answers by its own operation id, and answers terminally either way", async () => {
+  /* #1131: a delivery parked behind an account migration is an ACCEPTED send —
+     `/api/runtime/send` and `send_message` both hand its reservation's
+     operation id back — so it has to be queryable like every other acceptance,
+     and the query has to reach a terminal answer whichever way the coordinator
+     that owns it settles it. Nothing here has a journal record: the whole
+     answer comes from the durable delivery record. */
+  const active = fixture("held");
+  try {
+    const delivered = acceptSend(active, { clientMessageId: "held-delivered-key", operationId: "op_held_delivered" });
+    const failed = acceptSend(active, { clientMessageId: "held-failed-key", operationId: "op_held_failed" });
+    const emptyJournal = { ...active.client, operationStatus: async () => null } as RuntimeHostClient;
+    expect((await resolveSendReceipt(delivered.operationId, {
+      registry: active.registry,
+      client: emptyJournal,
+    }))?.state).toBe("in-flight");
+
+    active.registry.recordDeliveryOutcome(delivered.deliveryId, "delivered", null, "delivered");
+    active.registry.recordDeliveryOutcome(failed.deliveryId, "failed", "the migration could not deliver it");
+
+    const arrived = await resolveSendReceipt(delivered.operationId, {
+      registry: active.registry,
+      client: emptyJournal,
+    });
+    expect(arrived?.state).toBe("delivered");
+    expect(arrived?.resend).toBe("not-needed");
+    const lost = await resolveSendReceipt(failed.operationId, {
+      registry: active.registry,
+      client: emptyJournal,
+    });
+    expect(lost?.state).toBe("failed");
+    /* Settled by a path that proved nothing about execution, so it says so. */
+    expect(lost?.duplicateRisk).toBe(true);
+    expect(lost?.resend).toBe("verify-first");
+  } finally {
+    active.close();
+  }
+});
+
 test("compaction retires the reservation and keeps what it proved about the send", async () => {
   /* The reservation carries the reason; the owner row is what outlives it. When
      only `terminalState` survived, both answers collapsed into one — an
@@ -862,11 +911,13 @@ test("compaction retires the reservation and keeps what it proved about the send
     const unverified = acceptSend(active, { clientMessageId: "compacted-uncertain-key", operationId: "op_compacted_uncertain" });
     active.journal.transitionOperation(unverified.operationId, "delivering", { turnId: "turn-compacted" });
     const fenced = acceptSend(active, { clientMessageId: "compacted-dropped-key", operationId: "op_compacted_dropped" });
-    await settleUnsettledSends({
-      registry: active.registry,
-      client: active.client,
-      now: AFTER_THE_WINDOW,
-    });
+    for (const operationId of [unverified.operationId, fenced.operationId]) {
+      await resolveSendReceipt(operationId, {
+        registry: active.registry,
+        client: active.client,
+        now: AFTER_THE_WINDOW,
+      });
+    }
     expect(receiptOf(active, unverified.operationId)?.resend).toBe("verify-first");
     expect(receiptOf(active, fenced.operationId)?.resend).toBe("safe");
 
