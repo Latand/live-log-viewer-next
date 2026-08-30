@@ -529,7 +529,6 @@ export async function resolveSendReceipt(
   const journal = client
     ? await readEvidence(
       () => client.operationStatus(operationId, { currentRetryLeaf: true }),
-      null,
       "runtime host is unavailable",
     )
     : unreadableEvidence("runtime host socket is unavailable");
@@ -569,13 +568,17 @@ export async function resolveSendReceipt(
      writes do not would make `queued` permanent exactly as an outage would. So
      it ends the same way an outage does, on the durable record the delivery
      queue reads before it actuates anything. */
-  const fenced = await fenceOperation(client, journal.value.operationId, status).catch(() => null);
+  const journalOperationId = journal.value.operationId;
+  const fenced = await readEvidence(
+    () => fenceOperation(client, journalOperationId, status),
+    "the delivery journal would not accept the fence",
+  );
   return settleProjection(
     registry,
     operationId,
     projected,
-    fenced ?? unsettleable,
-    fenced ? "delivery-journal" : "delivery-record",
+    fenced.readable ? fenced.value : unsettleable,
+    fenced.readable ? "delivery-journal" : "delivery-record",
   );
 }
 

@@ -50,24 +50,33 @@ export function unreadableEvidence(reason: string): Evidence<never> {
   return { readable: false, reason };
 }
 
-/**
- * Performs one failable read and keeps whether it succeeded.
- *
- * `read` is optional so an optional port method can be passed straight in: an
- * absent source answers `whenAbsent` as a completed read, because a capability
- * that was never wired is a fact rather than a failure.
- */
+/** Performs one failable read and keeps whether it succeeded. */
 export async function readEvidence<T>(
-  read: (() => T | PromiseLike<T>) | undefined,
-  whenAbsent: T,
+  read: () => T | PromiseLike<T>,
   fallbackReason = "evidence could not be read",
 ): Promise<Evidence<T>> {
-  if (!read) return { readable: true, value: whenAbsent };
   try {
     return { readable: true, value: await read() };
   } catch (error) {
     return { readable: false, reason: unreadableReason(error, fallbackReason) };
   }
+}
+
+/**
+ * The same read where the SOURCE itself is optional.
+ *
+ * An optional port method can be passed straight in: an absent source answers
+ * `whenAbsent` as a completed read, because a capability that was never wired
+ * is a fact about the deployment rather than a failure. Only an attempted read
+ * that threw is unreadable.
+ */
+export async function readOptionalEvidence<T>(
+  read: (() => T | PromiseLike<T>) | undefined,
+  whenAbsent: T,
+  fallbackReason = "evidence could not be read",
+): Promise<Evidence<T>> {
+  if (!read) return { readable: true, value: whenAbsent };
+  return readEvidence(read, fallbackReason);
 }
 
 /**

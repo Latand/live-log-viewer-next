@@ -380,7 +380,6 @@ export async function handleRuntimeOperationQuery(
      rather than being converted into `queued`. */
   const settlement = await readEvidence(
     () => dependencies.settle(operationId, client),
-    null,
     "delivery settlement is unavailable",
   );
   const send = settlement.readable ? settlement.value : null;
@@ -466,7 +465,17 @@ export async function handleRuntimeRetry(
       }
     }
     const recordRetryAttempt = dependencies.recordRetryAttempt ?? recordDeliveryRetryAttempt;
-    const previous = await client.operationStatus(operationId, { currentRetryLeaf: true });
+    /* The attempt this call is about, and a FAILABLE read of it. Only a read
+       that COMPLETED and found nothing may answer `operation not found`: the
+       catch below classifies by message, and an outage whose message happens to
+       carry the journal's word for a missing operation would otherwise tell a
+       caller its send never existed. Unreadable ends the call retryably. */
+    const status = await readEvidence(
+      () => client.operationStatus(operationId, { currentRetryLeaf: true }),
+      "runtime operation status is unavailable",
+    );
+    if (!status.readable) return NextResponse.json({ error: status.reason, retryable: true }, { status: 503 });
+    const previous = status.value;
     if (!previous) return NextResponse.json({ error: "operation not found" }, { status: 404 });
     if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
       return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
@@ -483,7 +492,6 @@ export async function handleRuntimeRetry(
            one finds. */
         const recorded = await readEvidence(
           () => recordRetryAttempt(previous.receipt.presentationOperationId ?? operationId, previous.operationId),
-          false,
           RETRY_RECORD_UNAVAILABLE,
         );
         if (!recorded.readable || !recorded.value) return retryRecordUnavailable(recorded);
@@ -551,7 +559,6 @@ export async function handleRuntimeRetry(
        gets the id once the row exists. */
     const recorded = await readEvidence(
       () => recordRetryAttempt(previous.receipt.presentationOperationId ?? previous.operationId, result.operationId),
-      false,
       RETRY_RECORD_UNAVAILABLE,
     );
     if (!recorded.readable || !recorded.value) return retryRecordUnavailable(recorded);

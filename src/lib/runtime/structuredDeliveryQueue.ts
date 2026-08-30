@@ -2,8 +2,8 @@ import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selectio
 
 import { parseMessageOrigin, type MessageOrigin } from "./messageOrigin";
 import type { RuntimeSendSettings } from "./contracts";
-import { evidenceAgrees, readEvidence, type Evidence } from "./evidence";
-import type { CompactCapableHost, DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
+import { evidenceAgrees, readEvidence, readOptionalEvidence, type Evidence } from "./evidence";
+import type { CompactCapableHost, DeliveryReceipt, EngineHost, HostState, QueueEntry } from "./engineHost";
 import { hostSupportsCompact, StructuredCompactError } from "./engineHost";
 import {
   parseStructuredImageRefs,
@@ -32,9 +32,10 @@ export interface StructuredDeliveryQueuePort {
       already issued and never settled (#862), and the message path reads the
       ownership its own `delivering` write recorded back off the reason.
 
-      Every one of the three reads below is FAILABLE, and none of them may be
-      converted into a definite answer when it fails. An unreadable fence is not
-      an open one: it blocks this pass instead of authorising it (#1131). */
+      Every one of the three reads below is FAILABLE — as is the live host's
+      own state, read through the same type — and none of them may be converted
+      into a definite answer when it fails. An unreadable fence is not an open
+      one: it blocks this pass instead of authorising it (#1131). */
   status?(operationId: string): Promise<{ status: string; reason?: string | null } | null>;
   /** Whether the durable DELIVERY RECORD has already ended this send (#1131).
       The journal cannot answer that during the outage in which it is written,
@@ -634,7 +635,13 @@ export class StructuredDeliveryQueue {
         await this.recoverUnavailableHost(effect);
         return true;
       }
-      const health = await host.health();
+      /* The live host's state, and the fence that decides whether this message
+         may be handed over at all. Unreadable is not idle and not dead: it
+         proves neither that the host can take the message nor that recovery is
+         owed one, so the pass writes nothing and comes back. */
+      const state = await this.readHealth(host);
+      if (!state.readable) return this.fenceUnavailable();
+      const health = state.value;
       if (health.status === "dead" || health.status === "unhosted") {
         await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
         await this.recoverUnavailableHost(effect);
@@ -687,8 +694,15 @@ export class StructuredDeliveryQueue {
         } catch (error) {
           this.interruptAcknowledged.delete(effect.operationId);
           const reason = failureReason(error);
-          const afterFailure = await host.health().catch(() => null);
-          if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
+          /* Nothing was handed to the engine yet — the interrupt that would
+             have cleared the way for it is what failed — so both branches only
+             put the message back in the queue it came from, and an unreadable
+             state is grouped with the one that waits rather than retries. No
+             branch here converts it into a claim about the host. */
+          const afterFailure = await this.readHealth(host);
+          if (!afterFailure.readable
+            || afterFailure.value.status === "dead"
+            || afterFailure.value.status === "unhosted") {
             await this.port.transition(effect.operationId, "queued", { reason });
             return true;
           }
@@ -696,7 +710,14 @@ export class StructuredDeliveryQueue {
           this.retrySoon();
           return true;
         }
-        const afterInterrupt = await host.health();
+        /* The interrupt was issued; whether the turn it ended left the host
+           idle is the question this read answers. Unreadable answers nothing,
+           so the message is not handed over on it: the row stays `delivering`
+           and this instance's own next pass ends it as unverified rather than
+           sending after an interrupt whose outcome nothing established. */
+        const afterInterruptState = await this.readHealth(host);
+        if (!afterInterruptState.readable) return this.fenceUnavailable();
+        const afterInterrupt = afterInterruptState.value;
         if (afterInterrupt.status === "dead" || afterInterrupt.status === "unhosted") {
           this.interruptAcknowledged.delete(effect.operationId);
           await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
@@ -713,10 +734,15 @@ export class StructuredDeliveryQueue {
         receipt = await sendWithReadRetry(host, entry);
       } catch (error) {
         const reason = failureReason(error);
-        const afterFailure = await host.health().catch(() => null);
-        const hostIsGone = !afterFailure
-          || afterFailure.status === "dead"
-          || afterFailure.status === "unhosted";
+        /* The one resend below is allowed only where the host is READ to be
+           alive, so an unreadable state is grouped with the host being gone:
+           the grouping that resends nothing. It costs a drain pass on a
+           conversation whose host may be fine, and buys never issuing a second
+           delivery on evidence nobody could read. */
+        const afterFailure = await this.readHealth(host);
+        const hostIsGone = !afterFailure.readable
+          || afterFailure.value.status === "dead"
+          || afterFailure.value.status === "unhosted";
         if (!hostIsGone && isThreadReadTimeout(error)) {
           /* The one resend this path issues, and the host dedupes it by
              queue-entry id: it reads the thread back and returns the confirmed
@@ -840,7 +866,15 @@ export class StructuredDeliveryQueue {
       await this.port.transition(effect.operationId, "failed", { reason: "unsupported-capability" });
       return { blocked: false, terminated: false };
     }
-    const health = await host.health();
+    /* Same fence as the message path, and the same answer to an unreadable
+       one: a compaction is issued against a host this pass could read as idle,
+       never against one it could not read at all. */
+    const state = await this.readHealth(host);
+    if (!state.readable) {
+      this.retrySoon();
+      return { blocked: false, terminated: false };
+    }
+    const health = state.value;
     if (health.status === "dead" || health.status === "unhosted") {
       await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
       await this.recoverUnavailableHost(effect);
@@ -890,13 +924,7 @@ export class StructuredDeliveryQueue {
   }
 
   /**
-   * Terminalizes a compaction whose outcome nothing proved. `uncertain` is a
-   * newer transition than the rest of this channel, so a runtime-host from
-   * before #862 rejects it; the operation must still settle rather than wedge
-   * the conversation's queue behind a receipt no pass can ever clear.
-   */
-  /**
-   * The three failable reads this queue fences on, each keeping whether it
+   * The four failable reads this queue decides on, each keeping whether it
    * could be read at all.
    *
    * A port method that is not wired answers as a completed read: the fence does
@@ -906,17 +934,32 @@ export class StructuredDeliveryQueue {
    */
   private readStatus(operationId: string): Promise<Evidence<{ status: string; reason?: string | null } | null>> {
     const read = this.port.status?.bind(this.port);
-    return readEvidence(read && (() => read(operationId)), null, "delivery journal status is unavailable");
+    return readOptionalEvidence(read && (() => read(operationId)), null, "delivery journal status is unavailable");
   }
 
   private readSettled(operationId: string): Promise<Evidence<boolean>> {
     const read = this.port.settled?.bind(this.port);
-    return readEvidence(read && (() => read(operationId)), false, "durable delivery record is unavailable");
+    return readOptionalEvidence(read && (() => read(operationId)), false, "durable delivery record is unavailable");
   }
 
   private readHostClaim(conversationId: string): Promise<Evidence<string | null>> {
     const read = this.port.hostClaim?.bind(this.port);
-    return readEvidence(read && (() => read(conversationId)), null, "host claim projection is unavailable");
+    return readOptionalEvidence(read && (() => read(conversationId)), null, "host claim projection is unavailable");
+  }
+
+  /**
+   * The live host's own state, which is a read like any other.
+   *
+   * It decides whether a message may be handed over at all, whether a control
+   * may be issued, and — after an actuation that threw — whether the host is
+   * gone. It used to be read bare, so a throw took the whole pass down with it,
+   * or converted at the call site with `.catch(() => null)` into the host being
+   * GONE, which is a fact nothing read. Being gone is what lets a control be
+   * issued a second time, so that conversion was the same duplicate-actuation
+   * hazard as an unreadable journal fence one step further along.
+   */
+  private readHealth(host: EngineHost): Promise<Evidence<HostState>> {
+    return readEvidence(() => host.health(), "structured host state is unavailable");
   }
 
   /**
@@ -977,6 +1020,13 @@ export class StructuredDeliveryQueue {
     }
   }
 
+  /**
+   * Terminalizes an operation whose outcome nothing proved — a send an executor
+   * took and could not answer for, a compaction an earlier one issued. `uncertain` is a
+   * newer transition than the rest of this channel, so a runtime-host from
+   * before #862 rejects it; the operation must still settle rather than wedge
+   * the conversation's queue behind a receipt no pass can ever clear.
+   */
   private async terminalizeUnverified(operationId: string, reason: string): Promise<void> {
     try {
       await this.port.transition(operationId, "uncertain", { reason });
@@ -988,7 +1038,12 @@ export class StructuredDeliveryQueue {
   private async drainReconfigure(effect: StructuredReconfigureEffect): Promise<boolean> {
     const host = this.resolveHost(effect.conversationId);
     if (host) {
-      const health = await host.health();
+      /* A switch is applied at a turn boundary, and an unreadable state is not
+         one: it cannot show the host busy, and treating it as idle would apply
+         the switch across a turn that may be running. */
+      const state = await this.readHealth(host);
+      if (!state.readable) { this.retrySoon(); return true; }
+      const health = state.value;
       if (health.status === "active" || health.status === "attention" || health.activeTurnRef) return true;
     }
     await this.port.transition(effect.operationId, "applying");
@@ -1079,7 +1134,15 @@ export class StructuredDeliveryQueue {
       }
     }
     if (!host) return { blocked: true, terminated: false };
-    const health = await host.health();
+    /* An answer and an interrupt are engine writes like a message, so the same
+       rule holds one step earlier: a state that could not be read authorises
+       neither the control nor the `dead-host` requeue that would reissue it. */
+    const state = await this.readHealth(host);
+    if (!state.readable) {
+      this.retrySoon();
+      return { blocked: true, terminated: false };
+    }
+    const health = state.value;
     if (health.status === "dead" || health.status === "unhosted") {
       await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
       return { blocked: true, terminated: false };
@@ -1103,8 +1166,16 @@ export class StructuredDeliveryQueue {
       return { blocked: false, terminated: false };
     } catch (error) {
       const reason = failureReason(error);
-      const afterFailure = await host.health().catch(() => null);
-      if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
+      /* The control was issued and threw. `queued` here says it never reached
+         the engine and hands it to a later pass to issue AGAIN, which is only
+         honest where the host is read to be gone — a departed host answered
+         nothing and kept nothing. An unreadable state is not that proof, and
+         converting it into one let an answer or an interrupt be delivered a
+         second time to a host that was alive the whole time. It settles like
+         any other control this host refused instead. */
+      const afterFailure = await this.readHealth(host);
+      if (afterFailure.readable
+        && (afterFailure.value.status === "dead" || afterFailure.value.status === "unhosted")) {
         await this.port.transition(effect.operationId, "queued", { reason });
         return { blocked: true, terminated: false };
       }

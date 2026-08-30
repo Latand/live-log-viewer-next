@@ -1868,3 +1868,136 @@ test("an unreadable status leaves a compaction unissued rather than compacting a
   expect(compactions).toEqual([]);
   expect(transitions).toEqual([["op-compact-unreadable", "uncertain"]]);
 });
+
+test("an unreadable host state leaves the send unhanded rather than delivering on it", async () => {
+  /* The live host's state is a failable read like the journal fences, and it is
+     the last one before the engine write. It used to be read bare here, so the
+     only thing standing between a message and an unreadable host was an
+     exception thrown out of the whole pass; every other host state — idle,
+     active, dead — decides something, and "could not be read" decides nothing.
+     The pass writes nothing and comes back. */
+  const writes: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  let retries = 0;
+  let readable = false;
+  const target = host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-state" };
+  });
+  target.health = async () => {
+    if (!readable) throw new Error("structured host socket timed out");
+    return idleState();
+  };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => (transitions.some(([, status]) => status === "delivered") ? [] : [{
+      id: "effect:op-state-unreadable",
+      kind: "runtime.send",
+      eventSeq: 60,
+      payload: {
+        kind: "send",
+        operationId: "op-state-unreadable",
+        conversationId: "conversation-one",
+        text: "roll the cutover forward",
+        policy: "queue",
+      },
+    }]),
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+  }, () => target, undefined, () => { retries += 1; });
+
+  await queue.drain();
+
+  expect(writes).toEqual([]);
+  expect(transitions).toEqual([]);
+  expect(retries).toBeGreaterThan(0);
+
+  /* And once the host answers for itself, the same send is delivered once. */
+  readable = true;
+  await queue.drain();
+
+  expect(writes).toEqual(["op-state-unreadable"]);
+  expect(transitions).toEqual([
+    ["op-state-unreadable", "delivering"],
+    ["op-state-unreadable", "delivered"],
+  ]);
+});
+
+test("an unreadable host state after a failed control never issues the control again", async () => {
+  /* `queued` on a control that already reached the engine hands it to a later
+     pass to issue a SECOND time, and that is only honest where the host is read
+     to be GONE. This read used to become `null` on failure and land in exactly
+     that branch, so one unreadable host state was the whole distance between an
+     answer and two of them. */
+  const answers: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  const terminal = new Set<string>();
+  const target = host(async () => ({ outcome: "turn-started", turnId: "turn-unused" }));
+  target.answer = async (attentionId) => {
+    answers.push(attentionId);
+    issued = true;
+    throw new Error("attention answer timed out; outcome is uncertain");
+  };
+  /* Readable while the control is issued — a host that could not be read is
+     never actuated against at all — and unreadable from the moment the answer
+     failed, which is the outage this test is about. */
+  let issued = false;
+  target.health = async () => {
+    if (issued) throw new Error("structured host socket timed out");
+    return idleState();
+  };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => (terminal.has("op-answer-unreadable") ? [] : [{
+      id: "effect:op-answer-unreadable",
+      kind: "runtime.answer",
+      eventSeq: 61,
+      payload: {
+        operationId: "op-answer-unreadable",
+        conversationId: "conversation-one",
+        attentionId: "question-one",
+        resolution: { answer: "yes" },
+      },
+    }]),
+    transition: async (operationId, status) => {
+      transitions.push([operationId, status]);
+      if (status === "failed" || status === "answered" || status === "delivered") terminal.add(operationId);
+    },
+  }, () => target);
+
+  await queue.drain();
+  await queue.drain();
+
+  expect(answers).toEqual(["question-one"]);
+  expect(transitions).toEqual([
+    ["op-answer-unreadable", "delivering"],
+    ["op-answer-unreadable", "failed"],
+  ]);
+});
+
+test("an unreadable host state issues no control at all", async () => {
+  /* The other half of the same call site: an answer and an interrupt are engine
+     writes, so a host whose state could not be read is not written to in the
+     first place, exactly as a message is not handed over on one. */
+  const answers: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  const target = host(async () => ({ outcome: "turn-started", turnId: "turn-unused" }));
+  target.answer = async (attentionId) => { answers.push(attentionId); };
+  target.health = async () => { throw new Error("structured host socket timed out"); };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-answer-unreadable-state",
+      kind: "runtime.answer",
+      eventSeq: 62,
+      payload: {
+        operationId: "op-answer-unreadable-state",
+        conversationId: "conversation-one",
+        attentionId: "question-one",
+        resolution: { answer: "yes" },
+      },
+    }],
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+  }, () => target);
+
+  await queue.drain();
+
+  expect(answers).toEqual([]);
+  expect(transitions).toEqual([]);
+});

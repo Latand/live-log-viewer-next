@@ -1240,6 +1240,31 @@ test("a retry attempt whose durable row does not land hands back no id", async (
   expect(kicks).toBe(0);
 });
 
+test("a retry whose status read fails is retryable rather than not found", async () => {
+  /* The read that says which attempt this call is about is failable too, and
+     the catch below classifies by message — so an outage whose message carries
+     the journal's own word for a missing operation could tell a caller its send
+     never existed. Only a read that COMPLETED and found nothing answers 404. */
+  const client = {
+    operationStatus: async () => { throw new Error("runtime host is unknown to this process"); },
+    retryOperation: async () => { throw new Error("unreachable"); },
+  } as unknown as RuntimeHostClient;
+  let kicks = 0;
+  const response = await handleRuntimeRetry(new NextRequest(
+    "http://127.0.0.1/api/runtime/operations/op-status-unreadable",
+    { method: "POST", headers: { host: "127.0.0.1" } },
+  ), "op-status-unreadable", {
+    enabled: () => true,
+    client: () => client,
+    kick: () => { kicks += 1; },
+  });
+  const body = await response.json() as Record<string, unknown>;
+
+  expect(response.status).toBe(503);
+  expect(body.retryable).toBeTrue();
+  expect(kicks).toBe(0);
+});
+
 test("the id a retry hands back outlives the runtime and is fenced after its deadline", async () => {
   /* What the durable row is FOR, end to end. The caller holds the retry id; the
      runtime then goes away entirely. The id still answers, the deadline still
