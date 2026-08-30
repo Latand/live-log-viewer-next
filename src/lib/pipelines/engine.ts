@@ -49,7 +49,7 @@ import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipel
 import { renderStagePrompt } from "./prompts";
 import { PIPELINE_ROLE_IDS, pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
 import { pipelineValidationError, type PipelineValidationViolation } from "./validation";
-import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
+import { buildPipeline, findPipelineRecord, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
 import type {
   CreatePipelineRequest,
@@ -127,6 +127,7 @@ export type PipelineCloseReport = {
 export type PipelineStageLaunchReservation = Pick<PipelineStageSpawn, "launchId" | "conversationId">;
 export type PipelineSpawnReceipt = PipelineStageSpawn & {
   state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
+  error?: string | null;
 };
 
 export interface PipelinePorts {
@@ -305,13 +306,12 @@ async function spawnPipelineAgent(
   if (begun.kind === "conflict") throw new Error("pipeline spawn attempt conflicts with its original request");
   onReserved({ launchId: begun.receipt.launchId, conversationId: begun.receipt.conversationId });
   if (begun.kind === "replay") {
-    const conversation = registry.conversation(begun.receipt.conversationId);
-    const transcript = begun.receipt.artifactPath ?? conversation?.generations.at(-1)?.path ?? null;
+    const identityPublished = begun.receipt.state === "completed";
     return {
       launchId: begun.receipt.launchId,
       conversationId: begun.receipt.conversationId,
-      sessionId: begun.receipt.key?.sessionId ?? null,
-      transcript,
+      sessionId: identityPublished ? begun.receipt.key?.sessionId ?? null : null,
+      "transcript": identityPublished ? begun.receipt.artifactPath : null,
       paneId: begun.receipt.verifiedHost?.paneId ?? begun.receipt.pane?.paneId ?? null,
     };
   }
@@ -536,12 +536,43 @@ export function defaultPipelinePorts(): PipelinePorts {
   const registry = agentRegistry();
   let registrySnapshot: ReturnType<typeof registry.readOnlySnapshot> | null = null;
   let adoptionCandidatesByPipeline: Map<string, PipelineAdoptionCandidate[]> | null = null;
+  let unpublishedStructuredPaths: Set<string> | null = null;
   let flowSnapshot: Flow[] | null = null;
   const snapshot = () => registrySnapshot ??= registry.readOnlySnapshot();
+  /* The registry needs staged key/path data to bind the host. Pipeline read
+     projections publish that identity only after finalization proves the
+     transcript exists, so recovery cannot copy a phantom path into an attempt. */
+  const structuredIdentityPublished = (
+    receipt: ReturnType<typeof snapshot>["receipts"][string],
+    current = snapshot(),
+  ): boolean => {
+    const structured = receipt.transport === "structured"
+      || (receipt.transport === null
+        && Boolean(receipt.key && current.entries[sessionKeyId(receipt.key)]?.structuredHost));
+    return !structured || receipt.state === "completed";
+  };
+  const unpublishedIdentityPaths = (
+    current = snapshot(),
+  ): Set<string> => unpublishedStructuredPaths ??= new Set(Object.values(current.receipts).flatMap((receipt) =>
+    receipt.artifactPath
+      && !structuredIdentityPublished(receipt, current)
+      /* A same-path resume stages ownership for an identity that was already
+         published by the source generation; it cannot make that path phantom. */
+      && !(receipt.purpose === "resume-successor" && receipt.resumeSourcePath === receipt.artifactPath)
+      ? [receipt.artifactPath]
+      : []));
+  const publishedPathForConversation = (conversationId: ViewerConversationId): string | null => {
+    const current = snapshot();
+    const conversation = current.conversations[conversationId];
+    if (!conversation) return null;
+    const unpublished = unpublishedIdentityPaths(current);
+    return conversation.generations.findLast((generation) => !unpublished.has(generation.path))?.path ?? null;
+  };
   const flows = () => flowSnapshot ??= loadFlows();
   const invalidateRegistryProjection = () => {
     registrySnapshot = null;
     adoptionCandidatesByPipeline = null;
+    unpublishedStructuredPaths = null;
   };
   const adoptionCandidates = () => {
     if (adoptionCandidatesByPipeline) return adoptionCandidatesByPipeline;
@@ -557,7 +588,13 @@ export function defaultPipelinePorts(): PipelinePorts {
         const receipt = receiptsByConversation.get(conversationId as ViewerConversationId) ?? null;
         const conversation = current.conversations[conversationId as ViewerConversationId] ?? null;
         const generation = conversation?.generations.at(-1) ?? null;
-        const agentPath = receipt?.artifactPath ?? generation?.path ?? null;
+        const receiptPublished = receipt ? structuredIdentityPublished(receipt, current) : false;
+        let agentPath = generation?.path ?? null;
+        let sessionId: string | null = null;
+        if (receipt) {
+          agentPath = receiptPublished ? receipt.artifactPath : null;
+          sessionId = receiptPublished ? receipt.key?.sessionId ?? null : null;
+        }
         if (!agentPath) continue;
         const runtime = membership.runtime ?? (receipt ? {
           engine: receipt.engine,
@@ -574,7 +611,7 @@ export function defaultPipelinePorts(): PipelinePorts {
           sourceConversationId: membership.parentConversationId,
           launchId: receipt?.launchId ?? null,
           conversationId,
-          sessionId: receipt?.key?.sessionId ?? null,
+          sessionId,
           agentPath,
           paneId: receipt?.verifiedHost?.paneId ?? receipt?.pane?.paneId ?? null,
           startedAt: receipt?.createdAt ?? membership.createdAt,
@@ -609,15 +646,18 @@ export function defaultPipelinePorts(): PipelinePorts {
       timer.unref?.();
     },
     spawnReceipt: (launchId) => {
-      const receipt = snapshot().receipts[launchId];
+      const current = snapshot();
+      const receipt = current.receipts[launchId];
       if (!receipt) return null;
+      const identityPublished = structuredIdentityPublished(receipt, current);
       return {
         state: receipt.state,
         launchId: receipt.launchId,
         conversationId: receipt.conversationId,
-        sessionId: receipt.key?.sessionId ?? null,
-        "transcript": receipt.artifactPath,
+        sessionId: identityPublished ? receipt.key?.sessionId ?? null : null,
+        "transcript": identityPublished ? receipt.artifactPath : null,
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
+        error: receipt.error,
       };
     },
     claimSpawnRetry: (launchId, claimId) => {
@@ -693,10 +733,11 @@ export function defaultPipelinePorts(): PipelinePorts {
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
     pathForConversation: (conversationId) => conversationId.startsWith("conversation_")
-      ? snapshot().conversations[conversationId as ViewerConversationId]?.generations.at(-1)?.path ?? null
+      ? publishedPathForConversation(conversationId as ViewerConversationId)
       : null,
     sourcePathAllowed: transcriptAllowed,
     conversationIdForPath: (pathname) => {
+      if (unpublishedIdentityPaths().has(pathname)) return null;
       for (const conversation of Object.values(snapshot().conversations)) {
         if (conversation.generations.some((generation) => generation.path === pathname)) return conversation.id;
       }
@@ -1772,7 +1813,7 @@ async function tickRunStage(
       attempt.agentPath = receipt.transcript;
       attempt.paneId = receipt.paneId;
       if (receipt.state === "failed" || receipt.state === "conflicted" || (receipt.state === "starting" && !receipt.paneId && !receipt.transcript)) {
-        park(pipeline, `stage spawn cannot recover from receipt state ${receipt.state}`, attempt);
+        park(pipeline, receipt.error ?? `stage spawn cannot recover from receipt state ${receipt.state}`, attempt);
         return;
       }
     }
@@ -1783,8 +1824,23 @@ async function tickRunStage(
   const structuredActive = !attempt.paneId && attempt.conversationId
     ? await ports.conversationAgentActive(attempt.conversationId)
     : null;
+  const spawnReceipt = attempt.launchId ? ports.spawnReceipt(attempt.launchId) : null;
+  const terminalSpawnFailure = spawnReceipt
+    && (spawnReceipt.state === "failed" || spawnReceipt.state === "conflicted")
+    ? spawnReceipt.error ?? `stage spawn cannot recover from receipt state ${spawnReceipt.state}`
+    : null;
+  /* A terminal spawn receipt is durable evidence; only an affirmatively
+     active agent outranks it. A runtime-host outage answers null, and that
+     unknown must not hide the real drain cause behind a later
+     transcript-unreadable park (#1314). */
+  if (!attempt.paneId && attempt.conversationId && structuredActive !== true && terminalSpawnFailure) {
+    park(pipeline, terminalSpawnFailure, attempt);
+    return;
+  }
   if (!attempt.agentPath) {
-    if (structuredActive === false) park(pipeline, "structured stage ended before its session was discovered", attempt);
+    if (structuredActive === false) {
+      park(pipeline, "structured stage ended before its session was discovered", attempt);
+    }
     else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited before its session was discovered", attempt);
     return;
   }
@@ -2574,41 +2630,60 @@ async function reconcileUnconfirmedHosts(pipeline: Pipeline, ports: PipelinePort
     inside the pipelines transaction, so a slow host defers the rest of its
     pipeline's candidates to the next tick instead of stalling every mutation. */
 const TERMINAL_REAP_BUDGET_MS = 5_000;
-/** Sweeps one pipeline's terminal reap may spend before surfacing survivors. */
+/** Sweeps one finished-attempt batch may spend before surfacing survivors. */
 const TERMINAL_REAP_MAX_ROUNDS = 5;
 
 /**
- * Reaps a completed pipeline's finished stage hosts (#574).
+ * Reaps finished stage hosts as soon as their attempt is terminal (#574, #1123).
  *
- * advancePipeline marks the pipeline completed the moment its last stage
- * passes, but nothing stopped the hosts its stages left behind: every finished
- * builder kept an idle resume process resident on a paid quota, and a machine
- * running many pipelines accumulated hundreds of them. A close tears hosts
- * down (#670); completion now does the same, through the identical
- * identity-verified control path, with `closed` staying the close action's job
- * so an operator's acknowledge decision is never overridden by a later sweep.
+ * A stage may finish long before the pipeline: on a pass edge, a bounded repair
+ * loop, or a parked decision. Waiting for whole-pipeline completion left each
+ * finished host resident. The reap therefore follows attempt evidence through
+ * the same identity-verified control path while `closed` stays the explicit
+ * close action's job.
  *
  * Only hosts whose attempt finished its turn (a verdict or a completion stamp)
  * are candidates, and the runtime gets the last word: a conversation it
  * reports actively running is preserved, as are the pipeline's creator
- * conversation and transcript. The sweep is bounded twice — a per-sweep budget
- * so the transaction cannot stall behind slow kills, and a durable round
- * ceiling so a host that will not die becomes a visible unconfirmed host
- * (retired by reconcileUnconfirmedHosts once it is demonstrably gone) instead
- * of receiving a kill on every tick forever.
+ * conversation and transcript. Settled attempt keys make this incremental: a
+ * later terminal round opens another bounded batch without re-killing an older
+ * host. The per-sweep budget protects the transaction, and the durable round
+ * ceiling turns a survivor into a visible unconfirmed host.
  */
 async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePorts): Promise<boolean> {
-  if (pipeline.state !== "completed" || pipeline.terminalReap?.settledAt) return false;
-  const reap: PipelineTerminalReap = pipeline.terminalReap
-    ?? { rounds: 0, stopped: 0, lastAt: ports.now(), settledAt: null };
-  const deadline = ports.monotonicNow() + TERMINAL_REAP_BUDGET_MS;
+  if (!["running", "needs_decision", "paused", "completed"].includes(pipeline.state)) return false;
+  const settledAttempts = new Set(pipeline.terminalReap?.settledAttempts ?? []);
+  const unconfirmedAttempts = new Set((pipeline.unconfirmedHosts ?? [])
+    .map((host) => `${host.stageId}:${host.attempt}`));
+  const prior = pipeline.terminalReap;
   const candidates = launchedStageHosts(pipeline).filter(({ target, turnSettled }) => turnSettled
     && !(target.conversationId && target.conversationId === pipeline.srcConversationId)
-    && !(target.agentPath && target.agentPath === pipeline.srcPath));
+    && !(target.agentPath && target.agentPath === pipeline.srcPath)
+    && !settledAttempts.has(`${target.stageId}:${target.attempt}`)
+    && !unconfirmedAttempts.has(`${target.stageId}:${target.attempt}`));
+  if (candidates.length === 0) {
+    if (pipeline.state !== "completed" || prior?.settledAt) return false;
+    const settledAt = ports.now();
+    pipeline.terminalReap = prior
+      ? { ...prior, lastAt: settledAt, settledAttempts: [...settledAttempts], settledAt }
+      : { rounds: 0, stopped: 0, lastAt: settledAt, settledAttempts: [], settledAt };
+    return true;
+  }
+
+  const reap: PipelineTerminalReap = prior
+    ? {
+        ...prior,
+        rounds: prior.settledAt ? 0 : prior.rounds,
+        settledAttempts: [...settledAttempts],
+        settledAt: null,
+      }
+    : { rounds: 0, stopped: 0, lastAt: ports.now(), settledAttempts: [], settledAt: null };
+  const deadline = ports.monotonicNow() + TERMINAL_REAP_BUDGET_MS;
   const survivors: Array<PipelineStageHostRef & { operationId: string | null; detail: string }> = [];
   let attempted = false;
   let deferred = false;
   for (const [index, { target }] of candidates.entries()) {
+    const attemptKey = `${target.stageId}:${target.attempt}`;
     if (ports.monotonicNow() >= deadline) {
       deferred = true;
       /* Normally the next sweep picks these up; recorded here so that a reap
@@ -2623,18 +2698,28 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
       }
       break;
     }
-    if (!(await ports.stageHostResident(target))) continue;
+    if (!(await ports.stageHostResident(target))) {
+      settledAttempts.add(attemptKey);
+      continue;
+    }
     /* The attempt's own evidence says its turn ended, but a host the runtime
        still reports mid-turn (an adopted helper on a fresh turn) is live work,
        so it stays; the idle-TTL reaper owns it from here. */
-    if (target.conversationId && await ports.conversationAgentActive(target.conversationId) === true) continue;
+    if (target.conversationId && await ports.conversationAgentActive(target.conversationId) === true) {
+      settledAttempts.add(attemptKey);
+      continue;
+    }
     attempted = true;
     const result = await ports.stopStageAgent(target);
-    if (result.outcome === "stopped") reap.stopped += 1;
+    if (result.outcome === "stopped") {
+      reap.stopped += 1;
+      settledAttempts.add(attemptKey);
+    }
     else if (result.outcome === "unconfirmed") survivors.push({ ...target, operationId: result.operationId, detail: result.detail });
     else if (result.outcome === "failed") survivors.push({ ...target, operationId: null, detail: result.error });
   }
   reap.lastAt = ports.now();
+  reap.settledAttempts = [...settledAttempts];
   if (attempted || deferred) reap.rounds += 1;
   const clean = !deferred && survivors.length === 0;
   if (clean || reap.rounds >= TERMINAL_REAP_MAX_ROUNDS) {
@@ -4053,4 +4138,8 @@ export async function patchPipeline(
 
 export function getPipelines(): { pipelines: Pipeline[] } {
   return { pipelines: loadPipelines() };
+}
+
+export function getPipeline(pipelineId: string): Pipeline | null {
+  return findPipelineRecord(pipelineId);
 }

@@ -49,6 +49,7 @@ export const MCP_TOOL_NAMES = [
   "search_transcripts",
   "get_conversation",
   "conversation_deliverability",
+  "conversation_messages",
   "deploy_exact_sha",
   "get_pipeline",
   "board_snapshot",
@@ -199,6 +200,10 @@ export const MCP_BOUNDED_NUMERIC_ARGS: Partial<Record<McpToolName, readonly McpB
   get_conversation: [
     { path: ["maxRecords"], min: 1, max: 500, fallback: 100 },
     { path: ["tailLines"], min: 1, max: SELECTED_TAIL_MAX_LINES, fallback: 1 },
+  ],
+  conversation_messages: [
+    { path: ["limit"], min: 1, max: 200, fallback: 20 },
+    { path: ["maxChars"], min: 1, max: 16_000, fallback: 4_000 },
   ],
   board_snapshot: [
     { path: ["limit"], min: 1, max: 200, fallback: 100 },
@@ -1671,8 +1676,9 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   link_task_to_pipeline: "Attach a board task to a conversation owned by a pipeline.",
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
   search_transcripts: "Search indexed user and assistant message bodies across every scanned transcript store. Returns match snippets with speaker, timestamp, transcript path and byte offset; project is optional, and empty pages include corpus statistics. Queries never read transcript files.",
-  get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan.",
+  get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan. For normalized, filtered, paged messages use conversation_messages.",
   conversation_deliverability: "Read whether one conversation currently has a deliverable host from the durable registry record. An accepted resume stays synchronizing until the current generation records a claimed process; reclaimed, synchronizing, superseded, and unknown are distinct conditions.",
+  conversation_messages: "Read one conversation newest-first as engine-normalized records; Claude and Codex return the same shape, while hook attachments and usage envelopes are omitted. Identity accepts conversationId, transcriptPath, or selectedContext and resolves through the same bounded paths as get_conversation. kinds is a non-empty subset of message | reasoning | tool_call | tool_result | trace (default message). roles is a non-empty subset of user | assistant | system | tool (default all). since is an inclusive ISO timestamp lower bound. limit clamps to 1..200 (default 20); maxChars clamps to 1..16000 (default 4000), and truncated marks cut text after secret redaction. Records are newest-first. Pass the opaque cursor unchanged with a fresh clientRequestId for each next-older page while hasMore is true; cursors are bound to the transcript and filters. A normal empty page returns records: []. File work is bounded by the page, so a 100 MB rollout is never parsed in full.",
   deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
   board_snapshot: "Read a bounded, redacted snapshot of the Viewer board, durable placement, and the selected project's hidden conversation count.",
@@ -1966,6 +1972,26 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     clientRequestId: clientRequestIdSchema,
     conversationId: z.string().min(1).optional(),
     transcriptPath: z.string().min(1).optional(),
+  }).passthrough(),
+  conversation_messages: z.object({
+    clientRequestId: clientRequestIdSchema,
+    conversationId: z.string().min(1).optional()
+      .describe("Durable Viewer conversation id. Supply this, transcriptPath, or selectedContext."),
+    transcriptPath: z.string().min(1).optional()
+      .describe("Transcript under a registered scanner root. Supply this, conversationId, or selectedContext."),
+    selectedContext: selectedContextSchema,
+    kinds: z.array(z.enum(["message", "reasoning", "tool_call", "tool_result", "trace"])).min(1).optional()
+      .describe("Record kinds to return: message, reasoning, tool_call, tool_result, trace. Defaults to message; duplicates are ignored."),
+    roles: z.array(z.enum(["user", "assistant", "system", "tool"])).min(1).optional()
+      .describe("Record roles to return: user, assistant, system, tool. Defaults to all four; duplicates are ignored."),
+    since: z.string().min(1).optional()
+      .describe("Inclusive ISO-8601 timestamp lower bound with Z or a numeric offset."),
+    limit: boundedNumericInput("conversation_messages", "limit")
+      .describe("Newest-first records per page. Integer 1..200, default 20; numeric strings coerce and out-of-range values clamp."),
+    maxChars: boundedNumericInput("conversation_messages", "maxChars")
+      .describe("Characters retained per record after secret redaction. Integer 1..16000, default 4000; truncated is true when text was cut."),
+    cursor: z.string().min(1).optional()
+      .describe("Opaque cursor from the preceding page. Pass it unchanged with a fresh clientRequestId for the next-older page while hasMore is true."),
   }).passthrough(),
   deploy_exact_sha: z.object({
     clientRequestId: clientRequestIdSchema,

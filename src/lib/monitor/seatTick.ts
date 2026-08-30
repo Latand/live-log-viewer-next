@@ -1,6 +1,6 @@
 import { isTerminalHighSignalEvent } from "@/lib/lifecycle/vocabulary";
 
-import { seatTickRetryGuardRef, ORCHESTRATOR_ALERT_REF, SEAT_TICK_SETTINGS_REF } from "./cards";
+import { seatTickRetryGuardRef, seatTickSourceGapRef, ORCHESTRATOR_ALERT_REF, SEAT_TICK_SETTINGS_REF } from "./cards";
 import { evidenceStallReason } from "./classify";
 import {
   SEAT_TICK_WAKE_REASON_KINDS,
@@ -8,11 +8,14 @@ import {
   type SeatTickCheckInput,
   type SeatTickDecision,
   type SeatTickEventInput,
+  type SeatTickEvidenceGap,
   type SeatTickItem,
   type SeatTickPipelineInput,
   type SeatTickPolicy,
   type SeatTickProjectState,
+  type SeatTickPullRequestGap,
   type SeatTickSeatInput,
+  type SeatTickSourceGap,
   type SeatTickTaskInput,
   type SeatTickVerdict,
   type SeatTickWakeCommit,
@@ -60,6 +63,17 @@ import {
  *   finished and left its pull request unmerged IS one, however quiet the board
  *   otherwise looks (#1289). Where the two pull against each other the rarer,
  *   truer wake wins over the earlier one.
+ * - **A failed evidence source degrades ITSELF and nothing else** (#1298). The
+ *   rule above bought its truthfulness by refusing to conclude anything from a
+ *   read that failed — and then refused to conclude anything at all, so a
+ *   `gh` that could not authenticate withdrew a parked lane's wake as surely as
+ *   it withdrew the pull request's. Twenty-three consecutive checks reported
+ *   `error` while two lanes stood parked, which from the seat's side and the
+ *   operator's is the silence the refusal exists to prevent. So the reasons
+ *   that rest on the failed source are withheld, every other reason still wakes
+ *   the seat, and the wake names the evidence it could not see. Only when
+ *   nothing else stands is the check an `error` — quiet remains a conclusion
+ *   nobody may draw from a read that failed.
  */
 
 const MINUTE_MS = 60_000;
@@ -287,10 +301,109 @@ export function seatTickWakeDue(lastWakeAt: string | null, now: number, wakeInte
   return elapsed(lastWakeAt, now, wakeIntervalMs);
 }
 
-/** The retry-guard count that applies right now: a fingerprint that moved since
-    the last wake means the board changed, so nothing is being re-sent. */
+/**
+ * Whether an evidence source is failing rather than blipping (#1298).
+ *
+ * "Cannot be read at all" is a claim about a RUN of failures. `gh` refusing
+ * once is a rate limit or a flaky network, and putting a card on the board for
+ * that would teach the operator to ignore the card. A run that has
+ * outlived a whole wake interval is the other thing — the credential is missing,
+ * the command is not installed, the host config points nowhere — and that is
+ * worth saying once, out loud.
+ *
+ * The project's own interval is the threshold rather than a number of checks,
+ * because the check cadence is not what "how long has this been broken" means,
+ * and because the same predicate then bounds the retry: past this point the
+ * source is asked at the rate its answer could possibly change a wake, and no
+ * faster.
+ */
+export function seatTickSourceGapStanding(gap: SeatTickSourceGap | null, now: number, wakeIntervalMs: number): boolean {
+  if (!gap) return false;
+  const since = Date.parse(gap.since);
+  /* A run whose start cannot be read is not a run anything may be concluded
+     from, so it is treated as freshly failing: it keeps the fast retry and
+     raises no card. */
+  return Number.isFinite(since) && now - since >= wakeIntervalMs;
+}
+
+/**
+ * Whether the source is asked again on this check.
+ *
+ * Inside the first interval of a run, every check asks — a transient failure
+ * must recover at the check interval, not an hour later. Once the run stands
+ * (above), the subprocess is paid for at most once per wake interval: the
+ * answer cannot raise a wake more often than that anyway, and a source that
+ * has been dead all day should not cost one process per project every five
+ * minutes for ever.
+ *
+ * Slowing the read can never slow a decision, because a check that does not
+ * ask replays the gap it already knows about — see
+ * {@link SeatTickCheckInput.pullRequestsUnavailable}. Every verdict in between
+ * is the verdict a fresh failed read would have produced.
+ */
+export function seatTickSourceRetryDue(gap: SeatTickSourceGap | null, now: number, wakeIntervalMs: number): boolean {
+  if (!gap || !seatTickSourceGapStanding(gap, now, wakeIntervalMs)) return true;
+  const attempted = Date.parse(gap.lastAttemptAt);
+  return !Number.isFinite(attempted) || now - attempted >= wakeIntervalMs;
+}
+
+/** The run of failures after one attempt failed: a new one, or the standing one
+    advanced. `since` and `reported` belong to the RUN, so neither is reset by a
+    later failure inside it — only an answer clears the row. */
+export function seatTickSourceGapAfterFailure(
+  gap: SeatTickSourceGap | null,
+  kind: SeatTickPullRequestGap,
+  at: string,
+): SeatTickSourceGap {
+  if (!gap) return { gap: kind, since: at, lastAttemptAt: at, attempts: 1, reported: false };
+  return { ...gap, gap: kind, lastAttemptAt: at, attempts: gap.attempts + 1 };
+}
+
+/** The token the pull-request half carries when the source could not be read
+    (#1298). Shared with the composer, so the two halves cannot drift apart. */
+export const FINGERPRINT_UNREAD = "unread";
+
+/**
+ * Whether the board moved between two checks — the question the retry guard is
+ * an answer to, and the one place a fingerprint is interpreted rather than
+ * compared.
+ *
+ * Plain inequality answered it until one of the sources behind the digest
+ * could go missing (#1298). An unreadable pull-request source contributes no
+ * rows, which is byte-for-byte what a merged pull request contributes, so a
+ * source failing every other check made the digest alternate between two
+ * values and every wake looked like it had landed on a changed board. The
+ * guard would never have reached its count, and the gap that is supposed to
+ * cost nothing would have bought an unbounded wake for every reason on it.
+ *
+ * So the unreadable half says nothing instead of saying "empty": it can
+ * neither invent movement nor claim stillness, and the answer rests on the
+ * evidence both checks actually read. A digest from before this shape is
+ * compared whole, which reads as one movement on the first check after it
+ * changes and settles from there.
+ */
+export function seatTickBoardMoved(previous: string | null, current: string): boolean {
+  if (previous === null) return true;
+  const before = splitFingerprint(previous);
+  const now = splitFingerprint(current);
+  if (!before || !now) return previous !== current;
+  if (before.board !== now.board) return true;
+  /* The board part matched, so whatever moved has to have moved in the part one
+     of these two checks could not read. Neither of them knows that it did. */
+  if (before.pullRequests === FINGERPRINT_UNREAD || now.pullRequests === FINGERPRINT_UNREAD) return false;
+  return before.pullRequests !== now.pullRequests;
+}
+
+function splitFingerprint(fingerprint: string): { board: string; pullRequests: string } | null {
+  const cut = fingerprint.indexOf(".");
+  if (cut <= 0 || cut === fingerprint.length - 1) return null;
+  return { board: fingerprint.slice(0, cut), pullRequests: fingerprint.slice(cut + 1) };
+}
+
+/** The retry-guard count that applies right now: a board that moved since the
+    last wake means nothing is being re-sent. */
 function guardCount(state: SeatTickProjectState, kind: SeatTickWakeReasonKind, fingerprint: string): number {
-  if (state.lastWakeFingerprint !== fingerprint) return 0;
+  if (seatTickBoardMoved(state.lastWakeFingerprint, fingerprint)) return 0;
   return state.wakesWithoutChange[kind] ?? 0;
 }
 
@@ -331,6 +444,71 @@ function settingsCards(input: SeatTickCheckInput): SeatTickCard[] {
       ? `wakes for this project are set to one every ${Math.round(settings.wakeIntervalMs / MINUTE_MS)} minute(s)`
       : "ticking is off for this project: no wake will be sent until it is turned back on",
   }];
+}
+
+/**
+ * What this check could not read, in the form the wake carries it (#1298).
+ *
+ * One entry per source, and today the pull-request read is the only source that
+ * can fail without failing the whole check. The clause is written for the seat:
+ * it says which evidence is missing and which obligation therefore cannot be
+ * named, so a seat acting on the rest of the wake knows what is NOT in it.
+ */
+function evidenceGaps(input: SeatTickCheckInput): SeatTickEvidenceGap[] {
+  const gap = input.pullRequestsUnavailable;
+  if (!gap) return [];
+  return [{
+    source: "pull-requests",
+    gap,
+    detail: `the open pull requests of this project's finished lanes could not be read (${gap}), `
+      + "so a pull request a finished lane left unmerged cannot be named in this wake",
+  }];
+}
+
+/**
+ * The board card for a source that cannot be read at all, raised once per
+ * outage (#1298).
+ *
+ * The journal already carried every failure, and the whole failure was that
+ * nobody reads a journal: a `gh` that could not authenticate failed on every
+ * check from the day the feature shipped, and the first person to notice was
+ * the operator asking why the seat had been quiet for four hours. So a run of
+ * failures that outlives the wake interval — long enough that this is
+ * configuration rather than weather — is put where an operator looks.
+ *
+ * Once, and only once: {@link SeatTickSourceGap.reported} is the tick's own
+ * memory of having said it, so closing the card does not summon it again five
+ * minutes later. The row clears when the source answers, which is what makes
+ * the next outage a new card rather than a silent one.
+ *
+ * The row it returns is what to remember AFTER the report exists, and it is
+ * deliberately not folded into {@link SeatTickDecision.state}: `reported` is a
+ * claim about the board, the board write can fail, and a decision that records
+ * the claim anyway suppresses the one report this whole mechanism owes the
+ * operator, permanently. The controller writes it once the card is there.
+ *
+ * `since` is the outage's own identity, which is why it travels on the card as
+ * {@link SeatTickCard.instance}: every outage of this source shares one `ref`,
+ * so the create receipt of the first card would replay for the second one and
+ * put nothing on a board the first card has since been completed off.
+ */
+function sourceGapReport(
+  input: SeatTickCheckInput,
+  gaps: readonly SeatTickEvidenceGap[],
+): { card: SeatTickCard; gap: SeatTickSourceGap } | null {
+  const gap = input.state.pullRequestGap;
+  if (gaps.length === 0 || !gap || gap.reported) return null;
+  if (!seatTickSourceGapStanding(gap, input.now, input.settings.wakeIntervalMs)) return null;
+  return {
+    card: {
+      ref: seatTickSourceGapRef("pull-requests"),
+      kind: "source-unreadable",
+      instance: gap.since,
+      detail: `The open pull requests of this project's finished lanes have not been readable since `
+        + `${gap.since.slice(0, 16).replace("T", " ")} UTC (${gap.gap}, ${gap.attempts} attempt(s))`,
+    },
+    gap: { ...gap, reported: true },
+  };
 }
 
 /**
@@ -391,7 +569,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
   const openWork = hasOpenWork(input);
   const wakeDue = seatTickWakeDue(input.state.lastWakeAt, input.now, input.settings.wakeIntervalMs);
 
-  const state: SeatTickProjectState = { ...base, stalledSeen: stalledNow };
+  const observed: SeatTickProjectState = { ...base, stalledSeen: stalledNow };
 
   /* Ticking is off for this project, so no wake and no proposal — and the
      check still runs, still reads the board and still writes its journal line.
@@ -408,7 +586,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
           ? `ticking is off for this project: ${input.settings.reason}`
           : "ticking is off for this project",
       },
-      state: quiet(state, at),
+      state: quiet(observed, at),
       cards: [],
     };
   }
@@ -437,7 +615,12 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
        for one reason: a lane that finished with its pull request unmerged is
        the seat's next obligation, and the tick could not see one. It takes no
        shortcut around the bound — same interval above, same retry guard below —
-       and it clears itself when the pull request merges or closes. */
+       and it clears itself when the pull request merges or closes.
+
+       This is the ONE reason a pull-request gap withholds, and it withholds it
+       by having nothing to name: an unreadable source carries no rows, so the
+       clause below is simply false (#1298). Every other candidate is composed
+       from evidence this check did read. */
     if (input.pullRequests.length > 0) {
       const first = input.pullRequests[0]!;
       const more = input.pullRequests.length > 1 ? ` and ${input.pullRequests.length - 1} more` : "";
@@ -472,8 +655,10 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
 
   const cards: SeatTickCard[] = [];
   const reasons: SeatTickWakeReason[] = [];
+  let guardHeld = 0;
   for (const reason of candidates) {
     if (guardCount(input.state, reason.kind, input.changeFingerprint) >= input.policy.retryGuard) {
+      guardHeld += 1;
       cards.push({
         ref: seatTickRetryGuardRef(reason.kind),
         kind: "retry-guard",
@@ -484,35 +669,34 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     reasons.push(reason);
   }
 
-  /* Ahead of the wake, because the wake is what would pay for the gap.
-     Delivering one advances the wake stamp and the retry-guard count, so a
-     `gh` that answered nothing would buy the next hour of silence on the
-     strength of a read that established nothing — the same trade the error
-     below refuses, arriving by the one route that still charged for it.
+  /* What this check could not read, said once on the board and on every wake
+     that goes out while it stands (#1298). The card is the "once": a source
+     that has been failing since before the wake interval is not a blip, and
+     twenty-three journal lines nobody was reading is what the operator got
+     instead of being told. */
+  const gaps = evidenceGaps(input);
+  const gapReport = sourceGapReport(input, gaps);
+  if (gapReport) cards.push(gapReport.card);
+  /* The row this check writes says the outage is UNREPORTED, and it says so
+     even while the card for it is being raised. Marking it reported here is a
+     claim about a board write that has not happened yet and that the controller
+     catches when it fails — after which the tick remembers having told the
+     operator something nobody was ever told, and the report is suppressed for
+     the rest of the outage. So the reported row leaves separately and the
+     controller writes it once the card is confirmed on the board. */
+  const state = observed;
+  const reportedSourceGap = gapReport?.gap ?? null;
 
-     The reason that DID stand on its own is not dropped by this; it is held
-     until the next check, five minutes away rather than the hour a delivered
-     wake would have spent, and that check wakes with everything owed by then.
-     Meanwhile the error is journaled every check, so a `gh` outage is loud for
-     as long as it lasts instead of being quietly absorbed into a wake that
-     could not name what it was hiding.
+  /* The wake goes FIRST, and it goes out while a source is unreadable (#1298).
+     Every reason it carries was decided from evidence this check did read, and
+     the gaps beside them say what it could not — so the hour a delivered wake
+     buys is bought by a wake that named real work and named its own blind
+     spot. The trade the previous shape refused was a different one: a wake
+     with nothing but the failed read behind it. That one is still refused,
+     because the reason resting on the failed source is never composed at all.
 
-     It is an error rather than a wake precisely so it stays incapable of
-     costing anything: no delivery, no wake stamp, no retry-guard count. The
-     hourly bound belongs to wakes that were actually sent, and a failed read
-     cannot spend it. The cards the guard raised above still travel — they
-     describe the board, not this check's conclusion about it. */
-  if (input.pullRequestsUnavailable) {
-    return {
-      verdict: {
-        kind: "error",
-        detail: `the open pull requests of this project's finished lanes could not be read (${input.pullRequestsUnavailable}), so nothing owed is not established`,
-      },
-      state,
-      cards,
-    };
-  }
-
+     The guard and the interval are untouched by any of it: the reasons here
+     passed both, and a gap adds none. */
   if (reasons.length > 0) {
     const all = wakeItems({ input, stalled: persistedStalls, laneEvents, unstarted });
     return {
@@ -521,16 +705,36 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
         reasons,
         items: all.slice(0, input.policy.itemsPerWake),
         deferred: Math.max(0, all.length - input.policy.itemsPerWake),
+        gaps,
       },
       state,
       cards,
+      reportedSourceGap,
+    };
+  }
+
+  /* Nothing else was owed, so the unreadable source is the whole story — and
+     quiet is a conclusion this check cannot draw. It ends as an error that
+     costs nothing: no delivery, no wake stamp, no retry-guard count, no claim
+     of quiet in the row. The hourly bound belongs to wakes that were actually
+     sent, and a failed read still cannot spend it. It stays ahead of every
+     verdict below, each of which says nothing is owed. */
+  if (gaps.length > 0) {
+    return {
+      verdict: {
+        kind: "error",
+        detail: `the open pull requests of this project's finished lanes could not be read (${gaps[0]!.gap}), so nothing owed is not established`,
+      },
+      state,
+      cards,
+      reportedSourceGap,
     };
   }
 
   /* Nothing left to wake on, and every outcome below this line is a statement
      that nothing is owed — each of them resting on evidence the check above
      has already shown it could read. */
-  if (cards.length > 0) {
+  if (guardHeld > 0) {
     return { verdict: { kind: "quiet", detail: "every wake reason is held by the retry guard" }, state: quiet(state, at), cards };
   }
 
@@ -652,7 +856,11 @@ export function seatTickWakeCommit(
   }
 
   const carried = commit.reasons;
-  const fruitless = state.lastWakeFingerprint === commit.fingerprint;
+  /* A wake that changed nothing, counted the same way the guard reads it — an
+     hour whose pull-request half was unreadable is an hour that showed no
+     movement, so it accrues rather than resetting (#1298). A blind source
+     cannot postpone the guard any more than it can walk around it. */
+  const fruitless = !seatTickBoardMoved(state.lastWakeFingerprint, commit.fingerprint);
   const wakesWithoutChange: Partial<Record<SeatTickWakeReasonKind, number>> = {};
   for (const kind of SEAT_TICK_WAKE_REASON_KINDS) {
     if (!carried.includes(kind)) continue;

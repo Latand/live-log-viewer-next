@@ -38,6 +38,7 @@ describe("describeMcpCall", () => {
       ["list_conversations", { project: "viewer" }, "conversation", "Listing conversations"],
       ["search_transcripts", { query: "report" }, "conversation", "Searching transcripts"],
       ["get_conversation", { conversationId: "conversation_a" }, "conversation", "Opening conversation"],
+      ["conversation_messages", { conversationId: "conversation_a" }, "conversation", "Reading messages"],
       ["deploy_exact_sha", { revision: "abcdef1234567890", confirm: "deploy" }, "deploy", "Deploying release"],
       ["get_pipeline", { pipelineId: "pipe-a" }, "pipeline", "Opening pipeline"],
       ["board_snapshot", { project: "viewer" }, "conversation", "Reading board snapshot"],

@@ -88,8 +88,16 @@ test("bridge reports survive as the second channel, for the operator away from t
 
 /* Seats record the mandate version they were spawned on; `get_orchestrator` reports
    this constant as defaultPromptVersion, so an older seat reads as stale without a diff. */
-test("the default mandate is at version 11", () => {
-  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(11);
+test("the default mandate is at version 12", () => {
+  expect(ORCHESTRATOR_PROMPT_VERSION).toBe(12);
+});
+
+/* #1301 — the fences list the viewer surfaces a seat may use, and a seat that
+   reads `tmux` there repeats it into reports the operator reads. No tmux runs
+   in the delivery path; the endpoint is named for what it does. */
+test("the fences name the delivery endpoint for what it does and no transport", () => {
+  expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain("agent/snapshot, conversation-host)");
+  expect(ORCHESTRATOR_SYSTEM_PROMPT.toLowerCase()).not.toContain("tmux");
 });
 
 /* #1202 — every ask the manager makes should be answerable with a tap, so the

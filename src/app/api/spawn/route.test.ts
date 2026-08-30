@@ -593,7 +593,7 @@ test("derived, custom-title, and migrated generic receipts preserve pre-title re
     const replay = await post(restarted, { title: null });
 
     expect(replay.status).toBe(202);
-    expect(await replay.json()).toMatchObject({ launchId: firstBody.launchId, path: sharedPath });
+    expect(await replay.json()).toMatchObject({ launchId: firstBody.launchId, path: null });
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
@@ -3212,6 +3212,83 @@ test("a terminal structured replay returns its reserved identity and retry-safe 
   }
 });
 
+test("a concurrent HTTP replay withholds a staged transcript path (#1123)", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "staged-http-replay-"));
+  const store = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    registry: () => store,
+    defer: () => {},
+  } satisfies SpawnRouteTestDependencies;
+  const request = () => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      origin: "http://127.0.0.1:8898",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      title: "Inspect staged replay publication",
+      engine: "claude",
+      cwd,
+      "prompt": "inspect",
+      clientAttemptId: "staged_http_replay_20260830",
+    }),
+  });
+
+  try {
+    const admitted = await POST.withDependencies(request(), dependencies);
+    expect(admitted.status).toBe(202);
+    const receipt = store.spawnReceiptForClientAttempt("staged_http_replay_20260830");
+    if (!receipt) throw new Error("spawn receipt was unavailable");
+    const stagedPath = path.join(cwd, "provisional.jsonl");
+    store.stageStructuredSpawn(receipt.launchId, {
+      key: { engine: "claude", sessionId: "provisional-session" },
+      artifactPath: stagedPath,
+      cwd,
+      accountId: receipt.accountId,
+      launchProfile: receipt.launchProfile,
+      status: "starting",
+      host: null,
+      structuredHost: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: "spawn",
+    });
+
+    const replay = await POST.withDependencies(request(), dependencies);
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toMatchObject({
+      launchId: receipt.launchId,
+      conversationId: receipt.conversationId,
+      state: "path-pending",
+      path: null,
+    });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
 test("a clientAttemptId replay recovers the reserved card from runtime evidence", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "p0-282-runtime-replay-"));
   const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
@@ -3292,6 +3369,8 @@ test("a clientAttemptId replay recovers the reserved card from runtime evidence"
     const admitted = await POST.withDependencies(request(), dependencies);
     const admittedBody = await admitted.json();
     await runDeferred(deferred);
+    fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+    fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: { content: "Own issue #282" } })}\n`);
 
     const replay = await POST.withDependencies(request(), dependencies);
     expect(replay.status).toBe(200);

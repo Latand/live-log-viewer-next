@@ -293,6 +293,32 @@ test("get_conversation listTools publishes every bounded tail target", async () 
   });
 });
 
+test("conversation_messages publishes identity, filters, clamps, and paging on the first probe", async () => {
+  await withProtocolClient(inertBindings(), async (client) => {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "conversation_messages");
+    const properties = tool?.inputSchema.properties ?? {};
+
+    for (const target of ["conversationId", "selectedContext", "transcriptPath"]) {
+      expect(tool?.description).toContain(target);
+      expect(properties).toHaveProperty(target);
+    }
+    for (const kind of ["message", "reasoning", "tool_call", "tool_result", "trace"]) {
+      expect(tool?.description).toContain(kind);
+    }
+    for (const role of ["user", "assistant", "system", "tool"]) {
+      expect(tool?.description).toContain(role);
+    }
+    expect(tool?.description).toContain("limit clamps to 1..200 (default 20)");
+    expect(tool?.description).toContain("maxChars clamps to 1..16000 (default 4000)");
+    expect(tool?.description).toContain("next-older page");
+    expect(tool?.description).toContain("hasMore");
+    expect(tool?.description).toContain("fresh clientRequestId");
+    expect((properties.cursor as { description?: string }).description).toContain("next-older page");
+    expect((properties.cursor as { description?: string }).description).toContain("fresh clientRequestId");
+  });
+});
+
 test("conversation_action publishes full-generation archive outcomes and the 100-target bound", async () => {
   let calls = 0;
   await withProtocolClient(inertBindings({

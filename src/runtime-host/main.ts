@@ -2,7 +2,7 @@ import { discardWakatimeEnvironmentCredential } from "@/lib/wakatime/credential"
 
 discardWakatimeEnvironmentCredential();
 
-const { statePath } = await import("@/lib/configDir");
+const { stateDir, statePath } = await import("@/lib/configDir");
 const { procBackend } = await import("@/lib/proc");
 const { createServerRuntimeConsumers } = await import("@/lib/runtime/serverConsumers");
 const { requestPipelineTick } = await import("@/lib/pipelines/controllerSignal");
@@ -23,7 +23,13 @@ const { acquireRuntimeHostFence, runtimeHostFenceWaitPlan } = await import("./fe
 
 const { runtimeHostActivationRefusal } = await import("@/lib/runtime/flags");
 
-const socketPath = process.env.LLV_RUNTIME_HOST_SOCKET || statePath("runtime-host.sock");
+const { defaultRuntimeHostEndpoint, runtimeHostFencePath } = await import("@/lib/runtime/localEndpoint");
+/* One local endpoint: a Unix socket path on POSIX, a named pipe on Windows.
+   The fence is a real file on both, so on Windows it cannot be derived from the
+   endpoint by appending `.lock` — the CLI hands it over explicitly, and a host
+   started without one falls back to the state directory. */
+const defaultEndpoint = defaultRuntimeHostEndpoint(stateDir());
+const socketPath = process.env.LLV_RUNTIME_HOST_SOCKET || defaultEndpoint.socketPath;
 /* A started runtime-host is always an events host. The guard survives; it keys
    on the same reader the viewer uses, so a deployment that merely drops the
    variable no longer gets a viewer that believes events are live and a host
@@ -33,7 +39,9 @@ if (activationRefusal) throw new Error(activationRefusal);
 if (process.env.LLV_RUNTIME_LEGACY_SCHEDULER === "1" && process.env.LLV_ACCOUNT_CONTROLLER_DISABLED !== "1") {
   throw new Error("runtime legacy scheduler requires LLV_ACCOUNT_CONTROLLER_DISABLED=1 to preserve single-writer reconciliation");
 }
-const fence = new RuntimeHostFence(`${socketPath}.lock`);
+const fence = new RuntimeHostFence(
+  process.env.LLV_RUNTIME_HOST_FENCE?.trim() || runtimeHostFencePath(socketPath, stateDir()),
+);
 /* #518: a staged successor generation boots while its predecessor still holds
    the singleton fence, and must wait for the predecessor's graceful exit
    instead of failing its container. Ordinary boots keep the immediate throw.

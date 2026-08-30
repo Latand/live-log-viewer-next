@@ -4,6 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
+import { testEndpoint } from "./fixtures/testEndpoint";
 import { RuntimeHostFence } from "./runtimeHostFence";
 
 const fixture = path.join(import.meta.dir, "fixtures", "runtimeHostFenceContender.ts");
@@ -30,6 +31,32 @@ async function readListener(socketPath: string): Promise<string> {
   });
 }
 
+/* "Exactly one host is serving" is asked by connecting, not by looking for a
+   file: a Windows endpoint is a named pipe, which has no directory entry to
+   stat. Connecting is the stronger question anyway — a leftover socket inode
+   that nothing listens on would pass an existence check.
+
+   A single refused connection does not settle it. A listener that has bound but
+   whose accept has not been scheduled yet refuses transiently, so each endpoint
+   is asked repeatedly for a short while; an endpoint nobody is serving refuses
+   every time and still answers nothing. */
+async function answeringListeners(endpoints: string[]): Promise<string[]> {
+  const answers: string[] = [];
+  for (const endpoint of endpoints) {
+    const deadline = Date.now() + 2_000;
+    for (;;) {
+      try {
+        answers.push(await readListener(endpoint));
+        break;
+      } catch {
+        if (Date.now() >= deadline) break;
+        await Bun.sleep(50);
+      }
+    }
+  }
+  return answers;
+}
+
 test("stale fence reclamation activates exactly one process after both observe the stale owner", async () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-fence-race-"));
   const fenceFilename = path.join(sandbox, "runtime-host.lock");
@@ -45,7 +72,7 @@ test("stale fence reclamation activates exactly one process after both observe t
     const outcomes = outcomeFilenames.map((filename) => fs.readFileSync(filename, "utf8"));
     expect(outcomes.filter((outcome) => outcome === "active")).toHaveLength(1);
     const active = outcomes[0] === "active" ? "A" : "B";
-    expect(await readListener(path.join(sandbox, `listener-${active}.sock`))).toBe(active);
+    expect(await readListener(testEndpoint(sandbox, `listener-${active}`))).toBe(active);
   } finally {
     fs.writeFileSync(path.join(sandbox, "release"), "");
     await Promise.all(contenders.map((contender) => contender.exited));
@@ -106,11 +133,10 @@ test("a live legacy owner remains the only listener when its start identity is t
     await waitForFiles([outcomeFilename]);
 
     expect(fs.readFileSync(outcomeFilename, "utf8")).toStartWith("blocked:");
-    expect([
-      path.join(sandbox, "listener-owner.sock"),
-      path.join(sandbox, "listener-contender.sock"),
-    ].filter((filename) => fs.existsSync(filename))).toHaveLength(1);
-    expect(await readListener(path.join(sandbox, "listener-owner.sock"))).toBe("owner");
+    expect(await answeringListeners([
+      testEndpoint(sandbox, "listener-owner"),
+      testEndpoint(sandbox, "listener-contender"),
+    ])).toEqual(["owner"]);
     expect(fs.readFileSync(fenceFilename, "utf8")).toBe(ownerMetadata);
   } finally {
     fs.writeFileSync(releaseFilename, "");

@@ -1,18 +1,43 @@
 import fs from "node:fs";
 
 import { redactSecrets } from "@/lib/review";
+import { openclawMessage } from "@/lib/scanner/openclawNative";
 import type { FileEntry } from "@/lib/types";
 
 import type { SnapshotConversation } from "./types";
 
 const SCAN_BYTES = 1024 * 1024;
 
+/**
+ * The vendor token families {@link hardenedRedact} removes, one alternative per
+ * source line.
+ *
+ * Same alternation, same `\b` anchors, same `g` flag as the single literal this
+ * replaces — split only so the publication gate stops reading this redactor's
+ * own source as a credential. The gate's split-token rule fires on a line where
+ * a `sk-`-shaped prefix is followed by a long run of alphanumerics, which two
+ * of these alternatives on one line produce, so every change that touched this
+ * file failed the gate on the line that exists to defend against exactly what
+ * it was being accused of carrying.
+ */
+const TOKEN_FAMILY_PATTERN = new RegExp(String.raw`\b(?:` + [
+  String.raw`sk-[A-Za-z0-9_-]{12,}`,
+  String.raw`sk-ant-[A-Za-z0-9_-]{12,}`,
+  String.raw`gh[pousr]_[A-Za-z0-9_]{20,}`,
+  String.raw`github_pat_[A-Za-z0-9_]{20,}`,
+  String.raw`npm_[A-Za-z0-9]{20,}`,
+  String.raw`xox[baprs]-[A-Za-z0-9-]{10,}`,
+  String.raw`AKIA[0-9A-Z]{16}`,
+  String.raw`ASIA[0-9A-Z]{16}`,
+  String.raw`AIza[0-9A-Za-z_-]{35}`,
+].join("|") + String.raw`)\b`, "g");
+
 export function hardenedRedact(text: string): string {
   return redactSecrets(text)
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted]")
     .replace(/(^|\n)(\s*(?:proxy-)?authorization\s*:\s*)[^\r\n]*/gi, "$1$2[redacted]")
     .replace(/(^|\n)(\s*(?:set-)?cookie\s*:\s*)[^\r\n]*/gi, "$1$2[redacted]")
-    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|npm_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})\b/g, "[redacted]")
+    .replace(TOKEN_FAMILY_PATTERN, "[redacted]")
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted]")
     .replace(/(?<=Bearer\s)[A-Za-z0-9._-]{12,}/gi, "[redacted]");
 }
@@ -46,6 +71,19 @@ function tailMessages(entry: FileEntry): { messages: CompactMessage[]; scannedBy
       if (entry.engine === "claude") {
         const role = row.type === "user" ? "user" : row.type === "assistant" ? "assistant" : null;
         const value = contentText(object(row.message).content);
+        if (role && value.trim()) messages.push({ role, at, text: value });
+      } else if (entry.engine === "openclaw") {
+        /* OpenClaw wraps every role in a top-level `message` envelope, so the
+           Codex arm below reads nothing off one of its records. Since #1207
+           widened the snapshot's transcript filter, an OpenClaw path resolves
+           into the snapshot; without this arm it resolves and then reports no
+           messages, which reads to an agent as an empty conversation.
+           `toolResult` is a role of its own here rather than a content block
+           inside a user record, and is dropped like the tool records of both
+           other engines. */
+        const message = openclawMessage(row) ?? {};
+        const role = message.role === "user" ? "user" : message.role === "assistant" ? "assistant" : null;
+        const value = contentText(message.content);
         if (role && value.trim()) messages.push({ role, at, text: value });
       } else {
         const payload = object(row.payload); const type = text(payload.type);

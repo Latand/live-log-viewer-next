@@ -220,6 +220,21 @@ export function describeMcpCall(
     };
   }
 
+  if (toolName === "conversation_messages") {
+    const conversationId = string(result.conversationId) || string(args.conversationId);
+    const transcriptPath = string(result.transcriptPath) || string(args.transcriptPath);
+    const links = conversationId
+      ? [{ kind: "conversation" as const, id: conversationId, label: "Open conversation", href: `#c=${encodeURIComponent(conversationId)}` }]
+      : [];
+    return {
+      icon: "conversation",
+      verb: "Reading",
+      title: `Reading messages: ${conversationId || transcriptPath || "conversation"}`,
+      subtitle: replaySubtitle(result, transcriptPath),
+      links,
+    };
+  }
+
   if (toolName === "deploy_exact_sha") {
     /* #795: the exact revision is machine evidence; the operator-facing card
        names the release by its short form and leaves the full SHA to the

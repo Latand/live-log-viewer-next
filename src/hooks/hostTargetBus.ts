@@ -1,17 +1,23 @@
 "use client";
 
+/**
+ * Batched poll for the host currently behind each open conversation. Nothing
+ * here drives tmux: the endpoint answers out of the transcript-host snapshot,
+ * and the host it names is usually a structured one (#1301).
+ */
+
 const POLL_MS = 5_000;
 const MAX_REQS = 64;
 
-export type TmuxBusResult = string | null | { transportError: true };
+export type HostTargetResult = string | null | { transportError: true };
 
-export interface TmuxSubscriber {
+export interface HostTargetSubscriber {
   pid: number | null;
   path: string;
-  onTarget(result: TmuxBusResult): void;
+  onTarget(result: HostTargetResult): void;
 }
 
-const subs = new Set<TmuxSubscriber>();
+const subs = new Set<HostTargetSubscriber>();
 let timer: ReturnType<typeof setInterval> | null = null;
 let inFlight = false;
 let kickPending = false;
@@ -36,6 +42,9 @@ async function tick(): Promise<void> {
       let targets: Record<string, string | null> = {};
       let transportError = false;
       try {
+        /* The legacy path, still mounted on the same handler as
+           `/api/conversation-host/targets`. The URL moves with the call sites,
+           not with this rename (#1301). */
         const res = await fetch("/api/tmux/targets", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -75,7 +84,7 @@ function kick(): void {
   }, 0);
 }
 
-export function subscribeTmuxTarget(sub: TmuxSubscriber): () => void {
+export function subscribeHostTarget(sub: HostTargetSubscriber): () => void {
   subs.add(sub);
   if (timer === null) timer = setInterval(() => void tick(), POLL_MS);
   kick();

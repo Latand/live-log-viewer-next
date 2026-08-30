@@ -1279,10 +1279,10 @@ function ProjectDashboardView({
 
   /* The raw close, shared by an explicit user close and a history redo. */
   const applyClose = (path: string) => {
-    /* Closing a chat also puts out its tmux pane; fire-and-forget, since the
-       node disappears either way and a pane that survived a failed request
-       just stays for the next close. Branch nodes are filtered server-side —
-       they share the root's pane. */
+    /* Closing a chat also puts out its host; fire-and-forget, since the node
+       disappears either way and a host that survived a failed request just
+       stays for the next close. Branch nodes are filtered server-side — they
+       share the root's host. */
     void fetch("/api/tmux", {
       method: "POST",
       headers: { "content-type": "application/json" },

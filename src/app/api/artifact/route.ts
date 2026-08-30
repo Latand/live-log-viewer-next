@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { classifyArtifact } from "@/lib/artifact/classify";
 import { artifactEtag, artifactLimits, dispositionFilename, parseByteRange, sniffAgrees } from "@/lib/artifact/serve";
+import { homeDirectory } from "@/lib/platformHome";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
@@ -59,9 +60,11 @@ function fail(code: FailCode, error: string): NextResponse<FailBody> {
 }
 
 /* $HOME first: it is what the isolated demo/evidence runtimes (and tests)
-   repoint, and Bun's os.homedir() ignores the env override. */
+   repoint, and Bun's os.homedir() ignores the env override. On Windows HOME is
+   not a Windows variable and a Git Bash value would resolve to nothing — see
+   `homeDirectory`. */
 function homeRoot(): string {
-  return path.resolve(process.env.HOME || os.homedir());
+  return homeDirectory();
 }
 
 function resolveLocal(raw: string): string {

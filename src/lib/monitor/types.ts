@@ -222,20 +222,83 @@ export type SeatTickVerdict =
   | { kind: "skipped"; reason: "seat-busy" }
   /** Nothing owed. One journal line, nothing else — the default. */
   | { kind: "quiet"; detail: string }
-  | { kind: "wake"; reasons: SeatTickWakeReason[]; items: SeatTickItem[]; deferred: number }
+  | {
+    kind: "wake";
+    reasons: SeatTickWakeReason[];
+    items: SeatTickItem[];
+    deferred: number;
+    /** Evidence this check could not read (#1298). The reasons above stand
+        without it; this is what the wake says it could not see. */
+    gaps: SeatTickEvidenceGap[];
+  }
   /** No work, and the proposal slot is due. */
   | { kind: "proactive"; detail: string }
   /**
-   * The check could not establish that nothing is owed.
+   * The check could not establish that nothing is owed, and nothing else was
+   * owed either.
    *
    * Quiet is a conclusion, and a conclusion drawn from evidence that could not
    * be read is the failure this whole mechanism exists to prevent, so the
-   * check says so instead. It moves no stamp and holds no reason back: the
-   * wake interval and the retry guard are exactly where the previous check
-   * left them, and the next check asks again. A failure cannot spend the
-   * hourly budget.
+   * check says so instead. It moves no stamp: the wake interval and the retry
+   * guard are exactly where the previous check left them, and the next check
+   * asks again. A failure cannot spend the hourly budget.
+   *
+   * What it no longer does is hold back the reasons that did NOT depend on the
+   * unreadable source (#1298). Those are carried by a wake that names the gap,
+   * because a check whose whole decision is aborted by one failed read is the
+   * same silence to the operator as the quiet this verdict exists to refuse —
+   * and for four hours, with two lanes parked, that is exactly what it was.
    */
   | { kind: "error"; detail: string };
+
+/**
+ * One evidence source a check could not read (#1298).
+ *
+ * It travels ON the wake rather than instead of it. A failed source withdraws
+ * the reasons that rest on it and nothing else, so the seat is woken by
+ * whatever still stands and told, in the same message, which evidence was
+ * missing from the picture it is being asked to act on.
+ */
+export interface SeatTickEvidenceGap {
+  /** Which evidence is missing. A stable token: it names the card the standing
+      failure is reported under, so two outages of one source are one card. */
+  source: "pull-requests";
+  /** The class of the failure, as the source itself reported it. Machine
+      token, because the journal line carrying it is published. */
+  gap: SeatTickPullRequestGap;
+  /** What the seat loses while it stands, in one publication-safe clause. */
+  detail: string;
+}
+
+/**
+ * An unbroken run of failures of one evidence source, remembered across checks
+ * (#1298).
+ *
+ * The source it describes had been failing on every check for four hours with
+ * nothing anywhere saying so out loud, and before that it had failed on every
+ * check since the feature shipped. Two things follow from remembering the run,
+ * and the row exists for both:
+ *
+ * - A source that cannot be read AT ALL is reported once, on the board, rather
+ *   than only as another journal line every few minutes for ever.
+ * - Past that same point the read itself slows to the project's wake interval.
+ *   It cannot buy silence by slowing down: the gap this row holds is replayed
+ *   on every check in between, so the decision is exactly the decision a fresh
+ *   failed read would have produced.
+ */
+export interface SeatTickSourceGap {
+  /** The class of the newest failure in the run. */
+  gap: SeatTickPullRequestGap;
+  /** The first failure in it — what "how long has this been broken" reads. */
+  since: string;
+  /** The newest attempt, which is what the retry window is measured from. */
+  lastAttemptAt: string;
+  /** Attempts in this run, the newest included. */
+  attempts: number;
+  /** The standing failure is already on the board. Raised once per run, so an
+      operator who closes the card is not handed it again five minutes later. */
+  reported: boolean;
+}
 
 /**
  * The registry's own answer about a turn: the durable activity verdict
@@ -503,6 +566,9 @@ export interface SeatTickProjectState {
       addressed to. Survives a rotation precisely so the successor's first check
       can revoke what is still waiting for the predecessor. */
   outstandingWake: SeatTickOutstandingWake | null;
+  /** The pull-request source's unbroken run of failures (#1298), or null while
+      it is answering. Cleared by an answer and by nothing else. */
+  pullRequestGap: SeatTickSourceGap | null;
 }
 
 export interface SeatTickCheckInput {
@@ -522,18 +588,33 @@ export interface SeatTickCheckInput {
    * Set when the list above could not be established.
    *
    * A check that cannot see what its finished lanes left open has not shown
-   * that nothing is owed, so this ends the check as an `error` the controller
-   * journals and retries — ahead of any wake, because a delivered wake is what
-   * would advance the wake stamp and spend a retry-guard count on a read that
-   * established nothing. Deliberately incapable of costing anything, so a `gh`
-   * outage cannot buy the very silence it would otherwise be mistaken for.
-   * Whatever reason stood on its own waits for the next check instead, which
-   * is one check interval away rather than one wake interval.
+   * that nothing is owed, so it may not go quiet: with nothing else owed the
+   * check ends as an `error` the controller journals and retries, and no stamp
+   * moves. A `gh` outage cannot buy the very silence it would otherwise be
+   * mistaken for.
+   *
+   * What it does NOT do is withdraw the rest of the decision (#1298). Only the
+   * reasons that rest on this evidence are withheld — the pull-request list
+   * above is empty because it could not be read, so no `unmerged-pr` reason is
+   * composed from it. A parked lane, a lane event and an unstarted card have
+   * nothing to do with GitHub, and a wake carrying one of those goes out with
+   * a {@link SeatTickEvidenceGap} naming what was unreadable.
    */
   pullRequestsUnavailable: SeatTickPullRequestGap | null;
   signals: readonly SeatTickSignalInput[];
-  /** Digest of everything a wake could change. Compared against the previous
-      wake's, never interpreted. */
+  /**
+   * Digest of everything a wake could change, in two parts separated by a dot:
+   * the evidence every check reads, then the pull-request evidence.
+   *
+   * Two parts because one of them can be missing (#1298). A single digest over
+   * whatever happened to be readable makes an unreadable source look exactly
+   * like a merged pull request — the rows are gone either way — and the retry
+   * guard reads "the board moved" off that and resets. A source that failed
+   * every other check would then hand every reason an unbounded wake, which is
+   * the guard being walked around by the very gap that was supposed to cost
+   * nothing. So the second part reads `unread` when the source could not be
+   * read, and {@link seatTickBoardMoved} is the only thing that interprets it.
+   */
   changeFingerprint: string;
   state: SeatTickProjectState;
   policy: SeatTickPolicy;
@@ -547,14 +628,17 @@ export interface SeatTickCheckInput {
     second check re-finds it instead of minting a twin. */
 export interface SeatTickCard {
   ref: string;
-  kind: "no-seat" | "retry-guard" | "tick-settings";
+  kind: "no-seat" | "retry-guard" | "tick-settings" | "source-unreadable";
   detail: string;
   /**
    * Whether the condition still holds.
    *
-   * `open` is the default and the only thing the first two kinds ever say: they
-   * describe something that happened, and an operator closes the card. Tick
-   * settings are a STANDING state rather than an event (#1275) — a project
+   * `open` is the default and the only thing every kind but `tick-settings`
+   * ever says: they describe something that happened, and an operator closes
+   * the card. A source that cannot be read (#1298) is one of those — it is
+   * raised once per outage and stays until someone has seen it, because an
+   * outage that healed itself is still an outage the operator was blind to.
+   * Tick settings are a STANDING state rather than an event (#1275) — a project
    * whose tick is off or slowed carries the card while that is true — so the
    * check that reads the settings back at their default resolves the card
    * instead of leaving the board claiming a quiet tick that is ticking again.
@@ -565,6 +649,22 @@ export interface SeatTickCard {
       than when the check ran, so a card that has not changed is not rewritten
       on every check. */
   settings?: Pick<EffectiveSeatTickSettings, "reason" | "until" | "setBy" | "updatedAt">;
+  /**
+   * What distinguishes this OCCURRENCE of the condition from the last one, for
+   * the create receipt (#1298).
+   *
+   * The `ref` is the condition and is deliberately stable, because it is what
+   * re-finds a standing card instead of minting a twin. That made every outage
+   * of one source share a create id: once the first card was completed, the
+   * second outage replayed the first one's receipt, created nothing, and left a
+   * board that says the source is fine. A per-occurrence component — the
+   * outage's own start instant — makes the next outage its own card while the
+   * `ref` still collapses the checks within one.
+   *
+   * Absent means the condition is its own occurrence: a project has one seat,
+   * one tick-settings state, and one guard per reason kind.
+   */
+  instance?: string;
 }
 
 export interface SeatTickDecision {
@@ -572,6 +672,20 @@ export interface SeatTickDecision {
   /** The row to persist for this check, whatever the delivery does next. */
   state: SeatTickProjectState;
   cards: SeatTickCard[];
+  /**
+   * The source-gap row to persist INSTEAD, once the operator report in
+   * {@link SeatTickDecision.cards} is a fact rather than an intention (#1298).
+   *
+   * `reported` is the tick's memory of having told the operator, and it is the
+   * whole reason the outage is raised once. Writing it beside a decision made
+   * it a memory of having INTENDED to: the controller catches a failed card
+   * write, the row still said reported, and the report the state exists to
+   * guarantee was suppressed for the rest of the outage. So it travels apart
+   * from {@link SeatTickDecision.state} and is written only after the card
+   * reached the board — a check whose write fails leaves the row unreported and
+   * the next check raises the same card again.
+   */
+  reportedSourceGap?: SeatTickSourceGap | null;
 }
 
 /** What one check recorded. Four kinds are journal-only: `refused` is a sweep
@@ -626,5 +740,6 @@ export function emptySeatTickState(): SeatTickProjectState {
     lastWakeFingerprint: null,
     eventsThrough: null,
     outstandingWake: null,
+    pullRequestGap: null,
   };
 }

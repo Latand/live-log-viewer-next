@@ -621,6 +621,127 @@ test("get_conversation presents current direct Codex tools and redacts recovered
   expect(JSON.stringify(result)).not.toContain("issue626_fixture_token");
 });
 
+test("conversation_messages resolves id, path, and selectedContext through one pinned normalized reader", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-conversation-messages-"));
+  sandboxes.push(sandbox);
+  const transcriptPath = path.join(sandbox, "session.jsonl");
+  fs.writeFileSync(transcriptPath, [
+    { type: "response_item", timestamp: "2026-08-30T10:00:00.000Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "question" }] } },
+    { type: "event_msg", timestamp: "2026-08-30T10:01:00.000Z", payload: { type: "agent_message", message: "answer" } },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const selectedContext = {
+    selectedConversation: () => ({
+      resolve: (conversationId: string) => conversationId === "conversation_fixture"
+        ? { conversationId, engine: "codex" as const, path: transcriptPath, project: "fixture" }
+        : null,
+      readTail: () => { throw new Error("conversation_messages must not use the raw tail reader"); },
+    }),
+    pathAllowed: (candidate: string) => candidate === transcriptPath,
+  };
+  const pinnedTranscript = (candidate: string) => {
+    if (candidate !== transcriptPath) return undefined;
+    const descriptor = fs.openSync(candidate, "r");
+    return {
+      descriptor,
+      stat: fs.fstatSync(descriptor),
+      rootName: "codex-sessions",
+      root: sandbox,
+      sameIdentity: () => true,
+    };
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    selectedContext,
+    pinnedTranscript,
+  } as never);
+
+  const byId = await bindings.conversation_messages({
+    clientRequestId: "messages-by-id",
+    conversationId: "conversation_fixture",
+    roles: ["user", "assistant"],
+  });
+  expect(byId).toMatchObject({
+    conversationId: "conversation_fixture",
+    transcriptPath,
+    engine: "codex",
+    lastRecordAt: "2026-08-30T10:01:00.000Z",
+    records: [{ role: "assistant", text: "answer" }, { role: "user", text: "question" }],
+    hasMore: false,
+    cursor: null,
+  });
+
+  const byPath = await bindings.conversation_messages({
+    clientRequestId: "messages-by-path",
+    transcriptPath,
+  });
+  expect(byPath).toMatchObject({ conversationId: null, transcriptPath, engine: "codex" });
+
+  const bySelection = await bindings.conversation_messages({
+    clientRequestId: "messages-by-selection",
+    selectedContext: {
+      version: 1,
+      state: "selected",
+      conversationId: "conversation_fixture",
+      capturedAt: "2026-08-30T10:02:00.000Z",
+    },
+  });
+  expect(bySelection).toMatchObject({
+    conversationId: "conversation_fixture",
+    selectedContext: { state: "selected", conversationId: "conversation_fixture", project: "fixture" },
+  });
+});
+
+test("conversation_messages refuses unsupported roots and stale cursors with typed codes", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-conversation-message-refusals-"));
+  sandboxes.push(sandbox);
+  const transcriptPath = path.join(sandbox, "session.jsonl");
+  fs.writeFileSync(transcriptPath, [
+    { type: "user", timestamp: "2026-08-30T10:00:00.000Z", message: { content: "older" } },
+    { type: "assistant", timestamp: "2026-08-30T10:01:00.000Z", message: { content: [{ type: "text", text: "newer" }] } },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+  let rootName = "claude-projects";
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    pinnedTranscript: (candidate: string) => {
+      if (candidate !== transcriptPath) return undefined;
+      const descriptor = fs.openSync(candidate, "r");
+      return { descriptor, stat: fs.fstatSync(descriptor), rootName, root: sandbox, sameIdentity: () => true };
+    },
+  } as never);
+
+  const first = await bindings.conversation_messages({
+    clientRequestId: "messages-first",
+    transcriptPath,
+    limit: 1,
+  });
+  expect(typeof first.cursor).toBe("string");
+  const invalidSince = await bindings.conversation_messages({
+    clientRequestId: "messages-invalid-since",
+    transcriptPath,
+    since: "yesterday",
+  }).then(() => null, (error: unknown) => error as Error & { details?: { code?: string } });
+  expect(invalidSince?.details?.code).toBe("conversation_messages_since_invalid");
+  fs.writeFileSync(transcriptPath, "");
+  const stale = await bindings.conversation_messages({
+    clientRequestId: "messages-stale",
+    transcriptPath,
+    limit: 1,
+    cursor: first.cursor,
+  }).then(() => null, (error: unknown) => error as Error & { details?: { code?: string } });
+  expect(stale?.details?.code).toBe("conversation_messages_cursor_stale");
+
+  rootName = "openclaw-sessions";
+  const unsupported = await bindings.conversation_messages({
+    clientRequestId: "messages-openclaw",
+    transcriptPath,
+  }).then(() => null, (error: unknown) => error as Error & { details?: { code?: string } });
+  expect(unsupported?.details?.code).toBe("conversation_messages_engine_unsupported");
+
+  const outside = await bindings.conversation_messages({
+    clientRequestId: "messages-outside",
+    transcriptPath: path.join(sandbox, "outside.jsonl"),
+  }).then(() => null, (error: unknown) => error as Error & { details?: { code?: string } });
+  expect(outside?.details?.code).toBe("conversation_messages_transcript_unavailable");
+});
+
 test("link_task_to_pipeline binds the latest operational attempt after historical adoption", async () => {
   const operationalPath = "/pipeline/operational.jsonl";
   const operationalConversationId = "conversation_operational";

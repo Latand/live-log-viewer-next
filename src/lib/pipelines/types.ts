@@ -209,18 +209,21 @@ export type PipelineCreationIntent = {
   launchId: string;
 };
 
-/** Durable receipt of the terminal-settlement host reap (#574). Completion
-    sweeps the pipeline's finished stage hosts in bounded rounds; persisting the
-    round count and the settlement is what keeps the sweep from re-killing the
-    same survivor on every tick forever, across process restarts included. */
+/** Durable receipt of finished-attempt host reaping (#574, #1123). Each stage
+    attempt is settled independently, so an idle host can be retired while the
+    rest of its pipeline runs or waits for a decision. */
 export type PipelineTerminalReap = {
-  /** Sweeps that dispatched at least one kill, or were cut off by the budget. */
+  /** Sweeps in the current unsettled batch that dispatched at least one kill,
+      or were cut off by the budget. Reset when a later attempt becomes eligible. */
   rounds: number;
-  /** Hosts whose termination this reap evidenced, across all rounds. */
+  /** Hosts whose termination this reap evidenced, across all batches. */
   stopped: number;
   lastAt: string;
-  /** Set once no finished host remains resident, or the round ceiling is
-      reached — survivors then live on as unconfirmed hosts. Never re-entered. */
+  /** Stage-attempt keys already proved absent, stopped, or handed to the idle
+      lifecycle after the runtime reported a later active turn. */
+  settledAttempts: string[];
+  /** Set once the current batch has no unfinished host, or the round ceiling is
+      reached. A later finished attempt opens a new batch. */
   settledAt: string | null;
 };
 

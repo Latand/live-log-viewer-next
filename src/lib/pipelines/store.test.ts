@@ -205,6 +205,55 @@ test("current production records without verdict recovery metadata load and roun
   });
 });
 
+test("a settled legacy terminal reap protects the attempts it already inspected", () => {
+  sandboxed((sandbox) => {
+    const pipeline = buildPipeline({
+      id: "oldreap1",
+      task: "task",
+      project: "viewer",
+      repoDir: "/repo",
+      stages: v3Stages(),
+      srcPath: null,
+      srcConversationId: null,
+      now: "2026-07-31T00:00:00.000Z",
+    });
+    pipeline.state = "completed";
+    pipeline.cursor = null;
+    pipeline.closedAt = "2026-07-31T00:20:00.000Z";
+    pipeline.runs[0]!.attempts.push({
+      n: 1,
+      state: "passed",
+      effectiveRole: { ...v3Role },
+      launchId: "launch-old-reap",
+      conversationId: "conversation_old_reap",
+      sessionId: "session-old-reap",
+      agentPath: "/codex/old-reap.jsonl",
+      paneId: null,
+      flowId: null,
+      startedAt: "2026-07-31T00:00:00.000Z",
+      completedAt: "2026-07-31T00:10:00.000Z",
+      input: null,
+      activatedBy: null,
+      output: "done",
+      verdict: { status: "pass" },
+      error: null,
+    });
+    const legacy = JSON.parse(JSON.stringify(pipeline)) as Record<string, unknown>;
+    legacy.terminalReap = {
+      rounds: 1,
+      stopped: 1,
+      lastAt: "2026-07-31T00:20:00.000Z",
+      settledAt: "2026-07-31T00:20:00.000Z",
+    };
+    fs.writeFileSync(path.join(sandbox, "pipelines.json"), JSON.stringify({
+      schemaVersion: PIPELINES_SCHEMA_VERSION,
+      pipelines: [legacy],
+    }), "utf8");
+
+    expect(loadPipelines()[0]!.terminalReap?.settledAttempts).toEqual(["build:1"]);
+  });
+});
+
 test("a v2 registry migrates in memory preserving all attempt history (#353)", () => {
   sandboxed((sandbox) => {
     const pipeline = buildPipeline({ id: "mig00001", task: "task", project: "viewer", repoDir: "/repo", stages: v3Stages(), srcPath: null, srcConversationId: null, now: "now" });
