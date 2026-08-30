@@ -16,20 +16,12 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const args = process.argv.slice(2);
-const outDir = args.find((arg) => !arg.startsWith("--"));
-if (!outDir) {
-  console.error("usage: bun scripts/conversation-messages-fixture.ts <outDir> [--codex-bytes N] [--claude-bytes N] [--seed N]");
-  process.exit(2);
-}
-function flag(name: string, fallback: number): number {
+function flag(args: string[], name: string, fallback: number): number {
   const index = args.indexOf(`--${name}`);
   const value = index >= 0 ? Number(args[index + 1]) : Number.NaN;
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
-const CODEX_BYTES = flag("codex-bytes", 110 * 1024 * 1024);
-const CLAUDE_BYTES = flag("claude-bytes", 30 * 1024 * 1024);
-let seed = flag("seed", 1311) >>> 0;
+let seed = 1311;
 
 function random(): number {
   seed = (seed + 0x6d2b79f5) >>> 0;
@@ -168,6 +160,15 @@ function generateCodex(pathname: string, target: number): { turns: number; recor
   return { turns, records };
 }
 
+export function generateCodexRollout(
+  pathname: string,
+  targetBytes: number,
+  seedValue = 1311,
+): { turns: number; records: number } {
+  seed = seedValue >>> 0;
+  return generateCodex(pathname, targetBytes);
+}
+
 function generateClaude(pathname: string, sessionId: string, target: number): { turns: number; records: number } {
   const sink = new Sink(pathname);
   const clock = new Clock("2026-08-30T10:00:00.000Z");
@@ -224,14 +225,36 @@ function generateClaude(pathname: string, sessionId: string, target: number): { 
   return { turns, records };
 }
 
-const codexPath = path.join(outDir, "codex", `rollout-2026-08-30T10-00-00-${threadId()}.jsonl`);
-const claudeSession = threadId();
-const claudePath = path.join(outDir, "claude", `${claudeSession}.jsonl`);
-const startedAt = Date.now();
-const codex = generateCodex(codexPath, CODEX_BYTES);
-const claude = generateClaude(claudePath, claudeSession, CLAUDE_BYTES);
-console.log(JSON.stringify({
-  codex: { path: codexPath, bytes: fs.statSync(codexPath).size, ...codex },
-  claude: { path: claudePath, bytes: fs.statSync(claudePath).size, ...claude },
-  elapsedMs: Date.now() - startedAt,
-}, null, 2));
+export function generateClaudeTranscript(
+  pathname: string,
+  targetBytes: number,
+  seedValue = 1311,
+  sessionId = "synthetic-session",
+): { turns: number; records: number } {
+  seed = seedValue >>> 0;
+  return generateClaude(pathname, sessionId, targetBytes);
+}
+
+if (import.meta.main) {
+  const args = process.argv.slice(2);
+  const outDir = args.find((arg) => !arg.startsWith("--"));
+  if (!outDir) {
+    console.error("usage: bun scripts/conversation-messages-fixture.ts <outDir> [--codex-bytes N] [--claude-bytes N] [--seed N]");
+    process.exit(2);
+  }
+  const codexBytes = flag(args, "codex-bytes", 110 * 1024 * 1024);
+  const claudeBytes = flag(args, "claude-bytes", 30 * 1024 * 1024);
+  const seedValue = flag(args, "seed", 1311) >>> 0;
+  seed = seedValue;
+  const codexPath = path.join(outDir, "codex", `rollout-2026-08-30T10-00-00-${threadId()}.jsonl`);
+  const claudeSession = threadId();
+  const claudePath = path.join(outDir, "claude", `${claudeSession}.jsonl`);
+  const startedAt = Date.now();
+  const codex = generateCodexRollout(codexPath, codexBytes, seedValue);
+  const claude = generateClaudeTranscript(claudePath, claudeBytes, seedValue, claudeSession);
+  console.log(JSON.stringify({
+    codex: { path: codexPath, bytes: fs.statSync(codexPath).size, ...codex },
+    claude: { path: claudePath, bytes: fs.statSync(claudePath).size, ...claude },
+    elapsedMs: Date.now() - startedAt,
+  }, null, 2));
+}

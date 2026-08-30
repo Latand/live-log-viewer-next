@@ -25,6 +25,14 @@ export interface SessionReadResult {
   traces: SessionRecord[];
 }
 
+export interface NormalizedSessionLine {
+  record: SessionRecord;
+  /** Codex writes visible messages as adjacent event and response records.
+      Page readers use this provenance to collapse those twins without changing
+      readSession's long-standing output. */
+  representation?: "event" | "response";
+}
+
 function rec(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
@@ -122,45 +130,52 @@ function push(out: SessionReadResult, item: SessionRecord): void {
   else out.traces.push(item);
 }
 
+function normalizeClaudeLine(obj: Record<string, unknown>): NormalizedSessionLine[] {
+  const records: NormalizedSessionLine[] = [];
+  const add = (record: SessionRecord): void => { records.push({ record }); };
+  const ts = tsOf(obj);
+  if (obj.type === "user") {
+    const content = rec(obj.message).content;
+    if (isClaudeTaskNotification(obj)) {
+      add({ kind: "trace", role: "system", ts, name: "task-notification", text: textFromContent(content) });
+      return records;
+    }
+    if (hasToolResult(content)) {
+      for (const part of contentParts(content)) {
+        if (part.type === "tool_result") {
+          add({ kind: "tool_result", role: "tool", ts, text: textFromContent(part.content) || str(part.tool_use_id) });
+        }
+      }
+      return records;
+    }
+    add({ kind: "message", role: "user", ts, text: textFromContent(content) });
+    return records;
+  }
+  if (obj.type === "assistant") {
+    const content = arr(rec(obj.message).content);
+    for (const part of content) {
+      if (part.type === "text") {
+        add({ kind: "message", role: "assistant", ts, text: str(part.text) });
+      } else if (part.type === "thinking") {
+        add({ kind: "reasoning", role: "assistant", ts, text: str(part.thinking) });
+      } else if (part.type === "tool_use") {
+        add({ kind: "tool_call", role: "assistant", ts, name: str(part.name), text: JSON.stringify(rec(part.input)) });
+      } else if (part.type === "tool_result") {
+        add({ kind: "tool_result", role: "tool", ts, text: textFromContent(part.content) || str(part.tool_use_id) });
+      }
+    }
+    return records;
+  }
+  if (obj.type === "summary" || obj.type === "compact") {
+    add({ kind: "trace", role: "system", ts, name: str(obj.type), text: textFromContent(obj.summary) || JSON.stringify(obj) });
+  }
+  return records;
+}
+
 function readClaude(pathname: string): SessionReadResult {
   const out: SessionReadResult = { path: pathname, engine: "claude", messages: [], reasoning: [], tools: [], traces: [] };
   for (const obj of readJsonl(pathname)) {
-    const ts = tsOf(obj);
-    if (obj.type === "user") {
-      const content = rec(obj.message).content;
-      if (isClaudeTaskNotification(obj)) {
-        push(out, { kind: "trace", role: "system", ts, name: "task-notification", text: textFromContent(content) });
-        continue;
-      }
-      if (hasToolResult(content)) {
-        for (const part of contentParts(content)) {
-          if (part.type === "tool_result") {
-            push(out, { kind: "tool_result", role: "tool", ts, text: textFromContent(part.content) || str(part.tool_use_id) });
-          }
-        }
-        continue;
-      }
-      push(out, { kind: "message", role: "user", ts, text: textFromContent(content) });
-      continue;
-    }
-    if (obj.type === "assistant") {
-      const content = arr(rec(obj.message).content);
-      for (const part of content) {
-        if (part.type === "text") {
-          push(out, { kind: "message", role: "assistant", ts, text: str(part.text) });
-        } else if (part.type === "thinking") {
-          push(out, { kind: "reasoning", role: "assistant", ts, text: str(part.thinking) });
-        } else if (part.type === "tool_use") {
-          push(out, { kind: "tool_call", role: "assistant", ts, name: str(part.name), text: JSON.stringify(rec(part.input)) });
-        } else if (part.type === "tool_result") {
-          push(out, { kind: "tool_result", role: "tool", ts, text: textFromContent(part.content) || str(part.tool_use_id) });
-        }
-      }
-      continue;
-    }
-    if (obj.type === "summary" || obj.type === "compact") {
-      push(out, { kind: "trace", role: "system", ts, name: str(obj.type), text: textFromContent(obj.summary) || JSON.stringify(obj) });
-    }
+    for (const normalized of normalizeClaudeLine(obj)) push(out, normalized.record);
   }
   return out;
 }
@@ -176,55 +191,75 @@ function codexMessageFromPayload(payload: Record<string, unknown>): { role: Sess
   return null;
 }
 
+function normalizeCodexLine(obj: Record<string, unknown>): NormalizedSessionLine[] {
+  const records: NormalizedSessionLine[] = [];
+  const add = (record: SessionRecord, representation?: NormalizedSessionLine["representation"]): void => {
+    records.push({ record, ...(representation ? { representation } : {}) });
+  };
+  const ts = tsOf(obj);
+  const payload = rec(obj.payload);
+  const payloadType = str(payload.type);
+  const message = codexMessageFromPayload(payload);
+  if (message) {
+    add({
+      kind: "message",
+      role: message.role,
+      ts,
+      phase: str(payload.phase) || undefined,
+      text: message.text,
+    }, obj.type === "event_msg" ? "event" : obj.type === "response_item" ? "response" : undefined);
+    return records;
+  }
+  if (obj.type === "event_msg" && (payloadType === "agent_reasoning" || payloadType === "reasoning_delta")) {
+    add({ kind: "reasoning", role: "assistant", ts, text: str(payload.text) || str(payload.message) });
+    return records;
+  }
+  if (obj.type === "response_item") {
+    const nestedItem = recordOrNull(payload.item);
+    const item = nestedItem && str(nestedItem.type) ? nestedItem : payload;
+    const itemType = str(item.type);
+    if (itemType === "reasoning") {
+      const summary = arr(item.summary).map((part) => str(part.text)).filter(Boolean).join("\n");
+      add({ kind: "reasoning", role: "assistant", ts, text: summary || str(item.text) || str(item.message) });
+    } else if (itemType === "function_call" || itemType === "custom_tool_call") {
+      const name = str(item.name);
+      add({
+        kind: "tool_call",
+        role: "assistant",
+        ts,
+        ...(name ? { name } : {}),
+        text: str(item.arguments) || str(item.input) || JSON.stringify(item),
+      });
+    } else if (itemType === "function_call_output" || itemType === "custom_tool_call_output") {
+      const name = str(item.name);
+      add({
+        kind: "tool_result",
+        role: "tool",
+        ts,
+        ...(name ? { name } : {}),
+        text: textFromContent(item.output) || JSON.stringify(item),
+      });
+    } else if (itemType) {
+      add({ kind: "trace", role: "system", ts, name: itemType, text: JSON.stringify(item) });
+    }
+    return records;
+  }
+  if (payloadType) add({ kind: "trace", role: "system", ts, name: payloadType, text: JSON.stringify(payload) });
+  return records;
+}
+
+/** Normalize one parsed JSONL object without reading or knowing its path. */
+export function normalizeSessionLine(
+  engine: Extract<Engine, "claude" | "codex">,
+  obj: Record<string, unknown>,
+): NormalizedSessionLine[] {
+  return engine === "claude" ? normalizeClaudeLine(obj) : normalizeCodexLine(obj);
+}
+
 function readCodex(pathname: string): SessionReadResult {
   const out: SessionReadResult = { path: pathname, engine: "codex", messages: [], reasoning: [], tools: [], traces: [] };
   for (const obj of readJsonl(pathname)) {
-    const ts = tsOf(obj);
-    const payload = rec(obj.payload);
-    const payloadType = str(payload.type);
-    const message = codexMessageFromPayload(payload);
-    if (message) {
-      push(out, {
-        kind: "message",
-        role: message.role,
-        ts,
-        phase: str(payload.phase) || undefined,
-        text: message.text,
-      });
-      continue;
-    }
-    if (payloadType === "reasoning" || payloadType === "reasoning_delta") {
-      push(out, { kind: "reasoning", role: "assistant", ts, text: str(payload.text) || str(payload.message) });
-      continue;
-    }
-    if (obj.type === "response_item") {
-      const nestedItem = recordOrNull(payload.item);
-      const item = nestedItem && str(nestedItem.type) ? nestedItem : payload;
-      const itemType = str(item.type);
-      if (itemType === "function_call" || itemType === "custom_tool_call") {
-        const name = str(item.name);
-        push(out, {
-          kind: "tool_call",
-          role: "assistant",
-          ts,
-          ...(name ? { name } : {}),
-          text: str(item.arguments) || str(item.input) || JSON.stringify(item),
-        });
-      } else if (itemType === "function_call_output" || itemType === "custom_tool_call_output") {
-        const name = str(item.name);
-        push(out, {
-          kind: "tool_result",
-          role: "tool",
-          ts,
-          ...(name ? { name } : {}),
-          text: textFromContent(item.output) || JSON.stringify(item),
-        });
-      } else if (itemType) {
-        push(out, { kind: "trace", role: "system", ts, name: itemType, text: JSON.stringify(item) });
-      }
-      continue;
-    }
-    if (payloadType) push(out, { kind: "trace", role: "system", ts, name: payloadType, text: JSON.stringify(payload) });
+    for (const normalized of normalizeCodexLine(obj)) push(out, normalized.record);
   }
   return out;
 }
