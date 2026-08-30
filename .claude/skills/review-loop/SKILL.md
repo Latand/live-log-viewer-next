@@ -16,8 +16,9 @@ are same-origin: call them from localhost without an Origin header.
 
 ## Concepts
 
-- **Implementer** — an interactive CLI agent (claude or codex) in a tmux pane,
-  tracked by its transcript path. It lives across all rounds.
+- **Implementer** — an interactive CLI agent (claude or codex) on a
+  viewer-owned structured host, tracked by its transcript path. It lives across
+  all rounds.
 - **Reviewer** — a fresh session per round, headless by default
   (`codex exec` / `claude -p` with approval-free command access). The prompt
   carries the read-only contract, so every round is a blind, independent look

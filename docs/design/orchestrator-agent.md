@@ -59,7 +59,7 @@ rotation history. The sidebar flow:
 | `POST /api/flows`, `PATCH /api/flows/[id]` | Start and drive implement→review flows (rounds, verdict relays). |
 | `POST /api/pipelines` (**`autoStart: false` always**) | Compose multi-stage pipelines as **drafts** — see the contract below. |
 | `GET /api/files`, `GET /api/agent/snapshot` | Observe board state: conversations, activity, lineage, receipts. |
-| `POST /api/tmux` | Relay messages into worker panes (verdict summaries, nudges). |
+| `POST /api/conversation-host` | Relay messages to workers — resumes or respawns the target's host as needed (verdict summaries, nudges). Also served at the legacy path `/api/tmux`, which runs no tmux. |
 | `/api/tasks` | Keep task cards updated as work moves through the conveyor. |
 
 Fences: it never touches `src/lib/runtime` internals and never bypasses the

@@ -15,7 +15,7 @@ import { useCodexRealtime } from "@/hooks/useCodexRealtime";
 import { refreshRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
 import { useViewerSelectedContext, viewerSelectedContext } from "@/lib/selection/viewerSelectedContext";
-import { useTmuxTarget } from "@/hooks/useTmuxTarget";
+import { useHostTarget } from "@/hooks/useHostTarget";
 import { accountIdFromPath } from "@/lib/accounts/badge";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { activeCardMigration, cardMigrationState, migrationHoldsDelivery, migrationHoldsSends, migrationTargetName } from "@/lib/accounts/migration";
@@ -1249,7 +1249,7 @@ export function TmuxComposerCore({
   const holdsDelivery = migrationHoldsDelivery(cardMigrationState(liveMigration));
   /* An off-screen or far-zoom pane skips the pane-resolution poll; the last
      known target keeps the composer usable the moment it comes back. */
-  const target = useTmuxTarget(file.pid, canMessageWithoutPane(file) ? file.path : undefined, !pollPaused);
+  const target = useHostTarget(file.pid, canMessageWithoutPane(file) ? file.path : undefined, !pollPaused);
   /* Column reshuffles can remount the composer mid-typing; the draft lives in
      sessionStorage so the text survives the remount. */
   const composer = useComposer({
@@ -2103,7 +2103,11 @@ export function TmuxComposerCore({
                 ? t("composer.deliveryHeld", { label: heldFor })
                 : t("composer.deliveryHeldUnnamed")
             : result.outcome === "resumed" || result.spawned
-              ? t("composer.spawned", { target: result.target ?? "" })
+              /* A structured respawn answers with no target at all, so the
+                 named form would render a dangling dash (#1301). */
+              ? result.target
+                ? t("composer.spawned", { target: result.target })
+                : t("composer.spawnedUnnamed")
               : (result.imagePaths?.length ?? 0) + (result.filePaths?.length ?? 0)
                 ? t("composer.sentPaths", { count: (result.imagePaths?.length ?? 0) + (result.filePaths?.length ?? 0) })
                 : t("common.sent"),
