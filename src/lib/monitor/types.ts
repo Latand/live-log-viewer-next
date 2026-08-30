@@ -180,8 +180,11 @@ export interface MonitorRunReport {
 /** Why a wake is owed. Kinds are stable strings: they are journaled, counted
     against the retry guard, and named in the message the seat receives. */
 export type SeatTickWakeReasonKind =
-  /** A terminal, high-signal lane event since the last delivered wake (#1105). */
+  /** A terminal, high-signal lane event since the last delivered wake (#1105),
+      belonging to a lane that has NOT itself reached a terminal state. */
   | "lane-event"
+  /** A lane that finished and left a pull request open behind it (#1289). */
+  | "unmerged-pr"
   /** A parked or non-progressing lane that persisted across two checks. */
   | "stalled"
   /** A board task the operator assigned that nothing has started. */
@@ -191,6 +194,7 @@ export type SeatTickWakeReasonKind =
 
 export const SEAT_TICK_WAKE_REASON_KINDS: readonly SeatTickWakeReasonKind[] = [
   "lane-event",
+  "unmerged-pr",
   "stalled",
   "unstarted-task",
   "interval",
@@ -204,7 +208,7 @@ export interface SeatTickWakeReason {
 
 /** One line of the wake's body. Bounded and structural — never transcript text. */
 export interface SeatTickItem {
-  kind: "pipeline" | "task" | "event" | "signal";
+  kind: "pipeline" | "task" | "event" | "signal" | "pull-request";
   id: string;
   label: string;
 }
@@ -220,7 +224,18 @@ export type SeatTickVerdict =
   | { kind: "quiet"; detail: string }
   | { kind: "wake"; reasons: SeatTickWakeReason[]; items: SeatTickItem[]; deferred: number }
   /** No work, and the proposal slot is due. */
-  | { kind: "proactive"; detail: string };
+  | { kind: "proactive"; detail: string }
+  /**
+   * The check could not establish that nothing is owed.
+   *
+   * Quiet is a conclusion, and a conclusion drawn from evidence that could not
+   * be read is the failure this whole mechanism exists to prevent, so the
+   * check says so instead. It moves no stamp and holds no reason back: the
+   * wake interval and the retry guard are exactly where the previous check
+   * left them, and the next check asks again. A failure cannot spend the
+   * hourly budget.
+   */
+  | { kind: "error"; detail: string };
 
 /**
  * The registry's own answer about a turn: the durable activity verdict
@@ -295,14 +310,67 @@ export interface SeatTickTaskInput {
 }
 
 export interface SeatTickEventInput {
-  /** Journal seq — the cursor the tick advances only on a delivered wake. */
+  /** Journal seq — the cursor the tick advances only on a delivered wake, or
+      seals past when this check established that nothing here is owed. */
   seq: number;
   at: string;
   type: LifecycleEventType;
   /** Bounded summary the journal already stored; never raw transcript text. */
   summary: string;
   pipelineId: string | null;
+  /**
+   * Whether the lane this event names has since reached a terminal state
+   * (#1285), which is the difference between work waiting to start and history.
+   *
+   * A wake exists to name what is owed NOW. An event about a pipeline that
+   * closed yesterday cannot be that: the lane is over, and establishing so was
+   * the entire cost of three consecutive wakes — two of them naming lanes the
+   * seat had closed itself earlier in the same session. Events that name no
+   * pipeline at all (a deploy outcome, a held delivery) are never terminal by
+   * this field: nothing about them has finished.
+   */
+  pipelineTerminal: boolean;
 }
+
+/**
+ * A pull request a finished lane left open (#1289).
+ *
+ * The mirror of the field above, and the same property read from the other
+ * side. `hasOpenWork` counts open lanes and board cards, so a lane that
+ * COMPLETED with its pull request still unmerged was indistinguishable from
+ * finished work: the tick answered `quiet — nothing owed` every five minutes
+ * for twelve hours while three approved pull requests sat there. Finishing is
+ * exactly what creates the seat's next obligation, so the finished lane's open
+ * pull request is carried here and named in its own wake reason.
+ *
+ * It discharges itself: the source reads OPEN pull requests, so a merge or a
+ * close removes the row and the reason goes quiet with no second mechanism.
+ */
+export interface SeatTickPullRequestInput {
+  number: number;
+  /** Bounded, already redacted by the source. */
+  title: string;
+  /** The finished lane whose branch is this pull request's head. */
+  pipelineId: string;
+  pipelineTitle: string;
+  updatedAt: string | null;
+}
+
+/**
+ * Why a check could not establish what this project's finished lanes left open.
+ *
+ * Machine tokens only, because the journal line carrying one is published:
+ * `gh` could not be run or exited non-zero (`command-failed`), was killed at
+ * its timeout (`timed-out`), answered with anything but a JSON array of rows
+ * that can be attributed to a branch (`malformed-output`), or the lane records
+ * the pull requests are correlated against could not be read
+ * (`lanes-unreadable`).
+ */
+export type SeatTickPullRequestGap =
+  | "timed-out"
+  | "command-failed"
+  | "malformed-output"
+  | "lanes-unreadable";
 
 /** A durable log line the Viewer already writes: a deploy outcome, the host
     retirement report, a seat whose own turn stopped progressing. */
@@ -405,11 +473,23 @@ export interface SeatTickProjectState {
       otherwise a guard keyed on it outlives its own condition (#1262). */
   lastWakeFingerprint: string | null;
   /**
-   * Lifecycle journal seq the seat has actually been TOLD about.
+   * Lifecycle journal seq the seat has actually been told about, or that this
+   * check established nothing is owed on.
    *
-   * Advanced only by a delivered wake. Acknowledging at read time is how a
-   * lane event gets lost across a rotation or a refused send: the cursor moves,
-   * the message never arrives, and nothing offers the event again.
+   * A wake is what advances it past anything a seat still has to act on.
+   * Acknowledging THAT at read time is how a lane event gets lost across a
+   * rotation or a refused send: the cursor moves, the message never arrives,
+   * and nothing offers the event again.
+   *
+   * The other half is #1285. Everything in front of the first event that is
+   * still owed — routine progress, and terminal events belonging to lanes that
+   * have themselves finished — is history a single look discharges, so a check
+   * seals the cursor past it with no wake at all. Without that, a cursor that
+   * fell behind drained at `itemsPerWake` per hourly wake: a burst of fifty
+   * historical events became a ten-hour tail of resumed hosts and paid turns,
+   * and the seat could not tell it from real work without reading every item.
+   * The seal never crosses a live event, so nothing that is owed is discharged
+   * by it.
    *
    * Null means the tick has never established where the journal stood for this
    * project, which is not the same as zero. Zero is a real cursor with the
@@ -433,11 +513,24 @@ export interface SeatTickCheckInput {
   tasks: readonly SeatTickTaskInput[];
   /** Events after {@link SeatTickProjectState.eventsThrough}, oldest first. */
   events: readonly SeatTickEventInput[];
-  /** Whether a terminal high-signal event is pending anywhere past the cursor,
-      including beyond the page `events` carries. Asking this over the whole
-      pending range is what stops a backlog from burying the one class of event
-      the seat cannot decide without. */
-  terminalPending: boolean;
+  /** Pull requests that finished lanes left open (#1289). Empty whenever the
+      project has no finished lane, no repository to ask, or the check could
+      not raise a wake at all — all of which are answers. A read that FAILED is
+      not one of them; it arrives below. */
+  pullRequests: readonly SeatTickPullRequestInput[];
+  /**
+   * Set when the list above could not be established.
+   *
+   * A check that cannot see what its finished lanes left open has not shown
+   * that nothing is owed, so this ends the check as an `error` the controller
+   * journals and retries — ahead of any wake, because a delivered wake is what
+   * would advance the wake stamp and spend a retry-guard count on a read that
+   * established nothing. Deliberately incapable of costing anything, so a `gh`
+   * outage cannot buy the very silence it would otherwise be mistaken for.
+   * Whatever reason stood on its own waits for the next check instead, which
+   * is one check interval away rather than one wake interval.
+   */
+  pullRequestsUnavailable: SeatTickPullRequestGap | null;
   signals: readonly SeatTickSignalInput[];
   /** Digest of everything a wake could change. Compared against the previous
       wake's, never interpreted. */
@@ -481,14 +574,17 @@ export interface SeatTickDecision {
   cards: SeatTickCard[];
 }
 
-/** What one check recorded. Five kinds are journal-only: `error` is a check
-    that threw, `refused` a sweep or a second clock refused for want of
-    authority, and the other three are what became of a retained wake — it was
-    taken back from a seat that had already been replaced (`revoked`), the
-    layer holding it delivered it after all (`landed`), or that layer settled it
-    without ever delivering it (`dropped`). */
+/** What one check recorded. Four kinds are journal-only: `refused` is a sweep
+    or a second clock refused for want of authority, and the other three are
+    what became of a retained wake — it was taken back from a seat that had
+    already been replaced (`revoked`), the layer holding it delivered it after
+    all (`landed`), or that layer settled it without ever delivering it
+    (`dropped`). */
 export type SeatTickVerdictKind =
   | SeatTickVerdict["kind"]
+  /** A check that threw outright, which the decision never gets to see. The
+      decision has its own `error` above, for a check that ran and could not
+      establish what is owed; both are read the same way off the journal. */
   | "error"
   | "refused"
   | "revoked"

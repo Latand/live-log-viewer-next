@@ -28,7 +28,7 @@ import {
  * seat, the open lanes, the board, the lifecycle events past the seat's own
  * cursor and the Viewer's own signals, and answers one of five things.
  *
- * Four rules are load-bearing and easy to lose:
+ * Five rules are load-bearing and easy to lose:
  *
  * - **A stale tick is dropped, never queued.** A seat whose turn is genuinely
  *   progressing is `skipped`, and a skipped check remembers nothing: the stall
@@ -49,9 +49,17 @@ import {
  *   settings (#1275, and the ADR amendment it carries): the seat governs its
  *   own tick, deliberately and with the reason on the record, and a project
  *   nobody configured runs on the default hour exactly as before.
- * - **Nothing here creates, wakes or acknowledges anything.** The decision names
- *   what is owed; the controller sends it, re-reads the seat epoch before it
- *   does, and only a delivered send advances a stamp or a cursor.
+ * - **Nothing here creates or wakes anything.** The decision names what is
+ *   owed; the controller sends it, re-reads the seat epoch before it does, and
+ *   only a delivered send advances a stamp. The one thing a check may settle on
+ *   its own is the history in front of the cursor: an event nothing is owed on
+ *   is discharged by the look that established that, never by a wake (#1285).
+ * - **A wake names what is owed NOW, and silence means nothing is.** Both
+ *   directions of that are here. An event about a lane that has itself finished
+ *   is not an obligation, however far the cursor has fallen behind; a lane that
+ *   finished and left its pull request unmerged IS one, however quiet the board
+ *   otherwise looks (#1289). Where the two pull against each other the rarer,
+ *   truer wake wins over the earlier one.
  */
 
 const MINUTE_MS = 60_000;
@@ -142,11 +150,61 @@ function isUnstarted(task: SeatTickTaskInput, now: number, backlogAfterMs: numbe
   return Number.isFinite(movedAt) && now - movedAt < backlogAfterMs;
 }
 
-/** Work the seat could still carry: an open lane, or a board card that is
-    neither blocked (a recorded stop) nor done. */
+/**
+ * Work the seat could still carry: an open lane, a board card that is neither
+ * blocked (a recorded stop) nor done, or a pull request a finished lane left
+ * open.
+ *
+ * The third clause is #1289. Counting only lanes and cards made "the work
+ * finished" and "the work finished and left three approved pull requests
+ * unmerged" the same answer, and the tick said `quiet — nothing owed` to the
+ * second one every five minutes for twelve hours. A finished lane's open pull
+ * request is the obligation that finishing created, so it is open work.
+ */
 function hasOpenWork(input: SeatTickCheckInput): boolean {
   return input.pipelines.some(isOpenLane)
-    || input.tasks.some((task) => task.status === "inbox" || task.status === "assigned");
+    || input.tasks.some((task) => task.status === "inbox" || task.status === "assigned")
+    || input.pullRequests.length > 0;
+}
+
+/**
+ * A pending event that is still a present obligation.
+ *
+ * Two filters, and the second is the one #1285 adds: the event has to be
+ * terminal and high-signal (routine progress has never woken anyone on its
+ * own), and the lane it names must not have reached a terminal state itself.
+ * A `stage_completed` for a pipeline that closed yesterday is a fact about the
+ * past — nothing is owed on it, and a wake that carries it spends a resumed
+ * host and a paid turn establishing exactly that.
+ */
+function isOwedEvent(event: SeatTickEventInput): boolean {
+  return isTerminalHighSignalEvent(event.type) && !event.pipelineTerminal;
+}
+
+/**
+ * How far this check may move the cursor with no wake at all.
+ *
+ * The page is walked oldest-first and stops at the first event that is still
+ * owed, so the seal covers exactly the history in front of it: routine progress
+ * and terminal events whose lanes have finished. Null means the very first
+ * pending event is owed and the cursor stays where it is.
+ *
+ * This is what stops a backlog from costing one resume per page. The bound that
+ * makes a wake cheap — {@link SeatTickPolicy.itemsPerWake} items, once per
+ * project per interval — turned into a ten-hour tail the moment the cursor fell
+ * behind, because every page of history had to be carried to a seat before the
+ * next one could be read. A page of history is discharged by one look instead,
+ * and a check costs nothing.
+ */
+function dischargedThrough(events: readonly SeatTickEventInput[], cursor: number | null): number | null {
+  let sealed = cursor;
+  for (const event of events) {
+    if (isOwedEvent(event)) break;
+    /* A floor, never a subtraction: the cursor may only ever move forwards,
+       whatever order a page reaches this. */
+    sealed = Math.max(sealed ?? event.seq, event.seq);
+  }
+  return sealed;
 }
 
 /**
@@ -214,6 +272,19 @@ function elapsed(since: string | null, now: number, window: number): boolean {
   if (!since) return true;
   const at = Date.parse(since);
   return !Number.isFinite(at) || now - at >= window;
+}
+
+/**
+ * The one gate every wake passes, exported so the gather can apply the SAME
+ * clause rather than a second copy of it.
+ *
+ * It reads `lastWakeAt`, which the project keeps across a rotation, so an
+ * incoming seat inherits the bound rather than a clean slate the predecessor's
+ * wake is missing from — and the interval is the project's own (#1275), which
+ * is the default hour until someone records something else.
+ */
+export function seatTickWakeDue(lastWakeAt: string | null, now: number, wakeIntervalMs: number): boolean {
+  return elapsed(lastWakeAt, now, wakeIntervalMs);
 }
 
 /** The retry-guard count that applies right now: a fingerprint that moved since
@@ -300,7 +371,16 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     return { verdict: { kind: "skipped", reason: "seat-busy" }, state: unchanged, cards: [] };
   }
 
-  const base: SeatTickProjectState = { ...unchanged, seatEpoch: input.seat.seatEpoch };
+  /* The seal (#1285) rides on every verdict from here down, a skipped check
+     excepted — that one returns above and remembers nothing, deliberately. It
+     is not a record of anything having been sent: it says this check looked at
+     the history in front of the cursor and found nothing owed in it, which is
+     a conclusion a quiet check is as entitled to as a wake. */
+  const base: SeatTickProjectState = {
+    ...unchanged,
+    seatEpoch: input.seat.seatEpoch,
+    eventsThrough: dischargedThrough(input.events, unchanged.eventsThrough),
+  };
   const stalled = stalledLanes(input);
   const stalledNow = stalled.map((entry) => entry.pipeline.id);
   /* A stall is only reported once it survived a second check, so a lane between
@@ -309,12 +389,7 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
   const unstarted = input.tasks.filter((task) => isUnstarted(task, input.now, input.policy.backlogAfterMs));
   const backlog = input.tasks.filter((task) => task.status === "assigned" && !task.owned).length - unstarted.length;
   const openWork = hasOpenWork(input);
-  /* The one gate every wake passes. It reads `lastWakeAt`, which the project
-     keeps across a rotation, so an incoming seat inherits the bound rather than
-     a clean slate the predecessor's wake is missing from — and the interval is
-     the project's own (#1275), which is the default hour until someone records
-     something else. */
-  const wakeDue = elapsed(input.state.lastWakeAt, input.now, input.settings.wakeIntervalMs);
+  const wakeDue = seatTickWakeDue(input.state.lastWakeAt, input.now, input.settings.wakeIntervalMs);
 
   const state: SeatTickProjectState = { ...base, stalledSeen: stalledNow };
 
@@ -338,22 +413,37 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     };
   }
 
-  const laneEvents = input.events.filter((event) => isTerminalHighSignalEvent(event.type));
+  const laneEvents = input.events.filter(isOwedEvent);
   const candidates: SeatTickWakeReason[] = [];
   if (wakeDue) {
-    /* Terminal events are counted over the WHOLE pending range, not just the
-       page this check carries: a verdict sitting behind a backlog is as
-       decision-blocking as one at the front, and a page-sized answer is how it
-       gets buried. It leads the wake for that reason — and it waits for the
-       wake like everything else. Routine progress never wakes on its own. */
-    if (input.terminalPending) {
-      const first = laneEvents[0];
+    /* A verdict the seat cannot decide without leads the wake — and waits for
+       the wake like everything else. Routine progress never wakes on its own,
+       and neither does an event whose lane has finished.
+
+       The count beside it is what the seat reads as "how much is there", so it
+       counts what is owed and nothing else (#1285): "and 18 more" over a page
+       that was almost entirely closed lanes described a queue that did not
+       exist. A live event further down the journal than this check reads is
+       NOT announced here; the pages of history in front of it are sealed away
+       by the check itself at no cost, and the check that reaches it names it.
+       A wake that says only "something is waiting further down" is the empty
+       agenda this whole mechanism exists to stop sending. */
+    if (laneEvents.length > 0) {
+      const first = laneEvents[0]!;
       const more = laneEvents.length > 1 ? ` and ${laneEvents.length - 1} more` : "";
+      candidates.push({ kind: "lane-event", detail: `${first.type} since the last delivered wake${more}` });
+    }
+    /* The mirror image (#1289), and it is a wake reason rather than a silence
+       for one reason: a lane that finished with its pull request unmerged is
+       the seat's next obligation, and the tick could not see one. It takes no
+       shortcut around the bound — same interval above, same retry guard below —
+       and it clears itself when the pull request merges or closes. */
+    if (input.pullRequests.length > 0) {
+      const first = input.pullRequests[0]!;
+      const more = input.pullRequests.length > 1 ? ` and ${input.pullRequests.length - 1} more` : "";
       candidates.push({
-        kind: "lane-event",
-        detail: first
-          ? `${first.type} since the last delivered wake${more}`
-          : "a terminal lane event is waiting further down the journal than this check reads",
+        kind: "unmerged-pr",
+        detail: `pull request #${first.number}${more} left open by a lane that finished`,
       });
     }
     if (persistedStalls.length > 0) {
@@ -394,6 +484,35 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     reasons.push(reason);
   }
 
+  /* Ahead of the wake, because the wake is what would pay for the gap.
+     Delivering one advances the wake stamp and the retry-guard count, so a
+     `gh` that answered nothing would buy the next hour of silence on the
+     strength of a read that established nothing — the same trade the error
+     below refuses, arriving by the one route that still charged for it.
+
+     The reason that DID stand on its own is not dropped by this; it is held
+     until the next check, five minutes away rather than the hour a delivered
+     wake would have spent, and that check wakes with everything owed by then.
+     Meanwhile the error is journaled every check, so a `gh` outage is loud for
+     as long as it lasts instead of being quietly absorbed into a wake that
+     could not name what it was hiding.
+
+     It is an error rather than a wake precisely so it stays incapable of
+     costing anything: no delivery, no wake stamp, no retry-guard count. The
+     hourly bound belongs to wakes that were actually sent, and a failed read
+     cannot spend it. The cards the guard raised above still travel — they
+     describe the board, not this check's conclusion about it. */
+  if (input.pullRequestsUnavailable) {
+    return {
+      verdict: {
+        kind: "error",
+        detail: `the open pull requests of this project's finished lanes could not be read (${input.pullRequestsUnavailable}), so nothing owed is not established`,
+      },
+      state,
+      cards,
+    };
+  }
+
   if (reasons.length > 0) {
     const all = wakeItems({ input, stalled: persistedStalls, laneEvents, unstarted });
     return {
@@ -408,6 +527,9 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     };
   }
 
+  /* Nothing left to wake on, and every outcome below this line is a statement
+     that nothing is owed — each of them resting on evidence the check above
+     has already shown it could read. */
   if (cards.length > 0) {
     return { verdict: { kind: "quiet", detail: "every wake reason is held by the retry guard" }, state: quiet(state, at), cards };
   }
@@ -443,6 +565,17 @@ function wakeItems(context: {
   const items: SeatTickItem[] = [];
   for (const event of context.laneEvents) {
     items.push({ kind: "event", id: event.pipelineId ?? event.type, label: `${event.type}: ${event.summary}` });
+  }
+  /* Named, not merely counted (#1289). The twelve hours were spent because the
+     seat had no way to know a pull request was waiting; a wake that says one is
+     and leaves the seat to rediscover which would have cost most of the same
+     turn. The lane that produced it travels with it for the same reason. */
+  for (const pullRequest of input.pullRequests) {
+    items.push({
+      kind: "pull-request",
+      id: `#${pullRequest.number}`,
+      label: `${pullRequest.title} — open pull request from ${pullRequest.pipelineTitle}, unmerged since that lane finished`,
+    });
   }
   for (const entry of context.stalled) {
     items.push({ kind: "pipeline", id: entry.pipeline.id, label: `${entry.pipeline.title} — ${entry.reason}` });
