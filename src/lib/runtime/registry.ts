@@ -13,6 +13,7 @@ import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppSe
 import { ClaudeStreamBrokerHost, type ClaudeStreamBrokerHostOptions } from "./claudeStreamBrokerHost";
 import { StructuredHostAdoptionCleanupError, type HostState } from "./engineHost";
 import { structuredHostsEnabled } from "./flags";
+import { conversationTurnLiveness, type TurnLivenessDependencies } from "./liveness";
 
 export { structuredHostsEnabled };
 
@@ -356,17 +357,56 @@ async function waitForVerifiedProcessExit(processIdentity: ProcessIdentity, time
   return !verifiedProcessAlive(processIdentity);
 }
 
-async function terminateVerifiedClaudeOrphan(
-  processIdentity: ProcessIdentity,
-  claimOwner: string | null,
-): Promise<boolean> {
-  if (processIdentity.pid === process.pid
-    || !verifiedProcessAlive(processIdentity)
-    || claimOwnerBlocksOrphanReap(claimOwner)) return false;
+/** Ends one process the registry recorded, fenced on its start identity: a pid
+    that has been reused since the row was written is somebody else's process
+    and is never signalled. */
+async function terminateVerifiedProcess(processIdentity: ProcessIdentity): Promise<boolean> {
+  if (processIdentity.pid === process.pid || !verifiedProcessAlive(processIdentity)) return false;
   try { process.kill(processIdentity.pid, "SIGTERM"); } catch { /* process exited */ }
   if (await waitForVerifiedProcessExit(processIdentity, ORPHAN_TERM_GRACE_MS)) return true;
   try { process.kill(processIdentity.pid, "SIGKILL"); } catch { /* process exited */ }
   return waitForVerifiedProcessExit(processIdentity, ORPHAN_KILL_GRACE_MS);
+}
+
+async function terminateVerifiedClaudeOrphan(
+  processIdentity: ProcessIdentity,
+  claimOwner: string | null,
+): Promise<boolean> {
+  if (claimOwnerBlocksOrphanReap(claimOwner)) return false;
+  return terminateVerifiedProcess(processIdentity);
+}
+
+/**
+ * Ends a structured host process that evidence shows is severed, for a caller
+ * that has already established nothing in this Viewer owns it (#1282).
+ *
+ * This is the gap the incident fell into. `terminateInactiveStructuredHost`
+ * refuses while the recorded process is alive — correctly, since a live host is
+ * usually somebody's live work — and the claim owner is this Viewer itself, so
+ * the orphan reap above refuses too. A host adopted at boot but never claimed by
+ * the delivery controller satisfies both refusals at once and becomes
+ * unkillable: the operator's kill effect blocks the conversation's whole drain
+ * forever, taking every message queued behind it with it.
+ *
+ * The two fences that make the signal safe are independent of each other: the
+ * caller has proven no registration resolves this host, and the liveness
+ * decision has proven from process and transcript evidence that the turn is
+ * severed (#1281). A host that is working, or that cannot be shown not to be,
+ * is left strictly alone.
+ */
+export async function reapSeveredStructuredHost(
+  registry: AgentRegistry,
+  conversationId: RegistryConversation["id"],
+  key: SessionKey,
+  dependencies: TurnLivenessDependencies = {},
+): Promise<{ reaped: boolean; reason: string } | null> {
+  const entry = registry.readOnlySnapshot().entries[sessionKeyId(key)];
+  const structuredProcess = entry?.structuredHost?.process;
+  if (!structuredProcess) return null;
+  const liveness = await conversationTurnLiveness(registry, conversationId, dependencies);
+  if (liveness?.state !== "severed") return null;
+  if (sessionKeyId(liveness.key) !== sessionKeyId(key)) return null;
+  return { reaped: await terminateVerifiedProcess(structuredProcess), reason: liveness.reason };
 }
 
 /** Reconciles claimable structured ownership for rows excluded by startup adoption. */

@@ -18,6 +18,7 @@ import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { structuredHostsEnabled, supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
+import { conversationTurnLiveness } from "@/lib/runtime/liveness";
 import { structuredDeliveryPublicationState } from "@/lib/runtime/structuredDeliveryController";
 import { redactBounded } from "@/lib/monitor/redact";
 import { parseReview, type ReviewFinding } from "@/lib/review";
@@ -673,7 +674,19 @@ export function defaultPipelinePorts(): PipelinePorts {
       if (!key) return undefined;
       const entry = current.entries[sessionKeyId(key)];
       if (!entry) return generation.createdAt;
-      return entry.status === "dead" || entry.status === "unhosted" ? entry.updatedAt : null;
+      if (entry.status === "dead" || entry.status === "unhosted") return entry.updatedAt;
+      /* A row that still reads live proves nothing about the process behind it:
+         a redeploy leaves the pid of a host that no longer exists, and a host
+         relaunched over a severed turn can sit forever with nothing to run
+         (#1281). The stage stayed `running` through both, so `retry-stage` was
+         refused and the lane could only be freed by closing the pipeline. The
+         evidence decides instead — and only `severed` counts, so a host writing
+         to its transcript or burning CPU keeps the attempt alive however long
+         its current step takes. */
+      const liveness = await conversationTurnLiveness(registry, conversation.id, { snapshot: current });
+      return liveness?.state === "severed" && liveness.since !== null
+        ? new Date(liveness.since).toISOString()
+        : null;
     },
     sleep: (milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
     durableTurnEvidence: durableStageTurnEvidence,

@@ -326,6 +326,10 @@ export class StructuredDeliveryQueue {
     private readonly reconfigure: StructuredReconfigureHandler = async () => {
       throw new Error("structured host reconfigure is unavailable");
     },
+    /** Why this conversation's turn is severed, when evidence says it is
+        (#1281). Null means "not shown to be severed", which is what every
+        caller here treats as a reason to keep waiting. */
+    private readonly severedHostReason: (conversationId: string) => Promise<string | null> = async () => null,
   ) {}
 
   drain(): Promise<void> {
@@ -802,7 +806,22 @@ export class StructuredDeliveryQueue {
         throw error;
       }
     }
-    if (!host) return { blocked: true, terminated: false };
+    if (!host) {
+      /* Holding the control was right while a host might still come back to
+         answer it, and wrong once nothing can: the effect stays pending, the
+         group never drains, and every message queued behind it waits on a turn
+         no process is running (#1281). Evidence of a severed turn settles it
+         instead — an interrupt has nothing left to interrupt, and an attention
+         nothing left to answer. */
+      const severed = await this.severedHostReason(effect.conversationId);
+      if (!severed) return { blocked: true, terminated: false };
+      await this.port.transition(
+        effect.operationId,
+        effect.kind === "interrupt" ? "interrupted" : "failed",
+        { reason: `structured host is severed: ${severed}`.slice(0, 240) },
+      );
+      return { blocked: false, terminated: false };
+    }
     const health = await host.health();
     if (health.status === "dead" || health.status === "unhosted") {
       await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });

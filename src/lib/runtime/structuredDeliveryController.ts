@@ -10,6 +10,8 @@ import type { EngineHost, HostState } from "./engineHost";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { applyStructuredReconfigure } from "./structuredReconfigure";
 import { projectEngineHostEvent } from "./engineHostEvents";
+import { conversationTurnLiveness, type TurnLivenessDependencies } from "./liveness";
+import { reapSeveredStructuredHost } from "./registry";
 import { publishFilesRevision } from "./filesRevision";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
 import { runtimeImageCapability } from "./runtimeImageStore";
@@ -315,6 +317,10 @@ export async function bindStructuredDeliveryQueue(
     client?: RuntimeHostClient | null;
     recover?: StructuredConversationRecovery;
     deferStartupWork?: boolean;
+    /** Process and transcript readers behind the severed-turn evidence, so a
+        test can drive this seam against a real process and a real transcript
+        on a clock it controls. */
+    liveness?: TurnLivenessDependencies;
   } = {},
 ): Promise<void> {
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
@@ -369,6 +375,24 @@ export async function bindStructuredDeliveryQueue(
     hostResolver(registry, hosts),
     async (conversationId, expectedKey) => {
       if (await state.terminateActiveHost?.(expectedKey)) return true;
+      /* No registration in this process owns the host, so nothing here can end
+         it through its own lifecycle. When the evidence also says the turn is
+         severed, the recorded process is reaped on its start identity so the
+         row below can retire — without that, a kill on an unclaimed host is
+         refused forever and blocks every message behind it (#1282). */
+      const reaped = await reapSeveredStructuredHost(
+        registry,
+        conversationId as `conversation_${string}`,
+        expectedKey,
+        dependencies.liveness ?? {},
+      );
+      if (reaped) {
+        console.error("[structured delivery] reaped a severed structured host nothing owned", {
+          key: sessionKeyId(expectedKey),
+          reaped: reaped.reaped,
+          reason: reaped.reason,
+        });
+      }
       const terminated = registry.terminateInactiveStructuredHost(
         conversationId as `conversation_${string}`,
         expectedKey,
@@ -399,6 +423,10 @@ export async function bindStructuredDeliveryQueue(
       registry,
       ownsOperation: ownership.isCurrent,
     }),
+    async (conversationId) => {
+      const liveness = await conversationTurnLiveness(registry, conversationId, dependencies.liveness ?? {});
+      return liveness?.state === "severed" ? liveness.reason : null;
+    },
   );
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;
@@ -861,7 +889,17 @@ export async function bindStructuredDeliveryQueue(
   let completion = Promise.resolve();
   const complete = (items: readonly StructuredDeliveryHost[]) => {
     completion = completion.catch(() => {}).then(async () => {
-      if (stopped || state.activeQueue !== queue) return;
+      /* A generation that has been swapped out cannot register anything, but it
+         must not answer "done" either: its caller would clear its retry set and
+         the hosts it started would be left running with nothing able to claim
+         them (#1282). Hand them to whoever owns the publication now, or say the
+         controller is unavailable so the startup retry makes them good. */
+      if (stopped || state.activeQueue !== queue) {
+        const successor = state.completeActive;
+        if (!successor || successor === complete) throw new StructuredDeliveryControllerUnavailableError();
+        await successor(items);
+        return;
+      }
       for (const item of items) await register(item);
       const startupSnapshot = registry.readOnlySnapshot();
       const runtimeSnapshot = typeof client.snapshot === "function"

@@ -5,6 +5,8 @@ import { parseMeminfo, parseProcStatus } from "./memory";
 import type { ProcBackend, ProcessMemory, ProcSnapshotEntry, SystemMemory } from "./types";
 
 const PROC = "/proc";
+/** USER_HZ: the unit /proc reports process times in. */
+const CLOCK_TICKS_PER_SECOND = 100;
 
 function pidAlive(pid: number): boolean {
   return Number.isInteger(pid) && pid > 0 && fs.existsSync(path.join(PROC, String(pid)));
@@ -58,6 +60,16 @@ function processIdentity(pid: number): string | null {
   const fields = statFields(pid);
   const startTicks = fields?.[19];
   return startTicks ? `${pid}:${startTicks}` : null;
+}
+
+/** utime + stime from /proc/<pid>/stat, in milliseconds. USER_HZ is 100 on
+    every Linux this runs on, which is what makes the ticks convertible. */
+function processCpuMs(pid: number): number | null {
+  const fields = statFields(pid);
+  const utime = Number(fields?.[11]);
+  const stime = Number(fields?.[12]);
+  if (!Number.isFinite(utime) || !Number.isFinite(stime)) return null;
+  return ((utime + stime) / CLOCK_TICKS_PER_SECOND) * 1_000;
 }
 
 /**
@@ -244,6 +256,7 @@ export const linuxBackend: ProcBackend = {
   readCwd,
   readPpid,
   processIdentity,
+  processCpuMs,
   readEnvVar,
   listProcesses,
   systemMemory,
