@@ -17,6 +17,8 @@ import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { evidenceFromPipelines, evidenceFromTasks } from "./evidence";
+import { SEAT_TICK_WAKE_INTERVAL_MS } from "./seatTick";
+import { effectiveSeatTickSettings, readSeatTickSettings, type SeatTickSettings } from "./seatTickSettings";
 import type { PipelineSummary, TaskSummary } from "./viewerApi";
 import {
   type SeatTickActivity,
@@ -159,6 +161,10 @@ export interface SeatTickSources {
       sliced off an ordering that has nothing to do with time. */
   latestDeployment: typeof latestLedgerDeployment;
   retirementReport: () => StructuredHostRetirementReport | null;
+  /** The project's own tick settings (#1275), read fresh per check so a change
+      an agent just recorded takes effect at the very next check rather than at
+      the next deploy. A project nobody configured reads the defaults. */
+  settings: (project: string) => SeatTickSettings;
   /** Whether the layer holding a retained wake still has it, and whether the
       seat ever got it. The tick's stamps move on this answer and nothing else. */
   wakeState: (wake: SeatTickOutstandingWake) => Promise<SeatTickWakeState>;
@@ -193,6 +199,7 @@ export function defaultSeatTickSources(): SeatTickSources {
         return null;
       }
     },
+    settings: (project) => readSeatTickSettings(project),
     /* One rule for both halves: ask, and act on, the layer that is actually
        holding the payload. A send the runtime host queued belongs to the runtime
        host — the registry row beside it is a mirror, and settling a mirror stops
@@ -228,8 +235,20 @@ export function defaultSeatTickSources(): SeatTickSources {
   };
 }
 
+/**
+ * A lane the seat could still act on.
+ *
+ * `hiddenAt` is part of the predicate because hiding something and then
+ * reporting it as work is a contradiction on its own terms (#1274). A draft the
+ * operator discarded before this fix landed carries `hiddenAt` with `state:
+ * "draft"` and `closedAt: null`, and read as open it was parked by the stall
+ * rule at every check — an hourly wake carrying a lane whose only exit verb was
+ * the one the operator had just refused to press. Records written from now on
+ * settle properly (`discardDraft`); this clause is what retires the ones
+ * already on disk.
+ */
 function isOpen(pipeline: Pipeline): boolean {
-  return !pipeline.closedAt && pipeline.state !== "completed" && pipeline.state !== "closed";
+  return !pipeline.closedAt && !pipeline.hiddenAt && pipeline.state !== "completed" && pipeline.state !== "closed";
 }
 
 /** The projection `evidence.ts` correlates on, built in-process rather than
@@ -496,6 +515,7 @@ export async function gatherSeatTickInput(
   }));
 
   const { events, terminalPending, cursor } = eventsSince(canonical, state.eventsThrough, sources);
+  const settings = effectiveSeatTickSettings(sources.settings(canonical), now, SEAT_TICK_WAKE_INTERVAL_MS);
 
   return {
     project: canonical,
@@ -512,5 +532,6 @@ export async function gatherSeatTickInput(
        persists where the journal stood when the tick first saw this project. */
     state: { ...state, eventsThrough: cursor },
     policy,
+    settings,
   };
 }

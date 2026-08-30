@@ -3420,6 +3420,33 @@ function closeSummary(report: PipelineCloseReport): string | null {
   return parts.length > 0 ? `closed; ${parts.join("; ")}` : null;
 }
 
+/**
+ * Discarding a draft terminates it (#1274).
+ *
+ * `delete` used to set `hiddenAt` alone. The board stopped drawing the lane and
+ * every reader that asks the record whether it is live — the seat tick's open
+ * lanes, the bounded list projection, the task binding — kept answering yes,
+ * because `state` was still `draft` and `closedAt` was still null. So a
+ * discarded draft went on parking its owning seat once an hour with a lane
+ * nobody could discharge: `pause` and `skip-stage` refuse a draft, and `start`,
+ * the one verb that moved the state, is the verb that runs the stage the
+ * operator just threw away.
+ *
+ * A draft is a pipeline that has never run — the state a create with
+ * `autoStart: false` produces, which only `start` leaves — so there is no host
+ * to tear down, nothing published, and no attempt to preserve. Closing it
+ * outright is the honest record of what was asked for, and it keeps the record
+ * (and its archive path) instead of dropping the row.
+ */
+function discardDraft(pipeline: Pipeline, ports: PipelinePorts): void {
+  const at = ports.now();
+  pipeline.state = "closed";
+  pipeline.closedAt = at;
+  pipeline.hiddenAt = at;
+  pipeline.cursor = null;
+  pipeline.stateDetail = "discarded as a draft; it never ran";
+}
+
 export async function patchPipeline(
   id: string,
   req: PatchPipelineRequest,
@@ -3864,12 +3891,15 @@ export async function patchPipeline(
       }
     } else if (req.action === "delete") {
       if (pipeline.state !== "draft") return { error: "only draft pipelines can be deleted", status: 409 };
-      pipeline.hiddenAt = ports.now();
+      discardDraft(pipeline, ports);
       persist();
       return { pipeline };
     } else if (req.action === "close") {
       if (pipeline.state === "draft") {
-        pipeline.hiddenAt = ports.now();
+        /* Closing a draft is the same act as discarding it, and it settles the
+           record the same way — the two verbs differed only in which button
+           the board drew. */
+        discardDraft(pipeline, ports);
         persist();
         return { pipeline };
       }

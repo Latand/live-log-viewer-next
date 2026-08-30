@@ -13,6 +13,8 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
 const { reconcileSeatTick, runSeatTickCheck, startSeatTick, stopSeatTick, wakeReached } = await import("./seatTickController");
 const { DEFAULT_SEAT_TICK_POLICY } = await import("./seatTick");
+const { defaultSeatTickSettings } = await import("./seatTickSettings");
+import type { SeatTickSettings } from "./seatTickSettings";
 import type { SeatTickControllerDependencies } from "./seatTickController";
 import type { SeatTickWakeState, SeatTickWithdrawal } from "./seatTickSources";
 import {
@@ -69,6 +71,9 @@ function harness(options: {
   withdrawal?: SeatTickWithdrawal;
   /** The holder cannot be reached at all, for either question. */
   holderThrows?: boolean;
+  /** The project's own tick settings (#1275); the default is the tick as it
+      shipped. */
+  settings?: SeatTickSettings;
 }): Harness {
   const sent: ConversationMessage[] = [];
   const journal: SeatTickRunRecord[] = [];
@@ -146,6 +151,7 @@ function harness(options: {
       lifecycleJournal: () => ({ version: 1, lastSeq: options.events?.at(-1)?.seq ?? 0, events: options.events ?? [], retired: [] }),
       latestDeployment: () => ({ state: "unreadable", error: "no ledger" }) as never,
       retirementReport: () => null,
+      settings: () => options.settings ?? defaultSeatTickSettings(PROJECT),
       wakeState: async () => {
         if (options.holderThrows) throw new Error("the layer holding the wake cannot be read");
         return options.wakeState ?? "retained";
@@ -202,6 +208,137 @@ test("a quiet check writes one journal line, sends nothing, and raises no card",
   expect(rig.journal).toHaveLength(1);
   expect(rig.sent).toEqual([]);
   expect(rig.cards).toEqual([]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * The tick settings a project decides for itself (#1275).
+ * ------------------------------------------------------------------------- */
+
+function offSettings(over: Partial<SeatTickSettings> = {}): SeatTickSettings {
+  return {
+    ...defaultSeatTickSettings(PROJECT),
+    enabled: false,
+    reason: "the only open lane is a draft nothing can discharge",
+    updatedAt: "2026-08-28T11:00:00.000Z",
+    setBy: { kind: "manager", conversationId: CONVERSATION, project: PROJECT, seatEpoch: 7 },
+    ...over,
+  };
+}
+
+test("a project whose tick is off is checked, journaled and never woken (#1275)", async () => {
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings: offSettings() });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(rig.sent).toEqual([]);
+  /* The line is the whole difference between a tick that is off and a tick
+     that broke: one keeps writing, the other stops. */
+  expect(record).toMatchObject({
+    verdict: "quiet",
+    delivery: null,
+    detail: "ticking is off for this project: the only open lane is a draft nothing can discharge",
+  });
+  expect(rig.cards.map((entry) => entry.card)).toEqual([{
+    ref: "seat-tick-settings",
+    kind: "tick-settings",
+    state: "open",
+    settings: { reason: offSettings().reason, until: null, setBy: offSettings().setBy, updatedAt: "2026-08-28T11:00:00.000Z" },
+    detail: "ticking is off for this project: no wake will be sent until it is turned back on",
+  }]);
+});
+
+test("a tick setting that reached its expiry is written back to the default by the check that reads it (#1275)", async () => {
+  const settings = offSettings({ until: new Date(NOW - MINUTE).toISOString() });
+  const persisted: SeatTickSettings[] = [];
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  const record = await runSeatTickCheck(PROJECT, { ...rig.deps, writeSettings: (_project, row) => { persisted.push(row); } });
+  /* The wake goes out — the setting lapsed — and the record on disk stops
+     saying "off" beside a tick that is ticking. */
+  expect(record).toMatchObject({ verdict: "wake" });
+  expect(persisted).toEqual([defaultSeatTickSettings(PROJECT)]);
+  expect(rig.cards[0]!.card).toMatchObject({ state: "resolved" });
+});
+
+test("the lapse ends the setting that expired and keeps the monitor prompt it never covered (#1280)", async () => {
+  const settings = offSettings({ until: new Date(NOW - MINUTE).toISOString(), monitorPrompt: MONITOR_PROMPT });
+  const persisted: SeatTickSettings[] = [];
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  await runSeatTickCheck(PROJECT, { ...rig.deps, writeSettings: (_project, row) => { persisted.push(row); } });
+  /* The expiry was set on the on/off, so that is what it ended. The words the
+     seat left for its own wakes were not part of it, and the wake this very
+     check sent still carries them. */
+  expect(persisted).toEqual([{
+    ...defaultSeatTickSettings(PROJECT),
+    monitorPrompt: MONITOR_PROMPT,
+    updatedAt: settings.updatedAt,
+    setBy: settings.setBy,
+  }]);
+  expect(rig.sent[0]!.text).toContain(MONITOR_PROMPT);
+});
+
+test("the board card for a quiet tick is written, kept in step, and closed when the tick comes back (#1275)", async () => {
+  const project = `card-lifecycle-${crypto.randomUUID().slice(0, 8)}`;
+  const tasksFile = path.join(SANDBOX, "state", "tasks.json");
+  const readCards = (): { text: string; status: string }[] => {
+    const raw = fs.existsSync(tasksFile) ? JSON.parse(fs.readFileSync(tasksFile, "utf8")) as { tasks?: { project: string; text: string; status: string }[] } : {};
+    return (raw.tasks ?? []).filter((task) => task.project === project).map((task) => ({ text: task.text, status: task.status }));
+  };
+
+  const off = harness({ pipelines: OPEN_LANE, settings: { ...offSettings(), project } });
+  /* The real card writer, not the harness stub: this is the board surface the
+     issue asks for. */
+  await runSeatTickCheck(project, { ...off.deps, ensureCard: undefined });
+  const raised = readCards();
+  expect(raised).toHaveLength(1);
+  expect(raised[0]!.text).toContain("This project's seat tick is not on its default settings");
+  expect(raised[0]!.text).toContain("the only open lane is a draft nothing can discharge");
+  expect(raised[0]!.status).not.toBe("done");
+
+  /* A check that finds the same setting rewrites nothing … */
+  await runSeatTickCheck(project, { ...off.deps, ensureCard: undefined });
+  expect(readCards()).toEqual(raised);
+
+  /* … a changed setting updates the one card … */
+  const slowed = harness({
+    pipelines: OPEN_LANE,
+    settings: { ...offSettings(), project, enabled: true, wakeIntervalMinutes: 240, reason: "batching this board", updatedAt: "2026-08-28T11:30:00.000Z" },
+  });
+  await runSeatTickCheck(project, { ...slowed.deps, ensureCard: undefined });
+  const updated = readCards();
+  expect(updated).toHaveLength(1);
+  expect(updated[0]!.text).toContain("batching this board");
+
+  /* … and the check that reads the project back on its defaults closes it. */
+  const restored = harness({
+    pipelines: OPEN_LANE,
+    settings: { ...defaultSeatTickSettings(project), project, updatedAt: "2026-08-28T12:00:00.000Z" },
+  });
+  await runSeatTickCheck(project, { ...restored.deps, ensureCard: undefined });
+  expect(readCards().map((task) => task.status)).toEqual(["done"]);
+});
+
+/* The card writer resolves the board file per call, not once at import.
+   `mutateTasksFile`'s default is frozen the first time `@/lib/tasks/store` is
+   loaded anywhere in the process, so a tick that took it would write to
+   whichever state dir happened to be set THEN — in a suite, another test
+   file's; in a sandboxed run, the real board outside the sandbox. Asserted
+   here by moving the state dir under a running tick, which is the only way the
+   two readings can be told apart within one process. */
+test("a card is written to the state dir the tick is pointed at now, not the one loaded at import", async () => {
+  const project = `card-statedir-${crypto.randomUUID().slice(0, 8)}`;
+  const moved = fs.mkdtempSync(path.join(SANDBOX, "moved-state-"));
+  const previous = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = moved;
+  try {
+    const off = harness({ pipelines: OPEN_LANE, settings: { ...offSettings(), project } });
+    await runSeatTickCheck(project, { ...off.deps, ensureCard: undefined });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+  }
+
+  const written = JSON.parse(fs.readFileSync(path.join(moved, "tasks.json"), "utf8")) as { tasks: { project: string; text: string }[] };
+  const cards = written.tasks.filter((task) => task.project === project);
+  expect(cards).toHaveLength(1);
+  expect(cards[0]!.text).toContain("This project's seat tick is not on its default settings");
 });
 
 test("a wake is delivered by durable conversation id, with an idempotent client message id", async () => {
@@ -675,4 +812,187 @@ test("a check that outran its interval drops the next tick rather than queueing 
   await Promise.resolve();
   fire();
   expect(sweeps).toBe(2);
+});
+
+
+/* ------------------------------------------------------------------------- *
+ * The agent-authored monitor prompt on the wake the scheduler fires (#1280).
+ *
+ * The seat cannot schedule itself — that is settled, and stays settled. What
+ * it can do is say what the schedule the Viewer arms for it should look at,
+ * and these cases are about that instruction surviving the two boundaries a
+ * session-scheduled prompt never survived: the next check, and a rotation.
+ * ------------------------------------------------------------------------- */
+
+const MONITOR_PROMPT = "before the items, check whether last night's digest actually sent";
+const PROMPT_HEADING = "Standing monitor note for this project";
+
+function promptSettings(): SeatTickSettings {
+  return {
+    ...defaultSeatTickSettings(PROJECT),
+    monitorPrompt: MONITOR_PROMPT,
+    updatedAt: "2026-08-28T11:00:00.000Z",
+    setBy: { kind: "manager", conversationId: CONVERSATION, project: PROJECT, seatEpoch: 7 },
+  };
+}
+
+test("the wake the scheduler fires carries the project's own monitor prompt, check after check (#1280)", async () => {
+  const settings = promptSettings();
+  const first = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  const firstRecord = await runSeatTickCheck(PROJECT, first.deps);
+  expect(firstRecord).toMatchObject({ verdict: "wake" });
+  expect(first.sent[0]!.text).toContain(MONITOR_PROMPT);
+  /* Beside what the tick derived, not instead of it, and the contract still
+     has the last word. */
+  expect(first.sent[0]!.text).toContain("Items:");
+  expect(first.sent[0]!.text).toContain("Act on the listed items only");
+
+  /* The next check reads the same row rather than any memory of the last wake,
+     so an hour later the instruction is still on the wake. A prompt the seat
+     re-typed into a schedule it made for itself lasted exactly one turn; this
+     is the difference. */
+  const second = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  await runSeatTickCheck(PROJECT, second.deps);
+  expect(second.sent[0]!.text).toContain(MONITOR_PROMPT);
+});
+
+test("a rotation hands the monitor prompt on: the successor's first wake carries it (#1280)", async () => {
+  const settings = promptSettings();
+  const before = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  await runSeatTickCheck(PROJECT, before.deps);
+  expect(before.sent[0]!.conversationId).toBe(CONVERSATION);
+
+  /* A different seat, a later epoch: the row is the PROJECT's, so what the
+     retired seat asked its monitor to watch is what the successor is woken
+     with, rather than dying with the session that wrote it. */
+  const after = harness({
+    seat: { conversationId: SUCCESSOR, seatEpoch: 8, path: null },
+    pipelines: OPEN_LANE,
+    state: OVERDUE,
+    settings,
+  });
+  await runSeatTickCheck(PROJECT, after.deps);
+  expect(after.sent[0]!.conversationId).toBe(SUCCESSOR);
+  expect(after.sent[0]!.text).toContain(MONITOR_PROMPT);
+});
+
+test("a project with no monitor prompt is woken with exactly the message it was woken with before (#1280)", async () => {
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE });
+  await runSeatTickCheck(PROJECT, rig.deps);
+  expect(rig.sent[0]!.text).not.toContain(PROMPT_HEADING);
+  /* And a row that exists but carries no prompt is the same silence: an empty
+     field is not a section with nothing in it. */
+  const configured = harness({
+    pipelines: OPEN_LANE,
+    state: OVERDUE,
+    settings: { ...promptSettings(), monitorPrompt: null },
+  });
+  await runSeatTickCheck(PROJECT, configured.deps);
+  expect(configured.sent[0]!.text).toBe(rig.sent[0]!.text);
+});
+
+/* ------------------------------------------------------------------------- *
+ * Replacing and clearing the prompt while a wake is outstanding (#1280).
+ *
+ * The delivery layer's idempotency key is what says which two sends are the
+ * same message, and it refuses a CHANGED payload under a key it is already
+ * holding. The prompt reached the delivered text while the key ignored it, so a
+ * wake carrying one prompt that the layer held, followed by the record being
+ * changed to another, produced the same key with different text at the very
+ * next check — refused, and refused again, until the outstanding wake settled
+ * on its own. Replacing and withdrawing a standing instruction is the ordinary
+ * use of the field, so these cases are the ordinary path.
+ * ------------------------------------------------------------------------- */
+
+const REPLACEMENT_PROMPT = "the digest is fine now; watch the deploy ledger for a rollback that nobody chased";
+
+/** The one rule of the delivery layer these cases turn on: a key it is already
+    holding may be replayed with the SAME text, and is refused different text.
+    One instance spans both checks, the way the layer's reservation does. */
+function reservationLayer(outcome: DeliveryOutcome) {
+  const held = new Map<string, string>();
+  const accepted: ConversationMessage[] = [];
+  const refused: string[] = [];
+  return {
+    accepted,
+    refused,
+    deliver: async (message: ConversationMessage): Promise<DeliveryOutcome> => {
+      const key = message.clientMessageId ?? "";
+      const existing = held.get(key);
+      if (existing !== undefined && existing !== message.text) {
+        refused.push(key);
+        return { ok: false, outcome: "failed", error: "a different payload under a client message id already held", status: 409 };
+      }
+      held.set(key, message.text);
+      accepted.push(message);
+      return outcome;
+    },
+  };
+}
+
+const HELD: DeliveryOutcome = { ok: true, target: null, outcome: "held" };
+
+/** A first check whose wake the layer accepts and keeps, so the second check
+    runs against a wake that is genuinely still outstanding. */
+async function heldWake(layer: ReturnType<typeof reservationLayer>, settings: SeatTickSettings) {
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE, settings });
+  const record = await runSeatTickCheck(PROJECT, { ...rig.deps, deliver: layer.deliver });
+  expect(record!.delivery!.outcome).toBe("held");
+  return record!.delivery!.clientMessageId;
+}
+
+/** The next check, with the wake the first one left outstanding on the row. */
+async function nextCheck(layer: ReturnType<typeof reservationLayer>, outstanding: string, settings: SeatTickSettings) {
+  const rig = harness({
+    pipelines: OPEN_LANE,
+    state: { ...OVERDUE, outstandingWake: outstandingWake({ clientMessageId: outstanding }) },
+    settings,
+  });
+  const record = await runSeatTickCheck(PROJECT, { ...rig.deps, deliver: layer.deliver });
+  return record!;
+}
+
+test("a prompt replaced while a wake is outstanding delivers under a key of its own (#1280)", async () => {
+  const layer = reservationLayer(HELD);
+  const outstanding = await heldWake(layer, promptSettings());
+
+  const record = await nextCheck(layer, outstanding, { ...promptSettings(), monitorPrompt: REPLACEMENT_PROMPT });
+  expect(layer.refused).toEqual([]);
+  expect(record.delivery!.clientMessageId).not.toBe(outstanding);
+  expect(record.delivery!.outcome).toBe("held");
+  expect(layer.accepted.at(-1)!.text).toContain(REPLACEMENT_PROMPT);
+});
+
+test("a prompt cleared while a wake is outstanding delivers under the key a promptless wake has (#1280)", async () => {
+  const layer = reservationLayer(HELD);
+  const outstanding = await heldWake(layer, promptSettings());
+
+  const record = await nextCheck(layer, outstanding, { ...promptSettings(), monitorPrompt: null });
+  expect(layer.refused).toEqual([]);
+  expect(record.delivery!.clientMessageId).not.toBe(outstanding);
+  /* Withdrawn means withdrawn: the key is the one this wake would have had if
+     the project had never set a prompt, and the text carries no note. */
+  expect(record.delivery!.clientMessageId).toBe(outstanding.slice(0, outstanding.lastIndexOf(":prompt-")));
+  expect(layer.accepted.at(-1)!.text).not.toContain(PROMPT_HEADING);
+});
+
+test("an outstanding wake whose prompt has not changed re-sends as a replay (#1280)", async () => {
+  const layer = reservationLayer(HELD);
+  const outstanding = await heldWake(layer, promptSettings());
+
+  const record = await nextCheck(layer, outstanding, promptSettings());
+  /* Same words, same key, same text: the layer sees the message it is already
+     holding, and the seat is spared a second copy of one it may yet receive. */
+  expect(layer.refused).toEqual([]);
+  expect(record.delivery!.clientMessageId).toBe(outstanding);
+  expect(layer.accepted.at(-1)!.text).toBe(layer.accepted[0]!.text);
+});
+
+test("a promptless wake keeps the exact client message id it had before the prompt existed (#1280)", async () => {
+  const rig = harness({ pipelines: OPEN_LANE, state: OVERDUE });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  /* Nothing after the fingerprint: a project that never set a prompt is not
+     paying for the field with a changed identity. */
+  expect(record!.delivery!.clientMessageId).toBe(
+    `seat-tick:${PROJECT}:7:${OVERDUE.lastWakeAt}:interval:${rig.written[0]!.lastWakeFingerprint}`);
 });

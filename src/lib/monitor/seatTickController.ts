@@ -1,6 +1,9 @@
+import crypto from "node:crypto";
+
+import { statePath } from "@/lib/configDir";
 import { deliverConversationMessage, type DeliveryOutcome } from "@/lib/delivery";
 import { canonicalOrchestratorProject } from "@/lib/orchestrator/seats";
-import { createTask } from "@/lib/tasks/commands";
+import { createTask, patchTask } from "@/lib/tasks/commands";
 import { mutateTasksFile } from "@/lib/tasks/store";
 
 import {
@@ -8,12 +11,14 @@ import {
   monitorRefIn,
   orchestratorAlertCardText,
   seatTickRetryGuardCardText,
+  seatTickSettingsCardText,
 } from "./cards";
 import { openIssuesForProposal, type ProposalIssue } from "./githubEvidence";
 import { appendSeatTickRecord } from "./journalStore";
 import { redactMonitorText } from "./redact";
 import { seatTickProposalMessage, seatTickWakeMessage } from "./report";
 import { seatTickDecision, seatTickPolicy, seatTickWakeCommit, seatTickWakeCommitPlan } from "./seatTick";
+import { seatTickSettingsAfterLapse, writeSeatTickSettings } from "./seatTickSettings";
 import { readSeatTickState, seatTickStateForEpoch, writeSeatTickState } from "./seatTickState";
 import {
   defaultSeatTickSources,
@@ -75,6 +80,11 @@ export interface SeatTickControllerDependencies {
   policy?: SeatTickPolicy | null;
   readState?: typeof readSeatTickState;
   writeState?: typeof writeSeatTickState;
+  /** Persists a tick setting that reached its expiry (#1275). The reading is
+      already correct without it — the expiry is applied wherever the record is
+      read — so this only makes the record on disk say what the tick is
+      already doing. */
+  writeSettings?: typeof writeSeatTickSettings;
   appendRecord?: typeof appendSeatTickRecord;
   deliver?: typeof deliverConversationMessage;
   ensureCard?: (project: string, card: SeatTickCard, at: string) => void;
@@ -84,32 +94,79 @@ export interface SeatTickControllerDependencies {
 }
 
 function cardText(project: string, card: SeatTickCard, at: string): string {
-  return card.kind === "no-seat"
-    ? orchestratorAlertCardText(card.detail, at)
-    : seatTickRetryGuardCardText(project, card.detail, card.ref, at);
+  if (card.kind === "no-seat") return orchestratorAlertCardText(card.detail, at);
+  if (card.kind === "tick-settings") {
+    return seatTickSettingsCardText({
+      project,
+      detail: card.detail,
+      reason: card.settings?.reason ?? null,
+      until: card.settings?.until ?? null,
+      setBy: card.settings?.setBy ?? null,
+      updatedAt: card.settings?.updatedAt ?? null,
+    });
+  }
+  return seatTickRetryGuardCardText(project, card.detail, card.ref, at);
 }
 
 /**
  * One board card per condition, found by its `monitor-ref:` line rather than by
  * a receipt — so the idempotency survives a restart, and an operator who edits
  * the text above the marker keeps it.
+ *
+ * Two kinds of card meet here. A condition that HAPPENED (no seat, a wake
+ * reason the guard stopped) is written once and left for the operator to
+ * close. A STANDING state — a project's tick settings (#1275) — is instead
+ * kept in step with the state it describes: its text is rewritten when the
+ * setting changes, and the card is closed by the first check that reads the
+ * project back on its defaults, so the board never claims a quiet tick that is
+ * ticking again. The card body is stamped with when the SETTING was recorded,
+ * so a settled state rewrites nothing check after check.
  */
 function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): void {
+  /* The board file is resolved HERE, per call, rather than taken from the
+     module-load default `mutateTasksFile` would otherwise use. That default is
+     frozen the first time `@/lib/tasks/store` is imported anywhere in the
+     process, so which file this writes to would depend on which module got
+     imported first — the same reason `root/store.ts`, `flows/store.ts` and
+     `session/titleStore.ts` each resolve their own path at call time. The tick
+     is the one writer here that runs on a timer against whatever state dir the
+     process is pointed at, so a stale path would put a real board card in
+     someone else's board. In the Viewer both readings are identical. */
   mutateTasksFile<void>((state) => {
     const existing = state.tasks.find((task) =>
       canonicalOrchestratorProject(task.project) === project
       && task.status !== "done"
       && monitorRefIn(task.text) === card.ref);
-    if (existing) return { state: undefined, result: undefined };
+    if (card.state === "resolved") {
+      if (!existing) return { state: undefined, result: undefined };
+      const closed = patchTask(state.tasks, existing.id, { status: "done" });
+      return closed.ok
+        ? { state: { tasks: closed.tasks, recentCreates: state.recentCreates }, result: undefined }
+        : { state: undefined, result: undefined };
+    }
+    const text = cardText(project, card, at);
+    if (existing) {
+      /* A card for something that HAPPENED is left exactly as it stands: its
+         body carries the instant it was observed, so rewriting it would churn
+         the board once per check for as long as the condition holds. Only a
+         card that tracks a standing state — the one kind that declares its
+         `state` — is kept in step with what it describes. */
+      if (card.state !== "open") return { state: undefined, result: undefined };
+      if (existing.text === text) return { state: undefined, result: undefined };
+      const updated = patchTask(state.tasks, existing.id, { text });
+      return updated.ok
+        ? { state: { tasks: updated.tasks, recentCreates: state.recentCreates }, result: undefined }
+        : { state: undefined, result: undefined };
+    }
     const created = createTask(state.tasks, {
       project,
-      text: cardText(project, card, at),
+      text,
       placement: "unplaced",
       clientRequestId: monitorClientRequestId(card.ref),
     }, state.recentCreates);
     if (!created.ok || created.replay) return { state: undefined, result: undefined };
     return { state: { tasks: created.tasks, recentCreates: created.recentCreates }, result: undefined };
-  });
+  }, statePath("tasks.json"));
 }
 
 /**
@@ -169,17 +226,50 @@ function verdictDetail(verdict: SeatTickVerdict): string | null {
  *   landed send advances. Without it the hourly wake on an unchanged board
  *   would carry the previous hour's key and be swallowed as a replay: silence
  *   the seat could not tell from a healthy board.
+ *
+ * The project's monitor prompt is part of what the wake says, so it belongs in
+ * the first half — see {@link wakePromptIdentity} for why it is folded in as a
+ * digest and why a promptless wake keeps the key it always had.
  */
 function wakeClientMessageId(
   project: string,
   seatEpoch: number,
   verdict: SeatTickVerdict,
-  context: { fingerprint: string; lastWakeAt: string | null },
+  context: { fingerprint: string; lastWakeAt: string | null; monitorPrompt: string | null },
 ): string {
   const shape = verdict.kind === "wake"
     ? verdict.reasons.map((reason) => reason.kind).sort().join(",")
     : "proposal";
-  return `seat-tick:${project}:${seatEpoch}:${context.lastWakeAt ?? "first"}:${shape}:${context.fingerprint}`;
+  return `seat-tick:${project}:${seatEpoch}:${context.lastWakeAt ?? "first"}:${shape}:${context.fingerprint}`
+    + wakePromptIdentity(context.monitorPrompt);
+}
+
+/**
+ * The prompt's share of the wake's identity (#1280).
+ *
+ * The prompt is text the wake carries, and the delivery layer refuses a CHANGED
+ * payload sent under a key it is already holding. So without this, a wake
+ * carrying one prompt that the layer held or queued, followed by the record
+ * being changed to another, produced the same key with different text at the
+ * very next check: the replacement was refused, over and over, until the
+ * outstanding wake settled on its own. Replacing and clearing a standing
+ * instruction is the ordinary use of the field, so that is the ordinary case.
+ *
+ * A digest, because the key is a durable identifier written into the row, the
+ * journal and the delivery layer's reservation, and a thousand characters of a
+ * project's own prose has no business in any of them. Bounded, and derived from
+ * the prompt alone, so the same prompt is the same identity at every later
+ * check — which is what keeps an unlanded wake a replay the layer recognizes.
+ *
+ * A project with no prompt contributes NOTHING here, not the digest of an empty
+ * string: the promptless key is byte for byte the key it was before the field
+ * existed, so a promptless wake already outstanding still replays under it.
+ * Nothing here decides WHEN a seat is woken; this decides which two sends the
+ * delivery layer is entitled to treat as one message.
+ */
+function wakePromptIdentity(monitorPrompt: string | null): string {
+  if (!monitorPrompt) return "";
+  return `:prompt-${crypto.createHash("sha256").update(monitorPrompt).digest("hex").slice(0, 16)}`;
 }
 
 /**
@@ -432,6 +522,19 @@ async function check(
   const input = { ...gathered, state: seatTickStateForEpoch(gathered.state, gathered.seat?.seatEpoch ?? null) };
   const decision = seatTickDecision(input);
 
+  /* An expiry that passed is already reflected in everything above — the
+     reading applies it wherever the record is read — so this write changes no
+     behaviour. What it changes is the RECORD: a row that still says "off"
+     beside a tick that is ticking is the kind of disagreement someone reads
+     off the board at the worst possible moment. */
+  if (input.settings.lapsed) {
+    try {
+      (dependencies.writeSettings ?? writeSeatTickSettings)(input.project, seatTickSettingsAfterLapse(input.project, input.settings));
+    } catch (error) {
+      console.error("[seat tick] lapsed settings could not be persisted", error instanceof Error ? error.name : "unknown");
+    }
+  }
+
   for (const card of decision.cards) {
     try {
       ensureCard(input.project, card, at);
@@ -448,6 +551,10 @@ async function check(
     const clientMessageId = wakeClientMessageId(input.project, input.seat.seatEpoch, verdict, {
       fingerprint: input.changeFingerprint,
       lastWakeAt: input.state.lastWakeAt,
+      /* The same row the message below reads its prompt from, read once: the
+         identity and the text have to move together or they are exactly the
+         disagreement this key exists to prevent. */
+      monitorPrompt: input.settings.monitorPrompt,
     });
     const text = verdict.kind === "wake"
       ? seatTickWakeMessage({
@@ -456,6 +563,7 @@ async function check(
         items: verdict.items,
         deferred: verdict.deferred,
         signals: input.signals,
+        monitorPrompt: input.settings.monitorPrompt,
       })
       : seatTickProposalMessage({
         project: input.project,
@@ -463,9 +571,16 @@ async function check(
         signals: input.signals,
         items: policy.itemsPerWake,
         slot: String(Math.floor(input.now / policy.proposalIntervalMs)),
+        monitorPrompt: input.settings.monitorPrompt,
       });
 
-    /* The seat epoch is re-read here, one step before the send, for the same
+    /* The prompt above came off the settings row this check read, not out of
+       anything the controller carries between checks or between seats: the row
+       is the project's, so an instruction a seat left for its own monitor is
+       still on the next check's wake, and still on the wake the successor gets
+       after a rotation retires the seat that wrote it. (#1280)
+
+       The seat epoch is re-read here, one step before the send, for the same
        reason the retirement sweep re-checks: a rotation that landed while this
        check was gathering must not have its predecessor woken. */
     const current = sources.seatFor(input.project).active;

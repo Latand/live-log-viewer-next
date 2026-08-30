@@ -6050,7 +6050,7 @@ test("draft edits that would orphan a review-loop are rejected (#136)", async ()
   expect(loadPipelines()[0]!.stages.map((stage) => stage.id)).toEqual(["build", "review"]);
 });
 
-test("discarding a draft hides its persisted record", async () => {
+test("discarding a draft terminates its persisted record (#1274)", async () => {
   const { ports } = harness();
   savePipelines([]);
   const created = await createPipelineFromRequest({
@@ -6063,8 +6063,50 @@ test("discarding a draft hides its persisted record", async () => {
   const discarded = await patchPipeline(created.pipeline!.id, { action: "delete" }, ports);
   expect(discarded.pipeline?.id).toBe(created.pipeline!.id);
   expect(loadPipelines()).toHaveLength(1);
-  expect(loadPipelines()[0]).toMatchObject({ id: created.pipeline!.id, state: "draft" });
-  expect(loadPipelines()[0]!.hiddenAt).toBeTruthy();
+  const record = loadPipelines()[0]!;
+  /* A hide alone left `state: "draft"` with `closedAt: null`, which every
+     liveness reader answered "open" to — the hourly seat wake in #1274. */
+  expect(record.state).toBe("closed");
+  expect(record.closedAt).toBeTruthy();
+  expect(record.hiddenAt).toBe(record.closedAt);
+  expect(record.cursor).toBeNull();
+  expect(record.runs.flatMap((run) => run.attempts)).toHaveLength(0);
+});
+
+test("closing a draft settles it the same way discarding does (#1274)", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Draft closed rather than discarded",
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, ports);
+
+  const closed = await patchPipeline(created.pipeline!.id, { action: "close" }, ports);
+  expect(closed.pipeline?.id).toBe(created.pipeline!.id);
+  const record = loadPipelines()[0]!;
+  expect(record.state).toBe("closed");
+  expect(record.closedAt).toBeTruthy();
+  expect(record.hiddenAt).toBe(record.closedAt);
+});
+
+test("a draft that is real work still starts after the discard change (#1274)", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Draft nobody discarded",
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, ports);
+
+  const started = await patchPipeline(created.pipeline!.id, { action: "start" }, ports);
+  expect(started.status).toBeUndefined();
+  const record = loadPipelines()[0]!;
+  expect(record.state).not.toBe("draft");
+  expect(record.closedAt).toBeNull();
+  expect(record.hiddenAt ?? null).toBeNull();
 });
 
 test("draft-only mutations cannot rewrite or delete an active pipeline", async () => {

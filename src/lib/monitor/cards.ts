@@ -114,6 +114,12 @@ export function orchestratorAlertCardText(detail: string, at: string): string {
     One per reason kind, so two stuck reasons are two readable cards. */
 export const seatTickRetryGuardRef = (kind: string): string => `seat-tick-stuck-${kind}`;
 
+/** The ref of the card that says a project's tick is deliberately off or on a
+    changed interval (#1275). One per project, because the card is looked up
+    inside the project it belongs to — and one standing card, because the
+    settings are a standing state rather than a stream of events. */
+export const SEAT_TICK_SETTINGS_REF = "seat-tick-settings";
+
 /** The `monitor-ref:` value a proposal card carries. Colon-free, because that
     is what {@link monitorRefIn} will read back. */
 export const seatTickProposalRef = (slot: string): string => `seat-tick-proposal-${slot}`;
@@ -136,6 +142,47 @@ export function seatTickRetryGuardCardText(project: string, detail: string, ref:
       "The tick resumes this reason on its own once the board or a pipeline moves.",
       "",
       `${MONITOR_REF_PREFIX} ${ref}`,
+    ].join("\n"),
+    CARD_TEXT_LIMIT,
+  );
+}
+
+/**
+ * The card for a project whose tick settings depart from the default.
+ *
+ * It has to answer three questions a human reading the board will ask in this
+ * order: is this tick off or just slower, why, and who decided. The last one
+ * is on the card because a seat may set another project's tick — which is
+ * allowed — and the board is where that shows.
+ */
+export function seatTickSettingsCardText(input: {
+  project: string;
+  detail: string;
+  reason: string | null;
+  until: string | null;
+  setBy: { kind: string; conversationId: string | null; project: string | null } | null;
+  /** When the setting was recorded. NOT when the check ran: a card stamped
+      with the check's clock would be rewritten every five minutes. */
+  updatedAt: string | null;
+}): string {
+  const foreign = input.setBy?.project && input.setBy.project !== input.project;
+  const who = input.setBy
+    ? `Set by ${input.setBy.kind === "manager" ? "the designated seat" : input.setBy.kind === "gateway" ? "the operator's own session" : input.setBy.kind === "agent" ? "an agent session" : "a caller nothing identified"}${input.setBy.conversationId ? ` (${input.setBy.conversationId})` : ""}${foreign ? `, whose own project is ${input.setBy.project}` : ""}.`
+    : "Set by nobody the record names.";
+  return redactBounded(
+    [
+      "This project's seat tick is not on its default settings",
+      "",
+      `${input.detail}.`,
+      `Reason given: ${input.reason ?? "none recorded"}.`,
+      input.until
+        ? `It returns to the default at ${input.until.slice(0, 16).replace("T", " ")} UTC.`
+        : "It stands until someone changes it back.",
+      who,
+      `Project ${input.project}. Recorded ${input.updatedAt ? `${input.updatedAt.slice(0, 16).replace("T", " ")} UTC` : "at an unrecorded time"}.`,
+      "Change it with the seat tick settings tool; this card clears itself once the project is back on the defaults.",
+      "",
+      `${MONITOR_REF_PREFIX} ${SEAT_TICK_SETTINGS_REF}`,
     ].join("\n"),
     CARD_TEXT_LIMIT,
   );

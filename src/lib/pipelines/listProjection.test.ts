@@ -162,6 +162,18 @@ describe("filter, ordering and limit semantics are unchanged", () => {
     expect(all.find((row) => row.state === "closed")!.closedAt).toBeString();
   });
 
+  test("a hidden lane leaves the active listing and comes back with includeClosed (#1274)", () => {
+    const [open] = selectPipelineListRecords(corpus, { project: "viewer", limit: 1 });
+    /* The record #1274 was reported from: hidden by a discard, still carrying
+       `state: "draft"` and `closedAt: null`, and therefore listed as in flight
+       to every project's seat rather than only its owner's. */
+    const hidden: Pipeline = { ...open!, id: "hidden01", state: "draft", closedAt: null, hiddenAt: "2026-08-28T15:01:15.000Z" };
+    const registry = [hidden, ...corpus];
+    expect(selectPipelineListRecords(registry, { limit: 10 }).map((pipeline) => pipeline.id)).not.toContain("hidden01");
+    expect(selectPipelineListRecords(registry, { state: "draft", limit: 10 }).map((pipeline) => pipeline.id)).not.toContain("hidden01");
+    expect(selectPipelineListRecords(registry, { includeClosed: true, limit: 10 }).map((pipeline) => pipeline.id)).toContain("hidden01");
+  });
+
   test("limit is clamped to the published bounds", async () => {
     expect(await listPage({ limit: 0 })).toHaveLength(1);
     expect(await listPage({ limit: -5 })).toHaveLength(1);
