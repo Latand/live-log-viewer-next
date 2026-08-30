@@ -582,33 +582,40 @@ export class StructuredDeliveryQueue {
       } catch (error) {
         const reason = failureReason(error);
         const afterFailure = await host.health().catch(() => null);
-        if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
-          /* The message was handed to the engine and the engine is GONE. It may
-             have been taken, and the one thing that could say — the host's own
-             confirmed-delivery record — died with it, so this must not go back
-             to `queued`: that says the send was never executed, which is what
-             let a later resend look safe on a send the recipient had already
-             received (#1131). `uncertain` is absorbing — the journal refuses
-             every transition out of it — so no drain and no fresh request can
-             produce a second delivery, and the receipt says the fate is unknown
-             instead of inventing one.
-             A LIVE host that throws is a different answer: it refused the
-             message at a precondition, or the engine answered with an error,
-             and it is still there to dedupe a retry. That stays `failed`, which
-             is what keeps `failed` meaning "never reached the engine" — the
-             distinction settlement reads to decide whether a resend is safe. */
-          await this.terminalizeUnverified(effect.operationId, `${DELIVERY_UNVERIFIED_AFTER_ACTUATION}: ${reason}`);
-          return true;
-        }
-        if (isThreadReadTimeout(error)) {
+        const hostIsGone = !afterFailure
+          || afterFailure.status === "dead"
+          || afterFailure.status === "unhosted";
+        if (!hostIsGone && isThreadReadTimeout(error)) {
           /* The one resend this path issues, and the host dedupes it by
              queue-entry id: it reads the thread back and returns the confirmed
-             receipt rather than writing a second message. */
+             receipt rather than writing a second message. Its own operation is
+             retried, so this is the one failure after actuation that may go
+             back to `queued`. */
           await this.port.transition(effect.operationId, "queued", { reason: "delivery-auto-retry" });
           this.retrySoon();
           return true;
         }
-        await this.port.transition(effect.operationId, "failed", { reason });
+        /* The message was handed to the engine and the engine did not answer.
+           It may have been taken — whether the host then died or is still
+           standing, the only thing that could say is the confirmed-delivery
+           record this call failed to get — so it must not go back to `queued`,
+           which says the send was never executed and is what let a later resend
+           look safe on a send the recipient had already received (#1131), and
+           it must not settle `failed`, which the receipt reads as fenced and
+           answers `resend: "safe"`. A resend is issued under a NEW request id,
+           so nothing on the host side would dedupe it against this attempt.
+           `uncertain` is absorbing — the journal refuses every transition out
+           of it and clears the outbox row in the same transaction — so no
+           drain and no fresh request can produce a second delivery, and the
+           receipt says the fate is unknown instead of inventing one. That is
+           what keeps `failed` on a message effect meaning "never reached the
+           engine": the distinction settlement reads to decide whether a resend
+           is safe. The cost is that a precondition the host refused by throwing
+           reads as unverified too; one verification is the cheaper error. */
+        await this.terminalizeUnverified(effect.operationId, `${DELIVERY_UNVERIFIED_AFTER_ACTUATION}: ${reason}`);
+        /* A host that is gone takes the rest of this conversation's queue with
+           it; a live one keeps draining behind the send it could not answer. */
+        if (hostIsGone) return true;
         continue;
       }
       if (receipt.outcome === "rejected") {

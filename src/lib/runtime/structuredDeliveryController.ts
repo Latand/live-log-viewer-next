@@ -346,18 +346,28 @@ export async function bindStructuredDeliveryQueue(
       status: async (operationId: string) => (await client.operationStatus(operationId))?.receipt ?? null,
       transition: async (operationId, status, details) => {
         const result = await client.transitionOperation(operationId, status, details);
-        /* Only the two states a held delivery can settle into. A compaction's
-           `uncertain` is absent on purpose and costs nothing: this projection
-           is keyed on `heldDeliveries`, which only a composer message ever
-           creates, so a compact operation has no row here to settle (#862). */
-        if (status !== "delivered" && status !== "failed") return;
+        /* The three states a held delivery can settle into. `uncertain` — a
+           send an executor actuated and could not answer for — settles the
+           reservation HERE, at the moment the queue writes it, rather than
+           waiting for the settlement sweep to notice: terminality that needs
+           nothing to be healthy beats terminality that needs a runtime client
+           and a tick (#1131). A compaction transitions the same way and costs
+           nothing, because this projection is keyed on `heldDeliveries`, which
+           only a composer message ever creates, so a compact operation has no
+           row here to settle (#862). */
+        if (status !== "delivered" && status !== "failed" && status !== "uncertain") return;
         const conversationId = result.receipt.conversationId;
         if (!conversationId?.startsWith("conversation_")) return;
         registry.recordDeliveryOutcomeForOperation(
           conversationId as `conversation_${string}`,
           result.receipt.presentationOperationId ?? operationId,
-          status,
+          status === "uncertain" ? "failed" : status,
           details?.reason ?? null,
+          /* The disposition the record has to keep: actuation began, so a
+             resend can duplicate it. Every other `failed` on a message effect
+             means the send never reached the engine and proves nothing on its
+             own, so it carries none. */
+          status === "uncertain" ? "unverified" : undefined,
         );
         if (status === "delivered" && operationId.startsWith("spawn_message_")) {
           const launchId = operationId.slice("spawn_message_".length);

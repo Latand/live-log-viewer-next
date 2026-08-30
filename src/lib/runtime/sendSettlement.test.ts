@@ -644,6 +644,83 @@ test("a send the host took before it died stays uncertain, and no fresh request 
   }
 });
 
+/** A host that takes the instruction, fails to answer for it, and STAYS
+    STANDING — the failure a live host cannot distinguish from a refusal. */
+function unansweringHost(sessionKey: string): { host: EngineHost; received: string[] } {
+  const received: string[] = [];
+  return {
+    received,
+    host: {
+      attach: () => ({ async *[Symbol.asyncIterator]() {} }),
+      send: async (entry: QueueEntry): Promise<DeliveryReceipt> => {
+        received.push(entry.text ?? "");
+        throw new Error("engine answer never arrived");
+      },
+      interrupt: async () => {},
+      answer: async () => {},
+      health: async () => idleState(sessionKey),
+      release: async () => {},
+    },
+  };
+}
+
+test("a live host that cannot answer for a send it took is unverified, never safe to send again", async () => {
+  /* The other half of the same finding. A host that dies is not the only way a
+     send's fate goes unknown: the call that would have confirmed it can fail
+     with the host still standing, and out here that is indistinguishable from a
+     refusal. This used to settle `failed`, which the receipt reads as fenced
+     and answers `resend: "safe"` — and a resend is issued under a NEW request
+     id, so nothing on the host side would dedupe it against this attempt. */
+  const active = fixture("unanswered");
+  try {
+    const { operationId, deliveryId } = acceptSend(active, {
+      clientMessageId: "unanswered-key",
+      text: "restart the deployment",
+    });
+    const unanswered = unansweringHost(active.generationId);
+
+    await new StructuredDeliveryQueue(
+      stalePortFor(active, operationId, "unanswered-key", "restart the deployment"),
+      () => unanswered.host,
+    ).drain();
+
+    expect(unanswered.received).toEqual(["restart the deployment"]);
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("uncertain");
+    expect(await active.journal.effectBatch(100, ["runtime.send"])).toEqual([]);
+
+    const report = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(report.settled).toMatchObject([{ operationId, deliveryId, state: "failed", duplicateRisk: true }]);
+    const receipt = receiptOf(active, operationId);
+    expect(receipt?.reason).toBe(SEND_UNVERIFIED_REASON);
+    expect(receipt?.duplicateRisk).toBe(true);
+    expect(receipt?.resend).toBe("verify-first");
+
+    /* And the same fence: a fresh request under the key replays the settled
+       answer, and a queue handed the stale effect delivers nothing. */
+    const replay = active.journal.executeOperation({
+      kind: "send",
+      operationId,
+      conversationId: active.conversationId,
+      idempotencyKey: "unanswered-key",
+      text: "restart the deployment",
+      policy: "queue",
+    });
+    expect(replay.receipt.status).toBe("uncertain");
+    const survivor = recordingHost(active.generationId);
+    await new StructuredDeliveryQueue(
+      stalePortFor(active, operationId, "unanswered-key", "restart the deployment"),
+      () => survivor.host,
+    ).drain().catch(() => undefined);
+    expect(survivor.received).toEqual([]);
+  } finally {
+    active.close();
+  }
+});
+
 test("permanent runtime loss then recovery ends in one terminal receipt and no late delivery", async () => {
   /* The executor was killed after it handed the send to the engine, so the
      journal is left holding `delivering` and the effect is still in the outbox.

@@ -413,7 +413,7 @@ test("a retained successful-kill boundary fences only earlier operations", async
   ]);
 });
 
-test("structured delivery surfaces a host actuation failure", async () => {
+test("a host that cannot answer for a send it was handed settles it unverified", async () => {
   const transitions: Array<[string, string, string | null | undefined]> = [];
   const port: StructuredDeliveryQueuePort = {
     effects: async () => [{
@@ -432,9 +432,15 @@ test("structured delivery surfaces a host actuation failure", async () => {
 
   await queue.drain();
 
+  /* The send was already in the host's hands when the write threw, and a live
+     host proves nothing about it either: the confirmed-delivery record that
+     could have said is the very thing this call failed to get. `failed` is what
+     the receipt reads as fenced and answers `resend: "safe"` — and a resend
+     goes out under a new request id, which nothing on the host side would
+     dedupe against this attempt — so the fate is recorded as unknown (#1131). */
   expect(transitions).toEqual([
     ["op-failed", "delivering", undefined],
-    ["op-failed", "failed", "engine write failed"],
+    ["op-failed", "uncertain", "delivery was started and the structured host did not answer; whether it reached the recipient is unverified: engine write failed"],
   ]);
 });
 
@@ -706,9 +712,15 @@ test("an image effect reaches the host when capability discovery is still pendin
   await queue.drain();
 
   expect(sends).toBe(1);
+  /* A capability the host refused by throwing is indistinguishable, from out
+     here, from a write that reached the engine and could not be confirmed —
+     `host.send` either returns a receipt or does not. So it settles unverified
+     too: one caller verification is the cheaper of the two errors, and the
+     alternative is telling them a resend is safe on a send that may have
+     landed (#1131). */
   expect(transitions).toEqual([
     ["op-image-probe", "delivering", undefined],
-    ["op-image-probe", "failed", "Codex image capability discovery is temporarily unavailable; retry shortly."],
+    ["op-image-probe", "uncertain", "delivery was started and the structured host did not answer; whether it reached the recipient is unverified: Codex image capability discovery is temporarily unavailable; retry shortly."],
   ]);
 });
 

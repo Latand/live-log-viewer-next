@@ -14,6 +14,7 @@ import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import type { EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
 import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
+import { sendReceiptFor } from "./sendSettlement";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -30,6 +31,10 @@ function journalPort(journal: RuntimeJournal, failDelivered = false): Structured
       if (failDelivered && status === "delivered") throw new Error("runtime stopped before confirmation commit");
       journal.transitionOperation(operationId, status, details);
     },
+    /* Wired exactly as `runtimeClientDeliveryPort` and the controller wire it,
+       so the durable receipt these tests recover through is the one production
+       reads (#1131). */
+    status: async (operationId) => journal.operationResult(operationId)?.receipt ?? null,
   };
 }
 
@@ -1210,7 +1215,7 @@ test("a failed kill projection retries through the coalesced drain and terminali
   }
 });
 
-test("a delivering entry resumes after restart through the host ledger without a second engine write", async () => {
+test("a delivering entry left by a dead executor settles unverified instead of being written again", async () => {
   const filename = path.join(sandbox, "events.sqlite");
   const ledger = createFakeDeliveryLedger();
   const firstJournal = new RuntimeJournal(filename, { structuredHosts: true });
@@ -1245,14 +1250,23 @@ test("a delivering entry resumes after restart through the host ledger without a
   expect(ledger.writes).toMatchObject([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   firstJournal.close();
 
+  /* The executor died between the engine write and the transition that would
+     have recorded it, so the durable receipt is stuck at `delivering` with the
+     effect still in the outbox. It used to be re-issued here and deduped by the
+     host's own ledger — which works only while a host that can read the thread
+     back is standing, and writes the message a second time when it is not. The
+     durable row is the fence instead (#1131): the recovered queue hands the
+     engine nothing and terminalizes the receipt unverified, so recovery after
+     an outage of any length produces one terminal answer and zero late
+     deliveries. */
   const reopenedJournal = new RuntimeJournal(filename, { structuredHosts: true });
   const recoveredHost = new FakeEngineHost(ledger);
   const recoveredQueue = new StructuredDeliveryQueue(journalPort(reopenedJournal), () => recoveredHost);
   await recoveredQueue.drain();
 
   expect(reopenedJournal.operationResult("operation-one")?.receipt).toMatchObject({
-    status: "delivered",
-    turnId: "turn:operation-one",
+    status: "uncertain",
+    reason: "delivery was started by an earlier executor; whether it reached the recipient is unverified",
   });
   expect(reopenedJournal.effectBatch()).toEqual([]);
   expect(ledger.writes).toMatchObject([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
@@ -2110,6 +2124,118 @@ test("queue binding settles an uncertain reservation from a terminal journal rec
     error: null,
   });
   await bindStructuredDeliveryQueue([], { registry, client: null });
+});
+
+test("a send its host could not answer for settles the reservation without waiting for a sweep", async () => {
+  /* #1131: the queue writes `uncertain` for a send that was handed to the
+     engine and never answered for. The reservation has to settle on that write
+     rather than resting `delivery-uncertain` until a settlement sweep notices —
+     terminality that needs nothing to be healthy beats terminality that needs a
+     runtime client and a tick. The record keeps WHY, so the receipt says the
+     fate is unknown instead of offering a resend that could deliver the
+     instruction a second time. */
+  const sessionId = "badc0ffe-1111-\x34111-8111-111111111111";
+  const directory = path.join(sandbox, "controller-unanswered-send-settles");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "unanswered-send-account",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-30T09:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "unanswered-send-account",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:unanswered-send-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const text = "hold the cutover until I say go";
+  const operationId = "operation-unanswered-send";
+  const held = registry.holdDelivery(
+    conversation.id,
+    text,
+    "unanswered-send-key",
+    "text",
+    [],
+    structuredContentDigest({ text, images: [] }),
+    { operationId, kind: "send", policy: "queue", turnId: null },
+  );
+  expect(registry.beginDeliveryAttempt(held.id, held.generationId!)?.state).toBe("delivery-uncertain");
+  const journal = new RuntimeJournal(path.join(directory, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId,
+    idempotencyKey: "unanswered-send-key",
+    conversationId: conversation.id,
+    text,
+    policy: "queue",
+  });
+  const client = runtimeJournalClient(journal);
+  /* Alive throughout: the host takes the instruction and the call that would
+     have confirmed it fails. Nothing out here can tell that from a refusal. */
+  const taken: string[] = [];
+  const host = new FakeEngineHost();
+  host.send = async (entry: QueueEntry) => {
+    taken.push(entry.text ?? "");
+    throw new Error("engine answer never arrived");
+  };
+
+  try {
+    await bindStructuredDeliveryQueue([{ key, host: observableFakeHost(host) }], { registry, client });
+    await waitForCondition(() => journal.operationResult(operationId)?.receipt.status === "uncertain");
+
+    expect(taken).toEqual([text]);
+    expect(journal.effectBatch()).toEqual([]);
+    /* Settled at the moment of the write, by the projection alone — no sweep
+       has run in this test and no runtime recovery was needed. */
+    const settled = registry.snapshot().heldDeliveries[held.id];
+    expect(settled?.state).toBe("failed");
+    expect(settled?.error).toContain("whether it reached the recipient is unverified");
+    const receipt = sendReceiptFor(registry.readOnlySnapshot(), operationId);
+    expect(receipt?.state).toBe("failed");
+    expect(receipt?.duplicateRisk).toBe(true);
+    expect(receipt?.resend).toBe("verify-first");
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
 });
 
 test("production backlog reconciliation publishes the controller before a historical status read settles", async () => {
