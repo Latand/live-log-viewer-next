@@ -1867,7 +1867,11 @@ function normalizeDeliveryOperationOwners(
     }
   }
   for (const delivery of Object.values(heldDeliveries)) {
-    if (delivery.command.operationId === delivery.id || !delivery.requestDigest) continue;
+    /* The same rule the compaction below applies: one row per accepted send,
+       including the ordinary one whose operation id its reservation generated
+       (#1131). Load and compaction have to agree, or a restart is what decides
+       whether a send is still queryable. */
+    if (!delivery.requestDigest) continue;
     owners[delivery.command.operationId] ??= {
       conversationId: delivery.conversationId,
       runtimeConversationId: delivery.runtimeConversationId,
@@ -1899,8 +1903,13 @@ function compactDeliveryOperationOwners(file: RegistryFile, onlyConversationId?:
     terminalGroups.set(canonicalId, group);
   }
   for (const owners of terminalGroups.values()) {
+    /* Newest first, and the rows that say a send MAY HAVE ARRIVED ahead of
+       them: those are the duplicate-send evidence an exact replay is answered
+       from, so within one bounded retention they are the last to go (#1131). */
     owners.sort(([leftId, left], [rightId, right]) =>
-      right.createdAt.localeCompare(left.createdAt) || rightId.localeCompare(leftId));
+      Number(right.terminalDisposition === "unverified") - Number(left.terminalDisposition === "unverified")
+      || right.createdAt.localeCompare(left.createdAt)
+      || rightId.localeCompare(leftId));
     for (const [operationId] of owners.slice(DELIVERY_OPERATION_OWNER_TERMINAL_LIMIT)) {
       delete file.deliveryOperationOwners[operationId];
     }
