@@ -970,3 +970,50 @@ test("a reconfigure that names no account never consults the binding record", as
   expect(commands).toMatchObject([{ kind: "reconfigure", model: "gpt-5.6-sol" }]);
   expect(accountProjectOverrides()).toEqual([]);
 });
+
+test("a reconfigure the structured host refuses records nothing", async () => {
+  /* The record used to be appended before the command was ever sent, so a
+     reconfigure the host refused still left an out-of-pool switch on the
+     project view — one that never happened, in a journal that only appends. */
+  const fixture = structuredConversation();
+  const project = projectForCwd(sandbox);
+  expect(bindAccountToProject("codex", ALLOWED_ACCOUNT, project!).ok).toBe(true);
+
+  const result = await switchAccount(fixture, OUTSIDE_ACCOUNT, [], {}, {
+    client: {
+      command: async () => { throw new Error("the structured host refused the reconfigure"); },
+    } as unknown as RuntimeHostClient,
+  });
+
+  expect(result).toMatchObject({ status: 503 });
+  expect((result as { body: Record<string, unknown> }).body).not.toHaveProperty("accountOverride");
+  expect(accountProjectOverrides()).toEqual([]);
+});
+
+test("a socket that fails after the host took the reconfigure attributes the switch it accepted", async () => {
+  /* The other side of the same rule: the durable receipt says the command was
+     accepted, so this is a switch that happened and the record describes it. */
+  const fixture = structuredConversation();
+  const project = projectForCwd(sandbox);
+  expect(bindAccountToProject("codex", ALLOWED_ACCOUNT, project!).ok).toBe(true);
+
+  const result = await switchAccount(fixture, OUTSIDE_ACCOUNT, [], {}, {
+    client: {
+      command: async () => { throw new RuntimeHostUnavailableError("runtime host request timed out"); },
+      operationStatus: async (operationId: string) => ({
+        operationId,
+        receipt: { operationId, status: "queued", conversationId: fixture.conversationId },
+        replayed: true,
+      }),
+    } as unknown as RuntimeHostClient,
+  });
+
+  expect(result).toMatchObject({
+    status: 202,
+    body: { accountOverride: { outsidePool: true, accountId: OUTSIDE_ACCOUNT, recorded: true } },
+  });
+  expect(accountProjectOverrides({ project })).toMatchObject([{
+    accountId: OUTSIDE_ACCOUNT,
+    via: "structured-reconfigure",
+  }]);
+});

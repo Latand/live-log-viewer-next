@@ -233,3 +233,54 @@ test("a binding on one project leaves another project's switch alone", async () 
   expect(outcome).toMatchObject({ ok: true, outcome: "pending" });
   expect(counters.ticks).toBe(1);
 });
+
+test("a switch that is refused records nothing", async () => {
+  /* Attribution used to be appended before the account was authenticated, the
+     reseat reserved or the switch dispatched, so a switch onto a signed-out
+     account left the project view showing an out-of-pool choice that never
+     happened — and an appending journal has no compensating delete. */
+  expect(bindAccountToProject("codex", RESERVED, FENCED_PROJECT).ok).toBe(true);
+  const { pathname, registry, entry } = scenario("07", FENCED_PROJECT);
+  const counters = { resolved: 0, ticks: 0 };
+
+  const outcome = await reconfigureConversation(
+    pathname,
+    { model: "gpt-5.6-sol", effort: "high", fast: false, accountId: OUTSIDE },
+    {
+      ...overrides(registry, entry, counters),
+      validateAccount: async () => { throw new Error("codex account requires authentication"); },
+    },
+  );
+
+  expect(outcome).toMatchObject({ ok: false, status: 409 });
+  /* Nothing moved, so there is nothing to attribute. */
+  expect(registry.conversationForPath(pathname)?.migration ?? null).toBeNull();
+  expect(counters.ticks).toBe(0);
+  expect(accountProjectOverrides()).toEqual([]);
+});
+
+test("a switch the journal could not record happens anyway, and the answer says it is not on record", async () => {
+  expect(bindAccountToProject("codex", RESERVED, FENCED_PROJECT).ok).toBe(true);
+  const { pathname, registry, entry } = scenario("08", FENCED_PROJECT);
+  /* Nothing can be appended at a pathname that is a directory. */
+  fs.mkdirSync(path.join(process.env.LLV_STATE_DIR!, "account-project-overrides.json"), { recursive: true });
+  const counters = { resolved: 0, ticks: 0 };
+
+  const outcome = await reconfigureConversation(
+    pathname,
+    { model: "gpt-5.6-sol", effort: "high", fast: false, accountId: OUTSIDE },
+    overrides(registry, entry, counters),
+  );
+
+  /* The gesture is the operator's and it is carried out. What fails is the
+     record, and the answer to the gesture is where that has to arrive: the
+     switch will not be visible in the project view afterwards. */
+  expect(outcome).toMatchObject({
+    ok: true,
+    outcome: "pending",
+    accountOverride: { outsidePool: true, accountId: OUTSIDE, recorded: false },
+  });
+  expect((outcome as { accountOverride: { recordFailure?: string } }).accountOverride.recordFailure).toBeTruthy();
+  expect(registry.conversationForPath(pathname)?.migration).toMatchObject({ targetId: OUTSIDE });
+  expect(counters.ticks).toBe(1);
+});

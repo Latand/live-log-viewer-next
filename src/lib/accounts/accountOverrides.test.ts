@@ -158,3 +158,20 @@ test("the journal is bounded, keeping the newest entries", () => {
   expect(stored).toHaveLength(200);
   expect(stored[0]?.at).toContain(".204Z");
 });
+
+test("a journal that cannot take the record says so, and still does not refuse the choice", () => {
+  expect(bindAccountToProject("claude", RESERVED, ATLAS).ok).toBe(true);
+  /* Nothing can be appended at a pathname that is a directory. */
+  fs.mkdirSync(JOURNAL, { recursive: true });
+
+  const notice = choice({ now: () => "2026-08-30T09:00:00.000Z" });
+
+  /* Both halves of the same rule. The switch stands, because a record that
+     would not write is not a decision anybody made — and the answer carries
+     the reason, because a choice the panel will never show is exactly what
+     this journal exists to prevent, so it cannot be reduced to a flag nobody
+     reads. */
+  expect(notice).toMatchObject({ outsidePool: true, accountId: OUTSIDE, reason: "outside-pool", recorded: false });
+  expect(notice?.recordFailure).toBeTruthy();
+  expect(accountProjectOverrides()).toEqual([]);
+});
