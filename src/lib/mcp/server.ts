@@ -1652,6 +1652,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "Answer what became of one accepted send, by the `operationId` `send_message` returned.",
     "`state` is `delivered`, `failed` or `in-flight`, read from the durable delivery record rather than from what the send call reported at the time. Every accepted send reaches `delivered` or `failed`; a send that was dropped ends as `failed`.",
     "`resend` says what is safe to do next: `not-needed` (it arrived), `safe` (it provably never executed and is fenced, so the same instruction may be sent again), or `verify-first` (`duplicateRisk` is true — delivery was started and never settled, so check the recipient before sending again).",
+    "A resend is a NEW `send_message` under a NEW `clientRequestId`: the settled operation is fenced, so repeating the original `clientRequestId` replays that settled answer instead of delivering anything.",
   ].join(" "),
   create_task: "Create a durable board task.",
   update_task: "Update a durable board task.",

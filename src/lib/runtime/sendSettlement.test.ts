@@ -524,3 +524,48 @@ test("an operation id nothing ever admitted is answered with nothing, not an inv
     active.close();
   }
 });
+
+test("the caller's own replay of a settled loss is answered with the settlement, never with a second delivery", async () => {
+  /* The fence proved against the OTHER way the same instruction could arrive
+     twice: not a stale executor, but the sender deciding to send it again. The
+     settled operation still owns its idempotency key, so an identical send is
+     answered with the settled receipt and admits no new effect — which is why
+     `resend: "safe"` means a NEW request id rather than a repeat of this one. */
+  const active = fixture("replayed");
+  try {
+    const { operationId } = acceptSend(active, {
+      clientMessageId: "replayed-key",
+      text: "resume the cutover",
+    });
+    await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(receiptOf(active, operationId)?.resend).toBe("safe");
+
+    const replay = active.journal.executeOperation({
+      kind: "send",
+      operationId,
+      conversationId: active.conversationId,
+      idempotencyKey: "replayed-key",
+      text: "resume the cutover",
+      policy: "queue",
+    });
+
+    expect(replay).toMatchObject({ operationId, replayed: true });
+    expect(replay.receipt.status).toBe("failed");
+    expect(replay.receipt.reason).toBe(SEND_LOST_REASON);
+    /* Nothing new to execute, and the queue that would execute it delivers
+       nothing when it is asked. */
+    expect(await active.journal.effectBatch(100, ["runtime.send"])).toEqual([]);
+    const { host, received } = recordingHost(active.generationId);
+    await new StructuredDeliveryQueue(
+      stalePortFor(active, operationId, "replayed-key", "resume the cutover"),
+      () => host,
+    ).drain().catch(() => undefined);
+    expect(received).toEqual([]);
+  } finally {
+    active.close();
+  }
+});
