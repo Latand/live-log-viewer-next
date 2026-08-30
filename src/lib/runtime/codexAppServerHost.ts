@@ -1050,7 +1050,9 @@ export class CodexAppServerHost implements EngineHost {
         return { state: "unavailable", reason };
       }
       if (reason.startsWith("Codex app-server request failed:")) {
-        return { state: "failed", reason };
+        return /(?:thread|conversation).*(?:not found|unknown|does not exist)/i.test(reason)
+          ? { state: "failed", reason }
+          : { state: "unavailable", reason };
       }
       throw error;
     }

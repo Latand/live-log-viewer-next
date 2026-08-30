@@ -1870,6 +1870,22 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("keeps a transient thread/read rejection inconclusive", async () => {
+    const server = new FakeAppServer("transient-materialization-thread");
+    server.readError = "service temporarily unavailable";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    await expect(host.sessionMaterializationEvidence("operation-transient")).resolves.toMatchObject({
+      state: "unavailable",
+      reason: expect.stringContaining("service temporarily unavailable"),
+    });
+    await host.release();
+  });
+
   test("confirms the persisted first message from thread/read materialization evidence", async () => {
     const server = new FakeAppServer("materialized-thread");
     const host = await CodexAppServerHost.start({

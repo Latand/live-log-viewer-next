@@ -204,6 +204,8 @@ function isTerminalReap(value: unknown): value is PipelineTerminalReap {
   return Number.isInteger(reap.rounds) && (reap.rounds as number) >= 0
     && Number.isInteger(reap.stopped) && (reap.stopped as number) >= 0
     && typeof reap.lastAt === "string"
+    && (reap.settledAttempts === undefined
+      || (Array.isArray(reap.settledAttempts) && reap.settledAttempts.every((key) => typeof key === "string")))
     && isNullableString(reap.settledAt);
 }
 
@@ -511,6 +513,12 @@ export function planPipelineStateMigration(): {
     run, attempt, cursor rows), so cached records stay pristine while callers
     receive independently mutable structures. Deep config leaves are shared. */
 function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
+  const settledAttempts = pipeline.terminalReap?.settledAttempts
+    ?? (pipeline.terminalReap?.settledAt
+      ? pipeline.runs.flatMap((run) => run.attempts
+          .filter((attempt) => Boolean(attempt.verdict || attempt.completedAt))
+          .map((attempt) => `${run.stageId}:${attempt.n}`))
+      : []);
   return {
     ...pipeline,
     project: canonicalProject(pipeline.project),
@@ -530,7 +538,9 @@ function reviveLoadedPipeline(pipeline: Pipeline): Pipeline {
     unconfirmedHosts: pipeline.unconfirmedHosts?.length
       ? pipeline.unconfirmedHosts.map((host) => ({ ...host }))
       : undefined,
-    terminalReap: pipeline.terminalReap ? { ...pipeline.terminalReap } : undefined,
+    terminalReap: pipeline.terminalReap
+      ? { ...pipeline.terminalReap, settledAttempts: [...settledAttempts] }
+      : undefined,
     restored: undefined,
     stages: pipeline.stages.map((stage) => ({ ...stage, onFail: stage.onFail ?? null })),
     cursor: pipeline.cursor

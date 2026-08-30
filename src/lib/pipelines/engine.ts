@@ -2573,41 +2573,53 @@ async function reconcileUnconfirmedHosts(pipeline: Pipeline, ports: PipelinePort
     inside the pipelines transaction, so a slow host defers the rest of its
     pipeline's candidates to the next tick instead of stalling every mutation. */
 const TERMINAL_REAP_BUDGET_MS = 5_000;
-/** Sweeps one pipeline's terminal reap may spend before surfacing survivors. */
+/** Sweeps one finished-attempt batch may spend before surfacing survivors. */
 const TERMINAL_REAP_MAX_ROUNDS = 5;
 
 /**
- * Reaps a completed pipeline's finished stage hosts (#574).
+ * Reaps finished stage hosts as soon as their attempt is terminal (#574, #1123).
  *
- * advancePipeline marks the pipeline completed the moment its last stage
- * passes, but nothing stopped the hosts its stages left behind: every finished
- * builder kept an idle resume process resident on a paid quota, and a machine
- * running many pipelines accumulated hundreds of them. A close tears hosts
- * down (#670); completion now does the same, through the identical
- * identity-verified control path, with `closed` staying the close action's job
- * so an operator's acknowledge decision is never overridden by a later sweep.
+ * A stage may finish long before the pipeline: on a pass edge, a bounded repair
+ * loop, or a parked decision. Waiting for whole-pipeline completion left each
+ * finished host resident. The reap therefore follows attempt evidence through
+ * the same identity-verified control path while `closed` stays the explicit
+ * close action's job.
  *
  * Only hosts whose attempt finished its turn (a verdict or a completion stamp)
  * are candidates, and the runtime gets the last word: a conversation it
  * reports actively running is preserved, as are the pipeline's creator
- * conversation and transcript. The sweep is bounded twice — a per-sweep budget
- * so the transaction cannot stall behind slow kills, and a durable round
- * ceiling so a host that will not die becomes a visible unconfirmed host
- * (retired by reconcileUnconfirmedHosts once it is demonstrably gone) instead
- * of receiving a kill on every tick forever.
+ * conversation and transcript. Settled attempt keys make this incremental: a
+ * later terminal round opens another bounded batch without re-killing an older
+ * host. The per-sweep budget protects the transaction, and the durable round
+ * ceiling turns a survivor into a visible unconfirmed host.
  */
 async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePorts): Promise<boolean> {
-  if (pipeline.state !== "completed" || pipeline.terminalReap?.settledAt) return false;
-  const reap: PipelineTerminalReap = pipeline.terminalReap
-    ?? { rounds: 0, stopped: 0, lastAt: ports.now(), settledAt: null };
-  const deadline = ports.monotonicNow() + TERMINAL_REAP_BUDGET_MS;
+  if (!["running", "needs_decision", "paused", "completed"].includes(pipeline.state)) return false;
+  const settledAttempts = new Set(pipeline.terminalReap?.settledAttempts ?? []);
+  const unconfirmedAttempts = new Set((pipeline.unconfirmedHosts ?? [])
+    .map((host) => `${host.stageId}:${host.attempt}`));
   const candidates = launchedStageHosts(pipeline).filter(({ target, turnSettled }) => turnSettled
     && !(target.conversationId && target.conversationId === pipeline.srcConversationId)
-    && !(target.agentPath && target.agentPath === pipeline.srcPath));
+    && !(target.agentPath && target.agentPath === pipeline.srcPath)
+    && !settledAttempts.has(`${target.stageId}:${target.attempt}`)
+    && !unconfirmedAttempts.has(`${target.stageId}:${target.attempt}`));
+  if (candidates.length === 0) return false;
+
+  const prior = pipeline.terminalReap;
+  const reap: PipelineTerminalReap = prior
+    ? {
+        ...prior,
+        rounds: prior.settledAt ? 0 : prior.rounds,
+        settledAttempts: [...settledAttempts],
+        settledAt: null,
+      }
+    : { rounds: 0, stopped: 0, lastAt: ports.now(), settledAttempts: [], settledAt: null };
+  const deadline = ports.monotonicNow() + TERMINAL_REAP_BUDGET_MS;
   const survivors: Array<PipelineStageHostRef & { operationId: string | null; detail: string }> = [];
   let attempted = false;
   let deferred = false;
   for (const [index, { target }] of candidates.entries()) {
+    const attemptKey = `${target.stageId}:${target.attempt}`;
     if (ports.monotonicNow() >= deadline) {
       deferred = true;
       /* Normally the next sweep picks these up; recorded here so that a reap
@@ -2622,18 +2634,28 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
       }
       break;
     }
-    if (!(await ports.stageHostResident(target))) continue;
+    if (!(await ports.stageHostResident(target))) {
+      settledAttempts.add(attemptKey);
+      continue;
+    }
     /* The attempt's own evidence says its turn ended, but a host the runtime
        still reports mid-turn (an adopted helper on a fresh turn) is live work,
        so it stays; the idle-TTL reaper owns it from here. */
-    if (target.conversationId && await ports.conversationAgentActive(target.conversationId) === true) continue;
+    if (target.conversationId && await ports.conversationAgentActive(target.conversationId) === true) {
+      settledAttempts.add(attemptKey);
+      continue;
+    }
     attempted = true;
     const result = await ports.stopStageAgent(target);
-    if (result.outcome === "stopped") reap.stopped += 1;
+    if (result.outcome === "stopped") {
+      reap.stopped += 1;
+      settledAttempts.add(attemptKey);
+    }
     else if (result.outcome === "unconfirmed") survivors.push({ ...target, operationId: result.operationId, detail: result.detail });
     else if (result.outcome === "failed") survivors.push({ ...target, operationId: null, detail: result.error });
   }
   reap.lastAt = ports.now();
+  reap.settledAttempts = [...settledAttempts];
   if (attempted || deferred) reap.rounds += 1;
   const clean = !deferred && survivors.length === 0;
   if (clean || reap.rounds >= TERMINAL_REAP_MAX_ROUNDS) {
