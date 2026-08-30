@@ -3589,6 +3589,19 @@ export async function patchPipeline(
         const taskLinkError = pipelineTaskLinkError({ project }, pipeline.taskIds, loadTasks(), { allowMissing: true });
         if (taskLinkError) return { error: taskLinkError, status: 400 };
       }
+      /* #1279: the allowed set travels with the PROJECT, not with the plan, so
+         a move re-reads the binding exactly as create does. A pin that was
+         legal where the draft was written can be illegal where it lands, and
+         refusing here is what keeps the create-time reading true of every
+         stored draft — the alternative is a draft the launch can only ever
+         park, discovered later. Read before any field is assigned, so a
+         refusal leaves the draft where it was rather than half-moved. */
+      if (project !== pipeline.project) {
+        const movedAccountViolations = stageAccountViolations(pipeline.stages, project, ports);
+        if (movedAccountViolations.length) {
+          return { error: pipelineValidationError(movedAccountViolations), violations: movedAccountViolations, status: 400 };
+        }
+      }
       pipeline.task = task;
       if (spec) pipeline.spec = spec;
       else delete pipeline.spec;

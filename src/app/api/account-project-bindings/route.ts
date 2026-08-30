@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
-import { conversationProjectKey } from "@/lib/accounts/conversationProject";
 import {
   accountProjectRows,
+  carrierConversations,
   carryingAccountIds,
   projectEngineAccounts,
   type BoundAccount,
@@ -17,7 +17,9 @@ import {
   type BindingEngine,
 } from "@/lib/accounts/projectBindings";
 import { agentRegistry } from "@/lib/agent/registry";
+import { headCwd } from "@/lib/agent/transcript";
 import { canonicalProject, projectAliasSnapshot } from "@/lib/projects/aliases";
+import { projectForCwd } from "@/lib/scanner/describe";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
 export const runtime = "nodejs";
@@ -33,32 +35,44 @@ function accountsFor(engine: BindingEngine): BoundAccount[] {
 
 /**
  * Every registered conversation reduced to the carrier shape, each one keyed to
- * its project by the same resolution the reseat fence uses.
+ * its project by the same resolution the reseat fence uses — fallback included,
+ * so an ADOPTED conversation (empty launch profile) is still attributed to the
+ * project it is carrying work for instead of dropping out of the view.
  */
-function carrierConversations(): CarrierConversation[] {
+function carriers(): CarrierConversation[] {
   const snapshot = agentRegistry().readOnlySnapshot();
-  return Object.values(snapshot.conversations).flatMap((conversation) => {
-    const generation = conversation.generations.at(-1);
-    if (!generation) return [];
-    return [{
-      engine: conversation.engine,
-      project: conversationProjectKey(conversation.projectOwnership, generation.launchProfile),
-      accountId: generation.accountId,
-      busy: conversation.turn.state === "busy",
-    }];
-  });
+  return carrierConversations(
+    Object.values(snapshot.conversations).flatMap((conversation) => {
+      const generation = conversation.generations.at(-1);
+      if (!generation) return [];
+      return [{
+        engine: conversation.engine,
+        busy: conversation.turn.state === "busy",
+        accountId: generation.accountId,
+        ownership: conversation.projectOwnership,
+        launchProfile: generation.launchProfile,
+        path: generation.path,
+      }];
+    }),
+    /* Only reached for a conversation that names no project of its own, and
+       only for the busy ones — see carrierConversations. */
+    (transcript) => {
+      const cwd = headCwd(transcript);
+      return cwd ? projectForCwd(cwd) : null;
+    },
+  );
 }
 
 function projectView(project: string) {
   const bindings = accountProjectBindings();
-  const carriers = carrierConversations();
+  const carrying = carriers();
   const displayNames = projectAliasSnapshot().displayNames;
   return {
     project,
     projectName: displayNames[project] ?? project,
     engines: Object.fromEntries(ENGINES.map((engine) => [
       engine,
-      projectEngineAccounts(project, engine, accountsFor(engine), bindings, carryingAccountIds(carriers, project, engine)),
+      projectEngineAccounts(project, engine, accountsFor(engine), bindings, carryingAccountIds(carrying, project, engine)),
     ])),
     bindings: bindings.filter((binding) => binding.project === project),
   };

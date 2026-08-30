@@ -33,6 +33,25 @@ function portsAllowing(allowed: string[] | null): PipelinePorts {
   };
 }
 
+/* Two projects with different allowed sets, so a draft can be moved between
+   them: ATLAS reserves one account, NEBULA reserves the other. */
+const NEBULA = "project-nebula";
+const VEGA = "project-vega";
+const OTHER_REPO = path.join(sandbox, "repo-other");
+const SHARED_REPO = path.join(sandbox, "repo-shared");
+for (const dir of [OTHER_REPO, SHARED_REPO]) fs.mkdirSync(dir, { recursive: true });
+const PROJECT_BY_REPO: Record<string, string> = { [REPO]: ATLAS, [OTHER_REPO]: NEBULA, [SHARED_REPO]: VEGA };
+const ALLOWED_BY_PROJECT: Record<string, string[]> = { [ATLAS]: [RESERVED], [NEBULA]: [SPARE], [VEGA]: [RESERVED, SPARE] };
+
+function portsAcross(): PipelinePorts {
+  return {
+    ...defaultPipelinePorts(),
+    preflightRepo: (repoDir: string) => ({ ok: true, repoDir, gitCommonDir: path.join(repoDir, ".git"), worktreeParent: sandbox }),
+    projectForCwd: (cwd: string) => PROJECT_BY_REPO[cwd] ?? ATLAS,
+    allowedAccountIds: (project: string) => ALLOWED_BY_PROJECT[project] ?? null,
+  };
+}
+
 function draft(account?: string | null) {
   return {
     task: "Bind accounts to projects",
@@ -135,6 +154,45 @@ test("add-stage refuses a stage whose account the project forbids", async () => 
   }, portsAllowing([RESERVED]));
   expect(accepted.error).toBeUndefined();
   expect(accepted.pipeline?.stages.map((stage) => stage.account)).toEqual([undefined, RESERVED]);
+});
+
+/* Moving a draft to another repository moves it to another PROJECT, and the
+   allowed set travels with the project rather than with the plan. A pin that
+   was legal where the draft was written can be illegal where it lands, so the
+   same reading that refuses it at create runs again here — otherwise a draft
+   the launch will only ever park becomes the operator's to discover later. */
+test("update-draft re-reads the binding when a draft moves to another project", async () => {
+  const created = await createPipelineFromRequest(draft(RESERVED), portsAcross(), {
+    allowOperatorDraftWithoutLineage: true,
+  });
+  const id = created.pipeline?.id;
+  if (!id) throw new Error(`draft was not created: ${created.error}`);
+
+  const refused = await patchPipeline(id, { action: "update-draft", repoDir: OTHER_REPO }, portsAcross());
+  expect(refused.status).toBe(400);
+  expect(refused.error).toContain(RESERVED);
+  expect(refused.error).toContain(NEBULA);
+  expect(refused.violations?.[0]?.field).toBe("stages[0].account");
+
+  /* Refused means the move did not half-apply: the draft is still the project
+     and repository it was, with the pin the binding there still allows. */
+  const unmoved = await patchPipeline(id, { action: "update-draft", task: "Bind accounts to projects" }, portsAcross());
+  expect(unmoved.pipeline?.project).toBe(ATLAS);
+  expect(unmoved.pipeline?.repoDir).toBe(REPO);
+  expect(unmoved.pipeline?.stages[0]?.account).toBe(RESERVED);
+});
+
+test("update-draft moves a draft whose pin the destination project allows", async () => {
+  const created = await createPipelineFromRequest(draft(RESERVED), portsAcross(), {
+    allowOperatorDraftWithoutLineage: true,
+  });
+  const id = created.pipeline?.id;
+  if (!id) throw new Error(`draft was not created: ${created.error}`);
+
+  const moved = await patchPipeline(id, { action: "update-draft", repoDir: SHARED_REPO }, portsAcross());
+  expect(moved.error).toBeUndefined();
+  expect(moved.pipeline?.project).toBe(VEGA);
+  expect(moved.pipeline?.stages[0]?.account).toBe(RESERVED);
 });
 
 /* The launch seam itself. A refusal here is what parks the stage with the

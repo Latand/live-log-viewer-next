@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   accountProjectRows,
+  carrierConversations,
   carryingAccountIds,
   projectEngineAccounts,
 } from "./projectAccountsView";
@@ -60,4 +61,50 @@ test("the accounts side names the projects one account is bound to, with display
     { project: BEACON, displayName: BEACON },
   ]);
   expect(accountProjectRows("claude", "acct-unbound", bindings)).toEqual([]);
+});
+
+/* The carrier projection resolves a conversation's project the same way the
+   fence does. An ADOPTED conversation carries an empty launch profile, so a
+   resolution that read only ownership and profile would answer null for it and
+   the account actually carrying the project's work would never be marked —
+   the display-side form of the hole the fence seams pass a fallback to close. */
+const ADOPTED_TRANSCRIPT = "/transcripts/adopted.jsonl";
+
+function source(overrides: Partial<Parameters<typeof carrierConversations>[0][number]> = {}) {
+  return {
+    engine: "claude" as const,
+    busy: true,
+    accountId: RESERVED,
+    ownership: null,
+    launchProfile: { project: null, cwd: null },
+    path: ADOPTED_TRANSCRIPT,
+    ...overrides,
+  };
+}
+
+test("an adopted conversation's carrier is recovered from its transcript cwd", () => {
+  const carriers = carrierConversations([source()], (transcript) =>
+    (transcript === ADOPTED_TRANSCRIPT ? ATLAS : null));
+  expect(carriers).toEqual([{ engine: "claude", project: ATLAS, accountId: RESERVED, busy: true }]);
+  expect(carryingAccountIds(carriers, ATLAS, "claude")).toEqual([RESERVED]);
+});
+
+test("only a busy conversation with an account is a carrier, and only it costs a transcript read", () => {
+  const read: string[] = [];
+  const carriers = carrierConversations(
+    [source({ busy: false }), source({ accountId: null }), source({ path: "/transcripts/live.jsonl" })],
+    (transcript) => { read.push(transcript); return ATLAS; },
+  );
+  expect(carriers.map((carrier) => carrier.accountId)).toEqual([RESERVED]);
+  expect(read).toEqual(["/transcripts/live.jsonl"]);
+});
+
+test("a conversation that names its own project never pays for a transcript read", () => {
+  const read: string[] = [];
+  const carriers = carrierConversations(
+    [source({ ownership: { project: BEACON } })],
+    (transcript) => { read.push(transcript); return ATLAS; },
+  );
+  expect(carriers[0]?.project).toBe(BEACON);
+  expect(read).toEqual([]);
 });

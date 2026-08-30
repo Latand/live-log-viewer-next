@@ -1,3 +1,4 @@
+import { conversationProjectKey } from "./conversationProject";
 import {
   allowedAccountIdsForProject,
   projectsForAccount,
@@ -32,6 +33,54 @@ export interface CarrierConversation {
   project: string | null;
   accountId: string | null;
   busy: boolean;
+}
+
+/** A registered conversation, reduced to what the carrier projection reads. */
+export interface CarrierSource {
+  engine: BindingEngine;
+  busy: boolean;
+  accountId: string | null;
+  ownership: { project?: string | null } | null | undefined;
+  launchProfile: { project?: string | null; cwd?: string | null } | null | undefined;
+  /** Transcript path, read only to recover an adopted conversation's cwd. */
+  path: string;
+}
+
+/**
+ * Registered conversations reduced to carriers, keyed to their project by the
+ * same resolution the fence uses.
+ *
+ * `projectForTranscript` is the fallback, and it is here for the reason it is
+ * at every fence seam: an ADOPTED conversation carries an EMPTY launch profile
+ * — no project, no cwd — so a resolution reading only ownership and profile
+ * answers null for it, and the account actually carrying the project's work
+ * would silently never be marked. The display side has to resolve a project as
+ * carefully as the refusal side does, or it under-reports exactly the sessions
+ * an operator opens this strip to understand.
+ *
+ * Only a BUSY conversation with an account can carry anything, so those are the
+ * only ones whose project is resolved at all — the fallback reads a transcript
+ * head, and paying that per open turn instead of per known conversation is what
+ * keeps this cheap on a registry with a long history.
+ */
+export function carrierConversations(
+  sources: readonly CarrierSource[],
+  projectForTranscript: (transcript: string) => string | null,
+): CarrierConversation[] {
+  return sources.flatMap((source) => {
+    if (!source.busy || !source.accountId) return [];
+    return [{
+      engine: source.engine,
+      project: conversationProjectKey(source.ownership, source.launchProfile, {
+        /* A getter, so conversationProjectKey's own ordering decides whether the
+           read happens at all: a conversation that names its project never
+           reaches the transcript. */
+        get project() { return projectForTranscript(source.path); },
+      }),
+      accountId: source.accountId,
+      busy: true,
+    }];
+  });
 }
 
 /** Accounts with an open turn on this project's work, in id order. */
