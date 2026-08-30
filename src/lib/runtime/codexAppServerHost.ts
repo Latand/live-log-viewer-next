@@ -43,6 +43,7 @@ import type {
 import {
   normalizeQueueEntry,
   RuntimeReplayGapError,
+  type SessionMaterializationEvidence,
   StructuredCompactError,
   StructuredHostAdoptionCleanupError,
 } from "./engineHost";
@@ -1028,6 +1029,72 @@ export class CodexAppServerHost implements EngineHost {
     this.activeTurnId = turnId;
     this.notifyStateListeners();
     return this.awaitDeliveryConfirmation(entry, { outcome: "turn-started", turnId });
+  }
+
+  async sessionMaterializationEvidence(clientMessageId: string): Promise<SessionMaterializationEvidence> {
+    let result: unknown;
+    try {
+      result = await this.rpc("thread/read", {
+        threadId: this.identity.threadId,
+        includeTurns: true,
+      });
+    } catch (error) {
+      const reason = safeError(error);
+      if (/not materialized yet/i.test(reason) && /before first user message/i.test(reason)) {
+        const confirmed = this.confirmedDeliveries.get(clientMessageId);
+        const turnId = confirmed?.receipt.outcome !== "rejected"
+          ? confirmed?.receipt.turnId ?? null
+          : null;
+        const terminal = turnId
+          ? this.events.findLast((event): event is Extract<RuntimeEvent, { kind: "turn-ended" }> =>
+            event.kind === "turn-ended" && event.turnId === turnId)
+          : null;
+        /* Fresh Codex threads are in-memory placeholders until their first
+           turn persists a rollout. During a live turn this response is a
+           pending state. Once that same turn has ended, the app-server has
+           supplied the decisive contradiction: it accepted and completed the
+           first message while its session store still has no first message. */
+        if (terminal) {
+          return {
+            state: "failed",
+            reason: terminal.status === "completed"
+              ? "Codex app-server completed the confirmed first turn without materializing its session"
+              : `Codex app-server ended the confirmed first turn as ${terminal.status} without materializing its session`,
+          };
+        }
+        return {
+          state: "absent",
+          reason: "Codex app-server has not materialized the confirmed first message yet",
+        };
+      }
+      if (/thread\/read timed out/i.test(reason)) {
+        return { state: "unavailable", reason };
+      }
+      if (reason.startsWith("Codex app-server request failed:")) {
+        return /(?:thread|conversation).*(?:not found|unknown|does not exist)/i.test(reason)
+          ? { state: "failed", reason }
+          : { state: "unavailable", reason };
+      }
+      throw error;
+    }
+    let persistedIdentity: CodexThreadIdentity;
+    try {
+      persistedIdentity = threadFromResult(result, "thread/read");
+    } catch (error) {
+      return { state: "failed", reason: safeError(error) };
+    }
+    if (persistedIdentity.threadId !== this.identity.threadId) {
+      return { state: "failed", reason: "Codex app-server read back a different session identity" };
+    }
+    if (!persistedIdentity.path || persistedIdentity.path !== this.identity.path) {
+      return { state: "failed", reason: "Codex app-server did not confirm the canonical transcript path" };
+    }
+    const persistedFirstMessage = resumedTurns(result).some((turn) =>
+      Array.isArray(turn.items)
+      && turn.items.some((item) => stringField(item, "clientId") === clientMessageId));
+    return persistedFirstMessage
+      ? { state: "materialized" }
+      : { state: "absent", reason: "Codex app-server did not read back the confirmed first message" };
   }
 
   async interrupt(turnRef: string): Promise<void> {

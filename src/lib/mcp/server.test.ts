@@ -1578,6 +1578,7 @@ describe("MCP tool service", () => {
         "list_conversations",
         "search_transcripts",
         "get_conversation",
+        "conversation_messages",
         "deploy_exact_sha",
         "get_pipeline",
         "board_snapshot",

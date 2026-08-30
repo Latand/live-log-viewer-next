@@ -3,6 +3,7 @@ import net from "node:net";
 import path from "node:path";
 
 import type { RuntimeSocketRequest, RuntimeSocketResponse } from "@/lib/runtime/contracts";
+import { isNamedPipePath } from "@/lib/runtime/localEndpoint";
 
 import type { RuntimeHost } from "./host";
 import { PreserializedJson } from "./preserializedJson";
@@ -22,7 +23,16 @@ export interface RuntimeHostSocketOptions {
 
 export type RuntimeHostSocketHandler = Pick<RuntimeHost, "handle">;
 
-/** Newline-framed local protocol. It intentionally binds a Unix path only. */
+/**
+ * Newline-framed local protocol over one local endpoint: a Unix socket path on
+ * POSIX, a Windows named pipe (`\\.\pipe\…`) on win32. It never binds a TCP
+ * port. The filesystem preparation — creating the parent directory, unlinking a
+ * stale inode, tightening the mode once bound — belongs to the socket-path form
+ * only; a pipe name lives in the kernel's pipe namespace, has no parent
+ * directory and no mode, and its name disappears with the last handle. That
+ * difference in access control is documented rather than emulated: see
+ * `localEndpoint.ts`.
+ */
 export function serveRuntimeHost(socketPath: string, host: RuntimeHostSocketHandler, options: RuntimeHostSocketOptions = {}): net.Server {
   const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_SOCKET_TIMEOUT_MS;
   const deploymentTimeoutMs = options.deploymentTimeoutMs ?? DEPLOYMENT_SOCKET_TIMEOUT_MS;
@@ -34,8 +44,11 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHostSocketHand
   if (!Number.isSafeInteger(maxWaitConnections) || maxWaitConnections < 1 || maxWaitConnections >= maxConnections) {
     throw new Error("runtime socket maxWaitConnections must reserve at least one command connection");
   }
-  fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
-  try { fs.unlinkSync(socketPath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const namedPipe = isNamedPipePath(socketPath);
+  if (!namedPipe) {
+    fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
+    try { fs.unlinkSync(socketPath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
   let activeWaitConnections = 0;
   const server = net.createServer((socket) => {
     /* #1254: a peer that goes away mid-frame is a connection event, and the
@@ -106,7 +119,7 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHostSocketHand
   // The remaining slots keep snapshot, control, and deployment traffic
   // admissible while total file descriptors and journal waiters stay bounded.
   server.maxConnections = maxConnections;
-  server.once("listening", () => fs.chmodSync(socketPath, 0o600));
+  if (!namedPipe) server.once("listening", () => fs.chmodSync(socketPath, 0o600));
   server.listen(socketPath);
   return server;
 }

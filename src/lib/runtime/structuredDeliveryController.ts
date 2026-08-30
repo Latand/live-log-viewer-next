@@ -71,6 +71,7 @@ interface ControllerState {
   terminateActiveHost: ((key: SessionKey, expected?: Readonly<ProcessIdentity>) => Promise<boolean>) | null;
   completeActive: ((adopted: readonly StructuredDeliveryHost[]) => Promise<void>) | null;
   stopActive: () => void;
+  lastDrainError?: string | null;
   /* Distinguishes "this process hosts the controller and is between
      publications" from "this process never hosted one at all" (#1191). */
   everPublished?: boolean;
@@ -87,6 +88,7 @@ const state: ControllerState = controllerStore.__llvStructuredDeliveryController
   terminateActiveHost: null,
   completeActive: null,
   stopActive: () => {},
+  lastDrainError: null,
   everPublished: false,
 };
 
@@ -505,6 +507,10 @@ export async function bindStructuredDeliveryQueue(
       drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;
     } catch (error) {
       if (stopped) return;
+      if (state.activeQueue === queue) {
+        const message = error instanceof Error ? error.message : String(error);
+        state.lastDrainError = (message.trim() || "structured delivery drain failed").slice(0, 240);
+      }
       const retryMs = drainBackoffMs;
       const retryScheduled = scheduleDrain(retryMs);
       if (retryScheduled) {
@@ -1048,6 +1054,10 @@ export function hasStructuredDeliveryHost(key: SessionKey): boolean {
 export function structuredDeliveryHostForConversation(conversationId: string): EngineHost | null {
   if (!conversationId.startsWith("conversation_") || !state.activeRegistry || !state.activeHosts) return null;
   return hostResolver(state.activeRegistry, state.activeHosts)(conversationId);
+}
+
+export function structuredDeliveryLastError(conversationId: string): string | null {
+  return state.activeQueue?.lastTargetError(conversationId) ?? state.lastDrainError ?? null;
 }
 
 export async function publishStructuredDeliveryHost(

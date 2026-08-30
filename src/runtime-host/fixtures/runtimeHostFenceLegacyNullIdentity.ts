@@ -3,6 +3,8 @@ import net from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { testEndpoint } from "./testEndpoint";
+
 const [role, hostModule, procModule, fenceFilename, sandbox] = process.argv.slice(2);
 if (!role || !hostModule || !procModule || !fenceFilename || !sandbox) {
   throw new Error("legacy runtime host fence fixture arguments are required");
@@ -22,7 +24,7 @@ if (role === "owner") {
     pid: process.pid,
     startIdentity: "legacy-owner-start",
   }), { mode: 0o600 });
-  const listenerFilename = path.join(sandbox, "listener-owner.sock");
+  const listenerFilename = testEndpoint(sandbox, "listener-owner");
   const server = net.createServer((socket) => socket.end("owner"));
   try {
     await new Promise<void>((resolve, reject) => {
@@ -42,7 +44,7 @@ if (role === "owner") {
   let server: net.Server | null = null;
   try {
     fence.acquire();
-    const listenerFilename = path.join(sandbox, "listener-contender.sock");
+    const listenerFilename = testEndpoint(sandbox, "listener-contender");
     server = net.createServer((socket) => socket.end("contender"));
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);

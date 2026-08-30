@@ -57,14 +57,14 @@ need any of it.
 Each project is a pannable, zoomable scheme — root conversations on top,
 spawned agents one generation below, arrows colored by engine. Draft a new
 agent right on the board: pick Claude or Codex, a model and reasoning effort,
-type the first prompt, and it launches into tmux.
+type the first prompt, and it launches.
 
 ![Drafting and configuring a new agent on the project board](docs/media/spawn-agent.gif)
 
 ### Run implement → review loops
 
-The viewer orchestrates review cycles: a long-lived implementer in tmux, a
-fresh read-only reviewer each round over the full diff, findings relayed
+The viewer orchestrates review cycles: a long-lived implementer, a fresh
+read-only reviewer each round over the full diff, findings relayed
 automatically, and a verdict deck in the scheme view.
 
 ![A review loop: round 1 requested changes, round 2 re-checks live](docs/media/review-loop.gif)
@@ -72,8 +72,8 @@ automatically, and a verdict deck in the scheme view.
 ### Answer a blocked agent from the browser
 
 When an agent stops on an `AskUserQuestion`, the question surfaces as a card
-with clickable options. The answer is delivered into the agent's tmux pane and
-confirmed against the transcript — the agent just keeps going.
+with clickable options. The answer is delivered to the agent and confirmed
+against the transcript — the agent just keeps going.
 
 ![Answering a pending AskUserQuestion from the feed](docs/media/pending-question.gif)
 
@@ -277,6 +277,14 @@ scripts/rebuild.sh
 LLV_TEST_PORT=8901 docker compose --profile test up -d viewer-test
 ```
 
+`scripts/rebuild.sh` is the whole release command, run from any checkout of the
+repository — a worktree included — with nothing wrapping it and no `git pull`
+first. It posts a revision to the runtime host, which builds that revision from
+its own canonical Git mirror rather than from the working tree. With no argument
+and no `LLV_DEPLOY_REVISION` override, it resolves the canonical
+`refs/heads/main` tip and deploys that exact commit; a full 40-character commit
+SHA in either case pins a redeploy or a rollback and is posted lowercase.
+
 See [docs/docker.md](docs/docker.md) for the parity model, the nsenter shims,
 and volume/port details.
 
@@ -311,19 +319,69 @@ agent-log-viewer [options]
 
 Linux is the native target: process discovery reads `/proc` directly. macOS is
 supported through a portable backend that shells out to `ps` and `lsof`
-instead — same live-process detection, tmux composer targeting, agent
+instead — same live-process detection, composer host targeting, agent
 spawn/kill and background-task discovery, just a bit more subprocess overhead
-per scan. The backend is chosen automatically by `process.platform` (see
-`src/lib/proc/`); `VIEWER_PROC_BACKEND=portable` forces the portable path on
-Linux too, for testing.
+per scan. Windows has its own backend: one `Get-CimInstance Win32_Process`
+snapshot per five seconds for pids, lineage, command lines and memory, plus two
+values read from the kernel — the process creation time that makes up the
+identity token, and each agent's working directory. The backend is chosen
+automatically by `process.platform` (see `src/lib/proc/`); `VIEWER_PROC_BACKEND`
+forces one of `linux`, `portable` or `windows`, for testing.
 
-The package supports Linux and macOS. The package's `os` field blocks Windows
-installs with `EBADPLATFORM`. WSL works as Linux.
+### Windows
 
-`tmux` is optional. Without it, log viewing, the parentage tree, live activity
-and deep links all work; the composer, agent spawn/kill and resume-into-pane
-features need tmux (`brew install tmux` on macOS, or your distro's package on
-Linux).
+The package installs on Windows. Install Claude Code with its **native
+installer**, or put a `claude.exe` on `PATH`: an npm-only install exposes
+`claude.cmd`, and a shim is not something the Viewer will run without a shell.
+State lives under `%USERPROFILE%\.config\agent-log-viewer`, transcripts under
+`%USERPROFILE%\.claude\projects`. Run the Viewer where the agents run — a
+Claude installed inside WSL writes into the WSL filesystem, and a native Viewer
+does not see those transcripts (or the reverse).
+
+These stay WSL routes on Windows, and WSL still works exactly as Linux:
+
+- **Codex** — hosting, review flows, and everything Codex-side. Upstream calls
+  native Windows experimental and recommends WSL 2.
+- **The Telegram connector** and **local dictation** (cloud dictation backends
+  are unaffected).
+- **Workflow setup commands**, which are `sh -c`.
+- **Docker deployments and staging**, which are Linux by nature.
+- **The MCP server** for orchestrator agents, and **`--tailscale`**.
+
+These work natively but narrower than on Linux:
+
+- **No open-handle scan.** A transcript reads as live from mtime recency, and
+  its owning process from the `--session-id` in its argv or from its working
+  directory — never from a live writer holding the file open. Background-task
+  `.output` files cannot be mapped back to a pid.
+- **Termination is immediate.** Windows has no signals; every stop is
+  `TerminateProcess` after the child's stdin is closed, and the "force" step in
+  the task header is a second immediate kill. A host's process tree is walked
+  and killed descendants-first, each member's identity checked, in place of the
+  process-group signal Linux sends.
+- **A process the Viewer cannot open stays invisible.** Reading an agent's
+  working directory needs a handle on it, so an elevated console's `claude`, or
+  one running as another user, is not listed.
+- **Memory shows the working set only**, with no swap figure.
+- **Managed (multi) Claude accounts, the in-app login supervisor and composer
+  image attachments** are not available; log in from a terminal with `claude`,
+  and use the Main account.
+- **Claude background tasks and scratchpad sessions** have no project. The
+  background-task root depends on a Windows directory layout nobody has
+  observed, so it is simply absent. A scratchpad session is still recognised as
+  one, but the walk that turns the encoded path in its container back into a
+  repository starts at the filesystem root and a Windows path starts at a drive
+  letter, so no repository is found and the session lands in "Unresolved
+  project" along with every other one. Sessions started from an ordinary
+  directory are unaffected — they group by that directory.
+- **A session whose recorded path differs from a root only by drive-letter
+  case** forms its own project.
+
+`tmux` is optional, and nothing needs it to launch or message an agent —
+agents run on a structured runtime host (see [Spawn transport](#spawn-transport)),
+which is why none of it is required on Windows. It is needed only to attach a
+terminal to a legacy pane that predates that host (`brew install tmux` on macOS,
+or your distro's package on Linux).
 
 ## Language
 
@@ -352,7 +410,7 @@ and troubleshooting.
 ## Review loops
 
 The viewer orchestrates implement→review cycles: a long-lived implementer
-agent in tmux, a fresh read-only reviewer per round over the full diff,
+agent, a fresh read-only reviewer per round over the full diff,
 automatic relay of findings, and a verdict deck in the scheme view. Start one
 from the **Flow** chip above a conversation pane; presets pair engines and
 reasoning efforts per role (e.g. `Terra high → Sol xhigh`). New Codex agents
@@ -391,14 +449,18 @@ runs without `--tailscale`, the button shows a hint to start
 
 Anyone with tailnet access to this URL can read all agent transcripts,
 including any sensitive data that landed in a session, and can execute commands
-through `/api/tmux` and `/api/spawn`. Treat the tailnet URL as a secret — do
-not forward it to anyone else.
+through `/api/conversation-host` and `/api/spawn`. Treat the tailnet URL as a
+secret — do not forward it to anyone else.
 
 ## Security model
 
 The log APIs refuse any path that does not resolve into one of the whitelisted
 log roots (see `src/lib/scanner/roots.ts`). Mutating endpoints exist:
-`/api/tmux` sends keys to tmux sessions and `/api/spawn` starts commands.
+`/api/conversation-host` resumes or respawns a conversation's host and delivers
+a message to it, and `/api/spawn` starts commands. The same handlers are still
+mounted at the legacy path `/api/tmux`; that name is historical and no tmux is
+involved in delivery — the engine is spawned into the host namespace through
+`nsenter` with privileges dropped.
 
 By default the CLI binds to `127.0.0.1`. With `--tailscale`, access is exposed
 inside the tailnet via `tailscale serve` and guarded by the token gate in
@@ -412,7 +474,7 @@ All optional. Transcription variables are documented in full in
 
 | Variable | Effect |
 | --- | --- |
-| `VIEWER_PROC_BACKEND` | `portable` or `linux` — force the process-discovery backend (auto-selected by default). |
+| `VIEWER_PROC_BACKEND` | `portable`, `linux` or `windows` — force the process-discovery backend (auto-selected by default). |
 | `LLV_LANG` | `uk` or `en` — force the CLI message language. |
 | `LLV_TRANSCRIBE_BACKEND` | `local`, `chatgpt`, or `elevenlabs` — pick the dictation backend (default `local`). |
 | `LLV_WHISPER_MODEL` | faster-whisper model size (default `small`). |

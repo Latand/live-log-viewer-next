@@ -72,7 +72,7 @@ export function ProcessStatusControls({
       if (structuredSession) {
         /* Structured host (#242): Kill enters the durable structured control
            channel keyed by the canonical ROOT conversation identity — a single
-           /api/tmux → dispatchStructuredControl request that never touches
+           /api/conversation-host → dispatchStructuredControl request that never touches
            /api/proc, and with no SIGTERM/SIGKILL escalation (the host manages
            the process). For a structured-root subagent `structuredSession` is
            the ROOT's session, so the kill addresses the root, not the child. */

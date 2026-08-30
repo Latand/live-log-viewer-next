@@ -654,9 +654,12 @@ test("rotation composes a bounded handoff, switches designation atomically, and 
   expect(result.body.rotatedFrom).toMatchObject({ conversationId: NEW_ID });
   const spawnedPrompt = String(recorded2[0]!.prompt);
   /* Successor mandate = incumbent mandate + bounded handoff naming the
-     predecessor, its transcript, the open tasks and the caller's notes. */
+     predecessor, its MCP read, the open tasks and the caller's notes. */
   expect(spawnedPrompt).toStartWith("own the board");
   expect(spawnedPrompt).toContain(NEW_ID);
+  expect(spawnedPrompt).toContain(`conversation_messages({"clientRequestId":"rotation-predecessor-recent-turns-${NEW_ID}","conversationId":"${NEW_ID}","roles":["user","assistant"],"limit":40})`);
+  expect(spawnedPrompt).toContain("fresh clientRequestId");
+  expect(spawnedPrompt).not.toContain(`/tmp/${NEW_ID.slice(-4)}.jsonl`);
   expect(spawnedPrompt).toContain("[doing] Ship the handoff (task_1)");
   expect(spawnedPrompt).toContain("Prioritize the review queue.");
   expect(spawnedPrompt).toContain("all mandate missions are complete; standing by");

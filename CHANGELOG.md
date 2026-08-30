@@ -8,6 +8,40 @@ guarantees for the 1.x series.
 ## [Unreleased]
 
 ### Added
+- The Viewer installs and runs on native Windows, with the process backend,
+  paths, termination and CLI that requires (#1201, phase 1 of the merged
+  `docs/design/windows-support.md`). The `os` field no longer refuses a Windows
+  install. Process discovery gets a third backend beside `/proc` and
+  `ps`/`lsof`: one `Get-CimInstance Win32_Process` snapshot per five seconds for
+  pids, lineage, command lines and working set, and two values read from the
+  kernel through FFI — the process creation time, which is the identity token,
+  and each agent's working directory, read out of its own process parameters
+  because Windows has no other route to it and a process with no known working
+  directory is not shown at all. Identity is what pid reuse makes load-bearing
+  here, and Windows reuses a pid within seconds, so it comes from
+  `GetProcessTimes` rather than from anything that merely differs between two
+  processes. Termination replaces the process-group signal with a walk of the
+  parent tree, descendants first, each member's identity re-checked immediately
+  before it is killed; a parent link whose parent started after its own child is
+  dropped as the stale link it is. The runtime host listens on a named pipe
+  instead of a Unix socket, and its singleton fence keeps its file and its
+  kernel-released lock by way of `LockFileEx`. `HOME` is ignored on Windows,
+  where it is not a Windows variable and a Git Bash value resolves to nothing.
+  The CLI opens a browser through `rundll32` with no shell in the way.
+
+  Nobody working on this repository has a Windows machine, so none of the above
+  is a claim: a new `platform-tests.yml` runs the process backend, the endpoint,
+  the fence, the tree kill, the path handling and the launcher on
+  `windows-latest`, refuses a runner that is not Windows, and fails when any
+  kernel reader returns nothing — the same shape as the `macos-identity` job
+  that exists because nobody here has a Mac. Its Ubuntu leg runs the identical
+  file list, which is what makes "Linux is unchanged" witnessed rather than
+  asserted. What Windows does not get in this phase is written down in the
+  README, including the two grouping recognisers that stop resolving a
+  repository there and what they resolve to instead. The job earned its keep
+  immediately: it caught the fence refusing to create its own file on a fresh
+  machine, a process identity that outlived the process it named, and a CLI that
+  could not find its own server from a checkout.
 - The Viewer ticks the orchestrator seat, so a rotation stops dropping the
   monitor (#1245). The monitor that had been driving orchestrator sessions was
   never a feature: it was a schedule an agent armed inside its own session, so
@@ -69,6 +103,25 @@ guarantees for the 1.x series.
   window supersedes that evidence. A CPU-flat stage is likewise terminated and
   retired through its exact structured identity before the pipeline marks it
   retryable.
+- The documented release path works as written (#1309). The deploy protocol
+  named a wrapper command that is not installed on this machine and a
+  fast-forward-only pull before the release, and the pull was wrong in its own
+  right: `scripts/rebuild.sh` reads nothing from the working tree — it posts a
+  revision, and the runtime host builds that revision from its own canonical Git
+  mirror — so the pull only disturbed whatever branch the operator had checked
+  out. Every place that documents the release now names the plain
+  `scripts/rebuild.sh` invocation from any checkout, a worktree included, and
+  says where the revision is built from. The script itself advertised, defaulted
+  to and validated `origin/main` as a CLI sentinel, then resolved it before
+  posting because `POST /api/runtime/deployments` accepts no such `revision`
+  value. It now takes a full commit SHA in either case or, when no argument or
+  `LLV_DEPLOY_REVISION` override is present, resolves the canonical
+  `refs/heads/main` tip. Explicit SHAs are posted lowercase, and `git ls-remote`
+  fetches nothing into the checkout and moves no ref in it. The refusal also used
+  to arrive underneath `deployment key: …`, so a request that deployed nothing
+  read like a deployment that had started: nothing that reads as a started
+  deployment is printed now until the endpoint has returned a valid receipt, and
+  a refused request prints its error and exits non-zero.
 - Whether a turn is being worked on is decided from evidence, so a redeploy no
   longer strands a lane nothing can recover (#1281, #1282, #1276). `live`,
   `idle` and `busy` are inherited words: a turn severed mid-flight kept reading
