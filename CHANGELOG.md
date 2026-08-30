@@ -114,6 +114,15 @@ guarantees for the 1.x series.
   the successor; it used to answer "done" and register nothing, which is how a
   launched host ends up parked in `epoll_wait` for half an hour while every
   recovery verb is refused.
+- The macOS argv reader's live-child test waits for the child to announce its
+  exec before it reads. A pid exists before the image it will run does, and
+  until the exec lands the kernel has no argument record for that image to hand
+  back — the window the Claude login fence already polls through. The test read
+  the moment `spawn` returned, so it asserted the result of a race, and one CI
+  attempt lost it while the next attempt on the identical commit won: a red the
+  tree could not explain. The read now happens after a byte only the executed
+  script can have written. What the test requires is unchanged — one read, the
+  exact exec-time argv of a live child, and `null` once that child is gone.
 
 ### Removed
 - The conversation monitor's standalone CLI driver, its HTTP client and its
