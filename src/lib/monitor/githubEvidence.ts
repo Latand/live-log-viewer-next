@@ -124,6 +124,75 @@ function parseProposalIssues(raw: string): ProposalIssue[] {
   return issues;
 }
 
+/* ------------------------------------------------------------------------- *
+ * Open pull requests as the seat tick's unmerged-merge evidence (#1289).
+ *
+ * The third question asked of the same `gh` seam, and the narrowest: which pull
+ * requests are still open, and what branch each one is the head of. The branch
+ * is the whole point — it is what ties a pull request back to the lane that
+ * produced it, so a lane that finished with its work unmerged can be named
+ * rather than merely counted.
+ *
+ * Degradable exactly like the two above: a `gh` that is missing,
+ * unauthenticated or rate-limited returns nothing and the tick simply has no
+ * unmerged pull request to report, because a check that failed outright over an
+ * optional evidence source would take the whole seat tick down with it.
+ *
+ * Read-only. Nothing here merges, closes, comments on or opens a pull request.
+ * ------------------------------------------------------------------------- */
+
+export interface OpenPullRequest {
+  number: number;
+  title: string;
+  /** The branch the pull request is the head of, which is what a lane's own
+      branch is matched against. */
+  headRefName: string;
+  updatedAt: string | null;
+}
+
+const PULL_REQUEST_TITLE_LIMIT = 200;
+
+function parseOpenPullRequests(raw: string): OpenPullRequest[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const rows: OpenPullRequest[] = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const row = entry as { number?: unknown; title?: unknown; headRefName?: unknown; updatedAt?: unknown };
+    if (typeof row.number !== "number" || !Number.isSafeInteger(row.number)) continue;
+    /* A row with no head branch cannot be attributed to a lane, and an
+       unattributable pull request is not what the reason is about. */
+    if (typeof row.headRefName !== "string" || !row.headRefName) continue;
+    rows.push({
+      number: row.number,
+      title: typeof row.title === "string" ? row.title.slice(0, PULL_REQUEST_TITLE_LIMIT) : "",
+      headRefName: row.headRefName,
+      updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : null,
+    });
+  }
+  return rows;
+}
+
+export async function openPullRequestsForRepo(options: {
+  cwd: string;
+  limit?: number;
+  run?: GithubRunner;
+  timeoutMs?: number;
+}): Promise<OpenPullRequest[]> {
+  const run = options.run ?? githubRunner(options.cwd, options.timeoutMs ?? 20_000);
+  try {
+    const raw = await run(["pr", "list", "--state", "open", "--limit", String(options.limit ?? 60), "--json", "number,title,headRefName,updatedAt"]);
+    return parseOpenPullRequests(raw);
+  } catch {
+    return [];
+  }
+}
+
 export async function openIssuesForProposal(options: {
   cwd: string;
   limit?: number;

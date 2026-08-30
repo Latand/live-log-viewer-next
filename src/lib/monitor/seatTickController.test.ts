@@ -16,6 +16,7 @@ const { DEFAULT_SEAT_TICK_POLICY } = await import("./seatTick");
 const { defaultSeatTickSettings } = await import("./seatTickSettings");
 import type { SeatTickSettings } from "./seatTickSettings";
 import type { SeatTickControllerDependencies } from "./seatTickController";
+import type { OpenPullRequest } from "./githubEvidence";
 import type { SeatTickWakeState, SeatTickWithdrawal } from "./seatTickSources";
 import {
   emptySeatTickState,
@@ -57,7 +58,7 @@ function harness(options: {
   seat?: { conversationId: string; seatEpoch: number; path: string | null } | null;
   turn?: "busy" | "idle";
   seatActivity?: Partial<AgentLivenessRecord> | null;
-  pipelines?: { id: string; state: string; createdAt: string; movedAt: string | null }[];
+  pipelines?: { id: string; state: string; createdAt: string; movedAt: string | null; branch?: string; closedAt?: string | null }[];
   tasks?: { id: string; status: "inbox" | "assigned" | "blocked" | "done" }[];
   events?: LifecycleEvent[];
   state?: Partial<SeatTickProjectState>;
@@ -74,6 +75,8 @@ function harness(options: {
   /** The project's own tick settings (#1275); the default is the tick as it
       shipped. */
   settings?: SeatTickSettings;
+  /** What `gh` reports open in the project's repository (#1289). */
+  openPullRequests?: OpenPullRequest[];
 }): Harness {
   const sent: ConversationMessage[] = [];
   const journal: SeatTickRunRecord[] = [];
@@ -90,7 +93,7 @@ function harness(options: {
     project: PROJECT,
     repoDir: "/srv/repo",
     worktreeDir: "/srv/worktree",
-    branch: "topic",
+    branch: entry.branch ?? "topic",
     baseBranch: "main",
     baseRef: "main",
     lastPassedCommit: "",
@@ -103,7 +106,7 @@ function harness(options: {
     srcPath: null,
     srcConversationId: null,
     createdAt: entry.createdAt,
-    closedAt: null,
+    closedAt: entry.closedAt ?? null,
   }));
 
   const tasks = (options.tasks ?? []).map((entry) => ({
@@ -152,6 +155,7 @@ function harness(options: {
       latestDeployment: () => ({ state: "unreadable", error: "no ledger" }) as never,
       retirementReport: () => null,
       settings: () => options.settings ?? defaultSeatTickSettings(PROJECT),
+      openPullRequests: async () => options.openPullRequests ?? [],
       wakeState: async () => {
         if (options.holderThrows) throw new Error("the layer holding the wake cannot be read");
         return options.wakeState ?? "retained";
@@ -652,6 +656,84 @@ test("the check after the seal carries the events that arrived since it", async 
   const record = await runSeatTickCheck(PROJECT, next.deps);
   expect(record!.reasons).toEqual(["lane-event"]);
   expect(record!.eventsThrough).toBe(9854);
+});
+
+/* ------------------------------------------------------------------------- *
+ * #1285 / #1289, end to end: a wake names what is owed now, and silence means
+ * nothing is.
+ * ------------------------------------------------------------------------- */
+
+/** A lane that ran and finished, with the branch its pull request is the head
+    of. Whether it is still open is the whole question both halves turn on. */
+const FINISHED_LANE = [{
+  id: "pipeline_z9",
+  state: "completed",
+  createdAt: "2026-08-27T09:00:00.000Z",
+  movedAt: "2026-08-27T22:00:00.000Z",
+  branch: "topic-merge-queue",
+  closedAt: "2026-08-27T22:00:00.000Z",
+}];
+
+/* The report: three consecutive wakes whose every item named a pipeline that
+   had reached a terminal state the day before. Nothing was owed on any of them,
+   and establishing that was the entire cost of the wake. */
+test("events belonging to a lane that has finished send nothing, and the check that read them discharges them", async () => {
+  const rig = harness({
+    pipelines: FINISHED_LANE,
+    tasks: [{ id: "task_b2", status: "inbox" }],
+    events: [terminalEvent(44), terminalEvent(45), terminalEvent(46)].map((event) => ({ ...event, pipelineId: "pipeline_z9" })),
+    state: { ...OVERDUE, eventsThrough: 12 },
+  });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(record).toMatchObject({ verdict: "quiet", delivery: null, detail: "nothing owed" });
+  expect(rig.sent).toEqual([]);
+  /* And the backlog does not come back for a second, third and fourth wake:
+     one look moved the cursor past all of it. */
+  expect(rig.written[0]!.eventsThrough).toBe(46);
+  expect(record!.eventsThrough).toBe(46);
+});
+
+/* Twelve hours of `quiet — nothing owed` while three approved pull requests sat
+   unmerged, because the tick counts open lanes and board cards and a finished
+   lane is neither. */
+test("a completed lane whose pull request is still open wakes the seat, naming the pull request", async () => {
+  const rig = harness({
+    pipelines: FINISHED_LANE,
+    state: OVERDUE,
+    openPullRequests: [{
+      number: 1289,
+      title: "wake on a merge that is waiting",
+      headRefName: "topic-merge-queue",
+      updatedAt: "2026-08-28T11:30:00.000Z",
+    }],
+  });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(record).toMatchObject({ verdict: "wake", reasons: ["unmerged-pr"], items: 1 });
+  expect(rig.sent[0]!.text).toContain("pull request #1289 left open by a lane that finished");
+  expect(rig.sent[0]!.text).toContain("[pull-request] #1289 — wake on a merge that is waiting");
+});
+
+/* And the merge is what silences it, with nothing else to turn off. */
+test("once the pull request is merged the same project owes nothing again", async () => {
+  const rig = harness({
+    pipelines: FINISHED_LANE,
+    tasks: [{ id: "task_b2", status: "inbox" }],
+    state: OVERDUE,
+    openPullRequests: [],
+  });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(record).toMatchObject({ verdict: "quiet", detail: "nothing owed" });
+  expect(rig.sent).toEqual([]);
+
+  /* And with the board empty behind it too — one finished lane and nothing
+     else — the same merge leaves a project with no wake owed at all. */
+  const bare = harness({
+    pipelines: FINISHED_LANE,
+    state: { ...OVERDUE, lastProposalAt: new Date(NOW - MINUTE).toISOString() },
+    openPullRequests: [],
+  });
+  expect(await runSeatTickCheck(PROJECT, bare.deps)).toMatchObject({ verdict: "quiet" });
+  expect(bare.sent).toEqual([]);
 });
 
 test("a failed delivery leaves the wake stamp where it was, so the next check retries", async () => {

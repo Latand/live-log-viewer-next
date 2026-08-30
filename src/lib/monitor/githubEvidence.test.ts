@@ -11,7 +11,7 @@ process.env.XDG_CONFIG_HOME = path.join(SANDBOX, "config");
 process.env.TMPDIR = path.join(SANDBOX, "tmp");
 fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
-const { githubEvidenceSource, openIssuesForProposal } = await import("./githubEvidence");
+const { githubEvidenceSource, openIssuesForProposal, openPullRequestsForRepo } = await import("./githubEvidence");
 const { evidenceFromGithub } = await import("./evidence");
 
 afterAll(() => {
@@ -81,6 +81,41 @@ describe("open issues for the proactive slot", () => {
     expect(await openIssuesForProposal({ cwd: "/srv/repo", run: async () => { throw new Error("gh: command not found"); } })).toEqual([]);
     expect(await openIssuesForProposal({ cwd: "/srv/repo", run: async () => "not json" })).toEqual([]);
     expect(await openIssuesForProposal({ cwd: "/srv/repo", run: async () => "{}" })).toEqual([]);
+  });
+
+  test("open pull requests are read with the head branch that ties one to a lane (#1289)", async () => {
+    const calls: string[][] = [];
+    const pullRequests = await openPullRequestsForRepo({
+      cwd: "/srv/repo",
+      run: async (args) => {
+        calls.push(args);
+        return JSON.stringify([
+          { number: 1289, title: "wake on a merge that is waiting", headRefName: "topic-merge-queue", updatedAt: "2026-08-29T10:00:00Z" },
+          { number: 1285, title: "stop replaying closed lanes", headRefName: "topic-closed-lanes", updatedAt: null },
+        ]);
+      },
+    });
+    expect(calls[0]).toEqual(["pr", "list", "--state", "open", "--limit", "60", "--json", "number,title,headRefName,updatedAt"]);
+    expect(pullRequests).toEqual([
+      { number: 1289, title: "wake on a merge that is waiting", headRefName: "topic-merge-queue", updatedAt: "2026-08-29T10:00:00Z" },
+      { number: 1285, title: "stop replaying closed lanes", headRefName: "topic-closed-lanes", updatedAt: null },
+    ]);
+    /* Read-only, like every other question asked of this seam. */
+    expect(calls.flat()).not.toContain("merge");
+  });
+
+  test("a pull request with no head branch is dropped, because nothing could attribute it to a lane", async () => {
+    const pullRequests = await openPullRequestsForRepo({
+      cwd: "/srv/repo",
+      run: async () => JSON.stringify([{ number: 5, title: "no head" }, { number: 6, title: "kept", headRefName: "topic" }]),
+    });
+    expect(pullRequests).toEqual([{ number: 6, title: "kept", headRefName: "topic", updatedAt: null }]);
+  });
+
+  test("a gh that cannot answer costs the tick the reason, never the check", async () => {
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => { throw new Error("gh: command not found"); } })).toEqual([]);
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => "not json" })).toEqual([]);
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => "{}" })).toEqual([]);
   });
 
   test("a row without a usable number is dropped rather than ranked as issue zero", async () => {

@@ -16,6 +16,7 @@ import type { SeatTickSources } from "./seatTickSources";
 const { DEFAULT_SEAT_TICK_POLICY, seatTickDecision } = await import("./seatTick");
 const { defaultSeatTickSettings } = await import("./seatTickSettings");
 import type { AgentLivenessRecord } from "@/lib/lifecycle/liveness";
+import type { OpenPullRequest } from "./githubEvidence";
 import type { LifecycleEvent, LifecycleJournalFile } from "@/lib/lifecycle/journal";
 import { emptySeatTickState, type SeatTickProjectState } from "./types";
 
@@ -133,6 +134,9 @@ function sources(over: {
   latestDeployment?: ReturnType<SeatTickSources["latestDeployment"]>;
   settings?: ReturnType<SeatTickSources["settings"]>;
   livenessCalls?: { project?: string; conversationId?: string; stallAfterMs: number }[];
+  openPullRequests?: OpenPullRequest[];
+  pullRequestCalls?: { cwd: string; limit: number }[];
+  pullRequestsThrow?: boolean;
 }): SeatTickSources {
   return {
     seatFor: () => ({ active: { conversationId: CONVERSATION, seatEpoch: 7, path: null } as never, pending: null, history: [] }),
@@ -156,6 +160,11 @@ function sources(over: {
     latestDeployment: () => over.latestDeployment ?? ({ state: "unreadable", error: "no ledger" }) as never,
     retirementReport: () => null,
     settings: () => over.settings ?? defaultSeatTickSettings(PROJECT),
+    openPullRequests: async (options) => {
+      over.pullRequestCalls?.push(options);
+      if (over.pullRequestsThrow) throw new Error("gh is not authenticated");
+      return over.openPullRequests ?? [];
+    },
     wakeState: async () => "retained",
     withdrawWake: async () => "withdrawn",
     now: () => NOW,
@@ -353,7 +362,7 @@ test("events are read past the tick's own cursor, and reading acknowledges nothi
   const events = [event(10), event(11, { type: "review_verdict", summary: "the round passed" }), event(12)];
   const input = await gather({ events }, withCursor(10));
   expect(input.events.map((entry) => entry.seq)).toEqual([11, 12]);
-  expect(input.terminalPending).toBe(true);
+  expect(input.events.some((entry) => entry.type === "review_verdict")).toBe(true);
   /* Same cursor, same answer: a second read of the same state re-offers them. */
   const again = await gather({ events }, withCursor(10));
   expect(again.events.map((entry) => entry.seq)).toEqual([11, 12]);
@@ -379,7 +388,6 @@ test("a seat with no cursor yet starts at the present, so its first check carrie
   ];
   const input = await gather({ events: history });
   expect(input.events).toEqual([]);
-  expect(input.terminalPending).toBe(false);
   /* And the seal is written down, so the next check pages from it rather than
      re-deciding where the present was. */
   expect(input.state.eventsThrough).toBe(9853);
@@ -391,7 +399,6 @@ test("the seal is the journal head, so everything after the tick began is still 
   const later = [...history, event(9849, { type: "stage_blocked", summary: "the review round is parked" })];
   const second = await gather({ events: later }, first.state);
   expect(second.events.map((entry) => entry.seq)).toEqual([9849]);
-  expect(second.terminalPending).toBe(true);
 });
 
 /* The over-correction the fix must not make. A cursor a previous wake earned is
@@ -446,7 +453,6 @@ test("under a journal the cursor has already passed, only a card that recently m
   /* The journal is full and the check carries none of it, which is the whole
      point of the fixture: what wakes the seat here can only be the board. */
   expect(input.events).toEqual([]);
-  expect(input.terminalPending).toBe(false);
 
   const decision = seatTickDecision(input);
   expect(reasonsOf(decision)).toEqual(["unstarted-task"]);
@@ -514,16 +520,189 @@ test("the deployment signal reports the latest deployment, and stays silent when
   expect(running.signals).toEqual([]);
 });
 
-test("only terminal high-signal events count as pending; routine progress does not", async () => {
-  const input = await gather({ events: [event(10), event(11)] }, withCursor(0));
-  expect(input.events).toHaveLength(2);
-  expect(input.terminalPending).toBe(false);
+/* ------------------------------------------------------------------------- *
+ * #1285: an event whose lane is over, and a backlog of them.
+ * ------------------------------------------------------------------------- */
+
+/** A lane that ran and reached the end, which is what the tick's own store no
+    longer lists as open. */
+function finishedLane(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return lane({
+    id: "pipeline_z9",
+    task: "publish the merge queue",
+    branch: "topic-merge-queue",
+    state: "completed",
+    cursor: null,
+    runs: [],
+    closedAt: new Date(NOW - 14 * 60 * 60_000).toISOString(),
+    ...over,
+  });
+}
+
+test("an event is marked history exactly when its own lane is no longer open", async () => {
+  const input = await gather({
+    pipelines: [lane(), finishedLane()],
+    events: [
+      event(10, { type: "stage_completed", pipelineId: "pipeline_a1", summary: "the builder finished" }),
+      event(11, { type: "stage_completed", pipelineId: "pipeline_z9", summary: "the builder finished" }),
+      /* Archived out of the hot store, which only ever takes settled records. */
+      event(12, { type: "review_verdict", pipelineId: "pipeline_gone", summary: "the round passed" }),
+      /* A deploy outcome names no pipeline, and nothing about it has finished. */
+      event(13, { type: "deploy_failed", pipelineId: null, summary: "the release rolled back" }),
+    ],
+  }, withCursor(9));
+  expect(input.events.map((entry) => entry.pipelineTerminal)).toEqual([false, true, true, false]);
+});
+
+/* The report, end to end: a wake whose every item named a pipeline that had
+   reached a terminal state the day before, and whose entire cost was
+   establishing that nothing was owed on any of them. */
+test("a project whose only pending events belong to finished lanes is quiet, and the look discharges them", async () => {
+  const history = Array.from({ length: 50 }, (_, index) => event(9900 + index, {
+    type: "stage_completed",
+    pipelineId: "pipeline_z9",
+    summary: "the builder finished",
+  }));
+  const input = await gather(
+    { pipelines: [finishedLane()], tasks: [boardCard({ status: "inbox" })], events: history },
+    withCursor(9899, OVERDUE),
+  );
+  expect(input.events).toHaveLength(50);
+
+  const decision = seatTickDecision(input);
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+  /* And no second wake is owed for the same backlog: the cursor is past all
+     fifty on the strength of the one look that read them. */
+  expect(decision.state.eventsThrough).toBe(9949);
+});
+
+/* ------------------------------------------------------------------------- *
+ * #1289: a lane that finished and left its pull request open.
+ * ------------------------------------------------------------------------- */
+
+function openPullRequest(over: Partial<OpenPullRequest> = {}): OpenPullRequest {
+  return {
+    number: 1289,
+    title: "wake on a merge that is waiting",
+    headRefName: "topic-merge-queue",
+    updatedAt: new Date(NOW - 30 * 60_000).toISOString(),
+    ...over,
+  };
+}
+
+test("a finished lane whose branch still has an open pull request is carried, named by its lane", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([{
+    number: 1289,
+    title: "wake on a merge that is waiting",
+    pipelineId: "pipeline_z9",
+    pipelineTitle: "publish the merge queue",
+    updatedAt: new Date(NOW - 30 * 60_000).toISOString(),
+  }]);
+  expect(reasonsOf(seatTickDecision(input))).toEqual(["unmerged-pr"]);
+});
+
+test("a pull request no finished lane produced is not this seat's obligation", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest({ headRefName: "someone-elses-branch" })] },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([]);
+});
+
+/* An open lane's pull request is the lane's business; the lane is already open
+   work and the tick already carries it. The reason is about FINISHING. */
+test("an open lane's pull request raises nothing", async () => {
+  const input = await gather(
+    { pipelines: [lane({ branch: "topic-merge-queue" })], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([]);
+});
+
+/* A discarded draft never ran, so it published nothing and left nothing behind
+   (#1274 draws the same line for open lanes). */
+test("a hidden lane leaves no pull request behind it", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const input = await gather(
+    {
+      pipelines: [finishedLane({ hiddenAt: new Date(NOW - 60_000).toISOString(), state: "closed" })],
+      openPullRequests: [openPullRequest()],
+      pullRequestCalls: calls,
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([]);
+  expect(calls).toEqual([]);
+});
+
+/* The read is a subprocess, so it happens only where a wake could come of it. */
+test("the pull request read is skipped entirely until the wake interval has elapsed", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const early = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()], pullRequestCalls: calls },
+    withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString() }),
+  );
+  expect(calls).toEqual([]);
+  expect(early.pullRequests).toEqual([]);
+
+  await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()], pullRequestCalls: calls },
+    withCursor(0, OVERDUE),
+  );
+  expect(calls).toEqual([{ cwd: "/srv/repo", limit: 60 }]);
+});
+
+test("a project whose tick is off asks GitHub nothing", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const input = await gather(
+    {
+      pipelines: [finishedLane()],
+      openPullRequests: [openPullRequest()],
+      pullRequestCalls: calls,
+      settings: { ...defaultSeatTickSettings(PROJECT), enabled: false, configured: true } as never,
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(calls).toEqual([]);
+  expect(input.pullRequests).toEqual([]);
+});
+
+/* Degradable like every other `gh` read here: a missing, unauthenticated or
+   rate-limited CLI costs the tick this one reason, never the check. */
+test("a gh that cannot answer leaves the check standing with no pull request reason", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsThrow: true },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([]);
+  expect(input.tasks).toEqual([]);
+});
+
+/* The guard half, the same shape #1262 established for a card's movement: the
+   fingerprint has to carry what the reason is decided from, or a guard keyed on
+   it goes on suppressing the reason while a second pull request piles up. */
+test("a second unmerged pull request moves the fingerprint", async () => {
+  const one = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  const two = await gather(
+    {
+      pipelines: [finishedLane()],
+      openPullRequests: [openPullRequest(), openPullRequest({ number: 1290, headRefName: "topic-merge-queue" })],
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(two.changeFingerprint).not.toBe(one.changeFingerprint);
 });
 
 test("another project's events are not this project's", async () => {
   const input = await gather({ events: [event(10, { project: "other", type: "review_verdict" })] }, withCursor(0));
   expect(input.events).toEqual([]);
-  expect(input.terminalPending).toBe(false);
 });
 
 test("the projects worth checking are the seated ones plus anything with work and nobody on it", async () => {
