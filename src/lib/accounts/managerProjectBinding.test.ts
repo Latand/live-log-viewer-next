@@ -29,7 +29,8 @@ process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy-codex");
 process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 
 const { createManagedCodexAccount, listCodexAccounts } = await import("./codex");
-const { accountManager } = await import("./manager");
+const { createManagedClaudeAccount, listClaudeAccounts } = await import("./claude");
+const { accountManager, resolveHealthySpawnAccount } = await import("./manager");
 const { AccountProjectBindingsUnreadableError } = await import("./projectBindings");
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { resetProjectAliasesForTests } = await import("@/lib/projects/aliases");
@@ -39,6 +40,8 @@ const NOW = Date.now();
 
 let reserved = "";
 let spare = "";
+let claudeReserved = "";
+let claudeSpare = "";
 
 function seedAccounts(): void {
   const created = new Map<string, string>();
@@ -49,6 +52,12 @@ function seedAccounts(): void {
   }
   reserved = created.get("Reserved carrier")!;
   spare = created.get("Spare carrier")!;
+  /* No credentials written for these: the Claude health pass reads OAuth
+     metadata off each home, finds none, and refuses by NAMING the accounts it
+     considered — which is how the tests below read the candidate set without a
+     network probe or a fake dependency between them and the rule. */
+  claudeReserved = createManagedClaudeAccount("Reserved reviewer").id;
+  claudeSpare = createManagedClaudeAccount("Spare reviewer").id;
 }
 
 /** A live sample with `usedPercent` burned, fresh enough to be believed. */
@@ -70,9 +79,14 @@ function observation(accountId: string, usedPercent: number) {
   };
 }
 
-function registryWith(routedTo: string, observations: ReturnType<typeof observation>[]): void {
+function registryWith(
+  routedTo: string,
+  observations: ReturnType<typeof observation>[],
+  claudeRoutedTo?: string,
+): void {
   const registry = new AgentRegistry(path.join(SANDBOX, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   registry.setEngineRouting("codex", routedTo);
+  if (claudeRoutedTo) registry.setEngineRouting("claude", claudeRoutedTo);
   if (observations.length) {
     registry.recordQuotaEvaluation({
       engine: "codex",
@@ -183,4 +197,41 @@ test("a project with no binding keeps the answer it always had", () => {
 
   const headless = accountManager.resolveHeadlessSpawn("codex", null, [], ATLAS);
   expect(headless.kind === "available" && headless.account.accountId).toBe(spare);
+});
+
+/**
+ * The third automatic seam, and the one no test reached: `/api/spawn` does not
+ * resolve through `resolveProjectSpawn`. A raw launch that names no account
+ * goes to `resolveHealthySpawnAccount`, which the route hands the project's
+ * pool — and every spawn surface the Viewer has rides on it, the board's own
+ * button, the orchestrator seat and the scheduled report launcher among them.
+ * Each test below states what the seam answers WITHOUT the pool as well, so the
+ * pool is visibly what decided, rather than the routing agreeing by accident.
+ */
+test("the direct launch seam draws its automatic pick from the pool, not the engine's routing (#1279)", async () => {
+  registryWith(spare, []);
+
+  /* Routed at the spare account and the project bound to the reserved one. */
+  expect((await resolveHealthySpawnAccount("codex", undefined, [reserved])).accountId).toBe(reserved);
+  /* Unbound, the same call answers with the routing, exactly as it always did
+     — so the line above is the pool overriding it, not a coincidence. */
+  expect((await resolveHealthySpawnAccount("codex", undefined)).accountId).toBe(spare);
+});
+
+test("the direct launch's health pass considers the pool's accounts and no others (#1279)", async () => {
+  registryWith(spare, [], claudeSpare);
+  /* None of these homes carries an OAuth credential, so the pass admits none
+     and refuses by naming every account it looked at — the candidate set,
+     read out of the seam rather than asserted about its inputs. */
+  const fenced = await resolveHealthySpawnAccount("claude", undefined, [claudeReserved])
+    .then(() => null, (error: unknown) => error);
+  expect((fenced as { accountIds?: string[] }).accountIds).toEqual([claudeReserved]);
+
+  const unbound = await resolveHealthySpawnAccount("claude", undefined)
+    .then(() => null, (error: unknown) => error);
+  /* Unbound, every Claude account in the catalogue is a candidate, which is
+     both the historical behaviour and the width the pool removed above. */
+  expect((unbound as { accountIds?: string[] }).accountIds)
+    .toEqual(listClaudeAccounts().map((account) => account.id).sort());
+  expect((unbound as { accountIds?: string[] }).accountIds).toContain(claudeSpare);
 });
