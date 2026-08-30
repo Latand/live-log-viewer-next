@@ -2021,7 +2021,7 @@ test("durable conversation identity never adopts a competing cwd session", async
   expect(loadPipelines()[0]!.cursor?.stageId).toBe("plan");
 });
 
-test("a stage with no transcript parks on its first-message drain failure", async () => {
+test("a stage with an unwritten transcript parks on its first-message drain failure", async () => {
   const h = harness();
   await create(h.ports);
   await tickPipelines([], h.ports);
@@ -2031,7 +2031,7 @@ test("a stage with no transcript parks on its first-message drain failure", asyn
       launchId: "launch-drain-timeout",
       conversationId: "conversation_drain_timeout",
       sessionId: "session-drain-timeout",
-      "transcript": null,
+      "transcript": "/codex/unwritten-stage.jsonl",
       paneId: null,
     };
   };
@@ -2043,7 +2043,7 @@ test("a stage with no transcript parks on its first-message drain failure", asyn
     launchId: "launch-drain-timeout",
     conversationId: "conversation_drain_timeout",
     sessionId: "session-drain-timeout",
-    "transcript": null,
+    "transcript": "/codex/unwritten-stage.jsonl",
     paneId: null,
     error: reason,
   });

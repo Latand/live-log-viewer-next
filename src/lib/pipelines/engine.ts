@@ -1785,14 +1785,18 @@ async function tickRunStage(
   const structuredActive = !attempt.paneId && attempt.conversationId
     ? await ports.conversationAgentActive(attempt.conversationId)
     : null;
+  const spawnReceipt = attempt.launchId ? ports.spawnReceipt(attempt.launchId) : null;
+  const terminalSpawnFailure = spawnReceipt
+    && (spawnReceipt.state === "failed" || spawnReceipt.state === "conflicted")
+    ? spawnReceipt.error ?? `stage spawn cannot recover from receipt state ${spawnReceipt.state}`
+    : null;
+  if (structuredActive === false && terminalSpawnFailure) {
+    park(pipeline, terminalSpawnFailure, attempt);
+    return;
+  }
   if (!attempt.agentPath) {
-    const spawnReceipt = attempt.launchId ? ports.spawnReceipt(attempt.launchId) : null;
-    const spawnError = spawnReceipt
-      && (spawnReceipt.state === "failed" || spawnReceipt.state === "conflicted")
-      ? spawnReceipt.error
-      : null;
     if (structuredActive === false) {
-      park(pipeline, spawnError ?? "structured stage ended before its session was discovered", attempt);
+      park(pipeline, "structured stage ended before its session was discovered", attempt);
     }
     else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited before its session was discovered", attempt);
     return;
