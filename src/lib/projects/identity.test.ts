@@ -54,7 +54,7 @@ test("scp, ssh, and https clones of one remote resolve to one identity", () => {
 });
 
 test("packaged repository metadata resolves to the checkout's project identity", () => {
-  const checkout = createRepository("packaged-checkout", "git@example.invalid:team/shared-repository.git");
+  const checkout = createRepository("packaged-checkout", "https://example.invalid/team/shared-repository.git");
   const packaged = projectIdentityFromRemote(
     "git+https://example.invalid/team/shared-repository.git",
     SANDBOX,
