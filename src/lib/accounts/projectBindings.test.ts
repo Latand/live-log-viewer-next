@@ -14,6 +14,7 @@ import {
   resetAccountProjectBindingsForTests,
   unbindAccountFromProject,
 } from "./projectBindings";
+import { resetProjectAliasesForTests } from "@/lib/projects/aliases";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-project-bindings-"));
 const ORIGINAL_STATE = process.env.LLV_STATE_DIR;
@@ -27,6 +28,7 @@ const BEACON = "project-beacon";
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
   resetAccountProjectBindingsForTests();
+  resetProjectAliasesForTests();
 });
 
 afterAll(() => {
@@ -123,6 +125,30 @@ test("an unreadable record reads as no bindings, so a corrupt file cannot fence 
   resetAccountProjectBindingsForTests();
   expect(accountProjectBindings()).toEqual([]);
   expect(allowedAccountIdsForProject(ATLAS, "claude")).toBeNull();
+});
+
+test("a project spelled by an alias source reads the binding its target holds", () => {
+  /* The scanner answers with the pre-convergence id for a checkout whose
+     repository identities have since converged. Written from one spelling and
+     read from the other, the fence has to be the same fence. */
+  fs.mkdirSync(process.env.LLV_STATE_DIR!, { recursive: true });
+  fs.writeFileSync(
+    path.join(process.env.LLV_STATE_DIR!, "project-aliases.json"),
+    JSON.stringify({ schemaVersion: 1, aliases: { "project-atlas-old": ATLAS }, displayNames: { [ATLAS]: "Atlas" } }),
+    "utf8",
+  );
+  resetProjectAliasesForTests();
+
+  expect(bindAccountToProject("claude", RESERVED, "project-atlas-old").ok).toBe(true);
+  expect(accountProjectBindings()).toMatchObject([{ project: ATLAS }]);
+  expect(allowedAccountIdsForProject(ATLAS, "claude")).toEqual([RESERVED]);
+  expect(allowedAccountIdsForProject("project-atlas-old", "claude")).toEqual([RESERVED]);
+  expect(projectAllowsAccount("project-atlas-old", "claude", SHARED)).toBe(false);
+
+  expect(unbindAccountFromProject("claude", RESERVED, ATLAS)).toMatchObject({ ok: true, changed: true });
+  expect(allowedAccountIdsForProject("project-atlas-old", "claude")).toBeNull();
+  fs.rmSync(path.join(process.env.LLV_STATE_DIR!, "project-aliases.json"), { force: true });
+  resetProjectAliasesForTests();
 });
 
 test("the refusal wording names capacity, the project and the accounts it may use", () => {

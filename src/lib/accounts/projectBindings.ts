@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { canonicalProject } from "@/lib/projects/aliases";
 
 import type { ProjectSpawnResolution } from "./contracts";
 
@@ -147,6 +148,19 @@ export type BindingMutationResult =
   | { ok: true; changed: boolean; bindings: AccountProjectBinding[] }
   | { ok: false; code: BindingMutationFailure; message: string; bindings: AccountProjectBinding[] };
 
+/**
+ * The one key a binding is stored and read under.
+ *
+ * `projectForCwd` answers with the scanner's project, which may be an ALIAS
+ * SOURCE for a project whose repository identities have since converged. Store
+ * and read under the alias target and the two spellings are one project; skip
+ * this and a fence written from the accounts panel would silently not apply to
+ * a pipeline whose cwd resolved to the pre-convergence id.
+ */
+function bindingKey(project: string): string {
+  return canonicalProject(project.trim());
+}
+
 function normalized(engine: unknown, accountId: unknown, project: unknown):
   | { ok: true; engine: BindingEngine; accountId: string; project: string }
   | { ok: false; code: BindingMutationFailure; message: string } {
@@ -157,7 +171,7 @@ function normalized(engine: unknown, accountId: unknown, project: unknown):
   if (!account) return { ok: false, code: "INVALID_ACCOUNT", message: "accountId is required" };
   const key = typeof project === "string" ? project.trim() : "";
   if (!key) return { ok: false, code: "INVALID_PROJECT", message: "project is required" };
-  return { ok: true, engine, accountId: account, project: key };
+  return { ok: true, engine, accountId: account, project: bindingKey(key) };
 }
 
 function sameBinding(binding: AccountProjectBinding, engine: BindingEngine, accountId: string, project: string): boolean {
@@ -224,7 +238,7 @@ export function allowedAccountIdsForProject(
   engine: BindingEngine,
   bindings: readonly AccountProjectBinding[] = readBindings(),
 ): string[] | null {
-  const key = typeof project === "string" ? project.trim() : "";
+  const key = typeof project === "string" && project.trim() ? bindingKey(project) : "";
   if (!key) return null;
   const allowed = bindings
     .filter((binding) => binding.engine === engine && binding.project === key)
