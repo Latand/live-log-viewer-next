@@ -1,10 +1,11 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { canonicalProject } from "@/lib/projects/aliases";
+import { writeJsonDurably } from "@/lib/state/durableJson";
 
+import { AccountMutationBusyError, withAccountMutationLock } from "./accountMutation";
 import type { ProjectSpawnResolution } from "./contracts";
 
 /**
@@ -20,6 +21,14 @@ import type { ProjectSpawnResolution } from "./contracts";
  * The set is per engine on purpose: account ids are engine-scoped, so binding a
  * project to one Claude account must not silently forbid every Codex account
  * from it. Restriction begins for an engine at that engine's first binding.
+ *
+ * The record therefore has THREE states, not two, and the third is the one that
+ * matters most: ABSENT means unbound, READABLE is enforced, and DAMAGED —
+ * malformed, unsupported or unreadable — refuses. A damaged record read as an
+ * empty list would say "nobody bound anything", which allows every account on
+ * exactly the projects a binding was written to reserve; the reservation would
+ * disappear in the one condition where it matters most. Every read below throws
+ * instead, and the throw parks the launch, the reseat and the switch.
  */
 
 export type BindingEngine = "claude" | "codex";
@@ -36,17 +45,26 @@ interface BindingFile {
   bindings: AccountProjectBinding[];
 }
 
-type BindingCache = {
-  file: string;
-  mtimeMs: number;
-  size: number;
-  bindings: AccountProjectBinding[];
-};
+/** The record's name, in messages an operator has to act on. */
+const RECORD_NAME = "account-project-bindings.json";
 
-let cache: BindingCache | null = null;
+/**
+ * The record exists and this process cannot turn it into a binding list.
+ *
+ * Thrown by every read that was not given an explicit list, so no caller can
+ * mistake a damaged record for an unbound project. Callers that launch work
+ * park with this message; callers that mutate refuse without writing, which
+ * also keeps a damaged record intact for repair instead of overwriting it.
+ */
+export class AccountProjectBindingsUnreadableError extends Error {
+  constructor(readonly reason: string) {
+    super(`the account↔project binding record ${RECORD_NAME} is unreadable (${reason}); no account may be selected for a project until it is repaired or removed`);
+    this.name = "AccountProjectBindingsUnreadableError";
+  }
+}
 
 function bindingsFile(): string {
-  return statePath("account-project-bindings.json");
+  return statePath(RECORD_NAME);
 }
 
 function bindingList(value: unknown): AccountProjectBinding[] | null {
@@ -69,27 +87,47 @@ function bindingList(value: unknown): AccountProjectBinding[] | null {
   return entries;
 }
 
+/**
+ * The record, read from disk on every call. No cache: the file is one small
+ * record written by an atomic rename, and a cache keyed on mtime and size
+ * cannot see a same-millisecond same-size write by another process — which is
+ * the write that would drop a fence this process then keeps enforcing from
+ * memory.
+ *
+ * Absent means unbound. Anything else that stops this function from producing a
+ * list is a refusal.
+ */
 function readBindings(): AccountProjectBinding[] {
-  const file = bindingsFile();
-  let stat: fs.Stats;
+  let raw: string;
   try {
-    stat = fs.statSync(file);
-  } catch {
-    cache = { file, mtimeMs: -1, size: -1, bindings: [] };
-    return cache.bindings;
+    raw = fs.readFileSync(bindingsFile(), "utf8");
+  } catch (error) {
+    /* ENOENT and ENOTDIR are the two ways the record is simply not there: no
+       file, or no directory that could hold one. Every other errno — EACCES,
+       EISDIR, EIO, EMFILE — is a record this process failed to read, which is
+       not the same statement as "nobody bound anything". */
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return [];
+    throw new AccountProjectBindingsUnreadableError(code ? `the read failed with ${code}` : "the read failed");
   }
-  if (cache && cache.file === file && cache.mtimeMs === stat.mtimeMs && cache.size === stat.size) {
-    return cache.bindings;
-  }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<BindingFile>;
-    const bindings = parsed.schemaVersion === 1 ? bindingList(parsed.bindings) : null;
-    cache = { file, mtimeMs: stat.mtimeMs, size: stat.size, bindings: bindings ?? [] };
-    return cache.bindings;
+    parsed = JSON.parse(raw) as unknown;
   } catch {
-    cache = { file, mtimeMs: stat.mtimeMs, size: stat.size, bindings: [] };
-    return cache.bindings;
+    throw new AccountProjectBindingsUnreadableError("the record is not valid JSON");
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new AccountProjectBindingsUnreadableError("the record is not a binding file");
+  }
+  const record = parsed as Partial<BindingFile>;
+  if (record.schemaVersion !== 1) {
+    throw new AccountProjectBindingsUnreadableError(typeof record.schemaVersion === "number"
+      ? `the record's schemaVersion ${record.schemaVersion} is not supported`
+      : "the record names no supported schemaVersion");
+  }
+  const bindings = bindingList(record.bindings);
+  if (!bindings) throw new AccountProjectBindingsUnreadableError("the record's bindings are malformed");
+  return bindings;
 }
 
 /** Every binding on record, ordered by engine, project, then account. */
@@ -102,30 +140,16 @@ export function accountProjectBindings(): AccountProjectBinding[] {
       || left.accountId.localeCompare(right.accountId));
 }
 
-/** Drops the in-memory cache; the file stays authoritative. */
-export function resetAccountProjectBindingsForTests(): void {
-  cache = null;
-}
-
 function writeBindings(bindings: AccountProjectBinding[]): boolean {
   const file = bindingsFile();
-  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`);
   try {
+    /* The state directory is the operator's; keep it 0700 when this write is
+       the one that creates it. The record itself lands 0600 through the shared
+       durable write. */
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(
-      temporary,
-      JSON.stringify({ schemaVersion: 1, bindings } satisfies BindingFile, null, 2) + "\n",
-      { encoding: "utf8", mode: 0o600 },
-    );
-    fs.renameSync(temporary, file);
-    cache = null;
+    writeJsonDurably(file, { schemaVersion: 1, bindings } satisfies BindingFile);
     return true;
   } catch {
-    try {
-      fs.rmSync(temporary, { force: true });
-    } catch {
-      // The next mutation retries the write.
-    }
     return false;
   }
 }
@@ -134,6 +158,15 @@ export type BindingMutationFailure =
   | "INVALID_ENGINE"
   | "INVALID_ACCOUNT"
   | "INVALID_PROJECT"
+  /** The record on disk is damaged, so this mutation refused to read it, and
+      refused to write over it. Its own failure because the repair is the
+      operator's and nothing else will do: no launch, reseat or switch selects
+      an account for any project until the record is valid or gone. */
+  | "RECORD_UNREADABLE"
+  /** Another account mutation holds the cross-process lock. Retryable, and
+      distinct from every other failure here because nothing was refused on the
+      merits and nothing was written. */
+  | "BUSY"
   | "STORE_ERROR"
   /** The write reported success and the re-read does not show it. Reported as
       its own failure rather than folded into STORE_ERROR: the caller has to be
@@ -147,6 +180,50 @@ export type BindingMutationResult =
       an echo of the request: it is the only evidence the change landed. */
   | { ok: true; changed: boolean; bindings: AccountProjectBinding[] }
   | { ok: false; code: BindingMutationFailure; message: string; bindings: AccountProjectBinding[] };
+
+function unreadableRefusal(error: AccountProjectBindingsUnreadableError): BindingMutationResult {
+  /* An empty list here is not a record: the code is what the caller reads, and
+     it says the record could not be read at all. */
+  return { ok: false, code: "RECORD_UNREADABLE", message: error.message, bindings: [] };
+}
+
+/**
+ * Read, mutate, write and confirm as one transaction under the cross-process
+ * account mutation lock — the same lock every other account write in this
+ * codebase takes.
+ *
+ * Unlocked, two processes read the same record, each appends its own row, and
+ * the later atomic rename erases the earlier one while BOTH report success. A
+ * project whose sole binding is the row that vanished is then open to every
+ * account, which is the same inversion a damaged record would cause, arrived at
+ * by a race. Sixteen concurrent adds reproduced it: fifteen successes, thirteen
+ * rows.
+ *
+ * The lock is re-entrant per transaction, so a caller that already holds it —
+ * the API route awaits the async form so an operator's click queues instead of
+ * failing fast — runs this inline rather than acquiring a second time.
+ */
+function inRecordTransaction(operation: () => BindingMutationResult): BindingMutationResult {
+  try {
+    return withAccountMutationLock(operation);
+  } catch (error) {
+    if (error instanceof AccountProjectBindingsUnreadableError) return unreadableRefusal(error);
+    if (error instanceof AccountMutationBusyError) {
+      return { ok: false, code: "BUSY", message: "another account mutation holds the record; retry shortly", bindings: [] };
+    }
+    throw error;
+  }
+}
+
+/** A refusal that still carries the record, unless the record is why it failed. */
+function refusalWithRecord(input: { ok: false; code: BindingMutationFailure; message: string }): BindingMutationResult {
+  try {
+    return { ...input, bindings: accountProjectBindings() };
+  } catch (error) {
+    if (error instanceof AccountProjectBindingsUnreadableError) return unreadableRefusal(error);
+    throw error;
+  }
+}
 
 /**
  * The one key a binding is stored and read under.
@@ -190,20 +267,24 @@ export function bindAccountToProject(
   now: () => string = () => new Date().toISOString(),
 ): BindingMutationResult {
   const input = normalized(engine, accountId, project);
-  if (!input.ok) return { ...input, bindings: accountProjectBindings() };
-  const current = readBindings();
-  const existing = current.some((binding) => sameBinding(binding, input.engine, input.accountId, input.project));
-  if (!existing) {
-    const next = [...current, { engine: input.engine, accountId: input.accountId, project: input.project, createdAt: now() }];
-    if (!writeBindings(next)) {
-      return { ok: false, code: "STORE_ERROR", message: "the binding could not be written", bindings: accountProjectBindings() };
+  /* Validated before the lock: a malformed request is refused on its own
+     terms and never queues behind another process's account mutation. */
+  if (!input.ok) return refusalWithRecord(input);
+  return inRecordTransaction(() => {
+    const current = readBindings();
+    const existing = current.some((binding) => sameBinding(binding, input.engine, input.accountId, input.project));
+    if (!existing) {
+      const next = [...current, { engine: input.engine, accountId: input.accountId, project: input.project, createdAt: now() }];
+      if (!writeBindings(next)) {
+        return { ok: false, code: "STORE_ERROR", message: "the binding could not be written", bindings: accountProjectBindings() };
+      }
     }
-  }
-  const confirmed = accountProjectBindings();
-  if (!confirmed.some((binding) => sameBinding(binding, input.engine, input.accountId, input.project))) {
-    return { ok: false, code: "NOT_CONFIRMED", message: "the binding is not present in the record read back", bindings: confirmed };
-  }
-  return { ok: true, changed: !existing, bindings: confirmed };
+    const confirmed = accountProjectBindings();
+    if (!confirmed.some((binding) => sameBinding(binding, input.engine, input.accountId, input.project))) {
+      return { ok: false, code: "NOT_CONFIRMED", message: "the binding is not present in the record read back", bindings: confirmed };
+    }
+    return { ok: true, changed: !existing, bindings: confirmed };
+  });
 }
 
 /** Removes one binding. Idempotent, and confirmed by the same re-read. */
@@ -213,18 +294,20 @@ export function unbindAccountFromProject(
   project: unknown,
 ): BindingMutationResult {
   const input = normalized(engine, accountId, project);
-  if (!input.ok) return { ...input, bindings: accountProjectBindings() };
-  const current = readBindings();
-  const next = current.filter((binding) => !sameBinding(binding, input.engine, input.accountId, input.project));
-  const existed = next.length !== current.length;
-  if (existed && !writeBindings(next)) {
-    return { ok: false, code: "STORE_ERROR", message: "the binding could not be removed", bindings: accountProjectBindings() };
-  }
-  const confirmed = accountProjectBindings();
-  if (confirmed.some((binding) => sameBinding(binding, input.engine, input.accountId, input.project))) {
-    return { ok: false, code: "NOT_CONFIRMED", message: "the binding is still present in the record read back", bindings: confirmed };
-  }
-  return { ok: true, changed: existed, bindings: confirmed };
+  if (!input.ok) return refusalWithRecord(input);
+  return inRecordTransaction(() => {
+    const current = readBindings();
+    const next = current.filter((binding) => !sameBinding(binding, input.engine, input.accountId, input.project));
+    const existed = next.length !== current.length;
+    if (existed && !writeBindings(next)) {
+      return { ok: false, code: "STORE_ERROR", message: "the binding could not be removed", bindings: accountProjectBindings() };
+    }
+    const confirmed = accountProjectBindings();
+    if (confirmed.some((binding) => sameBinding(binding, input.engine, input.accountId, input.project))) {
+      return { ok: false, code: "NOT_CONFIRMED", message: "the binding is still present in the record read back", bindings: confirmed };
+    }
+    return { ok: true, changed: existed, bindings: confirmed };
+  });
 }
 
 /**
@@ -232,6 +315,10 @@ export function unbindAccountFromProject(
  * no binding for that engine — which means every account, exactly as before.
  * `null` and `[]` are deliberately different answers: an empty array is a
  * project whose entire allowed set is unusable, and nothing may run there.
+ *
+ * Reads the record when the caller passes no `bindings`, so a damaged record
+ * throws here rather than answering `null`: "the record could not be read" must
+ * never arrive at a caller wearing the answer that means "every account".
  */
 export function allowedAccountIdsForProject(
   project: string | null | undefined,

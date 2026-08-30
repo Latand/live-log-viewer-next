@@ -17,7 +17,7 @@ process.env.LLV_STATE_DIR = STATE;
 process.env.HOME = path.join(SANDBOX, "home");
 
 const { GET, POST } = await import("./route");
-const { accountProjectBindings, resetAccountProjectBindingsForTests } = await import("@/lib/accounts/projectBindings");
+const { accountProjectBindings } = await import("@/lib/accounts/projectBindings");
 
 const ATLAS = "project-atlas";
 
@@ -26,7 +26,6 @@ const MAIN = "default";
 
 beforeEach(() => {
   fs.rmSync(path.join(STATE, "account-project-bindings.json"), { force: true });
-  resetAccountProjectBindingsForTests();
 });
 
 afterAll(() => {
@@ -35,8 +34,15 @@ afterAll(() => {
   if (ORIGINAL_HOME === undefined) delete process.env.HOME;
   else process.env.HOME = ORIGINAL_HOME;
   fs.rmSync(SANDBOX, { recursive: true, force: true });
-  resetAccountProjectBindingsForTests();
 });
+
+async function readResponse(project?: string): Promise<{ status: number; payload: Record<string, unknown> }> {
+  const url = project
+    ? `http://127.0.0.1/api/account-project-bindings?project=${encodeURIComponent(project)}`
+    : "http://127.0.0.1/api/account-project-bindings";
+  const response = await GET(new NextRequest(url));
+  return { status: response.status, payload: await response.json() as Record<string, unknown> };
+}
 
 async function read(project?: string): Promise<Record<string, unknown>> {
   const url = project
@@ -72,7 +78,6 @@ test("an added binding is visible from both directions, and survives a fresh rea
   });
 
   /* The record, not the response: an independent process-level read finds it. */
-  resetAccountProjectBindingsForTests();
   expect(accountProjectBindings()).toMatchObject([{ engine: "claude", accountId: MAIN, project: ATLAS }]);
 
   const accountsSide = await read() as { accounts: Record<string, { accountId: string; projects: { project: string; displayName: string }[] }[]> };
@@ -92,6 +97,30 @@ test("a malformed mutation is refused and writes nothing", async () => {
   expect((await mutate({ action: "toggle", engine: "claude", accountId: MAIN, project: ATLAS })).status).toBe(400);
   expect((await mutate({ action: "add", engine: "gemini", accountId: MAIN, project: ATLAS })).status).toBe(400);
   expect((await mutate({ action: "add", engine: "claude", accountId: MAIN })).status).toBe(400);
-  resetAccountProjectBindingsForTests();
   expect(accountProjectBindings()).toEqual([]);
+});
+
+test("a damaged record answers with the repair it needs, and never with an empty relation", async () => {
+  await mutate({ action: "add", engine: "claude", accountId: MAIN, project: ATLAS });
+  const damaged = '{"schemaVersion":1,"bindings":[{"engine":"claude","accountId"';
+  fs.writeFileSync(path.join(STATE, "account-project-bindings.json"), damaged, "utf8");
+
+  /* Both reads: an empty `bindings` list with a 200 would tell the panel that
+     nothing is restricted, which is the fence disappearing from the view of the
+     one project that has one. */
+  for (const answer of [await readResponse(), await readResponse(ATLAS)]) {
+    expect(answer.status).toBe(409);
+    expect(answer.payload).toMatchObject({ error: "RECORD_UNREADABLE" });
+    expect(String(answer.payload.message)).toContain("account-project-bindings.json");
+    expect(answer.payload.engines).toBeUndefined();
+  }
+
+  const added = await mutate({ action: "add", engine: "claude", accountId: "acct-intruder", project: ATLAS });
+  expect(added.status).toBe(409);
+  expect(added.payload).toMatchObject({ error: "RECORD_UNREADABLE" });
+  const removed = await mutate({ action: "remove", engine: "claude", accountId: MAIN, project: ATLAS });
+  expect(removed.status).toBe(409);
+
+  /* Neither mutation wrote over the record the operator still has to repair. */
+  expect(fs.readFileSync(path.join(STATE, "account-project-bindings.json"), "utf8")).toBe(damaged);
 });

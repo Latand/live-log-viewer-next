@@ -10,7 +10,11 @@ import { afterAll, beforeEach, expect, spyOn, test } from "bun:test";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-stage-account-binding-"));
 process.env.LLV_STATE_DIR = path.join(sandbox, "state");
 process.env.LLV_STRUCTURED_HOSTS = "0";
+/* The account catalog the real resolution reads is derived from HOME, and the
+   one test below that does NOT stub the resolution must read this sandbox. */
+process.env.HOME = path.join(sandbox, "home");
 fs.mkdirSync(process.env.LLV_STATE_DIR, { recursive: true });
+fs.mkdirSync(process.env.HOME, { recursive: true });
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
 const { accountManager } = await import("@/lib/accounts/manager");
@@ -258,5 +262,26 @@ test("every allowed account out of capacity is reported as capacity, not solved 
       .rejects.toThrow(`no allowed claude account has capacity for project ${ATLAS} (allowed claude accounts: ${RESERVED}); resetsAt=2026-08-30T11:00:00.000Z`);
   } finally {
     resolve.mockRestore();
+  }
+});
+
+test("a damaged binding record parks the stage instead of launching it on any account", async () => {
+  /* The one test here that runs the REAL project resolution: the record on
+     disk is what decides, and a record that cannot be read must refuse the
+     launch rather than answer "this project is unbound" and hand the stage
+     whichever account the engine happens to be pointing at. */
+  const record = path.join(process.env.LLV_STATE_DIR!, "account-project-bindings.json");
+  fs.writeFileSync(record, '{"schemaVersion":1,"bindings":[{"engine":"claude"', "utf8");
+  const reservations: unknown[] = [];
+  try {
+    await expect(defaultPipelinePorts().spawnAgent(spawnInput(RESERVED), (reservation) => { reservations.push(reservation); }))
+      .rejects.toThrow(/account-project-bindings\.json is unreadable/);
+    /* Nothing was reserved, so the parked stage retries cleanly once the
+       operator repairs or removes the record. */
+    expect(reservations).toEqual([]);
+    await expect(defaultPipelinePorts().spawnAgent(spawnInput(null), () => {}))
+      .rejects.toThrow(/is unreadable/);
+  } finally {
+    fs.rmSync(record, { force: true });
   }
 });

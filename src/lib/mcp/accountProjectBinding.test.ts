@@ -18,7 +18,7 @@ afterAll(() => {
 });
 
 const { viewerMcpBindings } = await import("./bindings");
-const { accountProjectBindings, resetAccountProjectBindingsForTests } = await import("@/lib/accounts/projectBindings");
+const { accountProjectBindings } = await import("@/lib/accounts/projectBindings");
 
 const ATLAS = "project-atlas";
 const BEACON = "project-beacon";
@@ -37,7 +37,6 @@ function bindingsFor(callerProject = ATLAS) {
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
   fs.mkdirSync(process.env.LLV_STATE_DIR!, { recursive: true });
-  resetAccountProjectBindingsForTests();
 });
 
 test("a list of an unconfigured project reports every account allowed, and no bindings", async () => {
@@ -68,7 +67,6 @@ test("add and remove are confirmed by the record read back, and an independent r
   });
   /* The answer is a read of the store, so a reader that never saw the call has
      to find the same row — this is the check an echo could not pass. */
-  resetAccountProjectBindingsForTests();
   expect(accountProjectBindings()).toMatchObject([{ engine: "claude", accountId: RESERVED, project: ATLAS }]);
 
   const again = await tool.account_project_binding({
@@ -88,7 +86,6 @@ test("add and remove are confirmed by the record read back, and an independent r
     project: ATLAS,
   });
   expect(removed).toMatchObject({ action: "remove", changed: true, bindings: [] });
-  resetAccountProjectBindingsForTests();
   expect(accountProjectBindings()).toEqual([]);
 });
 
@@ -123,6 +120,5 @@ test("a mutation missing its engine, account or project is refused with nothing 
     .rejects.toThrow("accountId is required");
   await expect(tool.account_project_binding({ clientRequestId: "binding-bad-action", action: "toggle", engine: "claude", accountId: RESERVED, project: ATLAS }))
     .rejects.toThrow("action must be list, add or remove");
-  resetAccountProjectBindingsForTests();
   expect(accountProjectBindings()).toEqual([]);
 });

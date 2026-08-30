@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { freshSpecFor } from "@/lib/agent/cli";
 import { agentRegistry } from "@/lib/agent/registry";
+import type { ProjectSpawnResolution } from "@/lib/accounts/contracts";
 import { accountManager } from "@/lib/accounts/manager";
 import { projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
@@ -255,7 +256,17 @@ async function ensureStageAgent(
        account it forbids. Resolved before `startedAt` is stamped so a parked
        stage re-enters this branch cleanly once the operator answers. */
     if (!run.accountId) {
-      const resolution = accountManager.resolveProjectSpawn(role.engine, { project: wf.project });
+      /* A damaged binding record throws out of the resolution rather than
+         answering, and that refusal belongs to THIS stage: parked with the
+         reason, like every other one, instead of thrown into the tick that
+         drives every other workflow. */
+      let resolution: ProjectSpawnResolution;
+      try {
+        resolution = accountManager.resolveProjectSpawn(role.engine, { project: wf.project });
+      } catch (error) {
+        park(wf, error instanceof Error ? error.message : String(error));
+        return "waiting";
+      }
       if (resolution.kind !== "available") {
         park(wf, projectAccountRefusalDetail(resolution, role.engine, wf.project));
         return "waiting";

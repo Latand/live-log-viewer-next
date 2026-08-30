@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
 import {
@@ -11,6 +12,7 @@ import {
   type CarrierConversation,
 } from "@/lib/accounts/projectAccountsView";
 import {
+  AccountProjectBindingsUnreadableError,
   accountProjectBindings,
   bindAccountToProject,
   unbindAccountFromProject,
@@ -85,31 +87,55 @@ function projectView(project: string) {
  * projects each account is bound to.
  */
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const requested = request.nextUrl.searchParams.get("project")?.trim();
-  if (requested) {
-    return NextResponse.json(projectView(canonicalProject(requested)), { headers });
+  try {
+    const requested = request.nextUrl.searchParams.get("project")?.trim();
+    if (requested) {
+      return NextResponse.json(projectView(canonicalProject(requested)), { headers });
+    }
+    const bindings = accountProjectBindings();
+    const displayNames = projectAliasSnapshot().displayNames;
+    return NextResponse.json({
+      bindings,
+      accounts: Object.fromEntries(ENGINES.map((engine) => [
+        engine,
+        accountsFor(engine).map((account) => ({
+          ...account,
+          projects: accountProjectRows(engine, account.accountId, bindings, displayNames),
+        })),
+      ])),
+    }, { headers });
+  } catch (error) {
+    /* A damaged record answers with what is wrong with it. An empty relation
+       here would read as "nothing is restricted", which is the panel showing
+       every account allowed on a project that reserved one. */
+    if (error instanceof AccountProjectBindingsUnreadableError) return unreadableResponse(error);
+    throw error;
   }
-  const bindings = accountProjectBindings();
-  const displayNames = projectAliasSnapshot().displayNames;
-  return NextResponse.json({
-    bindings,
-    accounts: Object.fromEntries(ENGINES.map((engine) => [
-      engine,
-      accountsFor(engine).map((account) => ({
-        ...account,
-        projects: accountProjectRows(engine, account.accountId, bindings, displayNames),
-      })),
-    ])),
-  }, { headers });
 }
 
 const FAILURE_STATUS: Record<string, number> = {
   INVALID_ENGINE: 400,
   INVALID_ACCOUNT: 400,
   INVALID_PROJECT: 400,
+  /* The record on disk needs the operator, and until it gets them no project
+     selects an account. A conflict rather than a server fault: the request was
+     well formed and the state it addresses is the thing that is wrong. */
+  RECORD_UNREADABLE: 409,
+  /* Nothing was refused and nothing was written; the same request works on
+     retry, which is what 503 tells a caller. */
+  BUSY: 503,
   STORE_ERROR: 500,
   NOT_CONFIRMED: 500,
 };
+
+/** The one answer for a damaged record: its message, and never a view built
+    from a record this process could not read. */
+function unreadableResponse(error: AccountProjectBindingsUnreadableError): NextResponse {
+  return NextResponse.json(
+    { error: "RECORD_UNREADABLE", message: error.message, bindings: [] },
+    { status: 409, headers },
+  );
+}
 
 /**
  * `action: "add" | "remove"`. What comes back is the record re-read after the
@@ -137,21 +163,32 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "INVALID_PROJECT", message: "project is required" }, { status: 400, headers });
   }
   const canonical = canonicalProject(project);
-  const result = action === "add"
-    ? bindAccountToProject(record?.engine, record?.accountId, canonical)
-    : unbindAccountFromProject(record?.engine, record?.accountId, canonical);
-  if (!result.ok) {
-    return NextResponse.json(
-      { error: result.code, message: result.message, bindings: result.bindings },
-      { status: FAILURE_STATUS[result.code] ?? 400, headers },
-    );
+  /* Taken here, around the mutation AND the confirming view, so an operator's
+     click queues behind another account mutation instead of being turned away
+     by it — the store re-enters this transaction rather than acquiring twice.
+     It also makes the view below a read of the record this write produced. */
+  try {
+    return await withAccountMutationLockAsync(async () => {
+      const result = action === "add"
+        ? bindAccountToProject(record?.engine, record?.accountId, canonical)
+        : unbindAccountFromProject(record?.engine, record?.accountId, canonical);
+      if (!result.ok) {
+        return NextResponse.json(
+          { error: result.code, message: result.message, bindings: result.bindings },
+          { status: FAILURE_STATUS[result.code] ?? 400, headers },
+        );
+      }
+      return NextResponse.json({
+        ok: true,
+        changed: result.changed,
+        bindings: result.bindings,
+        /* The confirming read of the project the caller just changed, so the answer
+           carries the state the fence will actually enforce. */
+        project: projectView(canonical),
+      }, { headers });
+    });
+  } catch (error) {
+    if (error instanceof AccountProjectBindingsUnreadableError) return unreadableResponse(error);
+    throw error;
   }
-  return NextResponse.json({
-    ok: true,
-    changed: result.changed,
-    bindings: result.bindings,
-    /* The confirming read of the project the caller just changed, so the answer
-       carries the state the fence will actually enforce. */
-    project: projectView(canonical),
-  }, { headers });
 }

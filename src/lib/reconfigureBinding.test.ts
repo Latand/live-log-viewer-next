@@ -6,7 +6,7 @@ import { afterAll, beforeEach, expect, test } from "bun:test";
 
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
-import { bindAccountToProject, resetAccountProjectBindingsForTests } from "@/lib/accounts/projectBindings";
+import { bindAccountToProject } from "@/lib/accounts/projectBindings";
 import { AgentRegistry, setAgentRegistryForTests, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { resetProjectAliasesForTests } from "@/lib/projects/aliases";
 import type { FileEntry } from "@/lib/types";
@@ -46,7 +46,6 @@ beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
   fs.rmSync(path.join(SANDBOX, "work"), { recursive: true, force: true });
   fs.mkdirSync(path.join(SANDBOX, "work"), { recursive: true });
-  resetAccountProjectBindingsForTests();
   resetProjectAliasesForTests();
   setAgentRegistryForTests(null);
 });
