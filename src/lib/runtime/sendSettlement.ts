@@ -91,12 +91,15 @@ export const SEND_UNVERIFIED_REASON =
     unproven either way, so it settles like any other unverified send. */
 export const SEND_UNRECORDED_REASON =
   "delivery was accepted and the delivery journal holds no record of it; whether it reached the recipient is unknown, so sending it again may deliver it twice";
-/** The runtime host could not be asked at all. The send is ended anyway — that
-    is the whole point of a deadline that does not depend on anything being
-    healthy — and ended as unverified, because an outage is a reason to know
-    less, never a proof that nothing executed. */
-export const SEND_UNREACHABLE_REASON =
-  "delivery was accepted and the runtime host could not be reached to say what became of it; it is fenced from being delivered later, but whether it already reached the recipient is unknown";
+/** The runtime host could not give this send a terminal answer — it could not
+    be asked at all, or it could be asked and would not accept the fence. The
+    send is ended anyway, which is the whole point of a deadline that does not
+    depend on anything being healthy, and ended as unverified, because a host
+    that cannot answer is a reason to know less and never a proof that nothing
+    executed. The durable record is the fence in this case, and the delivery
+    queue reads it before it actuates anything. */
+export const SEND_UNSETTLEABLE_REASON =
+  "delivery was accepted and the runtime host could not give it a terminal answer; it is fenced from being delivered later, but whether it already reached the recipient is unknown";
 
 /**
  * How long an accepted send may rest unsettled before a receipt query ends it.
@@ -434,12 +437,13 @@ export async function resolveSendReceipt(
   if (!delivery || !pastSettlementDeadline(registry, file, delivery, ports)) return projected;
   /* Past the deadline, and the journal has no terminal answer of its own. What
      the settlement may CLAIM depends on what it could see. */
+  const unsettleable: JournalVerdict = {
+    state: "failed",
+    disposition: "unverified",
+    reason: SEND_UNSETTLEABLE_REASON,
+  };
   if (current === "unreachable" || !client) {
-    return settleProjection(registry, operationId, projected, {
-      state: "failed",
-      disposition: "unverified",
-      reason: SEND_UNREACHABLE_REASON,
-    });
+    return settleProjection(registry, operationId, projected, unsettleable);
   }
   if (current === null || status === null) {
     return settleProjection(registry, operationId, projected, {
@@ -450,12 +454,15 @@ export async function resolveSendReceipt(
   }
   /* The one path that can prove non-execution: the journal still holds the
      operation, so terminalizing it now is what makes "never executed" true
-     rather than merely hoped for. A fence that cannot be written leaves the
-     send in flight — an unwritable journal is not a licence to declare a
-     message lost while it may still be sitting in a live outbox. */
+     rather than merely hoped for. A fence the journal will not accept — a
+     socket that died between the read and the write, a database that has gone
+     read-only — proves nothing, so it may not report the send lost; it may not
+     leave the send in flight either, because a host whose reads work and whose
+     writes do not would make `queued` permanent exactly as an outage would. So
+     it ends the same way an outage does, on the durable record the delivery
+     queue reads before it actuates anything. */
   const fenced = await fenceOperation(client, current.operationId, status).catch(() => null);
-  if (!fenced) return projected;
-  return settleProjection(registry, operationId, projected, fenced);
+  return settleProjection(registry, operationId, projected, fenced ?? unsettleable);
 }
 
 /**

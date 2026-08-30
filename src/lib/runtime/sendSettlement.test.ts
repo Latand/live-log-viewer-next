@@ -30,7 +30,7 @@ const { RuntimeJournal } = await import("@/runtime-host/journal");
 const { StructuredDeliveryQueue } = await import("./structuredDeliveryQueue");
 const {
   SEND_LOST_REASON,
-  SEND_UNREACHABLE_REASON,
+  SEND_UNSETTLEABLE_REASON,
   SEND_UNRECORDED_REASON,
   SEND_UNVERIFIED_REASON,
   resolveSendReceipt,
@@ -495,7 +495,7 @@ test("a runtime host that cannot be reached still ends the send, and never calls
       now: AFTER_THE_WINDOW,
     });
     expect(answered?.state).toBe("failed");
-    expect(answered?.reason).toBe(SEND_UNREACHABLE_REASON);
+    expect(answered?.reason).toBe(SEND_UNSETTLEABLE_REASON);
     expect(answered?.duplicateRisk).toBe(true);
     expect(answered?.resend).toBe("verify-first");
 
@@ -510,10 +510,54 @@ test("a runtime host that cannot be reached still ends the send, and never calls
         now: AFTER_THE_WINDOW,
       });
       expect(again?.state).toBe("failed");
-      expect(again?.reason).toBe(SEND_UNREACHABLE_REASON);
+      expect(again?.reason).toBe(SEND_UNSETTLEABLE_REASON);
       expect(again?.settledAt).toBe(settledAt!);
     }
     expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
+  } finally {
+    active.close();
+  }
+});
+
+test("a journal that answers reads and refuses the fence still ends the send, and the record fences it", async () => {
+  /* The half-outage: the runtime host is reachable enough to say the send is
+     still open, and will not accept the write that would fence it — a socket
+     that died between the two calls, or a database gone read-only. Leaving the
+     send in flight here would make `queued` permanent exactly as a full outage
+     would, so it ends the same way, on the durable record alone. */
+  const active = fixture("fence-refused");
+  const { host, received } = recordingHost(active.generationId);
+  try {
+    const { operationId, deliveryId } = acceptSend(active, {
+      clientMessageId: "fence-refused-key",
+      text: "resume the cutover",
+    });
+    const refusesTheFence = {
+      ...active.client,
+      transitionOperation: async () => { throw new Error("runtime journal is read-only"); },
+    } as RuntimeHostClient;
+
+    const answered = await resolveSendReceipt(operationId, {
+      registry: active.registry,
+      client: refusesTheFence,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(answered?.state).toBe("failed");
+    expect(answered?.reason).toBe(SEND_UNSETTLEABLE_REASON);
+    expect(answered?.duplicateRisk).toBe(true);
+    expect(answered?.resend).toBe("verify-first");
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
+
+    /* And the answer stays true: the operation is still open in the journal, so
+       an executor reaching it later would deliver a message the sender was told
+       had not arrived. The settled record is what stops it. */
+    await new StructuredDeliveryQueue(
+      stalePortFor(active, operationId, "fence-refused-key", "resume the cutover"),
+      () => host,
+    ).drain();
+    expect(received).toEqual([]);
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("uncertain");
+    expect(receiptOf(active, operationId)?.resend).toBe("verify-first");
   } finally {
     active.close();
   }
