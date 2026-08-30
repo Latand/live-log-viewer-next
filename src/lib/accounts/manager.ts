@@ -102,19 +102,25 @@ export class ProjectAccountRefusedError extends Error {
  * `resolveSpawn` answers with the engine's active account when nothing is
  * named, which is a choice made without consulting anything; this is the same
  * call with the project's pool in front of it. An unbound project keeps that
- * exact behaviour — `selectProjectAccount` answers with the active account and
- * `contextForSpawn` resolves it, byte for byte what the caller did before. A
- * bound project draws from its allowed set only, reports when every allowed
+ * exact behaviour — `selectProjectAccount` answers with the preferred account
+ * and `contextForSpawn` resolves it, byte for byte what the caller did before.
+ * A bound project draws from its allowed set only, reports when every allowed
  * account is out of capacity, and refuses when the binding record cannot be
  * read (that read throws from here, and a caller that cannot see the boundary
  * does not get to decide there is none).
+ *
+ * `preferredAccountId` is a PREFERENCE and never a pin, because no caller of
+ * this function names an account: it carries continuity ("this work already
+ * ran on that account"), and continuity onto an account the project no longer
+ * allows is a preference the pool overrides, not a launch to refuse. The pool
+ * is still the fence — the pick simply comes from inside it.
  */
 export function resolveProjectSpawnAccount(
   engine: "claude" | "codex",
   project: string | null,
-  requestedId?: string | null,
+  preferredAccountId?: string | null,
 ): AccountContext {
-  const resolution = accountManager.resolveProjectSpawn(engine, { project, requestedId: requestedId ?? null });
+  const resolution = accountManager.resolveProjectSpawn(engine, { project, preferredId: preferredAccountId ?? null });
   if (resolution.kind !== "available") throw new ProjectAccountRefusedError(resolution, engine, project);
   return resolution.account;
 }
@@ -243,7 +249,9 @@ export const accountManager: AccountManager = {
       observations: agentRegistry().quotaObservations(engine),
       bindings: accountProjectBindings(),
       requestedId: request.requestedId,
-      preferredId: agentRegistry().engineRouting(engine).activeAccountId,
+      /* The caller's continuity hint outranks the engine's routing as an
+         ORDERING, and neither one widens the candidate set. */
+      preferredId: request.preferredId ?? agentRegistry().engineRouting(engine).activeAccountId,
       excludedIds: request.excludedIds ?? [],
     });
     if (selected.kind !== "available") return selected;

@@ -38,7 +38,7 @@ import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport
 import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "@/lib/pipelines/engine";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
-import { AccountProjectBindingsUnreadableError, allowedAccountIdsForProject } from "@/lib/accounts/projectBindings";
+import { AccountProjectBindingsUnreadableError, allowedAccountIdsForProject, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { derivedSpawnTitle, durableSemanticTitle, firstPromptLine, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
@@ -637,7 +637,26 @@ export async function executeSpawnRequest(
         ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
         : await dependencies.resolveHealthySpawnAccount(engine, body.accountId, allowedAccountIds);
     } catch (error) {
-      if (body.accountId === undefined) throw error;
+      if (body.accountId === undefined) {
+        /* #1279: a project whose pool produced no usable account. Nothing was
+           named, so there is no pin to degrade and nothing outside the pool to
+           reach for — what is left is to REPORT, in the one wording every
+           other seam uses, with the resolver's own reason after it so the
+           operator learns which account to repair. Thrown instead, it leaves
+           the request answering as a Viewer fault: a state the binding itself
+           created, reported as a crash. An UNBOUND project keeps the throw it
+           always had — its failure is about the machine's accounts, not about
+           a boundary anyone drew. */
+        if (allowedAccountIds === null) throw error;
+        const detail = projectAccountRefusalDetail(
+          { kind: "unavailable", allowedAccountIds },
+          engine,
+          spawnProject ?? "",
+        );
+        return NextResponse.json({
+          error: `${detail}: ${error instanceof Error ? error.message : String(error)}`,
+        }, { status: 409 });
+      }
       if (engine === "claude" && requestedAccountId) {
         try {
           const pinned = dependencies.resolveSpawnAccount(engine, requestedAccountId);

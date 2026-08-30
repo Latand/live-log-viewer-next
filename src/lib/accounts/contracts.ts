@@ -72,6 +72,20 @@ export type ProjectSpawnRequest = {
   project: string | null;
   /** Account the caller named — a pipeline stage's `account`, say. */
   requestedId?: string | null;
+  /**
+   * An account this launch would rather use, with nobody having named it: the
+   * one a previous attempt of the same work already ran on, say.
+   *
+   * Distinct from `requestedId` and the distinction is the rule itself. A
+   * preference ORDERS candidates and the pool is the fence, so a preference the
+   * project does not allow is dropped and an allowed account is picked instead;
+   * a `requestedId` the project does not allow is refused, because nobody may
+   * quietly substitute an account a caller actually named. Passing a continuity
+   * hint as a pin makes a bound project REFUSE where the rule says it draws
+   * from the pool — which is the automatic path failing on the useful side
+   * rather than the dangerous one, but failing all the same.
+   */
+  preferredId?: string | null;
   /** Accounts already attempted for this launch, deprioritized as before. */
   excludedIds?: string[];
 };

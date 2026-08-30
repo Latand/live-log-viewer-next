@@ -26,22 +26,38 @@ import type { BoardTask } from "@/lib/tasks/types";
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-spawn-binding-"));
 const STATE = path.join(SANDBOX, "state");
 const HOME = path.join(SANDBOX, "home");
+/* The Claude home the legacy account resolves to. Named explicitly rather than
+   derived from HOME: `os.homedir()` is read once per process, so reassigning
+   `process.env.HOME` inside a test file would still leave the account pointing
+   at the real one. */
+const CLAUDE_HOME = path.join(HOME, ".claude");
 const RECORD = path.join(STATE, "account-project-bindings.json");
 const ORIGINAL_STATE = process.env.LLV_STATE_DIR;
 const ORIGINAL_HOME = process.env.HOME;
+const ORIGINAL_CLAUDE_HOME = process.env.LLV_CLAUDE_HOME;
 fs.mkdirSync(STATE, { recursive: true });
 fs.mkdirSync(HOME, { recursive: true });
 process.env.LLV_STATE_DIR = STATE;
 process.env.HOME = HOME;
+process.env.LLV_CLAUDE_HOME = CLAUDE_HOME;
+/* That account's credential, written the way the safety check demands, so it
+   is an account the automatic pick may actually choose. Without it every
+   account reads as unauthenticated and a bound project has no candidate at
+   all — a different refusal from the one under test. */
+fs.mkdirSync(CLAUDE_HOME, { recursive: true, mode: 0o700 });
+fs.writeFileSync(path.join(CLAUDE_HOME, ".credentials.json"), "{}", { encoding: "utf8", mode: 0o600 });
 
 const { POST } = await import("./route");
 const { AgentRegistry } = await import("@/lib/agent/registry");
 const { projectInfoFromCwd } = await import("@/lib/scanner/describe");
 const { resetProjectAliasesForTests } = await import("@/lib/projects/aliases");
+const { listClaudeAccounts } = await import("@/lib/accounts/claude");
 
-/** The board task's project, and the account nobody on this machine has. */
+/** The board task's project, and the accounts nobody on this machine has. */
 const ATLAS = "project-atlas";
 const RESERVED = "acct-reserved";
+/** An account a task once ran on and that no longer exists. */
+const RETIRED = "acct-retired";
 
 /** The project key the route resolves for a directory — the same one the launch
     profile is stamped with, so the fence and the board agree on the name. */
@@ -52,6 +68,7 @@ function projectOf(cwd: string): string {
 beforeEach(() => {
   process.env.LLV_STATE_DIR = STATE;
   process.env.HOME = HOME;
+  process.env.LLV_CLAUDE_HOME = CLAUDE_HOME;
   fs.rmSync(RECORD, { force: true });
   resetProjectAliasesForTests();
 });
@@ -61,10 +78,12 @@ afterAll(() => {
   else process.env.LLV_STATE_DIR = ORIGINAL_STATE;
   if (ORIGINAL_HOME === undefined) delete process.env.HOME;
   else process.env.HOME = ORIGINAL_HOME;
+  if (ORIGINAL_CLAUDE_HOME === undefined) delete process.env.LLV_CLAUDE_HOME;
+  else process.env.LLV_CLAUDE_HOME = ORIGINAL_CLAUDE_HOME;
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 });
 
-function taskFor(id: string): BoardTask {
+function taskFor(id: string, assignments: BoardTask["assignments"] = []): BoardTask {
   return {
     id,
     project: ATLAS,
@@ -72,10 +91,24 @@ function taskFor(id: string): BoardTask {
     text: "Launch the atlas task",
     placement: "pinned",
     pos: { x: 0, y: 0 },
-    assignments: [],
+    assignments,
     createdAt: "2026-08-30T12:00:00.000Z",
     updatedAt: "2026-08-30T12:00:00.000Z",
   };
+}
+
+/** An assignment as a first launch leaves it: an account nobody named, kept by
+    retries for continuity. */
+function ranOn(accountId: string): BoardTask["assignments"] {
+  return [{
+    path: null,
+    panePid: null,
+    state: "delivered",
+    error: null,
+    at: "2026-08-30T12:00:00.000Z",
+    accountId,
+    engine: "claude",
+  }];
 }
 
 interface LaunchAttempt {
@@ -90,9 +123,13 @@ interface LaunchAttempt {
  * One task launch, with the task store and the pane substituted and the REAL
  * account resolution left in place — the seam the rule lives in.
  */
-async function launch(id: string, cwd: string): Promise<LaunchAttempt> {
+async function launch(
+  id: string,
+  cwd: string,
+  assignments: BoardTask["assignments"] = [],
+): Promise<LaunchAttempt> {
   const registry = new AgentRegistry(path.join(SANDBOX, `${id}.json`), undefined, undefined, { sqliteMode: "off" });
-  let tasks: BoardTask[] = [taskFor(id)];
+  let tasks: BoardTask[] = [taskFor(id, assignments)];
   let spawnCalls = 0;
   let writes = 0;
   const response = await POST.withDependencies(
@@ -192,4 +229,40 @@ test("a binding for the OTHER engine leaves this engine's launch unbound", async
      launch on a project with only a Codex row is untouched. */
   expect(attempt.spawnCalls).toBe(1);
   expect(attempt.status).not.toBe(409);
+});
+
+/**
+ * The account a first launch resolved is CONTINUITY, not a pin: nobody named
+ * it, the assignment simply keeps it so retries land where the work started.
+ * Passed to the project seam as a pin it made a bound project refuse its own
+ * task launch while the pool it was given sat idle — the automatic path
+ * declining to draw from the pool, which is exactly what the rule asks it to
+ * do. A preference loses to the fence and the launch proceeds.
+ */
+test("a task that already ran on an account the project no longer allows launches on the pool instead of refusing", async () => {
+  const cwd = fs.mkdtempSync(path.join(SANDBOX, "atlas-reseat-"));
+  const usable = listClaudeAccounts()[0]!.id;
+  bind("claude", usable, projectOf(cwd));
+
+  const attempt = await launch("10410104-89c5-0064-9118-51661c4f1041", cwd, ranOn(RETIRED));
+
+  /* The pool had capacity, so nothing is refused and nothing crosses: the
+     launch reaches the pane on the one account the project allows. */
+  expect(attempt.status).not.toBe(409);
+  expect(attempt.error).not.toContain(RETIRED);
+  expect(attempt.spawnCalls).toBe(1);
+});
+
+test("an unbound project still launches a retry on the account the task already ran on", async () => {
+  const cwd = fs.mkdtempSync(path.join(SANDBOX, "atlas-continuity-"));
+
+  const attempt = await launch("10410105-89c5-0064-9118-51661c4f1041", cwd, ranOn(RETIRED));
+
+  /* Unchanged, down to the failure: with no binding the preference IS the
+     account, so a task whose account has since been removed reports that
+     account as unknown rather than quietly starting somewhere else. It is a
+     bad account and not a fenced one, so it is a 400 and never a 409. */
+  expect(attempt.status).toBe(400);
+  expect(attempt.error).toContain(RETIRED);
+  expect(attempt.spawnCalls).toBe(0);
 });

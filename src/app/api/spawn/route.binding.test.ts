@@ -49,7 +49,7 @@ afterAll(() => {
 
 type SpawnRouteDependencies = NonNullable<Parameters<typeof POST.withDependencies>[1]>;
 
-async function spawn(cwd: string, clientAttemptId: string): Promise<{
+async function spawn(cwd: string, clientAttemptId: string, resolutionFailure?: Error): Promise<{
   status: number;
   error: string;
   accountResolutions: number;
@@ -73,6 +73,7 @@ async function spawn(cwd: string, clientAttemptId: string): Promise<{
     ) => {
       accountResolutions += 1;
       pools.push(allowedAccountIds);
+      if (resolutionFailure) throw resolutionFailure;
       return {
         engine: "claude" as const,
         accountId: "acct-default",
@@ -149,4 +150,47 @@ test("a record nobody wrote leaves the launch resolving its account exactly as b
   /* `null`, never `[]`: an unbound project offers every account, which is the
      behaviour every project has until somebody configures one. */
   expect(attempt.pools).toEqual([null]);
+});
+
+test("a bound project whose pool yields no usable account is reported as a conflict naming the pool", async () => {
+  /* Nothing named an account, so there is no pin to degrade and nothing
+     outside the pool to reach for. What is left is the report — and thrown
+     instead it answered as a Viewer fault for a state the binding itself
+     created. */
+  const cwd = fs.mkdtempSync(path.join(SANDBOX, "pool-unusable-"));
+  const project = projectForCwd(cwd)!;
+  fs.writeFileSync(RECORD, JSON.stringify({
+    schemaVersion: 1,
+    bindings: [{ engine: "claude", accountId: "acct-reserved", project, createdAt: "2026-08-30T00:00:00.000Z" }],
+  }), "utf8");
+
+  const attempt = await spawn(
+    cwd,
+    "binding_pool_unusable_20260830",
+    new Error("No healthy Claude account is available. Re-login acct-reserved in Accounts and retry."),
+  );
+
+  expect(attempt.status).toBe(409);
+  expect(attempt.error).toContain(project);
+  expect(attempt.error).toContain("acct-reserved");
+  /* And the resolver's own reason survives, so the operator learns which
+     account to repair rather than only that something was refused. */
+  expect(attempt.error).toContain("Re-login");
+  expect(attempt.receipts).toBe(0);
+});
+
+test("an unbound project keeps the failure it always had when no account resolves", async () => {
+  const cwd = fs.mkdtempSync(path.join(SANDBOX, "pool-absent-failure-"));
+
+  const attempt = await spawn(
+    cwd,
+    "binding_absent_failure_20260830",
+    new Error("No healthy Claude account is available. Re-login a Claude account in Accounts and retry."),
+  );
+
+  /* No boundary was drawn here, so the failure is about the machine's accounts
+     and is answered exactly as it was before this fence existed — the
+     resolver's own message, unwrapped and unqualified by any pool. */
+  expect(attempt.status).toBe(500);
+  expect(attempt.error).toBe("No healthy Claude account is available. Re-login a Claude account in Accounts and retry.");
 });

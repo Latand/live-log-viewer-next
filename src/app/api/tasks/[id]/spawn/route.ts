@@ -60,8 +60,9 @@ interface TaskSpawnDependencies {
   loadTasks: typeof loadTasks;
   mutateTasks: typeof mutateTasks;
   /** #1279: the project the work belongs to is part of the question, because
-      this route names no account of its own — it resolves one. */
-  resolveSpawnAccount(engine: AgentEngine, accountId: string | null, project: string | null): AccountContext;
+      this route names no account of its own — it resolves one. The account id
+      is the one this task already ran on, a PREFERENCE and not a pin. */
+  resolveSpawnAccount(engine: AgentEngine, preferredAccountId: string | null, project: string | null): AccountContext;
   spawnAgentWithPrompt: typeof spawnAgentWithPrompt;
   resolveSpawnedTranscriptPath: typeof resolveSpawnedTranscriptPath;
   ensureTaskPipelineForAssignment?: typeof ensureTaskPipelineForAssignment;
@@ -72,7 +73,7 @@ const productionDependencies: TaskSpawnDependencies = {
   registry: agentRegistry,
   loadTasks,
   mutateTasks,
-  resolveSpawnAccount: (engine, accountId, project) => resolveProjectSpawnAccount(engine, project, accountId),
+  resolveSpawnAccount: (engine, preferredAccountId, project) => resolveProjectSpawnAccount(engine, project, preferredAccountId),
   spawnAgentWithPrompt,
   resolveSpawnedTranscriptPath,
   ensureTaskPipelineForAssignment,
@@ -262,7 +263,14 @@ async function postTaskSpawn(
        engine's active account, or the one this task already ran on), a bound
        project draws from its allowed set only, an allowed set with no capacity
        is REPORTED rather than widened, and a binding record this process
-       cannot read refuses instead of guessing. */
+       cannot read refuses instead of guessing.
+
+       `previous` travels as a PREFERENCE. It is the account this task's first
+       launch happened to resolve, which retries keep for continuity; nobody
+       named it. Sent as a pin it would make a project that has since been
+       bound elsewhere REFUSE its own task launch while its pool sat idle —
+       the automatic path declining to draw from the pool it was given. As a
+       preference it orders the allowed candidates and loses to the fence. */
     account = dependencies.resolveSpawnAccount(engine, previous, project);
   } catch (error) {
     /* A refusal on the merits of the project's pool, or a record that needs the

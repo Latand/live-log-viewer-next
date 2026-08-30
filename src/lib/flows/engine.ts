@@ -679,10 +679,13 @@ function settleReviewerSpawn(flow: Flow, round: Round, role: RoleConfig, account
 function prepareReviewerLaunch(flow: Flow, round: Round): PreparedReviewerLaunch {
   if (flow.reviewerMode === "pane") {
     const role = flow.roles.reviewer;
-    /* #1279: the flow's project fences this pick too. A pane reviewer names its
-       account explicitly, so a named account the project forbids is refused
-       here rather than launched — the same rule the headless path below
-       applies, at the one other place a reviewer account is chosen. */
+    /* #1279: the flow's project fences this pick too. A round with no account
+       yet draws one from the project's pool, capacity-aware, exactly as the
+       headless path below does. A round that already has one is carrying the
+       account FROZEN at its start — `Round.accountId` exists so polling and
+       retry never silently adopt a different one — so it is passed as a pin,
+       and a frozen account the project forbids parks the flow with the reason
+       rather than being quietly re-seated mid-round. */
     const resolution = accountManager.resolveProjectSpawn(role.engine, {
       project: flow.project,
       requestedId: round.accountId,
