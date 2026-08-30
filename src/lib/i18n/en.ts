@@ -372,7 +372,6 @@ export const en = {
   "composer.imageCapabilityError": "Image capability could not be loaded.",
   "composer.imageCapabilityRetry": "Retry image check",
   "composer.attachTerminal": "Attach terminal viewer",
-  "composer.attachTerminalReady": "terminal viewer ready in tmux {target}",
   "composer.attachTerminalFailed": "couldn't create the terminal viewer",
   "composer.receiptHeld": "held",
   "composer.receiptQueued": "queued",
@@ -974,7 +973,10 @@ export const en = {
   "question.openedUnnamed": "opened the session",
   "question.answered": "Answered: {text}",
   "question.answeredElsewhere": "Answered elsewhere: {text}",
-  "question.noPane": "tmux pane unavailable",
+  /* Rendered whenever the question resolved no pane target, which is every
+     structured host — so it states what is missing and names no transport
+     (#1301). */
+  "question.noPane": "no terminal to key the answer into",
   "question.openSession": "open session",
   "question.rejectComment": "Rejection comment…",
   "question.approved": "approved",
@@ -1818,7 +1820,7 @@ export const en = {
   "attach.copiedReadonly": "read-only command copied",
   "attach.stale": "This pane changed or closed. Refresh and try again.",
   "attach.restarted": "The tmux server restarted. Refresh and try again.",
-  "attach.unavailable": "The tmux endpoint is unavailable. Refresh and try again.",
+  "attach.unavailable": "The tmux server is unavailable. Refresh and try again.",
   "attach.badRequest": "Can’t resolve this pane — refresh the list.",
   "attach.network": "Network error — try again.",
   "attach.clipboard": "Couldn’t copy — check clipboard permissions.",
