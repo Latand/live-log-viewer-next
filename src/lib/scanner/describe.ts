@@ -191,6 +191,20 @@ export function projectFromSlug(slug: string): string {
   return canonicalProject(slug);
 }
 
+/** Rejoins a `path.sep`-split absolute path into one.
+ *
+ * An empty prefix is the POSIX root. On Windows the same slice yields a bare
+ * drive letter, and `C:` there means "the current directory on drive C", a
+ * *relative* location that is not `C:\` — so it regains its separator. Without
+ * this, a repo checked out at a drive root would name a different project
+ * before and after its worktree was deleted, which is the one invariant the
+ * recognisers exist to hold (AGENTS.md). */
+function joinPathSegments(parts: string[]): string {
+  const joined = parts.join(path.sep);
+  if (!joined) return path.sep;
+  return /^[A-Za-z]:$/.test(joined) ? joined + path.sep : joined;
+}
+
 function worktreeFromPath(cwd: string): { repo: string; worktree: string } | null {
   const marker = path.sep + ".claude" + path.sep + "worktrees" + path.sep;
   const index = cwd.indexOf(marker);
@@ -216,7 +230,7 @@ function worktreeFromNested(cwd: string): { repo: string; worktree: string } | n
     if (parts[i - 1] === ".claude" || parts[i - 1] === ".codex") return null;
     const worktree = parts[i + 1];
     if (!worktree) return null;
-    return { repo: parts.slice(0, i).join(path.sep) || path.sep, worktree };
+    return { repo: joinPathSegments(parts.slice(0, i)), worktree };
   }
   return null;
 }
@@ -228,7 +242,14 @@ function repoPathFromSlug(slug: string): string | null {
   /* Slugs for repositories outside the two conventional roots are lossy:
      separators, dots, and spaces all become dashes. Walk only filesystem
      branches whose encoded prefix can still match, then accept a unique
-     existing directory (preferring a git root when ambiguity remains). */
+     existing directory (preferring a git root when ambiguity remains).
+
+     A slug always begins with the encoded separator of an absolute POSIX path.
+     A Windows cwd encodes its drive letter first (`C--Users-...`), so every
+     Windows slug is refused here and the deleted-cwd slug recovery is
+     unavailable there: such a session groups through its recorded cwd instead,
+     by the ordinary resolver. Seeding the frontier with each drive root is
+     phase 2; the degrade is stated in the README. */
   if (!slug.startsWith("-")) return null;
   const matches: string[] = [];
   let frontier: Array<{ pathname: string; encoded: string }> = [{ pathname: path.parse(path.resolve(path.sep)).root, encoded: "" }];
@@ -285,7 +306,12 @@ function worktreeFromCodexPath(cwd: string): { repo: string; worktree: string; p
 }
 
 /** Main-repo root + worktree name from a linked checkout's `.git` file
-    content (`gitdir: <main>/.git/worktrees/<name>`). Pure for testability. */
+    content (`gitdir: <main>/.git/worktrees/<name>`). Pure for testability.
+
+    Git for Windows writes that pointer with forward slashes and a drive letter
+    (`gitdir: C:/repo/.git/worktrees/<name>`); `path.resolve` normalises it to
+    backslashes before the split, so the recogniser needs no separate Windows
+    form. */
 export function parseWorktreeGitdir(cwd: string, gitFileText: string): { repo: string; worktree: string } | null {
   const target = /^gitdir:\s*(.+?)\s*$/m.exec(gitFileText)?.[1];
   if (!target) return null;
@@ -293,7 +319,7 @@ export function parseWorktreeGitdir(cwd: string, gitFileText: string): { repo: s
   const index = parts.lastIndexOf("worktrees");
   const worktree = index >= 0 ? parts[index + 1] : undefined;
   if (!worktree || parts[index - 1] !== ".git") return null;
-  return { repo: parts.slice(0, index - 1).join(path.sep) || path.sep, worktree };
+  return { repo: joinPathSegments(parts.slice(0, index - 1)), worktree };
 }
 
 /* A cwd's worktree resolution is one lstat + tiny read, but it runs on every

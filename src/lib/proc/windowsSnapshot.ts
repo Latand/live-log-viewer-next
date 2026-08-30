@@ -9,6 +9,7 @@
  *
  *   Get-CimInstance Win32_Process |
  *     Select-Object ProcessId, ParentProcessId, CommandLine, WorkingSetSize,
+ *       UserModeTime, KernelModeTime,
  *       @{n='Created';e={$_.CreationDate.ToFileTimeUtc()}} |
  *     ConvertTo-Csv -NoTypeInformation
  *
@@ -36,6 +37,14 @@ export interface WindowsProcessRow {
    */
   created: bigint | null;
   workingSetBytes: number;
+  /**
+   * User + kernel CPU consumed since launch, in milliseconds, or null when the
+   * snapshot reported neither. `Win32_Process` counts both in 100 ns units, so
+   * unlike macOS — which has no cheap per-pid CPU read at all — Windows gets
+   * this for free out of the snapshot it already takes, and the liveness
+   * verdict that treats null as "no evidence" gets real evidence here.
+   */
+  cpuMs: number | null;
 }
 
 export interface WindowsSnapshot {
@@ -139,7 +148,11 @@ export function parseWindowsCommandLine(commandLine: string): string[] {
  * fields so a future PowerShell that quotes less does not silently return
  * nothing. Line endings are CRLF from PowerShell and LF from the fixtures.
  */
-export function parseCsvRows(text: string): string[][] {
+export function parseCsvRows(raw: string): string[][] {
+  /* A byte-order mark ahead of the header would attach itself to the first
+     column name and make every column lookup miss, which reads downstream as
+     "this machine has no processes". */
+  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -197,11 +210,14 @@ function toInteger(value: string | undefined): number | null {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
-function toFiletime(value: string | undefined): bigint | null {
+function toUnsigned(value: string | undefined): bigint | null {
   const trimmed = value?.trim();
-  if (!trimmed || !/^\d+$/.test(trimmed)) return null;
-  const parsed = BigInt(trimmed);
-  return parsed > BigInt(0) ? parsed : null;
+  return trimmed && /^\d+$/.test(trimmed) ? BigInt(trimmed) : null;
+}
+
+function toFiletime(value: string | undefined): bigint | null {
+  const parsed = toUnsigned(value);
+  return parsed !== null && parsed > BigInt(0) ? parsed : null;
 }
 
 /**
@@ -226,7 +242,26 @@ export function windowsParentLinks(rows: Map<number, WindowsProcessRow>): Map<nu
   return ppids;
 }
 
-const COLUMNS = ["ProcessId", "ParentProcessId", "CommandLine", "WorkingSetSize", "Created"] as const;
+const COLUMNS = [
+  "ProcessId",
+  "ParentProcessId",
+  "CommandLine",
+  "WorkingSetSize",
+  "UserModeTime",
+  "KernelModeTime",
+  "Created",
+] as const;
+
+/** 100 ns ticks per millisecond, the unit both CPU columns are counted in. */
+const TICKS_PER_MILLISECOND = BigInt(10_000);
+
+function toCpuMs(user: string | undefined, kernel: string | undefined): number | null {
+  const userTicks = toUnsigned(user);
+  const kernelTicks = toUnsigned(kernel);
+  if (userTicks === null && kernelTicks === null) return null;
+  const total = ((userTicks ?? BigInt(0)) + (kernelTicks ?? BigInt(0))) / TICKS_PER_MILLISECOND;
+  return total > BigInt(Number.MAX_SAFE_INTEGER) ? null : Number(total);
+}
 
 /**
  * Parses the CSV projection into rows plus the filtered parent links. A row
@@ -255,6 +290,7 @@ export function parseWindowsProcessSnapshot(csv: string): WindowsSnapshot {
       argv: parseWindowsCommandLine(cell(row, "CommandLine") ?? ""),
       created: toFiletime(cell(row, "Created")),
       workingSetBytes: Math.max(0, toInteger(cell(row, "WorkingSetSize")) ?? 0),
+      cpuMs: toCpuMs(cell(row, "UserModeTime"), cell(row, "KernelModeTime")),
     });
   }
   return { rows, ppids: windowsParentLinks(rows) };
@@ -268,7 +304,7 @@ export function parseWindowsProcessSnapshot(csv: string): WindowsSnapshot {
  * and is not the same path as `C:\`.
  */
 export function normalizeWindowsCwd(raw: string): string | null {
-  const trimmed = raw.replace(/\0.*$/s, "").trim();
+  const trimmed = raw.replace(/\0[\s\S]*$/, "").trim();
   if (!trimmed) return null;
   if (/^[A-Za-z]:[\\/]$/.test(trimmed)) return trimmed[0]!.toUpperCase() + ":\\";
   const stripped = trimmed.replace(/[\\/]+$/, "");

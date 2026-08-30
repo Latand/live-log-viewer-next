@@ -1,6 +1,8 @@
 /**
  * Process-introspection backend contract. Linux reads `/proc` directly
- * (`linux.ts`); every other platform shells out to `ps`/`lsof` (`portable.ts`).
+ * (`linux.ts`); Windows reads one `Win32_Process` snapshot plus two kernel
+ * values through FFI (`windows.ts`); every other platform shells out to
+ * `ps`/`lsof` (`portable.ts`).
  * Callers never depend on which backend is active — see `scanner/process.ts`
  * and `tmux.ts`, which hold the platform-independent logic (engine matching,
  * memoization, ppid-chain walks) on top of these primitives.
@@ -39,7 +41,7 @@ export interface ProcSnapshotEntry {
 }
 
 export interface ProcBackend {
-  readonly name: "linux" | "portable";
+  readonly name: "linux" | "portable" | "windows";
 
   pidAlive(pid: number): boolean;
 

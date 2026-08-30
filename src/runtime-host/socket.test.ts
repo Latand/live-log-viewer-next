@@ -6,11 +6,22 @@ import path from "node:path";
 
 import type { RuntimeSocketRequest, RuntimeSocketResponse } from "@/lib/runtime/contracts";
 
+import { testEndpoint } from "./fixtures/testEndpoint";
 import type { RuntimeHost } from "./host";
 import { serveRuntimeHost } from "./socket";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-socket-"));
 const servers: net.Server[] = [];
+
+/* The endpoint is a Unix socket path on POSIX and a named pipe on Windows; the
+   framing, timeouts, abort signal and connection caps asserted below are the
+   same code either way, and running this file on both legs of
+   `platform-tests.yml` is what says so. */
+let endpointCounter = 0;
+function nextEndpoint(): string {
+  endpointCounter += 1;
+  return testEndpoint(SANDBOX, `socket-${endpointCounter}`);
+}
 
 afterAll(async () => {
   await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
@@ -35,7 +46,7 @@ function stubHost(
 }
 
 function serve(host: RuntimeHost, socketErrors: Error[]): string {
-  const socketPath = path.join(SANDBOX, `${crypto.randomUUID().slice(0, 8)}.sock`);
+  const socketPath = nextEndpoint();
   const server = serveRuntimeHost(socketPath, host);
   server.on("connection", (socket) => socket.on("error", (error) => socketErrors.push(error)));
   servers.push(server);
@@ -112,7 +123,7 @@ test("a timed-out socket destroyed by the server produces zero late writes", asy
   let releaseResponse = () => {};
   const gate = new Promise<void>((resolve) => { releaseResponse = () => resolve(); });
   const socketErrors: Error[] = [];
-  const socketPath = path.join(SANDBOX, `${crypto.randomUUID().slice(0, 8)}.sock`);
+  const socketPath = nextEndpoint();
   const server = serveRuntimeHost(socketPath, stubHost(async (request) => {
     await gate;
     return { id: request.id, ok: true, result: {} };
@@ -133,7 +144,7 @@ test("a timed-out socket destroyed by the server produces zero late writes", asy
 });
 
 test("a write that fails after the peer vanished ends the connection, not the host", async () => {
-  const socketPath = path.join(SANDBOX, `${crypto.randomUUID().slice(0, 8)}.sock`);
+  const socketPath = nextEndpoint();
   const server = serveRuntimeHost(socketPath, stubHost(async (request) => ({ id: request.id, ok: true, result: {} })));
   servers.push(server);
   await new Promise<void>((resolve) => server.once("listening", () => resolve()));

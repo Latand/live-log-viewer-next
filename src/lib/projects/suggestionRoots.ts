@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 
+import { homeDirectory } from "@/lib/platformHome";
 import { projectCurationSnapshot } from "@/lib/projects/curation";
 import { normalizeSuggestionRoots } from "@/lib/projects/directorySuggestions";
 import { knownProjectRoots } from "@/lib/scanner/projectDirectories";
@@ -29,9 +30,10 @@ export function anchorForProjectRoot(root: string): string {
    demo/evidence runtimes (and this module's tests) repoint, and Bun's
    `os.homedir()` ignores the env override. Taking `os.homedir()` directly here
    would mean a viewer running under an isolated home still suggests — and
-   readdirs — the machine's real one. */
+   readdirs — the machine's real one. On Windows the override is `USERPROFILE`
+   instead; see `homeDirectory`. */
 function homeRoot(): string {
-  return path.resolve(process.env.HOME?.trim() || os.homedir());
+  return homeDirectory();
 }
 
 /**

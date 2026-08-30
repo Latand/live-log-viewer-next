@@ -311,19 +311,69 @@ agent-log-viewer [options]
 
 Linux is the native target: process discovery reads `/proc` directly. macOS is
 supported through a portable backend that shells out to `ps` and `lsof`
-instead — same live-process detection, tmux composer targeting, agent
-spawn/kill and background-task discovery, just a bit more subprocess overhead
-per scan. The backend is chosen automatically by `process.platform` (see
-`src/lib/proc/`); `VIEWER_PROC_BACKEND=portable` forces the portable path on
-Linux too, for testing.
+instead — same live-process detection, composer targeting, agent spawn/kill and
+background-task discovery, just a bit more subprocess overhead per scan.
+Windows has its own backend: one `Get-CimInstance Win32_Process` snapshot per
+five seconds for pids, lineage, command lines and memory, plus two values read
+from the kernel — the process creation time that makes up the identity token,
+and each agent's working directory. The backend is chosen automatically by
+`process.platform` (see `src/lib/proc/`); `VIEWER_PROC_BACKEND` forces one of
+`linux`, `portable` or `windows`, for testing.
 
-The package supports Linux and macOS. The package's `os` field blocks Windows
-installs with `EBADPLATFORM`. WSL works as Linux.
+### Windows
+
+The package installs on Windows. Install Claude Code with its **native
+installer**, or put a `claude.exe` on `PATH`: an npm-only install exposes
+`claude.cmd`, and a shim is not something the Viewer will run without a shell.
+State lives under `%USERPROFILE%\.config\agent-log-viewer`, transcripts under
+`%USERPROFILE%\.claude\projects`. Run the Viewer where the agents run — a
+Claude installed inside WSL writes into the WSL filesystem, and a native Viewer
+does not see those transcripts (or the reverse).
+
+These stay WSL routes on Windows, and WSL still works exactly as Linux:
+
+- **Codex** — hosting, review flows, and everything Codex-side. Upstream calls
+  native Windows experimental and recommends WSL 2.
+- **The Telegram connector** and **local dictation** (cloud dictation backends
+  are unaffected).
+- **Workflow setup commands**, which are `sh -c`.
+- **Docker deployments and staging**, which are Linux by nature.
+- **The MCP server** for orchestrator agents, and **`--tailscale`**.
+
+These work natively but narrower than on Linux:
+
+- **No open-handle scan.** A transcript reads as live from mtime recency, and
+  its owning process from the `--session-id` in its argv or from its working
+  directory — never from a live writer holding the file open. Background-task
+  `.output` files cannot be mapped back to a pid.
+- **Termination is immediate.** Windows has no signals; every stop is
+  `TerminateProcess` after the child's stdin is closed, and the "force" step in
+  the task header is a second immediate kill. A host's process tree is walked
+  and killed descendants-first, each member's identity checked, in place of the
+  process-group signal Linux sends.
+- **A process the Viewer cannot open stays invisible.** Reading an agent's
+  working directory needs a handle on it, so an elevated console's `claude`, or
+  one running as another user, is not listed.
+- **Memory shows the working set only**, with no swap figure.
+- **Managed (multi) Claude accounts, the in-app login supervisor and composer
+  image attachments** are not available; log in from a terminal with `claude`,
+  and use the Main account.
+- **Claude background tasks and scratchpad sessions** have no project. The
+  background-task root depends on a Windows directory layout nobody has
+  observed, so it is simply absent. A scratchpad session is still recognised as
+  one, but the walk that turns the encoded path in its container back into a
+  repository starts at the filesystem root and a Windows path starts at a drive
+  letter, so no repository is found and the session lands in "Unresolved
+  project" along with every other one. Sessions started from an ordinary
+  directory are unaffected — they group by that directory.
+- **A session whose recorded path differs from a root only by drive-letter
+  case** forms its own project.
 
 `tmux` is optional. Without it, log viewing, the parentage tree, live activity
 and deep links all work; the composer, agent spawn/kill and resume-into-pane
 features need tmux (`brew install tmux` on macOS, or your distro's package on
-Linux).
+Linux). The structured transport the CLI pins needs no tmux at all, which is
+why none of it is required on Windows.
 
 ## Language
 
@@ -412,7 +462,7 @@ All optional. Transcription variables are documented in full in
 
 | Variable | Effect |
 | --- | --- |
-| `VIEWER_PROC_BACKEND` | `portable` or `linux` — force the process-discovery backend (auto-selected by default). |
+| `VIEWER_PROC_BACKEND` | `portable`, `linux` or `windows` — force the process-discovery backend (auto-selected by default). |
 | `LLV_LANG` | `uk` or `en` — force the CLI message language. |
 | `LLV_TRANSCRIBE_BACKEND` | `local`, `chatgpt`, or `elevenlabs` — pick the dictation backend (default `local`). |
 | `LLV_WHISPER_MODEL` | faster-whisper model size (default `small`). |

@@ -11,10 +11,13 @@ import { loadFlows } from "@/lib/flows/store";
 import { loadArchivedPipelines, loadPipelines } from "@/lib/pipelines/store";
 import { structuredHostsEnabled as structuredHostsEnabledInApp } from "@/lib/runtime/flags";
 import { loadWorkflows } from "@/lib/workflows/store";
+import { runtimeHostEndpoint } from "@/lib/runtime/localEndpoint";
 import { RuntimeHostFence } from "@/runtime-host/runtimeHostFence";
 
 import {
+  browserOpenCommand,
   cliRuntimeHostConfig,
+  cliRuntimeHostEndpoint,
   cliRuntimeHostEnvironment,
   structuredHostsEnabled as structuredHostsEnabledInLauncher,
   viewerServerBunRuntime,
@@ -22,6 +25,20 @@ import {
   WAKATIME_CREDENTIAL_ENV,
   withoutWakatimeCredential,
 } from "./server-runtime.mjs";
+
+/**
+ * Removing a scratch directory is teardown, not an assertion. Windows keeps a
+ * directory busy while any handle into it is open — the hot SQLite store this
+ * file opens through `loadFlows()` stays open for the life of the process by
+ * design — and the runner discards its temp root with the job either way.
+ */
+function removeSandbox(directory: string): void {
+  try {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  } catch {
+    /* the temp root goes with the job */
+  }
+}
 
 async function availablePort(): Promise<number> {
   const server = net.createServer();
@@ -62,10 +79,20 @@ test("the CLI derives a distinct managed runtime host for each install", () => {
 
     expect(first.entrypoint).toBe(firstBundle);
     expect(second.entrypoint).toBe(secondBundle);
-    expect(path.dirname(first.socketPath)).toBe(stateDirectory);
-    expect(path.dirname(second.socketPath)).toBe(stateDirectory);
-    expect(path.basename(first.socketPath)).toMatch(/^runtime-host-[a-f0-9]{16}\.sock$/);
-    expect(path.basename(second.socketPath)).toMatch(/^runtime-host-[a-f0-9]{16}\.sock$/);
+    /* On Windows the endpoint is a named pipe rather than a file in the state
+       directory; the fence is the file that stays there. */
+    for (const config of [first, second]) {
+      if (process.platform === "win32") {
+        expect(config.socketPath).toMatch(/^\\\\\.\\pipe\\agent-log-viewer-[a-f0-9]{16}$/);
+        expect(path.dirname(config.fencePath)).toBe(stateDirectory);
+        expect(path.basename(config.fencePath)).toMatch(/^runtime-host-[a-f0-9]{16}\.lock$/);
+      } else {
+        expect(path.dirname(config.socketPath)).toBe(stateDirectory);
+        expect(path.basename(config.socketPath)).toMatch(/^runtime-host-[a-f0-9]{16}\.sock$/);
+        expect(config.fencePath).toBe(`${config.socketPath}.lock`);
+      }
+    }
+    expect(first.fencePath).not.toBe(second.fencePath);
     expect(path.dirname(first.journalPath)).toBe(stateDirectory);
     expect(path.dirname(second.journalPath)).toBe(stateDirectory);
     expect(path.basename(first.journalPath)).toMatch(/^runtime-events-[a-f0-9]{16}\.sqlite$/);
@@ -77,7 +104,7 @@ test("the CLI derives a distinct managed runtime host for each install", () => {
     expect(first.journalPath).not.toBe(ambientJournal);
     expect(second.journalPath).not.toBe(ambientJournal);
   } finally {
-    fs.rmSync(sandbox, { recursive: true, force: true });
+    removeSandbox(sandbox);
   }
 });
 
@@ -93,30 +120,33 @@ test("the CLI uses the source runtime host in a checkout", () => {
       home: path.join(packageRoot, "home"),
     });
     expect(config.entrypoint).toBe(source);
-    expect(path.dirname(config.socketPath)).toBe(stateDirectory);
+    expect(path.dirname(process.platform === "win32" ? config.fencePath : config.socketPath)).toBe(stateDirectory);
     expect(path.dirname(config.journalPath)).toBe(stateDirectory);
   } finally {
-    fs.rmSync(packageRoot, { recursive: true, force: true });
+    removeSandbox(packageRoot);
   }
 });
 
-test("the CLI runtime environment owns its socket and journal and strips ambient WakaTime credentials", () => {
+test("the CLI runtime environment owns its socket, fence and journal and strips ambient WakaTime credentials", () => {
   const socketPath = "/runtime/viewer.sock";
+  const fencePath = "/runtime/viewer.sock.lock";
   const journalPath = "/runtime/viewer.sqlite";
   const env: Record<string, string | undefined> = cliRuntimeHostEnvironment({
     PATH: "/usr/bin",
     LLV_RUNTIME_HOST_SOCKET: "/runtime/operator.sock",
+    LLV_RUNTIME_HOST_FENCE: "/runtime/operator.sock.lock",
     LLV_RUNTIME_JOURNAL: "/runtime/operator.sqlite",
     LLV_STRUCTURED_HOSTS: "off",
     LLV_RUNTIME_EVENTS: "0",
     LLV_SPAWN_TRANSPORT: "tmux",
     NEXT_PUBLIC_RUNTIME_UI: "0",
     [WAKATIME_CREDENTIAL_ENV]: "fixture-value",
-  }, { socketPath, journalPath });
+  }, { socketPath, fencePath, journalPath });
 
   expect(env).toMatchObject({
     PATH: "/usr/bin",
     LLV_RUNTIME_HOST_SOCKET: socketPath,
+    LLV_RUNTIME_HOST_FENCE: fencePath,
     LLV_RUNTIME_JOURNAL: journalPath,
     LLV_STRUCTURED_HOSTS: "1",
     LLV_RUNTIME_EVENTS: "1",
@@ -139,8 +169,9 @@ test("the CLI rejects a ready runtime socket owned by another process", async ()
     LLV_LANG: "en",
     LLV_RUNTIME_HOST_FENCE_WAIT_MS: "0",
   };
-  const socketPath = cliRuntimeHostConfig(packageRoot, { env: environment, home: environment.HOME }).socketPath;
-  const fence = new RuntimeHostFence(`${socketPath}.lock`);
+  const incumbent = cliRuntimeHostConfig(packageRoot, { env: environment, home: environment.HOME });
+  const socketPath = incumbent.socketPath;
+  const fence = new RuntimeHostFence(incumbent.fencePath);
   const listener = net.createServer((socket) => socket.end());
   fs.mkdirSync(environment.HOME!, { recursive: true });
   fs.mkdirSync(environment.XDG_CONFIG_HOME!, { recursive: true });
@@ -169,7 +200,7 @@ test("the CLI rejects a ready runtime socket owned by another process", async ()
     if (!child.killed) child.kill();
     await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
     fence.release();
-    fs.rmSync(sandbox, { recursive: true, force: true });
+    removeSandbox(sandbox);
   }
 }, 10_000);
 
@@ -205,7 +236,7 @@ test("the CLI names a missing Bun prerequisite before starting the Viewer", asyn
     expect(stderr).toContain("Bun executable");
     expect(stderr).toContain("is unavailable");
   } finally {
-    fs.rmSync(sandbox, { recursive: true, force: true });
+    removeSandbox(sandbox);
   }
 }, 10_000);
 
@@ -311,7 +342,7 @@ test("documented development and production scripts pin Bun and open every hot c
   } finally {
     if (previous === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previous;
-    fs.rmSync(sandbox, { recursive: true, force: true });
+    removeSandbox(sandbox);
   }
 });
 
@@ -348,4 +379,54 @@ test("published launcher child options capture no ambient WakaTime key material"
   expect(options.env.KEEP_ME).toBe("kept");
   expect(options.env[WAKATIME_CREDENTIAL_ENV]).toBeUndefined();
   expect(JSON.stringify(options)).not.toContain(placeholder);
+});
+
+test("the launcher's endpoint rule is the same rule the runtime host compiles", () => {
+  /* `bin/server-runtime.mjs` is loaded by Node as plain `.mjs` and cannot
+     import the TypeScript module the host and the socket server use, so the
+     rule exists twice. A disagreement would put the CLI's readiness probe on
+     one endpoint and the host's listener on another, and the CLI would report a
+     host that never bound. */
+  for (const platform of ["linux", "darwin", "win32"] as const) {
+    const stateDirectory = platform === "win32"
+      ? "C:\\profile\\.config\\agent-log-viewer\\state"
+      : "/home/user/.config/agent-log-viewer/state";
+    expect(cliRuntimeHostEndpoint(stateDirectory, "0123456789abcdef", platform))
+      .toEqual(runtimeHostEndpoint(stateDirectory, "0123456789abcdef", platform));
+  }
+});
+
+test("a Windows install supervises a named-pipe host with a file fence beside its journal", () => {
+  const config = cliRuntimeHostConfig("/opt/agent-log-viewer", {
+    env: { LLV_STATE_DIR: "C:\\state" },
+    home: "C:\\profile",
+    platform: "win32",
+  });
+  expect(config.socketPath.startsWith("\\\\.\\pipe\\agent-log-viewer-")).toBe(true);
+  expect(config.fencePath.startsWith("C:\\state")).toBe(true);
+  expect(config.fencePath.endsWith(".lock")).toBe(true);
+  /* The fence cannot be `${socketPath}.lock` on Windows: that names a file
+     inside the kernel's pipe namespace, which is not a filesystem. */
+  expect(config.fencePath).not.toBe(`${config.socketPath}.lock`);
+});
+
+test("the browser opener never puts a URL through a shell", () => {
+  /* The viewer's URL carries `?k=<token>`; `cmd /c start` would parse `&`
+     between query parameters as a command separator, and `start` would treat a
+     quoted first argument as a window title. */
+  expect(browserOpenCommand("http://127.0.0.1:8899/?k=t", "linux")).toEqual({
+    command: "xdg-open",
+    args: ["http://127.0.0.1:8899/?k=t"],
+  });
+  expect(browserOpenCommand("http://127.0.0.1:8899/?k=t", "darwin")).toEqual({
+    command: "open",
+    args: ["http://127.0.0.1:8899/?k=t"],
+  });
+  expect(browserOpenCommand("http://127.0.0.1:8899/?k=t", "win32")).toEqual({
+    command: "rundll32.exe",
+    args: ["url.dll,FileProtocolHandler", "http://127.0.0.1:8899/?k=t"],
+  });
+  // Anything else keeps the pre-existing "the CLI still runs, it just does not
+  // open a browser" degrade.
+  expect(browserOpenCommand("http://127.0.0.1:8899/", "freebsd")).toBeNull();
 });

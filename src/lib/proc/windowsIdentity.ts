@@ -36,22 +36,41 @@ import { createRequire } from "node:module";
  */
 
 const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+/**
+ * `GetExitCodeProcess` reports this while a process is running. A Windows
+ * process object outlives the process itself for as long as anyone holds a
+ * handle to it — the spawning parent always does — and `GetProcessTimes` keeps
+ * answering for that corpse. An identity that outlives its process is the one
+ * thing this token must not do: `pidAlive` would say gone while the identity
+ * said present, and a caller comparing only identities would treat a dead host
+ * as a live one. (A process that genuinely exits with 259 reads as alive here.
+ * That is the documented ambiguity of this call, and it errs toward refusing to
+ * reclaim rather than toward reclaiming something live.)
+ */
+const STILL_ACTIVE = 259;
 /** FILETIME of 2000-01-01T00:00:00Z. A creation time below it is not a real one. */
 const MIN_PLAUSIBLE_FILETIME = BigInt("125911584000000000");
 
 type ProcessTimesReader = (pid: number, creation: Buffer) => boolean;
 
 interface BunFfiModule {
-  FFIType: { i32: number; u32: number; ptr: number };
+  FFIType: { i32: number; u32: number; u64: number; ptr: number };
   ptr(buffer: Buffer): unknown;
   dlopen(path: string, symbols: Record<string, unknown>): {
     symbols: {
-      OpenProcess: (...args: unknown[]) => unknown;
+      OpenProcess: (...args: unknown[]) => bigint | number;
       CloseHandle: (...args: unknown[]) => number;
       GetProcessTimes: (...args: unknown[]) => number;
+      GetExitCodeProcess: (...args: unknown[]) => number;
     };
   };
 }
+
+/* A HANDLE crosses the boundary as `u64`, never as `ptr`: a pointer-typed
+   argument makes Bun marshal the value through its own pointer objects, and
+   that path crashes the process on a bare integer. `u64` is the same eight
+   bytes in the same register. Only real buffers stay `ptr`. */
+const NULL_HANDLE = BigInt(0);
 
 let cachedReader: ProcessTimesReader | null | undefined;
 
@@ -76,19 +95,21 @@ function loadReader(): ProcessTimesReader | null {
   try {
     const runtimeRequire = createRequire(import.meta.url);
     const ffi = runtimeRequire(`bun:${"ffi"}`) as BunFfiModule;
+    const { i32, u32, u64, ptr } = ffi.FFIType;
     const library = ffi.dlopen("kernel32.dll", {
-      OpenProcess: { args: [ffi.FFIType.u32, ffi.FFIType.i32, ffi.FFIType.u32], returns: ffi.FFIType.ptr },
-      CloseHandle: { args: [ffi.FFIType.ptr], returns: ffi.FFIType.i32 },
-      GetProcessTimes: {
-        args: [ffi.FFIType.ptr, ffi.FFIType.ptr, ffi.FFIType.ptr, ffi.FFIType.ptr, ffi.FFIType.ptr],
-        returns: ffi.FFIType.i32,
-      },
+      OpenProcess: { args: [u32, i32, u32], returns: u64 },
+      CloseHandle: { args: [u64], returns: i32 },
+      GetProcessTimes: { args: [u64, ptr, ptr, ptr, ptr], returns: i32 },
+      GetExitCodeProcess: { args: [u64, ptr], returns: i32 },
     });
     cachedReader = (pid, creation) => {
-      const handle = library.symbols.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-      if (!handle) return false;
+      const handle = BigInt(library.symbols.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid));
+      if (handle === NULL_HANDLE) return false;
       const scratch = [Buffer.alloc(8), Buffer.alloc(8), Buffer.alloc(8)];
       try {
+        const exitCode = Buffer.alloc(4);
+        if (library.symbols.GetExitCodeProcess(handle, ffi.ptr(exitCode)) !== 0
+          && exitCode.readUInt32LE(0) !== STILL_ACTIVE) return false;
         return library.symbols.GetProcessTimes(
           handle,
           ffi.ptr(creation),
