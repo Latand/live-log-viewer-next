@@ -11,6 +11,7 @@ import type { RuntimeSnapshot } from "./contracts";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, RuntimeImageStore, runtimeImageCapability } from "./runtimeImageStore";
 import { structuredContentDigest, type StructuredImageRef } from "./structuredContent";
 
+import { sendReceiptFor } from "./sendSettlement";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 
@@ -1293,11 +1294,34 @@ test("a persisted structured current generation holds the send after a runtime s
 
   expect(result).toMatchObject({ ok: true, structured: true, target: conversation.id, outcome: "held" });
   expect(migrationTicks).toBe(1);
-  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+  const pending = registry.pendingDeliveries(conversation.id);
+  expect(pending).toMatchObject([{
     clientMessageId: "snapshot-window-message",
     text: "retain this snapshot-window send",
     state: "assigned",
   }]);
+  /* #1131: a hold is an ACCEPTED send with a durable reservation, so it answers
+     with the operation id that reservation carries. Without it a hold was the
+     one acceptance nobody could ever ask about afterwards, and `queued` went
+     back to being the last thing said about a send. */
+  const heldOperationId = (result as { operationId?: string }).operationId;
+  expect(heldOperationId).toBe(pending[0]!.command.operationId);
+  /* And that id is answerable from the moment it is handed out, through both
+     outcomes the reservation can reach. */
+  expect(sendReceiptFor(registry.readOnlySnapshot(), heldOperationId!)).toMatchObject({
+    state: "in-flight",
+    resend: null,
+  });
+  registry.recordDeliveryOutcome(pending[0]!.id, "failed", "the recipient never came back");
+  expect(sendReceiptFor(registry.readOnlySnapshot(), heldOperationId!)).toMatchObject({
+    state: "failed",
+    reason: "the recipient never came back",
+    /* Settled by a path that proved nothing about whether the send executed, so
+       the answer stays conservative. Only a record that positively says the
+       send was fenced reads as `safe`. */
+    duplicateRisk: true,
+    resend: "verify-first",
+  });
 });
 
 test("a persisted tmux current generation falls through after a runtime snapshot failure", async () => {

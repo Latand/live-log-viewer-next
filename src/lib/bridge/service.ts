@@ -1,7 +1,10 @@
+import { agentRegistry, type RegistryFile } from "@/lib/agent/registry";
 import {
   planBridgeReportDelivery,
   type BridgeDeliveryPlan,
 } from "@/lib/runtime/bridgeDelivery";
+import { readEvidenceSync, type Evidence } from "@/lib/runtime/evidence";
+import { sendReceiptFor } from "@/lib/runtime/sendSettlement";
 import { rootIdentity as readRootIdentity } from "@/lib/root/store";
 
 import type { BridgeAsk } from "@/lib/types";
@@ -15,6 +18,7 @@ import {
   openBridgeChannel,
   readBridgeReportLog,
   recordBridgeDirectiveAnswer,
+  recordBridgeDirectivePendingAnswer,
   redeemBridgeAckToken,
 } from "./store";
 import {
@@ -70,7 +74,7 @@ export function recordManagerReport(input: BridgeReportInput): BridgeReportV1 | 
  * (#1168). Exported here so the relay path settles an ask through the same
  * service every other bridge write goes through.
  */
-export { recordBridgeDirectiveAnswer };
+export { recordBridgeDirectiveAnswer, recordBridgeDirectivePendingAnswer };
 
 /**
  * The open ask of every orchestrator seat, for the surface that shows the
@@ -84,8 +88,36 @@ export { recordBridgeDirectiveAnswer };
 export function bridgeAsksForSeats(
   options: Omit<OpenBridgeAskOptions, "now"> & { now?: Date } = {},
 ): ReadonlyMap<string, BridgeAsk> {
+  /* #1131: a directive the runtime only ACCEPTED parked its answer against the
+     send's operation id, and the durable delivery record is what says whether
+     that send ever arrived. Read here rather than in the pure projection, and
+     read fresh on each call, because the answer to "did it arrive" changes
+     without the log changing — once per call and only if the log has a parked
+     answer to resolve.
+
+     Failable like every other fence in this path, and the only one of them that
+     is synchronous — which is exactly how it got missed. Letting it throw was a
+     conversion too, and the worst-shaped one on this surface: the exception
+     escaped the whole projection into the fail-closed catch below, so ONE
+     unreadable delivery record answered `no open asks` for every seat in every
+     project, retiring decision requests nobody had answered. Only `delivered`
+     may clear an ask, so an unreadable record leaves it standing exactly as a
+     dropped send does — and the memo keeps a failed read failed for the rest of
+     the call rather than re-reading a store that is down once per parked ref. */
+  let deliveries: Evidence<RegistryFile> | null = null;
   try {
-    return openBridgeAsks(readBridgeReportLog(), { ...options, now: options.now ?? new Date() });
+    return openBridgeAsks(readBridgeReportLog(), {
+      deliveredOperation: (operationId) => {
+        deliveries ??= readEvidenceSync(
+          () => agentRegistry().readOnlySnapshot(),
+          "the durable delivery record is unavailable",
+        );
+        return deliveries.readable
+          && sendReceiptFor(deliveries.value, operationId)?.state === "delivered";
+      },
+      ...options,
+      now: options.now ?? new Date(),
+    });
   } catch {
     return new Map();
   }

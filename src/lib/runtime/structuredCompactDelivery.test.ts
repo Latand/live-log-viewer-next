@@ -367,18 +367,51 @@ test("a compaction admitted before a successful kill is not allowed to respawn t
   expect(transitions[0]![2]).toContain("intentionally terminated");
 });
 
-test("a compact effect whose durable receipt cannot be read falls through to the host checks", async () => {
+test("a compact effect whose durable receipt cannot be read is not issued, and does not hold up the pass", async () => {
+  /* The receipt is the fence that says whether an earlier executor already
+     issued this control. Reading it used to fall through to the host checks on
+     failure, so an unreadable row was enough to compact a thread a SECOND time
+     — the control equivalent of a duplicate send (#1131). Nothing is issued
+     now, and nothing durable is written either, so the pass simply comes back.
+
+     What must not change: a drain pass is shared by every conversation, so this
+     must not take the other groups down with it. */
   const sent: QueueEntry[] = [];
   let compactions = 0;
+  let readable = false;
   const host: CompactCapableHost = Object.assign(baseHost(sent), {
     compact: async () => { compactions += 1; return { compactionId: "compaction-one" }; },
   });
-  const { port, transitions, settled } = recorder([compactEffect()]);
-  /* A drain pass is shared by every conversation, so an unreadable receipt must
-     not take the other groups down with it. */
-  port.status = async () => { throw new Error("runtime host request timed out"); };
+  const { port, transitions, settled } = recorder([
+    compactEffect(),
+    {
+      id: "effect:op-other-conversation",
+      kind: "runtime.send",
+      eventSeq: 8,
+      payload: {
+        kind: "send",
+        operationId: "op-other-conversation",
+        conversationId: "conversation-two",
+        text: "an unrelated conversation keeps draining",
+        policy: "queue",
+      },
+    },
+  ]);
+  const durable = port.status;
+  port.status = async (operationId) => {
+    if (!readable && operationId === "op-one") throw new Error("runtime host request timed out");
+    return durable?.(operationId) ?? null;
+  };
   const queue = new StructuredDeliveryQueue(port, () => host);
 
+  await queue.drain();
+
+  expect(compactions).toBe(0);
+  expect(transitions.filter(([operationId]) => operationId === "op-one")).toEqual([]);
+  /* The other conversation was drained in the same pass. */
+  expect(sent.map((entry) => entry.id)).toEqual(["op-other-conversation"]);
+
+  readable = true;
   await queue.drain();
   await settled;
 

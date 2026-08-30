@@ -472,6 +472,17 @@ export interface RegistryConversation {
   updatedAt: string;
 }
 
+/**
+ * What the durable record PROVES about a settled send (#1131).
+ *
+ * `lost` is the only disposition that permits a safe resend, and it is written
+ * only where the send was fenced before anything could execute it. A failure
+ * whose disposition is unknown is not a proof of non-delivery, so it is never
+ * read as one: absence of evidence is the `unverified` answer, not the `lost`
+ * one.
+ */
+export type DeliveryTerminalDisposition = "delivered" | "lost" | "unverified";
+
 export interface DeliveryOperationOwner {
   conversationId: ViewerConversationId;
   runtimeConversationId: ViewerConversationId;
@@ -481,7 +492,26 @@ export interface DeliveryOperationOwner {
   requestDigest: string;
   contentDigest: string | null;
   createdAt: string;
+  /** The attempt this row REPLACES, when a retry minted a fresh operation for a
+      send that already had one (#1131).
+
+      A retry is admitted as a new operation with a new id, and that id is what
+      the caller is handed. Without a row of its own it named nothing durable:
+      a query during a runtime outage found no record, and no deadline could
+      ever end it. So the attempt gets its own row, pointing at the same
+      reservation and carrying its OWN acceptance time and settlement — the
+      reservation is still terminal from the attempt this one replaces, and a
+      fresh attempt must not answer with the dead one's verdict.
+
+      Null on the ordinary row a reservation writes for itself. */
+  retryOfOperationId: string | null;
   terminalState: Extract<HeldDelivery["state"], "delivered" | "failed"> | null;
+  /** Kept on the owner rather than only on the reservation, because the
+      reservation is compacted away and the duplicate-send risk it recorded must
+      not be compacted away with it. */
+  terminalDisposition: DeliveryTerminalDisposition | null;
+  terminalReason: string | null;
+  settledAt: string | null;
 }
 
 export interface RegistryFile {
@@ -950,7 +980,8 @@ function terminalizeHeldDelivery(
   delivery: HeldDelivery,
   reason: string,
 ): void {
-  const terminalReason = delivery.state === "delivery-uncertain"
+  const uncertain = delivery.state === "delivery-uncertain";
+  const terminalReason = uncertain
     ? `${reason}; a prior delivery attempt may have been delivered because its journal outcome is unknown`
     : reason;
   delivery.state = "failed";
@@ -960,7 +991,7 @@ function terminalizeHeldDelivery(
   delivery.deliveredAt = null;
   delivery.error = terminalReason.slice(0, 240);
   failInitialSpawnReceiptForDelivery(file, delivery);
-  syncDeliveryOperationOwnerState(file, delivery);
+  syncDeliveryOperationOwnerState(file, delivery, uncertain ? "unverified" : "lost");
 }
 
 function terminalizeRolledBackMigrationDelivery(
@@ -1569,9 +1600,33 @@ function migrationDeliveryCancellationIsAbsorbing(delivery: HeldDelivery): boole
     && delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX) === true;
 }
 
-function syncDeliveryOperationOwnerState(file: RegistryFile, delivery: HeldDelivery): void {
+/**
+ * Copies a reservation's settlement onto the durable owner row.
+ *
+ * The disposition is written by whoever settled the reservation and knows what
+ * it proved; a later sync that passes none (reservation compaction runs one on
+ * every pass) keeps the recorded answer rather than blanking it.
+ */
+function syncDeliveryOperationOwnerState(
+  file: RegistryFile,
+  delivery: HeldDelivery,
+  disposition?: DeliveryTerminalDisposition,
+): void {
   const owner = file.deliveryOperationOwners[delivery.command.operationId];
-  if (owner?.deliveryId === delivery.id) owner.terminalState = terminalDeliveryState(delivery);
+  if (owner?.deliveryId !== delivery.id) return;
+  const terminalState = terminalDeliveryState(delivery);
+  owner.terminalState = terminalState;
+  if (terminalState === null) {
+    owner.terminalDisposition = null;
+    owner.terminalReason = null;
+    owner.settledAt = null;
+    return;
+  }
+  owner.terminalDisposition = terminalState === "delivered"
+    ? "delivered"
+    : disposition ?? owner.terminalDisposition ?? null;
+  owner.terminalReason = delivery.error ?? owner.terminalReason ?? null;
+  owner.settledAt = delivery.deliveredAt ?? owner.settledAt ?? now();
 }
 
 /** Strict initial-message ownership. The idempotency key, operation id, and
@@ -1640,6 +1695,24 @@ interface DeliveryReservationInspection {
       never actuate, so a changed payload under its client message id is a NEW
       logical message, not a conflict. `holdDelivery` releases its key claim. */
   supersededFailed: HeldDelivery | null;
+}
+
+/**
+ * Whether a reservation's own record says the message may already have reached
+ * the recipient (#1131).
+ *
+ * `delivery-uncertain` says it outright: an attempt started and nothing came
+ * back. A terminal failure says it too when the settlement that wrote it could
+ * not prove otherwise — that is exactly what the `unverified` disposition is —
+ * and the two must behave the same, because an answer that says "verify before
+ * sending again" cannot be followed by an exact replay that quietly sends
+ * again. Every other failure is an ordinary recoverable one whose retry
+ * contract is the same-key replay it has always had.
+ */
+export function deliveryMayHaveArrived(file: RegistryFile, delivery: HeldDelivery): boolean {
+  if (delivery.state === "delivery-uncertain") return true;
+  if (delivery.state !== "failed") return false;
+  return file.deliveryOperationOwners[delivery.command.operationId]?.terminalDisposition === "unverified";
 }
 
 function inspectDeliveryReservation(
@@ -1740,6 +1813,10 @@ function terminalDeliveryReplay(
   };
 }
 
+function normalizedDisposition(value: unknown): DeliveryTerminalDisposition | null {
+  return value === "delivered" || value === "lost" || value === "unverified" ? value : null;
+}
+
 function normalizeDeliveryOperationOwners(
   value: unknown,
   heldDeliveries: RegistryFile["heldDeliveries"],
@@ -1787,12 +1864,30 @@ function normalizeDeliveryOperationOwners(
         createdAt: typeof owner.createdAt === "string"
           ? owner.createdAt
           : referencedDelivery?.createdAt ?? settledDelivery?.createdAt ?? LEGACY_POLICY_RESTARTED_AT,
+        retryOfOperationId: typeof owner.retryOfOperationId === "string" && owner.retryOfOperationId
+          ? owner.retryOfOperationId
+          : null,
         terminalState,
+        /* A row written before the disposition existed keeps `null`, which is
+           read as "unproven" — never as a fenced send that may be resent. */
+        terminalDisposition: terminalState === "delivered"
+          ? "delivered"
+          : normalizedDisposition(owner.terminalDisposition),
+        terminalReason: typeof owner.terminalReason === "string"
+          ? owner.terminalReason
+          : referencedDelivery?.error ?? settledDelivery?.error ?? null,
+        settledAt: typeof owner.settledAt === "string"
+          ? owner.settledAt
+          : referencedDelivery?.deliveredAt ?? settledDelivery?.deliveredAt ?? null,
       };
     }
   }
   for (const delivery of Object.values(heldDeliveries)) {
-    if (delivery.command.operationId === delivery.id || !delivery.requestDigest) continue;
+    /* The same rule the compaction below applies: one row per accepted send,
+       including the ordinary one whose operation id its reservation generated
+       (#1131). Load and compaction have to agree, or a restart is what decides
+       whether a send is still queryable. */
+    if (!delivery.requestDigest) continue;
     owners[delivery.command.operationId] ??= {
       conversationId: delivery.conversationId,
       runtimeConversationId: delivery.runtimeConversationId,
@@ -1802,7 +1897,11 @@ function normalizeDeliveryOperationOwners(
       requestDigest: delivery.requestDigest,
       contentDigest: delivery.contentDigest,
       createdAt: delivery.createdAt,
+      retryOfOperationId: null,
       terminalState: terminalDeliveryState(delivery),
+      terminalDisposition: terminalDeliveryState(delivery) === "delivered" ? "delivered" : null,
+      terminalReason: delivery.error,
+      settledAt: delivery.deliveredAt,
     };
   }
   return owners;
@@ -1821,8 +1920,13 @@ function compactDeliveryOperationOwners(file: RegistryFile, onlyConversationId?:
     terminalGroups.set(canonicalId, group);
   }
   for (const owners of terminalGroups.values()) {
+    /* Newest first, and the rows that say a send MAY HAVE ARRIVED ahead of
+       them: those are the duplicate-send evidence an exact replay is answered
+       from, so within one bounded retention they are the last to go (#1131). */
     owners.sort(([leftId, left], [rightId, right]) =>
-      right.createdAt.localeCompare(left.createdAt) || rightId.localeCompare(leftId));
+      Number(right.terminalDisposition === "unverified") - Number(left.terminalDisposition === "unverified")
+      || right.createdAt.localeCompare(left.createdAt)
+      || rightId.localeCompare(leftId));
     for (const [operationId] of owners.slice(DELIVERY_OPERATION_OWNER_TERMINAL_LIMIT)) {
       delete file.deliveryOperationOwners[operationId];
     }
@@ -1842,7 +1946,14 @@ function terminalDeliveryExpired(delivery: HeldDelivery, nowMs: number | undefin
 
 function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: ViewerConversationId, nowMs?: number): number {
   for (const delivery of Object.values(file.heldDeliveries)) {
-    if (delivery.command.operationId === delivery.id || !delivery.requestDigest) continue;
+    /* Every accepted send gets its row, including the ordinary one whose
+       operation id the reservation generated for itself (#1131). The exception
+       used to be free — the reservation IS the record under that id — and it
+       stopped being free once a caller could ask what became of an operation
+       id: after the reservation is compacted away, a send that carried the
+       common shape was the one nobody could ask about, and its duplicate-send
+       evidence was the one that vanished. */
+    if (!delivery.requestDigest) continue;
     file.deliveryOperationOwners[delivery.command.operationId] ??= {
       conversationId: delivery.conversationId,
       runtimeConversationId: delivery.runtimeConversationId,
@@ -1852,7 +1963,11 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
       requestDigest: delivery.requestDigest,
       contentDigest: delivery.contentDigest,
       createdAt: delivery.createdAt,
+      retryOfOperationId: null,
       terminalState: null,
+      terminalDisposition: null,
+      terminalReason: null,
+      settledAt: null,
     };
     syncDeliveryOperationOwnerState(file, delivery);
   }
@@ -6393,7 +6508,7 @@ export class AgentRegistry {
         && ["waiting-turn", "requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
       const current = conversation?.generations.at(-1);
       const place = (delivery: HeldDelivery): HeldDelivery => {
-        if (delivery.state === "delivered" || delivery.state === "delivery-uncertain") {
+        if (delivery.state === "delivered" || deliveryMayHaveArrived(file, delivery)) {
           syncDeliveryOperationOwnerState(file, delivery);
           return clone(delivery);
         }
@@ -6459,19 +6574,21 @@ export class AgentRegistry {
         && ["held", "assigned", "delivery-uncertain"].includes(item.state)).length;
       if (count >= 100) throw new Error("held delivery limit reached for conversation");
       file.heldDeliveries[held.id] = held;
-      if (commandInput.operationId) {
-        file.deliveryOperationOwners[held.command.operationId] ??= {
-          conversationId: canonicalId,
-          runtimeConversationId: held.runtimeConversationId,
-          clientMessageId,
-          deliveryId: held.id,
-          command: held.command,
-          requestDigest: held.requestDigest!,
-          contentDigest: held.contentDigest,
-          createdAt: held.createdAt,
-          terminalState: null,
-        };
-      }
+      file.deliveryOperationOwners[held.command.operationId] ??= {
+        conversationId: canonicalId,
+        runtimeConversationId: held.runtimeConversationId,
+        clientMessageId,
+        deliveryId: held.id,
+        command: held.command,
+        requestDigest: held.requestDigest!,
+        contentDigest: held.contentDigest,
+        createdAt: held.createdAt,
+        retryOfOperationId: null,
+        terminalState: null,
+        terminalDisposition: null,
+        terminalReason: null,
+        settledAt: null,
+      };
       return place(held);
     });
   }
@@ -6582,10 +6699,100 @@ export class AgentRegistry {
     }));
   }
 
+  /**
+   * Gives a retry attempt its own durable settlement record (#1131).
+   *
+   * A retry mints a NEW operation with a new id, and that new id is what the
+   * caller is handed back. Everything durable stayed keyed to the presentation
+   * operation the attempt replaces, so the id in the caller's hand named
+   * nothing: a query during a runtime outage found no record to answer from,
+   * and no settlement deadline could ever end it. The caller was holding an
+   * operation id that nothing would ever settle.
+   *
+   * The row this writes fixes that without disturbing the reservation. It
+   * points at the same reservation — same conversation, same request, same
+   * content — and carries its own acceptance time, so the attempt is measured
+   * from when IT was admitted rather than from the send it replaces. It starts
+   * non-terminal on purpose: a retry is deliberately eligible for one fresh
+   * execution, and the delivery queue's fence reads exactly this record, so
+   * settling it up front would fence the attempt before it ran.
+   *
+   * Returns false when nothing durable is known about the attempt being
+   * replaced. There is nothing to relate the retry to in that case, and
+   * inventing a reservation for it would be worse than admitting it.
+   */
+  recordDeliveryRetryAttempt(previousOperationId: string, retryOperationId: string): boolean {
+    if (!retryOperationId || retryOperationId === previousOperationId) return false;
+    return this.mutate((file) => {
+      if (file.deliveryOperationOwners[retryOperationId]) return true;
+      const previous = file.deliveryOperationOwners[previousOperationId];
+      const delivery = previous
+        ? file.heldDeliveries[previous.deliveryId]
+        : Object.values(file.heldDeliveries).find((candidate) => candidate.command.operationId === previousOperationId);
+      const source = previous ?? (delivery
+        ? {
+          conversationId: delivery.conversationId,
+          runtimeConversationId: delivery.runtimeConversationId,
+          clientMessageId: delivery.clientMessageId,
+          deliveryId: delivery.id,
+          command: delivery.command,
+          requestDigest: delivery.requestDigest ?? "",
+          contentDigest: delivery.contentDigest,
+        }
+        : null);
+      if (!source?.requestDigest) return false;
+      file.deliveryOperationOwners[retryOperationId] = {
+        conversationId: source.conversationId,
+        runtimeConversationId: source.runtimeConversationId,
+        clientMessageId: source.clientMessageId,
+        deliveryId: source.deliveryId,
+        command: { ...source.command, operationId: retryOperationId },
+        requestDigest: source.requestDigest,
+        contentDigest: source.contentDigest,
+        createdAt: now(),
+        retryOfOperationId: previousOperationId,
+        terminalState: null,
+        terminalDisposition: null,
+        terminalReason: null,
+        settledAt: null,
+      };
+      return true;
+    });
+  }
+
+  /**
+   * Settles one retry attempt's own row.
+   *
+   * Only an attempt row — one that records what it is a retry OF — settles this
+   * way. The reservation belongs to the presentation operation and is already
+   * terminal from the attempt this one replaced, so writing the attempt's
+   * verdict onto it would say nothing new and could overwrite what the earlier
+   * attempt proved.
+   */
+  settleDeliveryRetryAttempt(
+    operationId: string,
+    state: Extract<HeldDelivery["state"], "delivered" | "failed">,
+    error: string | null = null,
+    disposition?: DeliveryTerminalDisposition,
+  ): DeliveryOperationOwner | null {
+    return this.mutate((file) => {
+      const owner = file.deliveryOperationOwners[operationId];
+      if (!owner?.retryOfOperationId || owner.terminalState !== null) return owner ? clone(owner) : null;
+      owner.terminalState = state;
+      owner.terminalDisposition = state === "delivered" ? "delivered" : disposition ?? null;
+      owner.terminalReason = error?.slice(0, 240) ?? null;
+      owner.settledAt = now();
+      return clone(owner);
+    });
+  }
+
   recordDeliveryOutcome(
     id: string,
     state: Extract<HeldDelivery["state"], "delivered" | "failed" | "delivery-uncertain">,
     error: string | null = null,
+    /** What the settling caller PROVED. Omitted where it proved nothing, which
+        the receipt reads as an unverified fate rather than a safe resend. */
+    disposition?: DeliveryTerminalDisposition,
   ): HeldDelivery {
     return this.mutate((file) => {
       const delivery = file.heldDeliveries[id];
@@ -6602,6 +6809,7 @@ export class AgentRegistry {
       if (state === "delivered") delivery.text = "";
       if (state === "failed") failInitialSpawnReceiptForDelivery(file, delivery);
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+      syncDeliveryOperationOwnerState(file, delivery, disposition);
       const settled = clone(delivery);
       if (state === "delivered" || state === "failed") compactDeliveryReservations(file, delivery.conversationId, this.now());
       return settled;
@@ -6613,12 +6821,14 @@ export class AgentRegistry {
     operationId: string,
     state: Extract<HeldDelivery["state"], "delivered" | "failed">,
     error: string | null = null,
+    disposition?: DeliveryTerminalDisposition,
   ): HeldDelivery | null {
     return this.recordDeliveryOutcomesForOperations([{
       conversationId,
       operationId,
       state,
       error,
+      ...(disposition ? { disposition } : {}),
     }])[0] ?? null;
   }
 
@@ -6631,6 +6841,7 @@ export class AgentRegistry {
       operationId: string;
       state: Extract<HeldDelivery["state"], "delivered" | "failed">;
       error?: string | null;
+      disposition?: DeliveryTerminalDisposition;
     }[],
   ): (HeldDelivery | null)[] {
     return this.mutate((file) => {
@@ -6659,6 +6870,7 @@ export class AgentRegistry {
         if (outcome.state === "delivered") delivery.text = "";
         if (outcome.state === "failed") failInitialSpawnReceiptForDelivery(file, delivery);
         if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+        syncDeliveryOperationOwnerState(file, delivery, outcome.disposition);
         compactConversations.add(delivery.conversationId);
         return clone(delivery);
       });

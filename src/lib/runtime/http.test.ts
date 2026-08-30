@@ -18,6 +18,7 @@ import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineH
 import { handleRuntimeCommand, handleRuntimeRetry, type RuntimeHttpDependencies } from "./http";
 import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
+import { resolveSendReceipt, sendIsSettled, sendReceiptFor } from "./sendSettlement";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorActivity";
@@ -382,13 +383,17 @@ test("direct runtime send reaches durable admission while the runtime socket syn
           structured: true,
           target: "conversation_sync_window",
           outcome: "held",
+          operationId: "op_sync_window_send",
         };
       },
     },
   );
 
   expect(response.status).toBe(202);
-  expect(await response.json()).toEqual({ held: true });
+  /* #1131: the hold's own operation id comes back, so the composer's send is
+     queryable through `message_receipt` like every other acceptance instead of
+     being the one admission nobody could ask about afterwards. */
+  expect(await response.json()).toEqual({ held: true, operationId: "op_sync_window_send" });
   expect(admissions).toMatchObject([{
     conversationId: "conversation_sync_window",
     clientMessageId: "sync-window-send",
@@ -661,6 +666,9 @@ test("runtime retry with an empty body recovers ownership and starts a fresh dur
     enabled: () => true,
     client: () => client,
     kick: () => {},
+    /* This attempt's durable row lands (#1131); these fixtures are about
+       ownership, idempotency and convergence rather than persistence. */
+    recordRetryAttempt: () => true,
     recover: async (input) => {
       recoveries.push(input);
       return {
@@ -726,6 +734,9 @@ test("runtime retry republishes an existing successor before retry admission", a
     enabled: () => true,
     client: () => client,
     kick: () => {},
+    /* This attempt's durable row lands (#1131); these fixtures are about
+       ownership, idempotency and convergence rather than persistence. */
+    recordRetryAttempt: () => true,
     recover: async () => ({
       target: null,
       path: "/existing-successor.jsonl",
@@ -786,6 +797,9 @@ test("runtime retry waits for confirmed recovery before creating a replacement",
     enabled: () => true,
     client: () => client,
     kick: () => { kicks += 1; },
+    /* This attempt's durable row lands (#1131); these fixtures are about
+       ownership, idempotency and convergence rather than persistence. */
+    recordRetryAttempt: () => true,
     recover: async () => {
       recoveryCalls += 1;
       return recoveryCalls === 1 ? null : {
@@ -871,6 +885,9 @@ test("runtime retry converges once when successor ownership changes during admis
       };
     },
     kick: () => { kicks += 1; },
+    /* This attempt's durable row lands (#1131); these fixtures are about
+       ownership, idempotency and convergence rather than persistence. */
+    recordRetryAttempt: () => true,
   };
   const retry = () => handleRuntimeRetry(new NextRequest(
     `http://127.0.0.1/api/runtime/operations/${original.operationId}`,
@@ -931,6 +948,9 @@ test("runtime retry stays loud after its bounded successor convergence attempt",
     enabled: () => true,
     client: () => client,
     kick: () => { kicks += 1; },
+    /* This attempt's durable row lands (#1131); these fixtures are about
+       ownership, idempotency and convergence rather than persistence. */
+    recordRetryAttempt: () => true,
     recover: async () => {
       recoveryCalls += 1;
       return {
@@ -997,6 +1017,9 @@ test("runtime retry accepts an explicit fresh idempotency key", async () => {
     enabled: () => true,
     client: () => client,
     kick: () => { kicks += 1; },
+    /* This attempt's durable row lands (#1131); these fixtures are about
+       ownership, idempotency and convergence rather than persistence. */
+    recordRetryAttempt: () => true,
     recover: async (input) => {
       recoveries.push(input);
       return {
@@ -1051,7 +1074,7 @@ test("runtime retry accepts an explicit fresh idempotency key", async () => {
   expect(conflict.status).toBe(409);
 });
 
-test("runtime retry network replay returns the same replacement operation", async () => {
+test("runtime retry network replay returns the same replacement operation, and both responses have a durable row behind them", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-http-retry-replay-"));
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   journal.append({
@@ -1084,6 +1107,7 @@ test("runtime retry network replay returns the same replacement operation", asyn
     retryOperation: async (operationId: string, nextIdempotencyKey?: string) =>
       journal.retryOperation(operationId, nextIdempotencyKey),
   } as unknown as RuntimeHostClient;
+  const retryRows = new Map<string, string>();
   const dependencies = {
     enabled: () => true,
     client: () => client,
@@ -1094,6 +1118,14 @@ test("runtime retry network replay returns the same replacement operation", asyn
       spawned: false,
     }),
     kick: () => {},
+    /* The durable rows this endpoint may hand an id out against (#1131). The
+       fresh admission writes one; the replay used to write none at all and
+       return the leaf anyway, so a lost HTTP response left a caller holding an
+       id that no query could answer and no deadline could end. */
+    recordRetryAttempt: (previousOperationId: string, retryOperationId: string) => {
+      retryRows.set(retryOperationId, previousOperationId);
+      return true;
+    },
   };
   const retry = () => handleRuntimeRetry(new NextRequest(
     "http://127.0.0.1/api/runtime/operations/op-retry-replay-original",
@@ -1109,6 +1141,9 @@ test("runtime retry network replay returns the same replacement operation", asyn
   expect(replayed.status).toBe(202);
   expect(replayedBody).toEqual(firstBody);
   expect(firstBody.receipt.operationId).toBe("op-retry-replay-original");
+  /* The id both responses handed back names a row, and the replay recorded it
+     against the same presentation operation the fresh admission did. */
+  expect(retryRows.get(firstBody.operationId)).toBe("op-retry-replay-original");
   expect(journal.effectBatch()).toEqual([
     expect.objectContaining({
       id: `effect:${firstBody.operationId}`,
@@ -1127,6 +1162,205 @@ test("runtime retry network replay returns the same replacement operation", asyn
     text: "deliver once after a lost HTTP response",
     expectedTurnId: null,
   }]);
+  expect(journal.effectBatch()).toEqual([]);
+
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a retry attempt whose durable row does not land hands back no id", async () => {
+  /* The persistence result used to be dropped on the floor, so an attempt whose
+     row never landed was still answered with its id — an id no query could
+     answer from during an outage, no deadline could end, and the delivery
+     queue's own fence had nothing to read. A row that was refused and a row
+     whose write could not be read are one answer here: the id stays in this
+     process. The refusal is retryable and the attempt is admitted under its own
+     idempotency key, so the next call converges on the same leaf and hands the
+     id back once the row exists. */
+  const client = {
+    operationStatus: async (operationId: string) => ({
+      operationId,
+      replayed: false,
+      receipt: {
+        operationId,
+        idempotencyKey: "send-orphan-original",
+        conversationId: "conversation_retry_orphan",
+        kind: "send" as const,
+        status: "failed" as const,
+        at: "2026-07-10T00:00:00.000Z",
+        revision: 3,
+      },
+    }),
+    retryOperation: async () => ({
+      operationId: "op-orphan-replacement",
+      replayed: false,
+      receipt: {
+        operationId: "op-orphan-replacement",
+        idempotencyKey: "key-orphan-replacement",
+        conversationId: "conversation_retry_orphan",
+        kind: "send" as const,
+        status: "queued" as const,
+        at: "2026-07-10T00:00:01.000Z",
+        revision: 4,
+      },
+    }),
+  } as unknown as RuntimeHostClient;
+  let kicks = 0;
+  const attempt = (recordRetryAttempt: () => boolean) => handleRuntimeRetry(new NextRequest(
+    "http://127.0.0.1/api/runtime/operations/op-orphan-original",
+    { method: "POST", headers: { host: "127.0.0.1" } },
+  ), "op-orphan-original", {
+    enabled: () => true,
+    client: () => client,
+    kick: () => { kicks += 1; },
+    recordRetryAttempt,
+    recover: async () => ({
+      target: null,
+      path: "/retry-orphan.jsonl",
+      conversationId: "conversation_retry_orphan" as const,
+      spawned: false,
+    }),
+  });
+
+  const refused = await attempt(() => false);
+  const refusedBody = await refused.json() as Record<string, unknown>;
+  expect(refused.status).toBe(503);
+  expect(Object.keys(refusedBody).sort()).toEqual(["error", "retryable"]);
+  expect(refusedBody.retryable).toBeTrue();
+
+  const unreadable = await attempt(() => { throw new Error("registry is unavailable"); });
+  const unreadableBody = await unreadable.json() as Record<string, unknown>;
+  expect(unreadable.status).toBe(503);
+  expect(Object.keys(unreadableBody).sort()).toEqual(["error", "retryable"]);
+  /* The read that failed says why, so an operator is not left guessing which
+     store was unavailable. */
+  expect(unreadableBody.error).toBe("registry is unavailable");
+
+  /* And neither refusal woke the queue: nothing is being waited on. */
+  expect(kicks).toBe(0);
+});
+
+test("a retry whose status read fails is retryable rather than not found", async () => {
+  /* The read that says which attempt this call is about is failable too, and
+     the catch below classifies by message — so an outage whose message carries
+     the journal's own word for a missing operation could tell a caller its send
+     never existed. Only a read that COMPLETED and found nothing answers 404. */
+  const client = {
+    operationStatus: async () => { throw new Error("runtime host is unknown to this process"); },
+    retryOperation: async () => { throw new Error("unreachable"); },
+  } as unknown as RuntimeHostClient;
+  let kicks = 0;
+  const response = await handleRuntimeRetry(new NextRequest(
+    "http://127.0.0.1/api/runtime/operations/op-status-unreadable",
+    { method: "POST", headers: { host: "127.0.0.1" } },
+  ), "op-status-unreadable", {
+    enabled: () => true,
+    client: () => client,
+    kick: () => { kicks += 1; },
+  });
+  const body = await response.json() as Record<string, unknown>;
+
+  expect(response.status).toBe(503);
+  expect(body.retryable).toBeTrue();
+  expect(kicks).toBe(0);
+});
+
+test("the id a retry hands back outlives the runtime and is fenced after its deadline", async () => {
+  /* What the durable row is FOR, end to end. The caller holds the retry id; the
+     runtime then goes away entirely. The id still answers, the deadline still
+     ends it, and the record that ended it is the same one the delivery queue
+     reads before it actuates anything — so the attempt cannot arrive after its
+     caller was told it had not. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-http-retry-durable-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const held = registry.holdDelivery(conversation.id, "hold the cutover until I say go", "send-durable-retry");
+  const originalOperationId = held.command.operationId;
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId: "session-durable-retry" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: originalOperationId,
+    idempotencyKey: "send-durable-retry",
+    conversationId: conversation.id,
+    text: "hold the cutover until I say go",
+    policy: "queue",
+  });
+  journal.transitionOperation(originalOperationId, "delivering");
+  journal.transitionOperation(originalOperationId, "failed", { reason: "dead-host" });
+  const client = {
+    operationStatus: async (operationId: string, options?: { currentRetryLeaf?: boolean }) => options?.currentRetryLeaf
+      ? journal.currentRetryResult(operationId)
+      : journal.operationResult(operationId),
+    retryOperation: async (...args: Parameters<RuntimeHostClient["retryOperation"]>) => journal.retryOperation(...args),
+  } as RuntimeHostClient;
+
+  const response = await handleRuntimeRetry(new NextRequest(
+    `http://127.0.0.1/api/runtime/operations/${originalOperationId}`,
+    { method: "POST", headers: { host: "127.0.0.1" } },
+  ), originalOperationId, {
+    enabled: () => true,
+    client: () => client,
+    kick: () => {},
+    /* The production write, against this sandbox's registry. */
+    recordRetryAttempt: (previousOperationId, retryOperationId) =>
+      registry.recordDeliveryRetryAttempt(previousOperationId, retryOperationId),
+    recover: async () => ({
+      target: null,
+      path: "/retry-durable.jsonl",
+      conversationId: conversation.id,
+      spawned: false,
+    }),
+  });
+
+  expect(response.status).toBe(202);
+  const leafOperationId = (await response.json() as { operationId: string }).operationId;
+  expect(leafOperationId).not.toBe(originalOperationId);
+
+  /* The runtime is gone now. The id the caller holds still answers, from the
+     record alone, and it answers about the ATTEMPT rather than the send it
+     replaced. */
+  expect(sendReceiptFor(registry.readOnlySnapshot(), leafOperationId)).toMatchObject({
+    operationId: leafOperationId,
+    state: "in-flight",
+  });
+  const settled = await resolveSendReceipt(leafOperationId, { registry, client: null, windowMs: 0 });
+  expect(settled).toMatchObject({
+    operationId: leafOperationId,
+    state: "failed",
+    duplicateRisk: true,
+    resend: "verify-first",
+    evidence: "delivery-record",
+  });
+
+  /* And the record that ended it is the fence the queue reads: the effect the
+     retry admitted is still in the outbox, and it is not delivered. */
+  expect(sendIsSettled(registry.readOnlySnapshot(), leafOperationId)).toBeTrue();
+  expect(journal.effectBatch()).toHaveLength(1);
+  const ledger = createFakeDeliveryLedger();
+  await new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transition: async (operationId, status, details) => {
+      journal.transitionOperation(operationId, status, details);
+    },
+    status: async (operationId) => journal.operationResult(operationId)?.receipt ?? null,
+    settled: (operationId) => sendIsSettled(registry.readOnlySnapshot(), operationId),
+  }, () => new FakeEngineHost(ledger)).drain();
+
+  expect(ledger.writes).toEqual([]);
+  expect(journal.operationResult(leafOperationId)?.receipt.status).toBe("uncertain");
   expect(journal.effectBatch()).toEqual([]);
 
   journal.close();
@@ -1193,4 +1427,43 @@ test("runtime retry leaves an in-flight operation and its ownership unchanged", 
   expect(response.status).toBe(409);
   expect(recoveries).toBe(0);
   expect(retries).toBe(0);
+});
+
+test("a send no structured delivery owns is refused rather than admitted without a reservation", async () => {
+  /* #1131: this was the last road by which `queued` could be a final answer.
+     The structured path declines the conversation, and the direct command below
+     used to admit the send straight into the runtime journal — an accepted
+     operation with no durable reservation behind it, so nothing could settle it
+     and a lasting outage left it neither executed nor queryable. A control on
+     the same road reserves nothing and still goes through. */
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "op_unowned", receipt: { operationId: "op_unowned", status: "queued" } };
+    },
+  } as unknown as RuntimeHostClient;
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => client,
+    enqueue: async () => null,
+  };
+
+  const send = await handleRuntimeCommand(
+    request({ conversationId: "conversation_unowned", text: "continue", idempotencyKey: "unowned-send" }),
+    "send",
+    dependencies,
+  );
+  expect(send.status).toBe(503);
+  expect(await send.json()).toMatchObject({ error: "structured delivery ownership is unavailable for this conversation" });
+  expect(commands).toEqual([]);
+
+  const interrupt = await handleRuntimeCommand(
+    request({ conversationId: "conversation_unowned", operationId: "op_unowned_interrupt" }),
+    "interrupt",
+    dependencies,
+  );
+  expect(interrupt.status).toBe(202);
+  expect(commands).toHaveLength(1);
 });

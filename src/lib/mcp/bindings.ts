@@ -47,7 +47,7 @@ import {
 } from "@/lib/lifecycle/liveness";
 import { refreshLifecycleJournal } from "@/lib/lifecycle/projector";
 import { isLifecycleEventType } from "@/lib/lifecycle/vocabulary";
-import { recordBridgeDirectiveAnswer, recordManagerReport } from "@/lib/bridge/service";
+import { recordBridgeDirectiveAnswer, recordBridgeDirectivePendingAnswer, recordManagerReport } from "@/lib/bridge/service";
 import { bridgeDirectiveBody, bridgeDirectiveId, type BridgeTrailer } from "@/lib/bridge/directive";
 import { seatIdentityResolver } from "@/lib/bridge/seatIdentity";
 import { isBridgeReportClass, type CanonicalSeatConversationId } from "@/lib/bridge/types";
@@ -85,6 +85,7 @@ import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { messageOriginRole, type MessageOrigin } from "@/lib/runtime/messageOrigin";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
+import { resolveSendReceipt } from "@/lib/runtime/sendSettlement";
 import {
   SELECTED_TAIL_MAX_BYTES,
   SELECTED_TAIL_MAX_LINES,
@@ -314,7 +315,22 @@ async function postViewerControl(
     ? parsed as Record<string, unknown>
     : {};
   if (result.error || (!response.ok && result.state !== "busy")) {
-    throw new Error(text(result.error) || `Viewer control request failed with status ${response.status}`);
+    const message = text(result.error) || `Viewer control request failed with status ${response.status}`;
+    /* #1131: a refusal that names an ACCEPTED send is not just prose. The send
+       began actuating and nothing could confirm it, so the caller needs the id
+       it was accepted under — `message_receipt` answers what became of it — and
+       the guidance that repeating the instruction may deliver it twice.
+       Flattening those into a message is what left an ambiguous legacy send
+       with nothing to ask about and no warning against sending it again. */
+    const operationId = text(result.operationId);
+    if (operationId) {
+      throw new McpToolRefusal(message, {
+        operationId,
+        ...(text(result.resend) ? { resend: text(result.resend) } : {}),
+        ...(result.actuation === "started" ? { actuation: "started" } : {}),
+      });
+    }
+    throw new Error(message);
   }
   return result;
 }
@@ -819,12 +835,44 @@ async function sendMessage(
   const conversation = conversationId
     ? lookup.conversation(conversationId as `conversation_${string}`)
     : lookup.conversationForPath(transcriptPath);
+  const settledOutcome = outcome.outcome ?? "delivered";
   return {
     conversationId: (conversation?.id ?? conversationId) || null,
     transcriptPath: (conversation?.generations.at(-1)?.path ?? transcriptPath) || null,
     operationId: outcome.operationId ?? (outcome.receipt as { operationId?: unknown } | undefined)?.operationId ?? null,
-    outcome: outcome.outcome ?? "delivered",
+    outcome: settledOutcome,
+    /* #1131: acceptance is not arrival. A `queued` send is admitted and not yet
+       settled, and saying so on the answer itself is what stops a caller from
+       reading the send-time guess as the end of the story — `message_receipt`
+       over the operation id is where the end of the story lives. */
+    settled: settledOutcome === "delivered",
   };
+}
+
+/**
+ * What became of one accepted send (#1131).
+ *
+ * The answer is read from the durable delivery record, so it survives the
+ * process that made the send, the runtime host that took it, and the
+ * reservation itself once compaction has retired it — and a record that is
+ * still in flight is reconciled against the delivery journal's CURRENT answer
+ * before it is reported, because a caller asking what became of a send is
+ * asking about now, not about whatever last updated the projection — and past
+ * the settlement deadline this query is also what ENDS an accepted send, so
+ * `queued` is never the last thing anyone can be told about it. An id nothing
+ * ever admitted is refused rather than answered with an invented in-flight
+ * state.
+ */
+async function messageReceipt(args: McpToolArgs): Promise<McpToolPayload> {
+  const operationId = required(args, "operationId");
+  const receipt = await resolveSendReceipt(operationId);
+  if (!receipt) {
+    throw new McpToolRefusal(
+      "no accepted send is recorded under that operationId",
+      { code: "OPERATION_UNKNOWN" },
+    );
+  }
+  return { ...receipt };
 }
 
 async function createBoardTask(args: McpToolArgs): Promise<McpToolPayload> {
@@ -1581,10 +1629,21 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
        names the gateway (or attributed caller role), never the operator. */
     origin: mcpSenderOrigin(dependencies),
   }, callerCapabilityHeaders());
+  const settledOutcome = outcome.outcome ?? "delivered";
+  const operationId = typeof outcome.operationId === "string" ? outcome.operationId : null;
   /* The trailer is the ONLY thing that says a report was answered — the drain
      cursor says only that it was read aloud — so it is recorded the moment the
-     answer actually reaches the manager (#1168). Scoped by the project and seat
-     this directive was just routed to, because a report seq is log-global: the
+     answer actually reaches the manager (#1168), and NOT before: an accepted
+     directive that is still `queued` has not reached anyone, and recording it
+     then would clear a pending decision that a dropped delivery means nobody
+     ever saw (#1131).
+     An acceptance is not the end of it either. The ref is PARKED against the
+     operation id the send returned, so the ask clears itself the moment that
+     send is recorded delivered, and stays standing if it is recorded failed —
+     which is what stops a queued directive from leaving the manager's decision
+     request open forever after the message did arrive.
+     Both are scoped by the project and seat this directive was just routed to,
+     because a report seq is log-global: the
      store settles the ref only if it names a decision request THIS seat filed,
      so a ref that names nothing yet cannot pre-answer a later report and a
      directive cannot clear another project's ask. The seat identity travels in
@@ -1595,17 +1654,19 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
      visible and unanswerable. Idempotent, so a directive retry under the same
      derived id settles the same seq once. */
   if (trailer) {
-    recordBridgeDirectiveAnswer(
-      trailer.ref,
-      { project, seatConversationId: manager.conversationId },
-      dependencies.canonicalSeatConversationId ?? productionCanonicalSeatConversationId,
-    );
+    const scope = { project, seatConversationId: manager.conversationId };
+    const canonical = dependencies.canonicalSeatConversationId ?? productionCanonicalSeatConversationId;
+    if (settledOutcome === "delivered") recordBridgeDirectiveAnswer(trailer.ref, scope, canonical);
+    else if (operationId) recordBridgeDirectivePendingAnswer(trailer.ref, scope, operationId, canonical);
   }
   return {
     directiveId: deliveryId,
     managerConversationId: manager.conversationId,
-    operationId: outcome.operationId ?? null,
-    outcome: outcome.outcome ?? "delivered",
+    operationId,
+    outcome: settledOutcome,
+    /* #1131: the same contract `send_message` answers with — acceptance is not
+       arrival, and `message_receipt` over the operation id is what says which. */
+    settled: settledOutcome === "delivered",
   };
 }
 
@@ -1939,6 +2000,10 @@ async function sendMessageToOrchestrator(
     predecessorConversationId: seat.predecessorConversationId,
     operationId: outcome.operationId ?? (outcome.receipt as { operationId?: unknown } | undefined)?.operationId ?? null,
     outcome: outcome.outcome ?? "delivered",
+    /* #1131: the same control path as `send_message`, so the same contract —
+       acceptance is not arrival, and `message_receipt` over the operation id is
+       what says which. */
+    settled: (outcome.outcome ?? "delivered") === "delivered",
   });
 }
 
@@ -3152,6 +3217,7 @@ export function viewerMcpBindings(
   return {
     spawn_agent: (args, context) => spawnAgent(args, viewerControlForCall(controlDependencies, context)),
     send_message: (args, context) => sendMessage(args, viewerControlForCall(controlDependencies, context), domainDependencies),
+    message_receipt: (args) => messageReceipt(args),
     create_task: createBoardTask,
     update_task: updateBoardTask,
     create_pipeline: createPipeline,

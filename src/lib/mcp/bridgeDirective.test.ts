@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import { parseBridgeTrailer } from "@/lib/bridge/directive";
 import { bridgeAsksForSeats, recordManagerReport } from "@/lib/bridge/service";
 import { drainBridgeReports, openBridgeChannel } from "@/lib/bridge/store";
@@ -73,12 +74,15 @@ function sandbox(withManager = true): void {
 function bindings(
   callerProject: string | null = "proj-voice",
   canonicalSeatConversationId?: (conversationId: string) => string,
+  /** What the delivery path answers. `delivered` is arrival; `queued` is
+      acceptance, and the two must not settle a decision request alike. */
+  deliveryOutcome: "delivered" | "queued" = "delivered",
 ) {
   posted = [];
   const control: ViewerControlDependencies = {
     async post(pathname, body, headers) {
       posted.push({ pathname, body, headers: headers ?? {} });
-      return { outcome: "delivered", operationId: "op-1" };
+      return { outcome: deliveryOutcome, operationId: "op-1" };
     },
   };
   /* The caller's canonical project as the production resolver would derive it
@@ -194,6 +198,150 @@ test("the trailer settles the ask of the seat this directive reached, and no oth
     ref: asked!.seq,
   });
   expect(bridgeAsksForSeats().size).toBe(0);
+});
+
+test("a directive that was only accepted leaves the ask standing, and says it is unsettled", async () => {
+  /* #1131: `queued` means the runtime admitted the operation, not that the
+     manager read anything. Recording the answer there cleared a pending
+     decision that a dropped delivery means nobody ever saw — the ask vanished
+     from the operator's card while the instruction behind it never arrived. */
+  sandbox();
+  const tools = bindings("proj-voice", undefined, "queued");
+  const asked = recordManagerReport({
+    key: "lane-9-blocked",
+    class: "blocked",
+    at: new Date().toISOString(),
+    project: "proj-voice",
+    targetSeatConversationId: "conversation_manager",
+    body: "cannot proceed: pick a base branch",
+  });
+  expect(bridgeAsksForSeats().size).toBe(1);
+
+  const receipt = await tools.bridge_directive({
+    clientRequestId: "d-unsettled",
+    rootTurnId: "turn_unsettled",
+    utterance: 0,
+    instruction: "cut it from main",
+    project: "proj-voice",
+    ref: asked!.seq,
+  });
+
+  expect(receipt).toMatchObject({ outcome: "queued", settled: false, operationId: "op-1" });
+  /* Still open, and answerable by the operation id the receipt just returned. */
+  expect(bridgeAsksForSeats().size).toBe(1);
+});
+
+test("a queued directive settles its ask once its own send is delivered, and never when it failed", async () => {
+  /* #1131: the other half of the trade above. Leaving a queued directive's ask
+     open forever is its own failure — the manager answered, the operator's card
+     kept asking — so the ref is parked against the operation id the send
+     returned and cleared by the DURABLE DELIVERY RECORD, which is the only
+     thing that knows whether the message ever arrived. Nothing polls: the ask
+     projection joins the two on every read. */
+  for (const settlement of ["delivered", "failed"] as const) {
+    sandbox();
+    const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "agent-registry.json"));
+    setAgentRegistryForTests(registry);
+    try {
+      const tools = bindings("proj-voice", undefined, "queued");
+      const asked = recordManagerReport({
+        key: "lane-11-blocked",
+        class: "blocked",
+        at: new Date().toISOString(),
+        project: "proj-voice",
+        targetSeatConversationId: "conversation_manager",
+        body: "cannot proceed: pick a base branch",
+      });
+      await tools.bridge_directive({
+        clientRequestId: `d-${settlement}`,
+        rootTurnId: `turn_${settlement}`,
+        utterance: 0,
+        instruction: "cut it from main",
+        project: "proj-voice",
+        ref: asked!.seq,
+      });
+      /* Accepted and nothing more: the ask stays open until the send settles. */
+      expect(bridgeAsksForSeats().size).toBe(1);
+
+      const conversation = registry.ensureConversation("codex", "", "default");
+      const held = registry.holdDelivery(conversation.id, "cut it from main", `key-${settlement}`, "text", [], null, {
+        operationId: "op-1",
+        kind: "send",
+        policy: "queue",
+      });
+      registry.recordDeliveryOutcome(
+        held.id,
+        settlement,
+        settlement === "failed" ? "the send was dropped" : null,
+        settlement === "failed" ? "unverified" : "delivered",
+      );
+
+      /* Delivered clears it — and idempotently, because the projection derives
+         the answer rather than racing to write one. A failure leaves it
+         standing, which is the whole reason the answer waited. */
+      expect(bridgeAsksForSeats().size).toBe(settlement === "delivered" ? 0 : 1);
+      expect(bridgeAsksForSeats().size).toBe(settlement === "delivered" ? 0 : 1);
+    } finally {
+      setAgentRegistryForTests(null);
+    }
+  }
+});
+
+test("a delivery record that cannot be read clears no ask, here or in any other project (#1131)", async () => {
+  /* The last failable read on this surface and the only SYNCHRONOUS one, which
+     is how it outlived the sweep that made the rest tri-state. The parked answer
+     asks the durable delivery record whether the directive's send arrived; a
+     record that could not be read has not said it did, so the ask stays exactly
+     where a dropped send leaves it.
+     Letting the read throw was its own conversion, and the worst-shaped one
+     here: the exception left the whole projection for its fail-closed catch, so
+     ONE unreadable record answered "no open asks" for every seat in every
+     project — retiring, in the operator's view, decision requests nobody had
+     answered. The second project below never parked anything and is what makes
+     that blast radius visible. */
+  sandbox();
+  seatProject("proj-second", "conversation_second_manager");
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  try {
+    const tools = bindings("proj-voice", undefined, "queued");
+    const asked = recordManagerReport({
+      key: "lane-12-blocked",
+      class: "blocked",
+      at: new Date().toISOString(),
+      project: "proj-voice",
+      targetSeatConversationId: "conversation_manager",
+      body: "cannot proceed: pick a base branch",
+    });
+    recordManagerReport({
+      key: "lane-13-blocked",
+      class: "blocked",
+      at: new Date().toISOString(),
+      project: "proj-second",
+      targetSeatConversationId: "conversation_second_manager",
+      body: "cannot proceed: name a release window",
+    });
+    await tools.bridge_directive({
+      clientRequestId: "d-unreadable",
+      rootTurnId: "turn_unreadable",
+      utterance: 0,
+      instruction: "cut it from main",
+      project: "proj-voice",
+      ref: asked!.seq,
+    });
+    expect(bridgeAsksForSeats().size).toBe(2);
+
+    /* The record goes unreadable AFTER the answer is parked — the outage this
+       fence exists for arrives between the acceptance and the question. */
+    const unreadable = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "agent-registry.json"));
+    unreadable.readOnlySnapshot = () => { throw new Error("agent registry is unavailable"); };
+    setAgentRegistryForTests(unreadable);
+
+    expect([...bridgeAsksForSeats().keys()].sort())
+      .toEqual(["conversation_manager", "conversation_second_manager"]);
+  } finally {
+    setAgentRegistryForTests(null);
+  }
 });
 
 test("a seat rekeyed since it asked is still the seat this directive settles (#1168 final review, HIGH 1)", async () => {

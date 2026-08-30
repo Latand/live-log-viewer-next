@@ -220,7 +220,8 @@ do not render as Viewer cards.
 The MCP surface includes:
 
 - conversations and the board: `board_snapshot`, `list_conversations`,
-  `get_conversation`, `send_message`, and `conversation_action` for
+  `get_conversation`, `send_message`, `message_receipt` (what became of an
+  accepted send, by its operation id), and `conversation_action` for
   `interrupt`, `kill`, `resume`, `compact`, and `dialog-key`;
 - review flows: `list_flows`, `get_flow`, and `flow_action`;
 - pipelines: `create_pipeline`, `list_pipelines`, `get_pipeline`,

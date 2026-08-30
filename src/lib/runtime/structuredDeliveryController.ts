@@ -6,6 +6,7 @@ import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { runtimeSettingsCapability, type RuntimeEventInput, type RuntimeSession } from "./contracts";
+import { readEvidence } from "./evidence";
 import type { EngineHost, HostState } from "./engineHost";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { applyStructuredReconfigure } from "./structuredReconfigure";
@@ -14,6 +15,7 @@ import { conversationTurnLiveness, type TurnLivenessDependencies } from "./liven
 import { reapSeveredStructuredHost } from "./registry";
 import { publishFilesRevision } from "./filesRevision";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
+import { journalVerdict, sendIsSettled } from "./sendSettlement";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 
@@ -188,6 +190,32 @@ function hostResolver(
   };
 }
 
+/**
+ * The writer claim that owns a conversation's structured host right now
+ * (#1131).
+ *
+ * The registry already records exactly one owner per host — the claim a writer
+ * must still hold for its engine writes to be accepted — so "may this executor
+ * still write to that host" is a fact the durable record already answers, and
+ * the delivery queue reads it here rather than growing an ownership model of
+ * its own. A conversation with no claimed structured host answers null: nothing
+ * to compare against, which the queue reads as evidence of neither a live owner
+ * nor a departed one, and a read that throws says exactly as much.
+ */
+function structuredHostClaim(
+  registry: AgentRegistry,
+): (conversationId: string) => string | null {
+  return (conversationId) => {
+    const conversation = registry.conversation(conversationId as `conversation_${string}`);
+    const generation = conversation?.generations.at(-1);
+    if (!conversation || !generation) return null;
+    const entry = registry.readOnlySnapshot()
+      .entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+    if (!entry?.claimOwner || !entry.structuredHost) return null;
+    return `${entry.claimOwner}:${entry.structuredHost.writerClaimEpoch}`;
+  };
+}
+
 async function yieldControllerTurn(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
@@ -210,8 +238,13 @@ async function reconcileTerminalDeliveries(
       try {
         const result = await client.operationStatus(delivery.command.operationId, { currentRetryLeaf: true });
         if (!result) return null;
-        const status = result.receipt.status;
-        if (status !== "delivered" && status !== "failed" && status !== "rejected") return null;
+        /* The same classifier the receipt query reads the journal through:
+           what a status PROVES about a send is one question with one answer,
+           and `uncertain` — the send was handed to the engine and never
+           answered for — is the one whose disposition stops a later receipt
+           from calling a resend safe (#1131). */
+        const verdict = journalVerdict(result.receipt.status);
+        if (!verdict) return null;
         const receiptConversationId = result.receipt.conversationId;
         if (!receiptConversationId.startsWith("conversation_")
           || registry.canonicalConversationId(receiptConversationId as `conversation_${string}`)
@@ -223,15 +256,21 @@ async function reconcileTerminalDeliveries(
           });
           return null;
         }
-        const state = status === "delivered" ? "delivered" as const : "failed" as const;
-        if (delivery.state === "failed" && state === "failed") return null;
+        if (delivery.state === "failed" && verdict.state === "failed") return null;
         return {
           conversationId: receiptConversationId as `conversation_${string}`,
           operationId: result.receipt.presentationOperationId ?? delivery.command.operationId,
-          state,
-          error: result.receipt.reason ?? null,
+          state: verdict.state,
+          /* The journal's own words where it has them, and the settlement's
+             where the status IS the reason. */
+          error: verdict.disposition === "unverified" ? verdict.reason : result.receipt.reason ?? null,
+          disposition: verdict.disposition,
         };
       } catch (error) {
+        /* Scoped to this one delivery on purpose (#1131): a status that could
+           not be read contributes no outcome, so the row keeps the state it
+           has and the next startup asks again. Nothing is terminalized on it,
+           and the other rows in the page are still reconciled. */
         console.error("[structured delivery] terminal receipt reconciliation failed", {
           operationId: delivery.command.operationId,
           conversationId: delivery.conversationId,
@@ -342,20 +381,38 @@ export async function bindStructuredDeliveryQueue(
       effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
       ...(typeof client.events === "function" ? { events: (afterEventSeq: number) => client.events(afterEventSeq) } : {}),
       status: async (operationId: string) => (await client.operationStatus(operationId))?.receipt ?? null,
+      /* The durable delivery record's own fence (#1131): a send a receipt query
+         already ended — the only answer it could give while this socket was
+         unreachable — must not be actuated when the socket comes back. */
+      settled: (operationId: string) => sendIsSettled(registry.readOnlySnapshot(), operationId),
+      /* Who may write to this conversation's engine right now (#1131): the
+         evidence a `delivering` row is compared against before it is called
+         abandoned, so a send another live executor is actuating is left to it. */
+      hostClaim: structuredHostClaim(registry),
       transition: async (operationId, status, details) => {
         const result = await client.transitionOperation(operationId, status, details);
-        /* Only the two states a held delivery can settle into. A compaction's
-           `uncertain` is absent on purpose and costs nothing: this projection
-           is keyed on `heldDeliveries`, which only a composer message ever
-           creates, so a compact operation has no row here to settle (#862). */
-        if (status !== "delivered" && status !== "failed") return;
+        /* The three states a held delivery can settle into. `uncertain` — a
+           send an executor actuated and could not answer for — settles the
+           reservation HERE, at the moment the queue writes it, rather than
+           leaving it for the next receipt query: terminality that needs nothing
+           to be healthy beats terminality that has to be asked for. A
+           compaction transitions the same way and costs nothing, because this
+           projection is keyed on `heldDeliveries`, which only a composer
+           message ever creates, so a compact operation has no row here to
+           settle (#862). */
+        if (status !== "delivered" && status !== "failed" && status !== "uncertain") return;
         const conversationId = result.receipt.conversationId;
         if (!conversationId?.startsWith("conversation_")) return;
         registry.recordDeliveryOutcomeForOperation(
           conversationId as `conversation_${string}`,
           result.receipt.presentationOperationId ?? operationId,
-          status,
+          status === "uncertain" ? "failed" : status,
           details?.reason ?? null,
+          /* The disposition the record has to keep: actuation began, so a
+             resend can duplicate it. Every other `failed` on a message effect
+             means the send never reached the engine and proves nothing on its
+             own, so it carries none. */
+          status === "uncertain" ? "unverified" : undefined,
         );
         if (status === "delivered" && operationId.startsWith("spawn_message_")) {
           const launchId = operationId.slice("spawn_message_".length);
@@ -472,31 +529,62 @@ export async function bindStructuredDeliveryQueue(
   const publishChains = new Map<string, Promise<void>>();
   const projectionEpoch = crypto.randomUUID();
   let projectionRevision = 0;
+  /**
+   * One registration's republish, and what it proves about its conversation.
+   *
+   * `conversationId` is set whenever this registration IS the conversation's
+   * current host — whether or not a projection was published — because a live
+   * registration speaks for its conversation and the derived fallback below
+   * must not overwrite it. `published` is the narrower answer to "did a
+   * projection actually go out", which is what a single-host republish
+   * reports to its caller.
+   */
   const republishRegistration = async (
     registration: { key: SessionKey; host: ObservableEngineHost },
-  ): Promise<string | null> => {
+  ): Promise<{ conversationId: string | null; published: boolean }> => {
+    const unclaimed = { conversationId: null, published: false } as const;
     const entry = entryForHost(registry, registration);
-    if (!entry) return null;
+    if (!entry) return unclaimed;
     const conversationId = conversationIdForEntry(registry, entry);
-    if (!conversationId) return null;
+    if (!conversationId) return unclaimed;
     const conversation = registry.conversation(conversationId as `conversation_${string}`);
     const generation = conversation?.generations.at(-1);
-    if (!conversation || !generation) return null;
-    if (sessionKeyId({ engine: conversation.engine, sessionId: generation.id }) !== sessionKeyId(registration.key)) return null;
+    if (!conversation || !generation) return unclaimed;
+    if (sessionKeyId({ engine: conversation.engine, sessionId: generation.id }) !== sessionKeyId(registration.key)) return unclaimed;
+    /* The host's own state, kept as evidence like every other read in this
+       path (#1131). Letting it throw was a conversion of the worst shape: the
+       exception answered for the WHOLE loop below, so ONE host that could not
+       be read cost every other host its republish AND failed the caller — a
+       kill whose host this controller had already retired came back reported
+       as un-terminated and was requeued. Unreadable publishes nothing and
+       claims the conversation, which leaves the projection exactly as it
+       stands: a state nobody read is not published, and it does not invite the
+       derived fallback to declare a live host unhosted either. */
+    const hostState = await readEvidence(
+      () => registration.host.health(),
+      "structured host state is unavailable",
+    );
+    if (!hostState.readable) {
+      console.error("[structured delivery] host state unavailable; projection left as published", {
+        conversationId,
+        reason: hostState.reason,
+      });
+      return { conversationId, published: false };
+    }
     projectionRevision += 1;
     await publishHostState(
       client,
       registry,
       registration,
-      await registration.host.health(),
+      hostState.value,
       `projection:${projectionEpoch}:${projectionRevision}`,
     );
-    return conversationId;
+    return { conversationId, published: true };
   };
   const republishCurrentHosts = async (): Promise<Set<string>> => {
     const republished = new Set<string>();
     for (const registration of registrations.values()) {
-      const conversationId = await republishRegistration(registration);
+      const { conversationId } = await republishRegistration(registration);
       if (conversationId) republished.add(conversationId);
     }
     return republished;
@@ -808,7 +896,7 @@ export async function bindStructuredDeliveryQueue(
   state.republishActiveHost = async (key) => {
     const registration = registrations.get(sessionKeyId(key));
     if (!registration) return false;
-    return await republishRegistration(registration) !== null;
+    return (await republishRegistration(registration)).published;
   };
   /* Both paths claim the seat first, so a host carried over at the swap is
      released here exactly like one this generation registered itself — even
@@ -902,6 +990,11 @@ export async function bindStructuredDeliveryQueue(
       }
       for (const item of items) await register(item);
       const startupSnapshot = registry.readOnlySnapshot();
+      /* Read only to skip republishing a projection that already says what
+         this pass would say. It decides nothing else: the state published
+         below is read off the registry, never off this snapshot, so a read
+         that failed costs one redundant publish and authorises nothing
+         (#1131). */
       const runtimeSnapshot = typeof client.snapshot === "function"
         ? await client.snapshot().catch(() => null)
         : null;
