@@ -14,7 +14,8 @@ import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient 
 import { parseRuntimeCommand } from "./commands";
 import { runtimePresentationReceipt, type RuntimeOperationKind } from "./contracts";
 import { runtimeEventsEnabled, runtimeEventsRolledBack, structuredHostsEnabled, RUNTIME_PLANE_ABSENT } from "./flags";
-import { resolveSendReceipt, runtimeReceiptForSend, type SendReceipt } from "./sendSettlement";
+import { readEvidence, type Evidence } from "./evidence";
+import { journalVerdict, resolveSendReceipt, runtimeReceiptForSend, type SendReceipt } from "./sendSettlement";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -79,6 +80,23 @@ function recordDeliveryRetryAttempt(previousOperationId: string, retryOperationI
 
 function terminalRetryIdempotencyKey(operationId: string): string {
   return `retry_${createHash("sha256").update(operationId).digest("hex")}`;
+}
+
+/**
+ * The refusal that keeps a retry id from leaving this process without a durable
+ * row behind it (#1131).
+ *
+ * Retryable, and honestly so: the attempt is admitted under its own idempotency
+ * key, so the next call converges on the same leaf rather than admitting a
+ * second one, and it persists the row this one could not.
+ */
+const RETRY_RECORD_UNAVAILABLE = "retry attempt could not be recorded durably";
+
+function retryRecordUnavailable(recorded: Evidence<boolean>): NextResponse {
+  return NextResponse.json({
+    error: recorded.readable ? RETRY_RECORD_UNAVAILABLE : recorded.reason,
+    retryable: true,
+  }, { status: 503 });
 }
 
 /**
@@ -355,7 +373,17 @@ export async function handleRuntimeOperationQuery(
     return NextResponse.json({ error: "operationId is invalid" }, { status: 400 });
   }
   const client = dependencies.client();
-  const send = await dependencies.settle(operationId, client).catch(() => null);
+  /* The authoritative store, and a FAILABLE read of it. A settlement that could
+     not be read is not a send that was never settled: answering the journal's
+     still-open status from here would re-open an answer this endpoint may
+     already have handed out as terminal, so an unreadable record ends the query
+     rather than being converted into `queued`. */
+  const settlement = await readEvidence(
+    () => dependencies.settle(operationId, client),
+    null,
+    "delivery settlement is unavailable",
+  );
+  const send = settlement.readable ? settlement.value : null;
   /* The rule above, applied before anything can contradict it. */
   if (send && send.state !== "in-flight") {
     return NextResponse.json({ operationId, receipt: runtimeReceiptForSend(send), send });
@@ -367,7 +395,11 @@ export async function handleRuntimeOperationQuery(
   if (client) {
     try {
       const result = await client.operationStatus(operationId);
-      if (result) {
+      /* A journal answer that is itself TERMINAL is proof on its own, and the
+         record is projected from it, so the two cannot disagree about it. An
+         open one can, which is exactly the case the unreadable record has to
+         stop. */
+      if (result && (settlement.readable || journalVerdict(result.receipt.status))) {
         return NextResponse.json({
           operationId: result.operationId,
           receipt: result.receipt,
@@ -381,6 +413,11 @@ export async function handleRuntimeOperationQuery(
   /* The journal could not answer. The durable delivery record still can, and
      for an accepted send that is the whole point of settling it there. */
   if (send) return NextResponse.json({ operationId, receipt: runtimeReceiptForSend(send), send });
+  if (!settlement.readable) {
+    /* Neither store gave a usable answer, and one of them was never read. That
+       is not an operation nobody admitted, so it must not be answered as one. */
+    return NextResponse.json({ error: settlement.reason, retryable: true }, { status: 503 });
+  }
   if (unreachable) return NextResponse.json({ error: unreachable }, { status: 503 });
   if (!client) {
     return NextResponse.json(
@@ -428,6 +465,7 @@ export async function handleRuntimeRetry(
         nextIdempotencyKey = value.idempotencyKey;
       }
     }
+    const recordRetryAttempt = dependencies.recordRetryAttempt ?? recordDeliveryRetryAttempt;
     const previous = await client.operationStatus(operationId, { currentRetryLeaf: true });
     if (!previous) return NextResponse.json({ error: "operation not found" }, { status: 404 });
     if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
@@ -435,6 +473,20 @@ export async function handleRuntimeRetry(
     }
     if (previous.receipt.status !== "failed" && previous.receipt.status !== "rejected") {
       if (previous.operationId !== operationId) {
+        /* The network replay: an earlier call's response was lost, and the
+           journal converges this one onto the SAME attempt. The id is still an
+           id this response is handing out, so it needs the same durable row the
+           fresh admission needs — this path used to return the leaf without
+           persisting anything at all, so a lost response was enough to leave a
+           caller holding an id no query and no deadline could ever settle. The
+           record is idempotent: the row an earlier call wrote is the row this
+           one finds. */
+        const recorded = await readEvidence(
+          () => recordRetryAttempt(previous.receipt.presentationOperationId ?? operationId, previous.operationId),
+          false,
+          RETRY_RECORD_UNAVAILABLE,
+        );
+        if (!recorded.readable || !recorded.value) return retryRecordUnavailable(recorded);
         const status = previous.receipt.status === "pending"
           || previous.receipt.status === "queued"
           || previous.receipt.status === "delivering"
@@ -488,9 +540,21 @@ export async function handleRuntimeRetry(
        It starts non-terminal, so the attempt keeps its intended eligibility for
        one fresh execution; once the deadline settles it, the same fence is what
        stops a late recovery from delivering it after the caller was told it had
-       not arrived. */
-    const recordRetryAttempt = dependencies.recordRetryAttempt ?? recordDeliveryRetryAttempt;
-    recordRetryAttempt(previous.receipt.presentationOperationId ?? previous.operationId, result.operationId);
+       not arrived.
+
+       The write is failable and its result was ignored, which made the record
+       best-effort and the id in the caller's hand an orphan whenever it did not
+       land. A row that was not written and a row whose write could not be read
+       are the same answer here: the id does not leave this process. The attempt
+       itself is idempotent under its own key, so a caller that retries after
+       this refusal converges on the same leaf through the replay path above and
+       gets the id once the row exists. */
+    const recorded = await readEvidence(
+      () => recordRetryAttempt(previous.receipt.presentationOperationId ?? previous.operationId, result.operationId),
+      false,
+      RETRY_RECORD_UNAVAILABLE,
+    );
+    if (!recorded.readable || !recorded.value) return retryRecordUnavailable(recorded);
     dependencies.kick();
     return NextResponse.json({
       operationId: result.operationId,

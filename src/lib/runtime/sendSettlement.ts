@@ -10,6 +10,7 @@ import type { HeldDelivery, ViewerConversationId } from "@/lib/accounts/migratio
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt, RuntimeReceiptStatus } from "./contracts";
+import { readEvidence, unreadableEvidence } from "./evidence";
 
 /**
  * Settlement of accepted sends (#1131).
@@ -522,10 +523,17 @@ export async function resolveSendReceipt(
   const projected = sendReceiptFor(registry.readOnlySnapshot(), operationId);
   if (!projected || projected.state !== "in-flight") return projected;
   const client = ports.client === undefined ? runtimeHostClient() : ports.client;
-  const current = client
-    ? await client.operationStatus(operationId, { currentRetryLeaf: true }).catch(() => "unreachable" as const)
-    : "unreachable" as const;
-  const status = current === "unreachable" ? null : current?.receipt.status ?? null;
+  /* The journal read, keeping whether it happened at all. A socket that is not
+     there is the runtime host being unreachable, which is the same answer as a
+     read that threw: nothing was asked, so nothing was learned. */
+  const journal = client
+    ? await readEvidence(
+      () => client.operationStatus(operationId, { currentRetryLeaf: true }),
+      null,
+      "runtime host is unavailable",
+    )
+    : unreadableEvidence("runtime host socket is unavailable");
+  const status = journal.readable ? journal.value?.receipt.status ?? null : null;
   const verdict = journalVerdict(status);
   if (verdict) return settleProjection(registry, operationId, projected, verdict);
 
@@ -539,13 +547,13 @@ export async function resolveSendReceipt(
     disposition: "unverified",
     reason: SEND_UNSETTLEABLE_REASON,
   };
-  if (current === "unreachable" || !client) {
+  if (!journal.readable || !client) {
     /* Nothing was asked and nothing answered: the durable record is the whole
        evidence, and the receipt says so rather than crediting a journal this
        query never reached. */
     return settleProjection(registry, operationId, projected, unsettleable, "delivery-record");
   }
-  if (current === null || status === null) {
+  if (journal.value === null || status === null) {
     return settleProjection(registry, operationId, projected, {
       state: "failed",
       disposition: "unverified",
@@ -561,7 +569,7 @@ export async function resolveSendReceipt(
      writes do not would make `queued` permanent exactly as an outage would. So
      it ends the same way an outage does, on the durable record the delivery
      queue reads before it actuates anything. */
-  const fenced = await fenceOperation(client, current.operationId, status).catch(() => null);
+  const fenced = await fenceOperation(client, journal.value.operationId, status).catch(() => null);
   return settleProjection(
     registry,
     operationId,

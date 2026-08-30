@@ -159,3 +159,56 @@ test("a journal that answers queued and refuses the fence yields one terminal an
      answer that could contradict the one already written. */
   expect(reads).toEqual([operationId]);
 });
+
+test("an unreadable settlement is not answered as an open send", async () => {
+  /* The authoritative store is a FAILABLE read like every other one here. When
+     it could not be read, the journal's still-open status is not the answer:
+     this endpoint may already have handed out a terminal settlement for this
+     id, and reporting `queued` beside it would take that answer back. The query
+     ends instead, retryably, and says which read was missing. */
+  const { registry } = sandboxRegistry("settlement-unreadable");
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const held = registry.holdDelivery(conversation.id, "hold the cutover", "operation-route-unreadable");
+  const operationId = held.command.operationId;
+  const queued = {
+    operationId,
+    replayed: false,
+    receipt: {
+      operationId,
+      idempotencyKey: "operation-route-unreadable",
+      conversationId: conversation.id,
+      kind: "send" as const,
+      status: "queued" as const,
+      reason: null,
+      at: new Date().toISOString(),
+      revision: 1,
+    },
+  };
+  const client = { operationStatus: async () => queued } as unknown as RuntimeHostClient;
+  const dependencies = {
+    client: () => client,
+    rolledBack: () => false,
+    settle: async () => { throw new Error("delivery record is unavailable"); },
+  };
+
+  const open = await handleRuntimeOperationQuery(operationId, dependencies);
+  const openBody = await open.json() as Record<string, unknown>;
+  expect(open.status).toBe(503);
+  expect(openBody).toMatchObject({ error: "delivery record is unavailable", retryable: true });
+
+  /* A journal answer that is itself terminal is proof on its own — the record
+     is projected from it, so the two cannot disagree about it — and it is
+     answered even while the record cannot be read. */
+  const terminal = await handleRuntimeOperationQuery(operationId, {
+    ...dependencies,
+    client: () => ({
+      operationStatus: async () => ({
+        ...queued,
+        receipt: { ...queued.receipt, status: "delivered" as const },
+      }),
+    }) as unknown as RuntimeHostClient,
+  });
+  expect(terminal.status).toBe(200);
+  expect(await terminal.json()).toMatchObject({ operationId, receipt: { status: "delivered" } });
+});
