@@ -3310,7 +3310,13 @@ describe("mergeBoundaryReview", () => {
   /* The commit the "Update branch" button composes: the base merged into the
      branch, authored by the account that pressed it and committed by the
      forge. */
-  function mergeAsForge(repo: string, base: string, branch: string, author = canonicalIdentity): void {
+  function mergeAsForge(
+    repo: string,
+    base: string,
+    branch: string,
+    author = canonicalIdentity,
+    committer = forgeWebFlowIdentity,
+  ): void {
     const result = Bun.spawnSync({
       cmd: ["git", "merge", "--quiet", "--no-ff", "-m", `Merge branch '${base}' into ${branch}`, base],
       cwd: repo,
@@ -3318,8 +3324,8 @@ describe("mergeBoundaryReview", () => {
         ...process.env,
         GIT_AUTHOR_EMAIL: author.email,
         GIT_AUTHOR_NAME: author.name,
-        GIT_COMMITTER_EMAIL: forgeWebFlowIdentity.email,
-        GIT_COMMITTER_NAME: forgeWebFlowIdentity.name,
+        GIT_COMMITTER_EMAIL: committer.email,
+        GIT_COMMITTER_NAME: committer.name,
       },
       stderr: "pipe",
       stdout: "pipe",
@@ -3511,6 +3517,7 @@ describe("mergeBoundaryReview", () => {
     runGit(repo, ["checkout", "--quiet", "feature"]);
     mergeAsForge(repo, "main", "feature");
 
+    expect(identityField(repo, "%P").split(" ")).toHaveLength(2);
     expect(identityField(repo, "%ce")).toBe(forgeWebFlowIdentity.email);
     expect(identityField(repo, "%ae")).toBe(canonicalIdentity.email);
 
@@ -3522,6 +3529,32 @@ describe("mergeBoundaryReview", () => {
     const result = runGateArguments(["--base", "main", "--check-commits"], {}, repo);
     expect(result.stdout.toString()).toBe("PRIVACY GATE: PASS\n");
     expect(result.exitCode).toBe(0);
+  });
+
+  test("a single-parent commit with the forge's web-flow committer is attributable and named", () => {
+    /* The forge mailbox identifies a merge only when the commit graph agrees.
+       A normal commit can carry the same committer identity, and that field
+       remains part of what a squash merge composes into its message even when
+       its author happens to carry the identical identity. */
+    const repo = gitRepo();
+    const personal = ["someone", "personal.dev"].join("@");
+    commit(repo, `feat: write to ${personal} about it`, forgeWebFlowIdentity);
+    const flagged = head(repo);
+
+    expect(identityField(repo, "%P").split(" ")).toHaveLength(1);
+    expect(identityField(repo, "%ae")).toBe(forgeWebFlowIdentity.email);
+    expect(identityField(repo, "%ce")).toBe(forgeWebFlowIdentity.email);
+
+    const result = runGateArguments(["--base", "main", "--check-commits"], {}, repo);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toBe(
+      `PRIVACY GATE: FAIL\nemail_address: 2\n`
+      + `commit_message: ${flagged.slice(0, 12)} message email_address\n`
+      + `merge_boundary: ${flagged.slice(0, 12)} committer identity composes an attributable `
+      + "Co-authored-by trailer (address withheld)\n",
+    );
+    expect(result.stdout.toString()).not.toContain(personal);
+    expect(result.stdout.toString()).not.toContain(forgeWebFlowIdentity.email);
   });
 
   test("a message with a real-looking address still fails behind a forge merge, and is named", () => {
@@ -3580,13 +3613,16 @@ describe("mergeBoundaryReview", () => {
        everything else on the trailer is read as it always was. */
     const repo = gitRepo();
     const personal = ["someone", "personal.dev"].join("@");
-    commit(repo, "feat: something", canonicalIdentity);
-    runGit(repo, [
-      "-c", `user.name=${personal}`,
-      "-c", `user.email=${forgeWebFlowIdentity.email}`,
-      "commit", "--quiet", "--amend", "--no-edit",
-    ]);
+    commit(repo, "feat: the branch's own work", canonicalIdentity);
+    runGit(repo, ["checkout", "--quiet", "main"]);
+    commit(repo, "chore: the base moves on", canonicalIdentity);
+    runGit(repo, ["checkout", "--quiet", "feature"]);
+    mergeAsForge(repo, "main", "feature", canonicalIdentity, {
+      email: forgeWebFlowIdentity.email,
+      name: personal,
+    });
 
+    expect(identityField(repo, "%P").split(" ")).toHaveLength(2);
     expect(identityField(repo, "%ce")).toBe(forgeWebFlowIdentity.email);
     expect(identityField(repo, "%cn")).toBe(personal);
     const review = mergeBoundaryReview(repo, "main");

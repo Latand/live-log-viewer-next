@@ -1495,7 +1495,13 @@ export function commitMessageFindings(
 
 export type MergeBoundaryReview = { findings: Map<FindingClass, number>; notices: string[] };
 
-type CommitIdentity = { address: string; commit: string; field: "author" | "committer"; name: string };
+type CommitIdentity = {
+  address: string;
+  commit: string;
+  field: "author" | "committer";
+  name: string;
+  parentCount: number;
+};
 
 /* The forge's account namespace, `<id>+<handle>` or `<handle>` at the no-reply
    host of its own domain. The forge issues that address for one purpose: so a
@@ -1514,12 +1520,11 @@ function isForgeAccountAddress(address: string): boolean {
   return address.slice(separator + 1).toLowerCase() === FORGE_ACCOUNT_DOMAIN;
 }
 
-/* The mailbox the forge writes as COMMITTER on a commit it composes itself —
-   the "Update branch" button, a merge run from the pull request page, an edit
-   made in the web editor. It is the forge's own web-flow identity: it names
-   the forge, it is the same address on every repository, and it identifies
-   nobody. The account that pressed the button is the AUTHOR, and the rule
-   above already reads that field.
+/* The mailbox the forge writes as COMMITTER on a merge commit it composes —
+   the "Update branch" button or a merge run from the pull request page. It is
+   the forge's own web-flow identity: it names the forge, it is the same address
+   on every repository, and it identifies nobody. The account that pressed the
+   button is the AUTHOR, and the rule above already reads that field.
    Stated here rather than left to the message rules: the merge boundary is the
    identity path, and an identity question is answered by identity rules. The
    machine-attribution mailbox rule reaches the same verdict on this address
@@ -1533,16 +1538,24 @@ function isForgeAccountAddress(address: string): boolean {
    beside it. That name is scanned, and a person in it is reported. */
 const FORGE_COMPOSER_ADDRESS = ["noreply", FORGE_DOMAIN].join("@");
 
-function isForgeComposerAddress(address: string, identity: CommitIdentity): boolean {
-  return identity.field === "committer"
-    && identity.address.toLowerCase() === FORGE_COMPOSER_ADDRESS
-    && address.toLowerCase() === FORGE_COMPOSER_ADDRESS;
+function isForgeComposerMailbox(address: string): boolean {
+  return address.toLowerCase() === FORGE_COMPOSER_ADDRESS;
 }
 
-/** Every identity git recorded on the commits the merge will squash. */
+function isForgeComposerIdentityAddress(address: string, identity: CommitIdentity): boolean {
+  return identity.field === "committer"
+    && isForgeComposerMailbox(identity.address)
+    && isForgeComposerMailbox(address);
+}
+
+function isForgeComposerAddress(address: string, identity: CommitIdentity): boolean {
+  return identity.parentCount > 1 && isForgeComposerIdentityAddress(address, identity);
+}
+
+/** Each distinct identity git recorded on the commits the merge will squash. */
 function branchIdentities(repository: string, base: string): CommitIdentity[] | undefined {
   const result = Bun.spawnSync({
-    cmd: ["git", "-C", repository, "log", "--format=%H%x00%an%x00%ae%x00%cn%x00%ce", `${base}..HEAD`],
+    cmd: ["git", "-C", repository, "log", "--format=%H%x00%P%x00%an%x00%ae%x00%cn%x00%ce", `${base}..HEAD`],
     env: withoutWakatimeCredential(process.env),
     stderr: "pipe",
     stdout: "pipe",
@@ -1550,14 +1563,22 @@ function branchIdentities(repository: string, base: string): CommitIdentity[] | 
   if (result.exitCode !== 0) return undefined;
   const identities: CommitIdentity[] = [];
   /* An identity carries no newline — git refuses to record one — so a commit
-     is a line and its five fields are NUL-separated within it. */
+     is a line and its six fields are NUL-separated within it. */
   for (const line of result.stdout.toString().split("\n")) {
     if (line === "") continue;
-    const [commit, authorName, authorAddress, committerName, committerAddress] = line.split("\0");
+    const [commit, parents, authorName, authorAddress, committerName, committerAddress] = line.split("\0");
     if (committerAddress === undefined) return undefined;
-    identities.push({ address: authorAddress, commit, field: "author", name: authorName });
-    if (committerName === authorName && committerAddress === authorAddress) continue;
-    identities.push({ address: committerAddress, commit, field: "committer", name: committerName });
+    const parentCount = parents === "" ? 0 : parents.split(" ").length;
+    const sameIdentity = committerName === authorName && committerAddress === authorAddress;
+    /* Equal identities compose one finding. The forge mailbox is
+       field-sensitive, so represent that pair as its committer record. */
+    if (sameIdentity && isForgeComposerMailbox(committerAddress)) {
+      identities.push({ address: committerAddress, commit, field: "committer", name: committerName, parentCount });
+      continue;
+    }
+    identities.push({ address: authorAddress, commit, field: "author", name: authorName, parentCount });
+    if (sameIdentity) continue;
+    identities.push({ address: committerAddress, commit, field: "committer", name: committerName, parentCount });
   }
   return identities;
 }
@@ -1582,8 +1603,8 @@ function composedAttributionMessage(identity: CommitIdentity): string {
  * made without them, so the question is never whether an identity publishes but
  * whose. Three answers publish nobody: an account on the forge's no-reply host,
  * which the forge issues so that the account's own address is not what its
- * commits carry; the forge's own web-flow mailbox where the forge committed a
- * commit it composed; and the machine-attribution mailboxes the trailer rule
+ * commits carry; the forge's own web-flow mailbox on a real merge commit the
+ * forge composed; and the machine-attribution mailboxes the trailer rule
  * already names. Every other identity is a person, and is reported exactly as
  * an address in a file is.
  *
@@ -1606,7 +1627,13 @@ export function mergeBoundaryReview(repository: string, base: string): MergeBoun
   }
   for (const identity of identities) {
     const { attributable } = commitMessageAddressReview(composedAttributionMessage(identity));
-    const publishes = attributable.some((address) => {
+    /* The composed trailer rules classify any exact `noreply` local part as
+       machine attribution. For the forge's web-flow mailbox, the commit graph
+       is the additional proof: a zero- or one-parent commit did not come from
+       the forge's merge composer and remains attributable. */
+    const unverifiedForgeComposer = isForgeComposerIdentityAddress(identity.address, identity)
+      && !isForgeComposerAddress(identity.address, identity);
+    const publishes = unverifiedForgeComposer || attributable.some((address) => {
       return !isForgeAccountAddress(address) && !isForgeComposerAddress(address, identity);
     });
     if (!publishes) continue;
