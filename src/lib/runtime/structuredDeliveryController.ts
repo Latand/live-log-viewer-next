@@ -1072,6 +1072,35 @@ export async function releaseStructuredDeliveryHost(key: SessionKey): Promise<bo
   return await state.releaseActiveHost?.(key) ?? false;
 }
 
+/** Releases every engine host owned by this Viewer before release demotion.
+ *
+ * Structured engines run outside the Viewer container namespace, so exiting
+ * the Viewer does not end them. Release the process-scoped registrations while
+ * their transports and writer fences still exist; the promoted Viewer can then
+ * claim each durable row on its bounded startup retry. All releases begin in
+ * one turn so several slow engine shutdowns consume one grace window. */
+export async function releaseStructuredDeliveryHostsForDemotion(): Promise<void> {
+  const registrations = state.activeRegistrations?.() ?? [];
+  const release = state.releaseActiveHost;
+  if (!release || registrations.length === 0) return;
+  const registry = state.activeRegistry;
+  await Promise.all(registrations.map(async ({ key, host }) => {
+    const current = await host.health();
+    if ((current.status !== "active" && current.status !== "attention")
+      || current.pid === null
+      || current.processStartIdentity === null) return;
+    if (!registry?.markStructuredHostHandoff(key, {
+      pid: current.pid,
+      startIdentity: current.processStartIdentity,
+    })) throw new Error(`structured host ${sessionKeyId(key)} changed before Viewer demotion`);
+  }));
+  const outcomes = await Promise.allSettled(registrations.map(({ key }) => release(key)));
+  const failures = outcomes.flatMap((outcome) => outcome.status === "rejected" ? [outcome.reason] : []);
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `failed to release ${failures.length} structured host(s) during Viewer demotion`);
+  }
+}
+
 /**
  * Ends a host this generation still holds, through its own lifecycle: the
  * engine host is released and its registry row retired in one move. `expected`

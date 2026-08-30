@@ -273,14 +273,28 @@ export async function completeViewerReleaseDemotion(
   checkpoint: () => void | Promise<void>,
   exit: (code: number) => unknown = (code) => process.exit(code),
   log: (...args: unknown[]) => void = console.error,
+  releaseStructuredHosts: () => Promise<unknown> = async () => {
+    const { releaseStructuredDeliveryHostsForDemotion } = await import("@/lib/runtime/structuredDeliveryController");
+    await releaseStructuredDeliveryHostsForDemotion();
+  },
 ): Promise<void> {
+  let failure: unknown = null;
+  try {
+    await releaseStructuredHosts();
+  } catch (error) {
+    failure = error;
+  }
   try {
     await checkpoint();
-    exit(0);
   } catch (error) {
-    log("[viewer release] demotion checkpoint failed", error);
-    exit(1);
+    failure ??= error;
   }
+  if (failure) {
+    log("[viewer release] demotion cleanup failed", failure);
+    exit(1);
+    return;
+  }
+  exit(0);
 }
 
 export async function checkpointHotStateRollbackMirrorsForDemotion(): Promise<HotStateCheckpoint["revisions"]> {

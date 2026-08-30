@@ -412,9 +412,23 @@ test("release demotion reports checkpoint failure before exiting with failure st
     (...args) => { events.push([String(args[0]), args[1]]); },
   );
 
-  expect(events[0]?.[0]).toBe("[viewer release] demotion checkpoint failed");
+  expect(events[0]?.[0]).toBe("[viewer release] demotion cleanup failed");
   expect(events[0]?.[1]).toBeInstanceOf(Error);
   expect(events[1]).toEqual(["exit", 1]);
+});
+
+test("release demotion still checkpoints when structured host cleanup fails", async () => {
+  const events: string[] = [];
+  await completeViewerReleaseDemotion(
+    () => { events.push("checkpoint"); },
+    (code) => { events.push(`exit:${code}`); },
+    () => { events.push("logged"); },
+    async () => {
+      events.push("release");
+      throw new Error("injected structured host release failure");
+    },
+  );
+  expect(events).toEqual(["release", "checkpoint", "logged", "exit:1"]);
 });
 
 test("release demotion exits successfully after its checkpoint", async () => {

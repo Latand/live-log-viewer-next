@@ -5063,22 +5063,46 @@ export class AgentRegistry {
         || entry.claimEpoch !== claimEpoch
         || entry.structuredHost.writerClaimEpoch !== claimEpoch) return null;
       const normalizedHost = normalizeStructuredHost(structuredHost);
+      const completesHandoff = entry.pendingAction === "handoff" && Boolean(normalizedHost?.process);
       if (!releaseClaim
         && entry.status === status
+        && !completesHandoff
         && isDeepStrictEqual(normalizeStructuredHost(entry.structuredHost), normalizedHost)) return clone(entry);
       const replacement = {
         ...entry,
         structuredHost: normalizedHost,
         status,
+        ...(completesHandoff ? { pendingAction: null } : {}),
       };
       const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
       const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       entry.structuredHost = replacement.structuredHost;
       entry.status = status;
+      entry.pendingAction = replacement.pendingAction;
       if (releaseClaim) entry.claimOwner = null;
       entry.updatedAt = now();
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
       return clone(entry);
+    });
+  }
+
+  /** Records a release handoff for one exact active engine. The process fence
+      prevents an old registration from appointing a replacement that took the
+      same session key concurrently. */
+  markStructuredHostHandoff(key: SessionKey, expected: Readonly<ProcessIdentity>): boolean {
+    return this.mutate((file) => {
+      const entry = file.entries[sessionKeyId(key)];
+      const current = entry?.structuredHost?.process;
+      if (!entry?.claimOwner || !current || expected.startIdentity === null
+        || current.pid !== expected.pid
+        || current.startIdentity !== expected.startIdentity) return false;
+      const replacement = { ...entry, pendingAction: "handoff" as const };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(key), replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      entry.pendingAction = replacement.pendingAction;
+      entry.updatedAt = now();
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return true;
     });
   }
 

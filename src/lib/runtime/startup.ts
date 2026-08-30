@@ -346,12 +346,10 @@ function assertAdoptedHostsAreClaimed(
 }
 
 /** Every row selected before adoption must end the pass with a host published
-    by this Viewer or cease to be eligible. During a deployment the durable
-    target appoints the candidate before the incumbent's demotion poll exits.
-    The incumbent writer claim is therefore still alive for a short window, and
-    an adopter that silently skips that row would otherwise let startup report
-    ready. The old Viewer exits next, leaving its engine process without any
-    controller and without a retry scheduled in the promoted release (#1296). */
+    by this Viewer or cease to be eligible. The durable target appoints the
+    candidate before the incumbent's demotion poll releases its engines. A
+    candidate that reaches adoption in that window sees the old live process
+    and must retry until demotion records and completes the handoff (#1296). */
 function assertEligibleHostsResolved(
   registry: AgentRegistry,
   shouldAdopt: StructuredHostAdoptionFilter,
@@ -650,7 +648,8 @@ function structuredStartupAdoptionFilter(
     }
     const conversationId = registry.canonicalConversationId(conversation.id);
     const hasPendingWork = pendingDeliveryConversationIds.has(conversationId)
-      || signals.pendingOperationConversationIds.has(conversationId);
+      || signals.pendingOperationConversationIds.has(conversationId)
+      || entry.pendingAction === "handoff";
     if (hasPendingWork) return true;
     if (conversation.turn.state === "terminal") return false;
     /* Past this point the only thing left arguing for a launch is the turn the

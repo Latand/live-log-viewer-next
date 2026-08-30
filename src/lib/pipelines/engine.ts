@@ -360,6 +360,11 @@ const KILL_REFUSED_STATES = new Set(["failed", "rejected"]);
 
 export type StageStopProbes = {
   client?: RuntimeHostClient | null;
+  action?: (request: {
+    conversationId: string;
+    transcriptPath: string;
+    action: "kill";
+  }) => Promise<{ status: number; body: unknown }>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   budgetMs?: number;
@@ -487,8 +492,11 @@ export async function stopPipelineStageAgent(
     if (!probe || !probe.resident()) return { outcome: "not-running" };
     const { conversationId, transcriptPath, resident } = probe;
 
-    const { applyConversationAction } = await import("@/lib/conversation/actions");
-    const result = await applyConversationAction({ conversationId, transcriptPath, action: "kill" });
+    const applyAction = probes.action ?? (async (request) => {
+      const { applyConversationAction } = await import("@/lib/conversation/actions");
+      return applyConversationAction(request);
+    });
+    const result = await applyAction({ conversationId, transcriptPath, action: "kill" });
     const body = result.body as { ok?: boolean; error?: string; operationId?: string; receipt?: { status?: string } };
     if (result.status >= 400 || body.ok !== true) {
       return { outcome: "failed", error: body.error ?? `stage host kill was refused with status ${result.status}` };
@@ -1841,6 +1849,26 @@ async function tickRunStage(
     }
   }
   if (hostUnavailablePastGrace) {
+    /* A CPU-flat structured process is still a real process. Retire it through
+       the same identity-fenced control path as an operator kill before making
+       the attempt retryable; otherwise pane-less retry admission can launch a
+       replacement while the recorded engine still exists (#1296). */
+    const stopped = await ports.stopStageAgent({
+      stageId: stage.id,
+      attempt: attempt.n,
+      conversationId: attempt.conversationId,
+      agentPath: attempt.agentPath,
+      paneId: attempt.paneId,
+      ...(attempt.historical ? { adopted: true as const } : {}),
+    });
+    if (stopped.outcome === "failed" || stopped.outcome === "unconfirmed") {
+      pipeline.stateDetail = stopped.outcome === "failed"
+        ? `automatic recovery could not retire the unavailable stage host: ${stopped.error}`
+        : "automatic recovery is waiting for the unavailable stage host to terminate";
+      ports.scheduleTick?.(1_000);
+      return;
+    }
+    pipeline.stateDetail = null;
     attempt.state = "failed";
     attempt.completedAt = ports.now();
     attempt.error = HISTORICAL_MISSING_STAGE_VERDICT;

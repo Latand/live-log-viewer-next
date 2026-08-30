@@ -30,7 +30,8 @@ const { beginLegacySpawnFixture } = await import("@/lib/agent/registryTestFixtur
 const { procBackend } = await import("@/lib/proc");
 const { RuntimeJournal } = await import("@/runtime-host/journal");
 const { bindStructuredDeliveryQueue } = await import("@/lib/runtime/structuredDeliveryController");
-const { createPipelineFromRequest, defaultPipelinePorts, patchPipeline, tickPipelines } = await import("./engine");
+const { dispatchStructuredControl } = await import("@/lib/runtime/structuredControls");
+const { createPipelineFromRequest, defaultPipelinePorts, patchPipeline, stopPipelineStageAgent, tickPipelines } = await import("./engine");
 const { loadPipelines, savePipelines } = await import("./store");
 const { registerPipelineTick } = await import("./controllerSignal");
 type PipelinePorts = import("./engine").PipelinePorts;
@@ -175,10 +176,18 @@ function severedStage(
  * agent, which no test may do — plus the wall clock, so the dead-host grace can
  * be spent without waiting it out.
  */
-function stagePorts(stage: ReturnType<typeof severedStage>, spawns: string[]): PipelinePorts {
+function stagePorts(
+  stage: ReturnType<typeof severedStage>,
+  spawns: string[],
+  options: {
+    liveness?: NonNullable<Parameters<typeof defaultPipelinePorts>[0]>["liveness"];
+    autonomousStopClient?: RuntimeHostClient;
+  } = {},
+): PipelinePorts {
   let wallClockOffsetMs = 0;
+  const defaults = defaultPipelinePorts({ liveness: options.liveness });
   const ports: PipelinePorts = {
-    ...defaultPipelinePorts(),
+    ...defaults,
     now: () => new Date(Date.now() + wallClockOffsetMs).toISOString(),
     exec: (rawCommand, rawArgs) => {
       const args = rawCommand === "timeout" ? rawArgs.slice(rawArgs.indexOf("git") + 1) : rawArgs;
@@ -222,7 +231,20 @@ function stagePorts(stage: ReturnType<typeof severedStage>, spawns: string[]): P
         paneId: null,
       };
     },
-    stopStageAgent: async () => ({ outcome: "not-running" }),
+    stopStageAgent: options.autonomousStopClient
+      ? (target) => stopPipelineStageAgent(target, {
+          client: options.autonomousStopClient,
+          action: async ({ conversationId, transcriptPath, action }) => await dispatchStructuredControl({
+            path: transcriptPath,
+            conversationId,
+            action,
+          }, {
+            registry: stage.registry,
+            client: options.autonomousStopClient,
+            enabled: () => true,
+          }) ?? { status: 409, body: { error: "structured control was unavailable" } },
+        })
+      : async () => ({ outcome: "not-running" }),
     stopStagePane: async () => ({ outcome: "not-running" }),
     stageHostResident: async () => false,
     paneAgentAlive: async () => false,
@@ -235,6 +257,69 @@ function stagePorts(stage: ReturnType<typeof severedStage>, spawns: string[]): P
     advanceWallClock: (milliseconds: number) => { wallClockOffsetMs += milliseconds; },
   });
 }
+
+test("a CPU-flat stage autonomously retires its exact child before one replacement attempt (#1296)", async () => {
+  const stage = severedStage();
+  const journal = new RuntimeJournal(path.join(path.dirname(stage.transcript), "autonomous-runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const liveness = {
+    now: () => Date.now() + LATER_MS,
+    uptimeSeconds: () => os.uptime() + LATER_MS / 1_000,
+    processCpuMs: () => 4_700,
+  };
+  const spawns: string[] = [];
+  const ports = stagePorts(stage, spawns, { liveness, autonomousStopClient: client }) as PipelinePorts & {
+    advanceWallClock(ms: number): void;
+  };
+
+  try {
+    savePipelines([]);
+    const created = await createPipelineFromRequest({
+      task: "Recover the CPU-flat stage",
+      spec: "AC1",
+      repoDir: stage.worktreeDir,
+      src: stage.transcript,
+      stages: [{
+        id: "build",
+        kind: "run",
+        role: { roleId: "builder" },
+        access: "read-write",
+        ["prompt"]: "Build the scoped change",
+        next: null,
+      }],
+    } as never, ports);
+    if (!created.pipeline) throw new Error(created.error ?? "pipeline creation was unavailable");
+    await tickPipelines([], ports);
+    await tickPipelines([], ports);
+    expect(loadPipelines()[0]!.runs[0]!.attempts[0]).toMatchObject({ state: "running" });
+
+    await bindStructuredDeliveryQueue([], { registry: stage.registry, client, liveness });
+    ports.advanceWallClock(6 * 60_000);
+    await tickPipelines([], ports);
+
+    expect(stage.registry.readOnlySnapshot().entries[`claude:${stage.key.sessionId}`]).toMatchObject({
+      status: "dead",
+      structuredHost: null,
+    });
+    const parked = loadPipelines()[0]!;
+    expect(parked.state).toBe("needs_decision");
+    expect(parked.runs[0]!.attempts[0]).toMatchObject({ state: "failed" });
+
+    const retried = await patchPipeline(parked.id, { action: "retry-stage" }, ports);
+    expect(retried.error).toBeUndefined();
+    await tickPipelines([], ports);
+    expect(spawns).toHaveLength(2);
+    expect(loadPipelines()[0]!.runs[0]!.attempts).toHaveLength(2);
+    expect(loadPipelines()[0]!.runs[0]!.attempts[1]).toMatchObject({
+      n: 2,
+      launchId: "replacement-1",
+    });
+  } finally {
+    stage.child.kill();
+    await bindStructuredDeliveryQueue([], { registry: stage.registry, client: null });
+    journal.close();
+  }
+});
 
 test("a live severed stage host is killed, retired, and its stage retried once, through the seams the incident ran through (#1282)", async () => {
   const stage = severedStage();
