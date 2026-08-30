@@ -137,9 +137,14 @@ function sources(over: {
   openPullRequests?: OpenPullRequest[];
   pullRequestCalls?: { cwd: string; limit: number }[];
   pullRequestsThrow?: boolean;
+  noSeat?: boolean;
 }): SeatTickSources {
   return {
-    seatFor: () => ({ active: { conversationId: CONVERSATION, seatEpoch: 7, path: null } as never, pending: null, history: [] }),
+    seatFor: () => ({
+      active: over.noSeat ? null : { conversationId: CONVERSATION, seatEpoch: 7, path: null } as never,
+      pending: null,
+      history: [],
+    }),
     activeSeats: () => [PROJECT],
     pipelines: () => (over.pipelines ?? [lane()]) as never,
     tasks: () => (over.tasks ?? []) as never,
@@ -654,6 +659,36 @@ test("the pull request read is skipped entirely until the wake interval has elap
     withCursor(0, OVERDUE),
   );
   expect(calls).toEqual([{ cwd: "/srv/repo", limit: 60 }]);
+});
+
+/* The same rule as the clause above, applied to the other two ways a check
+   ends before any wake reason is composed. A seat mid-turn is the expensive
+   one: a turn that runs for hours would otherwise pay a subprocess at every
+   five-minute check for its whole length. */
+test("a check whose seat is already mid-turn asks GitHub nothing", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const input = await gather(
+    {
+      pipelines: [finishedLane()],
+      openPullRequests: [openPullRequest()],
+      pullRequestCalls: calls,
+      seatTurn: "busy",
+      seatRows: [livenessRow({ lifecycle: "running", reason: "host_alive_turn_active" })],
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(calls).toEqual([]);
+  expect(input.pullRequests).toEqual([]);
+});
+
+test("a project with no seat to wake asks GitHub nothing", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [openPullRequest()], pullRequestCalls: calls, noSeat: true },
+    withCursor(0, OVERDUE),
+  );
+  expect(calls).toEqual([]);
+  expect(input.pullRequests).toEqual([]);
 });
 
 test("a project whose tick is off asks GitHub nothing", async () => {

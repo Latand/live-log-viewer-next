@@ -18,7 +18,7 @@ import type { BoardTask } from "@/lib/tasks/types";
 import { evidenceFromPipelines, evidenceFromTasks } from "./evidence";
 import { openPullRequestsForRepo, type OpenPullRequest } from "./githubEvidence";
 import { redactBounded } from "./redact";
-import { SEAT_TICK_WAKE_INTERVAL_MS, seatTickWakeDue } from "./seatTick";
+import { SEAT_TICK_WAKE_INTERVAL_MS, seatTickWakeDue, seatTurnProgressing } from "./seatTick";
 import { effectiveSeatTickSettings, readSeatTickSettings, type SeatTickSettings } from "./seatTickSettings";
 import type { PipelineSummary, TaskSummary } from "./viewerApi";
 import {
@@ -529,12 +529,13 @@ function eventsSince(
  * ref — durable on both sides, and the only tie that survives the lane being
  * closed, its worktree being removed and its host being reaped.
  *
- * Three bounds keep it cheap and keep it from becoming a route around the
- * hourly wake. It is read only when a wake could actually be raised from it —
- * the tick is on for this project and the interval has elapsed — only when the
- * project has a finished lane to attribute one to, and only when some pipeline
- * named a repository to ask in. Everything else answers with no pull requests
- * at all, which is the same answer a `gh` that cannot be reached gives.
+ * The bounds keep it cheap and keep it from becoming a route around the hourly
+ * wake. It is read only when a wake could actually be raised from it — the tick
+ * is on for this project, the interval has elapsed, there is a seat to wake and
+ * its turn is not already moving — only when the project has a finished lane to
+ * attribute one to, and only when some pipeline named a repository to ask in.
+ * Everything else answers with no pull requests at all, which is the same
+ * answer a `gh` that cannot be reached gives.
  *
  * The lanes come from the hot store, so the reason decays with it: a lane
  * settled long enough to have been archived stops attributing a pull request.
@@ -546,11 +547,19 @@ function eventsSince(
  */
 async function unmergedPullRequests(context: {
   project: string;
+  seat: SeatTickSeatInput | null;
   wakeDue: boolean;
   enabled: boolean;
   sources: SeatTickSources;
 }): Promise<SeatTickPullRequestInput[]> {
   if (!context.wakeDue || !context.enabled) return [];
+  /* The other two ways a check can be unable to raise any reason at all: a
+     project with nobody to wake ends in `no-seat`, and a seat whose turn is
+     genuinely moving ends in `skipped`, both before a wake reason is composed.
+     Without this clause a seat that stays busy for hours pays a `gh` subprocess
+     every five minutes for the whole turn, to answer a question that check was
+     never going to ask. */
+  if (!context.seat || seatTurnProgressing(context.seat)) return [];
   const finished = context.sources.pipelines()
     .filter((pipeline) => canonicalOrchestratorProject(pipeline.project) === context.project && isFinished(pipeline));
   if (finished.length === 0) return [];
@@ -630,6 +639,7 @@ export async function gatherSeatTickInput(
   const { events, cursor } = eventsSince(canonical, state.eventsThrough, openPipelineIds, sources);
   const pullRequests = await unmergedPullRequests({
     project: canonical,
+    seat,
     /* The same clause the decision applies, asked here because the read behind
        it is a subprocess: a reason that cannot be raised this check is a reason
        whose evidence is not worth fetching. The decision applies the bound
