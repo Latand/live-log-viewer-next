@@ -1590,6 +1590,71 @@ test("a send resumes a reclaimed conversation after reserving the instruction an
   });
 });
 
+test("a durable dead host resumes even while the runtime still projects it as unhosted", async () => {
+  const { registry, conversation } = registryWithConversation();
+  const generation = conversation.generations.at(-1)!;
+  registry.upsert({
+    key: { engine: conversation.engine, sessionId: generation.id },
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: { pid: 4040, startIdentity: "departed-process" },
+      eventCursor: 12,
+      protocolVersion: "v2",
+      writerClaimEpoch: 8,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 8,
+    claimOwner: "structured-host:departed-owner",
+    pendingAction: null,
+  });
+  const projected = snapshot(conversation.id);
+  projected.sessions[0] = {
+    ...projected.sessions[0]!,
+    hostKind: "unhosted",
+    host: "unhosted",
+    provenance: "derived",
+  };
+  let recoveryCalls = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "durable-dead-runtime-unhosted",
+    text: "resume from the durable conversation",
+  }, {
+    enabled: () => true,
+    client: () => ({ snapshot: async () => projected } as unknown as RuntimeHostClient),
+    registry: () => registry,
+    recover: async () => {
+      recoveryCalls += 1;
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
+    kick: () => {},
+  });
+
+  expect(recoveryCalls).toBe(1);
+  expect(result).toMatchObject({
+    ok: true,
+    structured: true,
+    outcome: "held",
+    spawned: true,
+  });
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "durable-dead-runtime-unhosted",
+    text: "resume from the durable conversation",
+    attempts: 0,
+  }]);
+});
+
 test("a reclaimed send stays durably held while its accepted resume has no process", async () => {
   const { registry, conversation } = registryWithConversation();
   const generation = conversation.generations.at(-1)!;
@@ -1767,6 +1832,40 @@ test("delivery failures name reclaimed recovery separately from host synchroniza
   });
 });
 
+test("a dead structured host names reclamation when its recovery fails", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  const projected = snapshot(conversation.id);
+  projected.sessions[0] = {
+    ...projected.sessions[0]!,
+    host: "dead",
+  };
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "dead-host-recovery-error",
+    text: "continue after recovery",
+  }, {
+    enabled: () => true,
+    client: () => ({ snapshot: async () => projected } as unknown as RuntimeHostClient),
+    registry: () => registry,
+    recover: async () => { throw new Error("recovery process failed to publish"); },
+  });
+
+  expect(result).toMatchObject({
+    ok: false,
+    status: 503,
+    operationId: expect.any(String),
+    error: "conversation host was reclaimed; automatic resume did not establish a deliverable host: recovery process failed to publish",
+  });
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    command: { operationId: expect.any(String) },
+    clientMessageId: "dead-host-recovery-error",
+    attempts: 0,
+  }]);
+});
+
 test("reclaimed-host recovery never repeats an instruction whose delivery fate is unknown", async () => {
   const { registry, conversation } = registryWithConversation();
   const generation = conversation.generations.at(-1)!;
@@ -1820,6 +1919,56 @@ test("reclaimed-host recovery never repeats an instruction whose delivery fate i
   });
 
   expect(recoveryCalls).toBe(0);
+  expect(result).toMatchObject({
+    ok: false,
+    status: 409,
+    operationId: reservation.command.operationId,
+    transportUncertain: true,
+    error: "delivery started; recovery requires an explicit outcome",
+  });
+});
+
+test("dead structured recovery stays behind an instruction whose delivery fate is unknown", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  const generation = conversation.generations.at(-1)!;
+  const reservation = registry.holdDelivery(
+    conversation.id,
+    "the instruction with an unknown structured fate",
+    "unknown-structured-fate-message",
+  );
+  registry.beginDeliveryAttempt(reservation.id, generation.id);
+  const projected = snapshot(conversation.id);
+  projected.sessions[0] = {
+    ...projected.sessions[0]!,
+    host: "dead",
+  };
+  let recoveryCalls = 0;
+  let commands = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "unknown-structured-fate-message",
+    text: "the instruction with an unknown structured fate",
+  }, {
+    enabled: () => true,
+    client: () => ({
+      snapshot: async () => projected,
+      command: async () => {
+        commands += 1;
+        throw new Error("an uncertain instruction was repeated");
+      },
+    } as unknown as RuntimeHostClient),
+    registry: () => registry,
+    recover: async () => {
+      recoveryCalls += 1;
+      throw new Error("recovery must stay behind the uncertainty fence");
+    },
+  });
+
+  expect(recoveryCalls).toBe(0);
+  expect(commands).toBe(0);
   expect(result).toMatchObject({
     ok: false,
     status: 409,

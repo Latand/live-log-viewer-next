@@ -453,6 +453,18 @@ function deliveredReservationReplay(
   };
 }
 
+function uncertainReservationFailure(reservation: HeldDelivery): StructuredMessageResult {
+  return {
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: reservation.error || "the previous delivery outcome is unknown; verify its receipt before sending again",
+    status: 409,
+    operationId: reservation.command.operationId,
+    transportUncertain: true,
+  };
+}
+
 function requestDeliveryDrain(kick: () => void | Promise<void>): void {
   try {
     void Promise.resolve(kick()).catch((error) => {
@@ -464,11 +476,12 @@ function requestDeliveryDrain(kick: () => void | Promise<void>): void {
 }
 
 /**
- * A reclaimed current generation has no runtime session to inspect. Admission
- * therefore starts from the durable conversation, reserves the instruction,
- * and only then asks the existing recovery path to publish a host. The durable
- * delivery queue remains the reserved operation's sole actuator after recovery.
- * A resume still waiting for a process leaves that same operation held there.
+ * A reclaimed current generation has no deliverable runtime host to inspect.
+ * Admission therefore starts from the durable conversation, reserves the
+ * instruction, and only then asks the existing recovery path to publish a host.
+ * The durable delivery queue remains the reserved operation's sole actuator
+ * after recovery. A resume still waiting for a process leaves that same
+ * operation held there.
  */
 async function recoverReclaimedMessage(
   request: StructuredMessageRequest,
@@ -491,15 +504,7 @@ async function recoverReclaimedMessage(
   const reservation = Object.values(registry.readOnlySnapshot().heldDeliveries)
     .find((candidate) => candidate.command.operationId === admitted.operationId);
   if (reservation?.state === "delivery-uncertain") {
-    return {
-      ok: false,
-      structured: true,
-      outcome: "failed",
-      error: reservation.error || "the previous delivery outcome is unknown; verify its receipt before sending again",
-      status: 409,
-      operationId: reservation.command.operationId,
-      transportUncertain: true,
-    };
+    return uncertainReservationFailure(reservation);
   }
   if (!reservation || reservation.state === "held") return admitted;
 
@@ -698,7 +703,16 @@ export async function enqueueStructuredMessage(
     );
   }
   if (session.hostKind === "tmux-legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
-  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return ownershipUnavailable();
+  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") {
+    const deliverability = conversationDeliverabilityFromRecord(registry.readOnlySnapshot(), {
+      conversationId: request.conversationId,
+      transcriptPath: request.path,
+    });
+    if (deliverability.condition === "reclaimed") {
+      return recoverReclaimedMessage(request, registry, client, dependencies);
+    }
+    return ownershipUnavailable(deliverability.condition);
+  }
   try {
     assertStructuredTextEnvelope(request.text);
   } catch (error) {
@@ -832,9 +846,10 @@ export async function enqueueStructuredMessage(
   const recoveryRequired = !migrationOwnsSend
     && !successorAwaitsItsHost
     && requiresDeadConversationRecovery(session, registry, conversation);
+  let recoveryReservation: HeldDelivery | null = null;
   if (recoveryRequired && !wantsImages) {
     try {
-      registry.holdDelivery(
+      recoveryReservation = registry.holdDelivery(
         conversation.id,
         content.content.text,
         idempotencyKey,
@@ -845,6 +860,9 @@ export async function enqueueStructuredMessage(
       );
     } catch (error) {
       return deliveryFailure(error);
+    }
+    if (recoveryReservation.state === "delivery-uncertain") {
+      return uncertainReservationFailure(recoveryReservation);
     }
   }
   let recoveredHost = false;
@@ -864,11 +882,17 @@ export async function enqueueStructuredMessage(
         ok: false,
         structured: true,
         outcome: "failed",
-        error: error instanceof Error ? error.message : "structured host recovery failed",
+        error: `${deliverabilityFailureMessage({ condition: "reclaimed" })}: ${error instanceof Error ? error.message : "structured host recovery failed"}`,
         status: 503,
+        ...(recoveryReservation ? { operationId: recoveryReservation.command.operationId } : {}),
       };
     }
-    if (!recovered) return ownershipUnavailable();
+    if (!recovered) {
+      const failure = ownershipUnavailable("reclaimed");
+      return recoveryReservation
+        ? { ...failure, operationId: recoveryReservation.command.operationId }
+        : failure;
+    }
     recoveredHost = recovered.spawned;
     try {
       const refreshed = await client.snapshot();

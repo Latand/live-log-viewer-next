@@ -124,7 +124,16 @@ export function conversationDeliverabilityFromRecord(
       reason: "the durable host record is still publishing ownership",
     };
   }
-  if (entry.host && entry.status !== "dead" && entry.status !== "unhosted") {
+  if (entry.status === "dead" || entry.status === "unhosted") {
+    return {
+      ...base,
+      deliverable: false,
+      condition: "reclaimed",
+      resumeRequired: true,
+      reason: "the durable host record says that no deliverable host remains",
+    };
+  }
+  if (entry.host) {
     return {
       ...base,
       deliverable: true,
@@ -134,9 +143,7 @@ export function conversationDeliverabilityFromRecord(
     };
   }
   if (processRecorded
-    && entry.claimOwner !== null
-    && entry.status !== "dead"
-    && entry.status !== "unhosted") {
+    && entry.claimOwner !== null) {
     return {
       ...base,
       deliverable: true,
@@ -145,7 +152,7 @@ export function conversationDeliverabilityFromRecord(
       reason: "the durable record names a claimed structured host process",
     };
   }
-  if (!entry.host && !processRecorded) {
+  if (!processRecorded) {
     return {
       ...base,
       deliverable: false,
