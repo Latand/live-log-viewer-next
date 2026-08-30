@@ -13,7 +13,8 @@ import { recordDirectOperatorWakatimeActivity } from "@/lib/wakatime/operatorAct
 import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { parseRuntimeCommand } from "./commands";
 import { runtimePresentationReceipt, type RuntimeOperationKind } from "./contracts";
-import { runtimeEventsEnabled, structuredHostsEnabled } from "./flags";
+import { runtimeEventsEnabled, runtimeEventsRolledBack, structuredHostsEnabled, RUNTIME_PLANE_ABSENT } from "./flags";
+import { resolveSendReceipt, runtimeReceiptForSend, type SendReceipt } from "./sendSettlement";
 import { republishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -49,6 +50,12 @@ export interface RuntimeRetryHttpDependencies extends RuntimeHttpDependencies {
   kick(): void;
   recover?: typeof recoverDeadStructuredConversation;
   republish?(conversationId: string): Promise<boolean>;
+  /** Gives the id this route is about to hand back a durable record of its own
+      (#1131), so the caller holding it can be answered during a runtime outage
+      and the settlement deadline can end it. Defaulted at the call site rather
+      than in the dependency literal, because a caller that supplies its own
+      dependencies must not silently opt the settlement record out. */
+  recordRetryAttempt?(previousOperationId: string, retryOperationId: string): boolean;
 }
 
 async function republishStructuredConversation(conversationId: string): Promise<boolean> {
@@ -65,6 +72,10 @@ const DEFAULT_RETRY_DEPENDENCIES: RuntimeRetryHttpDependencies = {
   kick: kickStructuredDeliveryQueue,
   republish: republishStructuredConversation,
 };
+
+function recordDeliveryRetryAttempt(previousOperationId: string, retryOperationId: string): boolean {
+  return agentRegistry().recordDeliveryRetryAttempt(previousOperationId, retryOperationId);
+}
 
 function terminalRetryIdempotencyKey(operationId: string): string {
   return `retry_${createHash("sha256").update(operationId).digest("hex")}`;
@@ -288,6 +299,98 @@ export async function handleRuntimeCommand(
   return response;
 }
 
+export interface RuntimeOperationQueryDependencies {
+  client(): RuntimeHostClient | null;
+  rolledBack(): boolean;
+  /** The durable settlement for this id, read through the same client the
+      journal half uses so both halves describe one runtime. */
+  settle(operationId: string, client: RuntimeHostClient | null): Promise<SendReceipt | null>;
+}
+
+const DEFAULT_OPERATION_QUERY_DEPENDENCIES: RuntimeOperationQueryDependencies = {
+  client: runtimeHostClient,
+  rolledBack: () => runtimeEventsRolledBack(),
+  settle: (operationId, client) => resolveSendReceipt(operationId, { client }),
+};
+
+/**
+ * What became of one operation, from the two stores that can answer.
+ *
+ * #1131: this used to report the delivery journal's raw state and nothing else,
+ * so an accepted send answered `queued` for as long as the outage lasted and
+ * 503 once the socket was gone. It settles the durable record first now — and
+ * settling first is also what stopped the two answers from being written in the
+ * wrong order.
+ *
+ * ── THE CONSISTENCY RULE ──────────────────────────────────────────────────
+ *
+ * **A terminal durable settlement is authoritative once it is written.** The
+ * journal is preferred everywhere else: while the send is still in flight, and
+ * for every operation kind the durable record knows nothing about.
+ *
+ * It needs a rule because the two stores can be terminal in one and open in the
+ * other, by design. Settlement deliberately writes the record when the journal
+ * READ succeeds and the fence WRITE fails — a host whose reads work and whose
+ * writes do not must not make `queued` permanent — and in that supported half
+ * outage the journal still holds the operation open. Preferring the journal
+ * unconditionally answered `send: failed` beside `receipt: queued`: one query,
+ * two contradictory answers, and the caller left to guess which one is safe to
+ * act on. Once an answer has been settled and handed out it has to stay the
+ * answer, so the settled record wins and the journal's open status is not
+ * reported beside it. Nothing is lost by that: the delivery queue reads the
+ * same record before it actuates anything, so the operation the journal still
+ * shows as open will not be delivered later either.
+ */
+export async function handleRuntimeOperationQuery(
+  operationId: string,
+  dependencies: RuntimeOperationQueryDependencies = DEFAULT_OPERATION_QUERY_DEPENDENCIES,
+): Promise<NextResponse> {
+  if (dependencies.rolledBack()) {
+    return NextResponse.json(
+      { error: "runtime events are disabled", code: RUNTIME_PLANE_ABSENT },
+      { status: 503 },
+    );
+  }
+  if (!operationId || operationId.includes(":") || /\s/.test(operationId)) {
+    return NextResponse.json({ error: "operationId is invalid" }, { status: 400 });
+  }
+  const client = dependencies.client();
+  const send = await dependencies.settle(operationId, client).catch(() => null);
+  /* The rule above, applied before anything can contradict it. */
+  if (send && send.state !== "in-flight") {
+    return NextResponse.json({ operationId, receipt: runtimeReceiptForSend(send), send });
+  }
+  /* An absent plane and an unreachable one stay distinct answers: only the
+     first carries the code, and reporting a dead socket as a rolled-back plane
+     is what makes an outage look like a configuration. */
+  let unreachable: string | null = null;
+  if (client) {
+    try {
+      const result = await client.operationStatus(operationId);
+      if (result) {
+        return NextResponse.json({
+          operationId: result.operationId,
+          receipt: result.receipt,
+          ...(send ? { send } : {}),
+        });
+      }
+    } catch (error) {
+      unreachable = error instanceof Error ? error.message : "runtime host is unavailable";
+    }
+  }
+  /* The journal could not answer. The durable delivery record still can, and
+     for an accepted send that is the whole point of settling it there. */
+  if (send) return NextResponse.json({ operationId, receipt: runtimeReceiptForSend(send), send });
+  if (unreachable) return NextResponse.json({ error: unreachable }, { status: 503 });
+  if (!client) {
+    return NextResponse.json(
+      { error: "runtime host socket is unavailable", code: RUNTIME_PLANE_ABSENT },
+      { status: 503 },
+    );
+  }
+  return NextResponse.json({ error: "operation not found" }, { status: 404 });
+}
+
 export async function handleRuntimeRetry(
   request: NextRequest,
   operationId: string,
@@ -377,6 +480,17 @@ export async function handleRuntimeRetry(
       await dependencies.republish?.(previous.receipt.conversationId);
       result = await retry();
     }
+    /* Before the queue is kicked, and before the id leaves this process: the
+       attempt gets a durable record keyed by the id the caller is handed
+       (#1131). Without it that id named nothing — a query during a runtime
+       outage found no record to answer from, no deadline could end it, and the
+       delivery queue's own fence, which reads this record, had nothing to read.
+       It starts non-terminal, so the attempt keeps its intended eligibility for
+       one fresh execution; once the deadline settles it, the same fence is what
+       stops a late recovery from delivering it after the caller was told it had
+       not arrived. */
+    const recordRetryAttempt = dependencies.recordRetryAttempt ?? recordDeliveryRetryAttempt;
+    recordRetryAttempt(previous.receipt.presentationOperationId ?? previous.operationId, result.operationId);
     dependencies.kick();
     return NextResponse.json({
       operationId: result.operationId,

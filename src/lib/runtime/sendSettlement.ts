@@ -1,6 +1,7 @@
 import {
   agentRegistry,
   type AgentRegistry,
+  type DeliveryOperationOwner,
   type DeliveryTerminalDisposition,
   type RegistryFile,
 } from "@/lib/agent/registry";
@@ -196,6 +197,22 @@ function deliveryForOperation(file: RegistryFile, operationId: string): HeldDeli
 }
 
 /**
+ * The row a RETRY attempt owns, when this id names one (#1131).
+ *
+ * A retry is admitted as a fresh operation under a new id, and that id is what
+ * the caller is handed. It shares the send's reservation, but not the
+ * reservation's answer: the reservation is still terminal from the attempt this
+ * one replaces, and reporting that verdict for an attempt that is queued right
+ * now would be the dead attempt's answer given for a live one. So an attempt
+ * row carries its own acceptance time and its own settlement, and everything
+ * below reads it in place of the reservation wherever the two differ.
+ */
+function retryAttemptOwner(file: RegistryFile, operationId: string): DeliveryOperationOwner | null {
+  const owner = file.deliveryOperationOwners[operationId];
+  return owner?.retryOfOperationId ? owner : null;
+}
+
+/**
  * What a caller may do next, from the durable disposition rather than prose.
  *
  * `safe` requires the record to POSITIVELY say the send was fenced before
@@ -227,17 +244,23 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
   const owner = file.deliveryOperationOwners[operationId];
   const delivery = deliveryForOperation(file, operationId);
   if (!owner && !delivery) return null;
+  const attempt = retryAttemptOwner(file, operationId);
   const conversationId = (delivery?.conversationId ?? owner?.conversationId) ?? null;
   const clientMessageId = (delivery?.clientMessageId ?? owner?.clientMessageId) ?? null;
   const kind = (delivery?.command ?? owner?.command)?.kind ?? "send";
-  const acceptedAt = delivery ? acceptedAtOf(delivery) : owner?.createdAt ?? null;
+  const acceptedAt = attempt ? attempt.createdAt : delivery ? acceptedAtOf(delivery) : owner?.createdAt ?? null;
   /* The reservation wins when it is still present — it carries the reason and
      the delivery time — and the owner row answers once it has been compacted
      away. The two never disagree: the owner is synchronized from the
-     reservation every time one settles. */
-  const terminalState = delivery && (delivery.state === "delivered" || delivery.state === "failed")
-    ? delivery.state
-    : owner?.terminalState ?? null;
+     reservation every time one settles. A retry ATTEMPT is the exception, and
+     the only one: it shares the reservation with the attempt it replaces, so
+     the reservation's terminal answer belongs to that earlier attempt and this
+     row keeps its own. */
+  const terminalState = attempt
+    ? attempt.terminalState
+    : delivery && (delivery.state === "delivered" || delivery.state === "failed")
+      ? delivery.state
+      : owner?.terminalState ?? null;
   if (terminalState === "delivered") {
     return {
       operationId,
@@ -247,14 +270,14 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
       state: "delivered",
       reason: null,
       acceptedAt,
-      settledAt: delivery?.deliveredAt ?? owner?.settledAt ?? null,
+      settledAt: attempt ? attempt.settledAt : delivery?.deliveredAt ?? owner?.settledAt ?? null,
       duplicateRisk: false,
       resend: "not-needed",
       evidence: "delivery-record",
     };
   }
   if (terminalState === "failed") {
-    const reason = delivery?.error ?? owner?.terminalReason ?? null;
+    const reason = attempt ? attempt.terminalReason : delivery?.error ?? owner?.terminalReason ?? null;
     return {
       operationId,
       kind,
@@ -264,7 +287,7 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
       reason,
       acceptedAt,
       settledAt: owner?.settledAt ?? null,
-      ...resendGuidance(owner?.terminalDisposition ?? null, reason),
+      ...resendGuidance((attempt ?? owner)?.terminalDisposition ?? null, reason),
       evidence: "delivery-record",
     };
   }
@@ -427,24 +450,51 @@ const SETTLEABLE_DELIVERY_STATES: ReadonlySet<HeldDelivery["state"]> = new Set<H
   "assigned",
 ]);
 
+/** What the deadline is measured against: an unsettled reservation, or a retry
+    attempt's own row, which ages from its OWN admission. */
+interface SettlementSubject {
+  conversationId: ViewerConversationId;
+  acceptedAt: string;
+  settleable: boolean;
+}
+
+function settlementSubject(
+  attempt: DeliveryOperationOwner | null,
+  delivery: HeldDelivery | null,
+): SettlementSubject | null {
+  if (attempt) {
+    return {
+      conversationId: attempt.conversationId,
+      acceptedAt: attempt.createdAt,
+      settleable: attempt.terminalState === null,
+    };
+  }
+  if (!delivery) return null;
+  return {
+    conversationId: delivery.conversationId,
+    acceptedAt: acceptedAtOf(delivery),
+    settleable: SETTLEABLE_DELIVERY_STATES.has(delivery.state),
+  };
+}
+
 /**
  * Whether an accepted send has rested long enough that this read must end it.
  */
 function pastSettlementDeadline(
   registry: AgentRegistry,
   file: RegistryFile,
-  delivery: HeldDelivery,
+  subject: SettlementSubject,
   ports: SendSettlementPorts,
 ): boolean {
-  if (!SETTLEABLE_DELIVERY_STATES.has(delivery.state)) return false;
-  const acceptedAt = parseTime(acceptedAtOf(delivery));
+  if (!subject.settleable) return false;
+  const acceptedAt = parseTime(subject.acceptedAt);
   /* An acceptance time that cannot be parsed can never age, and a send nothing
      can ever end is the silence this issue is about. */
   if (acceptedAt === null) return true;
   const restedMs = (ports.now ?? Date.now)() - acceptedAt;
   if (restedMs < (ports.windowMs ?? SEND_SETTLEMENT_WINDOW_MS)) return false;
   if (restedMs >= (ports.inTurnCeilingMs ?? SEND_SETTLEMENT_IN_TURN_CEILING_MS)) return true;
-  return !awaitingRecipientTurn(registry, file, delivery.conversationId);
+  return !awaitingRecipientTurn(registry, file, subject.conversationId);
 }
 
 /**
@@ -480,8 +530,8 @@ export async function resolveSendReceipt(
   if (verdict) return settleProjection(registry, operationId, projected, verdict);
 
   const file = registry.readOnlySnapshot();
-  const delivery = deliveryForOperation(file, operationId);
-  if (!delivery || !pastSettlementDeadline(registry, file, delivery, ports)) return projected;
+  const subject = settlementSubject(retryAttemptOwner(file, operationId), deliveryForOperation(file, operationId));
+  if (!subject || !pastSettlementDeadline(registry, file, subject, ports)) return projected;
   /* Past the deadline, and the journal has no terminal answer of its own. What
      the settlement may CLAIM depends on what it could see. */
   const unsettleable: JournalVerdict = {
@@ -535,7 +585,17 @@ function settleProjection(
   verdict: JournalVerdict,
   evidence: SendReceipt["evidence"] = "delivery-journal",
 ): SendReceipt {
-  const delivery = deliveryForOperation(registry.readOnlySnapshot(), operationId);
+  const file = registry.readOnlySnapshot();
+  /* A retry attempt settles on its OWN row. Its reservation belongs to the
+     attempt it replaces and is already terminal from it, so writing this
+     verdict there would overwrite what that earlier attempt proved with what
+     this one did. */
+  if (retryAttemptOwner(file, operationId)) {
+    registry.settleDeliveryRetryAttempt(operationId, verdict.state, verdict.reason, verdict.disposition);
+    const reconciled = sendReceiptFor(registry.readOnlySnapshot(), operationId);
+    if (reconciled) return { ...reconciled, evidence };
+  }
+  const delivery = deliveryForOperation(file, operationId);
   if (delivery && SETTLEABLE_DELIVERY_STATES.has(delivery.state)) {
     registry.recordDeliveryOutcome(delivery.id, verdict.state, verdict.reason, verdict.disposition);
     const reconciled = sendReceiptFor(registry.readOnlySnapshot(), operationId);

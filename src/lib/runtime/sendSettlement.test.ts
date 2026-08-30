@@ -24,7 +24,7 @@ for (const [name, directory] of Object.entries(isolatedEnvironment)) {
   process.env[name] = directory;
 }
 
-const { AgentRegistry } = await import("@/lib/agent/registry");
+const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 const { RuntimeJournal } = await import("@/runtime-host/journal");
 const { StructuredDeliveryQueue } = await import("./structuredDeliveryQueue");
@@ -37,6 +37,8 @@ const {
   sendIsSettled,
   sendReceiptFor,
 } = await import("./sendSettlement");
+const { handleRuntimeOperationQuery, handleRuntimeRetry } = await import("./http");
+const { NextRequest } = await import("next/server");
 type AgentRegistry = InstanceType<typeof AgentRegistry>;
 type RuntimeJournal = InstanceType<typeof RuntimeJournal>;
 type RuntimeHostClient = import("./client").RuntimeHostClient;
@@ -116,6 +118,7 @@ function recordingHost(sessionKey: string): { host: EngineHost; received: string
 
 interface Fixture {
   registry: AgentRegistry;
+  registryPath: string;
   journal: RuntimeJournal;
   client: RuntimeHostClient;
   conversationId: ViewerConversationId;
@@ -187,6 +190,7 @@ function fixture(name: string, options: { now?: () => number } = {}): Fixture {
   });
   return {
     registry,
+    registryPath: path.join(directory, "agent-registry.json"),
     journal,
     client: runtimeClient(journal),
     conversationId: conversation.id,
@@ -832,6 +836,133 @@ test("permanent runtime loss then recovery ends in one terminal receipt and no l
     expect(settled?.resend).toBe("verify-first");
     expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
   } finally {
+    active.close();
+  }
+});
+
+test("a retry's own operation id is answerable, settles at its own deadline, and is not delivered late", async () => {
+  /* The finding: a retry is admitted as a FRESH operation with a new id, and
+     that id is what the caller is handed — while everything durable stayed
+     keyed to the presentation operation the attempt replaced. So the id in the
+     caller's hand named nothing: a query during a runtime outage found no
+     record, no deadline could ever end it, and the queue's own fence had
+     nothing to read either. A caller could hold an operation id that nothing in
+     the system would ever settle.
+
+     Four things have to hold at once, and the third and fourth pull against
+     each other: the attempt is answerable, it is deliberately still eligible
+     for ONE fresh execution, its deadline ends it, and after that ending a
+     recovery may not deliver it. */
+  const active = fixture("retry-attempt");
+  try {
+    const { operationId } = acceptSend(active, {
+      clientMessageId: "retry-attempt-key",
+      text: "roll the release forward",
+    });
+    /* The first attempt reached an executor and failed there, which is what
+       makes a retry offerable at all. */
+    active.journal.transitionOperation(operationId, "delivering");
+    active.journal.transitionOperation(operationId, "failed", { reason: "dead-host" });
+    active.registry.recordDeliveryOutcomeForOperation(active.conversationId, operationId, "failed", "dead-host");
+    expect(receiptOf(active, operationId)?.state).toBe("failed");
+
+    let kicks = 0;
+    /* The route's OWN dependency wiring records the attempt — this fixture
+       registry stands in for the process registry so the default path is the
+       one under test, not a stub of it. */
+    setAgentRegistryForTests(active.registry);
+    const response = await handleRuntimeRetry(
+      new NextRequest(`http://127.0.0.1/api/runtime/operations/${operationId}`, {
+        method: "POST",
+        headers: { host: "127.0.0.1", "content-type": "application/json" },
+      }),
+      operationId,
+      {
+        enabled: () => true,
+        client: () => active.client,
+        recover: async () => ({
+          target: null,
+          path: active.transcriptPath,
+          conversationId: active.conversationId,
+          spawned: false,
+        }),
+        kick: () => { kicks += 1; },
+      },
+    );
+    expect(response.status).toBe(202);
+    const admitted = await response.json() as { operationId: string };
+    const retryOperationId = admitted.operationId;
+    expect(retryOperationId).not.toBe(operationId);
+    expect(kicks).toBe(1);
+
+    /* ONE: the id the caller was handed is answerable, and it answers about the
+       attempt it names rather than about the dead one it replaced. */
+    const accepted = receiptOf(active, retryOperationId);
+    expect(accepted?.state).toBe("in-flight");
+    expect(accepted?.conversationId).toBe(active.conversationId);
+
+    /* TWO: the attempt is still eligible for its one fresh execution — the
+       durable fence the queue reads before it actuates anything does not hold
+       it. */
+    expect(sendIsSettled(active.registry.readOnlySnapshot(), retryOperationId)).toBeFalse();
+
+    /* THREE: the runtime is lost, and the id is answered from the durable
+       record instead of a 503 — then ENDED by its own deadline, which is
+       measured from when this attempt was admitted rather than from the send it
+       replaced. */
+    const duringLoss = await handleRuntimeOperationQuery(retryOperationId, {
+      client: () => null,
+      rolledBack: () => false,
+      settle: (asked, asClient) => resolveSendReceipt(asked, { registry: active.registry, client: asClient }),
+    });
+    expect(duringLoss.status).toBe(200);
+    expect(await duringLoss.json()).toMatchObject({
+      operationId: retryOperationId,
+      receipt: { status: "queued" },
+      send: { state: "in-flight" },
+    });
+
+    const settled = await resolveSendReceipt(retryOperationId, {
+      registry: active.registry,
+      client: null,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(settled?.state).toBe("failed");
+    expect(settled?.reason).toBe(SEND_UNSETTLEABLE_REASON);
+    expect(settled?.duplicateRisk).toBeTrue();
+    expect(settled?.resend).toBe("verify-first");
+    expect(settled?.evidence).toBe("delivery-record");
+
+    /* FOUR: recovery. The retry effect is still in the outbox and an executor
+       picks it up with the runtime healthy again — and finds the record that
+       ended it. The recipient receives nothing, because the caller has already
+       been told this attempt did not arrive. */
+    expect(sendIsSettled(active.registry.readOnlySnapshot(), retryOperationId)).toBeTrue();
+    const afterRecovery = recordingHost(active.generationId);
+    await new StructuredDeliveryQueue(
+      stalePortFor(active, retryOperationId, "retry-attempt-key", "roll the release forward"),
+      () => afterRecovery.host,
+    ).drain();
+    expect(afterRecovery.received).toEqual([]);
+    expect(active.journal.operationResult(retryOperationId)?.receipt.status).toBe("uncertain");
+    expect(await active.journal.effectBatch(100, ["runtime.send"])).toEqual([]);
+
+    /* And the answer stays the answer once the runtime can speak again — and
+       across the restart of the process that wrote it, because a settlement
+       nothing has to be running to honour is the whole point of keeping it on
+       the durable record. */
+    const afterwards = await resolveSendReceipt(retryOperationId, {
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(afterwards?.state).toBe("failed");
+    expect(afterwards?.resend).toBe("verify-first");
+    const reloaded = sendReceiptFor(new AgentRegistry(active.registryPath).readOnlySnapshot(), retryOperationId);
+    expect(reloaded?.state).toBe("failed");
+    expect(reloaded?.resend).toBe("verify-first");
+  } finally {
+    setAgentRegistryForTests(null);
     active.close();
   }
 });

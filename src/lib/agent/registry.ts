@@ -492,6 +492,19 @@ export interface DeliveryOperationOwner {
   requestDigest: string;
   contentDigest: string | null;
   createdAt: string;
+  /** The attempt this row REPLACES, when a retry minted a fresh operation for a
+      send that already had one (#1131).
+
+      A retry is admitted as a new operation with a new id, and that id is what
+      the caller is handed. Without a row of its own it named nothing durable:
+      a query during a runtime outage found no record, and no deadline could
+      ever end it. So the attempt gets its own row, pointing at the same
+      reservation and carrying its OWN acceptance time and settlement — the
+      reservation is still terminal from the attempt this one replaces, and a
+      fresh attempt must not answer with the dead one's verdict.
+
+      Null on the ordinary row a reservation writes for itself. */
+  retryOfOperationId: string | null;
   terminalState: Extract<HeldDelivery["state"], "delivered" | "failed"> | null;
   /** Kept on the owner rather than only on the reservation, because the
       reservation is compacted away and the duplicate-send risk it recorded must
@@ -1851,6 +1864,9 @@ function normalizeDeliveryOperationOwners(
         createdAt: typeof owner.createdAt === "string"
           ? owner.createdAt
           : referencedDelivery?.createdAt ?? settledDelivery?.createdAt ?? LEGACY_POLICY_RESTARTED_AT,
+        retryOfOperationId: typeof owner.retryOfOperationId === "string" && owner.retryOfOperationId
+          ? owner.retryOfOperationId
+          : null,
         terminalState,
         /* A row written before the disposition existed keeps `null`, which is
            read as "unproven" — never as a fenced send that may be resent. */
@@ -1881,6 +1897,7 @@ function normalizeDeliveryOperationOwners(
       requestDigest: delivery.requestDigest,
       contentDigest: delivery.contentDigest,
       createdAt: delivery.createdAt,
+      retryOfOperationId: null,
       terminalState: terminalDeliveryState(delivery),
       terminalDisposition: terminalDeliveryState(delivery) === "delivered" ? "delivered" : null,
       terminalReason: delivery.error,
@@ -1946,6 +1963,7 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
       requestDigest: delivery.requestDigest,
       contentDigest: delivery.contentDigest,
       createdAt: delivery.createdAt,
+      retryOfOperationId: null,
       terminalState: null,
       terminalDisposition: null,
       terminalReason: null,
@@ -6565,6 +6583,7 @@ export class AgentRegistry {
         requestDigest: held.requestDigest!,
         contentDigest: held.contentDigest,
         createdAt: held.createdAt,
+        retryOfOperationId: null,
         terminalState: null,
         terminalDisposition: null,
         terminalReason: null,
@@ -6678,6 +6697,93 @@ export class AgentRegistry {
     withAccountMutationLock(() => this.mutate((file) => {
       Object.assign(file, restoreOwnedChanges(file, expectedCurrent, replacement) as RegistryFile);
     }));
+  }
+
+  /**
+   * Gives a retry attempt its own durable settlement record (#1131).
+   *
+   * A retry mints a NEW operation with a new id, and that new id is what the
+   * caller is handed back. Everything durable stayed keyed to the presentation
+   * operation the attempt replaces, so the id in the caller's hand named
+   * nothing: a query during a runtime outage found no record to answer from,
+   * and no settlement deadline could ever end it. The caller was holding an
+   * operation id that nothing would ever settle.
+   *
+   * The row this writes fixes that without disturbing the reservation. It
+   * points at the same reservation — same conversation, same request, same
+   * content — and carries its own acceptance time, so the attempt is measured
+   * from when IT was admitted rather than from the send it replaces. It starts
+   * non-terminal on purpose: a retry is deliberately eligible for one fresh
+   * execution, and the delivery queue's fence reads exactly this record, so
+   * settling it up front would fence the attempt before it ran.
+   *
+   * Returns false when nothing durable is known about the attempt being
+   * replaced. There is nothing to relate the retry to in that case, and
+   * inventing a reservation for it would be worse than admitting it.
+   */
+  recordDeliveryRetryAttempt(previousOperationId: string, retryOperationId: string): boolean {
+    if (!retryOperationId || retryOperationId === previousOperationId) return false;
+    return this.mutate((file) => {
+      if (file.deliveryOperationOwners[retryOperationId]) return true;
+      const previous = file.deliveryOperationOwners[previousOperationId];
+      const delivery = previous
+        ? file.heldDeliveries[previous.deliveryId]
+        : Object.values(file.heldDeliveries).find((candidate) => candidate.command.operationId === previousOperationId);
+      const source = previous ?? (delivery
+        ? {
+          conversationId: delivery.conversationId,
+          runtimeConversationId: delivery.runtimeConversationId,
+          clientMessageId: delivery.clientMessageId,
+          deliveryId: delivery.id,
+          command: delivery.command,
+          requestDigest: delivery.requestDigest ?? "",
+          contentDigest: delivery.contentDigest,
+        }
+        : null);
+      if (!source?.requestDigest) return false;
+      file.deliveryOperationOwners[retryOperationId] = {
+        conversationId: source.conversationId,
+        runtimeConversationId: source.runtimeConversationId,
+        clientMessageId: source.clientMessageId,
+        deliveryId: source.deliveryId,
+        command: { ...source.command, operationId: retryOperationId },
+        requestDigest: source.requestDigest,
+        contentDigest: source.contentDigest,
+        createdAt: now(),
+        retryOfOperationId: previousOperationId,
+        terminalState: null,
+        terminalDisposition: null,
+        terminalReason: null,
+        settledAt: null,
+      };
+      return true;
+    });
+  }
+
+  /**
+   * Settles one retry attempt's own row.
+   *
+   * Only an attempt row — one that records what it is a retry OF — settles this
+   * way. The reservation belongs to the presentation operation and is already
+   * terminal from the attempt this one replaced, so writing the attempt's
+   * verdict onto it would say nothing new and could overwrite what the earlier
+   * attempt proved.
+   */
+  settleDeliveryRetryAttempt(
+    operationId: string,
+    state: Extract<HeldDelivery["state"], "delivered" | "failed">,
+    error: string | null = null,
+    disposition?: DeliveryTerminalDisposition,
+  ): DeliveryOperationOwner | null {
+    return this.mutate((file) => {
+      const owner = file.deliveryOperationOwners[operationId];
+      if (!owner?.retryOfOperationId || owner.terminalState !== null) return owner ? clone(owner) : null;
+      owner.terminalState = state;
+      owner.terminalDisposition = state === "delivered" ? "delivered" : disposition ?? null;
+      owner.terminalReason = error?.slice(0, 240) ?? null;
+      owner.settledAt = now();
+      return clone(owner);
+    });
   }
 
   recordDeliveryOutcome(

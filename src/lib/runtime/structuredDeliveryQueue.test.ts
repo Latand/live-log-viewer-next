@@ -1603,6 +1603,61 @@ test("a delivering send whose executor still owns the host is left to that execu
   });
 });
 
+test("a delivering send whose ownership evidence cannot be read is left to its executor", async () => {
+  /* The finding this closes: an absent or failing claim read arrived at the
+     comparison as `null` and lost it, so a gap in the claim projection was
+     enough to terminalize a send another executor was actuating right then.
+     Absence of evidence is not evidence of a handover. Both shapes of "cannot
+     read" — a projection with nothing recorded, and one that throws — leave the
+     row where it is; the receipt deadline is what ends a send whose owner never
+     comes back, and it needs none of this to be healthy. */
+  let claim: () => string | null = () => "claim-alpha:3";
+  const journal = ownershipJournal(() => claim());
+  const writes: string[] = [];
+  const engine = () => host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started" as const, turnId: "turn-owned" };
+  });
+
+  const owner = new StructuredDeliveryQueue(journal.port, engine);
+  await owner.drain();
+  const recorded = journal.transitions.find(([, status]) => status === "delivering")?.[2] ?? null;
+  expect(recorded).toContain("delivering-owner:");
+  const stillDelivering = () => {
+    journal.receipts.set("op-owned", { status: "delivering", reason: recorded });
+    journal.pending.add("op-owned");
+  };
+
+  /* Nothing recorded for the conversation. */
+  claim = () => null;
+  stillDelivering();
+  await new StructuredDeliveryQueue(journal.port, engine).drain();
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({ status: "delivering", reason: recorded });
+
+  /* The read itself fails. */
+  claim = () => { throw new Error("claim projection is unavailable"); };
+  stillDelivering();
+  await new StructuredDeliveryQueue(journal.port, engine).drain();
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({ status: "delivering", reason: recorded });
+
+  /* No pass has terminalized it, and none has sent it again either — the row is
+     still exactly where its executor left it. */
+  expect(journal.transitions.filter(([, status]) => status === "uncertain")).toEqual([]);
+
+  /* And an explicitly DIFFERENT claim, which is the only evidence that proves
+     the executor can no longer write to the engine, still ends it. */
+  claim = () => "claim-beta:4";
+  stillDelivering();
+  await new StructuredDeliveryQueue(journal.port, engine).drain();
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({
+    status: "uncertain",
+    reason: "delivery was started by an earlier executor; whether it reached the recipient is unverified",
+  });
+});
+
 test("a delivering send this executor abandoned itself settles unverified rather than waiting on itself", async () => {
   /* Ownership evidence must never become a way to hang: a row this executor
      wrote and then lost — a pass that threw between the engine write and the

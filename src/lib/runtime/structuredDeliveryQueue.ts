@@ -40,8 +40,8 @@ export interface StructuredDeliveryQueuePort {
       Recorded when a send enters delivery and compared when one is found still
       there, so a `delivering` row is called abandoned on evidence that
       ownership CHANGED rather than on its mere existence. Absent port, absent
-      claim: no evidence either way, and an actuated send with no evidence
-      settles unverified rather than being executed again. */
+      claim, or a read that throws: no evidence either way, which leaves the row
+      with the executor that holds it rather than ending its send. */
   hostClaim?(conversationId: string): string | null | Promise<string | null>;
 }
 
@@ -329,6 +329,13 @@ export const DELIVERY_FENCED_BY_SETTLEMENT =
  * carrier — the journal already persists it per transition, and inventing a
  * durable column for one token would be a schema for a fact one string holds.
  *
+ * The comparison has three outcomes, not two, and the third is the one that
+ * bites: a claim that cannot be READ is not a claim that has moved. A transient
+ * gap in the projection used to read as a handover and terminalize a send
+ * another executor was actuating at that moment, so only an explicitly named
+ * differing claim proves abandonment now; unreadable evidence leaves the row
+ * where it is.
+ *
  * The absorbing rule is untouched by any of it: no branch here sends anything
  * again and no branch returns the row to `queued`. Ownership only decides
  * whether this pass ends the send as unverified or leaves it to its owner —
@@ -561,14 +568,17 @@ export class StructuredDeliveryQueue {
          deployment control, so this pass never writes it — the durable
          `delivering` row IS the fence, and it holds across a Viewer restart, a
          runtime-host restart, and a socket that was gone for hours.
-         What it settles depends on WHO holds it. An executor that still owns
-         the writer claim on this host is still able to answer for the send, so
-         its row is left where it is; one whose claim has moved on — or that
-         left no ownership evidence at all — cannot write to the engine and
-         cannot settle the row either, so this pass ends it unverified. */
+         What it settles depends on WHO holds it, and that is a question with
+         THREE answers rather than two. An executor that still owns the writer
+         claim on this host can answer for the send, so its row is left where it
+         is. One whose claim has explicitly moved on cannot write to the engine
+         and cannot settle the row either, so this pass ends it unverified. And
+         where the claim cannot be read at all the row is left alone too: a gap
+         in the claim projection says nothing about who is delivering, and the
+         receipt deadline ends the send anyway if its owner never comes back. */
       const durable = await this.port.status?.(effect.operationId).catch(() => null);
       if (durable?.status === "delivering") {
-        if (await this.deliveringOwnerIsLive(effect.conversationId, durable.reason)) continue;
+        if (await this.deliveringOwnerDisposition(effect.conversationId, durable.reason) !== "abandoned") continue;
         await this.terminalizeUnverified(effect.operationId, DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR);
         continue;
       }
@@ -855,7 +865,8 @@ export class StructuredDeliveryQueue {
   }
 
   /** The writer claim currently owning a conversation's host, or null when the
-      port cannot say. An unreadable claim is no evidence, never a licence. */
+      port cannot say — an absent port, an absent claim, and a read that threw
+      are one answer, because none of them is evidence of anything. */
   private async hostClaim(conversationId: string): Promise<string | null> {
     try {
       return (await this.port.hostClaim?.(conversationId)) ?? null;
@@ -865,21 +876,38 @@ export class StructuredDeliveryQueue {
   }
 
   /**
-   * Whether the executor that took this send into delivery can still answer for
-   * it — the one case where a `delivering` row must be left alone.
+   * What a `delivering` row's recorded ownership proves about its executor.
    *
-   * It requires positive evidence on both halves: a DIFFERENT executor wrote
-   * the row, and the writer claim it wrote under is still the claim that owns
-   * the host. A row this executor wrote itself is never live — no other pass of
-   * this instance can be actuating it, so finding it here means an earlier pass
-   * of ours abandoned it. A row with no recorded ownership is never live
-   * either: absence of evidence is what the old unconditional fence assumed
-   * everywhere, and it stays the answer only where nothing was recorded.
+   * Three answers, because two were one too few. The row says actuation began;
+   * whether the executor that began it is still there is a separate question,
+   * and an unreadable answer to that question is not a `no`.
+   *
+   * - `live`: a DIFFERENT executor wrote the row and the writer claim it wrote
+   *   under is still the claim that owns the host. It can still write to the
+   *   engine, so the row is its to settle.
+   * - `abandoned`: the host is owned by a DIFFERENT, explicitly named claim, so
+   *   the recorded executor can no longer write to the engine and nothing but
+   *   this pass is left to end the row. A row this executor wrote itself is
+   *   abandoned too — no other pass of this instance can be actuating it, so
+   *   finding it here means an earlier pass of ours dropped it — as is a row
+   *   that recorded no ownership at all, which is what every row looked like
+   *   before this evidence existed.
+   * - `unproven`: the claim could not be read — no port, no claim recorded for
+   *   the conversation, or a read that threw. That is a gap in the projection
+   *   and not a handover, so the row stays with the executor that holds it.
+   *   Nothing is withheld by waiting: an owner that never comes back leaves the
+   *   send to the receipt deadline, which ends it from the durable record
+   *   alone, and no branch here sends anything again.
    */
-  private async deliveringOwnerIsLive(conversationId: string, reason: string | null | undefined): Promise<boolean> {
+  private async deliveringOwnerDisposition(
+    conversationId: string,
+    reason: string | null | undefined,
+  ): Promise<"live" | "abandoned" | "unproven"> {
     const owner = deliveringOwnership(reason);
-    if (!owner || owner.executorId === this.executorId) return false;
-    return owner.hostClaim === await this.hostClaim(conversationId);
+    if (!owner || owner.executorId === this.executorId) return "abandoned";
+    const claim = await this.hostClaim(conversationId);
+    if (claim === null) return "unproven";
+    return claim === owner.hostClaim ? "live" : "abandoned";
   }
 
   private async terminalizeUnverified(operationId: string, reason: string): Promise<void> {
