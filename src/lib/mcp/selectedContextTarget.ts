@@ -155,18 +155,15 @@ export interface SelectedTailAnswer {
   tail: BoundedTranscriptTail;
 }
 
-/**
- * The bounded read: keyed identity, then a tail of the named transcript.
- *
- * Touches no scan of any kind — not the completed generation, not a pinned
- * walk, not `observeFiles()` — so it keeps answering while the corpus scan is
- * hung or failing, which is the degraded case #844 §6 is about.
- */
-export function selectedConversationTail(
-  request: SelectedTailRequest,
+export interface SelectedConversationTargetRequest {
+  conversationId: string;
+}
+
+function selectedConversationTargetFromResolver(
+  request: SelectedConversationTargetRequest,
   dependencies: SelectedContextTargetDependencies,
-): SelectedTailAnswer {
-  const resolver = dependencies.selectedConversation();
+  resolver: SelectedConversationResolver,
+): SelectedConversationRecord {
   const record = resolver.resolve(request.conversationId);
   if (!record) {
     throw new McpToolRefusal(
@@ -180,16 +177,36 @@ export function selectedConversationTail(
       { code: "selected_conversation_has_no_transcript", conversationId: record.conversationId },
     );
   }
-  /* The path is registry-minted rather than caller-supplied, so this gate is
-     belt-and-braces — but a tail is a file read reached from tool arguments,
-     and every other such read in this server proves scanner-root membership
-     before it opens anything. */
   if (!dependencies.pathAllowed(record.path)) {
     throw new McpToolRefusal(
       "that conversation's transcript is outside the Viewer's scanner roots.",
       { code: "selected_conversation_outside_roots", conversationId: record.conversationId },
     );
   }
+  return record;
+}
+
+/** Resolve and root-gate one registry identity without reading its transcript. */
+export function selectedConversationTarget(
+  request: SelectedConversationTargetRequest,
+  dependencies: SelectedContextTargetDependencies,
+): SelectedConversationRecord {
+  return selectedConversationTargetFromResolver(request, dependencies, dependencies.selectedConversation());
+}
+
+/**
+ * The bounded read: keyed identity, then a tail of the named transcript.
+ *
+ * Touches no scan of any kind — not the completed generation, not a pinned
+ * walk, not `observeFiles()` — so it keeps answering while the corpus scan is
+ * hung or failing, which is the degraded case #844 §6 is about.
+ */
+export function selectedConversationTail(
+  request: SelectedTailRequest,
+  dependencies: SelectedContextTargetDependencies,
+): SelectedTailAnswer {
+  const resolver = dependencies.selectedConversation();
+  const record = selectedConversationTargetFromResolver(request, dependencies, resolver);
   const tail = resolver.readTail(record.conversationId, { maxLines: request.maxLines });
   if (!tail) {
     throw new McpToolRefusal(

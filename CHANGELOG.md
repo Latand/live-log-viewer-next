@@ -85,6 +85,25 @@ guarantees for the 1.x series.
   questions still have to be answered, the queue still has to drain.
 
 ### Fixed
+- The documented release path works as written (#1309). The deploy protocol
+  named a wrapper command that is not installed on this machine and a
+  fast-forward-only pull before the release, and the pull was wrong in its own
+  right: `scripts/rebuild.sh` reads nothing from the working tree — it posts a
+  revision, and the runtime host builds that revision from its own canonical Git
+  mirror — so the pull only disturbed whatever branch the operator had checked
+  out. Every place that documents the release now names the plain
+  `scripts/rebuild.sh` invocation from any checkout, a worktree included, and
+  says where the revision is built from. The script itself advertised, defaulted
+  to and validated `origin/main` as a CLI sentinel, then resolved it before
+  posting because `POST /api/runtime/deployments` accepts no such `revision`
+  value. It now takes a full commit SHA in either case or, when no argument or
+  `LLV_DEPLOY_REVISION` override is present, resolves the canonical
+  `refs/heads/main` tip. Explicit SHAs are posted lowercase, and `git ls-remote`
+  fetches nothing into the checkout and moves no ref in it. The refusal also used
+  to arrive underneath `deployment key: …`, so a request that deployed nothing
+  read like a deployment that had started: nothing that reads as a started
+  deployment is printed now until the endpoint has returned a valid receipt, and
+  a refused request prints its error and exits non-zero.
 - Whether a turn is being worked on is decided from evidence, so a redeploy no
   longer strands a lane nothing can recover (#1281, #1282, #1276). `live`,
   `idle` and `busy` are inherited words: a turn severed mid-flight kept reading
