@@ -2375,3 +2375,43 @@ test("message_receipt refuses an operation id nothing ever admitted", async () =
   expect(refusal?.name).toBe("McpToolRefusal");
   expect(refusal?.details?.code).toBe("OPERATION_UNKNOWN");
 });
+
+test("an ambiguous send's operation id and resend guidance survive the control refusal", async () => {
+  /* #1131: the Viewer answers an ambiguous send with the id it accepted the
+     send under and what is safe to do next. The control client used to keep the
+     prose and drop the rest, so the caller of a send that may already be in the
+     recipient's pane was left with a sentence, no id to ask `message_receipt`
+     about, and no warning against sending it again. */
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-binding-ambiguous-"));
+  sandboxes.push(sandbox);
+  process.env.LLV_STATE_DIR = sandbox;
+  const operationId = ["operation", "ambiguous", "legacy", "send"].join("_");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    ok: false,
+    outcome: "failed",
+    error: "delivery was started and never settled",
+    actuation: "started",
+    operationId,
+    resend: "verify-first",
+  }), { status: 409, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+
+  try {
+    const sendMessage = viewerMcpBindings().send_message;
+    const refusal = await sendMessage({
+      clientRequestId: "mcp-ambiguous-send",
+      conversationId: "conversation_ambiguous",
+      text: "hold the cutover until I say go",
+    }).then(() => null, (error: unknown) => error);
+
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("delivery was started and never settled");
+    expect((refusal as { details?: Record<string, unknown> }).details).toEqual({
+      operationId,
+      resend: "verify-first",
+      actuation: "started",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
