@@ -1,7 +1,14 @@
 import { resumeEligibility, resumeSpecFor } from "@/lib/agent/cli";
 import type { AgentReconfiguration } from "@/lib/agent/reconfigure";
 import { agentRegistry, deliveryMayHaveArrived, type AgentRegistry, type AgentRegistryEntry, type RegistryConversation, type TmuxHostEvidence } from "@/lib/agent/registry";
-import { accountManager } from "@/lib/accounts/manager";
+import { accountManager, ProjectAccountRefusedError, resolveResumeAccountId } from "@/lib/accounts/manager";
+import { AccountProjectBindingsUnreadableError } from "@/lib/accounts/projectBindings";
+import { conversationProjectKey } from "@/lib/accounts/conversationProject";
+import {
+  attributeNamedAccountChoice,
+  type AccountChoiceActor,
+  type AccountOverrideNotice,
+} from "@/lib/accounts/accountOverrides";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
@@ -86,9 +93,17 @@ export interface DeliverySuccess {
   structured?: true;
   operationId?: string;
   receipt?: RuntimeOperationReceipt;
+  /** Set when an account switch named an account outside the project's pool:
+      the switch was carried out and attributed, and the answer says so. */
+  accountOverride?: AccountOverrideNotice;
 }
 
 interface ReconfigureConversationOverrides {
+  /** Who is switching, for attribution. Absent means the operator: an agent is
+      the only caller that can name itself, exactly as the operator authority
+      gate reads a request. */
+  actor?: AccountChoiceActor;
+  attributeAccountChoice?: typeof attributeNamedAccountChoice;
   pathAllowed?: typeof pathAllowed;
   listFiles?: typeof listFiles;
   resumeSpecFor?: typeof resumeSpecFor;
@@ -122,6 +137,24 @@ export async function reconfigureConversation(
   const generation = conversation?.generations.at(-1);
   if (config.accountId && (!conversation || !generation)) return failure("conversation identity is unavailable for an account switch", 409);
   if (config.accountId && conversation && generation && config.accountId !== generation.accountId) {
+    /* #1279: switching a conversation's account names an account outright, so
+       it asks the project's binding — to ATTRIBUTE the choice, not to veto it.
+       The pool is what the Viewer selects from on its own (the reseat, and any
+       account it would default to); a deliberate switch is a control, and a
+       control the operator is entitled to use onto an account outside the pool.
+       Inside the pool, and on an unbound project, nothing is recorded and the
+       switch is exactly what it always was.
+
+       Attribution follows ACCEPTANCE, below. Appended here — before
+       authentication, before the reseat is reserved — it recorded ATTEMPTS: a
+       switch onto an account that turned out to be signed out left the project
+       view showing an out-of-pool choice that never happened, and there is no
+       compensating delete for a journal that only appends. */
+    const project = conversationProjectKey(conversation.projectOwnership, generation.launchProfile, {
+      /* An adopted conversation carries no launch profile, and the scanner's
+         project for this transcript is what the board already groups it under. */
+      project: entry.project,
+    });
     const previousProfile = generation.launchProfile;
     let profileUpdated = false;
     try {
@@ -135,16 +168,43 @@ export async function reconfigureConversation(
       profileUpdated = true;
       const queued = registry.requestConversationReseat(conversation.id, config.accountId);
       if (!queued.migration) throw new Error("account switch could not be queued");
-      (overrides.requestMigrationTick ?? requestAccountMigrationTick)();
-      return { ok: true, target: registered.host.paneId, outcome: "pending" };
     } catch (error) {
       if (profileUpdated) registry.updateConversationLaunchProfile(conversation.id, previousProfile);
       return failure(error, 409);
     }
+    /* Accepted: the reseat is durably queued, so the record describes a switch
+       that happened rather than one that was attempted. Attribution sits
+       OUTSIDE the try for the same reason it sits after it — nothing about
+       writing the record may turn an accepted switch back into a failure. */
+    const accountOverride = (overrides.attributeAccountChoice ?? attributeNamedAccountChoice)({
+      engine: entry.engine,
+      project,
+      accountId: config.accountId,
+      conversationId: conversation.id,
+      actor: overrides.actor ?? { kind: "operator" },
+      via: "conversation-switch",
+    }) ?? undefined;
+    (overrides.requestMigrationTick ?? requestAccountMigrationTick)();
+    return {
+      ok: true,
+      target: registered.host.paneId,
+      outcome: "pending",
+      ...(accountOverride ? { accountOverride } : {}),
+    };
+  }
+  /* Resolved before the operation lock is taken, so a fenced or unreadable
+     record refuses without ever holding it. `config.accountId` here is a switch
+     the caller NAMED — the branch above already returned for a named switch to
+     a different account — so it stands untouched. */
+  let resumeAccount: string | null;
+  try {
+    resumeAccount = config.accountId ?? resumeAccountId(registry, entry);
+  } catch (error) {
+    return accountFenceFailure(error);
   }
   const buildSpec = (profile: AgentRegistryEntry["launchProfile"]) => (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
     ...config,
-    accountId: config.accountId ?? recordedAccountId(registry, entry),
+    accountId: resumeAccount,
     readOnly: profile?.readOnly ?? null,
     permissionMode: profile?.permissionMode ?? null,
     allowSubagents: profile?.allowSubagents ?? false,
@@ -351,12 +411,43 @@ interface ResumeConversationOverrides {
   deliver?: typeof deliverToTranscriptHost;
 }
 
-/** Provenance the resume spec needs to name the account a Claude session
-    reopens under. Inside the shared transcript store (#891) the path names no
-    owner, so the registry's recorded account is the only answer (#935). */
-function recordedAccountId(registry: AgentRegistry, entry: FileEntry): string | null {
+/**
+ * The account a legacy resume reopens under, for every seam in this file.
+ *
+ * Provenance first: inside the shared transcript store (#891) the path names no
+ * owner, so the registry's recorded account is the only answer (#935). When
+ * there is no record — an adopted conversation the Viewer never launched, or
+ * one whose account has since been deleted — nobody has named an account and
+ * the spec builder used to answer from the engine's ACTIVE one, which is a pick
+ * made with neither the project's pool nor any quota read (#1279). That half
+ * now goes through the shared automatic decision like every other pick, so this
+ * function returns continuity or a fenced choice and never an unfenced one.
+ */
+function resumeAccountId(registry: AgentRegistry, entry: FileEntry): string | null {
   if (entry.engine !== "claude" && entry.engine !== "codex") return null;
-  return registry.transcriptAccountId(entry.engine, entry.path);
+  const conversation = registry.conversationForPath(entry.path);
+  const project = conversationProjectKey(
+    conversation?.projectOwnership,
+    conversation?.generations?.at(-1)?.launchProfile,
+    /* An adopted conversation carries an empty profile, and this is exactly the
+       population whose account is unrecorded — the scanner's project for the
+       transcript, and the cwd behind it, are what the fence has to read. */
+    { project: entry.project, cwd: entry.cwd },
+  );
+  return resolveResumeAccountId(entry.engine, registry.transcriptAccountId(entry.engine, entry.path), project);
+}
+
+/**
+ * A pool boundary, or a binding record nobody can read, answered as this
+ * contract's own refusal rather than an unhandled failure: the resume has
+ * started nothing, and 409 is the answer the reseat, the spawn route and the
+ * task launch already give for the same two conditions.
+ */
+function accountFenceFailure(error: unknown): DeliveryFailure {
+  if (error instanceof ProjectAccountRefusedError || error instanceof AccountProjectBindingsUnreadableError) {
+    return failure(error, 409);
+  }
+  throw error;
 }
 
 /**
@@ -433,10 +524,16 @@ export async function resumeConversation(
     }
   }
   const profile = registry.launchProfileForPath(entry.path);
+  let resumeAccount: string | null;
+  try {
+    resumeAccount = resumeAccountId(registry, entry);
+  } catch (error) {
+    return accountFenceFailure(error);
+  }
   const specOptions = {
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
-    accountId: recordedAccountId(registry, entry),
+    accountId: resumeAccount,
     allowSubagents: profile?.allowSubagents,
     plugins: profile?.plugins,
     /* The durable grant travels with the resume (#739). Omitting it silently
@@ -791,11 +888,19 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       return settle(failure("file is unknown to the viewer", 403));
     }
     const entryProfile = registry.launchProfileForPath(entry.path);
+    /* Resolved before any image is materialized, like every other precondition
+       on this ladder: a fenced pool refuses without orphaning an inbox file. */
+    let entryAccount: string | null;
+    try {
+      entryAccount = resumeAccountId(registry, entry);
+    } catch (error) {
+      return settle(accountFenceFailure(error));
+    }
     const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
       model: message.resumeModel ?? entry.launchModel ?? entry.model,
       effort: message.resumeEffort ?? entry.effort,
       ...(typeof message.resumeFast === "boolean" ? { fast: message.resumeFast } : {}),
-      accountId: recordedAccountId(registry, entry),
+      accountId: entryAccount,
       allowSubagents: entryProfile?.allowSubagents,
       plugins: entryProfile?.plugins,
       mcpServers: entryProfile?.mcpServers,
@@ -823,10 +928,16 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     /* Resolved before saving anything: the root's live pane or resume spec
        must exist, or the request is rejected without ever writing an image. */
     const rootProfile = registry.launchProfileForPath(root.path);
+    let rootAccount: string | null;
+    try {
+      rootAccount = resumeAccountId(registry, root);
+    } catch (error) {
+      return settle(accountFenceFailure(error));
+    }
     const rootSpec = (overrides.resumeSpecFor ?? resumeSpecFor)(root.root, root.path, {
       model: root.launchModel ?? root.model,
       effort: root.effort,
-      accountId: recordedAccountId(registry, root),
+      accountId: rootAccount,
       allowSubagents: rootProfile?.allowSubagents,
       plugins: rootProfile?.plugins,
       mcpServers: rootProfile?.mcpServers,

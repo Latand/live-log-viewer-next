@@ -129,7 +129,25 @@ export type AccountOption = {
   login?: ClaudeLoginView | null;
   /** Session/weekly quota windows with reset times, when a read exists (issue #40). */
   limits?: AccountLimits | null;
+  /** Projects this account is bound to (#1279). Empty means it is fenced to no
+      project — which does not fence the account, it fences the projects: any
+      project with no binding of its own may still use it. */
+  projects?: { project: string; displayName: string }[];
 };
+
+/** Crash-safe: a malformed projects block renders as no bindings, never a throw. */
+function parseBoundProjects(raw: unknown): { project: string; displayName: string }[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    if (typeof item !== "object" || item === null) return [];
+    const record = item as Record<string, unknown>;
+    if (typeof record.project !== "string" || !record.project.trim()) return [];
+    return [{
+      project: record.project,
+      displayName: typeof record.displayName === "string" && record.displayName.trim() ? record.displayName : record.project,
+    }];
+  });
+}
 
 /** Crash-safe validation of one quota window. A malformed shape yields `null` so
     a stray payload never breaks the account row. */
@@ -305,7 +323,7 @@ function accountResponse(body: unknown, engine: Engine): EngineResponse {
     const authHealth: AccountAuthHealth = authState === "authenticated" || authState === "signed_out" || authState === "unknown" || authState === "error"
       ? authState
       : account.authPresent ? "unknown" : "signed_out";
-    return { ...account, authHealth, login, loginPending, limits: parseAccountLimits(account.limits) };
+    return { ...account, authHealth, login, loginPending, limits: parseAccountLimits(account.limits), projects: parseBoundProjects((raw as { projects?: unknown }).projects) };
   });
   return {
     active: section.active,

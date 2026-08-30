@@ -351,7 +351,9 @@ export type HandoffDigestOutcome =
   | { kind: "fallback"; reason: HandoffDigestFallbackReason };
 
 export interface HandoffDigestRuntime {
-  resolveAccount(): HeadlessSpawnAvailability | Promise<HeadlessSpawnAvailability>;
+  /** `project` fences the pick to that project's allowed accounts (#1279);
+      an unbound project selects across every account, as it always did. */
+  resolveAccount(project: string): HeadlessSpawnAvailability | Promise<HeadlessSpawnAvailability>;
   run(request: HeadlessCodexRunRequest): Promise<HeadlessRunResult>;
   readPredecessorReport(transcript: string, engine: "claude" | "codex"): string | null;
 }
@@ -360,9 +362,9 @@ export const productionDigestRuntime: HandoffDigestRuntime = {
   /* Imported at call time: the seat command is on the request path of every
      designation, and nothing about it should drag the headless runner or the
      account manager into module load. */
-  resolveAccount: async () => {
+  resolveAccount: async (project) => {
     const { accountManager } = await import("@/lib/accounts/manager");
-    return accountManager.resolveHeadlessSpawn("codex", null, []);
+    return accountManager.resolveHeadlessSpawn("codex", null, [], project);
   },
   run: async (request) => {
     const { runHeadlessCodexOnce } = await import("@/lib/flows/exec");
@@ -535,7 +537,7 @@ export async function summarizeHandoffsHeadless(
   request: HandoffDigestRequest,
   runtime: HandoffDigestRuntime = productionDigestRuntime,
 ): Promise<HandoffDigestOutcome> {
-  const availability = await runtime.resolveAccount();
+  const availability = await runtime.resolveAccount(request.project);
   if (availability.kind === "exhausted") return { kind: "fallback", reason: "exhausted" };
   if (availability.kind !== "available") return { kind: "fallback", reason: "unavailable" };
   const report = request.predecessor

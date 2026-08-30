@@ -6,7 +6,7 @@ import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import { accountManager, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
+import { accountManager, ProjectAccountRefusedError, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
@@ -38,6 +38,7 @@ import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport
 import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "@/lib/pipelines/engine";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
+import { AccountProjectBindingsUnreadableError } from "@/lib/accounts/projectBindings";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { derivedSpawnTitle, durableSemanticTitle, firstPromptLine, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
@@ -605,12 +606,33 @@ export async function executeSpawnRequest(
       );
     }
     const requestedAccountId = typeof body.accountId === "string" ? body.accountId : null;
+    /* #1279: the project the launch belongs to, and nothing more. The rule
+       itself — which accounts this project allows, whether any of them has
+       capacity, and what a record nobody can read means — lives at the account
+       seam with every other automatic selection's copy of it, so this route
+       carries no second copy to drift from the first. */
+    const spawnProject = explicitProject ?? projectForCwd(cwd);
     let account: HealthySpawnAccountResolution;
     try {
       account = existingAttempt && existingAttempt.accountId !== null && !(existingAttempt.accountPin && requestedAccountId)
         ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
-        : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
+        : await dependencies.resolveHealthySpawnAccount(engine, body.accountId, spawnProject);
     } catch (error) {
+      /* The record needs the operator, and until it gets them this launch
+         selects nothing. A conflict, not a server fault: the request is well
+         formed and the state it addresses is what is wrong — the same answer
+         the reseat, the binding route and the task launch give for the same
+         record, so one repair clears all of them. */
+      if (error instanceof AccountProjectBindingsUnreadableError) {
+        return NextResponse.json({ error: error.message }, { status: 409 });
+      }
+      /* A boundary somebody drew, answered as a boundary: the pin the project
+         forbids, and the pool with no account left to launch on. Answered
+         before any receipt exists, so there is nothing for a retry to replay
+         onto an account this project does not allow. */
+      if (error instanceof ProjectAccountRefusedError) {
+        return NextResponse.json({ error: error.message }, { status: 409 });
+      }
       if (body.accountId === undefined) throw error;
       if (engine === "claude" && requestedAccountId) {
         try {

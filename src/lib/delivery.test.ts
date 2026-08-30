@@ -1357,8 +1357,8 @@ test("a resume that cannot build a command names the failing condition (issue #9
   });
 });
 
-test("a resume passes the conversation's recorded account to the resume spec (issue #935)", async () => {
-  const pathname = path.join(SANDBOX, "recorded-account-fixture.jsonl");
+async function resumeSpecAccountFor(recorded: string | null, fixture: string): Promise<string | null | undefined> {
+  const pathname = path.join(SANDBOX, fixture);
   fs.writeFileSync(pathname, "");
   const entry = { root: "claude-projects", path: pathname, project: "p", mtime: 0, size: 0, engine: "claude" } as unknown as FileEntry;
   const options: { accountId?: string | null }[] = [];
@@ -1368,7 +1368,7 @@ test("a resume passes the conversation's recorded account to the resume spec (is
     registry: {
       conversationForPath: () => ({ id: "conversation_recorded", supersededBy: null }),
       launchProfileForPath: () => null,
-      transcriptAccountId: () => "account-b",
+      transcriptAccountId: () => recorded,
     },
     recover: async () => null,
     listFiles: async () => [entry],
@@ -1380,10 +1380,25 @@ test("a resume passes the conversation's recorded account to the resume spec (is
   } as never);
 
   expect(outcome).toMatchObject({ ok: true });
-  /* Under the shared transcript store the path names no owner, so the recorded
-     account is the only thing that picks the home the resume runs under. */
   expect(options).toHaveLength(1);
-  expect(options[0]!.accountId).toBe("account-b");
+  return options[0]!.accountId;
+}
+
+test("a resume passes the conversation's recorded account to the resume spec (issue #935)", async () => {
+  /* Under the shared transcript store the path names no owner, so the recorded
+     account is the only thing that picks the home the resume runs under. The
+     legacy account is the one id every machine has, so this asserts the
+     pass-through without naming anybody's account. */
+  expect(await resumeSpecAccountFor("default", "recorded-account-fixture.jsonl")).toBe("default");
+});
+
+test("a resume whose recorded account this machine no longer has asks the rule instead (#1279)", async () => {
+  /* Provenance that resolves to nothing is not continuity: `resumeSpecFor`
+     would fall through to the shared-store fallback and answer from the
+     engine's ACTIVE account, with neither the project's pool nor any quota
+     read. So the automatic rule decides — and this project is unbound, so it
+     offers no account and the builder's own fallback stands, unchanged. */
+  expect(await resumeSpecAccountFor("account-that-was-retired", "retired-account-fixture.jsonl")).toBeNull();
 });
 
 test("message-triggered relaunches carry the stored MCP grant on both the direct and root-relay paths", async () => {
