@@ -633,9 +633,12 @@ export interface SeatTickCard {
   /**
    * Whether the condition still holds.
    *
-   * `open` is the default and the only thing the first two kinds ever say: they
-   * describe something that happened, and an operator closes the card. Tick
-   * settings are a STANDING state rather than an event (#1275) — a project
+   * `open` is the default and the only thing every kind but `tick-settings`
+   * ever says: they describe something that happened, and an operator closes
+   * the card. A source that cannot be read (#1298) is one of those — it is
+   * raised once per outage and stays until someone has seen it, because an
+   * outage that healed itself is still an outage the operator was blind to.
+   * Tick settings are a STANDING state rather than an event (#1275) — a project
    * whose tick is off or slowed carries the card while that is true — so the
    * check that reads the settings back at their default resolves the card
    * instead of leaving the board claiming a quiet tick that is ticking again.

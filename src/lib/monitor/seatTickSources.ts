@@ -634,13 +634,6 @@ async function unmergedPullRequests(context: {
     unavailable: kind,
     gap: seatTickSourceGapAfterFailure(context.gap, kind, at),
   });
-  /* A source that has been unreadable for longer than a whole wake interval is
-     asked at that interval and no faster (#1298). The gap it already produced
-     is replayed in between, so every check still refuses to call this quiet —
-     what the backoff saves is the subprocess, never a conclusion. */
-  if (context.gap && !seatTickSourceRetryDue(context.gap, context.now, context.wakeIntervalMs)) {
-    return { pullRequests: [], unavailable: context.gap.gap, gap: context.gap };
-  }
 
   let archived: readonly Pipeline[];
   try {
@@ -655,6 +648,23 @@ async function unmergedPullRequests(context: {
   if (finished.length === 0) return unasked;
   const cwd = repoDirForProject(context.project, context.sources, archived);
   if (!cwd) return unasked;
+
+  /* A source that has been unreadable for longer than a whole wake interval is
+     asked at that interval and no faster (#1298). The gap it already produced
+     is replayed in between, so every check still refuses to call this quiet —
+     what the backoff saves is the `gh` subprocess, never a conclusion.
+
+     It sits BELOW the two gates above, because a replayed gap must not outlive
+     the question it answers. Each of those gates is this check finding there is
+     nothing to ask: no finished lane left anything open, or the project has no
+     repository to ask about. A fresh read on such a check reports no gap at all,
+     so replaying one above them would name an unreadable source for the rest of
+     the backoff window on a check that would have succeeded trivially, and would
+     refuse a quiet the evidence allows. Everything between the gates and here is
+     a local read; the subprocess below is the only thing the backoff ever saved. */
+  if (context.gap && !seatTickSourceRetryDue(context.gap, context.now, context.wakeIntervalMs)) {
+    return { pullRequests: [], unavailable: context.gap.gap, gap: context.gap };
+  }
 
   let result: OpenPullRequestsResult;
   try {

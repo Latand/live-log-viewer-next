@@ -946,6 +946,32 @@ test("a standing run is asked once per wake interval, and the gap is replayed in
   expect(asked.state.pullRequestGap).toMatchObject({ attempts: 24, reported: true });
 });
 
+/* The replay is bounded by the question it answers. A check with no finished
+   lane to correlate never asks the source at all, and a fresh read on it
+   reports no gap — so the backoff must not hand one back and refuse a quiet
+   this check's own evidence allows. */
+test("a standing run is not replayed onto a check that had nothing to ask", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const standing = {
+    gap: "command-failed" as const,
+    since: new Date(NOW - 4 * 60 * 60_000).toISOString(),
+    lastAttemptAt: new Date(NOW - 10 * 60_000).toISOString(),
+    attempts: 23,
+    reported: true,
+  };
+  const input = await gather(
+    { pipelines: [], pullRequestsUnavailable: "command-failed", pullRequestCalls: calls },
+    withCursor(0, { ...OVERDUE, pullRequestGap: standing }),
+  );
+  /* The subprocess the backoff exists to save is still saved. */
+  expect(calls).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBeNull();
+  /* And the run is left standing, because this check learned nothing about
+     whether the source can be read. */
+  expect(input.state.pullRequestGap).toEqual(standing);
+  expect(seatTickDecision(input).verdict.kind).not.toBe("error");
+});
+
 /* An answer ends the run, whatever it says — which is what makes the next
    outage a fresh run with a report of its own. */
 test("an answer clears the run of failures", async () => {
