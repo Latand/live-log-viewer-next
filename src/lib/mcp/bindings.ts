@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import viewerPackageManifest from "../../../package.json";
+
 import { agentRegistry, readOnlyConversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { ENGINE_MODELS, validateLaunchModel } from "@/lib/agent/models";
 import { procBackend } from "@/lib/proc";
@@ -74,7 +76,7 @@ import { PIPELINE_LIST_DEFAULT_LIMIT, projectPipelineListRows } from "@/lib/pipe
 import { loadPipelinesForList } from "@/lib/pipelines/store";
 import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
 import type { PauseResumeActor } from "@/lib/pauseResumeActor";
-import { isRepositoryProjectId, projectIdentityFromRemote } from "@/lib/projects/identity";
+import { projectIdentityFromRemote } from "@/lib/projects/identity";
 import { listFiles } from "@/lib/scanner";
 import { describe, projectForCwd, reprojectFileDescription } from "@/lib/scanner/describe";
 import { pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
@@ -445,9 +447,9 @@ export interface ViewerMcpDomainDependencies {
       Null means the invariant "a registered session has a canonical project"
       is violated, and unscoped directive routing fails closed diagnostically. */
   callerProject?(): string | null;
-  /** The canonical project of the repository that owns this Viewer. The MCP
-      launcher sets its cwd to the selected Viewer package root, and this
-      resolver returns the repository key used by seats and conversations. */
+  /** The canonical project of the repository that owns this Viewer, derived
+      from the Viewer's package metadata through the repository-key algorithm
+      used by seats and conversations. */
   viewerProject(): string | null;
 }
 
@@ -468,27 +470,13 @@ function productionCallerProject(): string | null {
   return cwd ? projectForCwd(cwd) : null;
 }
 
-function viewerRepositoryRemote(repoDir: string): string | null {
-  const manifest = JSON.parse(fs.readFileSync(path.join(repoDir, "package.json"), "utf8")) as unknown;
-  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return null;
-  const repository = (manifest as { repository?: unknown }).repository;
-  if (typeof repository === "string") return repository.trim() || null;
-  if (!repository || typeof repository !== "object" || Array.isArray(repository)) return null;
-  const url = (repository as { url?: unknown }).url;
-  return typeof url === "string" ? url.trim() || null : null;
-}
-
-/** The launcher runs from the selected Viewer package root. Source checkouts
-    carry `.git`; managed release packages carry the same repository identity in
-    package metadata. Both paths feed the shared project-key derivation. */
+/** MCP clients may launch from the caller's project. Repository metadata bundled
+    with the selected Viewer release keeps this identity anchored to the code
+    this server can deploy. */
 function productionViewerProject(): string | null {
-  const repoDir = process.cwd();
   const configuredRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE?.trim();
-  if (configuredRemote) return projectIdentityFromRemote(configuredRemote, repoDir)?.project ?? null;
-  const project = projectForCwd(repoDir);
-  if (project && isRepositoryProjectId(project)) return project;
-  const remote = viewerRepositoryRemote(repoDir);
-  return remote ? projectIdentityFromRemote(remote, repoDir)?.project ?? null : null;
+  const remote = configuredRemote || viewerPackageManifest.repository.url.trim();
+  return remote ? projectIdentityFromRemote(remote, process.cwd())?.project ?? null : null;
 }
 
 /** Server-derived origin of the current caller. Shared by the attention record

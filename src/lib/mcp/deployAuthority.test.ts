@@ -1,6 +1,12 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { expect, test } from "bun:test";
 
-import { viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
+import { projectIdentityFromRepositoryRoot } from "@/lib/projects/identity";
+
+import { productionDomainDependencies, viewerMcpBindings, type ViewerControlDependencies } from "./bindings";
 import { McpToolRefusal } from "./server";
 
 /**
@@ -114,6 +120,33 @@ test("a designated seat of another project is refused before the deployments POS
   expect(error.message).toContain("cannot deploy the caller's project");
   expect(error.message).toContain("no Viewer surface deploys other projects");
   expect(posted).toEqual([]);
+});
+
+test("the production Viewer project identity does not follow the caller's working directory", () => {
+  const originalCwd = process.cwd();
+  const configuredRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE;
+  const viewerProject = productionDomainDependencies.viewerProject();
+  const viewerRepository = path.resolve(import.meta.dir, "../../..");
+  expect(viewerProject).toBe(projectIdentityFromRepositoryRoot(viewerRepository)?.project ?? null);
+  const foreign = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-foreign-project-"));
+  fs.mkdirSync(path.join(foreign, ".git"));
+  fs.writeFileSync(path.join(foreign, ".git", "HEAD"), "ref: refs/heads/main\n");
+  fs.writeFileSync(path.join(foreign, ".git", "config"), [
+    '[remote "origin"]',
+    "  url = https://example.invalid/team/another-project.git",
+    "",
+  ].join("\n"));
+
+  try {
+    delete process.env.LLV_VIEWER_CANONICAL_REMOTE;
+    process.chdir(foreign);
+    expect(productionDomainDependencies.viewerProject()).toBe(viewerProject);
+  } finally {
+    process.chdir(originalCwd);
+    if (configuredRemote === undefined) delete process.env.LLV_VIEWER_CANONICAL_REMOTE;
+    else process.env.LLV_VIEWER_CANONICAL_REMOTE = configuredRemote;
+    fs.rmSync(foreign, { recursive: true, force: true });
+  }
 });
 
 test("an abbreviated SHA is refused before the endpoint is called at all", async () => {
