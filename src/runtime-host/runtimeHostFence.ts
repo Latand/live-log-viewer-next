@@ -1,48 +1,49 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import path from "node:path";
 
 import { procBackend } from "@/lib/proc";
+import { isNamedPipePath } from "@/lib/runtime/localEndpoint";
 
-const LOCK_EX = 2;
-const LOCK_NB = 4;
-const LOCK_UN = 8;
+import { tryLockFenceExclusive, type HeldFenceLock } from "./fenceLock";
+
 const MAX_OWNER_BYTES = 4_096;
-// Linux and Darwin expose O_CLOEXEC under different numeric values.
-const O_CLOEXEC = process.platform === "darwin" ? 0x01000000 : 0x00080000;
+
+/*
+ * How the fence file is opened, and why Windows asks by name.
+ *
+ * POSIX needs a numeric mask, because `O_CLOEXEC` — which keeps this descriptor
+ * out of every spawned child — and `O_NOFOLLOW` — which refuses a fence path
+ * that is a symlink — exist nowhere else. Windows has neither concern: a handle
+ * is not inheritable unless it is asked to be, and an ordinary open does not
+ * traverse a reparse point. `O_NOFOLLOW` is not even defined there, and one
+ * absent constant turns the whole `|` mask into `NaN`.
+ *
+ * Removing it is not enough, and this is the part worth writing down. The
+ * Windows runner reports the right numbers for the rest — `O_CREAT` 0x100,
+ * `O_EXCL` 0x400, the C runtime's own values, printed by
+ * `scripts/verify-platform-backend.ts` — and passing exactly those as a numeric
+ * mask still did not perform the open that was asked for: creating answered
+ * ENOENT for a directory that plainly exists, and opening an existing record
+ * left a descriptor that failed at its first truncate with EPERM. The named
+ * forms are translated by the runtime itself and do work. `wx+` is read-write,
+ * create, fail-if-exists, and does not truncate; `r+` is read-write on
+ * something that must already be there. Both were measured on the Windows leg,
+ * after a probe printed beside them had cleared `mkdirSync` of suspicion.
+ */
+const CREATE_EXCLUSIVE = process.platform === "win32"
+  ? "wx+"
+  : fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL
+    | (process.platform === "darwin" ? 0x01000000 : 0x00080000) | fs.constants.O_NOFOLLOW;
+const OPEN_EXISTING = process.platform === "win32"
+  ? "r+"
+  : fs.constants.O_RDWR
+    | (process.platform === "darwin" ? 0x01000000 : 0x00080000) | fs.constants.O_NOFOLLOW;
 
 interface RuntimeHostFenceOwner {
   pid: number;
   startIdentity: string | null;
   acquisitionId?: string;
-}
-
-interface BunFfiModule {
-  FFIType: { i32: number };
-  dlopen(path: string, symbols: Record<string, unknown>): {
-    symbols: { flock: (fd: number, operation: number) => number };
-  };
-}
-
-let cachedFlock: ((fd: number, operation: number) => number) | null = null;
-
-function flock(fd: number, operation: number): number {
-  if (!cachedFlock) {
-    const runtimeRequire = createRequire(import.meta.url);
-    const ffi = runtimeRequire(`bun:${"ffi"}`) as BunFfiModule;
-    const library = ffi.dlopen(
-      process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6",
-      {
-        flock: {
-          args: [ffi.FFIType.i32, ffi.FFIType.i32],
-          returns: ffi.FFIType.i32,
-        },
-      },
-    );
-    cachedFlock = (lockedFd, lockedOperation) => library.symbols.flock(lockedFd, lockedOperation);
-  }
-  return cachedFlock(fd, operation);
 }
 
 function readOwner(fd: number): RuntimeHostFenceOwner | null {
@@ -81,6 +82,7 @@ export interface RuntimeHostSocketIdentity {
  */
 export class RuntimeHostFence {
   private fd: number | null = null;
+  private lock: HeldFenceLock | null = null;
   private acquisitionId: string | null = null;
 
   constructor(
@@ -102,24 +104,23 @@ export class RuntimeHostFence {
     fs.mkdirSync(path.dirname(this.filename), { recursive: true, mode: 0o700 });
     let created = false;
     let fd: number;
-    const openFlags = fs.constants.O_RDWR | O_CLOEXEC | fs.constants.O_NOFOLLOW;
     try {
-      fd = fs.openSync(this.filename, openFlags | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+      fd = fs.openSync(this.filename, CREATE_EXCLUSIVE, 0o600);
       created = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      fd = fs.openSync(this.filename, openFlags);
+      fd = fs.openSync(this.filename, OPEN_EXISTING);
     }
 
-    let locked = false;
+    let lock: HeldFenceLock | null = null;
     try {
       const observedOwner = readOwner(fd);
       if (!created && !observedOwner) throw new Error("runtime host singleton fence is held");
       if (observedOwner && !observedOwner.acquisitionId && this.ownerAlive(observedOwner)) {
         throw new Error("runtime host singleton fence is held");
       }
-      if (flock(fd, LOCK_EX | LOCK_NB) !== 0) throw new Error("runtime host singleton fence is held");
-      locked = true;
+      lock = tryLockFenceExclusive({ fd, filename: this.filename });
+      if (!lock) throw new Error("runtime host singleton fence is held");
 
       const lockedOwner = readOwner(fd);
       if (!created && !lockedOwner) throw new Error("runtime host singleton fence is held");
@@ -145,9 +146,10 @@ export class RuntimeHostFence {
         throw new Error("runtime host singleton fence changed during acquisition");
       }
       this.fd = fd;
+      this.lock = lock;
       this.acquisitionId = acquisitionId;
     } catch (error) {
-      if (locked) flock(fd, LOCK_UN);
+      lock?.release();
       fs.closeSync(fd);
       throw error;
     }
@@ -159,6 +161,10 @@ export class RuntimeHostFence {
    * captured by this acquisition is unlinked from the private retirement path.
    */
   removeOwnedSocket(socketPath: string, identity: RuntimeHostSocketIdentity): void {
+    /* A named pipe has no inode to retire: the kernel drops the name when the
+       last handle closes. Only the Docker deployment bootstrap calls this, and
+       that is Linux-only, but the endpoint kind is what decides, not the caller. */
+    if (isNamedPipePath(socketPath)) return;
     const fd = this.fd;
     const acquisitionId = this.acquisitionId;
     if (fd === null || !acquisitionId) throw new Error("runtime host singleton fence is not held");
@@ -201,11 +207,13 @@ export class RuntimeHostFence {
 
   release(): void {
     const fd = this.fd;
+    const lock = this.lock;
     this.fd = null;
+    this.lock = null;
     this.acquisitionId = null;
     if (fd === null) return;
     try {
-      flock(fd, LOCK_UN);
+      lock?.release();
     } finally {
       fs.closeSync(fd);
     }

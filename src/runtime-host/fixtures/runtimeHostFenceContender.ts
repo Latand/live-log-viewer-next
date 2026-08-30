@@ -3,6 +3,8 @@ import net from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { testEndpoint } from "./testEndpoint";
+
 const [moduleFilename, fenceFilename, barrierDir, contender] = process.argv.slice(2);
 if (!moduleFilename || !fenceFilename || !barrierDir || !contender) {
   throw new Error("runtime host fence contender arguments are required");
@@ -26,7 +28,7 @@ const waitForAsync = async (filename: string): Promise<void> => {
 
 const observedFilename = path.join(barrierDir, `observed-${contender}`);
 const outcomeFilename = path.join(barrierDir, `outcome-${contender}`);
-const listenerFilename = path.join(barrierDir, `listener-${contender}.sock`);
+const listenerFilename = testEndpoint(barrierDir, `listener-${contender}`);
 const releaseFilename = path.join(barrierDir, "release");
 const { RuntimeHostFence } = await import(pathToFileURL(moduleFilename).href);
 const fence = new RuntimeHostFence(fenceFilename, () => {
