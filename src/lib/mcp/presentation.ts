@@ -100,6 +100,21 @@ export function describeMcpCall(
     };
   }
 
+  if (toolName === "message_receipt") {
+    const operationId = string(result.operationId) || string(args.operationId);
+    const state = string(result.state) || "unknown";
+    const conversationId = string(result.conversationId);
+    return {
+      icon: "message",
+      verb: "Checking",
+      title: `Checking delivery of ${operationId || "a send"}: ${state}`,
+      subtitle: string(result.reason),
+      links: conversationId
+        ? [{ kind: "conversation", id: conversationId, label: "Open conversation", href: `#c=${encodeURIComponent(conversationId)}` }]
+        : [],
+    };
+  }
+
   if (toolName === "create_task") {
     const id = entityId(result, "task");
     return {

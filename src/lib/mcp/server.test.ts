@@ -1569,6 +1569,7 @@ describe("MCP tool service", () => {
       expect(listed.tools.map((tool) => tool.name)).toEqual([
         "spawn_agent",
         "send_message",
+        "message_receipt",
         "create_task",
         "update_task",
         "create_pipeline",

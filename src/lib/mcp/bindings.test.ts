@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { SEND_LOST_REASON } from "@/lib/runtime/sendSettlement";
 import { VIEWER_SPAWN_CAPABILITY_ENV, VIEWER_SPAWN_CAPABILITY_HEADER } from "@/lib/agent/spawnPolicy";
 import { applyBoardCommand } from "@/lib/board/command";
 import { boardFor, mutateBoard, patchBoard } from "@/lib/board/store";
@@ -2296,4 +2298,80 @@ test("seat_tick_settings is callable by a session that holds no seat at all", as
   });
   expect(applied).toMatchObject({ changed: true });
   expect(store.get("viewer")).toMatchObject({ setBy: { kind: "agent", conversationId: TICK_SEAT } });
+});
+
+test("send_message reports acceptance as unsettled, and message_receipt answers what became of it", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-send-receipt-"));
+  sandboxes.push(sandbox);
+  const registry = new AgentRegistry(
+    path.join(sandbox, "agent-registry.json"),
+    undefined,
+    undefined,
+    { sqliteMode: "off" },
+  );
+  setAgentRegistryForTests(registry);
+  const transcriptPath = path.join(sandbox, "recipient.jsonl");
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: transcriptPath,
+    accountId: "receipt-fixture-account",
+    launchProfile: emptyLaunchProfile({ cwd: sandbox }),
+    turn: { state: "idle", source: "assistant", terminalAt: null },
+    observedAt: "2026-08-30T10:00:00.000Z",
+  }]);
+  const conversation = Object.values(registry.snapshot().conversations)[0]!;
+  const generationId = conversation.generations.at(-1)!.id;
+  const operationId = "op_receipt_fixture";
+
+  const bindings = viewerMcpBindings(undefined, {
+    post: async () => ({ outcome: "queued", operationId, receipt: { operationId, status: "queued" } }),
+  });
+  const accepted = await bindings.send_message({
+    clientRequestId: "receipt-fixture-send",
+    conversationId: conversation.id,
+    text: "hold the cutover",
+  });
+  /* #1131: the answer says acceptance, and says that acceptance is not the end
+     of the story. A caller that read `queued` as terminal is what cost forty
+     idle minutes. */
+  expect(accepted).toMatchObject({ operationId, outcome: "queued", settled: false });
+
+  const reservation = registry.holdDelivery(
+    conversation.id,
+    "hold the cutover",
+    "receipt-fixture-send",
+    "text",
+    [],
+    null,
+    { operationId, kind: "send", policy: "queue" },
+  );
+  registry.beginDeliveryAttempt(reservation.id, generationId);
+  expect(await bindings.message_receipt({ clientRequestId: "receipt-read-1", operationId }))
+    .toMatchObject({ operationId, state: "in-flight", resend: null, evidence: "delivery-journal" });
+
+  registry.recordDeliveryOutcome(reservation.id, "failed", SEND_LOST_REASON);
+  expect(await bindings.message_receipt({ clientRequestId: "receipt-read-2", operationId })).toMatchObject({
+    operationId,
+    conversationId: conversation.id,
+    state: "failed",
+    reason: SEND_LOST_REASON,
+    duplicateRisk: false,
+    resend: "safe",
+  });
+});
+
+test("message_receipt refuses an operation id nothing ever admitted", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-send-receipt-unknown-"));
+  sandboxes.push(sandbox);
+  setAgentRegistryForTests(new AgentRegistry(
+    path.join(sandbox, "agent-registry.json"),
+    undefined,
+    undefined,
+    { sqliteMode: "off" },
+  ));
+  const refusal = await viewerMcpBindings()
+    .message_receipt({ clientRequestId: "receipt-unknown", operationId: "op_never_admitted" })
+    .then(() => null, (error: unknown) => error as Error & { details?: { code?: string } });
+  expect(refusal?.name).toBe("McpToolRefusal");
+  expect(refusal?.details?.code).toBe("OPERATION_UNKNOWN");
 });

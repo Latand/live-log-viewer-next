@@ -39,6 +39,7 @@ export const MCP_SERVER_NAME = "viewer";
 export const MCP_TOOL_NAMES = [
   "spawn_agent",
   "send_message",
+  "message_receipt",
   "create_task",
   "update_task",
   "create_pipeline",
@@ -1643,7 +1644,15 @@ export function createMcpToolService(
 
 const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   spawn_agent: "Create a Viewer-managed agent conversation and return its durable conversation and launch ids.",
-  send_message: "Deliver a message to a Viewer conversation through its registered runtime host.",
+  send_message: [
+    "Deliver a message to a Viewer conversation through its registered runtime host.",
+    "The answer reports acceptance, not arrival: `outcome` is `queued` or `delivering` until the delivery record settles, and `settled` says which. Hold `operationId` and ask `message_receipt` what became of it — never treat `queued` as a terminal answer, and never re-send an unsettled operation, because a send whose fate is unknown can be delivered twice.",
+  ].join(" "),
+  message_receipt: [
+    "Answer what became of one accepted send, by the `operationId` `send_message` returned.",
+    "`state` is `delivered`, `failed` or `in-flight`, read from the durable delivery record rather than from what the send call reported at the time. Every accepted send reaches `delivered` or `failed`; a send that was dropped ends as `failed`.",
+    "`resend` says what is safe to do next: `not-needed` (it arrived), `safe` (it provably never executed and is fenced, so the same instruction may be sent again), or `verify-first` (`duplicateRisk` is true — delivery was started and never settled, so check the recipient before sending again).",
+  ].join(" "),
   create_task: "Create a durable board task.",
   update_task: "Update a durable board task.",
   create_pipeline: [
@@ -1692,7 +1701,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   bridge_directive: "Relay the user's intent to the designated manager. The recipient and the delivery id are derived server-side, so a retry of the same root turn is one instruction, never two.",
   get_orchestrator: "Read a project's designated orchestrator: designation, health and activity, model and prompt version, transcript size, message/tool/compaction counts, context usage against its model's configured window (clearly labelled when estimated), predecessor lineage, and a bounded rotation recommendation — STRONGLY_RECOMMEND_ROTATION once usage reaches the configured threshold. Words only: it never rotates, creates, or interrupts anything itself.",
   create_orchestrator: "Create a project's orchestrator or adopt one eligible registered conversation: designate it as the project's selected orchestrator and deliver the approved versioned mandate (editable). Idempotent by clientRequestId.",
-  send_message_to_orchestrator: "Deliver a message to the project's selected orchestrator, resolved server-side. A dead selected conversation is resumed; with none designated, one is created first and then delivered to. Idempotent by clientRequestId.",
+  send_message_to_orchestrator: "Deliver a message to the project's selected orchestrator, resolved server-side. A dead selected conversation is resumed; with none designated, one is created first and then delivered to. Idempotent by clientRequestId. Like send_message, the answer reports acceptance rather than arrival: ask message_receipt what became of the operationId.",
   seat_tick_settings: [
     "Read — and change — one project's seat tick: whether the Viewer wakes that project's seat at all, how often, and what your own monitor prompt tells the wake to look at.",
     "Called with no change fields it is a read. `project` defaults to your own, and naming another project's is allowed rather than refused; the answer says which of the two you did, and the record, the board card and the tick's journal all carry who changed whose tick.",
@@ -1880,6 +1889,10 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     conversationId: z.string().optional(),
     transcriptPath: z.string().optional(),
     text: z.string().min(1),
+  }).passthrough(),
+  message_receipt: z.object({
+    clientRequestId: clientRequestIdSchema,
+    operationId: z.string().min(1).describe("The operationId a send_message call returned."),
   }).passthrough(),
   create_task: z.object({
     clientRequestId: clientRequestIdSchema,

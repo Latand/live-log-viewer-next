@@ -1,0 +1,526 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, expect, test } from "bun:test";
+
+/* Isolated state only: this suite writes real registry files and a real runtime
+   journal, neither of which may be the operator's. Nothing here addresses a
+   real conversation — every send is built in a fixture. */
+const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "llv-send-settlement-"));
+const isolatedEnvironment = {
+  HOME: path.join(isolated, "home"),
+  XDG_CONFIG_HOME: path.join(isolated, "config"),
+  LLV_STATE_DIR: path.join(isolated, "state"),
+  TMPDIR: path.join(isolated, "tmp"),
+};
+/* Restored in afterAll: a bun run that carries several test files shares one
+   process, so an isolated TMPDIR this file then deletes would strand every
+   later file's mkdtemp. */
+const ambientEnvironment = Object.fromEntries(
+  Object.keys(isolatedEnvironment).map((name) => [name, process.env[name]]),
+);
+for (const [name, directory] of Object.entries(isolatedEnvironment)) {
+  fs.mkdirSync(directory, { recursive: true });
+  process.env[name] = directory;
+}
+
+const { AgentRegistry } = await import("@/lib/agent/registry");
+const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
+const { RuntimeJournal } = await import("@/runtime-host/journal");
+const { projectDeliveryEvents } = await import("@/lib/lifecycle/projector");
+const { StructuredDeliveryQueue } = await import("./structuredDeliveryQueue");
+const {
+  SEND_LOST_REASON,
+  SEND_UNVERIFIED_REASON,
+  sendReceiptFor,
+  settleUnsettledSends,
+  unsettledSends,
+} = await import("./sendSettlement");
+type AgentRegistry = InstanceType<typeof AgentRegistry>;
+type RuntimeJournal = InstanceType<typeof RuntimeJournal>;
+type RuntimeHostClient = import("./client").RuntimeHostClient;
+type StructuredDeliveryQueuePort = import("./structuredDeliveryQueue").StructuredDeliveryQueuePort;
+type EngineHost = import("./engineHost").EngineHost;
+type HostState = import("./engineHost").HostState;
+type QueueEntry = import("./engineHost").QueueEntry;
+type DeliveryReceipt = import("./engineHost").DeliveryReceipt;
+type ViewerConversationId = `conversation_${string}`;
+
+afterAll(() => {
+  for (const [name, value] of Object.entries(ambientEnvironment)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  fs.rmSync(isolated, { recursive: true, force: true });
+});
+
+const SETTLEMENT_WINDOW_MS = 10 * 60_000;
+/** Every fixture send is accepted "now"; the sweep is driven from a clock past
+    the window instead of sleeping through it. */
+const AFTER_THE_WINDOW = () => Date.now() + SETTLEMENT_WINDOW_MS + 60_000;
+
+function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
+  return {
+    snapshot: async () => journal.snapshot(),
+    events: async (after: number) => journal.replay(after),
+    waitEvents: async (after: number) => journal.replay(after),
+    append: async (event) => journal.append(event),
+    operation: async (event) => journal.append(event),
+    command: async (command) => journal.executeOperation(command),
+    operationStatus: async (operationId: string, options?: { currentRetryLeaf?: boolean }) =>
+      (options?.currentRetryLeaf ? journal.currentRetryResult(operationId) : journal.operationResult(operationId)),
+    producerCursor: async (producerKind: string, eventKeyPrefix: string) =>
+      journal.producerCursor(producerKind, eventKeyPrefix),
+    effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
+    retryOperation: async (operationId, nextIdempotencyKey) => journal.retryOperation(operationId, nextIdempotencyKey),
+  } as RuntimeHostClient;
+}
+
+function idleState(sessionKey: string): HostState {
+  return {
+    status: "idle",
+    sessionKey,
+    endpoint: "fixture:host",
+    pid: 1,
+    processStartIdentity: "1",
+    eventCursor: 0,
+    protocolVersion: "fixture",
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+    account: null,
+  };
+}
+
+/** A host that records everything handed to it, so "was never delivered" is an
+    assertion about the recipient rather than about a receipt. */
+function recordingHost(sessionKey: string): { host: EngineHost; received: string[] } {
+  const received: string[] = [];
+  return {
+    received,
+    host: {
+      attach: () => ({ async *[Symbol.asyncIterator]() {} }),
+      send: async (entry: QueueEntry): Promise<DeliveryReceipt> => {
+        received.push(entry.text ?? "");
+        return { outcome: "turn-started", turnId: `turn-${entry.id}` };
+      },
+      interrupt: async () => {},
+      answer: async () => {},
+      health: async () => idleState(sessionKey),
+      release: async () => {},
+    },
+  };
+}
+
+interface Fixture {
+  registry: AgentRegistry;
+  journal: RuntimeJournal;
+  client: RuntimeHostClient;
+  conversationId: ViewerConversationId;
+  generationId: string;
+  transcriptPath: string;
+  close(): void;
+}
+
+function fixture(name: string): Fixture {
+  const directory = fs.mkdtempSync(path.join(isolated, `${name}-`));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const transcriptPath = path.join(directory, `${name}.jsonl`);
+  const launchProfile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: transcriptPath,
+    accountId: "settlement-fixture-account",
+    launchProfile,
+    turn: { state: "idle", source: "assistant", terminalAt: null },
+    observedAt: "2026-08-30T10:00:00.000Z",
+  }]);
+  const conversation = Object.values(registry.snapshot().conversations)[0];
+  const generation = conversation?.generations.at(-1);
+  if (!conversation || !generation) throw new Error("fixture conversation is missing");
+  registry.upsert({
+    key: { engine: "codex", sessionId: generation.id },
+    artifactPath: transcriptPath,
+    cwd: directory,
+    accountId: "settlement-fixture-account",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fixture:settlement-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fixture-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  /* The runtime journal only admits a send for a hosted session, so the fixture
+     publishes the same host state a live structured host would. */
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId: generation.id },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: transcriptPath,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  return {
+    registry,
+    journal,
+    client: runtimeClient(journal),
+    conversationId: conversation.id,
+    generationId: generation.id,
+    transcriptPath,
+    close: () => journal.close(),
+  };
+}
+
+/**
+ * Admits one send exactly the way the structured send path does: a durable
+ * reservation, a claimed attempt, then the runtime-journal operation. What
+ * comes back is the operation id an MCP caller would have been handed with
+ * `outcome: "queued"`.
+ */
+function acceptSend(
+  active: Fixture,
+  options: { text?: string; clientMessageId?: string; operationId?: string } = {},
+): { operationId: string; deliveryId: string } {
+  const clientMessageId = options.clientMessageId ?? "fixture-message-key";
+  const operationId = options.operationId ?? `op_${clientMessageId}`;
+  const text = options.text ?? "hold the cutover until I say go";
+  const reservation = active.registry.holdDelivery(
+    active.conversationId,
+    text,
+    clientMessageId,
+    "text",
+    [],
+    null,
+    { operationId, kind: "send", policy: "queue" },
+  );
+  if (reservation.state !== "assigned") throw new Error(`fixture reservation is ${reservation.state}`);
+  const claimed = active.registry.beginDeliveryAttempt(reservation.id, active.generationId);
+  if (!claimed) throw new Error("fixture reservation could not claim its attempt");
+  const admitted = active.journal.executeOperation({
+    kind: "send",
+    operationId,
+    conversationId: active.conversationId,
+    idempotencyKey: clientMessageId,
+    text,
+    policy: "queue",
+  });
+  expect(admitted.receipt.status).toBe("queued");
+  return { operationId, deliveryId: reservation.id };
+}
+
+/** An executor that had already batched this effect before anything settled it
+    — the exact race a fence has to survive. */
+function stalePortFor(
+  active: Fixture,
+  operationId: string,
+  clientMessageId: string,
+  text: string,
+): StructuredDeliveryQueuePort {
+  return {
+    effects: async () => [{
+      id: `effect:${operationId}`,
+      kind: "runtime.send",
+      eventSeq: 1,
+      payload: {
+        kind: "send",
+        operationId,
+        conversationId: active.conversationId,
+        text,
+        idempotencyKey: clientMessageId,
+        policy: "queue",
+      },
+    }],
+    transition: async (id, status, details) => {
+      await active.client.transitionOperation(id, status, details);
+    },
+  };
+}
+
+function receiptOf(active: Fixture, operationId: string) {
+  return sendReceiptFor(active.registry.readOnlySnapshot(), operationId);
+}
+
+test("an accepted send that the journal delivered reconciles rather than being reported lost", async () => {
+  const active = fixture("delivered");
+  try {
+    const { operationId, deliveryId } = acceptSend(active, { clientMessageId: "delivered-key" });
+    /* The executor did its job; only the projection onto the reservation was
+       missed, which must never be mistaken for a loss. */
+    active.journal.transitionOperation(operationId, "delivering");
+    active.journal.transitionOperation(operationId, "delivered", { turnId: "turn-1" });
+    expect(receiptOf(active, operationId)?.state).toBe("in-flight");
+
+    const report = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+
+    expect(report.settled).toEqual([{
+      operationId,
+      deliveryId,
+      conversationId: active.conversationId,
+      state: "delivered",
+      disposition: "reconciled",
+      duplicateRisk: false,
+    }]);
+    const receipt = receiptOf(active, operationId);
+    expect(receipt?.state).toBe("delivered");
+    expect(receipt?.resend).toBe("not-needed");
+    expect(receipt?.duplicateRisk).toBe(false);
+    expect(receipt?.evidence).toBe("delivery-journal");
+  } finally {
+    active.close();
+  }
+});
+
+test("a dropped send settles as failed, and the fence stops the queue from delivering it afterwards", async () => {
+  const active = fixture("dropped");
+  try {
+    const { operationId, deliveryId } = acceptSend(active, {
+      clientMessageId: "dropped-key",
+      text: "resume the cutover",
+    });
+    /* Nothing else happens to it: this is the incident's shape — accepted,
+       answered `queued`, and then silence. */
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("queued");
+    expect(unsettledSends(active.registry.readOnlySnapshot(), { now: AFTER_THE_WINDOW() })).toMatchObject([
+      { operationId, deliveryId, awaitingTurn: false },
+    ]);
+
+    const report = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+
+    expect(report.settled).toEqual([{
+      operationId,
+      deliveryId,
+      conversationId: active.conversationId,
+      state: "failed",
+      disposition: "lost",
+      duplicateRisk: false,
+    }]);
+    const receipt = receiptOf(active, operationId);
+    expect(receipt?.state).toBe("failed");
+    expect(receipt?.reason).toBe(SEND_LOST_REASON);
+    expect(receipt?.duplicateRisk).toBe(false);
+    expect(receipt?.resend).toBe("safe");
+
+    /* The fence, proved against the real queue rather than asserted: the effect
+       is gone from the outbox, and an executor that had already batched it is
+       refused at the `delivering` transition — before `host.send` is reached. */
+    expect(await active.journal.effectBatch(100, ["runtime.send"])).toEqual([]);
+    const { host, received } = recordingHost(active.generationId);
+    const stalePort = stalePortFor(active, operationId, "dropped-key", "resume the cutover");
+    await new StructuredDeliveryQueue(stalePort, () => host).drain().catch(() => undefined);
+    expect(received).toEqual([]);
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("failed");
+  } finally {
+    active.close();
+  }
+});
+
+test("the same queue pass delivers a send the settlement has not fenced", async () => {
+  /* The control for the fence above: with the operation left open, this exact
+     port, queue and host do deliver, so the empty recipient in that test is the
+     fence's doing and not the harness's. */
+  const active = fixture("unfenced");
+  try {
+    const { operationId } = acceptSend(active, { clientMessageId: "unfenced-key", text: "resume the cutover" });
+    const { host, received } = recordingHost(active.generationId);
+    await new StructuredDeliveryQueue(stalePortFor(active, operationId, "unfenced-key", "resume the cutover"), () => host).drain();
+    expect(received).toEqual(["resume the cutover"]);
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("delivered");
+  } finally {
+    active.close();
+  }
+});
+
+test("a send whose first attempt is uncertain settles as failed and refuses to call a resend safe", async () => {
+  const active = fixture("uncertain");
+  try {
+    const { operationId, deliveryId } = acceptSend(active, { clientMessageId: "uncertain-key" });
+    /* The executor took it and never came back. Nothing can prove the recipient
+       did not receive it, so nothing here may pretend otherwise. */
+    active.journal.transitionOperation(operationId, "delivering", { turnId: "turn-7" });
+
+    const report = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+
+    expect(report.settled).toEqual([{
+      operationId,
+      deliveryId,
+      conversationId: active.conversationId,
+      state: "failed",
+      disposition: "unverified",
+      duplicateRisk: true,
+    }]);
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("uncertain");
+    const receipt = receiptOf(active, operationId);
+    expect(receipt?.state).toBe("failed");
+    expect(receipt?.reason).toBe(SEND_UNVERIFIED_REASON);
+    expect(receipt?.duplicateRisk).toBe(true);
+    expect(receipt?.resend).toBe("verify-first");
+    /* Terminal either way: an unverified send is still fenced against being
+       executed a second time by the queue. */
+    expect(await active.journal.effectBatch(100, ["runtime.send"])).toEqual([]);
+  } finally {
+    active.close();
+  }
+});
+
+test("a send queued behind the recipient's own turn waits, and stops being exempt at the ceiling", async () => {
+  const active = fixture("in-turn");
+  try {
+    const { operationId } = acceptSend(active, { clientMessageId: "in-turn-key" });
+    active.registry.setStructuredHost({ engine: "codex", sessionId: active.generationId }, {
+      kind: "codex-app-server",
+      endpoint: "fixture:settlement-host",
+      process: null,
+      eventCursor: 1,
+      protocolVersion: "fixture-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: "turn-in-progress",
+      pendingAttention: [],
+      activeFlags: [],
+    });
+
+    const inTurn = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(inTurn).toMatchObject({ examined: 0, settled: [], deferred: [] });
+    expect(receiptOf(active, operationId)?.state).toBe("in-flight");
+
+    /* A host wedged mid-turn must not make `queued` permanent again. */
+    const pastCeiling = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: () => Date.now() + 61 * 60_000,
+    });
+    expect(pastCeiling.settled).toMatchObject([{ operationId, state: "failed", disposition: "lost" }]);
+    expect(receiptOf(active, operationId)?.state).toBe("failed");
+  } finally {
+    active.close();
+  }
+});
+
+test("a retried send is judged by its current attempt, not by the ancestor it replaced", async () => {
+  const active = fixture("retried");
+  try {
+    const { operationId, deliveryId } = acceptSend(active, { clientMessageId: "retried-key" });
+    /* The first attempt died with the host; a fresh attempt was admitted under a
+       new idempotency key and delivered. The reservation still names the
+       ancestor, so reading the ancestor would report a delivered message as a
+       loss — and would then try to fence an operation already terminal. */
+    active.journal.transitionOperation(operationId, "failed", { reason: "dead-host" });
+    const retry = active.journal.retryOperation(operationId, "retried-key-second");
+    expect(retry.operationId).not.toBe(operationId);
+    active.journal.transitionOperation(retry.operationId, "delivering");
+    active.journal.transitionOperation(retry.operationId, "delivered", { turnId: "turn-9" });
+
+    const report = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+
+    expect(report.settled).toMatchObject([{ operationId, deliveryId, state: "delivered", disposition: "reconciled" }]);
+    expect(receiptOf(active, operationId)?.state).toBe("delivered");
+  } finally {
+    active.close();
+  }
+});
+
+test("an unreadable delivery journal defers the send instead of declaring it lost", async () => {
+  const active = fixture("deferred");
+  try {
+    const { operationId } = acceptSend(active, { clientMessageId: "deferred-key" });
+
+    const withoutHost = await settleUnsettledSends({
+      registry: active.registry,
+      client: null,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(withoutHost.settled).toEqual([]);
+    expect(withoutHost.deferred).toEqual([{ operationId, reason: "runtime host is unavailable" }]);
+
+    const unreachable = await settleUnsettledSends({
+      registry: active.registry,
+      client: {
+        ...active.client,
+        operationStatus: async () => { throw new Error("runtime host request timed out"); },
+      } as RuntimeHostClient,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(unreachable.settled).toEqual([]);
+    expect(unreachable.deferred).toEqual([{ operationId, reason: "runtime host request timed out" }]);
+    /* Still open, still unfenced: knowing less is never a licence to declare a
+       message lost while it may be sitting in a live outbox. */
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("queued");
+    expect(receiptOf(active, operationId)?.state).toBe("in-flight");
+  } finally {
+    active.close();
+  }
+});
+
+test("a settled loss is journaled as it is declared, so nobody has to run a silence monitor", async () => {
+  const active = fixture("visible");
+  try {
+    const { operationId, deliveryId } = acceptSend(active, { clientMessageId: "visible-key" });
+    const journaled: unknown[] = [];
+    await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+      /* The shared lifecycle file is not this fixture's to write; what matters
+         is that the loss is handed to it inside the settlement rather than left
+         for whichever poll happens next. */
+      journalLifecycle: (deliveries) => journaled.push(...projectDeliveryEvents([...deliveries])),
+    });
+
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
+    expect(journaled).toMatchObject([{
+      key: `delivery:${deliveryId}:failed`,
+      type: "delivery_expired",
+      conversationId: active.conversationId,
+    }]);
+    expect(receiptOf(active, operationId)?.state).toBe("failed");
+  } finally {
+    active.close();
+  }
+});
+
+test("an operation id nothing ever admitted is answered with nothing, not an invented in-flight state", () => {
+  const active = fixture("unknown");
+  try {
+    expect(receiptOf(active, "op_never_admitted")).toBeNull();
+  } finally {
+    active.close();
+  }
+});

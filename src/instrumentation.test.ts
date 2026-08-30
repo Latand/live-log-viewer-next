@@ -515,6 +515,36 @@ test("automatic host retirement starts with the release that owns traffic, not w
   expect(started).toEqual(["pipelines", "host-retirement"]);
 });
 
+test("send settlement starts with the release that owns traffic, and a failure to start it costs only itself", async () => {
+  /* #1131: the sweep fences operations in the runtime journal that THIS
+     process's delivery queue would otherwise still execute, so it belongs to
+     the process that owns traffic — and, like every controller here, it must
+     not take the rest of the boot down when it cannot start. */
+  const started: string[] = [];
+  await startCurrentReleaseControllers(
+    { LLV_ACCOUNT_CONTROLLER_DISABLED: "1" },
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { started.push("pipelines"); } }),
+      loadAccountMigrationController: async () => ({ startAccountMigrationController: async () => { started.push("account"); } }),
+      loadSendSettlement: async () => ({ startSendSettlement: () => { started.push("send-settlement"); } }),
+      loadSeatTick: async () => ({ startSeatTick: () => { started.push("seat-tick"); return true; } }),
+    },
+  );
+  expect(started).toEqual(["pipelines", "send-settlement", "seat-tick"]);
+
+  const withoutSettlement: string[] = [];
+  await startCurrentReleaseControllers(
+    { LLV_ACCOUNT_CONTROLLER_DISABLED: "1" },
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { withoutSettlement.push("pipelines"); } }),
+      loadAccountMigrationController: async () => ({ startAccountMigrationController: async () => { withoutSettlement.push("account"); } }),
+      loadSendSettlement: async () => { throw new Error("runtime state unavailable"); },
+      loadSeatTick: async () => ({ startSeatTick: () => { withoutSettlement.push("seat-tick"); return true; } }),
+    },
+  );
+  expect(withoutSettlement).toEqual(["pipelines", "seat-tick"]);
+});
+
 test("the seat tick starts with the release that owns traffic — one clock, one process", async () => {
   /* #1245: the thing that drove orchestrator sessions was a prompt an agent
      scheduled for itself, so it died with the session and every rotation

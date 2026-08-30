@@ -89,6 +89,8 @@ interface CurrentReleaseControllerLoaders {
   /** Optional for the same reason. */
   loadStructuredHostRetirement?: () => Promise<{ startStructuredHostRetirement: () => void }>;
   /** Optional for the same reason. */
+  loadSendSettlement?: () => Promise<{ startSendSettlement: () => void }>;
+  /** Optional for the same reason. */
   loadSeatTick?: () => Promise<{ startSeatTick: () => boolean }>;
 }
 
@@ -335,6 +337,7 @@ export async function startCurrentReleaseControllers(
     loadTelegramReportScheduler: () => import("@/lib/telegram/reportRunner"),
     loadTelegramConnectorBoot: () => import("@/lib/telegram/connectorBoot"),
     loadStructuredHostRetirement: () => import("@/lib/runtime/structuredHostRetirement"),
+    loadSendSettlement: () => import("@/lib/runtime/sendSettlement"),
     loadSeatTick: () => import("@/lib/monitor/seatTickController"),
   },
 ): Promise<void> {
@@ -379,6 +382,19 @@ export async function startCurrentReleaseControllers(
     retirement?.startStructuredHostRetirement();
   } catch (error) {
     console.error("[host retirement] sweep start failed", error instanceof Error ? error.name : "unknown");
+  }
+  /* Send settlement (#1131). An accepted send that the delivery queue never
+     executed used to rest at `queued` forever, with nothing anywhere turning
+     that into an answer; this sweep is what makes every accepted send reach
+     `delivered` or `failed`. It belongs to the release that owns traffic for
+     the reason retirement does — it fences operations in the runtime journal
+     that the delivery queue of THIS process would otherwise still execute — and
+     it must not take the controllers below down if it fails to start. */
+  try {
+    const settlement = await loaders.loadSendSettlement?.();
+    settlement?.startSendSettlement();
+  } catch (error) {
+    console.error("[send settlement] sweep start failed", error instanceof Error ? error.name : "unknown");
   }
   /* The seat tick (#1245). It belongs here for the reason every controller
      above does — one clock, in the release that owns traffic. Starting here

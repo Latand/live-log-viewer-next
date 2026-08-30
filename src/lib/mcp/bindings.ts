@@ -85,6 +85,7 @@ import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { messageOriginRole, type MessageOrigin } from "@/lib/runtime/messageOrigin";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
+import { sendReceiptFor } from "@/lib/runtime/sendSettlement";
 import {
   SELECTED_TAIL_MAX_BYTES,
   SELECTED_TAIL_MAX_LINES,
@@ -819,12 +820,41 @@ async function sendMessage(
   const conversation = conversationId
     ? lookup.conversation(conversationId as `conversation_${string}`)
     : lookup.conversationForPath(transcriptPath);
+  const settledOutcome = outcome.outcome ?? "delivered";
   return {
     conversationId: (conversation?.id ?? conversationId) || null,
     transcriptPath: (conversation?.generations.at(-1)?.path ?? transcriptPath) || null,
     operationId: outcome.operationId ?? (outcome.receipt as { operationId?: unknown } | undefined)?.operationId ?? null,
-    outcome: outcome.outcome ?? "delivered",
+    outcome: settledOutcome,
+    /* #1131: acceptance is not arrival. A `queued` send is admitted and not yet
+       settled, and saying so on the answer itself is what stops a caller from
+       reading the send-time guess as the end of the story — `message_receipt`
+       over the operation id is where the end of the story lives. */
+    settled: settledOutcome === "delivered",
   };
+}
+
+/**
+ * What became of one accepted send (#1131).
+ *
+ * The answer is read from the durable delivery record, so it survives the
+ * process that made the send, the runtime host that took it, and the
+ * reservation itself once compaction has retired it. An id nothing ever
+ * admitted is refused rather than answered with an invented in-flight state.
+ */
+async function messageReceipt(
+  args: McpToolArgs,
+  dependencies: Pick<ViewerMcpDomainDependencies, "registrySnapshot">,
+): Promise<McpToolPayload> {
+  const operationId = required(args, "operationId");
+  const receipt = sendReceiptFor(dependencies.registrySnapshot(), operationId);
+  if (!receipt) {
+    throw new McpToolRefusal(
+      "no accepted send is recorded under that operationId",
+      { code: "OPERATION_UNKNOWN" },
+    );
+  }
+  return { ...receipt };
 }
 
 async function createBoardTask(args: McpToolArgs): Promise<McpToolPayload> {
@@ -1939,6 +1969,10 @@ async function sendMessageToOrchestrator(
     predecessorConversationId: seat.predecessorConversationId,
     operationId: outcome.operationId ?? (outcome.receipt as { operationId?: unknown } | undefined)?.operationId ?? null,
     outcome: outcome.outcome ?? "delivered",
+    /* #1131: the same control path as `send_message`, so the same contract —
+       acceptance is not arrival, and `message_receipt` over the operation id is
+       what says which. */
+    settled: (outcome.outcome ?? "delivered") === "delivered",
   });
 }
 
@@ -3152,6 +3186,7 @@ export function viewerMcpBindings(
   return {
     spawn_agent: (args, context) => spawnAgent(args, viewerControlForCall(controlDependencies, context)),
     send_message: (args, context) => sendMessage(args, viewerControlForCall(controlDependencies, context), domainDependencies),
+    message_receipt: (args) => messageReceipt(args, domainDependencies),
     create_task: createBoardTask,
     update_task: updateBoardTask,
     create_pipeline: createPipeline,
