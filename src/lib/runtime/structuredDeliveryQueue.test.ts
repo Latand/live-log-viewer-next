@@ -1515,3 +1515,117 @@ test("an active-host kill retries after terminal projection fails", async () => 
     ["kill-active-retry", "delivered", undefined],
   ]);
 });
+
+/**
+ * A durable delivery journal small enough to be read twice, by two executors
+ * (#1131). The receipt keeps whatever reason the transition recorded, because
+ * that is where an executor stamps the claim it is delivering under.
+ */
+function ownershipJournal(claim: () => string | null): {
+  port: StructuredDeliveryQueuePort;
+  receipts: Map<string, { status: string; reason?: string | null }>;
+  writes: string[];
+  pending: Set<string>;
+  transitions: Array<[string, string, string | null]>;
+} {
+  const receipts = new Map<string, { status: string; reason?: string | null }>([
+    ["op-owned", { status: "queued", reason: null }],
+  ]);
+  const pending = new Set(["op-owned"]);
+  const writes: string[] = [];
+  const transitions: Array<[string, string, string | null]> = [];
+  return {
+    receipts,
+    writes,
+    pending,
+    transitions,
+    port: {
+      effects: async () => [...pending].map((operationId) => ({
+        id: `effect:${operationId}`,
+        kind: "runtime.send",
+        eventSeq: 21,
+        payload: { kind: "send", operationId, conversationId: "conversation-one", text: "ship it", idempotencyKey: "owned", policy: "queue" },
+      })),
+      transition: async (operationId, status, details) => {
+        transitions.push([operationId, status, details?.reason ?? null]);
+        receipts.set(operationId, { status, reason: details?.reason ?? null });
+        if (status !== "queued" && status !== "delivering") pending.delete(operationId);
+      },
+      status: async (operationId) => receipts.get(operationId) ?? null,
+      hostClaim: () => claim(),
+    },
+  };
+}
+
+test("a delivering send whose executor still owns the host is left to that executor", async () => {
+  /* The row an executor writes before it calls the engine says only that
+     actuation began; whether it was ABANDONED is a separate question, and the
+     answer used to be assumed. A second executor draining the same journal
+     during a release succession would terminalize a send the first one was
+     still delivering — the durable fence dropping work that was going
+     somewhere. The claim it recorded is the evidence: while it still owns the
+     host, the row is its to settle. */
+  let claim: string | null = "claim-alpha:3";
+  const journal = ownershipJournal(() => claim);
+  const writes: string[] = [];
+  const engine = () => host(async (entry) => {
+    writes.push(entry.id);
+    return { outcome: "turn-started" as const, turnId: "turn-owned" };
+  });
+
+  /* The owner takes it into delivery and does not come back within this pass —
+     the send is on the wire. */
+  const owner = new StructuredDeliveryQueue(journal.port, engine);
+  await owner.drain();
+  expect(writes).toEqual(["op-owned"]);
+  const recorded = journal.transitions.find(([, status]) => status === "delivering")?.[2] ?? null;
+  expect(recorded).toContain("delivering-owner:");
+  journal.receipts.set("op-owned", { status: "delivering", reason: recorded });
+  journal.pending.add("op-owned");
+
+  /* A second executor, drained while the first still holds the claim. */
+  const successor = new StructuredDeliveryQueue(journal.port, engine);
+  await successor.drain();
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({ status: "delivering", reason: recorded });
+
+  /* Ownership actually changes — the host was re-adopted, so the earlier
+     executor can no longer write to the engine and can no longer answer for the
+     send either. NOW it is abandoned, and it ends the only way an actuated send
+     may: unverified, never queued, never written again. */
+  claim = "claim-beta:4";
+  const afterHandover = new StructuredDeliveryQueue(journal.port, engine);
+  await afterHandover.drain();
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")).toMatchObject({
+    status: "uncertain",
+    reason: "delivery was started by an earlier executor; whether it reached the recipient is unverified",
+  });
+});
+
+test("a delivering send this executor abandoned itself settles unverified rather than waiting on itself", async () => {
+  /* Ownership evidence must never become a way to hang: a row this executor
+     wrote and then lost — a pass that threw between the engine write and the
+     transition — matches the current claim, and there is nobody but this pass
+     to end it. */
+  const journal = ownershipJournal(() => "claim-alpha:3");
+  const writes: string[] = [];
+  const queue = new StructuredDeliveryQueue(journal.port, () => host(async (entry) => {
+    writes.push(entry.id);
+    throw new Error("runtime stopped before confirmation commit");
+  }));
+
+  await queue.drain().catch(() => undefined);
+  expect(journal.receipts.get("op-owned")?.status).toBe("uncertain");
+  /* The pass that threw before its own transition landed: the row is still
+     `delivering`, stamped by this very executor. */
+  journal.receipts.set("op-owned", {
+    status: "delivering",
+    reason: journal.transitions.find(([, status]) => status === "delivering")?.[2] ?? null,
+  });
+  journal.pending.add("op-owned");
+  await queue.drain();
+
+  expect(writes).toEqual(["op-owned"]);
+  expect(journal.receipts.get("op-owned")?.status).toBe("uncertain");
+});

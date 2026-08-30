@@ -28,12 +28,21 @@ export interface StructuredDeliveryQueuePort {
   ): Promise<void>;
   /** The durable receipt state, when the port can read it. The compact control
       needs it to tell a control it must issue from one an earlier executor
-      already issued and never settled (#862). */
-  status?(operationId: string): Promise<{ status: string } | null>;
+      already issued and never settled (#862), and the message path reads the
+      ownership its own `delivering` write recorded back off the reason. */
+  status?(operationId: string): Promise<{ status: string; reason?: string | null } | null>;
   /** Whether the durable DELIVERY RECORD has already ended this send (#1131).
       The journal cannot answer that during the outage in which it is written,
       which is exactly when it has to be honoured. */
   settled?(operationId: string): boolean | Promise<boolean>;
+  /** The writer claim that currently owns this conversation's structured host —
+      the durable answer to "who may write to the engine right now" (#1131).
+      Recorded when a send enters delivery and compared when one is found still
+      there, so a `delivering` row is called abandoned on evidence that
+      ownership CHANGED rather than on its mere existence. Absent port, absent
+      claim: no evidence either way, and an actuated send with no evidence
+      settles unverified rather than being executed again. */
+  hostClaim?(conversationId: string): string | null | Promise<string | null>;
 }
 
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
@@ -302,6 +311,54 @@ export const DELIVERY_UNVERIFIED_AFTER_ACTUATION =
 export const DELIVERY_FENCED_BY_SETTLEMENT =
   "delivery was settled before this executor reached it; whether it reached the recipient is unverified";
 
+/**
+ * Who took a send into delivery, written where the durable row can carry it.
+ *
+ * A `delivering` row is the fence that stops a send from being written to the
+ * engine twice, and it used to be read as proof of an ABANDONED executor on its
+ * own. It is not: a send another executor is actuating right now looks exactly
+ * the same, and terminalizing it drops work that is still going somewhere —
+ * during a release succession, where two executors are briefly alive over one
+ * journal, that is the ordinary case rather than the rare one.
+ *
+ * So the executor stamps itself and the writer claim it is delivering under
+ * onto the transition, and a later executor calls the row abandoned only when
+ * that ownership has actually CHANGED: a different executor whose claim on the
+ * host is no longer the current one can no longer write to the engine at all,
+ * so nothing is left to settle the row but this pass. The receipt reason is the
+ * carrier — the journal already persists it per transition, and inventing a
+ * durable column for one token would be a schema for a fact one string holds.
+ *
+ * The absorbing rule is untouched by any of it: no branch here sends anything
+ * again and no branch returns the row to `queued`. Ownership only decides
+ * whether this pass ends the send as unverified or leaves it to its owner —
+ * and a send left to an owner that never comes back is still ended by the
+ * settlement deadline a receipt query applies, so leaving it can delay an
+ * answer but can never withhold one.
+ */
+const DELIVERING_OWNERSHIP_PREFIX = "delivering-owner:";
+
+interface DeliveringOwnership {
+  executorId: string;
+  hostClaim: string;
+}
+
+function deliveringOwnershipReason(executorId: string, hostClaim: string): string {
+  return `${DELIVERING_OWNERSHIP_PREFIX}${executorId}@${hostClaim}`;
+}
+
+/** Ownership off a durable reason, or null where the row carries none — a row
+    written before this evidence existed, or by a path that recorded none. */
+function deliveringOwnership(reason: string | null | undefined): DeliveringOwnership | null {
+  if (typeof reason !== "string" || !reason.startsWith(DELIVERING_OWNERSHIP_PREFIX)) return null;
+  const recorded = reason.slice(DELIVERING_OWNERSHIP_PREFIX.length);
+  const separator = recorded.indexOf("@");
+  if (separator < 1) return null;
+  const hostClaim = recorded.slice(separator + 1);
+  if (!hostClaim) return null;
+  return { executorId: recorded.slice(0, separator), hostClaim };
+}
+
 function failureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return (message.trim() || "structured host delivery failed").slice(0, 240);
@@ -325,6 +382,11 @@ async function sendWithReadRetry(host: EngineHost, entry: QueueEntry): Promise<D
 export class StructuredDeliveryQueue {
   private activeDrain: Promise<void> | null = null;
   private rerun = false;
+  /** This executor's identity, minted per instance and never persisted beyond
+      the `delivering` rows it writes. A successor instance — in this process or
+      in the one that replaced it — is a different executor by construction,
+      which is what a recovered row has to be able to tell (#1131). */
+  private readonly executorId = crypto.randomUUID();
   private readonly interruptAcknowledged = new Set<string>();
   private readonly successfulKillBoundaries = new Map<string, SuccessfulKillBoundary>();
   /** Compactions whose engine control is issued and whose evidence has not
@@ -494,17 +556,19 @@ export class StructuredDeliveryQueue {
         });
         continue;
       }
-      /* An earlier executor already handed this effect to the engine and never
-         settled it — its process died, or the terminal transition never reached
-         the journal. Nothing in this process can know whether the recipient got
-         it, and delivering it again would be a SECOND instruction on a channel
-         that carries deployment control, so the receipt terminalizes unverified
-         instead. This is the guard `drainCompact` already applies to a control,
-         applied to the effect that carries messages: the durable `delivering`
-         row IS the fence, so it holds across a Viewer restart, a runtime-host
-         restart, and a socket that was gone for hours. */
+      /* An executor already handed this effect to the engine. Delivering it
+         again would be a SECOND instruction on a channel that carries
+         deployment control, so this pass never writes it — the durable
+         `delivering` row IS the fence, and it holds across a Viewer restart, a
+         runtime-host restart, and a socket that was gone for hours.
+         What it settles depends on WHO holds it. An executor that still owns
+         the writer claim on this host is still able to answer for the send, so
+         its row is left where it is; one whose claim has moved on — or that
+         left no ownership evidence at all — cannot write to the engine and
+         cannot settle the row either, so this pass ends it unverified. */
       const durable = await this.port.status?.(effect.operationId).catch(() => null);
       if (durable?.status === "delivering") {
+        if (await this.deliveringOwnerIsLive(effect.conversationId, durable.reason)) continue;
         await this.terminalizeUnverified(effect.operationId, DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR);
         continue;
       }
@@ -559,10 +623,17 @@ export class StructuredDeliveryQueue {
         ...(effect.selectedContext ? { selectedContext: effect.selectedContext } : {}),
         ...(effect.origin ? { origin: effect.origin } : {}),
       };
+      /* Stamped only where there is a claim to stamp: ownership evidence exists
+         to be COMPARED, and a token no later pass could compare against would
+         be noise on the durable row rather than evidence on it. */
+      const claim = await this.hostClaim(effect.conversationId);
       await this.port.transition(
         effect.operationId,
         "delivering",
-        { turnId: deliveryFence },
+        {
+          turnId: deliveryFence,
+          ...(claim ? { reason: deliveringOwnershipReason(this.executorId, claim) } : {}),
+        },
       );
       if (shouldInterrupt) {
         try {
@@ -781,6 +852,34 @@ export class StructuredDeliveryQueue {
     } catch {
       return false;
     }
+  }
+
+  /** The writer claim currently owning a conversation's host, or null when the
+      port cannot say. An unreadable claim is no evidence, never a licence. */
+  private async hostClaim(conversationId: string): Promise<string | null> {
+    try {
+      return (await this.port.hostClaim?.(conversationId)) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Whether the executor that took this send into delivery can still answer for
+   * it — the one case where a `delivering` row must be left alone.
+   *
+   * It requires positive evidence on both halves: a DIFFERENT executor wrote
+   * the row, and the writer claim it wrote under is still the claim that owns
+   * the host. A row this executor wrote itself is never live — no other pass of
+   * this instance can be actuating it, so finding it here means an earlier pass
+   * of ours abandoned it. A row with no recorded ownership is never live
+   * either: absence of evidence is what the old unconditional fence assumed
+   * everywhere, and it stays the answer only where nothing was recorded.
+   */
+  private async deliveringOwnerIsLive(conversationId: string, reason: string | null | undefined): Promise<boolean> {
+    const owner = deliveringOwnership(reason);
+    if (!owner || owner.executorId === this.executorId) return false;
+    return owner.hostClaim === await this.hostClaim(conversationId);
   }
 
   private async terminalizeUnverified(operationId: string, reason: string): Promise<void> {

@@ -375,13 +375,29 @@ function awaitingRecipientTurn(
 }
 
 /**
- * Whether an accepted send has rested long enough that this read must end it.
+ * The reservation states an accepted send can rest in, and that this read may
+ * therefore end.
  *
- * `delivery-uncertain` is the state a reservation holds from the moment the
- * send path claims its attempt until a terminal transition projects an outcome
- * onto it, so it is exactly "accepted, not settled". `held` is excluded: a
- * parked delivery is waiting on an account migration by design, and ending it
- * here would fight the coordinator that owns it.
+ * `delivery-uncertain` is what a reservation holds from the moment the send
+ * path claims its attempt until a terminal transition projects an outcome onto
+ * it. `assigned` is what a send admitted while the runtime host was
+ * UNREACHABLE holds: no journal operation exists for it, so nothing in the
+ * journal can ever settle it, and it waits for a drain that only happens once
+ * the runtime is healthy again. Leaving that one out is how the original bug
+ * survived inside its own fix — an accepted send whose only terminal path
+ * required the very health it did not have (#1131).
+ *
+ * `held` is excluded, and stays excluded: a parked delivery is waiting on an
+ * account migration by design, its owner is the migration coordinator, and
+ * ending it here would drop work that is still going somewhere.
+ */
+const SETTLEABLE_DELIVERY_STATES: ReadonlySet<HeldDelivery["state"]> = new Set<HeldDelivery["state"]>([
+  "delivery-uncertain",
+  "assigned",
+]);
+
+/**
+ * Whether an accepted send has rested long enough that this read must end it.
  */
 function pastSettlementDeadline(
   registry: AgentRegistry,
@@ -389,7 +405,7 @@ function pastSettlementDeadline(
   delivery: HeldDelivery,
   ports: SendSettlementPorts,
 ): boolean {
-  if (delivery.state !== "delivery-uncertain") return false;
+  if (!SETTLEABLE_DELIVERY_STATES.has(delivery.state)) return false;
   const acceptedAt = parseTime(acceptedAtOf(delivery));
   /* An acceptance time that cannot be parsed can never age, and a send nothing
      can ever end is the silence this issue is about. */
@@ -443,7 +459,10 @@ export async function resolveSendReceipt(
     reason: SEND_UNSETTLEABLE_REASON,
   };
   if (current === "unreachable" || !client) {
-    return settleProjection(registry, operationId, projected, unsettleable);
+    /* Nothing was asked and nothing answered: the durable record is the whole
+       evidence, and the receipt says so rather than crediting a journal this
+       query never reached. */
+    return settleProjection(registry, operationId, projected, unsettleable, "delivery-record");
   }
   if (current === null || status === null) {
     return settleProjection(registry, operationId, projected, {
@@ -462,7 +481,13 @@ export async function resolveSendReceipt(
      it ends the same way an outage does, on the durable record the delivery
      queue reads before it actuates anything. */
   const fenced = await fenceOperation(client, current.operationId, status).catch(() => null);
-  return settleProjection(registry, operationId, projected, fenced ?? unsettleable);
+  return settleProjection(
+    registry,
+    operationId,
+    projected,
+    fenced ?? unsettleable,
+    fenced ? "delivery-journal" : "delivery-record",
+  );
 }
 
 /**
@@ -477,21 +502,22 @@ function settleProjection(
   operationId: string,
   projected: SendReceipt,
   verdict: JournalVerdict,
+  evidence: SendReceipt["evidence"] = "delivery-journal",
 ): SendReceipt {
   const delivery = deliveryForOperation(registry.readOnlySnapshot(), operationId);
-  if (delivery?.state === "delivery-uncertain") {
+  if (delivery && SETTLEABLE_DELIVERY_STATES.has(delivery.state)) {
     registry.recordDeliveryOutcome(delivery.id, verdict.state, verdict.reason, verdict.disposition);
     const reconciled = sendReceiptFor(registry.readOnlySnapshot(), operationId);
-    if (reconciled) return { ...reconciled, evidence: "delivery-journal" };
+    if (reconciled) return { ...reconciled, evidence };
   }
   if (verdict.state === "delivered") {
-    return { ...projected, state: "delivered", reason: null, duplicateRisk: false, resend: "not-needed", evidence: "delivery-journal" };
+    return { ...projected, state: "delivered", reason: null, duplicateRisk: false, resend: "not-needed", evidence };
   }
   return {
     ...projected,
     state: "failed",
     reason: verdict.reason,
     ...resendGuidance(verdict.disposition, verdict.reason),
-    evidence: "delivery-journal",
+    evidence,
   };
 }

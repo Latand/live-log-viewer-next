@@ -187,6 +187,31 @@ function hostResolver(
   };
 }
 
+/**
+ * The writer claim that owns a conversation's structured host right now
+ * (#1131).
+ *
+ * The registry already records exactly one owner per host — the claim a writer
+ * must still hold for its engine writes to be accepted — so "may this executor
+ * still write to that host" is a fact the durable record already answers, and
+ * the delivery queue reads it here rather than growing an ownership model of
+ * its own. A conversation with no claimed structured host answers null: no
+ * evidence of an owner, which the queue reads as no evidence of a live one.
+ */
+function structuredHostClaim(
+  registry: AgentRegistry,
+): (conversationId: string) => string | null {
+  return (conversationId) => {
+    const conversation = registry.conversation(conversationId as `conversation_${string}`);
+    const generation = conversation?.generations.at(-1);
+    if (!conversation || !generation) return null;
+    const entry = registry.readOnlySnapshot()
+      .entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+    if (!entry?.claimOwner || !entry.structuredHost) return null;
+    return `${entry.claimOwner}:${entry.structuredHost.writerClaimEpoch}`;
+  };
+}
+
 async function yieldControllerTurn(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
@@ -348,6 +373,10 @@ export async function bindStructuredDeliveryQueue(
          already ended — the only answer it could give while this socket was
          unreachable — must not be actuated when the socket comes back. */
       settled: (operationId: string) => sendIsSettled(registry.readOnlySnapshot(), operationId),
+      /* Who may write to this conversation's engine right now (#1131): the
+         evidence a `delivering` row is compared against before it is called
+         abandoned, so a send another live executor is actuating is left to it. */
+      hostClaim: structuredHostClaim(registry),
       transition: async (operationId, status, details) => {
         const result = await client.transitionOperation(operationId, status, details);
         /* The three states a held delivery can settle into. `uncertain` — a

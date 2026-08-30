@@ -14,7 +14,7 @@ import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import type { EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
 import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost, publishStructuredDeliveryHost, republishStructuredDeliveryHost } from "./structuredDeliveryController";
-import { sendReceiptFor } from "./sendSettlement";
+import { resolveSendReceipt, sendReceiptFor } from "./sendSettlement";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -3814,4 +3814,120 @@ test("late discarded-successor cleanup republishes the committed retarget host",
   await unregisterCommitted();
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
+});
+
+test("a send admitted while the runtime is unavailable settles without the runtime coming back", async () => {
+  /* #1131, the bug this fix had rebuilt inside itself: with no runtime client
+     the send is still ACCEPTED — a durable reservation, an operation id handed
+     back — but no journal operation exists for it, so nothing the journal could
+     ever say would end it. It rested `assigned` until a drain that only runs
+     while the runtime is healthy picked it up, which is the one condition a
+     lost send does not meet. The deadline now covers that reservation too: the
+     receipt query ends it from the durable record alone, and because the record
+     is terminal the recovered runtime hands the engine nothing. */
+  const sessionId = "0ff1ce11-2222-\x34222-8222-222222222222";
+  const directory = path.join(sandbox, "runtime-unavailable-admission");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "outage-account",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-08-30T09:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "outage-account",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:outage-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  const admitted = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "outage-window-message",
+    text: "hold the cutover until I say go",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+    startupFailed: () => false,
+  });
+  expect(admitted).toMatchObject({ ok: true, outcome: "held" });
+  const operationId = (admitted as { operationId: string }).operationId;
+  expect(operationId).toBeTruthy();
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "assigned" }]);
+
+  /* Inside the window the answer is still honest about being in flight: the
+     recipient may simply be mid-turn, and ending it here would cancel a message
+     that is about to be delivered. */
+  const inFlight = await resolveSendReceipt(operationId, { registry, client: null });
+  expect(inFlight).toMatchObject({ state: "in-flight", resend: null });
+
+  const pastDeadline = await resolveSendReceipt(operationId, {
+    registry,
+    client: null,
+    now: () => Date.now() + 11 * 60_000,
+  });
+  expect(pastDeadline).toMatchObject({
+    operationId,
+    state: "failed",
+    duplicateRisk: true,
+    resend: "verify-first",
+    /* Nothing was asked of the journal, so nothing is credited to it. */
+    evidence: "delivery-record",
+  });
+  expect(pastDeadline?.reason).toContain("could not give it a terminal answer");
+  /* Asking again is idempotent: one terminal answer, not a fresh one per read. */
+  expect(await resolveSendReceipt(operationId, { registry, client: null })).toMatchObject({
+    state: "failed",
+    resend: "verify-first",
+  });
+
+  const ledger = createFakeDeliveryLedger();
+  const journal = new RuntimeJournal(path.join(directory, "events.sqlite"), { structuredHosts: true });
+  try {
+    /* The runtime comes back. The settled reservation is not eligible for the
+       drain that would have delivered it, so the recipient is handed nothing —
+       the answer the sender already has stays true. */
+    const client = runtimeJournalClient(journal);
+    await bindStructuredDeliveryQueue([{ key, host: observableFakeHost(new FakeEngineHost(ledger)) }], { registry, client });
+    let delivered = 0;
+    await drainHeldDeliveries(conversation.id, {
+      async deliver() {
+        delivered += 1;
+        return "delivered";
+      },
+    }, registry);
+    expect(delivered).toBe(0);
+    expect(ledger.writes).toEqual([]);
+    expect(sendReceiptFor(registry.readOnlySnapshot(), operationId)).toMatchObject({ state: "failed" });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
 });
