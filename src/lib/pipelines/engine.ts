@@ -18,7 +18,7 @@ import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { structuredHostsEnabled, supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
-import { conversationTurnLiveness } from "@/lib/runtime/liveness";
+import { conversationTurnLiveness, type TurnLivenessDependencies } from "@/lib/runtime/liveness";
 import { structuredDeliveryPublicationState } from "@/lib/runtime/structuredDeliveryController";
 import { redactBounded } from "@/lib/monitor/redact";
 import { parseReview, type ReviewFinding } from "@/lib/review";
@@ -531,7 +531,9 @@ export async function stopPipelineStageAgent(
   }
 }
 
-export function defaultPipelinePorts(): PipelinePorts {
+export function defaultPipelinePorts(
+  dependencies: { liveness?: TurnLivenessDependencies } = {},
+): PipelinePorts {
   let runtimeSnapshot: ReturnType<NonNullable<ReturnType<typeof runtimeHostClient>>["snapshot"]> | null = null;
   const registry = agentRegistry();
   let registrySnapshot: ReturnType<typeof registry.readOnlySnapshot> | null = null;
@@ -683,7 +685,10 @@ export function defaultPipelinePorts(): PipelinePorts {
          evidence decides instead — and only `severed` counts, so a host writing
          to its transcript or burning CPU keeps the attempt alive however long
          its current step takes. */
-      const liveness = await conversationTurnLiveness(registry, conversation.id, { snapshot: current });
+      const liveness = await conversationTurnLiveness(registry, conversation.id, {
+        ...dependencies.liveness,
+        snapshot: current,
+      });
       return liveness?.state === "severed" && liveness.since !== null
         ? new Date(liveness.since).toISOString()
         : null;
