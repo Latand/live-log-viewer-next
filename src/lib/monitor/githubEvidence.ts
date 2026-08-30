@@ -184,9 +184,13 @@ const PULL_REQUEST_TITLE_LIMIT = 200;
  * quiet verdict this result type exists to make earnable, which is the
  * collapse the type was introduced to end taking a shorter route.
  *
- * `gh` asked for these four fields answers with them; an array whose rows do
- * not carry them is output nobody can attribute, so it is reported as what it
- * is. Exactly the empty array stays the answer that nothing is open.
+ * The two fields that make a row usable are the number and the head branch:
+ * one names the pull request, the other ties it to the lane that opened it, and
+ * a `gh` answering the question it was asked carries both on every row. An
+ * array whose rows do not is output nobody can attribute, so it is reported as
+ * what it is. A missing title or timestamp is a different matter — neither is
+ * load-bearing for the reason, so a row is still attributable without them.
+ * Exactly the empty array stays the answer that nothing is open.
  */
 function parseOpenPullRequests(raw: string): OpenPullRequest[] | null {
   let parsed: unknown;

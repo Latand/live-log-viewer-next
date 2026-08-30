@@ -533,11 +533,17 @@ test("no candidate reason lets a failed read spend the stamp or the guard", () =
   const candidates = {
     "lane-event": { events: [event({ seq: 60 })] },
     "unstarted-task": { tasks: [card({ updatedAt: new Date(NOW - 90 * MINUTE).toISOString() })] },
+    /* Carrying its own row, because a stall is only a reason once the memory of
+       the previous check says it survived one. */
+    stalled: {
+      pipelines: [lane({ stageActivity: { lifecycle: "stalled", reason: "host_alive_transcript_silent" } })],
+      state: { ...before, stalledSeen: ["pipeline_a1"] },
+    },
     interval: { pipelines: [lane()] },
   } satisfies Record<string, Partial<SeatTickCheckInput>>;
   for (const gap of ["command-failed", "timed-out", "malformed-output"] as const) {
     for (const [name, candidate] of Object.entries(candidates)) {
-      const decision = seatTickDecision(input({ ...candidate, pullRequestsUnavailable: gap, state: before }));
+      const decision = seatTickDecision(input({ state: before, ...candidate, pullRequestsUnavailable: gap }));
       expect(`${name}/${gap}: ${decision.verdict.kind}`).toBe(`${name}/${gap}: error`);
       expect(decision.state.lastWakeAt).toBe(before.lastWakeAt);
       expect(decision.state.lastWakeFingerprint).toBe(before.lastWakeFingerprint);
@@ -547,6 +553,23 @@ test("no candidate reason lets a failed read spend the stamp or the guard", () =
       expect(decision.state.quietSince).toBeNull();
     }
   }
+});
+
+/* The proposal is the fourth thing a check can spend, and it is spent on the
+   strength of an idle board — which is the very reading a failed pull-request
+   read leaves unestablished. So it waits with the rest, and its 24-hour slot
+   stays unstamped for the check that can see what the finished lanes left. */
+test("an idle board with the proposal slot due proposes nothing while GitHub is unreadable", () => {
+  const decision = seatTickDecision(input({
+    tasks: [card({ status: "done" })],
+    pullRequestsUnavailable: "lanes-unreadable",
+  }));
+  expect(decision.verdict.kind).toBe("error");
+  expect(decision.state.lastProposalAt).toBeNull();
+  /* And the board is not recorded as idle since now either: an idle board is
+     the same claim about the same evidence. */
+  expect(decision.state.idleSince).toBeNull();
+  expect(decision.state.quietSince).toBeNull();
 });
 
 /* And the interval still bounds it from the other side: a check that was never
