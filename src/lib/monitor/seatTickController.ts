@@ -12,6 +12,7 @@ import {
   orchestratorAlertCardText,
   seatTickRetryGuardCardText,
   seatTickSettingsCardText,
+  seatTickSourceGapCardText,
 } from "./cards";
 import { openIssuesForProposal, type ProposalIssue } from "./githubEvidence";
 import { appendSeatTickRecord } from "./journalStore";
@@ -87,7 +88,8 @@ export interface SeatTickControllerDependencies {
   writeSettings?: typeof writeSeatTickSettings;
   appendRecord?: typeof appendSeatTickRecord;
   deliver?: typeof deliverConversationMessage;
-  ensureCard?: (project: string, card: SeatTickCard, at: string) => void;
+  /** Whether the board now carries the card. See {@link ensureSeatTickCard}. */
+  ensureCard?: (project: string, card: SeatTickCard, at: string) => boolean;
   proposalIssues?: (project: string, sources: SeatTickSources) => Promise<ProposalIssue[]>;
   /** Whether this release still owns viewer traffic, re-asked per sweep. */
   ownsTraffic?: () => boolean | Promise<boolean>;
@@ -95,6 +97,7 @@ export interface SeatTickControllerDependencies {
 
 function cardText(project: string, card: SeatTickCard, at: string): string {
   if (card.kind === "no-seat") return orchestratorAlertCardText(card.detail, at);
+  if (card.kind === "source-unreadable") return seatTickSourceGapCardText(project, card.detail, card.ref, at);
   if (card.kind === "tick-settings") {
     return seatTickSettingsCardText({
       project,
@@ -121,8 +124,16 @@ function cardText(project: string, card: SeatTickCard, at: string): string {
  * project back on its defaults, so the board never claims a quiet tick that is
  * ticking again. The card body is stamped with when the SETTING was recorded,
  * so a settled state rewrites nothing check after check.
+ *
+ * It answers whether the board now carries what the card asked for, because one
+ * caller has to know: the source-gap row records that the operator was told
+ * (#1298), and that may only be written when the telling happened. A create the
+ * board refused is a false, and so is a close that did not take; an open card
+ * already standing for this condition is a true, as is a replayed create — with
+ * a per-outage receipt (see {@link SeatTickCard.instance}) a replay means this
+ * very outage was carded by an earlier check.
  */
-function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): void {
+function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): boolean {
   /* The board file is resolved HERE, per call, rather than taken from the
      module-load default `mutateTasksFile` would otherwise use. That default is
      frozen the first time `@/lib/tasks/store` is imported anywhere in the
@@ -132,17 +143,17 @@ function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): vo
      is the one writer here that runs on a timer against whatever state dir the
      process is pointed at, so a stale path would put a real board card in
      someone else's board. In the Viewer both readings are identical. */
-  mutateTasksFile<void>((state) => {
+  return mutateTasksFile<boolean>((state) => {
     const existing = state.tasks.find((task) =>
       canonicalOrchestratorProject(task.project) === project
       && task.status !== "done"
       && monitorRefIn(task.text) === card.ref);
     if (card.state === "resolved") {
-      if (!existing) return { state: undefined, result: undefined };
+      if (!existing) return { state: undefined, result: true };
       const closed = patchTask(state.tasks, existing.id, { status: "done" });
       return closed.ok
-        ? { state: { tasks: closed.tasks, recentCreates: state.recentCreates }, result: undefined }
-        : { state: undefined, result: undefined };
+        ? { state: { tasks: closed.tasks, recentCreates: state.recentCreates }, result: true }
+        : { state: undefined, result: false };
     }
     const text = cardText(project, card, at);
     if (existing) {
@@ -151,21 +162,26 @@ function ensureSeatTickCard(project: string, card: SeatTickCard, at: string): vo
          the board once per check for as long as the condition holds. Only a
          card that tracks a standing state — the one kind that declares its
          `state` — is kept in step with what it describes. */
-      if (card.state !== "open") return { state: undefined, result: undefined };
-      if (existing.text === text) return { state: undefined, result: undefined };
+      if (card.state !== "open") return { state: undefined, result: true };
+      if (existing.text === text) return { state: undefined, result: true };
       const updated = patchTask(state.tasks, existing.id, { text });
       return updated.ok
-        ? { state: { tasks: updated.tasks, recentCreates: state.recentCreates }, result: undefined }
-        : { state: undefined, result: undefined };
+        ? { state: { tasks: updated.tasks, recentCreates: state.recentCreates }, result: true }
+        /* The condition is on the board either way; only its wording is stale. */
+        : { state: undefined, result: true };
     }
     const created = createTask(state.tasks, {
       project,
       text,
       placement: "unplaced",
-      clientRequestId: monitorClientRequestId(card.ref),
+      /* The occurrence, not just the condition (#1298). Without it the second
+         outage of a source replays the first outage's receipt and creates no
+         card at all, once the first has been completed. */
+      clientRequestId: monitorClientRequestId(card.instance ? `${card.ref}:${card.instance}` : card.ref),
     }, state.recentCreates);
-    if (!created.ok || created.replay) return { state: undefined, result: undefined };
-    return { state: { tasks: created.tasks, recentCreates: created.recentCreates }, result: undefined };
+    if (!created.ok) return { state: undefined, result: false };
+    if (created.replay) return { state: undefined, result: true };
+    return { state: { tasks: created.tasks, recentCreates: created.recentCreates }, result: true };
   }, statePath("tasks.json"));
 }
 
@@ -208,7 +224,13 @@ function deliveryOutcomeLabel(outcome: DeliveryOutcome): string {
 
 function verdictDetail(verdict: SeatTickVerdict): string | null {
   if (verdict.kind === "skipped") return "the seat's turn is progressing; the tick is dropped, never queued";
-  if (verdict.kind === "wake") return verdict.reasons.map((reason) => reason.detail).join("; ");
+  if (verdict.kind === "wake") {
+    /* The gap is journaled beside the reasons, not in place of them (#1298):
+       a wake that went out over an unreadable source has to be readable back
+       as exactly that, or the journal shows a healthy hour where one reason
+       was blind. */
+    return [...verdict.reasons.map((reason) => reason.detail), ...verdict.gaps.map((gap) => gap.detail)].join("; ");
+  }
   return verdict.detail;
 }
 
@@ -535,15 +557,25 @@ async function check(
     }
   }
 
+  let state = decision.state;
   for (const card of decision.cards) {
+    let carded = false;
     try {
-      ensureCard(input.project, card, at);
+      carded = ensureCard(input.project, card, at);
     } catch (error) {
       console.error("[seat tick] card write failed", error instanceof Error ? error.name : "unknown");
     }
+    /* The outage is remembered as reported only once the report EXISTS (#1298).
+       The decision names the row to write and the board write is what earns it:
+       a write that threw, or that the board refused, leaves the row unreported,
+       so the next check raises the same card again instead of the tick sitting
+       on a memory of having told an operator who was never told. A write that
+       succeeded — or replayed this outage's own receipt — is the telling. */
+    if (carded && card.kind === "source-unreadable" && decision.reportedSourceGap) {
+      state = { ...state, pullRequestGap: decision.reportedSourceGap };
+    }
   }
 
-  let state = decision.state;
   let delivery: SeatTickRunRecord["delivery"] = null;
   const verdict = decision.verdict;
 
@@ -563,6 +595,10 @@ async function check(
         items: verdict.items,
         deferred: verdict.deferred,
         signals: input.signals,
+        /* What the check could not read travels with the wake it could still
+           raise (#1298), so the seat acts on the rest knowing what is missing
+           from it. */
+        gaps: verdict.gaps,
         monitorPrompt: input.settings.monitorPrompt,
       })
       : seatTickProposalMessage({

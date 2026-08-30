@@ -9,6 +9,8 @@ import {
   SEAT_TICK_WAKE_REASON_KINDS,
   type SeatTickOutstandingWake,
   type SeatTickProjectState,
+  type SeatTickPullRequestGap,
+  type SeatTickSourceGap,
   type SeatTickWakeCommit,
   type SeatTickWakeReasonKind,
 } from "./types";
@@ -100,6 +102,30 @@ function normalizeOutstandingWake(value: unknown): SeatTickOutstandingWake | nul
   };
 }
 
+const PULL_REQUEST_GAPS: SeatTickPullRequestGap[] = ["timed-out", "command-failed", "malformed-output", "lanes-unreadable"];
+
+/**
+ * An evidence source's run of failures (#1298).
+ *
+ * A row that cannot be read back whole is dropped rather than half-trusted: the
+ * two instants are what the report threshold and the retry window are measured
+ * from, so a run missing either would report at the wrong time or ask at the
+ * wrong rate. Dropping it costs one fast retry and one re-reported outage,
+ * which is the harmless direction — the check still refuses to call an
+ * unreadable source quiet, whatever this row says.
+ */
+function normalizeSourceGap(value: unknown): SeatTickSourceGap | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const gap = PULL_REQUEST_GAPS.find((candidate) => candidate === raw.gap);
+  const since = isoOrNull(raw.since);
+  const lastAttemptAt = isoOrNull(raw.lastAttemptAt);
+  const attempts = raw.attempts;
+  if (!gap || !since || !lastAttemptAt) return null;
+  if (typeof attempts !== "number" || !Number.isInteger(attempts) || attempts < 1) return null;
+  return { gap, since, lastAttemptAt, attempts, reported: raw.reported === true };
+}
+
 function normalizeRow(value: unknown, legacy: boolean): SeatTickProjectState {
   const empty = emptySeatTickState();
   if (!value || typeof value !== "object" || Array.isArray(value)) return empty;
@@ -126,6 +152,7 @@ function normalizeRow(value: unknown, legacy: boolean): SeatTickProjectState {
     lastWakeFingerprint: typeof raw.lastWakeFingerprint === "string" ? raw.lastWakeFingerprint.slice(0, 200) : null,
     eventsThrough: eventsThrough(raw, legacy),
     outstandingWake: normalizeOutstandingWake(raw.outstandingWake),
+    pullRequestGap: normalizeSourceGap(raw.pullRequestGap),
   };
 }
 
@@ -167,6 +194,10 @@ function readFile(filePath: string): SeatTickStateFile {
  *   the PREDECESSOR. It survives so the successor's first check is what takes
  *   it back; dropping it here would leave it addressed to a seat nothing is
  *   watching any more.
+ * - The run of failures of an evidence source (#1298), which is a fact about
+ *   `gh` and the machine it runs on. A rotation does not fix a missing
+ *   credential, so clearing it here would re-report the same outage to the
+ *   board and put the read back on the five-minute retry it had outgrown.
  */
 export function seatTickStateForEpoch(row: SeatTickProjectState, seatEpoch: number | null): SeatTickProjectState {
   if (row.seatEpoch === seatEpoch) return row;
@@ -177,6 +208,7 @@ export function seatTickStateForEpoch(row: SeatTickProjectState, seatEpoch: numb
     lastWakeAt: row.lastWakeAt,
     lastProposalAt: row.lastProposalAt,
     outstandingWake: row.outstandingWake,
+    pullRequestGap: row.pullRequestGap,
   };
 }
 

@@ -772,7 +772,7 @@ export async function executeOrchestratorRotation(
   const handoff: HandoffParts = {
     header: [
       `You are replacing orchestrator conversation ${incumbent.conversationId} for project ${project}. Its manager authority is revoked; its session and card remain on the board, linked to yours.`,
-      `Your predecessor's recent turns — decisions, blockers, in-flight work — are one call away: conversation_messages({"clientRequestId":"rotation-predecessor-recent-turns","conversationId":"${incumbent.conversationId}","roles":["user","assistant"],"limit":40}). Records are newest first; pass the returned cursor for older turns. Read them before acting, and never open the transcript file. If the call reports that the conversation has no transcript, reconstruct state from the board.`,
+      `Your predecessor's recent turns — decisions, blockers, in-flight work — are one call away: conversation_messages({"clientRequestId":"rotation-predecessor-recent-turns-${incumbent.conversationId}","conversationId":"${incumbent.conversationId}","roles":["user","assistant"],"limit":40}). Records are newest first; pass the returned cursor for older turns. Read them before acting, and never open the transcript file. If the call reports that the conversation has no transcript, reconstruct state from the board.`,
     ],
     tasks: tasks.length
       ? `Open board tasks for this project:\n${tasks.map((task) => `- [${task.status}] ${task.text.slice(0, HANDOFF_TASK_TEXT_CAP)} (${task.id})`).join("\n")}`

@@ -176,6 +176,33 @@ test("multiple records from one line resume at the exact part", () => {
   expect(third.hasMore).toBe(false);
 });
 
+test("Claude tool-result parts page to the oldest record without repeats or gaps", () => {
+  const pathname = fixture([
+    { type: "user", timestamp: times[0], message: { content: "oldest" } },
+    { type: "user", timestamp: times[1], message: { content: [
+      { type: "tool_result", tool_use_id: "tool-a", content: "result-a" },
+      { type: "tool_result", tool_use_id: "tool-b", content: "result-b" },
+      { type: "tool_result", tool_use_id: "tool-c", content: "result-c" },
+    ] } },
+    { type: "assistant", timestamp: times[2], message: { content: [{ type: "text", text: "newest" }] } },
+  ]);
+  const expected = ["newest", "result-c", "result-b", "result-a", "oldest"];
+
+  for (const limit of [1, 7]) {
+    const walked: string[] = [];
+    let cursor: MessagesPageCursor | null = null;
+    for (;;) {
+      const current = page(pathname, "claude", { limit, cursor });
+      walked.push(...current.records.map((record) => record.text));
+      if (!current.hasMore) break;
+      expect(current.cursor).not.toBeNull();
+      cursor = current.cursor;
+    }
+    expect(walked).toEqual(expected);
+    expect(new Set(walked).size).toBe(walked.length);
+  }
+});
+
 test("limit and text bounds clamp while full-text redaction runs before truncation", () => {
   const sensitive = `${["api", "key"].join("_")}=fixture-value`;
   const pathname = fixture(Array.from({ length: 250 }, (_value, index) => ({
@@ -199,4 +226,52 @@ test("cursor tokens are opaque and scoped to transcript plus filters", () => {
   expect(decodeMessagesCursor(token, scope)).toEqual(cursor);
   expect(() => decodeMessagesCursor(token, messagesCursorScope("fixture/other.jsonl", kinds, ALL_ROLES)))
     .toThrow("cursor is invalid");
+});
+
+test("a filter with no matches returns bounded empty pages until the oldest record", () => {
+  const megabyte = "x".repeat(1024 * 1024);
+  const pathname = fixture(Array.from({ length: 20 }, (_value, index) => ({
+    type: "assistant",
+    timestamp: new Date(Date.parse(times[0]) + index * 1_000).toISOString(),
+    message: { content: [{ type: "text", text: `${index}:${megabyte}` }] },
+  })));
+  const query = {
+    kinds: new Set<SessionRecordKind>(["tool_call"]),
+    roles: ALL_ROLES,
+    limit: 20,
+  };
+
+  const first = page(pathname, "claude", query);
+  expect(first.records).toEqual([]);
+  expect(first.scanned.capped).toBe(true);
+  expect(first.scanned.bytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+  expect(first.hasMore).toBe(true);
+  expect(first.cursor).not.toBeNull();
+
+  let current = first;
+  let pages = 1;
+  while (current.hasMore && pages < 5) {
+    current = page(pathname, "claude", { ...query, cursor: current.cursor });
+    expect(current.records).toEqual([]);
+    pages += 1;
+  }
+  expect(current.hasMore).toBe(false);
+  expect(current.cursor).toBeNull();
+});
+
+test("an oversized record is skipped while paging continues to older records", () => {
+  const pathname = fixture([
+    { type: "user", timestamp: times[0], message: { content: "oldest" } },
+    { type: "assistant", timestamp: times[1], message: { content: [{ type: "text", text: "x".repeat(20 * 1024 * 1024) }] } },
+    { type: "assistant", timestamp: times[2], message: { content: [{ type: "text", text: "newest" }] } },
+  ], "oversized.jsonl");
+  const walked: string[] = [];
+  let cursor: MessagesPageCursor | null = null;
+  for (let pages = 0; pages < 5; pages += 1) {
+    const current = page(pathname, "claude", { kinds: new Set(["message"]), limit: 20, cursor });
+    walked.push(...current.records.map((record) => record.text));
+    if (!current.hasMore) break;
+    cursor = current.cursor;
+  }
+  expect(walked).toEqual(["newest", "oldest"]);
 });

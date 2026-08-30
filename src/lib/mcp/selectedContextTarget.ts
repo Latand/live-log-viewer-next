@@ -159,12 +159,12 @@ export interface SelectedConversationTargetRequest {
   conversationId: string;
 }
 
-/** Resolve and root-gate one registry identity without reading its transcript. */
-export function selectedConversationTarget(
+function selectedConversationTargetFromResolver(
   request: SelectedConversationTargetRequest,
   dependencies: SelectedContextTargetDependencies,
+  resolver: SelectedConversationResolver,
 ): SelectedConversationRecord {
-  const record = dependencies.selectedConversation().resolve(request.conversationId);
+  const record = resolver.resolve(request.conversationId);
   if (!record) {
     throw new McpToolRefusal(
       "no Viewer conversation has that id.",
@@ -186,6 +186,14 @@ export function selectedConversationTarget(
   return record;
 }
 
+/** Resolve and root-gate one registry identity without reading its transcript. */
+export function selectedConversationTarget(
+  request: SelectedConversationTargetRequest,
+  dependencies: SelectedContextTargetDependencies,
+): SelectedConversationRecord {
+  return selectedConversationTargetFromResolver(request, dependencies, dependencies.selectedConversation());
+}
+
 /**
  * The bounded read: keyed identity, then a tail of the named transcript.
  *
@@ -198,7 +206,7 @@ export function selectedConversationTail(
   dependencies: SelectedContextTargetDependencies,
 ): SelectedTailAnswer {
   const resolver = dependencies.selectedConversation();
-  const record = selectedConversationTarget(request, dependencies);
+  const record = selectedConversationTargetFromResolver(request, dependencies, resolver);
   const tail = resolver.readTail(record.conversationId, { maxLines: request.maxLines });
   if (!tail) {
     throw new McpToolRefusal(

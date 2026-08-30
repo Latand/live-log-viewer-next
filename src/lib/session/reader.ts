@@ -210,7 +210,8 @@ function normalizeCodexLine(obj: Record<string, unknown>): NormalizedSessionLine
     }, obj.type === "event_msg" ? "event" : obj.type === "response_item" ? "response" : undefined);
     return records;
   }
-  if (obj.type === "event_msg" && (payloadType === "agent_reasoning" || payloadType === "reasoning_delta")) {
+  if (obj.type === "event_msg"
+    && (payloadType === "agent_reasoning" || payloadType === "reasoning" || payloadType === "reasoning_delta")) {
     add({ kind: "reasoning", role: "assistant", ts, text: str(payload.text) || str(payload.message) });
     return records;
   }

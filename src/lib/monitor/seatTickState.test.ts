@@ -43,6 +43,13 @@ const row = {
     operationId: "op-wake-1",
     commit: { proposal: false, reasons: ["interval" as const], fingerprint: "fp-1", eventsThrough: 44 },
   },
+  pullRequestGap: {
+    gap: "command-failed" as const,
+    since: "2026-08-28T08:00:00.000Z",
+    lastAttemptAt: "2026-08-28T11:55:00.000Z",
+    attempts: 23,
+    reported: true,
+  },
 };
 
 test("a row survives the write and reads back whole", () => {
@@ -103,6 +110,32 @@ test("the bound and the unlanded wake survive the rotation, because neither is t
   expect(successor.lastWakeAt).toBe("2026-08-28T11:00:00.000Z");
   expect(successor.lastProposalAt).toBe(row.lastProposalAt);
   expect(successor.outstandingWake).toEqual(row.outstandingWake);
+});
+
+/* The run of failures is a fact about `gh` and the machine it runs on (#1298),
+   so a rotation carries it: a new seat does not fix a missing credential, and
+   clearing it here would re-report the same outage to the board and put the
+   read back on the five-minute retry it had outgrown. */
+test("the run of failures of an evidence source survives the rotation", () => {
+  expect(seatTickStateForEpoch(row, 8).pullRequestGap).toEqual(row.pullRequestGap);
+});
+
+/* Half a run is worse than none: the two instants are what the report
+   threshold and the retry window are measured from. Dropping it costs one fast
+   retry and one re-reported outage, and the check still refuses to call the
+   source quiet meanwhile. */
+test("a run of failures missing an instant or a count is dropped", () => {
+  const file = path.join(SANDBOX, "half-gap.json");
+  const halves = [
+    { gap: "command-failed", lastAttemptAt: "2026-08-28T11:55:00.000Z", attempts: 3 },
+    { gap: "command-failed", since: "2026-08-28T08:00:00.000Z", attempts: 3 },
+    { gap: "command-failed", since: "2026-08-28T08:00:00.000Z", lastAttemptAt: "2026-08-28T11:55:00.000Z", attempts: 0 },
+    { gap: "invented", since: "2026-08-28T08:00:00.000Z", lastAttemptAt: "2026-08-28T11:55:00.000Z", attempts: 3 },
+  ];
+  for (const half of halves) {
+    fs.writeFileSync(file, JSON.stringify({ version: 2, projects: { viewer: { ...row, pullRequestGap: half } } }));
+    expect(readSeatTickState("viewer", file).pullRequestGap).toBeNull();
+  }
 });
 
 test("a hand-edited outstanding wake missing any required field is dropped", () => {

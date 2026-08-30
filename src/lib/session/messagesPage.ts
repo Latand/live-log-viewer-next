@@ -288,7 +288,8 @@ export function readMessagesPage(source: MessagesPageSource, query: MessagesPage
     return "continue";
   };
 
-  let end = cursor?.o ?? source.size;
+  const pageStart = cursor?.o ?? source.size;
+  let end = pageStart;
   if (cursor && cursor.p > 0) {
     let probe = Buffer.alloc(0);
     while (probe.indexOf(0x0a) === -1
@@ -315,7 +316,12 @@ export function readMessagesPage(source: MessagesPageSource, query: MessagesPage
       capped = true;
       hasMore = true;
       const resumeEnd = Math.min(source.size, end + carry.length + (carry.length ? 1 : 0));
-      next = { o: resumeEnd, p: 0, r: [...recent] };
+      /* A line wider than the call budget can leave `carry` spanning the
+         entire scan. Rewinding to its later newline would reproduce the same
+         empty page forever, so drop that over-budget record and advance to
+         the oldest byte this call reached. */
+      const resumeOffset = resumeEnd >= pageStart ? end : resumeEnd;
+      next = { o: resumeOffset, p: 0, r: [...recent] };
       break;
     }
     const allowance = Math.max(1, MAX_SCAN_BYTES - bytes);

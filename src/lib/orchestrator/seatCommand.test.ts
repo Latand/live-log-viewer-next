@@ -657,7 +657,7 @@ test("rotation composes a bounded handoff, switches designation atomically, and 
      predecessor, its MCP read, the open tasks and the caller's notes. */
   expect(spawnedPrompt).toStartWith("own the board");
   expect(spawnedPrompt).toContain(NEW_ID);
-  expect(spawnedPrompt).toContain(`conversation_messages({"clientRequestId":"rotation-predecessor-recent-turns","conversationId":"${NEW_ID}","roles":["user","assistant"],"limit":40})`);
+  expect(spawnedPrompt).toContain(`conversation_messages({"clientRequestId":"rotation-predecessor-recent-turns-${NEW_ID}","conversationId":"${NEW_ID}","roles":["user","assistant"],"limit":40})`);
   expect(spawnedPrompt).not.toContain(`/tmp/${NEW_ID.slice(-4)}.jsonl`);
   expect(spawnedPrompt).toContain("[doing] Ship the handoff (task_1)");
   expect(spawnedPrompt).toContain("Prioritize the review queue.");
