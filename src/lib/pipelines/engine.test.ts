@@ -167,6 +167,8 @@ test("a concurrent pipeline replay and its recovery projections withhold staged 
       promptScaffold: "Builder guidance",
     },
     cwd,
+    project: "repo-00000000000000000000000000000001",
+    requestedAccountId: null,
     title: "Build scoped change",
     "prompt": "Build the scoped change",
     parentPath: null,
