@@ -9,8 +9,8 @@ Agent Log Viewer (`~/.agents/tools/live-log-viewer-next`) is the user's dashboar
 
 ## Hard rules
 
-- **One management surface.** Every agent you start must appear in the viewer: a tmux pane or viewer-owned structured host, plus a transcript the scanner picks up. Detached background-job runtimes (`codex-companion.mjs task`, plugin rescue subagents) create an invisible second control channel — spawn through the viewer instead.
-- **API-first.** While the prod viewer is up, all agent interaction — spawn, message, interrupt, kill, flows — goes through its API, which gives the delivery queue, receipts, and idempotency the user watches in the UI. If the probe `curl -sS http://127.0.0.1:8898/api/files >/dev/null` fails, the viewer is down: follow [references/tmux-fallback.md](references/tmux-fallback.md) exactly — it is the complete manual procedure for spawning and messaging over raw tmux.
+- **One management surface.** Every agent you start must appear in the viewer: a viewer-owned structured host, plus a transcript the scanner picks up. Detached background-job runtimes (`codex-companion.mjs task`, plugin rescue subagents) create an invisible second control channel — spawn through the viewer instead.
+- **API-first.** While the prod viewer is up, all agent interaction — spawn, message, interrupt, kill, flows — goes through its API, which gives the delivery queue, receipts, and idempotency the user watches in the UI. If the probe `curl -sS http://127.0.0.1:8898/api/files >/dev/null` fails, the viewer is down: there is no fallback transport to reach for. No tmux server runs on this machine — the viewer spawns engines into the host namespace through `nsenter` — so report the outage to the operator and wait rather than inventing a second control channel.
 - **Port 8898 only.** 8899 is a dev/scratch build (`bun dev` default): the user never watches it, and sends to it fail silently the moment it stops. Real spawns, messages, flows, and task actions go to 8898 even when 8899 appears to work.
 - **Spawn fresh + empty.** Hand every helper its whole job as the first prompt. Fork (context-inheriting) agents only when the user explicitly asks for a fork this turn — forked agents carry your context and skip the actual task.
 - Prompts to agents: English. Codex effort is set at boot (`-c model_reasoning_effort=...`), never mid-conversation.
@@ -67,12 +67,12 @@ If the operator view is absent, points at another project, or omits the card, th
 
 ```
 TOK=$(tr -d '\n' < ~/.config/agent-log-viewer/token)
-curl -sS -X POST "http://127.0.0.1:8898/api/tmux?k=$TOK" \
+curl -sS -X POST "http://127.0.0.1:8898/api/conversation-host?k=$TOK" \
   -H 'content-type: application/json' \
   -d '{"path":"<transcript path>","text":"...","clientMessageId":"<stable-id>"}'
 ```
 
-- `path` is the conversation transcript (Claude `~/.claude/projects/**.jsonl`, Codex `~/.codex/sessions/**.jsonl`); the viewer resolves it to the live pane or respawns a resume window.
+- `path` is the conversation transcript (Claude `~/.claude/projects/**.jsonl`, Codex `~/.codex/sessions/**.jsonl`); the viewer resolves it to the conversation's live host, or resumes/respawns one. The same handlers are still mounted at the legacy path `/api/tmux`; that name is historical and no tmux is involved.
 - `clientMessageId` makes retries idempotent; give each distinct message its own id — reusing one across different messages fails with `Idempotency key already belongs to another request`.
 - Receipt outcomes: `delivered-to-live | queued | delivering | delivered | resumed | held`. Delivery is confirmed when the message appears in the target transcript; replies are readable there too, which makes this endpoint full duplex with any agent.
 - Actions on the same endpoint: `{"action":"interrupt"}` (Escape), `{"action":"kill"}`, `{"action":"resume"}`, `{"action":"compact"}`, `{"action":"dialog-key","key":...}`.
@@ -112,4 +112,4 @@ The viewer runs implement→review cycles itself (spec: `docs/review-loop-ui.md`
 | codex plugin jobs | `~/.claude/plugins/data/codex-openai-codex/state` |
 | claude bg tasks | `/tmp/claude-<uid>/<slug>/<sid>/tasks/*.output` |
 
-Interactive `claude`/`codex` processes in tmux are auto-matched to their transcripts (fd holders, `--session-id` argv, cwd), so a correctly spawned pane appears in the UI with composer, kill, and interrupt controls.
+Interactive `claude`/`codex` processes are auto-matched to their transcripts (fd holders, `--session-id` argv, cwd), so a correctly spawned agent appears in the UI with composer, kill, and interrupt controls.

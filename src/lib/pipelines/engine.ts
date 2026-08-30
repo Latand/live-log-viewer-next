@@ -49,7 +49,7 @@ import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipel
 import { renderStagePrompt } from "./prompts";
 import { PIPELINE_ROLE_IDS, pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
 import { pipelineValidationError, type PipelineValidationViolation } from "./validation";
-import { buildPipeline, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
+import { buildPipeline, findPipelineRecord, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
 import type {
   CreatePipelineRequest,
@@ -4115,4 +4115,8 @@ export async function patchPipeline(
 
 export function getPipelines(): { pipelines: Pipeline[] } {
   return { pipelines: loadPipelines() };
+}
+
+export function getPipeline(pipelineId: string): Pipeline | null {
+  return findPipelineRecord(pipelineId);
 }

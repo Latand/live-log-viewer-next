@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, fstatSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -18,7 +19,10 @@ const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 let selectedReleaseRevision = null;
 
 function deployedPackageRoot() {
-  const configRoot = process.env.XDG_CONFIG_HOME || join(process.env.HOME || "/home/user", ".config");
+  /* `os.homedir()` rather than `$HOME` with a Linux-shaped default: on Windows
+     HOME is not a Windows variable at all, and the fallback named a directory
+     that exists on no machine running this. */
+  const configRoot = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
   const stateDir = process.env.LLV_STATE_DIR || join(configRoot, "agent-log-viewer", "state");
   const targetFile = process.env.LLV_VIEWER_DEPLOY_TARGET || join(stateDir, "viewer-release.json");
   let target;

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { detectTailscale, getToken, readStatus, serve as serveTailscale, TailscaleError } from "./tailscale.mjs";
 import {
+  browserOpenCommand,
   cliRuntimeHostConfig,
   cliRuntimeHostEnvironment,
   discardWakatimeEnvironmentCredential,
@@ -264,8 +265,16 @@ function resolveServer(packageRoot) {
     };
   }
 
-  const nextBin = join(packageRoot, "node_modules", ".bin", "next");
-  if (!existsSync(nextBin)) {
+  /* `node_modules/.bin/next` is a shell shim, and on Windows the installer
+     writes `next.cmd` / `next.ps1` / `next.exe` instead of an extension-less
+     file — so this probe found nothing there and a checkout could not start at
+     all. Next's own entry point is an ordinary JavaScript file on every
+     platform, and it is what the Bun runtime below actually runs. */
+  const nextBin = [
+    join(packageRoot, "node_modules", ".bin", "next"),
+    join(packageRoot, "node_modules", "next", "dist", "bin", "next"),
+  ].find((candidate) => existsSync(candidate));
+  if (!nextBin) {
     fail(m.noServer());
   }
 
@@ -411,9 +420,9 @@ function probeRuntimeHost(socketPath) {
   });
 }
 
-function runtimeHostFenceOwner(socketPath) {
+function runtimeHostFenceOwner(fencePath) {
   try {
-    const owner = JSON.parse(readFileSync(`${socketPath}.lock`, "utf8"));
+    const owner = JSON.parse(readFileSync(fencePath, "utf8"));
     if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 1) return null;
     if (typeof owner.startIdentity !== "string" || !owner.startIdentity.startsWith(`${owner.pid}:`)) return null;
     if (typeof owner.acquisitionId !== "string" || owner.acquisitionId.length < 16) return null;
@@ -440,7 +449,9 @@ function runtimeHostExitDetail(processHandle) {
   return stderr ? `${outcome}: ${stderr}` : outcome;
 }
 
-async function waitForRuntimeHost(socketPath, processHandle = null) {
+/* The fence is a separate name from the endpoint because a Windows endpoint is
+   a named pipe with no file to sit beside — see `cliRuntimeHostEndpoint`. */
+async function waitForRuntimeHost(socketPath, fencePath, processHandle = null) {
   const deadline = Date.now() + RUNTIME_HOST_READINESS_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (processHandle?.state.spawnError) {
@@ -450,7 +461,7 @@ async function waitForRuntimeHost(socketPath, processHandle = null) {
       throw new Error(m.runtimeHostExited(runtimeHostExitDetail(processHandle)));
     }
     if (await probeRuntimeHost(socketPath)) {
-      const owner = runtimeHostFenceOwner(socketPath);
+      const owner = runtimeHostFenceOwner(fencePath);
       if (!processHandle) return;
       if (owner?.pid === processHandle.child.pid) return;
       if (owner) throw new Error(m.runtimeHostOwnerMismatch(owner.pid, processHandle.child.pid));
@@ -517,7 +528,7 @@ function createRuntimeHostSupervisor(config, bunRuntime, environment, packageRoo
   const launch = async (initial) => {
     const processHandle = spawnHost();
     try {
-      await waitForRuntimeHost(config.socketPath, processHandle);
+      await waitForRuntimeHost(config.socketPath, config.fencePath, processHandle);
       processHandle.state.readyAt = Date.now();
       if (processHandle.child.exitCode !== null || processHandle.child.signalCode !== null) {
         throw new Error(m.runtimeHostExited(runtimeHostExitDetail(processHandle)));
@@ -613,16 +624,17 @@ async function printTailscaleBanner(runtime) {
 }
 
 function openBrowser(url) {
-  const opener =
-    process.platform === "linux" ? "xdg-open" : process.platform === "darwin" ? "open" : null;
-
+  const opener = browserOpenCommand(url);
   if (!opener) {
     return;
   }
 
-  const child = spawn(opener, [url], viewerChildProcessOptions({
+  /* `windowsHide` keeps the console rundll32 would otherwise flash on the
+     desktop; it is inert on every other platform. */
+  const child = spawn(opener.command, opener.args, viewerChildProcessOptions({
     stdio: "ignore",
     detached: true,
+    windowsHide: true,
   }));
   child.unref();
 }

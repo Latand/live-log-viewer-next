@@ -1,0 +1,148 @@
+name: Platform tests
+
+# Nobody working on this repository has a Windows machine, so every claim about
+# Windows behaviour has to be something CI can refuse. This workflow is that
+# refusal. It follows the precedent set by `macos-identity.yml`, which exists
+# for the same reason on the macOS side: a job that fails when the behaviour
+# does not hold, not a paragraph saying it was tried.
+#
+# Two legs run the same explicit list of files. The Ubuntu leg is what makes
+# "Linux is unchanged" a witnessed claim rather than an assertion — no other
+# workflow here runs the suite at all. The Windows leg is the only place the
+# Windows process backend, the named-pipe endpoint, the LockFileEx fence and
+# the tree-kill termination ever execute.
+#
+# Files are named one by one. A directory sweep is forbidden by AGENTS.md
+# because sweeping `src/lib/agent/` or `src/app/api/runtime/` drives host
+# lifecycle code against whatever registry the runtime resolves; on a runner
+# that state is empty, but the rule is the rule and the list is also what keeps
+# these jobs short.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-platform:
+    name: Linux (unchanged)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.3
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Prepare an isolated state, config and temp root
+        shell: bash
+        run: mkdir -p "${RUNNER_TEMP}/llv-home" "${RUNNER_TEMP}/llv-config" "${RUNNER_TEMP}/llv-state" "${RUNNER_TEMP}/llv-tmp"
+
+      - name: Require the live backend this platform selects
+        env:
+          HOME: ${{ runner.temp }}/llv-home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/llv-config
+          LLV_STATE_DIR: ${{ runner.temp }}/llv-state
+          TMPDIR: ${{ runner.temp }}/llv-tmp
+        run: bun scripts/verify-platform-backend.ts --expect linux
+
+      - name: Platform tests
+        env:
+          HOME: ${{ runner.temp }}/llv-home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/llv-config
+          LLV_STATE_DIR: ${{ runner.temp }}/llv-state
+          TMPDIR: ${{ runner.temp }}/llv-tmp
+        run: >
+          bun test
+          src/lib/proc/memory.test.ts
+          src/lib/proc/portable.test.ts
+          src/lib/proc/darwinIdentity.test.ts
+          src/lib/proc/index.test.ts
+          src/lib/proc/windowsSnapshot.test.ts
+          src/lib/proc/windowsIdentity.test.ts
+          src/lib/proc/windowsCwd.test.ts
+          src/lib/proc/windows.test.ts
+          src/lib/processGroup.test.ts
+          src/lib/platformHome.test.ts
+          src/lib/runtime/localEndpoint.test.ts
+          src/lib/scanner/describe.test.ts
+          src/runtime-host/socket.test.ts
+          src/runtime-host/runtimeHostFence.test.ts
+          bin/server-runtime.test.ts
+
+  windows-platform:
+    name: Windows (native)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.3
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Refuse to install where the package says it cannot run
+        # The originating report: `"os": ["linux", "darwin"]` makes an install on
+        # Windows fail with EBADPLATFORM before anything else can be tried. This
+        # reads the field the resolver reads.
+        run: |
+          $manifest = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($manifest.os -notcontains 'win32') { throw "package.json still refuses win32: $($manifest.os -join ', ')" }
+          Write-Output "package os field: $($manifest.os -join ', ')"
+
+      - name: Prepare an isolated profile, state and temp root
+        run: |
+          foreach ($leaf in @('llv-home', 'llv-config', 'llv-state', 'llv-tmp')) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP $leaf) | Out-Null
+          }
+
+      # The Windows-only cases below skip themselves off win32, and a silent skip
+      # would leave this job green having executed nothing. This step fails
+      # instead when the runner is not Windows, when the backend selection is
+      # wrong, or when any kernel reader the backend depends on returns nothing.
+      - name: Require the live Windows kernel readers on this runner
+        env:
+          USERPROFILE: ${{ runner.temp }}\llv-home
+          XDG_CONFIG_HOME: ${{ runner.temp }}\llv-config
+          LLV_STATE_DIR: ${{ runner.temp }}\llv-state
+          TMP: ${{ runner.temp }}\llv-tmp
+          TEMP: ${{ runner.temp }}\llv-tmp
+        run: bun scripts/verify-platform-backend.ts --expect win32
+
+      - name: Platform tests
+        env:
+          USERPROFILE: ${{ runner.temp }}\llv-home
+          XDG_CONFIG_HOME: ${{ runner.temp }}\llv-config
+          LLV_STATE_DIR: ${{ runner.temp }}\llv-state
+          TMP: ${{ runner.temp }}\llv-tmp
+          TEMP: ${{ runner.temp }}\llv-tmp
+        run: >
+          bun test
+          src/lib/proc/memory.test.ts
+          src/lib/proc/portable.test.ts
+          src/lib/proc/darwinIdentity.test.ts
+          src/lib/proc/index.test.ts
+          src/lib/proc/windowsSnapshot.test.ts
+          src/lib/proc/windowsIdentity.test.ts
+          src/lib/proc/windowsCwd.test.ts
+          src/lib/proc/windows.test.ts
+          src/lib/processGroup.test.ts
+          src/lib/platformHome.test.ts
+          src/lib/runtime/localEndpoint.test.ts
+          src/lib/scanner/describe.test.ts
+          src/runtime-host/socket.test.ts
+          src/runtime-host/runtimeHostFence.test.ts
+          bin/server-runtime.test.ts
