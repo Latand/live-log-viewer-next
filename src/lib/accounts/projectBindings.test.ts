@@ -343,6 +343,34 @@ test("an alias introduced AFTER the row was persisted holds the same fence", () 
   expect(allowedAccountIdsForProject(OLD, "claude")).toBeNull();
 });
 
+test("a stored spelling padded with whitespace still fences its project", () => {
+  /* A row is accepted when its project TRIMS to something, so a hand-edited or
+     older record can hold `" project-atlas "`. Compared raw against a trimmed
+     request it matches neither spelling, and both lookups then answer "nobody
+     bound this project" — the fence disappearing on the one project it was
+     written for. The stored spelling is normalized on the way out for the same
+     reason an alias is, so the padded row is the same fence. */
+  damage(JSON.stringify({
+    schemaVersion: 1,
+    bindings: [{
+      engine: "claude",
+      accountId: RESERVED,
+      project: `  ${ATLAS}\t`,
+      createdAt: "2026-08-30T00:00:00.000Z",
+    }],
+  }));
+
+  expect(allowedAccountIdsForProject(ATLAS, "claude")).toEqual([RESERVED]);
+  expect(projectAllowsAccount(ATLAS, "claude", SHARED)).toBe(false);
+  expect(accountProjectBindings()).toMatchObject([{ project: ATLAS }]);
+  expect(projectsForAccount("claude", RESERVED)).toEqual([ATLAS]);
+
+  /* And it is removable under the spelling the project actually has, so the
+     padding cannot leave a row nothing can address. */
+  expect(unbindAccountFromProject("claude", RESERVED, ATLAS)).toMatchObject({ ok: true, changed: true });
+  expect(accountProjectBindings()).toEqual([]);
+});
+
 test("rows for two spellings that have converged are one binding, and one unbind removes both", () => {
   /* A record written across a convergence carries both spellings for what is
      now one project. Counted separately they are a duplicate chip in the panel

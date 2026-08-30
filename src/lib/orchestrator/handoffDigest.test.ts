@@ -380,3 +380,48 @@ test("identityRedact leaves ordinary working text alone", () => {
   const kept = "the /api/board route still 500s; agent_registry and account_manager are fine; and/or the queue drains, see https://example.com/docs/page (issue #1067, 12/13 checks)";
   expect(identityRedact(kept)).toBe(kept);
 });
+
+test("#1279: the digest's account is resolved against the seat's own project", async () => {
+  /* Nothing here names an account — the digest picks one by itself — so the
+     pick is bound by the project's pool, and the project has to REACH the
+     resolver for that to be true. Passing none is how an automatic pick
+     silently selects across every account on a bound project. */
+  const projects: (string | null)[] = [];
+  const outcome = await summarizeHandoffsHeadless({
+    project: "proj-atlas",
+    clientRequestId: "req_digest_project",
+    priorHistory: null,
+    priorHandoffs: ["a prior handoff"],
+    predecessor: null,
+  }, runtime({
+    resolveAccount: (project) => {
+      projects.push(project);
+      return { kind: "available", account };
+    },
+  }));
+
+  expect(projects).toEqual(["proj-atlas"]);
+  expect(outcome.kind).toBe("digest");
+});
+
+test("#1279: a refusal from the account resolver stops the digest before any turn runs", async () => {
+  /* A damaged binding record refuses the automatic pick, and the refusal
+     arrives here as a throw. What must not happen is the turn running anyway on
+     whatever account is reachable — so nothing is run, and the refusal is left
+     to the rotation, which already composes the deterministic history for any
+     thrown resolver failure. */
+  let runs = 0;
+  const outcome = await summarizeHandoffsHeadless({
+    project: "proj-atlas",
+    clientRequestId: "req_digest_unreadable",
+    priorHistory: null,
+    priorHandoffs: ["a prior handoff"],
+    predecessor: null,
+  }, runtime({
+    resolveAccount: () => { throw new Error("the account↔project binding record is unreadable"); },
+    run: async () => { runs += 1; return runResult(); },
+  })).catch((error: unknown) => error);
+
+  expect(runs).toBe(0);
+  expect(outcome).toBeInstanceOf(Error);
+});

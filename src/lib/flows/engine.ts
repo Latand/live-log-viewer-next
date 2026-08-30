@@ -703,7 +703,7 @@ function prepareReviewerLaunch(flow: Flow, round: Round): PreparedReviewerLaunch
        the project's allowed set only. Every allowed account exhausted parks the
        flow with `rateLimitStateDetail`, exactly as it already did — it just
        can no longer reach an account the project forbids to avoid parking. */
-    (engine, requestedId, excludedIds) => accountManager.resolveHeadlessSpawn(engine, requestedId, excludedIds, flow.project),
+    (engine, requestedId, excludedIds) => accountManager.resolveHeadlessSpawn(engine, requestedId ?? null, excludedIds ?? [], flow.project),
   );
   if (decision.kind === "exhausted") throw new ReviewerAccountsExhaustedError(decision.resetsAt);
   if (decision.kind === "unavailable") throw new Error("no authenticated reviewer account is available");

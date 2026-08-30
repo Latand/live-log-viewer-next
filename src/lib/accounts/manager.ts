@@ -207,7 +207,7 @@ export const accountManager: AccountManager = {
   async submitLoginInput() { throw new Error("login input is Claude-operation specific"); },
   async cancelLogin() { throw new Error("login cancellation is Claude-operation specific"); },
   resolveSpawn(engine, requested) { return contextForSpawn(engine, requested ?? agentRegistry().engineRouting(engine).activeAccountId ?? undefined); },
-  resolveHeadlessSpawn(engine, requested, excludedIds = [], project = null) {
+  resolveHeadlessSpawn(engine, requested, excludedIds, project) {
     const selected = selectProjectAccount({
       project,
       engine,

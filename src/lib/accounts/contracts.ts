@@ -84,9 +84,19 @@ export interface AccountManager {
   submitLoginInput(operationId: string, code: string): Promise<LoginOperationSummary>;
   cancelLogin(operationId: string): Promise<LoginOperationSummary>;
   resolveSpawn(engine: "claude" | "codex", requestedId?: string | null): AccountContext;
-  /** `project` restricts the candidates to the project's allowed set (#1279);
-      omitted or null it selects over every account, as it always did. */
-  resolveHeadlessSpawn(engine: "claude" | "codex", requestedId?: string | null, excludedIds?: string[], project?: string | null): HeadlessSpawnAvailability;
+  /**
+   * The unattended, capacity-aware pick. Nothing names an account here, so this
+   * is an AUTOMATIC selection and `project` is what binds it to that project's
+   * pool (#1279); `null` is the project a caller genuinely cannot name, and
+   * selects over every account exactly as this always did.
+   *
+   * `project` is REQUIRED rather than defaulted, and that is the point: a
+   * defaulted `null` makes forgetting it compile, and a forgotten project is an
+   * automatic pick silently drawn from every account on a bound project — the
+   * fence failing open at the one seam whose whole job is to hold it. Required,
+   * a new caller has to answer the question.
+   */
+  resolveHeadlessSpawn(engine: "claude" | "codex", requestedId: string | null, excludedIds: string[], project: string | null): HeadlessSpawnAvailability;
   /** The one seam every project-owned launch resolves its account through. */
   resolveProjectSpawn(engine: "claude" | "codex", request: ProjectSpawnRequest): ProjectSpawnResolution;
   resolveTranscriptOwner(engine: "claude" | "codex", transcript: string): AccountContext | null;
