@@ -1041,9 +1041,30 @@ export class CodexAppServerHost implements EngineHost {
     } catch (error) {
       const reason = safeError(error);
       if (/not materialized yet/i.test(reason) && /before first user message/i.test(reason)) {
+        const confirmed = this.confirmedDeliveries.get(clientMessageId);
+        const turnId = confirmed?.receipt.outcome !== "rejected"
+          ? confirmed?.receipt.turnId ?? null
+          : null;
+        const terminal = turnId
+          ? this.events.findLast((event): event is Extract<RuntimeEvent, { kind: "turn-ended" }> =>
+            event.kind === "turn-ended" && event.turnId === turnId)
+          : null;
+        /* Fresh Codex threads are in-memory placeholders until their first
+           turn persists a rollout. During a live turn this response is a
+           pending state. Once that same turn has ended, the app-server has
+           supplied the decisive contradiction: it accepted and completed the
+           first message while its session store still has no first message. */
+        if (terminal) {
+          return {
+            state: "failed",
+            reason: terminal.status === "completed"
+              ? "Codex app-server completed the confirmed first turn without materializing its session"
+              : `Codex app-server ended the confirmed first turn as ${terminal.status} without materializing its session`,
+          };
+        }
         return {
           state: "absent",
-          reason: "Codex app-server confirmed the first message without materializing its session",
+          reason: "Codex app-server has not materialized the confirmed first message yet",
         };
       }
       if (/thread\/read timed out/i.test(reason)) {

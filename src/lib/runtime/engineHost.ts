@@ -112,11 +112,11 @@ export interface EngineHost {
 
 export type SessionMaterializationEvidence =
   | { state: "materialized" }
-  /** The engine currently has no persisted first message; later reads may advance. */
+  /** The first turn is still live and later persistence reads may advance. */
   | { state: "absent"; reason: string }
   /** The persistence read had no verdict; a readable canonical artifact may still prove success. */
   | { state: "unavailable"; reason: string }
-  /** The engine rejected or contradicted the staged session identity. */
+  /** The engine rejected the identity or ended its first turn while still reporting no first message. */
   | { state: "failed"; reason: string };
 
 export class StructuredSessionMaterializationError extends Error {

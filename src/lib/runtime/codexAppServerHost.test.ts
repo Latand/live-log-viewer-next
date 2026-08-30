@@ -1834,7 +1834,7 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
-  test("surfaces authoritative failure when a confirmed first delivery never materializes the thread", async () => {
+  test("fails materialization only after the confirmed first turn ends without a session", async () => {
     const server = new FakeAppServer("failed-materialization-thread");
     server.readError = "thread failed-materialization-thread is not materialized yet; includeTurns is unavailable before first user message";
     const host = await CodexAppServerHost.start({
@@ -1849,7 +1849,16 @@ describe("CodexAppServerHost", () => {
     });
     await expect(host.sessionMaterializationEvidence("operation-materialization")).resolves.toEqual({
       state: "absent",
-      reason: "Codex app-server confirmed the first message without materializing its session",
+      reason: "Codex app-server has not materialized the confirmed first message yet",
+    });
+
+    server.notify("turn/completed", {
+      threadId: "failed-materialization-thread",
+      turn: { id: "turn-1", status: "completed" },
+    });
+    await expect(host.sessionMaterializationEvidence("operation-materialization")).resolves.toEqual({
+      state: "failed",
+      reason: "Codex app-server completed the confirmed first turn without materializing its session",
     });
     await host.release();
   });

@@ -51,6 +51,12 @@ export const INITIAL_MESSAGE_TIMEOUT_MS = 30_000;
 const INITIAL_MESSAGE_POLL_MS = 250;
 export const ADMISSION_RETRY_ATTEMPTS = 3;
 const ADMISSION_RETRY_BACKOFF_MS = 250;
+/**
+ * Operational ownership bound for one synchronous setup generation. It gives
+ * host start, binding, first delivery, and publication one five-minute caller
+ * lifetime, then hands cleanup to durable reconciliation. Engine evidence can
+ * establish a concrete failure earlier; this bound supplies no causal claim.
+ */
 export const STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS = 5 * 60_000;
 export const READ_ONLY_STAGE_PERMISSION_PROFILE = "llv-read-only-stage";
 const PINNED_SPAWN_HEALTH_TIMEOUT_MS = 600;
@@ -184,7 +190,7 @@ export class StructuredInitialMessageTimeoutError extends Error {
 
 export class StructuredTranscriptMaterializationError extends Error {
   constructor(timeoutMs: number) {
-    super(`structured spawn transcript did not become readable within ${timeoutMs}ms`);
+    super(`structured spawn startup reached its ${timeoutMs}ms durable setup bound without a readable transcript`);
     this.name = "StructuredTranscriptMaterializationError";
   }
 }
@@ -241,12 +247,12 @@ async function waitForStructuredSessionMaterialization(
     if (remaining <= 0) {
       if (lastEvidence.state === "absent") {
         throw new StructuredSessionMaterializationError(
-          `${lastEvidence.reason} before the durable setup deadline`,
+          `${lastEvidence.reason}; startup reached its ${options.timeoutMs}ms durable setup bound`,
         );
       }
       if (lastEvidence.state === "unavailable") {
         throw new StructuredSessionMaterializationError(
-          `structured spawn session evidence remained unavailable before the durable setup deadline: ${lastEvidence.reason}`,
+          `structured spawn startup reached its ${options.timeoutMs}ms durable setup bound while session evidence was unavailable: ${lastEvidence.reason}`,
         );
       }
       throw new StructuredTranscriptMaterializationError(options.timeoutMs);
@@ -520,7 +526,7 @@ export async function reconcileStructuredSpawnReplay(
     ?? failedOperationReason(spawnOperation, "structured spawn");
   if (!terminalReason && ageMs >= timeoutMs) {
     if (runtimeDelivered) {
-      terminalReason = `structured spawn transcript remained absent after confirmed first-message delivery for ${timeoutMs}ms`;
+      terminalReason = `structured spawn startup reached its ${timeoutMs}ms durable setup bound with no readable transcript after confirmed first-message delivery`;
     } else if (liveRuntimeSession) {
       terminalReason = `structured spawn durable setup remained incomplete for ${timeoutMs}ms`;
     } else if (effectHistoryUnavailable) {
@@ -1255,6 +1261,10 @@ export async function recoverPendingStructuredSpawns(
       continue;
     }
     if (status === "delivered") {
+      /* A prior process may have written the runtime receipt before its
+         registry settlement. Publish that staged identity only when the
+         session artifact still supplies the persistence evidence. */
+      if (!structuredTranscriptIsReadable(receipt.artifactPath)) continue;
       const hostReady = entry?.structuredHost?.process
         && entry.claimOwner
         && entry.status !== "dead"
@@ -1305,6 +1315,9 @@ export async function recoverPendingStructuredSpawns(
         settleInitialMessageReservation(registry, receipt.launchId);
       }
     }
+    /* Delivery acceptance can precede lazy Codex rollout creation. Keep the
+       receipt staged so replay exposes no identity while the host is live. */
+    if (!structuredTranscriptIsReadable(receipt.artifactPath)) continue;
     await client.transitionOperation(receipt.launchId, "delivered");
     const finalized = registry.finalizeStructuredSpawn(receipt.launchId);
     if (finalized.kind === "conflict") throw new Error(`structured spawn recovery conflict: ${finalized.code}`);
@@ -1591,7 +1604,7 @@ export async function spawnStructuredConversation(
         durableSetupTimedOut = true;
         reject(materializationPending
           ? new StructuredSessionMaterializationError(
-            `structured spawn session did not materialize before the durable setup deadline (${durableSetupTimeoutMs}ms)`,
+            `structured spawn startup reached its ${durableSetupTimeoutMs}ms durable setup bound while session materialization was pending`,
           )
           : new Error(`structured spawn durable host setup timed out after ${durableSetupTimeoutMs}ms`));
       }, durableSetupTimeoutMs);

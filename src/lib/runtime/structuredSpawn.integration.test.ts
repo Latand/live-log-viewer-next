@@ -922,7 +922,7 @@ class RoundTripHost implements SpawnedStructuredHost {
     | { state: "failed"; reason: string }
   > {
     return this.materializationFailure
-      ? { state: "absent", reason: this.materializationFailure }
+      ? { state: "failed", reason: this.materializationFailure }
       : { state: "materialized" };
   }
 
@@ -1355,10 +1355,9 @@ async function completesWithin<T>(operation: T | PromiseLike<T>, message: string
 }
 
 test.each([
-  { cleanup: "releases its host", releaseResists: false, evidenceHangs: false },
-  { cleanup: "records failure when host release is unconfirmed", releaseResists: true, evidenceHangs: false },
-  { cleanup: "settles an unreapable host when the durable materialization timer wins", releaseResists: true, evidenceHangs: true },
-])("a structured Codex spawn $cleanup on permanent session absence (#1123)", async ({ releaseResists, evidenceHangs }) => {
+  { cleanup: "releases its host", releaseResists: false },
+  { cleanup: "records failure when host release is unconfirmed", releaseResists: true },
+])("a structured Codex spawn $cleanup on authoritative permanent session absence (#1123)", async ({ releaseResists }) => {
   const engine = "codex" as const;
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `missing-transcript-${id}`);
@@ -1378,19 +1377,14 @@ test.each([
   const host = releaseResists
     ? new UnreapableRoundTripHost(engine, artifactPath, id, {
       materializeTranscript: false,
-      materializationFailure: "Codex app-server confirmed the first message without materializing its session",
+      materializationFailure: "Codex app-server completed the confirmed first turn without materializing its session",
     })
     : new RoundTripHost(engine, artifactPath, id, {
       materializeTranscript: false,
-      materializationFailure: "Codex app-server confirmed the first message without materializing its session",
+      materializationFailure: "Codex app-server completed the confirmed first turn without materializing its session",
     });
-  if (evidenceHangs) {
-    host.sessionMaterializationEvidence = async () => await new Promise<never>(() => {});
-  }
-  let now = 0;
-  const expectedFailure = evidenceHangs
-    ? "structured spawn session did not materialize before the durable setup deadline"
-    : "Codex app-server confirmed the first message without materializing its session";
+  const expectedFailure = "Codex app-server completed the confirmed first turn without materializing its session";
+  let sleepCalls = 0;
 
   try {
     await expect(spawnStructuredConversation({
@@ -1421,11 +1415,8 @@ test.each([
       publishHost: async () => async () => {},
       deliverFirst: async () => {},
       processIdentity: () => ({ pid: process.pid, startIdentity: "missing-transcript-host" }),
-      durableSetupTimeoutMs: evidenceHangs ? 5 : 100,
-      ...(evidenceHangs ? {} : {
-        now: () => now,
-        sleep: async (ms: number) => { now += ms; },
-      }),
+      durableSetupTimeoutMs: 60_000,
+      sleep: async () => { sleepCalls += 1; },
     })).rejects.toThrow(expectedFailure);
 
     expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
@@ -1433,6 +1424,7 @@ test.each([
       error: expect.stringContaining(expectedFailure),
     });
     expect(host.releaseCount).toBe(1);
+    expect(sleepCalls).toBe(0);
     if (!releaseResists) {
       expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
         status: "dead",
@@ -1526,7 +1518,7 @@ test("a live Codex host whose transcript materializes after the former 30-second
   host.sessionMaterializationEvidence = async () => {
     evidenceChecks += 1;
     return evidenceChecks === 1
-      ? { state: "unavailable", reason: "thread/read timed out" }
+      ? { state: "absent", reason: "Codex app-server has not materialized the confirmed first message yet" }
       : { state: "materialized" };
   };
 
@@ -1557,7 +1549,10 @@ test("a live Codex host whose transcript materializes after the former 30-second
         return () => {};
       },
       publishHost: async () => async () => {},
-      deliverFirst: async () => { now = INITIAL_MESSAGE_TIMEOUT_MS + 1; },
+      deliverFirst: async () => {
+        await host.send({ id: `spawn_${begun.receipt.launchId}`, text: "build the scoped change" });
+        now = INITIAL_MESSAGE_TIMEOUT_MS + 1;
+      },
       processIdentity: () => ({ pid: process.pid, startIdentity: "slow-transcript-host" }),
       now: () => now,
       sleep: async (ms) => {
@@ -3890,6 +3885,80 @@ test("startup recovery finalizes a staged spawn without duplicating its admitted
 
   expect(host.sent.map((entry) => entry.text)).toEqual(["recover this first prompt"]);
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "completed", artifactPath });
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("delivered");
+});
+
+test("startup recovery withholds a staged identity when recovered delivery has no transcript (#1123)", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `recovery-unmaterialized-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const begun = beginLegacySpawnFixture(registry, { engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    cwd,
+    "prompt": "recover this first prompt",
+    accountId: "codex-subscription",
+    parentConversationId: null,
+  });
+  const key = { engine: "codex" as const, sessionId: id };
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "unhosted",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:pending",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: null,
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("spawn identity was unavailable");
+  const claimed = registry.claimStructuredHost(key, { pid: process.pid, startIdentity: "test-process" }, { allowUnhosted: true });
+  if (!claimed?.claimOwner) throw new Error("structured claim was unavailable");
+  registry.setStructuredHostClaimed(key, {
+    kind: "codex-app-server",
+    endpoint: "fake:stdio",
+    process: { pid: process.pid, startIdentity: "test-process" },
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    writerClaimEpoch: claimed.claimEpoch,
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+  }, "idle", claimed.claimOwner, claimed.claimEpoch);
+  const host = new RoundTripHost("codex", artifactPath, id, { materializeTranscript: false });
+  await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(host.sent.map((entry) => entry.text)).toEqual(["recover this first prompt"]);
+  expect(fs.existsSync(artifactPath)).toBeFalse();
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "path-pending",
+    artifactPath,
+  });
   expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("delivered");
 });
 
