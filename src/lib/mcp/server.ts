@@ -48,6 +48,7 @@ export const MCP_TOOL_NAMES = [
   "list_conversations",
   "search_transcripts",
   "get_conversation",
+  "conversation_deliverability",
   "conversation_messages",
   "deploy_exact_sha",
   "get_pipeline",
@@ -1656,7 +1657,8 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   spawn_agent: "Create a Viewer-managed agent conversation and return its durable conversation and launch ids.",
   send_message: [
     "Deliver a message to a Viewer conversation through its registered runtime host.",
-    "The answer reports acceptance, not arrival: `outcome` is `queued` or `delivering` until the delivery record settles, and `settled` says which. Hold `operationId` and ask `message_receipt` what became of it — never treat `queued` as a terminal answer, and never re-send an unsettled operation, because a send whose fate is unknown can be delivered twice.",
+    "A reclaimed conversation host is resumed after the instruction is durably reserved, and the delivery queue keeps that single operation through publication.",
+    "The answer reports acceptance. `outcome` is `held`, `queued` or `delivering` until the delivery record settles, and `settled` says whether arrival is established. Hold `operationId` and ask `message_receipt` what became of it — never treat an unsettled outcome as terminal, and never re-send an unsettled operation, because a send whose fate is unknown can be delivered twice.",
   ].join(" "),
   message_receipt: [
     "Answer what became of one accepted send, by the `operationId` `send_message` returned.",
@@ -1680,6 +1682,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
   search_transcripts: "Search indexed user and assistant message bodies across every scanned transcript store. Returns match snippets with speaker, timestamp, transcript path and byte offset; project is optional, and empty pages include corpus statistics. Queries never read transcript files.",
   get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan. For normalized, filtered, paged messages use conversation_messages.",
+  conversation_deliverability: "Read whether one conversation currently has a deliverable host from the durable registry record. An accepted resume stays synchronizing until the current generation records a claimed process; reclaimed, synchronizing, superseded, and unknown are distinct conditions.",
   conversation_messages: "Read one conversation newest-first as engine-normalized records; Claude and Codex return the same shape, while hook attachments and usage envelopes are omitted. Identity accepts conversationId, transcriptPath, or selectedContext and resolves through the same bounded paths as get_conversation. kinds is a non-empty subset of message | reasoning | tool_call | tool_result | trace (default message). roles is a non-empty subset of user | assistant | system | tool (default all). since is an inclusive ISO timestamp lower bound. limit clamps to 1..200 (default 20); maxChars clamps to 1..16000 (default 4000), and truncated marks cut text after secret redaction. Records are newest-first. Pass the opaque cursor unchanged with a fresh clientRequestId for each next-older page while hasMore is true; cursors are bound to the transcript and filters. A normal empty page returns records: []. File work is bounded by the page, so a 100 MB rollout is never parsed in full.",
   deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
@@ -1977,6 +1980,11 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     selectedContext: selectedContextSchema,
     tailLines: boundedNumericInput("get_conversation", "tailLines")
       .describe("Read this many trailing transcript lines instead of the scanned summary. Use conversationId or selectedContext for the bounded identity path, or transcriptPath for the validated pinned reader; all alternatives keep answering while corpus scans are degraded."),
+  }).passthrough(),
+  conversation_deliverability: z.object({
+    clientRequestId: clientRequestIdSchema,
+    conversationId: z.string().min(1).optional(),
+    transcriptPath: z.string().min(1).optional(),
   }).passthrough(),
   conversation_messages: z.object({
     clientRequestId: clientRequestIdSchema,
