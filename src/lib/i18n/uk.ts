@@ -330,7 +330,8 @@ export const uk: Record<keyof typeof en, Message> = {
 
   "composer.imagesCount": { one: "{count} картинка", few: "{count} картинки", many: "{count} картинок", other: "{count} картинок" },
   "composer.attachmentsCount": { one: "{count} вкладення", few: "{count} вкладення", many: "{count} вкладень", other: "{count} вкладень" },
-  "composer.spawned": "запущено агента в tmux {target}",
+  "composer.spawned": "запущено агента — {target}",
+  "composer.spawnedUnnamed": "запущено агента",
   "composer.sentPaths": "надіслано {count} шлях(и)",
   "composer.failedInterrupt": "не вдалося перервати",
   "composer.escapeSent": "надіслано Escape — агент перервано",
@@ -937,6 +938,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "question.alreadyAnswered": "відповідь уже записана",
   "question.openFailed": "не вдалося відкрити сесію",
   "question.opened": "відкрито {target}",
+  "question.openedUnnamed": "сесію відкрито",
   "question.answered": "Відповідено: {text}",
   "question.answeredElsewhere": "Відповідено в іншому місці: {text}",
   "question.noPane": "tmux-пейн недоступний",

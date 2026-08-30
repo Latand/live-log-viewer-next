@@ -331,7 +331,12 @@ export const en = {
   // TmuxComposer
   "composer.imagesCount": { one: "{count} image", other: "{count} images" },
   "composer.attachmentsCount": { one: "{count} attachment", other: "{count} attachments" },
-  "composer.spawned": "launched agent in tmux {target}",
+  /* A send that had to bring the host back reports `spawned`/`resumed` for
+     both transports, and the structured one answers with a conversation id
+     or no target at all — so this line names the target it got and no
+     transport (#1301). */
+  "composer.spawned": "launched agent — {target}",
+  "composer.spawnedUnnamed": "launched agent",
   "composer.sentPaths": "sent {count} path(s)",
   "composer.failedInterrupt": "couldn't interrupt",
   "composer.escapeSent": "sent Escape — agent interrupted",
@@ -964,6 +969,9 @@ export const en = {
   "question.alreadyAnswered": "answer already recorded",
   "question.openFailed": "couldn't open the session",
   "question.opened": "opened {target}",
+  /* A resume that brought a structured host back names no target, and the
+     card used to fill that hole with the word "tmux" (#1301). */
+  "question.openedUnnamed": "opened the session",
   "question.answered": "Answered: {text}",
   "question.answeredElsewhere": "Answered elsewhere: {text}",
   "question.noPane": "tmux pane unavailable",

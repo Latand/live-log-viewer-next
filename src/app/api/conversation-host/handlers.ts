@@ -9,14 +9,17 @@
  * debugging a session that will not start should look there and at the host
  * claim, not for a tmux server (#1301).
  *
- * Two branches here do still drive tmux, and both are still wired to live
- * callers, so the word means something where it survives:
+ * Three branches here do still drive tmux, and each is still wired to a live
+ * caller, so the word means something where it survives:
  *   - `GET ?attach=1` composes a `tmux attach-session` command for a legacy
  *     pane (`AttachTerminalDialog`, `resources/AttachControls`);
  *   - `POST {action:"kill-target"}` kills a legacy pane from the resource
- *     panel (`ResourcesFooter`).
- * Everything else on this route — sends, conversation actions, reconfigure,
- * `attach-terminal` — is structured.
+ *     panel (`ResourcesFooter`);
+ *   - `POST {action:"attach-terminal"}` opens a tmux window that tails a
+ *     *structured* conversation's transcript — the host stays structured, only
+ *     the viewer window is a pane (`materializeStructuredTerminal`).
+ * Everything else on this route — sends, conversation actions, reconfigure —
+ * is structured end to end.
  */
 import { NextRequest, NextResponse } from "next/server";
 
