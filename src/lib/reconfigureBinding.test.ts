@@ -6,6 +6,7 @@ import { afterAll, beforeEach, expect, test } from "bun:test";
 
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { accountProjectOverrides } from "@/lib/accounts/accountOverrides";
 import { bindAccountToProject } from "@/lib/accounts/projectBindings";
 import { AgentRegistry, setAgentRegistryForTests, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { resetProjectAliasesForTests } from "@/lib/projects/aliases";
@@ -15,10 +16,11 @@ import { reconfigureConversation } from "./delivery";
 
 /**
  * #1279 at the reconfigure seam: switching a live conversation onto another
- * account is a pin on that conversation's project's work, so a project that
- * does not allow the named account refuses it — the same answer a spawn or a
- * pipeline stage gives, at the one other door that could move work across the
- * boundary.
+ * account names that account outright, which makes it a DELIBERATE choice
+ * rather than a selection the Viewer made. The project's pool is what the
+ * Viewer draws from on its own — the reseat, and any account it would default
+ * to — so a named switch outside the pool is carried out and ATTRIBUTED, and
+ * the record says who chose it and what the pool was.
  *
  * Account and project names here are invented.
  */
@@ -98,7 +100,7 @@ function overrides(registry: AgentRegistry, entry: FileEntry, counters: { resolv
   };
 }
 
-test("a project bound to one account refuses a switch onto an account outside its set", async () => {
+test("a deliberate switch outside the project's set is carried out, and recorded against the pool", async () => {
   expect(bindAccountToProject("codex", RESERVED, FENCED_PROJECT).ok).toBe(true);
   const { pathname, registry, entry } = scenario("01", FENCED_PROJECT);
   const counters = { resolved: 0, ticks: 0 };
@@ -109,13 +111,72 @@ test("a project bound to one account refuses a switch onto an account outside it
     overrides(registry, entry, counters),
   );
 
-  expect(outcome).toMatchObject({ ok: false, status: 409 });
-  expect((outcome as { error: string }).error).toContain(OUTSIDE);
-  expect((outcome as { error: string }).error).toContain(FENCED_PROJECT);
-  /* Refused before anything moved: no migration queued, no tick requested. */
-  expect(counters.resolved).toBe(0);
-  expect(counters.ticks).toBe(0);
-  expect(registry.conversationForPath(pathname)?.migration ?? null).toBeNull();
+  /* The operator named this account. The switch happens. */
+  expect(outcome).toMatchObject({ ok: true, outcome: "pending" });
+  expect(counters.ticks).toBe(1);
+  expect(registry.conversationForPath(pathname)?.migration).toMatchObject({ targetId: OUTSIDE });
+  /* And the answer, and the durable record, both say it went outside the pool
+     and who took it there. */
+  expect(outcome).toMatchObject({
+    accountOverride: {
+      outsidePool: true,
+      accountId: OUTSIDE,
+      project: FENCED_PROJECT,
+      allowedAccountIds: [RESERVED],
+      reason: "outside-pool",
+      actor: "operator",
+      recorded: true,
+    },
+  });
+  expect(accountProjectOverrides({ project: FENCED_PROJECT, engine: "codex" })).toMatchObject([{
+    accountId: OUTSIDE,
+    actor: "operator",
+    actorConversationId: null,
+    reason: "outside-pool",
+    via: "conversation-switch",
+    allowedAccountIds: [RESERVED],
+  }]);
+});
+
+test("an agent's out-of-pool switch is recorded under the agent that made it", async () => {
+  expect(bindAccountToProject("codex", RESERVED, FENCED_PROJECT).ok).toBe(true);
+  const { pathname, registry, entry } = scenario("05", FENCED_PROJECT);
+  const counters = { resolved: 0, ticks: 0 };
+
+  const outcome = await reconfigureConversation(
+    pathname,
+    { model: "gpt-5.6-sol", effort: "high", fast: false, accountId: OUTSIDE },
+    { ...overrides(registry, entry, counters), actor: { kind: "agent" as const, conversationId: "conversation_caller" } },
+  );
+
+  expect(outcome).toMatchObject({ ok: true, accountOverride: { actor: "agent" } });
+  expect(accountProjectOverrides({ project: FENCED_PROJECT })).toMatchObject([{
+    actor: "agent",
+    actorConversationId: "conversation_caller",
+  }]);
+});
+
+test("a binding record that cannot be read does not veto a named switch, and is recorded as unreadable", async () => {
+  fs.mkdirSync(process.env.LLV_STATE_DIR!, { recursive: true });
+  fs.writeFileSync(path.join(process.env.LLV_STATE_DIR!, "account-project-bindings.json"), "{ not json", "utf8");
+  const { pathname, registry, entry } = scenario("06", FENCED_PROJECT);
+  const counters = { resolved: 0, ticks: 0 };
+
+  const outcome = await reconfigureConversation(
+    pathname,
+    { model: "gpt-5.6-sol", effort: "high", fast: false, accountId: OUTSIDE },
+    overrides(registry, entry, counters),
+  );
+
+  /* A damaged file fails closed for what the Viewer picks on its own; it is not
+     a decision anybody made, so it cannot stand in for the operator's. */
+  expect(outcome).toMatchObject({
+    ok: true,
+    outcome: "pending",
+    accountOverride: { reason: "binding-unreadable", allowedAccountIds: null },
+  });
+  expect(counters.ticks).toBe(1);
+  expect(accountProjectOverrides()).toMatchObject([{ reason: "binding-unreadable", accountId: OUTSIDE }]);
 });
 
 test("the same switch onto an account the project allows goes through", async () => {
@@ -133,6 +194,9 @@ test("the same switch onto an account the project allows goes through", async ()
   expect(outcome).toMatchObject({ ok: true, outcome: "pending" });
   expect(counters.ticks).toBe(1);
   expect(registry.conversationForPath(pathname)?.migration).toMatchObject({ targetId: OUTSIDE });
+  /* Inside the pool there is nothing to attribute. */
+  expect(outcome).not.toHaveProperty("accountOverride");
+  expect(accountProjectOverrides()).toEqual([]);
 });
 
 test("an unbound project switches accounts exactly as it always did", async () => {
@@ -148,6 +212,9 @@ test("an unbound project switches accounts exactly as it always did", async () =
   expect(outcome).toMatchObject({ ok: true, outcome: "pending" });
   expect(counters.ticks).toBe(1);
   expect(registry.conversationForPath(pathname)?.migration).toMatchObject({ targetId: OUTSIDE });
+  /* An unbound project has no pool to be outside of. */
+  expect(outcome).not.toHaveProperty("accountOverride");
+  expect(accountProjectOverrides()).toEqual([]);
 });
 
 test("a binding on one project leaves another project's switch alone", async () => {

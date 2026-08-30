@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
+import { accountProjectOverrides } from "@/lib/accounts/accountOverrides";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
 import {
@@ -69,12 +70,24 @@ function projectView(project: string) {
   const bindings = accountProjectBindings();
   const carrying = carriers();
   const displayNames = projectAliasSnapshot().displayNames;
+  /* Deliberate choices of an account outside this project's pool. Read once for
+     both engines, and rendered beside the pool rather than instead of it: the
+     pool is what the Viewer selects from on its own, and this is what somebody
+     decided to do anyway. */
+  const overrides = accountProjectOverrides({ project });
   return {
     project,
     projectName: displayNames[project] ?? project,
     engines: Object.fromEntries(ENGINES.map((engine) => [
       engine,
-      projectEngineAccounts(project, engine, accountsFor(engine), bindings, carryingAccountIds(carrying, project, engine)),
+      projectEngineAccounts(
+        project,
+        engine,
+        accountsFor(engine),
+        bindings,
+        carryingAccountIds(carrying, project, engine),
+        overrides,
+      ),
     ])),
     bindings: bindings.filter((binding) => binding.project === project),
   };

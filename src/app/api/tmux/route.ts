@@ -8,7 +8,8 @@ import {
 import { structuredHostsEnabled } from "@/lib/runtime/flags";
 import { applyConversationAction, CONVERSATION_ACTIONS } from "@/lib/conversation/actions";
 import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/transcriptHost";
-import { directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
+import type { AccountChoiceActor } from "@/lib/accounts/accountOverrides";
+import { callerConversationId, directOperatorActivityAuthority } from "@/lib/agent/operatorAuthority";
 import { reconfigurationFromBody } from "@/lib/agent/reconfigure";
 import { listFiles } from "@/lib/scanner";
 import { completedFileScan } from "@/lib/scanner/scanCache";
@@ -298,11 +299,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     return NextResponse.json(result.body, { status: result.status });
   }
 
+  /* Who is asking, for attributing an account choice outside a project's pool.
+     An agent names itself by presenting its conversation capability; anything
+     else is the operator, which is the same reading every operator-only gate in
+     this codebase uses. */
+  const caller = callerConversationId(req);
+  const actor: AccountChoiceActor = caller ? { kind: "agent", conversationId: caller } : { kind: "operator" };
   const structuredControl = explicitAction === "reconfigure" && structuredHostsEnabled()
     ? await dispatchStructuredControl({
         path: filePath,
         conversationId,
         action: explicitAction,
+        actor,
         ...(explicitAction === "reconfigure" ? {
           reconfiguration: {
             model: typeof body.model === "string" ? body.model : undefined,
@@ -321,7 +329,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     }
     const parsed = reconfigurationFromBody(file.engine, body);
     if (!parsed.value) return NextResponse.json({ error: parsed.error ?? "invalid configuration" }, { status: 400 });
-    return respond(await reconfigureConversation(filePath, parsed.value));
+    return respond(await reconfigureConversation(filePath, parsed.value, { actor }));
   }
 
   const text = typeof body.text === "string" ? body.text : "";

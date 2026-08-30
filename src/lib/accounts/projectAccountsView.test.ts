@@ -6,6 +6,7 @@ import {
   carryingAccountIds,
   projectEngineAccounts,
 } from "./projectAccountsView";
+import type { AccountProjectOverride } from "./accountOverrides";
 import type { AccountProjectBinding } from "./projectBindings";
 
 const ATLAS = "project-atlas";
@@ -39,6 +40,54 @@ test("a bound project shows its allowed accounts with labels, and who is carryin
 test("a bound account the catalog no longer holds still shows, under its own id", () => {
   const view = projectEngineAccounts(ATLAS, "claude", ACCOUNTS, [binding("acct-retired", ATLAS)], []);
   expect(view.allowed).toEqual([{ accountId: "acct-retired", label: "acct-retired" }]);
+});
+
+function override(over: Partial<AccountProjectOverride> = {}): AccountProjectOverride {
+  return {
+    at: "2026-08-30T09:00:00.000Z",
+    engine: "claude",
+    project: ATLAS,
+    accountId: SPARE,
+    allowedAccountIds: [RESERVED],
+    reason: "outside-pool",
+    actor: "operator",
+    actorConversationId: null,
+    conversationId: "conversation_one",
+    via: "conversation-switch",
+    ...over,
+  };
+}
+
+test("an account deliberately chosen from outside the pool is shown beside it, with who and when", () => {
+  const view = projectEngineAccounts(ATLAS, "claude", ACCOUNTS, [binding(RESERVED, ATLAS)], [SPARE], [override()]);
+  expect(view.allowed).toEqual([{ accountId: RESERVED, label: "Reserved" }]);
+  expect(view.outsidePool).toEqual([{ accountId: SPARE, label: "Spare", at: "2026-08-30T09:00:00.000Z", actor: "operator" }]);
+});
+
+test("repeating the same choice is one row, carrying the latest time", () => {
+  const view = projectEngineAccounts(ATLAS, "claude", ACCOUNTS, [binding(RESERVED, ATLAS)], [], [
+    override({ at: "2026-08-30T09:00:00.000Z" }),
+    override({ at: "2026-08-30T11:00:00.000Z", actor: "agent" }),
+    override({ at: "2026-08-30T10:00:00.000Z" }),
+  ]);
+  expect(view.outsidePool).toEqual([{ accountId: SPARE, label: "Spare", at: "2026-08-30T11:00:00.000Z", actor: "agent" }]);
+});
+
+test("an engine the project never bound has no pool, so nothing reads as outside one", () => {
+  const view = projectEngineAccounts(ATLAS, "claude", ACCOUNTS, [], [], [override()]);
+  expect(view.restricted).toBe(false);
+  expect(view.outsidePool).toEqual([]);
+});
+
+test("a choice of another project, another engine, or an account since bound, is not this project's", () => {
+  const view = projectEngineAccounts(ATLAS, "claude", ACCOUNTS, [binding(RESERVED, ATLAS), binding(SPARE, ATLAS)], [], [
+    override({ project: BEACON }),
+    override({ engine: "codex" }),
+    /* Bound since the choice was made: it is inside the pool now, and the row
+       would claim a boundary that no longer exists. */
+    override({ accountId: SPARE }),
+  ]);
+  expect(view.outsidePool).toEqual([]);
 });
 
 test("carrying counts only busy conversations of the same engine and project", () => {

@@ -100,11 +100,13 @@ test("a mutation is confirmed by the record read back, not by its own echo", () 
   expect(unbindAccountFromProject("claude", RESERVED, ATLAS)).toMatchObject({ ok: true, changed: false });
 });
 
-test("a write that cannot land is refused rather than reported ok", async () => {
-  /* A state directory that cannot be created: its parent is a FILE. The read
-     answers "no record" (ENOTDIR is one of the two ways a record is absent) and
-     the write cannot put one there, which is the one shape of write failure a
-     test can produce without depending on the uid it runs as.
+test("a regular file in the state path refuses every read; it never reads as unbound", async () => {
+  /* The state directory cannot exist because its parent is a FILE, so every
+     read of the record fails with ENOTDIR. Answered as "the record is not
+     there", that is "nobody bound anything" — every account allowed on exactly
+     the projects a binding was written to reserve, in the one condition where
+     the fence matters most. Absence has to be CONFIRMED to mean unbound, and
+     here it cannot be.
 
      Held inside an already-acquired account mutation transaction on purpose:
      the store re-enters that transaction instead of taking the lock a second
@@ -115,16 +117,76 @@ test("a write that cannot land is refused rather than reported ok", async () => 
   await withAccountMutationLockAsync(async () => {
     process.env.LLV_STATE_DIR = path.join(blocker, "state");
     try {
-      const result = bindAccountToProject("claude", RESERVED, ATLAS);
-      expect(result.ok).toBe(false);
-      if (result.ok) throw new Error("a failed write was reported as ok");
-      expect(result.code).toBe("STORE_ERROR");
-      expect(allowedAccountIdsForProject(ATLAS, "claude")).toBeNull();
+      expect(() => allowedAccountIdsForProject(ATLAS, "claude")).toThrow(AccountProjectBindingsUnreadableError);
+      expect(() => projectAllowsAccount(ATLAS, "claude", SHARED)).toThrow(AccountProjectBindingsUnreadableError);
+      expect(() => accountProjectBindings()).toThrow(/the read failed with ENOTDIR/);
+      /* And the mutation refuses on the record rather than on the write: it
+         never read a list it could append to. */
+      expect(bindAccountToProject("claude", RESERVED, ATLAS)).toMatchObject({ ok: false, code: "RECORD_UNREADABLE" });
     } finally {
       process.env.LLV_STATE_DIR = STATE;
     }
   });
   fs.rmSync(blocker, { force: true });
+});
+
+test("a dangling link where the record belongs is damage, not absence", () => {
+  /* `existsSync` and `readFileSync` both report a dangling link exactly the way
+     they report a pathname with nothing at it. The record's absence is
+     established by an lstat instead, which does not follow the last link. */
+  const repaired = path.join(STATE, "account-project-bindings.repair.json");
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.symlinkSync(repaired, RECORD);
+
+  expect(fs.existsSync(RECORD)).toBe(false);
+  expect(() => allowedAccountIdsForProject(ATLAS, "claude")).toThrow(AccountProjectBindingsUnreadableError);
+  expect(() => projectAllowsAccount(ATLAS, "claude", SHARED)).toThrow(AccountProjectBindingsUnreadableError);
+  expect(() => accountProjectBindings()).toThrow(/dangling link/);
+  expect(bindAccountToProject("claude", RESERVED, ATLAS)).toMatchObject({ ok: false, code: "RECORD_UNREADABLE" });
+
+  /* A link whose target exists is a record like any other, so the repair is to
+     put one there — or to remove the link. */
+  fs.writeFileSync(repaired, JSON.stringify({ schemaVersion: 1, bindings: [] }), "utf8");
+  expect(allowedAccountIdsForProject(ATLAS, "claude")).toBeNull();
+});
+
+/* The two cases below need a uid the filesystem can refuse. Root cannot be
+   refused, so they are skipped there rather than asserting nothing. */
+const REFUSABLE_UID = typeof process.getuid === "function" && process.getuid() !== 0;
+
+test.skipIf(!REFUSABLE_UID)("a record whose bytes this process cannot read refuses after its existence is established", () => {
+  damage(JSON.stringify({ schemaVersion: 1, bindings: [] }));
+  fs.chmodSync(RECORD, 0o000);
+  try {
+    expect(() => allowedAccountIdsForProject(ATLAS, "claude")).toThrow(/the read failed with EACCES/);
+    expect(() => projectAllowsAccount(ATLAS, "claude", SHARED)).toThrow(AccountProjectBindingsUnreadableError);
+    expect(bindAccountToProject("claude", RESERVED, ATLAS)).toMatchObject({ ok: false, code: "RECORD_UNREADABLE" });
+  } finally {
+    fs.chmodSync(RECORD, 0o600);
+  }
+});
+
+test.skipIf(!REFUSABLE_UID)("a write that cannot land is refused rather than reported ok", async () => {
+  /* The record is genuinely absent and the directory that would hold it cannot
+     be written. The read is unbound, as it always was; the write fails, and the
+     mutation reports the failure instead of a binding it never stored.
+
+     The lock is taken while the directory is still writable and the mutation
+     re-enters that transaction, so what fails here is the record write itself. */
+  fs.mkdirSync(STATE, { recursive: true });
+  await withAccountMutationLockAsync(async () => {
+    fs.chmodSync(STATE, 0o500);
+    try {
+      expect(allowedAccountIdsForProject(ATLAS, "claude")).toBeNull();
+      const result = bindAccountToProject("claude", RESERVED, ATLAS);
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("a failed write was reported as ok");
+      expect(result.code).toBe("STORE_ERROR");
+      expect(fs.existsSync(RECORD)).toBe(false);
+    } finally {
+      fs.chmodSync(STATE, 0o700);
+    }
+  });
 });
 
 test("malformed input is refused with the field it names, and changes nothing", () => {

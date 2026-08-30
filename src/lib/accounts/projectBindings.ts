@@ -29,6 +29,11 @@ import type { ProjectSpawnResolution } from "./contracts";
  * exactly the projects a binding was written to reserve; the reservation would
  * disappear in the one condition where it matters most. Every read below throws
  * instead, and the throw parks the launch, the reseat and the switch.
+ *
+ * ABSENT is the narrow state, and only a CONFIRMED absence qualifies: nothing
+ * at the record's pathname at all. Everything that merely resembles absence
+ * from inside a failed read — a state path that is a regular file, a dangling
+ * link where the record belongs — is damage, and widens nothing.
  */
 
 export type BindingEngine = "claude" | "codex";
@@ -88,6 +93,34 @@ function bindingList(value: unknown): AccountProjectBinding[] | null {
 }
 
 /**
+ * Whether the record's pathname holds nothing at all — the one state that means
+ * "nobody bound anything".
+ *
+ * A failed read cannot answer this on its own: `readFileSync` reports ENOENT
+ * both for a pathname with nothing at it AND for a symlink whose target is
+ * gone. `lstat` does not follow that last link, so a dangling link answers with
+ * the link's own stats — an entry IS there and this process failed to read it.
+ * An lstat that fails for any other reason (ENOTDIR when a parent component is
+ * a file, EACCES on the directory) leaves absence unestablished, which refuses
+ * for the same reason.
+ */
+function bindingPathnameAbsence(file: string): { absent: true } | { absent: false; reason: string } {
+  try {
+    fs.lstatSync(file);
+    return { absent: false, reason: "an entry at the record's pathname could not be read (a dangling link)" };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { absent: true };
+    return {
+      absent: false,
+      reason: code
+        ? `the record could not be read and its pathname could not be inspected (${code})`
+        : "the record could not be read and its pathname could not be inspected",
+    };
+  }
+}
+
+/**
  * The record, read from disk on every call. No cache: the file is one small
  * record written by an atomic rename, and a cache keyed on mtime and size
  * cannot see a same-millisecond same-size write by another process — which is
@@ -98,16 +131,24 @@ function bindingList(value: unknown): AccountProjectBinding[] | null {
  * list is a refusal.
  */
 function readBindings(): AccountProjectBinding[] {
+  const file = bindingsFile();
   let raw: string;
   try {
-    raw = fs.readFileSync(bindingsFile(), "utf8");
+    raw = fs.readFileSync(file, "utf8");
   } catch (error) {
-    /* ENOENT and ENOTDIR are the two ways the record is simply not there: no
-       file, or no directory that could hold one. Every other errno — EACCES,
-       EISDIR, EIO, EMFILE — is a record this process failed to read, which is
-       not the same statement as "nobody bound anything". */
+    /* ENOENT is the ONLY errno that can mean unbound, and only once the
+       pathname is confirmed to hold nothing. Every other errno — ENOTDIR,
+       EACCES, EISDIR, ELOOP, EIO — is a record this process failed to read,
+       which is not the same statement as "nobody bound anything": answered as
+       one, the fence every bound project was given disappears at once, and a
+       forbidden account becomes allowed everywhere. ENOTDIR is the one that
+       shipped: a regular file in the state path read as "no project is bound". */
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return [];
+    if (code === "ENOENT") {
+      const absence = bindingPathnameAbsence(file);
+      if (absence.absent) return [];
+      throw new AccountProjectBindingsUnreadableError(absence.reason);
+    }
     throw new AccountProjectBindingsUnreadableError(code ? `the read failed with ${code}` : "the read failed");
   }
   let parsed: unknown;
@@ -331,6 +372,45 @@ export function allowedAccountIdsForProject(
     .filter((binding) => binding.engine === engine && binding.project === key)
     .map((binding) => binding.accountId);
   return allowed.length ? [...new Set(allowed)].sort() : null;
+}
+
+/**
+ * How a DELIBERATE named-account choice stands against a project's pool.
+ *
+ * The distinction this whole record rests on: the binding constrains what the
+ * Viewer picks BY ITSELF — the one-click reseat, and any account it would
+ * default to — and those selectors read `allowedAccountIdsForProject`, where an
+ * unreadable record throws and the selection parks. A person or an agent naming
+ * an account is exercising a control, and a control is a capability. This
+ * function therefore never refuses and never throws: it CLASSIFIES, so the
+ * caller can carry the choice out and attribute it.
+ *
+ * `within-pool` covers the two cases that must stay byte-identical to what they
+ * always were: the account is allowed, or the project is unbound and every
+ * account always was.
+ */
+export type ExplicitAccountChoice =
+  | { kind: "within-pool" }
+  | { kind: "outside-pool"; allowedAccountIds: string[] }
+  | { kind: "binding-unreadable"; reason: string };
+
+export function explicitAccountChoice(
+  project: string | null | undefined,
+  engine: BindingEngine,
+  accountId: string,
+): ExplicitAccountChoice {
+  let allowed: string[] | null;
+  try {
+    allowed = allowedAccountIdsForProject(project, engine);
+  } catch (error) {
+    if (!(error instanceof AccountProjectBindingsUnreadableError)) throw error;
+    /* The record is damaged, so no pool can be shown. The machine's own
+       selection refuses on this; a named choice is carried out and recorded,
+       because a damaged file is not a decision anybody made. */
+    return { kind: "binding-unreadable", reason: error.message };
+  }
+  if (allowed === null || allowed.includes(accountId)) return { kind: "within-pool" };
+  return { kind: "outside-pool", allowedAccountIds: allowed };
 }
 
 /** Projects an account is bound to, for the accounts-side view of the relation. */

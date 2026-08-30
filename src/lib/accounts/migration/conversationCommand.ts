@@ -2,7 +2,11 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
 import { conversationProjectKey } from "@/lib/accounts/conversationProject";
-import { allowedAccountIdsForProject, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
+import {
+  AccountProjectBindingsUnreadableError,
+  allowedAccountIdsForProject,
+  projectAccountRefusalDetail,
+} from "@/lib/accounts/projectBindings";
 import { chooseProjectReseatTarget } from "@/lib/accounts/reseat";
 import { headCwd } from "@/lib/agent/transcript";
 
@@ -71,7 +75,16 @@ export async function applyConversationMigration(
          empty profile, and its transcript head still names the cwd it runs in. */
       cwd: headCwd(source.path),
     });
-    const allowedAccountIds = allowedAccountIdsForProject(project, conversation.engine);
+    /* A record that cannot be read is this contract's own refusal, not an
+       unhandled failure: the reseat has queued nothing, and the operator is
+       told which record to repair. */
+    let allowedAccountIds: string[] | null;
+    try {
+      allowedAccountIds = allowedAccountIdsForProject(project, conversation.engine);
+    } catch (error) {
+      if (!(error instanceof AccountProjectBindingsUnreadableError)) throw error;
+      return { status: 409, body: { error: error.message, project } };
+    }
     const selection = chooseProjectReseatTarget(
       source.accountId,
       registry.quotaObservations(conversation.engine),

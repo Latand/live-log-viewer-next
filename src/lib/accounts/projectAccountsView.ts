@@ -1,3 +1,4 @@
+import type { AccountProjectOverride } from "./accountOverrides";
 import { conversationProjectKey } from "./conversationProject";
 import {
   allowedAccountIdsForProject,
@@ -25,6 +26,17 @@ export interface ProjectEngineAccounts {
   restricted: boolean;
   allowed: BoundAccount[];
   carrying: BoundAccount[];
+  /** Accounts a person or an agent deliberately chose from outside the pool,
+      newest first, with who chose and when. The pool is a default for what the
+      Viewer picks on its own; a choice that reached past it is shown here
+      rather than hidden, so an account carrying work it is not bound to reads
+      as somebody's decision instead of a fence that stopped holding. */
+  outsidePool: OutsidePoolChoice[];
+}
+
+export interface OutsidePoolChoice extends BoundAccount {
+  at: string;
+  actor: "operator" | "agent";
 }
 
 /** A live conversation, reduced to what deciding "carrying" needs. */
@@ -103,12 +115,31 @@ export function projectEngineAccounts(
   accounts: readonly BoundAccount[],
   bindings: readonly AccountProjectBinding[],
   carriers: readonly string[],
+  overrides: readonly AccountProjectOverride[] = [],
 ): ProjectEngineAccounts {
   const allowedIds = allowedAccountIdsForProject(project, engine, bindings);
   const labels = new Map(accounts.map((account) => [account.accountId, account.label] as const));
   const named = (accountId: string): BoundAccount => ({ accountId, label: labels.get(accountId) ?? accountId });
+  /* One row per account, carrying the most recent choice of it: repeating the
+     same switch is one fact about that account, not a list the strip grows by. */
+  const latestChoice = new Map<string, OutsidePoolChoice>();
+  /* A project with no binding for this engine has no pool to be outside of,
+     and an account bound since the choice was made is inside it now. Either
+     row would claim a boundary that is not there. */
+  const pool = allowedIds;
+  if (pool !== null) {
+    for (const override of overrides) {
+      if (override.engine !== engine || override.project !== project || pool.includes(override.accountId)) continue;
+      const existing = latestChoice.get(override.accountId);
+      if (!existing || existing.at < override.at) {
+        latestChoice.set(override.accountId, { ...named(override.accountId), at: override.at, actor: override.actor });
+      }
+    }
+  }
   return {
     engine,
+    outsidePool: [...latestChoice.values()].sort((left, right) =>
+      right.at.localeCompare(left.at) || left.accountId.localeCompare(right.accountId)),
     restricted: allowedIds !== null,
     /* A bound account the catalog no longer holds still appears, under its own
        id: the binding is what the project is fenced to, and hiding a row the

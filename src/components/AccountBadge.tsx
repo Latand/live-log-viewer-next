@@ -209,8 +209,14 @@ export function AccountBadge({
         operationId?: string;
         receipt?: { operationId: string; status: string };
         error?: string;
+        accountOverride?: { outsidePool?: boolean };
       };
       if (!response.ok || !body.ok) throw new Error(body.error ?? t("accounts.switchFailed"));
+      /* #1279: the switch went through, and it went outside the accounts this
+         project's work is normally drawn from. Said at the moment of the
+         gesture, because the operator is entitled to make it and entitled to
+         know it was recorded as theirs. */
+      if (body.accountOverride?.outsidePool) pushTaskToast("ok", t("accounts.switchedOutsidePool"));
       if (targetAccountRef.current === targetId) {
         operationRef.current = body.operationId ?? body.receipt?.operationId ?? null;
       }

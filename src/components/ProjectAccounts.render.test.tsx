@@ -13,6 +13,7 @@ function view(over: Partial<ProjectAccountsView["engines"][number]> = {}): Proje
       restricted: true,
       allowed: [{ accountId: "acct-reserved", label: "Reserved" }],
       carrying: [],
+      outsidePool: [],
       ...over,
     }],
   };
@@ -54,6 +55,39 @@ test("a malformed payload parses to nothing rather than throwing", () => {
   expect(parseProjectAccountsView({ project: ATLAS })).toBeNull();
   expect(parseProjectAccountsView({ project: ATLAS, engines: { claude: { restricted: "yes", allowed: 4 } } })).toEqual({
     project: ATLAS,
-    engines: [{ engine: "claude", restricted: false, allowed: [], carrying: [] }],
+    engines: [{ engine: "claude", restricted: false, allowed: [], carrying: [], outsidePool: [] }],
   });
+});
+
+test("an account chosen from outside the pool is shown, dated and attributed", () => {
+  const html = render(view({
+    outsidePool: [{ accountId: "acct-outside", label: "Outside", at: "2026-08-30T09:00:00.000Z", actor: "operator" }],
+  }));
+  /* The pool still reads as the pool, and the deliberate choice reads as a
+     choice: shown beside it, marked, and naming who made it. */
+  expect(html).toContain("Reserved");
+  expect(html).toContain('data-project-account-outside-pool="acct-outside"');
+  expect(html).toContain("outside the pool");
+  expect(html).toContain("by you");
+  expect(html).toContain("2026-08-30T09:00:00.000Z");
+});
+
+test("an agent's choice is attributed to the agent", () => {
+  const html = render(view({
+    outsidePool: [{ accountId: "acct-outside", label: "Outside", at: "2026-08-30T09:00:00.000Z", actor: "agent" }],
+  }));
+  expect(html).toContain('data-project-account-outside-pool="acct-outside"');
+  expect(html).toContain("by an agent");
+});
+
+test("a choice of an account that is also carrying reads as both, on one chip", () => {
+  const html = render(view({
+    carrying: [{ accountId: "acct-outside", label: "Outside" }],
+    outsidePool: [{ accountId: "acct-outside", label: "Outside", at: "2026-08-30T09:00:00.000Z", actor: "operator" }],
+  }));
+  expect(html.match(/acct-outside/g)?.length).toBeGreaterThan(0);
+  expect(html).toContain('data-project-account-carrying="acct-outside"');
+  expect(html).toContain('data-project-account-outside-pool="acct-outside"');
+  expect(html).toContain("carrying");
+  expect(html).toContain("outside the pool");
 });

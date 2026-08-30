@@ -3,7 +3,14 @@ import { agentRegistry, type AgentRegistry, type ProcessIdentity } from "@/lib/a
 import { reconfigurationFromBody, type AgentReconfiguration } from "@/lib/agent/reconfigure";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
+import {
+  attributeNamedAccountChoice,
+  type AccountChoiceActor,
+  type AccountOverrideNotice,
+} from "@/lib/accounts/accountOverrides";
+import { conversationProjectKey } from "@/lib/accounts/conversationProject";
 import { sessionKeyId } from "@/lib/agent/sessionKey";
+import { headCwd } from "@/lib/agent/transcript";
 
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { newOperationId, runtimeCompactCapability, type RuntimeControlCapability, type RuntimeOperationCommand } from "./contracts";
@@ -14,7 +21,19 @@ import { recoverDeadStructuredConversation, structuredHostProcessAlive } from ".
 export type StructuredControlResult =
   | { status: 200; body: { ok: true; structured: true; target: string; outcome: "delivered" } }
   | { status: 200; body: { ok: true; structured: true; target: string; outcome: "resumed"; spawned: boolean } }
-  | { status: 200 | 202; body: { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } } }
+  | {
+      status: 200 | 202;
+      body: {
+        ok: true;
+        structured: true;
+        target: string;
+        operationId: string;
+        receipt: { operationId: string; status: string };
+        /** Present only when the named account is outside the project's pool:
+            the choice was carried out AND attributed, and the answer says so. */
+        accountOverride?: AccountOverrideNotice;
+      };
+    }
   /** A control this engine genuinely does not expose (#862). It is typed, so a
       caller can tell "this engine cannot" from "this attempt failed", and no
       prompt-based fallback is ever offered in its place. */
@@ -29,6 +48,10 @@ export interface StructuredControlRequest {
   action: string;
   operationId?: string;
   reconfiguration?: Partial<AgentReconfiguration>;
+  /** Who is making this request, for attributing an out-of-pool account choice.
+      Absent means the operator: an agent is the only caller that can name
+      itself here, exactly as `requireOperatorAuthority` reads a request. */
+  actor?: AccountChoiceActor;
 }
 
 export async function dispatchStructuredControl(
@@ -40,6 +63,7 @@ export async function dispatchStructuredControl(
     kick?: () => void;
     enabled?: () => boolean;
     accountExists?: (engine: "claude" | "codex", accountId: string) => boolean;
+    attributeAccountChoice?: typeof attributeNamedAccountChoice;
     recover?: typeof recoverDeadStructuredConversation;
     republish?: typeof republishStructuredDeliveryHost;
     hostProcessAlive?: (identity: ProcessIdentity | null) => boolean;
@@ -154,6 +178,9 @@ export async function dispatchStructuredControl(
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   if (!client) return { status: 503, body: { error: "structured runtime host is unavailable" } };
   const operationId = request.operationId ?? (dependencies.operationId ?? newOperationId)();
+  /* Set when the named account is outside the project's pool; it rides both the
+     immediate answer and the durable journal the project view renders. */
+  let accountOverride: AccountOverrideNotice | undefined;
   try {
     const reconfiguration = request.action === "reconfigure"
       ? reconfigurationFromBody(conversation.engine, request.reconfiguration ?? {})
@@ -166,6 +193,34 @@ export async function dispatchStructuredControl(
         (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).some((account) => account.id === accountId));
       if (!accountExists(conversation.engine, reconfiguration.value.accountId)) {
         return { status: 400, body: { error: `account is not available for ${conversation.engine}` } };
+      }
+      /* #1279: a reconfigure that MOVES this conversation onto another account
+         places its work there, so this path — which returned before ever
+         consulting the binding — now asks it. It asks in order to ATTRIBUTE,
+         not to refuse: the pool is the default the Viewer selects from on its
+         own, and a deliberate switch is a control the operator (or an agent
+         acting for them) is entitled to use, including onto an account outside
+         the pool. Inside the pool, and on an unbound project, nothing is
+         recorded and every line below is what it always was.
+
+         The same condition the legacy switch path uses — a reconfigure that
+         re-states the account it is already on moves nothing, and the two
+         paths answering the same gesture differently is the shape of the
+         defect this seam is fixing. */
+      if (reconfiguration.value.accountId !== generation.accountId) {
+        accountOverride = (dependencies.attributeAccountChoice ?? attributeNamedAccountChoice)({
+          engine: conversation.engine,
+          project: conversationProjectKey(conversation.projectOwnership, generation.launchProfile, {
+            /* A getter, so the transcript is read only for a conversation that
+               names no project of its own — an ADOPTED one, whose launch
+               profile is empty and whose cwd is only in its transcript head. */
+            get cwd() { return headCwd(generation.path); },
+          }),
+          accountId: reconfiguration.value.accountId,
+          conversationId: conversation.id,
+          actor: request.actor ?? { kind: "operator" },
+          via: "structured-reconfigure",
+        }) ?? undefined;
       }
     }
     const sessionKey = { engine: conversation.engine, sessionId: generation.id };
@@ -208,6 +263,7 @@ export async function dispatchStructuredControl(
         target: conversation.id,
         operationId,
         receipt: result.receipt,
+        ...(accountOverride ? { accountOverride } : {}),
       },
     };
   } catch (error) {
@@ -226,6 +282,7 @@ export async function dispatchStructuredControl(
             target: conversation.id,
             operationId: durable.operationId,
             receipt: durable.receipt,
+            ...(accountOverride ? { accountOverride } : {}),
           },
         };
       }
