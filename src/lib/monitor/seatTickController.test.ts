@@ -14,9 +14,10 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 const { reconcileSeatTick, runSeatTickCheck, startSeatTick, stopSeatTick, wakeReached } = await import("./seatTickController");
 const { DEFAULT_SEAT_TICK_POLICY } = await import("./seatTick");
 const { defaultSeatTickSettings } = await import("./seatTickSettings");
+const { openPullRequestsForRepo } = await import("./githubEvidence");
 import type { SeatTickSettings } from "./seatTickSettings";
 import type { SeatTickControllerDependencies } from "./seatTickController";
-import type { OpenPullRequest, OpenPullRequestsUnavailable } from "./githubEvidence";
+import type { GithubRunner, OpenPullRequest, OpenPullRequestsUnavailable } from "./githubEvidence";
 import type { SeatTickWakeState, SeatTickWithdrawal } from "./seatTickSources";
 import {
   emptySeatTickState,
@@ -107,6 +108,11 @@ function harness(options: {
   /** The `gh` read failing rather than answering (#1289). Distinct from an
       empty answer on purpose: that is what the check may go quiet on. */
   pullRequestsUnavailable?: OpenPullRequestsUnavailable;
+  /** The `gh` seam itself, one level below the option above, so a command that
+      throws, a child killed at its timeout and output nobody can attribute
+      reach the check the way they reach it in production — through the real
+      parse — rather than as a verdict the test picked for it. */
+  githubRun?: GithubRunner;
   archivedPipelines?: PipelineFixture[];
 }): Harness {
   const sent: ConversationMessage[] = [];
@@ -169,9 +175,12 @@ function harness(options: {
       latestDeployment: () => ({ state: "unreadable", error: "no ledger" }) as never,
       retirementReport: () => null,
       settings: () => options.settings ?? defaultSeatTickSettings(PROJECT),
-      openPullRequests: async () => (options.pullRequestsUnavailable
-        ? { ok: false, unavailable: options.pullRequestsUnavailable }
-        : { ok: true, pullRequests: options.openPullRequests ?? [] }),
+      openPullRequests: async (request) => {
+        if (options.githubRun) return openPullRequestsForRepo({ ...request, run: options.githubRun });
+        return options.pullRequestsUnavailable
+          ? { ok: false, unavailable: options.pullRequestsUnavailable }
+          : { ok: true, pullRequests: options.openPullRequests ?? [] };
+      },
       wakeState: async () => {
         if (options.holderThrows) throw new Error("the layer holding the wake cannot be read");
         return options.wakeState ?? "retained";
@@ -835,10 +844,12 @@ test("the check after the failure asks again, and wakes as soon as GitHub answer
   expect(await runSeatTickCheck(PROJECT, recovered.deps)).toMatchObject({ verdict: "wake", reasons: ["unmerged-pr"] });
 });
 
-/* The failure costs this one reason and not the check: while `gh` is down a
-   lane event that IS established still reaches the seat, because a GitHub
-   outage silencing the tick is the failure this all exists to prevent. */
-test("a lane event still wakes the seat while GitHub is unreadable", async () => {
+/* The wake that WOULD have gone out is where the failure used to be paid for.
+   Delivering it stamps `lastWakeAt` and the retry accounting, so the hour it
+   bought was bought by a read that answered nothing. The lane event is held
+   for the next check instead — five minutes, not an hour — and the gap is
+   journaled for as long as it lasts. */
+test("a lane event is held rather than spent while GitHub is unreadable", async () => {
   const rig = harness({
     pipelines: [...OPEN_LANE, ...FINISHED_LANE],
     state: { ...OVERDUE, eventsThrough: 12 },
@@ -846,8 +857,62 @@ test("a lane event still wakes the seat while GitHub is unreadable", async () =>
     pullRequestsUnavailable: "malformed-output",
   });
   const record = await runSeatTickCheck(PROJECT, rig.deps);
-  expect(record).toMatchObject({ verdict: "wake", reasons: ["lane-event"] });
-  expect(rig.sent).toHaveLength(1);
+  expect(record).toMatchObject({ verdict: "error", reasons: [], items: 0 });
+  expect(record!.detail).toContain("malformed-output");
+  expect(rig.sent).toEqual([]);
+  expect(rig.written[0]!.lastWakeAt).toBe(OVERDUE.lastWakeAt);
+  expect(rig.written[0]!.wakesWithoutChange).toEqual({});
+  /* And the event cursor stays put too, so the check that can answer still has
+     the event to name. */
+  expect(rig.written[0]!.eventsThrough).toBe(12);
+});
+
+/* The three ways `gh` itself fails, each carried through the real seam and the
+   real parse, each alongside a lane event that would otherwise have woken the
+   seat. None of them may move the stamp, the guard or the cursor, and each
+   must still be asked on the next check. */
+test("a thrown command, a timeout and unusable output each cost nothing and are asked again", async () => {
+  const killed = Object.assign(new Error("Command failed"), { killed: true, signal: "SIGTERM" });
+  const failures: { name: string; gap: string; run: GithubRunner }[] = [
+    { name: "thrown command", gap: "command-failed", run: async () => { throw new Error("gh: command not found"); } },
+    { name: "timeout", gap: "timed-out", run: async () => { throw killed; } },
+    /* A nonempty answer whose only row names no head branch: the shape that
+       used to arrive as a successful empty list. */
+    { name: "unusable output", gap: "malformed-output", run: async () => JSON.stringify([{ number: 1289, title: "no head" }]) },
+  ];
+
+  for (const failure of failures) {
+    let asked = 0;
+    const run: GithubRunner = async (args) => {
+      asked += 1;
+      return failure.run(args);
+    };
+    const rig = harness({
+      pipelines: [...OPEN_LANE, ...FINISHED_LANE],
+      state: { ...OVERDUE, eventsThrough: 12, wakesWithoutChange: { "lane-event": 1 }, lastWakeFingerprint: "fp-0" },
+      events: [terminalEvent(44)],
+      githubRun: run,
+    });
+
+    const record = await runSeatTickCheck(PROJECT, rig.deps);
+    expect(`${failure.name}: ${record!.verdict}`).toBe(`${failure.name}: error`);
+    expect(record!.detail).toContain(failure.gap);
+    expect(rig.sent).toEqual([]);
+    expect(rig.written[0]!.lastWakeAt).toBe(OVERDUE.lastWakeAt);
+    expect(rig.written[0]!.wakesWithoutChange).toEqual({ "lane-event": 1 });
+    expect(rig.written[0]!.quietSince).toBeNull();
+    expect(asked).toBe(1);
+
+    /* The next check reads the row the failed one wrote and asks `gh` again,
+       rather than waiting out an hour it never spent. */
+    await runSeatTickCheck(PROJECT, harness({
+      pipelines: [...OPEN_LANE, ...FINISHED_LANE],
+      state: rig.written[0]!,
+      events: [terminalEvent(44)],
+      githubRun: run,
+    }).deps);
+    expect(`${failure.name}: asked ${asked}`).toBe(`${failure.name}: asked 2`);
+  }
 });
 
 test("a failed delivery leaves the wake stamp where it was, so the next check retries", async () => {

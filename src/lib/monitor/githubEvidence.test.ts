@@ -107,12 +107,28 @@ describe("open issues for the proactive slot", () => {
     expect(calls.flat()).not.toContain("merge");
   });
 
-  test("a pull request with no head branch is dropped, because nothing could attribute it to a lane", async () => {
-    const pullRequests = await openPullRequestsForRepo({
-      cwd: "/srv/repo",
-      run: async () => JSON.stringify([{ number: 5, title: "no head" }, { number: 6, title: "kept", headRefName: "topic" }]),
-    });
-    expect(pullRequests).toEqual({ ok: true, pullRequests: [{ number: 6, title: "kept", headRefName: "topic", updatedAt: null }] });
+  /* Dropping the unusable row was the same collapse by a shorter route: one
+     row nobody can attribute to a lane turned a nonempty answer into an empty
+     one, and an empty one is the claim that everything merged. */
+  test("a single row with no head branch is malformed output, never a repository with nothing open", async () => {
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => JSON.stringify([{ number: 1289 }]) }))
+      .toEqual({ ok: false, unavailable: "malformed-output" });
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => JSON.stringify([{ title: "no number", headRefName: "topic" }]) }))
+      .toEqual({ ok: false, unavailable: "malformed-output" });
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => JSON.stringify(["a string"]) }))
+      .toEqual({ ok: false, unavailable: "malformed-output" });
+  });
+
+  /* And the mixed array, which is the case the skip hid best: the valid rows
+     make the answer look like a real one while the dropped row is exactly the
+     pull request that might still be open. */
+  test("one unusable row among valid ones fails the whole read rather than shortening it", async () => {
+    const mixed = JSON.stringify([
+      { number: 1289, title: "kept", headRefName: "topic-merge-queue" },
+      { number: 1290, title: "no head" },
+    ]);
+    expect(await openPullRequestsForRepo({ cwd: "/srv/repo", run: async () => mixed }))
+      .toEqual({ ok: false, unavailable: "malformed-output" });
   });
 
   /* The distinction the whole reason rests on: a repository with everything

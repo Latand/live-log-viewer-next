@@ -484,25 +484,18 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     reasons.push(reason);
   }
 
-  if (reasons.length > 0) {
-    const all = wakeItems({ input, stalled: persistedStalls, laneEvents, unstarted });
-    return {
-      verdict: {
-        kind: "wake",
-        reasons,
-        items: all.slice(0, input.policy.itemsPerWake),
-        deferred: Math.max(0, all.length - input.policy.itemsPerWake),
-      },
-      state,
-      cards,
-    };
-  }
+  /* Ahead of the wake, because the wake is what would pay for the gap.
+     Delivering one advances the wake stamp and the retry-guard count, so a
+     `gh` that answered nothing would buy the next hour of silence on the
+     strength of a read that established nothing — the same trade the error
+     below refuses, arriving by the one route that still charged for it.
 
-  /* Nothing left to wake on — and every outcome below this line is a statement
-     that nothing is owed. One of them rests on the pull requests this project's
-     finished lanes left open, and a `gh` that could not be reached establishes
-     none of it. So the check reports what happened and is retried at the next
-     one, rather than reporting a silence it never earned.
+     The reason that DID stand on its own is not dropped by this; it is held
+     until the next check, five minutes away rather than the hour a delivered
+     wake would have spent, and that check wakes with everything owed by then.
+     Meanwhile the error is journaled every check, so a `gh` outage is loud for
+     as long as it lasts instead of being quietly absorbed into a wake that
+     could not name what it was hiding.
 
      It is an error rather than a wake precisely so it stays incapable of
      costing anything: no delivery, no wake stamp, no retry-guard count. The
@@ -520,6 +513,23 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     };
   }
 
+  if (reasons.length > 0) {
+    const all = wakeItems({ input, stalled: persistedStalls, laneEvents, unstarted });
+    return {
+      verdict: {
+        kind: "wake",
+        reasons,
+        items: all.slice(0, input.policy.itemsPerWake),
+        deferred: Math.max(0, all.length - input.policy.itemsPerWake),
+      },
+      state,
+      cards,
+    };
+  }
+
+  /* Nothing left to wake on, and every outcome below this line is a statement
+     that nothing is owed — each of them resting on evidence the check above
+     has already shown it could read. */
   if (cards.length > 0) {
     return { verdict: { kind: "quiet", detail: "every wake reason is held by the retry guard" }, state: quiet(state, at), cards };
   }

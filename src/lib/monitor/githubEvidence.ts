@@ -136,12 +136,13 @@ function parseProposalIssues(raw: string): ProposalIssue[] {
  * Unlike the two questions above, this one does NOT degrade to an empty list.
  * An empty list here is a claim — every pull request those lanes opened has
  * since been merged or closed — and a `gh` that is missing, unauthenticated,
- * rate-limited, killed at the timeout or answering with something that is not
- * a JSON array has established no such thing. Collapsing the two made a failed
- * read indistinguishable from a finished merge, and the tick then reported
- * `nothing owed` on the strength of it, which is the twelve-hour silence #1289
- * exists to end returning by a slower route. So the failure is carried out as
- * a failure and the caller decides what it costs.
+ * rate-limited, killed at the timeout, or answering with anything but a JSON
+ * array of rows that can be attributed to a branch has established no such
+ * thing. Collapsing the two made a failed read indistinguishable from a
+ * finished merge, and the tick then reported `nothing owed` on the strength of
+ * it, which is the twelve-hour silence #1289 exists to end returning by a
+ * slower route. So the failure is carried out as a failure and the caller
+ * decides what it costs.
  *
  * Read-only. Nothing here merges, closes, comments on or opens a pull request.
  * ------------------------------------------------------------------------- */
@@ -173,13 +174,19 @@ export type OpenPullRequestsResult =
 const PULL_REQUEST_TITLE_LIMIT = 200;
 
 /**
- * Null means the output was not a JSON array at all, which is a read that
- * failed rather than a repository with nothing open.
+ * Null means the read failed rather than answered, and there are two ways.
  *
- * A row INSIDE a well-formed array that names no number or no head branch is
- * still skipped rather than failing the read: that one row cannot be
- * attributed to a lane, and `gh` answering the question it was asked is not
- * put in doubt by it.
+ * Output that is not a JSON array at all is the obvious one. The other is a
+ * well-formed array carrying a row that names no number or no head branch:
+ * dropping that row quietly turns a nonempty answer into an empty one, and an
+ * empty one here is a claim — every pull request those lanes opened has since
+ * merged or closed. A single unusable row was therefore enough to buy the
+ * quiet verdict this result type exists to make earnable, which is the
+ * collapse the type was introduced to end taking a shorter route.
+ *
+ * `gh` asked for these four fields answers with them; an array whose rows do
+ * not carry them is output nobody can attribute, so it is reported as what it
+ * is. Exactly the empty array stays the answer that nothing is open.
  */
 function parseOpenPullRequests(raw: string): OpenPullRequest[] | null {
   let parsed: unknown;
@@ -191,12 +198,12 @@ function parseOpenPullRequests(raw: string): OpenPullRequest[] | null {
   if (!Array.isArray(parsed)) return null;
   const rows: OpenPullRequest[] = [];
   for (const entry of parsed) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
     const row = entry as { number?: unknown; title?: unknown; headRefName?: unknown; updatedAt?: unknown };
-    if (typeof row.number !== "number" || !Number.isSafeInteger(row.number)) continue;
-    /* A row with no head branch cannot be attributed to a lane, and an
-       unattributable pull request is not what the reason is about. */
-    if (typeof row.headRefName !== "string" || !row.headRefName) continue;
+    if (typeof row.number !== "number" || !Number.isSafeInteger(row.number)) return null;
+    /* A row with no head branch cannot be attributed to a lane, and a pull
+       request nobody can name is not evidence that nothing is open. */
+    if (typeof row.headRefName !== "string" || !row.headRefName) return null;
     rows.push({
       number: row.number,
       title: typeof row.title === "string" ? row.title.slice(0, PULL_REQUEST_TITLE_LIMIT) : "",

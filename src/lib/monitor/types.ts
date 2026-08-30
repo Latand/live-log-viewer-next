@@ -361,9 +361,10 @@ export interface SeatTickPullRequestInput {
  *
  * Machine tokens only, because the journal line carrying one is published:
  * `gh` could not be run or exited non-zero (`command-failed`), was killed at
- * its timeout (`timed-out`), answered with something that is not a JSON array
- * (`malformed-output`), or the lane records the pull requests are correlated
- * against could not be read (`lanes-unreadable`).
+ * its timeout (`timed-out`), answered with anything but a JSON array of rows
+ * that can be attributed to a branch (`malformed-output`), or the lane records
+ * the pull requests are correlated against could not be read
+ * (`lanes-unreadable`).
  */
 export type SeatTickPullRequestGap =
   | "timed-out"
@@ -521,11 +522,13 @@ export interface SeatTickCheckInput {
    * Set when the list above could not be established.
    *
    * A check that cannot see what its finished lanes left open has not shown
-   * that nothing is owed, so this turns an otherwise-quiet verdict into an
-   * `error` the controller journals and retries. Deliberately incapable of
-   * doing anything else: it raises no wake, so it can neither advance the wake
-   * stamp nor spend a retry-guard count, and a `gh` outage is therefore unable
-   * to buy the very silence it would otherwise be mistaken for.
+   * that nothing is owed, so this ends the check as an `error` the controller
+   * journals and retries — ahead of any wake, because a delivered wake is what
+   * would advance the wake stamp and spend a retry-guard count on a read that
+   * established nothing. Deliberately incapable of costing anything, so a `gh`
+   * outage cannot buy the very silence it would otherwise be mistaken for.
+   * Whatever reason stood on its own waits for the next check instead, which
+   * is one check interval away rather than one wake interval.
    */
   pullRequestsUnavailable: SeatTickPullRequestGap | null;
   signals: readonly SeatTickSignalInput[];

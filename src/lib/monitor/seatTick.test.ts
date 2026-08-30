@@ -505,16 +505,48 @@ test("a failed read spends neither the wake stamp nor the retry guard", () => {
   expect(decision.state.quietSince).toBeNull();
 });
 
-/* The failure costs this one reason, never the check: a lane event that IS
-   established still wakes the seat while `gh` is down, because a `gh` outage
-   silencing the tick is the failure this whole issue is about. */
-test("a wake reason that stands on its own still wakes while GitHub is unreadable", () => {
+/* The failed read is refused ahead of the wake, not only ahead of the quiet.
+   A wake delivered here would advance the wake stamp and the retry guard, so
+   the reason that stood on its own would have paid the hour on behalf of the
+   read that answered nothing. It waits for the next check instead — one check
+   interval, not one wake interval — and the gap is journaled meanwhile. */
+test("a wake reason that stands on its own is held rather than spent while GitHub is unreadable", () => {
   const decision = seatTickDecision(input({
     pullRequestsUnavailable: "command-failed",
     events: [event({ seq: 60, type: "stage_blocked", summary: "the review round is parked" })],
     state: stateWith({ eventsThrough: 59, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
   }));
-  expect(reasonsOf(decision.verdict)).toEqual(["lane-event"]);
+  expect(decision.verdict.kind).toBe("error");
+  expect(reasonsOf(decision.verdict)).toEqual([]);
+});
+
+/* Every way the read can fail, against every other reason that could have
+   carried a wake past it. None of them may move the stamp or the counter. */
+test("no candidate reason lets a failed read spend the stamp or the guard", () => {
+  const before = stateWith({
+    eventsThrough: 59,
+    lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+    lastWakeFingerprint: "fp-0",
+    wakesWithoutChange: { "lane-event": 1 },
+    quietSince: null,
+  });
+  const candidates = {
+    "lane-event": { events: [event({ seq: 60 })] },
+    "unstarted-task": { tasks: [card({ updatedAt: new Date(NOW - 90 * MINUTE).toISOString() })] },
+    interval: { pipelines: [lane()] },
+  } satisfies Record<string, Partial<SeatTickCheckInput>>;
+  for (const gap of ["command-failed", "timed-out", "malformed-output"] as const) {
+    for (const [name, candidate] of Object.entries(candidates)) {
+      const decision = seatTickDecision(input({ ...candidate, pullRequestsUnavailable: gap, state: before }));
+      expect(`${name}/${gap}: ${decision.verdict.kind}`).toBe(`${name}/${gap}: error`);
+      expect(decision.state.lastWakeAt).toBe(before.lastWakeAt);
+      expect(decision.state.lastWakeFingerprint).toBe(before.lastWakeFingerprint);
+      expect(decision.state.wakesWithoutChange).toEqual({ "lane-event": 1 });
+      /* And no claim of quiet in the row either, so the next check is due
+         exactly as this one was. */
+      expect(decision.state.quietSince).toBeNull();
+    }
+  }
 });
 
 /* And the interval still bounds it from the other side: a check that was never
