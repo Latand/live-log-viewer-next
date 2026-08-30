@@ -51,6 +51,19 @@ guarantees for the 1.x series.
   questions still have to be answered, the queue still has to drain.
 
 ### Fixed
+- Card activity now uses the structured turn-liveness evidence that governs
+  recovery (#1296). A verified process with an open turn stays `live` only while
+  transcript writes or recent CPU movement show progress; the measured flat
+  100-second window projects `stalled`, and a recorded pid that has exited no
+  longer projects `running`. Promotion also keeps structured startup retrying
+  while the incumbent Viewer still owns an eligible host. The target switch
+  appoints the candidate before the incumbent's demotion poll exits, so the
+  production adopter previously skipped every live incumbent claim and reported
+  successful startup with zero adopted hosts. The incumbent then exited and left
+  each skipped pipeline host without a controller. Retaining the startup retry
+  closes that hand-over window; shared liveness then moves any silent adopted
+  host to the pipeline's existing retryable-stage path without manual process
+  inspection.
 - Whether a turn is being worked on is decided from evidence, so a redeploy no
   longer strands a lane nothing can recover (#1281, #1282, #1276). `live`,
   `idle` and `busy` are inherited words: a turn severed mid-flight kept reading

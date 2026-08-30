@@ -1800,6 +1800,68 @@ test("a seat whose host is still working through a long step is left alone at bo
   }
 });
 
+test.each(["codex", "claude"] as const)(
+  "a promoted Viewer retries while the incumbent still owns a running %s pipeline host",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-incumbent-claim-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+    const client = runtimeJournalClient(journal);
+    const sessionId = engine === "codex"
+      ? "25300000-0000-0000-0000-000000000034"
+      : "25300000-0000-0000-0000-000000000035";
+    const { conversation } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      transcriptRecords: openTurnRecords(engine),
+      transcriptSuffix: "\n",
+    });
+    registry.rememberMembership(conversation.id, {
+      kind: "pipeline",
+      containerId: "pipeline_handoff",
+      role: "builder",
+      slot: "build:1",
+      stageId: "build",
+      stageOrder: 0,
+      round: 1,
+      parentConversationId: null,
+    });
+    const incumbent = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+    const entry = registry.readOnlySnapshot().entries[`${engine}:${sessionId}`]!;
+    registry.upsert({
+      ...entry,
+      claimOwner: `structured-host:${JSON.stringify(incumbent)}`,
+      structuredHost: { ...entry.structuredHost!, process: incumbent },
+    });
+    const dependencies: StructuredStartupDependencies = {
+      registry,
+      client,
+      orchestratorSeats: () => [],
+      refreshTranscriptState: async () => {},
+      resolveCodexOwner: () => null,
+      resolveClaudeOwner: () => null,
+      ...(engine === "codex" ? { adoptClaude: async () => [] } : { adopt: async () => [] }),
+    };
+
+    try {
+      /* Promotion appoints the candidate before the incumbent's demotion poll
+         exits its process. The real engine adopter cannot claim this row while
+         that prior writer identity is alive, and today it reports an empty
+         adoption as success. Once the incumbent exits, no startup retry remains
+         to adopt the engine process it left in the host namespace. */
+      await expect(adoptStructuredHostsAtStartup(dependencies)).rejects.toThrow(
+        `structured startup left 1 eligible host(s) owned by the incumbent Viewer: ${engine}:${sessionId}`,
+      );
+    } finally {
+      await bindStructuredDeliveryQueue([], { registry, client: null });
+      journal.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
 test("a seat whose row reads busy is owed no nudge when its transcript cannot be read", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-orchestrator-unreadable-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));

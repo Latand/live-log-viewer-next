@@ -13,6 +13,7 @@ const processes: Array<{
 // Path → holder pid, populated per test to simulate a process keeping a
 // transcript's rollout open for writing.
 let holderMap = new Map<string, number>();
+let exitedPids = new Set<number>();
 
 mock.module("./process", () => ({
   agentProcesses: () => processes,
@@ -24,7 +25,7 @@ mock.module("./process", () => ({
   },
   isHelperArgv: () => false,
   outputHolders: () => new Map(),
-  pidAlive: (pid: number) => processes.some((proc) => proc.pid === pid),
+  pidAlive: (pid: number) => processes.some((proc) => proc.pid === pid) && !exitedPids.has(pid),
   pidHoldsPath: () => false,
   pidWritesPath: () => false,
   readArgv: (pid: number) => processes.find((proc) => proc.pid === pid)?.argv ?? [],
@@ -126,6 +127,7 @@ describe("assignTranscriptPids", () => {
   beforeEach(() => {
     processes.length = 0;
     holderMap = new Map<string, number>();
+    exitedPids = new Set<number>();
   });
 
   test("never assigns one writing-holder pid to two transcripts", () => {
@@ -196,5 +198,25 @@ describe("assignTranscriptPids", () => {
     expect(file.pid).toBe(1876135);
     expect(file.proc).toBe("running");
     expect(file.activity).toBe("idle");
+  });
+
+  test("a cached process that has exited never projects running", () => {
+    const id = "44444444-5555-7666-1777-888899990000";
+    const pathname = `/fixtures/.codex/sessions/2026/07/07/rollout-2026-07-07T12-29-50-${id}.jsonl`;
+    const pid = 1_876_136;
+    processes.push({
+      pid,
+      engine: "codex",
+      argv: ["/fixtures/bin/codex", "resume", id],
+      cwd: "/repo",
+      tty: 1,
+    });
+    exitedPids.add(pid);
+
+    const file = entry(pathname);
+    assignTranscriptPids([file]);
+
+    expect(file.pid).toBeNull();
+    expect(file.proc).toBeNull();
   });
 });
