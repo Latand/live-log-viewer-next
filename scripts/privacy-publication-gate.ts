@@ -1233,6 +1233,8 @@ export function formatPrivacyReport(findings: Map<FindingClass, number>, notices
   return `${lines.join("\n")}\n`;
 }
 
+const COMMIT_HASH = /^[0-9a-f]{40}$/;
+
 const commitMessageFindingClasses = new Set<FindingClass>([
   "credential",
   "email_address",
@@ -1389,27 +1391,76 @@ export function commitMessageAddressReview(message: string): CommitAddressReview
   return { attributable: [...attributable], exempt: [...exempt] };
 }
 
-export function commitMessageFindings(repository: string, base: string): Map<FindingClass, number> {
+/**
+ * The messages this branch publishes when it is pushed.
+ *
+ * The range is `base..HEAD` — the commits the branch ADDS. It read
+ * `base...HEAD` until #1315, and to `git log` the three-dot form is the
+ * SYMMETRIC difference — not the ancestry cut the identical spelling means to
+ * the `git diff` in `changedPaths`, which is how it got here. So every commit
+ * already on the protected base but not on the branch was scanned too, and a
+ * finding on one of them is reported against this pull request. Those messages
+ * were published when they landed; this branch neither wrote them nor can
+ * change them, and a branch that is merely BEHIND the base inherited every one
+ * of them.
+ *
+ * That is what made the forge's "Update branch" button useless against such a
+ * finding: the button merges the base tip, another merge lands on the base
+ * seconds later, the gate resolves its base to the newer tip, and the branch
+ * is behind again with the same finding nobody on it can fix.
+ *
+ * The identity half below has always read `base..HEAD`; the two halves of
+ * `--check-commits` now read the same commits.
+ */
+export function commitMessageFindings(
+  repository: string,
+  base: string,
+  notices?: string[],
+): Map<FindingClass, number> {
   const findings = new Map<FindingClass, number>();
   const result = Bun.spawnSync({
-    cmd: ["git", "-C", repository, "log", "--format=%B%x00", `${base}...HEAD`],
+    cmd: ["git", "-C", repository, "log", "--format=%H%x00%B%x00", `${base}..HEAD`],
     env: withoutWakatimeCredential(process.env),
     stderr: "pipe",
     stdout: "pipe",
   });
   if (result.exitCode !== 0) {
     addFinding(findings, "inspection_error");
+    notices?.push("commit_message: range unreadable");
     return findings;
   }
-  const messages = result.stdout.toString().split("\0").filter(Boolean);
-  for (const message of messages) {
+  let commit = "";
+  /* Two NUL-separated fields per commit, hash then message. The walk names a
+     chunk by its SHAPE rather than by its position, so a message that somehow
+     carried a NUL splits into two chunks that are both still scanned instead
+     of shifting the pairing and turning half the messages into hashes nobody
+     reads. A message that is nothing but a full hash is read as one and not
+     scanned; it holds no address, path or credential either way. */
+  for (const chunk of result.stdout.toString().split("\0")) {
+    const message = chunk.startsWith("\n") ? chunk.slice(1) : chunk;
+    if (message === "") continue;
+    if (COMMIT_HASH.test(message)) {
+      commit = message;
+      continue;
+    }
     const messageFindings = sensitiveClasses(message);
     if (messageFindings.has("email_address")) {
       const { attributable, exempt } = commitMessageAddressReview(message);
       if (exempt.length > 0 && attributable.length === 0) messageFindings.delete("email_address");
     }
+    const reported: FindingClass[] = [];
     for (const finding of messageFindings) {
-      if (commitMessageFindingClasses.has(finding)) addFinding(findings, finding);
+      if (!commitMessageFindingClasses.has(finding)) continue;
+      addFinding(findings, finding);
+      reported.push(finding);
+    }
+    /* The notice names WHERE the finding is and never WHAT it is: this report
+       is published as a check run's log on a public repository, and a report
+       that quoted the address or the path to prove it leaked, leaks it.
+       `git show -s <commit>` names it to whoever is fixing it. */
+    if (reported.length > 0) {
+      const classes = reported.sort((left, right) => left.localeCompare(right)).join(", ");
+      notices?.push(`commit_message: ${commit.slice(0, 12)} message ${classes}`);
     }
   }
   return findings;
@@ -1542,7 +1593,7 @@ if (import.meta.main) {
   );
   const notices: string[] = [];
   if (arguments_.includes("--check-commits")) {
-    for (const [finding, count] of commitMessageFindings(inspectionRoot, trustedBase)) {
+    for (const [finding, count] of commitMessageFindings(inspectionRoot, trustedBase, notices)) {
       pathFindings.set(finding, (pathFindings.get(finding) ?? 0) + count);
     }
     /* The branch commits publish their messages when they are pushed; the merge

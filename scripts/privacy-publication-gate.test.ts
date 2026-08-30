@@ -3153,6 +3153,63 @@ describe("commitMessageFindings", () => {
     const findings = commitMessageFindings(repo, "main");
     expect(findings.has("resource_identifier")).toBe(false);
   });
+
+  test("a message already on the protected base is not this branch's surface", () => {
+    /* #1315. The range was `base...HEAD`, and to `git log` three dots are the
+       SYMMETRIC difference — not the ancestry cut they are to `git diff` — so
+       a branch that was merely BEHIND the base inherited every message the
+       base had gained since the fork. The finding named a commit this branch
+       did not write and cannot change, and no push it could make would clear
+       it. */
+    const repo = gitRepo();
+    const person = ["someone", "personal.dev"].join("@");
+    runGit(repo, ["commit", "--allow-empty", "--quiet", "-m", "feat: the branch's own work"]);
+    runGit(repo, ["checkout", "--quiet", "main"]);
+    runGit(repo, ["commit", "--allow-empty", "--quiet", "-m", `fix: write to ${person} about it`]);
+    runGit(repo, ["checkout", "--quiet", "feature"]);
+
+    expect(commitMessageFindings(repo, "main").size).toBe(0);
+  });
+
+  test("the same message on the branch's own commit is still flagged", () => {
+    /* The other half of the range: narrowing it must not stop reading what the
+       branch does publish. */
+    const repo = gitRepo();
+    const person = ["someone", "personal.dev"].join("@");
+    runGit(repo, ["commit", "--allow-empty", "--quiet", "-m", `fix: write to ${person} about it`]);
+
+    expect(commitMessageFindings(repo, "main").get("email_address")).toBe(1);
+  });
+
+  test("names the commit and the field for every message it flags", () => {
+    const repo = gitRepo();
+    const person = ["someone", "personal.dev"].join("@");
+    const segment = ["home", "fixture-person"].join("/");
+    runGit(repo, ["commit", "--allow-empty", "--quiet", "-m", `fix: write to ${person} about it`]);
+    const first = git(repo, "rev-parse", "HEAD").trim();
+    runGit(repo, ["commit", "--allow-empty", "--quiet", "-m", `fix: read /${segment}/notes.txt`]);
+    const second = git(repo, "rev-parse", "HEAD").trim();
+
+    const notices: string[] = [];
+    commitMessageFindings(repo, "main", notices);
+
+    expect(notices).toEqual([
+      `commit_message: ${second.slice(0, 12)} message home_path`,
+      `commit_message: ${first.slice(0, 12)} message email_address`,
+    ]);
+    /* The notice locates the finding; the report is itself published, so it
+       never quotes what it found. */
+    expect(notices.join("\n")).not.toContain(person);
+    expect(notices.join("\n")).not.toContain(segment);
+  });
+
+  test("names an unreadable range rather than reporting it silently", () => {
+    const repo = gitRepo();
+    const notices: string[] = [];
+
+    expect(commitMessageFindings(repo, "no-such-base", notices).get("inspection_error")).toBe(1);
+    expect(notices).toEqual(["commit_message: range unreadable"]);
+  });
 });
 
 describe("mergeBoundaryReview", () => {
@@ -3188,6 +3245,42 @@ describe("mergeBoundaryReview", () => {
   function head(repo: string): string {
     const result = Bun.spawnSync({ cmd: ["git", "-C", repo, "rev-parse", "HEAD"], stderr: "pipe", stdout: "pipe" });
     return result.stdout.toString().trim();
+  }
+
+  function identityField(repo: string, format: string): string {
+    const result = Bun.spawnSync({
+      cmd: ["git", "-C", repo, "log", "-1", `--format=${format}`, "HEAD"],
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    return result.stdout.toString().trim();
+  }
+
+  /* What the forge records as COMMITTER on a commit it composes itself: its
+     own web-flow mailbox, whose local part is exactly `noreply`. It names the
+     forge and identifies nobody, which is why the machine-attribution rule
+     already reads it as a tool. */
+  const forgeWebFlowIdentity = { email: ["noreply", "github.com"].join("@"), name: "GitHub" };
+
+  /* The commit the "Update branch" button composes: the base merged into the
+     branch, authored by the account that pressed it and committed by the
+     forge. */
+  function mergeAsForge(repo: string, base: string, branch: string): void {
+    const result = Bun.spawnSync({
+      cmd: ["git", "merge", "--quiet", "--no-ff", "-m", `Merge branch '${base}' into ${branch}`, base],
+      cwd: repo,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_EMAIL: canonicalIdentity.email,
+        GIT_AUTHOR_NAME: canonicalIdentity.name,
+        GIT_COMMITTER_EMAIL: forgeWebFlowIdentity.email,
+        GIT_COMMITTER_NAME: forgeWebFlowIdentity.name,
+      },
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    expect(result.stderr.toString()).toBe("");
+    expect(result.exitCode).toBe(0);
   }
 
   test("a non-canonical author becomes an attributable trailer at the merge boundary", () => {
@@ -3337,6 +3430,59 @@ describe("mergeBoundaryReview", () => {
     const output = result.stdout.toString();
 
     expect(result.exitCode).toBe(1);
-    expect(output).toBe("PRIVACY GATE: FAIL\nemail_address: 1\n");
+    expect(output).toBe(
+      `PRIVACY GATE: FAIL\nemail_address: 1\ncommit_message: ${head(repo).slice(0, 12)} message email_address\n`,
+    );
+    expect(output).not.toContain(personal);
+  });
+
+  test("a forge-composed 'Update branch' merge commit passes every field the gate reads", () => {
+    /* #1315 read this commit as the one that failed. It is clean on all three
+       surfaces, and this pins that: the AUTHOR is an account on the forge's
+       no-reply host, the COMMITTER is the forge's own web-flow identity, and
+       the MESSAGE the forge writes carries no address at all. The finding on
+       that pull request came from a commit already on the base, which the
+       range above no longer reads. */
+    const repo = gitRepo();
+    commit(repo, "feat: the branch's own work", canonicalIdentity);
+    runGit(repo, ["checkout", "--quiet", "main"]);
+    commit(repo, "chore: the base moves on", canonicalIdentity);
+    runGit(repo, ["checkout", "--quiet", "feature"]);
+    mergeAsForge(repo, "main", "feature");
+
+    expect(identityField(repo, "%ce")).toBe(forgeWebFlowIdentity.email);
+    expect(identityField(repo, "%ae")).toBe(canonicalIdentity.email);
+
+    const review = mergeBoundaryReview(repo, "main");
+    expect(review.findings.size).toBe(0);
+    expect(review.notices).toEqual([]);
+    expect(commitMessageFindings(repo, "main").size).toBe(0);
+
+    const result = runGateArguments(["--base", "main", "--check-commits"], {}, repo);
+    expect(result.stdout.toString()).toBe("PRIVACY GATE: PASS\n");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("a message with a real-looking address still fails behind a forge merge, and is named", () => {
+    /* The narrowed range and the forge exemptions must not carry a person
+       across with them: this commit is the branch's own, and the merge that
+       follows it publishes it either way. */
+    const repo = gitRepo();
+    const personal = ["someone", "personal.dev"].join("@");
+    commit(repo, `feat: write to ${personal} about it`, canonicalIdentity);
+    const flagged = head(repo);
+    runGit(repo, ["checkout", "--quiet", "main"]);
+    commit(repo, "chore: the base moves on", canonicalIdentity);
+    runGit(repo, ["checkout", "--quiet", "feature"]);
+    mergeAsForge(repo, "main", "feature");
+
+    const result = runGateArguments(["--base", "main", "--check-commits"], {}, repo);
+    const output = result.stdout.toString();
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toBe(
+      `PRIVACY GATE: FAIL\nemail_address: 1\ncommit_message: ${flagged.slice(0, 12)} message email_address\n`,
+    );
+    expect(output).not.toContain(personal);
   });
 });
