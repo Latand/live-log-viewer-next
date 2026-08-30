@@ -43,6 +43,7 @@ import type {
 import {
   normalizeQueueEntry,
   RuntimeReplayGapError,
+  type SessionMaterializationEvidence,
   StructuredCompactError,
   StructuredHostAdoptionCleanupError,
 } from "./engineHost";
@@ -1028,6 +1029,49 @@ export class CodexAppServerHost implements EngineHost {
     this.activeTurnId = turnId;
     this.notifyStateListeners();
     return this.awaitDeliveryConfirmation(entry, { outcome: "turn-started", turnId });
+  }
+
+  async sessionMaterializationEvidence(clientMessageId: string): Promise<SessionMaterializationEvidence> {
+    let result: unknown;
+    try {
+      result = await this.rpc("thread/read", {
+        threadId: this.identity.threadId,
+        includeTurns: true,
+      });
+    } catch (error) {
+      const reason = safeError(error);
+      if (/not materialized yet/i.test(reason) && /before first user message/i.test(reason)) {
+        return {
+          state: "absent",
+          reason: "Codex app-server confirmed the first message without materializing its session",
+        };
+      }
+      if (/thread\/read timed out/i.test(reason)) {
+        return { state: "unavailable", reason };
+      }
+      if (reason.startsWith("Codex app-server request failed:")) {
+        return { state: "failed", reason };
+      }
+      throw error;
+    }
+    let persistedIdentity: CodexThreadIdentity;
+    try {
+      persistedIdentity = threadFromResult(result, "thread/read");
+    } catch (error) {
+      return { state: "failed", reason: safeError(error) };
+    }
+    if (persistedIdentity.threadId !== this.identity.threadId) {
+      return { state: "failed", reason: "Codex app-server read back a different session identity" };
+    }
+    if (!persistedIdentity.path || persistedIdentity.path !== this.identity.path) {
+      return { state: "failed", reason: "Codex app-server did not confirm the canonical transcript path" };
+    }
+    const persistedFirstMessage = resumedTurns(result).some((turn) =>
+      Array.isArray(turn.items)
+      && turn.items.some((item) => stringField(item, "clientId") === clientMessageId));
+    return persistedFirstMessage
+      ? { state: "materialized" }
+      : { state: "absent", reason: "Codex app-server did not read back the confirmed first message" };
   }
 
   async interrupt(turnRef: string): Promise<void> {

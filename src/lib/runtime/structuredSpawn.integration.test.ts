@@ -24,7 +24,7 @@ import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { readStructuredHostRecords, terminateStructuredHostTree } from "./structuredHostControl";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
-import { INITIAL_MESSAGE_TIMEOUT_MS, STALE_STRUCTURED_SPAWN_TIMEOUT_MS, STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudeLaunchForm, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForReadableStructuredTranscript, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
+import { INITIAL_MESSAGE_TIMEOUT_MS, STALE_STRUCTURED_SPAWN_TIMEOUT_MS, STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudeLaunchForm, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
 import { materializeStructuredTerminal } from "./structuredTerminal";
 import { structuredContentDigest } from "./structuredContent";
 import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
@@ -166,41 +166,6 @@ test("initial-message confirmation survives a transient runtime status read", as
   expect(now).toBe(250);
 });
 
-test("transcript materialization accepts a readable file that appears inside the bound", async () => {
-  const artifactPath = path.join(sandbox, `delayed-transcript-${crypto.randomUUID()}.jsonl`);
-  let now = 0;
-
-  await waitForReadableStructuredTranscript(artifactPath, {
-    now: () => now,
-    timeoutMs: 300,
-    pollMs: 50,
-    sleep: async (ms) => {
-      now += ms;
-      if (now === 100) fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "session_meta" })}\n`);
-    },
-  });
-
-  expect(now).toBe(100);
-});
-
-test.each([
-  { state: "a zero-byte file", contents: "" },
-  { state: "an incomplete JSONL record", contents: "{" },
-])("transcript materialization rejects $state at the bound", async ({ contents }) => {
-  const artifactPath = path.join(sandbox, `empty-transcript-${crypto.randomUUID()}.jsonl`);
-  fs.writeFileSync(artifactPath, contents);
-  let now = 0;
-
-  await expect(waitForReadableStructuredTranscript(artifactPath, {
-    now: () => now,
-    timeoutMs: 100,
-    pollMs: 25,
-    sleep: async (ms) => { now += ms; },
-  })).rejects.toThrow("structured spawn transcript did not become readable within 100ms");
-
-  expect(now).toBe(100);
-});
-
 test("attempt 93c42855 recovers a failed registry receipt from transcript evidence", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `transcript-replay-${id}`);
@@ -305,6 +270,7 @@ test("issue 533: restart recovery adopts late child delivery after released-main
   await client.transitionOperation(childOperationId, "delivered");
   await client.transitionOperation(begun.receipt.launchId, "failed", { reason: "released timeout failure" });
   registry.failStructuredSpawn(begun.receipt.launchId, "released timeout failure");
+  fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "late child delivery" } })}\n`);
 
   await recoverPendingStructuredSpawns(registry, client);
 
@@ -317,7 +283,7 @@ test("issue 533: restart recovery adopts late child delivery after released-main
   expect((await client.operationStatus(childOperationId))?.receipt.status).toBe("delivered");
 });
 
-test("clientAttemptId replay materializes its reserved conversation from runtime evidence", async () => {
+test("clientAttemptId replay materializes its reserved conversation from runtime and transcript evidence", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `runtime-replay-${id}`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -331,6 +297,7 @@ test("clientAttemptId replay materializes its reserved conversation from runtime
     clientAttemptId: "p0_282_runtime_replay_20260716_a1",
   });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "runtime replay" } })}\n`);
   const client = {
     snapshot: async () => ({
       schemaVersion: 1,
@@ -392,7 +359,7 @@ test("clientAttemptId replay materializes its reserved conversation from runtime
   expect(registry.snapshot().conversations[begun.receipt.conversationId]?.generations).toHaveLength(1);
 });
 
-test("issue 533: matching runtime evidence preserves a claimed path-pending structured host", async () => {
+test("issue 533: matching runtime and transcript evidence preserves a claimed path-pending structured host", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `claimed-runtime-replay-${id}`);
   const artifactPath = path.join(cwd, `${id}.jsonl`);
@@ -411,6 +378,7 @@ test("issue 533: matching runtime evidence preserves a claimed path-pending stru
     },
     claimEpoch: 7, claimOwner: "claim-runtime-owner", pendingAction: "spawn",
   });
+  fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "claimed runtime replay" } })}\n`);
   const client = {
     operationStatus: async (operationId: string) => operationId === `spawn_message_${begun.receipt.launchId}` ? {
       receipt: {
@@ -845,7 +813,7 @@ test("replay terminalizes an explicit initial-message failure before the stage t
   expect(released).toBe(1);
 });
 
-test("p0_282 empty-host replay terminalizes the receipt and releases its stale guard", async () => {
+test("p0_282 empty-host replay terminalizes at the durable startup deadline and releases its stale guard", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `empty-host-replay-${id}`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -890,7 +858,7 @@ test("p0_282 empty-host replay terminalizes the receipt and releases its stale g
   let released = 0;
 
   const reconciled = await reconcileStructuredSpawnReplay(begun.receipt.launchId, registry, client, {
-    now: () => Date.parse(begun.receipt.createdAt) + INITIAL_MESSAGE_TIMEOUT_MS,
+    now: () => Date.parse(begun.receipt.createdAt) + STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS,
     releaseHost: async () => { released += 1; return true; },
   });
 
@@ -933,16 +901,29 @@ class RoundTripHost implements SpawnedStructuredHost {
   private pendingAttention: string[] = [];
   private released = false;
   private readonly materializeTranscriptOnHealth: boolean;
+  private readonly materializationFailure: string | null;
   releaseCount = 0;
 
   constructor(
     readonly engine: "codex" | "claude",
     readonly artifactPath: string,
     sessionId: string,
-    options: { materializeTranscript?: boolean } = {},
+    options: { materializeTranscript?: boolean; materializationFailure?: string } = {},
   ) {
     this.identity = engine === "codex" ? { threadId: sessionId, path: artifactPath } : { sessionId };
     this.materializeTranscriptOnHealth = options.materializeTranscript !== false;
+    this.materializationFailure = options.materializationFailure ?? null;
+  }
+
+  async sessionMaterializationEvidence(): Promise<
+    | { state: "materialized" }
+    | { state: "absent"; reason: string }
+    | { state: "unavailable"; reason: string }
+    | { state: "failed"; reason: string }
+  > {
+    return this.materializationFailure
+      ? { state: "absent", reason: this.materializationFailure }
+      : { state: "materialized" };
   }
 
   private materializeTranscript(): void {
@@ -1374,10 +1355,11 @@ async function completesWithin<T>(operation: T | PromiseLike<T>, message: string
 }
 
 test.each([
-  { engine: "codex" as const, cleanup: "releases its host", releaseResists: false },
-  { engine: "codex" as const, cleanup: "records failure when host release is unconfirmed", releaseResists: true },
-  { engine: "claude" as const, cleanup: "releases its host", releaseResists: false },
-])("a structured $engine spawn $cleanup when its issued transcript path never materializes (#1123)", async ({ engine, releaseResists }) => {
+  { cleanup: "releases its host", releaseResists: false, evidenceHangs: false },
+  { cleanup: "records failure when host release is unconfirmed", releaseResists: true, evidenceHangs: false },
+  { cleanup: "settles an unreapable host when the durable materialization timer wins", releaseResists: true, evidenceHangs: true },
+])("a structured Codex spawn $cleanup on permanent session absence (#1123)", async ({ releaseResists, evidenceHangs }) => {
+  const engine = "codex" as const;
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `missing-transcript-${id}`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -1394,8 +1376,21 @@ test.each([
   });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const host = releaseResists
-    ? new UnreapableRoundTripHost(engine, artifactPath, id, { materializeTranscript: false })
-    : new RoundTripHost(engine, artifactPath, id, { materializeTranscript: false });
+    ? new UnreapableRoundTripHost(engine, artifactPath, id, {
+      materializeTranscript: false,
+      materializationFailure: "Codex app-server confirmed the first message without materializing its session",
+    })
+    : new RoundTripHost(engine, artifactPath, id, {
+      materializeTranscript: false,
+      materializationFailure: "Codex app-server confirmed the first message without materializing its session",
+    });
+  if (evidenceHangs) {
+    host.sessionMaterializationEvidence = async () => await new Promise<never>(() => {});
+  }
+  let now = 0;
+  const expectedFailure = evidenceHangs
+    ? "structured spawn session did not materialize before the durable setup deadline"
+    : "Codex app-server confirmed the first message without materializing its session";
 
   try {
     await expect(spawnStructuredConversation({
@@ -1424,14 +1419,18 @@ test.each([
         return () => {};
       },
       publishHost: async () => async () => {},
-      deliverFirst: async () => "held" as never,
+      deliverFirst: async () => {},
       processIdentity: () => ({ pid: process.pid, startIdentity: "missing-transcript-host" }),
-      transcriptMaterializationTimeoutMs: 0,
-    })).rejects.toThrow("structured spawn transcript did not become readable");
+      durableSetupTimeoutMs: evidenceHangs ? 5 : 100,
+      ...(evidenceHangs ? {} : {
+        now: () => now,
+        sleep: async (ms: number) => { now += ms; },
+      }),
+    })).rejects.toThrow(expectedFailure);
 
     expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
       state: "failed",
-      error: expect.stringContaining("structured spawn transcript did not become readable"),
+      error: expect.stringContaining(expectedFailure),
     });
     expect(host.releaseCount).toBe(1);
     if (!releaseResists) {
@@ -1506,6 +1505,77 @@ test.each([
   }
 });
 
+test("a live Codex host whose transcript materializes after the former 30-second window succeeds (#1123)", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `slow-transcript-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const begun = beginLegacySpawnFixture(registry, {
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const host = new RoundTripHost("codex", artifactPath, id, { materializeTranscript: false });
+  let now = 0;
+  let evidenceChecks = 0;
+  host.sessionMaterializationEvidence = async () => {
+    evidenceChecks += 1;
+    return evidenceChecks === 1
+      ? { state: "unavailable", reason: "thread/read timed out" }
+      : { state: "materialized" };
+  };
+
+  try {
+    const response = await spawnStructuredConversation({
+      engine: "codex",
+      receipt: begun.receipt,
+      spec: { command: "codex", cwd, windowName: "slow-transcript", engine: "codex", transcript: artifactPath },
+      account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+      "prompt": "build the scoped change",
+      registry,
+      client,
+    }, {
+      startHost: async () => host,
+      bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+        const state = await runningHost.health();
+        targetRegistry.setStructuredHostClaimed(key, {
+          kind: "codex-app-server",
+          endpoint: state.endpoint,
+          process: { pid: process.pid, startIdentity: "slow-transcript-host" },
+          eventCursor: state.eventCursor,
+          protocolVersion: state.protocolVersion,
+          writerClaimEpoch: claimEpoch,
+          activeTurnRef: state.activeTurnRef,
+          pendingAttention: state.pendingAttention,
+          activeFlags: state.activeFlags,
+        }, "idle", claimOwner, claimEpoch);
+        return () => {};
+      },
+      publishHost: async () => async () => {},
+      deliverFirst: async () => { now = INITIAL_MESSAGE_TIMEOUT_MS + 1; },
+      processIdentity: () => ({ pid: process.pid, startIdentity: "slow-transcript-host" }),
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms;
+        fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "session_meta", payload: { id } })}\n`);
+      },
+    });
+
+    expect(now).toBeGreaterThan(INITIAL_MESSAGE_TIMEOUT_MS);
+    expect(evidenceChecks).toBe(2);
+    expect(response).toMatchObject({ state: "settled", path: artifactPath, initialMessage: "delivered" });
+    expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "completed" });
+    expect(host.releaseCount).toBe(0);
+  } finally {
+    journal.close();
+  }
+});
+
 test("a fresh structured spawn permits an intentionally empty first message", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `empty-spawn-${id}`);
@@ -1522,7 +1592,7 @@ test("a fresh structured spawn permits an intentionally empty first message", as
     launchProfile,
   });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
-  const host = new RoundTripHost("codex", artifactPath, id);
+  const host = new RoundTripHost("codex", artifactPath, id, { materializeTranscript: false });
 
   await expect(spawnStructuredConversation({
     engine: "codex",
@@ -1551,9 +1621,19 @@ test("a fresh structured spawn permits an intentionally empty first message", as
     },
     publishHost: async () => async () => {},
     processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
-  })).resolves.toMatchObject({ launched: true, state: "settled" });
+  })).resolves.toMatchObject({
+    launched: true,
+    state: "path-pending",
+    path: null,
+    initialMessage: "pending",
+  });
 
   expect(host.sent).toEqual([]);
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "path-pending",
+    key: { engine: "codex", sessionId: id },
+    artifactPath,
+  });
   expect(await client.effectBatch(["runtime.send", "runtime.steer"], 0)).toEqual([]);
 });
 
@@ -1624,7 +1704,7 @@ test("a concurrent structured spawn replay stays pending until durable host setu
   const replay = beginLegacySpawnFixture(registry, request);
   if (replay.kind !== "replay") throw new Error("concurrent request did not replay");
   const response = spawnResponseForReceipt(replay.receipt, replay.receipt.artifactPath, { structured: true });
-  expect(response).toMatchObject({ launched: false, state: "path-pending", path: artifactPath });
+  expect(response).toMatchObject({ launched: false, state: "path-pending", path: null });
 
   allowBind.resolve();
   await expect(spawning).resolves.toMatchObject({ launched: true, state: "settled", path: artifactPath });
@@ -1685,7 +1765,7 @@ test("a runtime synchronization hold preserves the staged spawn until recovery d
   expect(response).toMatchObject({
     launchId: begun.receipt.launchId,
     conversationId: begun.receipt.conversationId,
-    path: artifactPath,
+    path: null,
     launched: true,
     retrySafe: false,
     initialMessage: "queued",
@@ -1746,7 +1826,7 @@ test("a runtime synchronization hold preserves the staged spawn until recovery d
   expect(host.releaseCount).toBe(0);
 });
 
-test("issue 533: a 30 second initial-message timeout releases admission ownership and late success settles once", async () => {
+test("issue 533: an initial-message status timeout releases admission ownership and late success settles once", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `recoverable-timeout-${id}`);
   fs.mkdirSync(cwd, { recursive: true });
@@ -1788,7 +1868,7 @@ test("issue 533: a 30 second initial-message timeout releases admission ownershi
     processIdentity: () => ({ pid: process.pid, startIdentity: "timeout-host" }),
   });
 
-  expect(response).toMatchObject({ state: "path-pending", initialMessage: "queued", path: artifactPath });
+  expect(response).toMatchObject({ state: "path-pending", initialMessage: "queued", path: null });
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
     state: "path-pending",
     admissionOwner: null,
@@ -3340,7 +3420,7 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
     expect(spawnResponseForReceipt(replay.receipt, replay.receipt.artifactPath, { structured: true })).toMatchObject({
       launched: false,
       state: "path-pending",
-      path: artifactPath,
+      path: null,
     });
 
     release.resolve();

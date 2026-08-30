@@ -1834,6 +1834,65 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("surfaces authoritative failure when a confirmed first delivery never materializes the thread", async () => {
+    const server = new FakeAppServer("failed-materialization-thread");
+    server.readError = "thread failed-materialization-thread is not materialized yet; includeTurns is unavailable before first user message";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-materialization", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "turn-1",
+    });
+    await expect(host.sessionMaterializationEvidence("operation-materialization")).resolves.toEqual({
+      state: "absent",
+      reason: "Codex app-server confirmed the first message without materializing its session",
+    });
+    await host.release();
+  });
+
+  test("classifies a terminal thread/read rejection as failed materialization evidence", async () => {
+    const server = new FakeAppServer("rejected-materialization-thread");
+    server.readError = "thread rejected-materialization-thread not found";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    await expect(host.sessionMaterializationEvidence("operation-rejected")).resolves.toMatchObject({
+      state: "failed",
+      reason: expect.stringContaining("thread rejected-materialization-thread not found"),
+    });
+    await host.release();
+  });
+
+  test("confirms the persisted first message from thread/read materialization evidence", async () => {
+    const server = new FakeAppServer("materialized-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-materialized", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "turn-1",
+    });
+    server.readTurns = [{
+      id: "turn-1",
+      status: "inProgress",
+      items: [{ type: "userMessage", clientId: "operation-materialized", content: [{ type: "text", text: "hello" }] }],
+    }];
+    await expect(host.sessionMaterializationEvidence("operation-materialized")).resolves.toEqual({
+      state: "materialized",
+    });
+    await host.release();
+  });
+
   test("closes an unresolved ledger turn when resume reports idle", async () => {
     const eventStore = new MemoryEventStore();
     eventStore.append("crashed-turn", { kind: "turn-started", turnId: "turn-active", seq: 1 });

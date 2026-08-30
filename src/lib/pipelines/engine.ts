@@ -305,13 +305,12 @@ async function spawnPipelineAgent(
   if (begun.kind === "conflict") throw new Error("pipeline spawn attempt conflicts with its original request");
   onReserved({ launchId: begun.receipt.launchId, conversationId: begun.receipt.conversationId });
   if (begun.kind === "replay") {
-    const conversation = registry.conversation(begun.receipt.conversationId);
-    const transcript = begun.receipt.artifactPath ?? conversation?.generations.at(-1)?.path ?? null;
+    const identityPublished = begun.receipt.state === "completed";
     return {
       launchId: begun.receipt.launchId,
       conversationId: begun.receipt.conversationId,
-      sessionId: begun.receipt.key?.sessionId ?? null,
-      transcript,
+      sessionId: identityPublished ? begun.receipt.key?.sessionId ?? null : null,
+      "transcript": identityPublished ? begun.receipt.artifactPath : null,
       paneId: begun.receipt.verifiedHost?.paneId ?? begun.receipt.pane?.paneId ?? null,
     };
   }

@@ -77,10 +77,11 @@ export function spawnResponseForReceipt(
   const launched = (receipt.verifiedHost !== null || (options.structured === true && receipt.state === "completed"))
     && receipt.state !== "failed"
     && receipt.state !== "conflicted";
+  const publishedPath = structured && receipt.state !== "completed" ? null : path;
   return {
     ok: true,
     target: receipt.pane?.paneId ?? receipt.target ?? null,
-    path,
+    path: publishedPath,
     ...(structured && receipt.engine === "claude"
       ? { effectivePermissionMode: receipt.launchProfile.permissionMode ?? "default" }
       : {}),

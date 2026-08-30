@@ -105,6 +105,25 @@ export interface EngineHost {
   answer(attentionRef: string, value: unknown): Promise<void>;
   health(): Promise<HostState>;
   release(): Promise<void>;
+  /** Engine-backed persistence evidence for a fresh session's first message.
+      A logical session may exist before its canonical transcript does. */
+  sessionMaterializationEvidence?(clientMessageId: string): Promise<SessionMaterializationEvidence>;
+}
+
+export type SessionMaterializationEvidence =
+  | { state: "materialized" }
+  /** The engine currently has no persisted first message; later reads may advance. */
+  | { state: "absent"; reason: string }
+  /** The persistence read had no verdict; a readable canonical artifact may still prove success. */
+  | { state: "unavailable"; reason: string }
+  /** The engine rejected or contradicted the staged session identity. */
+  | { state: "failed"; reason: string };
+
+export class StructuredSessionMaterializationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StructuredSessionMaterializationError";
+  }
 }
 
 export interface RuntimeCompactRequest {

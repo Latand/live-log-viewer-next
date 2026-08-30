@@ -140,6 +140,83 @@ test("a pipeline stage keeps its reserved account through a routing change befor
   }
 });
 
+test("a concurrent pipeline replay withholds its staged session identity and transcript (#1123)", async () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "pipeline-phantom-replay-registry.json"));
+  const cwd = process.env.LLV_STATE_DIR!;
+  setAgentRegistryForTests(registry);
+  const resolveSpawn = spyOn(accountManager, "resolveSpawn").mockImplementation(() => ({
+    engine: "codex",
+    accountId: "pipeline-account",
+    kind: "managed",
+    home: cwd,
+    transcriptRoot: cwd,
+    env: { NODE_ENV: "test" },
+  }));
+  const input: Parameters<PipelinePorts["spawnAgent"]>[0] = {
+    role: {
+      roleId: "builder",
+      engine: "codex" as const,
+      model: "gpt-5.6-sol",
+      effort: "xhigh",
+      access: "read-write" as const,
+      promptScaffold: "Builder guidance",
+    },
+    cwd,
+    title: "Build scoped change",
+    "prompt": "Build the scoped change",
+    parentPath: null,
+    clientAttemptId: "pipeline_phantom_replay_attempt",
+    membership: {
+      kind: "pipeline" as const,
+      containerId: "pipeline-phantom-replay",
+      role: "builder",
+      slot: "build:1",
+      stageId: "build",
+      stageOrder: 0,
+      round: 1,
+      parentConversationId: null,
+    },
+    creatorConversationId: null,
+  };
+  const reservations: Array<{ launchId: string; conversationId: string }> = [];
+
+  try {
+    const ports = defaultPipelinePorts();
+    await expect(ports.spawnAgent(input, (created) => {
+      reservations.push(created);
+      throw new Error("reservation captured");
+    })).rejects.toThrow("reservation captured");
+    const reservation = reservations[0];
+    if (!reservation) throw new Error("pipeline reservation was not captured");
+    const receipt = registry.snapshot().receipts[reservation.launchId]!;
+    const stagedPath = path.join(cwd, "provisional-stage.jsonl");
+    registry.stageStructuredSpawn(receipt.launchId, {
+      key: { engine: "codex", sessionId: "provisional-session" },
+      artifactPath: stagedPath,
+      cwd,
+      accountId: "pipeline-account",
+      launchProfile: receipt.launchProfile,
+      status: "starting",
+      host: null,
+      structuredHost: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: "spawn",
+    });
+
+    const replay = await ports.spawnAgent(input, () => {});
+    expect(replay).toMatchObject({
+      launchId: receipt.launchId,
+      conversationId: receipt.conversationId,
+      sessionId: null,
+      "transcript": null,
+    });
+  } finally {
+    resolveSpawn.mockRestore();
+    setAgentRegistryForTests(null);
+  }
+});
+
 const RUN_STAGES = [
   { id: "plan", kind: "run", role: { roleId: "architect" }, access: "read-only", prompt: "Plan {{task}}", next: "build" },
   { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Build from {{prev.output}}", next: null },
