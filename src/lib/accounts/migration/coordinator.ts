@@ -989,6 +989,7 @@ export async function reconcileMigrations(
       const pending = registry.pendingDeliveries(conversation.id);
       for (const item of pending) {
         if ((item.state === "held" || item.state === "assigned")
+          && item.recoveryIntent !== "reclaimed-host"
           && !deliveryHasDurableClaimOwner(before, conversation, item)) {
           registry.terminalizeHeldDelivery(item.id, orphanedDeliveryReason);
         }

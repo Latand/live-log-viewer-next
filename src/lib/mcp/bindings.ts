@@ -32,6 +32,7 @@ import { applyBoardCommand } from "@/lib/board/command";
 import { boardFor } from "@/lib/board/store";
 import { MAX_BOARD_MUTATIONS_PER_REQUEST, MAX_BOARD_PATH_LIST_ITEMS } from "@/lib/board/validation";
 import { applyConversationAction } from "@/lib/conversation/actions";
+import { conversationDeliverabilityFromRecord } from "@/lib/conversation/deliverability";
 import { backoffDelayMs, DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
 import { getFlowsWithPresets } from "@/lib/flows/engine";
@@ -1499,6 +1500,22 @@ async function getConversation(
     ...(hint ? { hint } : {}),
     ...selectedContextEcho(selected.target),
   });
+}
+
+function conversationDeliverability(
+  args: McpToolArgs,
+  dependencies: Pick<ViewerMcpDomainDependencies, "registrySnapshot">,
+): McpToolPayload {
+  const conversationId = text(args.conversationId);
+  const transcriptPath = text(args.transcriptPath) || text(args.path);
+  if (!conversationId && !transcriptPath) {
+    throw new Error("conversationId or transcriptPath is required");
+  }
+  const result = conversationDeliverabilityFromRecord(dependencies.registrySnapshot(), {
+    conversationId,
+    transcriptPath,
+  });
+  return redactPayload({ ...result });
 }
 
 const CONVERSATION_MESSAGE_KINDS = ["message", "reasoning", "tool_call", "tool_result", "trace"] as const;
@@ -3418,6 +3435,7 @@ export function viewerMcpBindings(
     list_conversations: (args, context) => listConversations(args, viewerControlForCall(controlDependencies, context)),
     search_transcripts: (args, context) => searchTranscripts(args, viewerControlForCall(controlDependencies, context)),
     get_conversation: (args, context) => getConversation(args, domainDependencies, context),
+    conversation_deliverability: (args) => Promise.resolve(conversationDeliverability(args, domainDependencies)),
     conversation_messages: (args, context) => conversationMessages(args, domainDependencies, context),
     deploy_exact_sha: (args, context) => deployExactSha(args, viewerControlForCall(controlDependencies, context), domainDependencies),
     get_pipeline: getPipeline,
