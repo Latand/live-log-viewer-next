@@ -71,9 +71,10 @@ target. Inspect the owner with
 Run that command from any checkout of the repository, a worktree included, with
 nothing wrapping it and no `git pull` before it: it posts a revision, and the
 runtime host builds that revision from its own canonical Git mirror rather than
-from the working tree (#1309). With no argument it resolves the canonical
-`refs/heads/main` tip and deploys that exact commit; a full lowercase commit SHA
-pins a redeploy or a rollback.
+from the working tree (#1309). With no argument and no `LLV_DEPLOY_REVISION`
+override it resolves the canonical `refs/heads/main` tip and deploys that exact
+commit; a full 40-character commit SHA in either case pins a redeploy or a
+rollback and is posted lowercase.
 
 ### Bootstrap the runtime host onto a new revision (#1216)
 

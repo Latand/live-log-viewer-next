@@ -281,8 +281,9 @@ LLV_TEST_PORT=8901 docker compose --profile test up -d viewer-test
 repository — a worktree included — with nothing wrapping it and no `git pull`
 first. It posts a revision to the runtime host, which builds that revision from
 its own canonical Git mirror rather than from the working tree. With no argument
-it resolves the canonical `refs/heads/main` tip and deploys that exact commit; a
-full lowercase commit SHA pins a redeploy or a rollback.
+and no `LLV_DEPLOY_REVISION` override, it resolves the canonical
+`refs/heads/main` tip and deploys that exact commit; a full 40-character commit
+SHA in either case pins a redeploy or a rollback and is posted lowercase.
 
 See [docs/docker.md](docs/docker.md) for the parity model, the nsenter shims,
 and volume/port details.

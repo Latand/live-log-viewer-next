@@ -12,29 +12,37 @@ CANONICAL_REMOTE="${LLV_VIEWER_CANONICAL_REMOTE:-https://github.com/Latand/live-
 
 usage() {
   echo "usage: rebuild.sh [full-commit-sha]" >&2
-  echo "  no argument       deploy the canonical refs/heads/main tip, resolved here to the commit it names" >&2
-  echo "  full-commit-sha   40 lowercase hex characters: a pinned redeploy or rollback" >&2
+  echo "  no argument       with LLV_DEPLOY_REVISION unset, deploy the canonical refs/heads/main tip resolved here" >&2
+  echo "  full-commit-sha   40 hex characters, in either case; posted lowercase for a pinned redeploy or rollback" >&2
+  echo "  LLV_DEPLOY_REVISION follows the same SHA contract and supplies an omitted argument" >&2
 }
 
 if [ "$#" -gt 1 ]; then
   usage
   exit 1
 fi
-if [ "$#" -eq 1 ] && [ -n "${LLV_DEPLOY_REVISION:-}" ] && [ "$1" != "$LLV_DEPLOY_REVISION" ]; then
-  echo "revision argument conflicts with LLV_DEPLOY_REVISION" >&2
-  exit 1
-fi
-
 # #1309: what this script advertises, validates and sends is exactly what
 # `/api/runtime/deployments` accepts for `revision` — a full 40-character
-# lowercase commit SHA. It used to default to, print and post `origin/main`,
-# which that endpoint has never accepted (`revision_invalid`).
-REVISION="${1:-${LLV_DEPLOY_REVISION:-}}"
-if [ -n "$REVISION" ] && [[ ! "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "invalid revision: pass a full lowercase 40-character commit SHA, or no argument to deploy the canonical main tip" >&2
+# hexadecimal commit SHA, normalized to lowercase. The old CLI exposed
+# `origin/main` as an input sentinel and resolved it before posting; omitting the
+# argument now expresses that default without advertising a value the endpoint
+# would reject as `revision_invalid`.
+ARG_REVISION="${1:-}"
+ENV_REVISION="${LLV_DEPLOY_REVISION:-}"
+if { [ "$#" -eq 1 ] && [ -z "$ARG_REVISION" ]; } \
+  || { [ -n "$ARG_REVISION" ] && [[ ! "$ARG_REVISION" =~ ^[0-9a-fA-F]{40}$ ]]; } \
+  || { [ -n "$ENV_REVISION" ] && [[ ! "$ENV_REVISION" =~ ^[0-9a-fA-F]{40}$ ]]; }; then
+  echo "invalid revision: pass a full 40-character hexadecimal commit SHA in either case, or no argument to deploy the canonical main tip" >&2
   usage
   exit 1
 fi
+if [ -n "$ARG_REVISION" ] && [ -n "$ENV_REVISION" ] \
+  && [ "${ARG_REVISION,,}" != "${ENV_REVISION,,}" ]; then
+  echo "revision argument conflicts with LLV_DEPLOY_REVISION" >&2
+  exit 1
+fi
+REVISION="${ARG_REVISION:-$ENV_REVISION}"
+REVISION="${REVISION,,}"
 
 IDEMPOTENCY_KEY="${LLV_DEPLOY_IDEMPOTENCY_KEY:-deploy-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 case "$IDEMPOTENCY_KEY" in
@@ -59,10 +67,11 @@ if [ -z "$REVISION" ]; then
     exit 1
   fi
   REVISION="$(printf '%s\n' "$ls_remote" | head -n 1 | cut -f1)"
-  if [[ ! "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+  if [[ ! "$REVISION" =~ ^[0-9a-fA-F]{40}$ ]]; then
     echo "could not resolve refs/heads/main at $CANONICAL_REMOTE" >&2
     exit 1
   fi
+  REVISION="${REVISION,,}"
   echo "resolved refs/heads/main at $CANONICAL_REMOTE: $REVISION"
 fi
 
@@ -70,13 +79,13 @@ BASE="http://127.0.0.1:${PORT}"
 BODY="$(bun -e 'const [revision, idempotencyKey] = process.argv.slice(1); process.stdout.write(JSON.stringify({ revision, idempotencyKey }))' "$REVISION" "$IDEMPOTENCY_KEY")"
 
 # #1309: nothing that reads as a started deployment is printed before the
-# endpoint has accepted the request. A refusal used to arrive underneath
+# endpoint has returned a valid receipt. A refusal used to arrive underneath
 # `deployment key: …`, so a request that deployed nothing read like one that
 # had started. A request whose response never arrives is the one case where the
 # key still has to be shown: that request may have been admitted, and the key
 # is what claims its receipt.
 if ! response="$(curl -sS --max-time 125 -H 'content-type: application/json' -d "$BODY" -w $'\n%{http_code}' "${BASE}/api/runtime/deployments")"; then
-  echo "deployment request did not complete; it may still have been admitted — rerun with LLV_DEPLOY_IDEMPOTENCY_KEY=$IDEMPOTENCY_KEY to claim the original receipt" >&2
+  printf 'deployment request did not complete; it may still have been admitted — rerun with LLV_DEPLOY_IDEMPOTENCY_KEY=%q scripts/rebuild.sh %q to claim the original receipt\n' "$IDEMPOTENCY_KEY" "$REVISION" >&2
   exit 1
 fi
 code="${response##*$'\n'}"
@@ -85,15 +94,25 @@ if [ "$code" != "202" ] && [ "$code" != "409" ]; then
   echo "deployment request failed (HTTP $code): $json" >&2
   exit 1
 fi
+if ! deployment_id="$(bun -e '
+  try {
+    const [raw, code] = process.argv.slice(1);
+    const receipt = JSON.parse(raw);
+    const expectedState = code === "409" ? "busy" : "accepted";
+    if (!receipt || typeof receipt !== "object" || receipt.state !== expectedState
+      || typeof receipt.deploymentId !== "string" || receipt.deploymentId.length === 0) process.exit(1);
+    process.stdout.write(receipt.deploymentId);
+  } catch { process.exit(1); }
+' "$json" "$code")"; then
+  echo "deployment request failed (HTTP $code): $json" >&2
+  exit 1
+fi
 
 echo "deployment key: $IDEMPOTENCY_KEY"
-state="$(bun -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.state || ""))' "$json")"
-deployment_id="$(bun -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.deploymentId || ""))' "$json")"
-if [ "$state" = "busy" ]; then
+if [ "$code" = "409" ]; then
   echo "deployment busy: $deployment_id"
   exit 2
 fi
-[ -n "$deployment_id" ] || { echo "deployment receipt is missing its id" >&2; exit 1; }
 
 echo "deployment admitted: $deployment_id"
 while :; do
