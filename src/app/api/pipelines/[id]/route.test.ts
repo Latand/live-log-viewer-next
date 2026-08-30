@@ -2,7 +2,16 @@ import { expect, mock, test } from "bun:test";
 
 import { NextRequest } from "next/server";
 
-const pipeline = { id: "pipeline-1" };
+const pipeline = {
+  id: "pipeline-1",
+  task: "read one pipeline",
+  spec: "Return the full durable record.",
+  stages: [{ id: "build", kind: "run", prompt: "Build the route", next: null }],
+  runs: [{
+    stageId: "build",
+    attempts: [{ attempt: 1, input: "Implement", output: "Complete", verdict: { status: "pass", findings: [] } }],
+  }],
+};
 const closeReport = {
   stopped: [{ stageId: "build", attempt: 1, conversationId: "conversation_stage_1", agentPath: null, paneId: null }],
   alreadyStopped: [],
@@ -19,6 +28,10 @@ const refusedClose = {
 };
 mock.module("@/lib/pipelines/engine", () => ({
   getPipelines: () => ({ pipelines: [pipeline] }),
+  getPipeline: (id: string) => {
+    if (id === "pipeline-unreadable") throw new Error("pipeline registry unreadable");
+    return id === pipeline.id ? pipeline : null;
+  },
   createPipelineFromRequest: () => ({ pipeline }),
   tickPipelines: async () => ({ pipelines: [], changed: false }),
   patchPipeline: async (id: string, body: unknown) => {
@@ -36,8 +49,46 @@ mock.module("@/lib/pipelines/engine", () => ({
   },
 }));
 
-const { DELETE, PATCH } = await import("./route");
+const { DELETE, GET, PATCH } = await import("./route");
+const { GET: GET_COLLECTION } = await import("../route");
 const { registerPipelineTick } = await import("@/lib/pipelines/controllerSignal");
+
+test("pipeline GET returns the full record for a known id", async () => {
+  const response = await GET(
+    new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1"),
+    { params: Promise.resolve({ id: "pipeline-1" }) },
+  );
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ ok: true, pipeline });
+});
+
+test("pipeline GET returns 404 for an unknown id", async () => {
+  const response = await GET(
+    new NextRequest("http://127.0.0.1/api/pipelines/pipeline-missing"),
+    { params: Promise.resolve({ id: "pipeline-missing" }) },
+  );
+  expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({ error: "pipeline not found" });
+});
+
+test("pipeline GET record matches the same id in the collection response", async () => {
+  const collection = await (await GET_COLLECTION()).json() as { pipelines: Array<{ id: string }> };
+  const response = await GET(
+    new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1"),
+    { params: Promise.resolve({ id: "pipeline-1" }) },
+  );
+  const body = await response.json() as { pipeline: unknown };
+  expect(body.pipeline).toEqual(collection.pipelines.find((candidate) => candidate.id === pipeline.id));
+});
+
+test("pipeline GET returns 500 when the registry is unreadable", async () => {
+  const response = await GET(
+    new NextRequest("http://127.0.0.1/api/pipelines/pipeline-unreadable"),
+    { params: Promise.resolve({ id: "pipeline-unreadable" }) },
+  );
+  expect(response.status).toBe(500);
+  expect(await response.json()).toEqual({ error: "pipeline registry unreadable" });
+});
 
 test("pipeline PATCH accepts control and task-link actions", async () => {
   let ticks = 0;

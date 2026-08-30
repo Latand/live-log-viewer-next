@@ -59,6 +59,50 @@ test("the proposal brief asks for one ranked card and forbids opening issues or 
   expect(text).toContain("Open no GitHub issue and start no pipeline from this");
 });
 
+/* ------------------------------------------------------------------------- *
+ * What the wake could not see (#1298).
+ *
+ * The reasons stand without the failed source; the seat is told which evidence
+ * was missing so it can tell a short agenda from a blind one.
+ * ------------------------------------------------------------------------- */
+
+test("a wake names the evidence it could not read, above the items and below the reasons", () => {
+  const text = seatTickWakeMessage({
+    project: PROJECT,
+    reasons: [{ kind: "stalled", detail: "pipeline pipeline_a1 stage review is parked" }],
+    items: [{ kind: "pipeline", id: "pipeline_a1", label: "ship the exporter — parked" }],
+    deferred: 0,
+    signals: [],
+    gaps: [{
+      source: "pull-requests",
+      gap: "command-failed",
+      detail: "the open pull requests of this project's finished lanes could not be read (command-failed), "
+        + "so a pull request a finished lane left unmerged cannot be named in this wake",
+    }],
+  });
+  expect(text).toContain("Evidence unavailable:");
+  expect(text).toContain("- pull-requests: the open pull requests of this project's finished lanes could not be read (command-failed)");
+  /* Above the agenda, which is the half the length bound eats into: a wake
+     that dropped its own blind spot to fit one more item would be the silence
+     this section exists to end, one line smaller. */
+  expect(text.indexOf("Evidence unavailable:")).toBeLessThan(text.indexOf("Items:"));
+  expect(text.indexOf("stalled: pipeline")).toBeLessThan(text.indexOf("Evidence unavailable:"));
+  /* And the contract is untouched, as it is by everything else. */
+  expect(text).toContain("Do not wait on the operator inside this turn");
+});
+
+test("a wake with every source readable says nothing about evidence at all", () => {
+  const text = seatTickWakeMessage({
+    project: PROJECT,
+    reasons: [{ kind: "interval", detail: "the wake interval elapsed while work is open" }],
+    items: [],
+    deferred: 0,
+    signals: [],
+    gaps: [],
+  });
+  expect(text).not.toContain("Evidence unavailable");
+});
+
 test("an unreadable gh leaves the slot working from the board rather than failing the wake", () => {
   const text = seatTickProposalMessage({ project: PROJECT, issues: [], signals: [], items: 5, slot: "1" });
   expect(text).toContain("(none readable; rank from the board and the signals below)");
