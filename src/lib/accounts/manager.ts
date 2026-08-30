@@ -6,7 +6,8 @@ import type { AccountContext, AccountManager, AccountSummary } from "./contracts
 import { unavailableLimits } from "./contracts";
 import { withAccountMutationLockAsync } from "./accountMutation";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { selectHeadlessAccount } from "./headlessSelection";
+import { accountProjectBindings } from "./projectBindings";
+import { selectProjectAccount } from "./projectSelection";
 import { selectHealthyClaudeAccount } from "./spawnHealth";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 import { classifySpawnAccountAdmission, type SpawnAccountAdmission } from "@/lib/agent/accountLiveness";
@@ -25,8 +26,21 @@ export type HealthySpawnAccountResolution = AccountContext & {
 export async function resolveHealthySpawnAccount(
   engine: "claude" | "codex",
   requested?: string | null,
+  /* #1279: the project's allowed set, or null for a project with no binding —
+     which is every project until someone configures one, and takes the
+     identical path this function always took. A bound project's health pass
+     runs over its allowed accounts only, so the fallback a failing probe picks
+     is drawn from the same set the pin would have been checked against. */
+  allowedAccountIds: readonly string[] | null = null,
 ): Promise<HealthySpawnAccountResolution> {
-  const active = agentRegistry().engineRouting(engine).activeAccountId ?? undefined;
+  if (allowedAccountIds !== null && allowedAccountIds.length === 0) {
+    throw new Error(`project allows no ${engine} account`);
+  }
+  const allowed = allowedAccountIds === null ? null : new Set(allowedAccountIds);
+  const routing = agentRegistry().engineRouting(engine).activeAccountId ?? undefined;
+  const active = allowed === null || (routing !== undefined && allowed.has(routing))
+    ? routing
+    : allowedAccountIds![0];
   const routed = requested ?? active;
   const missingRequested = classifySpawnAccountAdmission({
     enabled: false,
@@ -43,7 +57,7 @@ export async function resolveHealthySpawnAccount(
       return { ...contextForSpawn(engine, active), requestedAdmission: missingRequested };
     }
   }
-  const accounts = listClaudeAccounts();
+  const accounts = listClaudeAccounts().filter((account) => allowed === null || allowed.has(account.id));
   const requestedExists = requested === undefined
     || requested === null
     || accounts.some((account) => account.id === requested);
@@ -151,12 +165,47 @@ export const accountManager: AccountManager = {
   async submitLoginInput() { throw new Error("login input is Claude-operation specific"); },
   async cancelLogin() { throw new Error("login cancellation is Claude-operation specific"); },
   resolveSpawn(engine, requested) { return contextForSpawn(engine, requested ?? agentRegistry().engineRouting(engine).activeAccountId ?? undefined); },
-  resolveHeadlessSpawn(engine, requested, excludedIds = []) {
-    const accounts = engine === "claude" ? listClaudeAccounts() : listCodexAccounts();
-    const selected = selectHeadlessAccount(accounts, agentRegistry().quotaObservations(engine), requested ?? agentRegistry().engineRouting(engine).activeAccountId, excludedIds);
-    return selected.kind === "available"
-      ? { kind: "available", account: contextForSpawn(engine, selected.accountId) }
-      : selected;
+  resolveHeadlessSpawn(engine, requested, excludedIds = [], project = null) {
+    const selected = selectProjectAccount({
+      project,
+      engine,
+      accounts: engine === "claude" ? listClaudeAccounts() : listCodexAccounts(),
+      observations: agentRegistry().quotaObservations(engine),
+      bindings: accountProjectBindings(),
+      /* Headless selection has no pin: `requested` has always been a
+         preference here, and it stays one — the fence is the candidate set. */
+      preferredId: requested ?? agentRegistry().engineRouting(engine).activeAccountId,
+      excludedIds,
+      /* This path has always been the rate-limit-aware one, bound project or
+         not, and stays so — the binding only narrows what it may pick from. */
+      unbound: "capacity",
+    });
+    if (selected.kind === "available") {
+      return { kind: "available", account: contextForSpawn(engine, selected.accountId ?? undefined) };
+    }
+    return selected.kind === "exhausted"
+      ? { kind: "exhausted", resetsAt: selected.resetsAt }
+      : { kind: "unavailable" };
+  },
+  /* #1279: one seam for every project-owned launch. An unbound project takes
+     the branch that has always existed — the active account, resolved and
+     used, with no capacity arithmetic anywhere near it. A bound project is the
+     only case that changes: its candidates are the allowed set and nothing
+     else, and when all of them are out of capacity that is reported, never
+     resolved by widening the set. */
+  resolveProjectSpawn(engine, request) {
+    const selected = selectProjectAccount({
+      project: request.project,
+      engine,
+      accounts: engine === "claude" ? listClaudeAccounts() : listCodexAccounts(),
+      observations: agentRegistry().quotaObservations(engine),
+      bindings: accountProjectBindings(),
+      requestedId: request.requestedId,
+      preferredId: agentRegistry().engineRouting(engine).activeAccountId,
+      excludedIds: request.excludedIds ?? [],
+    });
+    if (selected.kind !== "available") return selected;
+    return { kind: "available", account: contextForSpawn(engine, selected.accountId ?? undefined) };
   },
   resolveTranscriptOwner(engine, transcript) {
     /* Registry first (issue #891, phase 0): the durable generation record

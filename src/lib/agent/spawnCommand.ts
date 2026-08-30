@@ -38,6 +38,7 @@ import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport
 import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "@/lib/pipelines/engine";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
+import { allowedAccountIdsForProject } from "@/lib/accounts/projectBindings";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { derivedSpawnTitle, durableSemanticTitle, firstPromptLine, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
@@ -605,11 +606,25 @@ export async function executeSpawnRequest(
       );
     }
     const requestedAccountId = typeof body.accountId === "string" ? body.accountId : null;
+    /* #1279: the project's binding fences a raw spawn the same way it fences a
+       pipeline stage. A project with no binding answers null here and every
+       branch below is byte-identical to what it always was; a bound one
+       refuses an account outside its set outright, rather than degrading the
+       pin to a fallback the project forbids. */
+    const spawnProject = explicitProject ?? projectForCwd(cwd);
+    const allowedAccountIds = allowedAccountIdsForProject(spawnProject, engine);
+    if (requestedAccountId && allowedAccountIds !== null && !allowedAccountIds.includes(requestedAccountId)) {
+      return NextResponse.json({
+        error: allowedAccountIds.length
+          ? `${engine} account ${requestedAccountId} is not allowed on project ${spawnProject} (allowed: ${allowedAccountIds.join(", ")})`
+          : `project ${spawnProject} allows no ${engine} account`,
+      }, { status: 409 });
+    }
     let account: HealthySpawnAccountResolution;
     try {
       account = existingAttempt && existingAttempt.accountId !== null && !(existingAttempt.accountPin && requestedAccountId)
         ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
-        : await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
+        : await dependencies.resolveHealthySpawnAccount(engine, body.accountId, allowedAccountIds);
     } catch (error) {
       if (body.accountId === undefined) throw error;
       if (engine === "claude" && requestedAccountId) {

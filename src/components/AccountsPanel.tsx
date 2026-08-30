@@ -222,6 +222,7 @@ function AccountRow({ account, engine, quota, activeId, onSelect, onRemove, onCo
         <CapacityChip quota={quota} engine={engine} />
         <StateChip state={state} />
       </button>
+      <BoundProjects account={account} />
       {children}
       {state === "pending" && account.deviceAuth ? (
         <div className="flex items-center gap-2 px-3.5 pb-1.5 text-[10px] text-muted">
@@ -281,6 +282,36 @@ function AccountRow({ account, engine, quota, activeId, onSelect, onRemove, onCo
           )
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The accounts side of #1279's relation: the projects this account is bound to.
+ *
+ * Nothing renders when there are none, and that reads correctly: a binding
+ * fences the PROJECT, not the account, so an account with no bindings is not
+ * restricted — every project that has not bound anything may still use it.
+ */
+function BoundProjects({ account }: { account: AccountOption }) {
+  const { t } = useLocale();
+  const projects = account.projects ?? [];
+  if (!projects.length) return null;
+  return (
+    <div
+      data-account-projects={account.id}
+      className="flex flex-wrap items-center gap-1 px-3.5 pb-0.5 pl-[30px] text-[10px]"
+    >
+      <span className="font-semibold text-muted">{t("accounts.boundProjects")}</span>
+      {projects.map((entry) => (
+        <span
+          key={entry.project}
+          title={entry.project}
+          className="max-w-[160px] truncate rounded-full border border-border bg-canvas px-1.5 py-0.5 font-semibold text-secondary"
+        >
+          {entry.displayName}
+        </span>
+      ))}
     </div>
   );
 }

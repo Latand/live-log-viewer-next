@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { accountManager } from "@/lib/accounts/manager";
+import { allowedAccountIdsForProject, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import { mirroredClaudeTranscriptPath } from "@/lib/accounts/claude";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
@@ -14,7 +15,7 @@ import { headCwd } from "@/lib/agent/transcript";
 import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, isRecoverableLegacyRelayFailurePause, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage, readFindingsFile } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
-import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
+import type { CreateFlowRequest, Flow, FlowEngine, RoleConfig } from "@/lib/flows/types";
 import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { structuredHostsEnabled, supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
@@ -135,6 +136,11 @@ export interface PipelinePorts {
   spawnAgent(input: {
     role: EffectivePipelineRole;
     cwd: string;
+    /** Project the launch belongs to; the account it may use is drawn from
+        this project's allowed set and nothing wider (#1279). */
+    project: string;
+    /** The account the stage named, if it named one. */
+    requestedAccountId: string | null;
     title: string;
     "prompt": string;
     parentPath: string | null;
@@ -201,7 +207,37 @@ export interface PipelinePorts {
   getFlow(id: string): Flow | null;
   findFlow(implementerPath: string, implementerConversationId: string | null, baseRef: string, targetSha: string): Flow | null;
   projectForCwd(cwd: string): string | null;
+  /** Accounts `project` allows for `engine`, or null when the project has no
+      binding for it — which means every account, as it always did (#1279). */
+  allowedAccountIds?(project: string, engine: FlowEngine): string[] | null;
   now(): string;
+}
+
+/** Create/override-time reading of #1279's rule, over stages already
+    normalized. The launch re-reads it at the seam; this is what keeps a plan
+    that could never run from being stored in the first place. */
+function stageAccountViolations(
+  stages: readonly PipelineStage[],
+  project: string,
+  ports: PipelinePorts,
+): PipelineValidationViolation[] {
+  if (!ports.allowedAccountIds) return [];
+  const violations: PipelineValidationViolation[] = [];
+  for (const [index, stage] of stages.entries()) {
+    const requested = stage.account?.trim();
+    if (!requested) continue;
+    const engine = stage.effectiveRole.engine;
+    const allowed = ports.allowedAccountIds(project, engine);
+    if (allowed === null || allowed.includes(requested)) continue;
+    violations.push({
+      field: `stages[${index}].account`,
+      message: allowed.length
+        ? `stage ${stage.id} names ${engine} account ${requested}, which project ${project} does not allow (allowed: ${allowed.join(", ")})`
+        : `stage ${stage.id} names ${engine} account ${requested}, and project ${project} allows no ${engine} account`,
+      expected: STAGE_ACCOUNT_SHAPE,
+    });
+  }
+  return violations;
 }
 
 function engineForTranscript(transcript: string): "claude" | "codex" | null {
@@ -236,7 +272,20 @@ async function spawnPipelineAgent(
   input: Parameters<PipelinePorts["spawnAgent"]>[0],
   onReserved: (reservation: PipelineStageLaunchReservation) => void,
 ): Promise<PipelineStageSpawn> {
-  const account = accountManager.resolveSpawn(input.role.engine);
+  /* #1279's seam. An unbound project takes the same branch it always took —
+     the active account — so nothing changes for a project nobody configured.
+     A bound one draws from its allowed set only: a stage naming an account
+     outside it is refused, and an allowed set with no capacity left is
+     REPORTED. Neither case falls back onto an account the project forbids;
+     the throw parks the stage with the reason on the record. */
+  const resolution = accountManager.resolveProjectSpawn(input.role.engine, {
+    project: input.project,
+    requestedId: input.requestedAccountId,
+  });
+  if (resolution.kind !== "available") {
+    throw new Error(projectAccountRefusalDetail(resolution, input.role.engine, input.project));
+  }
+  const account = resolution.account;
   const parent = parentIdentity(input.parentPath);
   const specBase = freshSpecFor(input.role.engine, input.cwd, {
     model: input.role.model,
@@ -589,6 +638,7 @@ export function defaultPipelinePorts(): PipelinePorts {
     exec: realExec,
     preflightRepo: preflightPipelineRepo,
     roleLookup: pipelineRoleLookup,
+    allowedAccountIds: (project, engine) => allowedAccountIdsForProject(project, engine),
     spawnAgent: async (input, onReserved) => {
       const result = await spawnPipelineAgent(input, onReserved);
       invalidateRegistryProjection();
@@ -1652,6 +1702,8 @@ async function tickRunStage(
       const spawnInput: Parameters<PipelinePorts["spawnAgent"]>[0] = {
         role: attempt.effectiveRole,
         cwd: pipeline.worktreeDir,
+        project: pipeline.project,
+        requestedAccountId: stage.account ?? null,
         title: pipelineStageTitle(pipeline.task, stage.id),
         prompt,
         parentPath: latestCompletedAgentPath(pipeline, stage.id),
@@ -2709,13 +2761,14 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
 /* #1026: the expected shape each stage constraint names, shared by the batched
    error response and the MCP tool schema's field descriptions so a caller reads
    the same contract whether it asks the schema or trips the validator. */
-const STAGE_OBJECT_SHAPE = "{id, kind, prompt, next, onFail?, role?, engine?/model?/effort?/access? overrides}";
+const STAGE_OBJECT_SHAPE = "{id, kind, prompt, next, onFail?, role?, engine?/model?/effort?/access?/account? overrides}";
 const STAGE_PROMPT_SHAPE = `non-empty string up to ${MAX_STAGE_PROMPT_LENGTH} characters`;
 const STAGE_ROLE_SHAPE = `{roleId: one of ${PIPELINE_ROLE_IDS.join(" | ")}, params?: {<key>: string | number}} — runtime overrides belong on the stage, not in role`;
 const STAGE_ROLE_ID_SHAPE = `one of ${PIPELINE_ROLE_IDS.join(" | ")}`;
 const STAGE_ROLE_PARAMS_SHAPE = "object of the role's declared parameters, values string or number";
 const STAGE_RUNTIME_SHAPE = "a role and stage-level engine/model/effort/access the role registry can resolve";
 const STAGE_NEXT_SHAPE = "id of another stage, or null to terminate the pass chain";
+const STAGE_ACCOUNT_SHAPE = "id of an account the pipeline's project allows, or null to let the project's own selection choose";
 const STAGE_ON_FAIL_SHAPE = `null, or {to: <existing stage id>, maxRounds?: 1–${MAX_FAIL_EDGE_ROUNDS}} — run stages only`;
 const STAGE_GRAPH_SHAPE = "acyclic next chains over existing stage ids, with every review-loop reachable from a run stage";
 
@@ -2851,6 +2904,13 @@ function normalizeStages(
     if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") {
       violations.push({ field: at("effort"), message: `stage ${id} effort must be a string or null`, expected: "effort string supported by the stage engine, or null to inherit the role default" });
     }
+    /* #1279: the stage may name the account it runs on. Shape is checked here;
+       whether the project's binding ALLOWS that account is checked where the
+       project is known — at create, at override, and again at the launch
+       itself, which is the seam that actually decides. */
+    if (stage.account !== undefined && stage.account !== null && typeof stage.account !== "string") {
+      violations.push({ field: at("account"), message: `stage ${id} account must be an account id string or null`, expected: STAGE_ACCOUNT_SHAPE });
+    }
     const nextValid = stage.next === undefined || stage.next === null || typeof stage.next === "string";
     if (!nextValid) {
       violations.push({ field: at("next"), message: `stage ${id} next must be a stage id or null`, expected: STAGE_NEXT_SHAPE });
@@ -2883,6 +2943,7 @@ function normalizeStages(
       ...(stage.model !== undefined ? { model: typeof stage.model === "string" ? stage.model.trim() || null : null } : {}),
       ...(stage.effort !== undefined ? { effort: typeof stage.effort === "string" ? stage.effort.trim() || null : null } : {}),
       ...(stage.access !== undefined ? { access: stage.access } : {}),
+      ...(stage.account !== undefined ? { account: typeof stage.account === "string" ? stage.account.trim() || null : null } : {}),
       prompt,
       next: stage.next ?? null,
       onFail: onFailEdge,
@@ -2921,6 +2982,7 @@ function draftStageInputs(stages: PipelineStage[]): PipelineStageInput[] {
     ...(stage.model !== undefined ? { model: stage.model } : {}),
     ...(stage.effort !== undefined ? { effort: stage.effort } : {}),
     ...(stage.access !== undefined ? { access: stage.access } : {}),
+    ...(stage.account !== undefined ? { account: stage.account } : {}),
     "prompt": stage.prompt,
     next: stage.next ?? null,
     onFail: stage.onFail ?? null,
@@ -3148,6 +3210,14 @@ export async function createPipelineFromRequest(
   const admission = ports.preflightRepo(requestedRepoDir);
   if (!admission.ok) return preflightFailure(admission);
   const repoDir = admission.repoDir;
+  /* The project is resolved here rather than at buildPipeline so #1279's rule
+     can be read before anything is stored: a stage naming an account the
+     project does not allow is refused at create, not discovered at launch. */
+  const project = ports.projectForCwd(repoDir) ?? path.basename(repoDir);
+  const accountViolations = stageAccountViolations(normalized.stages, project, ports);
+  if (accountViolations.length) {
+    return { error: pipelineValidationError(accountViolations), violations: accountViolations, status: 400 };
+  }
   const base = req.autoStart === false && !explicitBaseRef
     ? null
     : resolvePipelineBase(repoDir, { baseBranch: req.baseBranch, baseRef: explicitBaseRef }, ports.exec);
@@ -3158,7 +3228,7 @@ export async function createPipelineFromRequest(
     taskIds,
     ...(taskSpawn ? { creationIntent: { kind: "task-spawn" as const, taskId: taskSpawn.task.id, launchId: taskSpawn.params.launchId } } : {}),
     ...(spec ? { spec } : {}),
-    project: ports.projectForCwd(repoDir) ?? path.basename(repoDir),
+    project,
     repoDir,
     stages: normalized.stages,
     srcPath: creator.lineage.srcPath,
@@ -3552,6 +3622,14 @@ export async function patchPipeline(
       if (predecessor) predecessor.next = inserted.id;
       const replaced = replaceDraftStages(pipeline, inputs, ports.roleLookup);
       if (replaced.error) return { error: replaced.error, status: 400, ...(replaced.violations ? { violations: replaced.violations } : {}) };
+      /* #1279: read after normalization, because the stage's engine — and so
+         which allowed set applies — is what role resolution just settled. The
+         early return leaves the transaction unpersisted, as every other
+         post-mutation refusal in this function does. */
+      const addedAccountViolations = stageAccountViolations(pipeline.stages, pipeline.project, ports);
+      if (addedAccountViolations.length) {
+        return { error: pipelineValidationError(addedAccountViolations), violations: addedAccountViolations, status: 400 };
+      }
     } else if (req.action === "remove-stage") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
       /* A draft can be emptied entirely on the canvas (#136); the 2-stage floor is
@@ -3804,7 +3882,7 @@ export async function patchPipeline(
       const run = pipeline.runs.find((item) => item.stageId === target.id);
       if (run && run.attempts.length > 0) return { error: "stage has already started", status: 409 };
       const changesRoleOrRuntime = req.role !== undefined || req.engine !== undefined || req.model !== undefined || req.effort !== undefined;
-      if (!changesRoleOrRuntime && req.prompt === undefined) return { error: "override-stage needs at least one field to change", status: 400 };
+      if (!changesRoleOrRuntime && req.prompt === undefined && req.account === undefined) return { error: "override-stage needs at least one field to change", status: 400 };
       /* Validate the runtime types up front: resolvePipelineRole treats a
          non-string, non-null model/effort as absent and silently uses the
          fallback, so a raw `model: 123` / `effort: false` would 200 with the old
@@ -3875,6 +3953,29 @@ export async function patchPipeline(
            later balloon a run prompt / park review-loop delivery. */
         if (prompt.length > MAX_STAGE_PROMPT_LENGTH) return { error: `stage prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters`, status: 400 };
         target.prompt = prompt;
+      }
+
+      /* #1279: the account pin is applied last, so it is checked against the
+         engine this override just settled on rather than the stage's previous
+         one. `null` clears the pin; a named account the project does not allow
+         is refused here for the same reason the launch refuses it. */
+      if (req.account !== undefined) {
+        if (req.account !== null && typeof req.account !== "string") return { error: "account must be an account id string or null", status: 400 };
+        const requested = typeof req.account === "string" ? req.account.trim() : "";
+        if (!requested) delete target.account;
+        else {
+          const engine = target.effectiveRole.engine;
+          const allowed = ports.allowedAccountIds?.(pipeline.project, engine) ?? null;
+          if (allowed !== null && !allowed.includes(requested)) {
+            return {
+              error: allowed.length
+                ? `${engine} account ${requested} is not allowed on project ${pipeline.project} (allowed: ${allowed.join(", ")})`
+                : `project ${pipeline.project} allows no ${engine} account`,
+              status: 409,
+            };
+          }
+          target.account = requested;
+        }
       }
     } else if (req.action === "delete") {
       if (pipeline.state !== "draft") return { error: "only draft pipelines can be deleted", status: 409 };

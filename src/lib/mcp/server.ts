@@ -72,6 +72,7 @@ export const MCP_TOOL_NAMES = [
   "send_message_to_orchestrator",
   "rotate_orchestrator",
   "seat_tick_settings",
+  "account_project_binding",
 ] as const;
 
 export type McpToolName = typeof MCP_TOOL_NAMES[number];
@@ -120,6 +121,10 @@ const MUTATING_MCP_TOOL_NAMES = new Set<McpToolName>([
      outlive this process either way: a replayed clientRequestId must answer
      with what the first call recorded. */
   "seat_tick_settings",
+  /* Writes the durable account↔project bindings when it carries a change
+     (#1279), and the record it answers with outlives this process either way:
+     a replayed clientRequestId must answer with what the first call recorded. */
+  "account_project_binding",
 ]);
 
 /**
@@ -1701,6 +1706,12 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "`monitorPrompt` is your own additional prompt for this project's monitor, in your own words: it is appended to every later scheduler-fired wake beside the reasons and items the tick derives, never replacing them or the contract. Send a new `monitorPrompt` to replace it and `monitorPrompt: null` to clear it, and read the record back rather than trusting the echo. It is bounded and redacted before it is stored, like the reason. It changes what a wake says and never whether or when one is sent, so a prompt on its own needs no reason and leaves the project on the default tick — and `untilMinutes` expires the on/off and cadence setting, not the prompt.",
     "A project nobody has configured runs on the defaults, which are exactly the behaviour the tick has always had.",
   ].join(" "),
+  account_project_binding: [
+    "List, add and remove the bindings that decide which accounts a project's work may run on. `action` is list (the default), add or remove; add and remove need `engine`, `accountId` and `project`.",
+    "Every answer is a READ of the record: an add or a remove returns the bindings re-read from the store after the write, and a mutation the re-read does not show is refused rather than reported ok. Do not trust an echo — read `bindings` back.",
+    "A project with no binding for an engine allows every account of that engine, which is exactly the behaviour it has always had; `restricted: false` on an engine's block says so. Binding a project to a subset fences every selection for its work, including the automatic switch under rate-limit pressure: when every allowed account is out of capacity that is reported and the work parks, and an account outside the set is never chosen.",
+    "`project` defaults to your own on a list, and is required to add or remove.",
+  ].join(" "),
   rotate_orchestrator: "Explicitly hand a project's orchestrator seat to a fresh successor: bounded handoff (predecessor transcript reference, open tasks, optional notes), atomic designation switch, manager-authority-only revocation of the predecessor, bidirectional lineage. Never triggered automatically.",
 };
 
@@ -1787,6 +1798,8 @@ const pipelineStageSchema = z.object({
     .describe("Stage-level effort override, or null to inherit the role default. Must be an effort the stage engine supports."),
   access: z.enum(["read-only", "read-write"]).optional()
     .describe("Stage-level access override. A review-loop stage is always read-only."),
+  account: z.string().nullable().optional()
+    .describe("Account this stage runs on (#1279), or null to let the project's own selection choose. Honored only when the pipeline's project allows that account; an account outside the project's allowed set is refused with the allowed ones named. A project with no binding allows every account."),
 }).passthrough();
 
 /* #1016: the typed target contract, published rather than guessed. `target` was
@@ -2141,6 +2154,17 @@ export const TOOL_INPUT_SCHEMAS: Record<McpToolName, z.ZodObject> = {
     model: z.string().optional(),
     effort: z.string().optional().describe("Reasoning effort for the successor; round-trips into its spawn like create_orchestrator's."),
     accountId: z.string().optional(),
+  }).passthrough(),
+  account_project_binding: z.object({
+    clientRequestId: clientRequestIdSchema,
+    action: z.enum(["list", "add", "remove"]).optional()
+      .describe("list (default) reads the record; add and remove change it and answer with the record read back."),
+    engine: z.enum(["claude", "codex"]).optional()
+      .describe("Engine the account belongs to. Required to add or remove."),
+    accountId: z.string().trim().min(1).optional()
+      .describe("Account to allow on, or stop allowing on, the project. Required to add or remove."),
+    project: z.string().trim().min(1).optional()
+      .describe("Project whose allowed set to read or change. Defaults to your own on a list; required to add or remove."),
   }).passthrough(),
   seat_tick_settings: z.object({
     clientRequestId: clientRequestIdSchema,

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
 import { accountManager } from "@/lib/accounts/manager";
+import { projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
@@ -678,7 +679,18 @@ function settleReviewerSpawn(flow: Flow, round: Round, role: RoleConfig, account
 function prepareReviewerLaunch(flow: Flow, round: Round): PreparedReviewerLaunch {
   if (flow.reviewerMode === "pane") {
     const role = flow.roles.reviewer;
-    const account = accountManager.resolveSpawn(role.engine, round.accountId);
+    /* #1279: the flow's project fences this pick too. A pane reviewer names its
+       account explicitly, so a named account the project forbids is refused
+       here rather than launched — the same rule the headless path below
+       applies, at the one other place a reviewer account is chosen. */
+    const resolution = accountManager.resolveProjectSpawn(role.engine, {
+      project: flow.project,
+      requestedId: round.accountId,
+    });
+    if (resolution.kind !== "available") {
+      throw new Error(projectAccountRefusalDetail(resolution, role.engine, flow.project));
+    }
+    const account = resolution.account;
     round.accountId = account.accountId;
     round.reviewerRole = { ...role };
     return { role, account };
@@ -687,7 +699,11 @@ function prepareReviewerLaunch(flow: Flow, round: Round): PreparedReviewerLaunch
     flow.roles.reviewer,
     flow.reviewerFallback,
     round.attemptedAccounts ?? [],
-    (engine, requestedId, excludedIds) => accountManager.resolveHeadlessSpawn(engine, requestedId, excludedIds),
+    /* The project is passed down so the automatic rate-limit switch draws from
+       the project's allowed set only. Every allowed account exhausted parks the
+       flow with `rateLimitStateDetail`, exactly as it already did — it just
+       can no longer reach an account the project forbids to avoid parking. */
+    (engine, requestedId, excludedIds) => accountManager.resolveHeadlessSpawn(engine, requestedId, excludedIds, flow.project),
   );
   if (decision.kind === "exhausted") throw new ReviewerAccountsExhaustedError(decision.resetsAt);
   if (decision.kind === "unavailable") throw new Error("no authenticated reviewer account is available");

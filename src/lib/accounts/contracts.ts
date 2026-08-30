@@ -55,6 +55,27 @@ export type HeadlessSpawnAvailability =
   | { kind: "exhausted"; resetsAt: number | null }
   | { kind: "unavailable" };
 
+/** What a project's account binding (#1279) does to one launch's selection. */
+export type ProjectSpawnResolution =
+  | { kind: "available"; account: AccountContext }
+  /** The launch named an account the project does not permit. Never downgraded
+      to a fallback: crossing the boundary silently is the failure the binding
+      exists to prevent. */
+  | { kind: "not_allowed"; accountId: string; allowedAccountIds: string[] }
+  /** Every account the project permits has a fresh zero-capacity sample. The
+      caller reports and parks; an account outside the set is not a fallback. */
+  | { kind: "exhausted"; resetsAt: number | null; allowedAccountIds: string[] }
+  | { kind: "unavailable"; allowedAccountIds: string[] };
+
+export type ProjectSpawnRequest = {
+  /** Project the work belongs to; null resolves exactly as an unbound one. */
+  project: string | null;
+  /** Account the caller named — a pipeline stage's `account`, say. */
+  requestedId?: string | null;
+  /** Accounts already attempted for this launch, deprioritized as before. */
+  excludedIds?: string[];
+};
+
 export interface AccountManager {
   list(): Promise<AccountCatalog>;
   add(engine: "claude" | "codex", label: string): Promise<AccountSummary>;
@@ -63,7 +84,11 @@ export interface AccountManager {
   submitLoginInput(operationId: string, code: string): Promise<LoginOperationSummary>;
   cancelLogin(operationId: string): Promise<LoginOperationSummary>;
   resolveSpawn(engine: "claude" | "codex", requestedId?: string | null): AccountContext;
-  resolveHeadlessSpawn(engine: "claude" | "codex", requestedId?: string | null, excludedIds?: string[]): HeadlessSpawnAvailability;
+  /** `project` restricts the candidates to the project's allowed set (#1279);
+      omitted or null it selects over every account, as it always did. */
+  resolveHeadlessSpawn(engine: "claude" | "codex", requestedId?: string | null, excludedIds?: string[], project?: string | null): HeadlessSpawnAvailability;
+  /** The one seam every project-owned launch resolves its account through. */
+  resolveProjectSpawn(engine: "claude" | "codex", request: ProjectSpawnRequest): ProjectSpawnResolution;
   resolveTranscriptOwner(engine: "claude" | "codex", transcript: string): AccountContext | null;
 }
 

@@ -4,7 +4,10 @@ import { activeCodexAccountId, codexAccountsMutationLocked, listCodexAccounts } 
 import { activeClaudeAccountId, claudeAccountsMutationLocked, listClaudeAccounts } from "@/lib/accounts/claude";
 import { claudeLoginSupervisor, LIVE_CLAUDE_LOGIN_PHASES } from "@/lib/accounts/claudeLogin";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
+import { accountProjectRows } from "@/lib/accounts/projectAccountsView";
+import { accountProjectBindings } from "@/lib/accounts/projectBindings";
 import { agentRegistry } from "@/lib/agent/registry";
+import { projectAliasSnapshot } from "@/lib/projects/aliases";
 import { AUTO_BALANCE_FRESH_MS, AUTO_BALANCE_THRESHOLD, effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
 import type { DurableQuotaObservation, MigrationEngine } from "@/lib/accounts/migration/contracts";
 
@@ -126,6 +129,11 @@ export async function GET() {
   const now = Date.now();
   const claudeObservations = snapshot.quotaObservations.claude;
   const codexObservations = snapshot.quotaObservations.codex;
+  /* #1279's accounts side: which projects each account is bound to. Read once
+     for the whole response — the record is one small file, and both engine
+     lists project from the same read. */
+  const bindings = accountProjectBindings();
+  const projectDisplayNames = projectAliasSnapshot().displayNames;
   const codexAccountList = listCodexAccounts();
   const codexLogins = managedCodexRuntime().peekLogins(codexAccountList);
   const codexAccounts = codexAccountList.map((account) => {
@@ -141,6 +149,7 @@ export async function GET() {
       loginState: authenticated ? "authenticated" : compatibilityPending ? "pending" : login.state,
       attemptState: compatibilityPending ? "pending" : login.attemptState,
       deviceAuth: login.deviceAuth,
+      projects: accountProjectRows("codex", account.id, bindings, projectDisplayNames),
       ...accountProjection(codexObservations[account.id], account.authPresent, now),
     };
   });
@@ -157,6 +166,7 @@ export async function GET() {
       loginState: account.authPresent ? "authenticated" : "idle",
       attemptState: null,
       deviceAuth: null,
+      projects: accountProjectRows("claude", account.id, bindings, projectDisplayNames),
       ...accountProjection(claudeObservations[account.id], account.authPresent, now),
       login,
     };
