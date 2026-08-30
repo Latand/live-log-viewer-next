@@ -260,6 +260,63 @@ test("a concurrent pipeline replay and its recovery projections withhold staged 
   }
 });
 
+test("a staged resume cannot hide its already-published transcript (#1123)", () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "pipeline-staged-resume-registry.json"));
+  const cwd = process.env.LLV_STATE_DIR!;
+  const sessionId = crypto.randomUUID();
+  const transcript = path.join(cwd, `${sessionId}.jsonl`);
+  fs.writeFileSync(transcript, `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`);
+  const conversation = registry.ensureConversation("codex", transcript, "pipeline-account");
+  setAgentRegistryForTests(registry);
+
+  try {
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd,
+      transport: "structured",
+      accountId: "pipeline-account",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+      launchProfile: { title: "Resume published session" },
+    });
+    if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+    const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+      key: { engine: "codex", sessionId },
+      artifactPath: transcript,
+      cwd,
+      accountId: "pipeline-account",
+      launchProfile: begun.receipt.launchProfile,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: `stdio:${sessionId}`,
+        process: { pid: process.pid, startIdentity: "staged-resume-host" },
+        eventCursor: 0,
+        protocolVersion: null,
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: "structured-host:staged-resume-host",
+      pendingAction: "spawn",
+    });
+    if (staged.kind !== "settled") throw new Error("resume staging conflicted");
+
+    const ports = defaultPipelinePorts();
+    expect(ports.spawnReceipt(begun.receipt.launchId)).toMatchObject({
+      sessionId: null,
+      "transcript": null,
+    });
+    expect(ports.pathForConversation(conversation.id)).toBe(transcript);
+    expect(ports.conversationIdForPath(transcript)).toBe(conversation.id);
+  } finally {
+    setAgentRegistryForTests(null);
+  }
+});
+
 const RUN_STAGES = [
   { id: "plan", kind: "run", role: { roleId: "architect" }, access: "read-only", prompt: "Plan {{task}}", next: "build" },
   { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Build from {{prev.output}}", next: null },

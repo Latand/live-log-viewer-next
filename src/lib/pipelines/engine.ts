@@ -553,7 +553,13 @@ export function defaultPipelinePorts(): PipelinePorts {
   const unpublishedIdentityPaths = (
     current = snapshot(),
   ): Set<string> => unpublishedStructuredPaths ??= new Set(Object.values(current.receipts).flatMap((receipt) =>
-    receipt.artifactPath && !structuredIdentityPublished(receipt, current) ? [receipt.artifactPath] : []));
+    receipt.artifactPath
+      && !structuredIdentityPublished(receipt, current)
+      /* A same-path resume stages ownership for an identity that was already
+         published by the source generation; it cannot make that path phantom. */
+      && !(receipt.purpose === "resume-successor" && receipt.resumeSourcePath === receipt.artifactPath)
+      ? [receipt.artifactPath]
+      : []));
   const publishedPathForConversation = (conversationId: ViewerConversationId): string | null => {
     const current = snapshot();
     const conversation = current.conversations[conversationId];
