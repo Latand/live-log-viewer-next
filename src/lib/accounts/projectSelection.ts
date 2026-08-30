@@ -9,9 +9,9 @@ import {
 /**
  * #1279's automatic rule, and the inventory of everything that obeys it.
  *
- * Four rounds each closed one account-selecting path and the next round found
+ * Five rounds each closed one account-selecting path and the next round found
  * another, so this file exists to make the SET the thing under review rather
- * than the next member of it. Ten places choose an account without being
+ * than the next member of it. Eleven places choose an account without being
  * told which. Every one of them reaches one of the two functions below, or is
  * continuity that chooses nothing, and nothing here re-derives a pool or a
  * capacity bar of its own:
@@ -54,6 +54,14 @@ import {
  *    any transcript in the SHARED store, where every cut-over home resolves to
  *    one root and the path names no owner (#935). That half → (2)'s rule, via
  *    `selectProjectAccount`; the callers answer its refusal as a 409.
+ * 11. **Settlement-time enrollment** — `settleSpawn`, where a spawn that
+ *    settles while an engine-wide drain is running is enrolled into it. The
+ *    account was chosen for that conversation by the drain, not by whoever
+ *    launched it: a spawn reserved on its birth account before the drain
+ *    settles afterwards and follows a target nobody picked for its project. →
+ *    `admitAutomaticAccountTarget`, per conversation, when the intent is
+ *    AUTOMATIC. A manual intent named its target and enrolls unrestricted, and
+ *    a refusal parks the settled conversation on its birth account.
  *
  * Five neighbours are NOT on this list because they never choose an account for
  * any work: `selectHeadlessAccount` classifies capacity for a candidate set it

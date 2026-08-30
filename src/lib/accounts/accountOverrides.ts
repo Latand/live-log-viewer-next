@@ -95,6 +95,9 @@ export interface AccountOverrideNotice {
   at: string;
   /** False when the choice stands but the journal write did not land. */
   recorded: boolean;
+  /** Why the record did not land, present only then, so the answer to the
+      gesture can say that this choice will not be visible afterwards. */
+  recordFailure?: string;
 }
 
 function overridesFile(): string {
@@ -158,21 +161,30 @@ export function accountProjectOverrides(query: AccountOverrideQuery = {}): Accou
 }
 
 /**
- * Appends one record. Returns false when it could not be stored — the caller's
- * choice still stands, and says so, because attribution that failed to write is
- * not a reason to refuse a gesture the operator is entitled to make.
+ * Appends one record, and names the failure when it could not. The caller's
+ * choice still stands — attribution that failed to write is not a reason to
+ * refuse a gesture the operator is entitled to make — but the failure is
+ * carried out of here rather than reduced to a bare false: a switch nobody can
+ * see afterwards is the thing this journal exists to prevent, so the one
+ * condition that produces it has to arrive somewhere a person reads.
+ *
+ * There is no retry here on purpose. The write already queues behind the
+ * journal's file transaction for as long as that transaction waits, so what
+ * reaches this catch is a durable failure of the state directory itself —
+ * unwritable, full, gone — and repeating it changes nothing except how long
+ * the switch takes to answer.
  */
-function appendOverride(override: AccountProjectOverride): boolean {
+function appendOverride(override: AccountProjectOverride): { ok: true } | { ok: false; reason: string } {
   const file = overridesFile();
   try {
     return withFileTransactionSync(file, "the account override journal is busy", () => {
       const next = [...readOverrides(), override].slice(-CAPACITY);
       fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
       writeJsonDurably(file, { schemaVersion: 1, overrides: next } satisfies OverrideFile);
-      return true;
+      return { ok: true } as const;
     });
-  } catch {
-    return false;
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -183,7 +195,15 @@ function appendOverride(override: AccountProjectOverride): boolean {
  * caller's behaviour there is exactly what it always was.
  *
  * Both explicit switch seams call THIS, so neither can drift into refusing what
- * the other allows.
+ * the other allows. Both call it AFTER their switch has been accepted, which is
+ * what makes the record a statement about something that happened: an attempt
+ * attributed before authentication, reservation and dispatch left the panel
+ * showing an out-of-pool choice that was refused a moment later.
+ *
+ * A journal that would not take the record does not pass quietly. The notice
+ * says `recorded: false` and carries the reason, the caller's answer carries it
+ * to whoever made the choice, and the failure is logged here so it is on the
+ * Viewer's own record even when nobody is watching the answer.
  */
 export function attributeNamedAccountChoice(choice: NamedAccountChoice): AccountOverrideNotice | null {
   const classified = explicitAccountChoice(choice.project, choice.engine, choice.accountId);
@@ -201,6 +221,16 @@ export function attributeNamedAccountChoice(choice: NamedAccountChoice): Account
     conversationId: choice.conversationId,
     via: choice.via,
   };
+  const stored = appendOverride(override);
+  if (!stored.ok) {
+    console.warn("[account-override] an out-of-pool account choice was carried out but not recorded", {
+      engine: override.engine,
+      project: override.project,
+      via: override.via,
+      actor: override.actor,
+      reason: stored.reason,
+    });
+  }
   return {
     outsidePool: true,
     accountId: override.accountId,
@@ -209,6 +239,7 @@ export function attributeNamedAccountChoice(choice: NamedAccountChoice): Account
     reason: override.reason,
     actor: override.actor,
     at,
-    recorded: appendOverride(override),
+    recorded: stored.ok,
+    ...(stored.ok ? {} : { recordFailure: stored.reason }),
   };
 }

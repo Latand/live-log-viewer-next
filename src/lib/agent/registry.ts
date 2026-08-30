@@ -918,6 +918,52 @@ function conversationMigrationForIntent(
   };
 }
 
+/**
+ * #1279's eleventh automatic selector, and the one the inventory missed: a
+ * spawn that SETTLES while an engine-wide drain is running is enrolled into it
+ * at settlement.
+ *
+ * Nobody named an account for that enrollment. The spawn was reserved on its
+ * BIRTH account before the drain existed, and this is the machine deciding by
+ * itself that the settled conversation should follow the drain's target — so
+ * for an AUTOMATIC intent it is an automatic selection and asks exactly what
+ * every other one asks, through the same admission: this conversation's own
+ * project's pool, and whether the target has room in it. Without it a spawn
+ * reserved before the drain migrated project B onto a target only project A
+ * allows, and an exhausted target or an unreadable record passed the same
+ * point untouched.
+ *
+ * A MANUAL intent NAMED its target. That is a control, it is carried out, and
+ * it reads no bindings at all — enrollment there is unrestricted, exactly as
+ * it was.
+ *
+ * A refusal PARKS: the settlement stands and the conversation stays on the
+ * account it was born on, which crosses nothing. That is also why no read
+ * failure escapes this function — the spawn has already happened, and evidence
+ * this process cannot turn into a pool must not be able to lose it. Every
+ * failure answers "not admitted", the same direction the fence fails
+ * everywhere else, and the conversation is visibly still on its birth account.
+ */
+function settlementEnrollmentAdmitted(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  source: NativeGeneration,
+  intent: MigrationIntent,
+): boolean {
+  if (intent.origin !== "auto") return true;
+  try {
+    return admitAutomaticAccountTarget({
+      project: conversationProjectKey(conversation.projectOwnership, source.launchProfile),
+      engine: conversation.engine,
+      targetId: intent.targetId,
+      observations: Object.values(file.quotaObservations[conversation.engine]),
+      bindings: accountProjectBindings(),
+    }).kind === "available";
+  } catch {
+    return false;
+  }
+}
+
 function queueAbandonedMigrationCleanup(
   file: RegistryFile,
   conversation: RegistryConversation,
@@ -4470,30 +4516,26 @@ export class AgentRegistry {
     /* A spawn that began before an account switch remains attributable to its
        birth account. The already-active engine-wide migration intent still
        applies to the new conversation through the existing coordinator
-       contract; a conversation-scoped reseat moves only its own thread. */
+       contract — and through the SAME admission the drain itself uses, since
+       an automatic intent enrolling a conversation nobody named is the
+       eleventh automatic selection (#1279); a conversation-scoped reseat moves
+       only its own thread. The migration record is the shared construction, so
+       settlement cannot drift from the two paths that queue the same move. */
     const activeIntent = Object.values(file.migrationIntents).find((intent) =>
       intent.engine === conversation.engine
       && engineScopedIntent(intent)
       && migrationIntentCanEnroll(file, intent, Date.parse(createdAt)));
     const source = conversation.generations.at(-1);
-    if (activeIntent && !conversation.pinnedAccountId && source && source.accountId !== activeIntent.targetId && !conversation.migration) {
-      conversation.migration = {
-        intentId: activeIntent.id,
-        phase: migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
-        targetId: activeIntent.targetId,
-        revision: activeIntent.revision,
-        error: null,
-        errorCode: null,
-        operationId: crypto.randomUUID(),
-        sourceGenerationId: source.id,
-        successorLaunchProfile: null,
-        providerReceipt: null,
-        pendingContinuityPaths: [],
-        boardProject: null,
-        boardOperationId: null,
-        boardPlacementProject: conversation.projectOwnership?.project ?? source.launchProfile.project,
-        updatedAt: createdAt,
-      };
+    if (activeIntent && !conversation.pinnedAccountId && source
+      && source.accountId !== activeIntent.targetId && !conversation.migration
+      && settlementEnrollmentAdmitted(file, conversation, source, activeIntent)) {
+      conversation.migration = conversationMigrationForIntent(
+        conversation,
+        source,
+        activeIntent,
+        migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",
+        createdAt,
+      );
     }
     conversation.updatedAt = createdAt;
     file.conversations[conversation.id] = conversation;

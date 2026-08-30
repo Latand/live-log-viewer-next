@@ -178,9 +178,12 @@ export async function dispatchStructuredControl(
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   if (!client) return { status: 503, body: { error: "structured runtime host is unavailable" } };
   const operationId = request.operationId ?? (dependencies.operationId ?? newOperationId)();
-  /* Set when the named account is outside the project's pool; it rides both the
-     immediate answer and the durable journal the project view renders. */
-  let accountOverride: AccountOverrideNotice | undefined;
+  /* Set when the named account is outside the project's pool, and CALLED only
+     once the command has been accepted: what it produces rides both the
+     immediate answer and the durable journal the project view renders, and a
+     journal that only appends cannot take back a record written for a
+     reconfigure the host then refused. */
+  let attributeSwitch: (() => AccountOverrideNotice | undefined) | null = null;
   try {
     const reconfiguration = request.action === "reconfigure"
       ? reconfigurationFromBody(conversation.engine, request.reconfiguration ?? {})
@@ -208,7 +211,8 @@ export async function dispatchStructuredControl(
          paths answering the same gesture differently is the shape of the
          defect this seam is fixing. */
       if (reconfiguration.value.accountId !== generation.accountId) {
-        accountOverride = (dependencies.attributeAccountChoice ?? attributeNamedAccountChoice)({
+        const accountId = reconfiguration.value.accountId;
+        attributeSwitch = () => (dependencies.attributeAccountChoice ?? attributeNamedAccountChoice)({
           engine: conversation.engine,
           project: conversationProjectKey(conversation.projectOwnership, generation.launchProfile, {
             /* A getter, so the transcript is read only for a conversation that
@@ -216,7 +220,7 @@ export async function dispatchStructuredControl(
                profile is empty and whose cwd is only in its transcript head. */
             get cwd() { return headCwd(generation.path); },
           }),
-          accountId: reconfiguration.value.accountId,
+          accountId,
           conversationId: conversation.id,
           actor: request.actor ?? { kind: "operator" },
           via: "structured-reconfigure",
@@ -254,6 +258,9 @@ export async function dispatchStructuredControl(
               turnId: entry.structuredHost?.activeTurnRef ?? null,
             };
     const result = await client.command(command);
+    /* The host holds a durable receipt for this reconfigure, so the switch is a
+       thing that happened and the record describes it. */
+    const accountOverride = attributeSwitch?.();
     (dependencies.kick ?? kickStructuredDeliveryQueue)();
     return {
       status: result.receipt.status === "delivered" ? 200 : 202,
@@ -273,6 +280,9 @@ export async function dispatchStructuredControl(
          durable receipt decides whether structured control owns the response. */
       const durable = await client.operationStatus(operationId).catch(() => null);
       if (durable) {
+        /* The socket failed, the receipt did not: the command was accepted, so
+           this is the same acceptance the success path attributes. */
+        const accountOverride = attributeSwitch?.();
         (dependencies.kick ?? kickStructuredDeliveryQueue)();
         return {
           status: durable.receipt.status === "delivered" ? 200 : 202,

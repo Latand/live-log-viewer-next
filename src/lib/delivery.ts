@@ -135,20 +135,18 @@ export async function reconfigureConversation(
        account it would default to); a deliberate switch is a control, and a
        control the operator is entitled to use onto an account outside the pool.
        Inside the pool, and on an unbound project, nothing is recorded and the
-       switch is exactly what it always was. */
+       switch is exactly what it always was.
+
+       Attribution follows ACCEPTANCE, below. Appended here — before
+       authentication, before the reseat is reserved — it recorded ATTEMPTS: a
+       switch onto an account that turned out to be signed out left the project
+       view showing an out-of-pool choice that never happened, and there is no
+       compensating delete for a journal that only appends. */
     const project = conversationProjectKey(conversation.projectOwnership, generation.launchProfile, {
       /* An adopted conversation carries no launch profile, and the scanner's
          project for this transcript is what the board already groups it under. */
       project: entry.project,
     });
-    const accountOverride = (overrides.attributeAccountChoice ?? attributeNamedAccountChoice)({
-      engine: entry.engine,
-      project,
-      accountId: config.accountId,
-      conversationId: conversation.id,
-      actor: overrides.actor ?? { kind: "operator" },
-      via: "conversation-switch",
-    }) ?? undefined;
     const previousProfile = generation.launchProfile;
     let profileUpdated = false;
     try {
@@ -162,17 +160,29 @@ export async function reconfigureConversation(
       profileUpdated = true;
       const queued = registry.requestConversationReseat(conversation.id, config.accountId);
       if (!queued.migration) throw new Error("account switch could not be queued");
-      (overrides.requestMigrationTick ?? requestAccountMigrationTick)();
-      return {
-        ok: true,
-        target: registered.host.paneId,
-        outcome: "pending",
-        ...(accountOverride ? { accountOverride } : {}),
-      };
     } catch (error) {
       if (profileUpdated) registry.updateConversationLaunchProfile(conversation.id, previousProfile);
       return failure(error, 409);
     }
+    /* Accepted: the reseat is durably queued, so the record describes a switch
+       that happened rather than one that was attempted. Attribution sits
+       OUTSIDE the try for the same reason it sits after it — nothing about
+       writing the record may turn an accepted switch back into a failure. */
+    const accountOverride = (overrides.attributeAccountChoice ?? attributeNamedAccountChoice)({
+      engine: entry.engine,
+      project,
+      accountId: config.accountId,
+      conversationId: conversation.id,
+      actor: overrides.actor ?? { kind: "operator" },
+      via: "conversation-switch",
+    }) ?? undefined;
+    (overrides.requestMigrationTick ?? requestAccountMigrationTick)();
+    return {
+      ok: true,
+      target: registered.host.paneId,
+      outcome: "pending",
+      ...(accountOverride ? { accountOverride } : {}),
+    };
   }
   /* Resolved before the operation lock is taken, so a fenced or unreadable
      record refuses without ever holding it. `config.accountId` here is a switch
