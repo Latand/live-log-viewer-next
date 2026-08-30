@@ -24,7 +24,11 @@ import { beginLegacySpawnFixture } from "@/lib/agent/registryTestFixtures";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-delivery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
-function journalPort(journal: RuntimeJournal, failDelivered = false): StructuredDeliveryQueuePort {
+function journalPort(
+  journal: RuntimeJournal,
+  failDelivered = false,
+  hostClaim: (() => string | null) | null = null,
+): StructuredDeliveryQueuePort {
   return {
     effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
     transition: async (operationId, status, details) => {
@@ -34,6 +38,10 @@ function journalPort(journal: RuntimeJournal, failDelivered = false): Structured
     /* Wired exactly as the controller wires it, so the durable receipt these
        tests recover through is the one production reads (#1131). */
     status: async (operationId) => journal.operationResult(operationId)?.receipt ?? null,
+    /* The controller wires this from the registry's own claim owner. A fixture
+       that leaves it out is a deployment where no ownership evidence exists at
+       all, which is a legitimate state and proves nothing either way. */
+    ...(hostClaim ? { hostClaim } : {}),
   };
 }
 
@@ -1241,7 +1249,10 @@ test("a delivering entry left by a dead executor settles unverified instead of b
     policy: "queue",
   });
   const firstHost = new FakeEngineHost(ledger);
-  const firstQueue = new StructuredDeliveryQueue(journalPort(firstJournal, true), () => firstHost);
+  const firstQueue = new StructuredDeliveryQueue(
+    journalPort(firstJournal, true, () => "claim-first:1"),
+    () => firstHost,
+  );
 
   await expect(firstQueue.drain()).rejects.toThrow("runtime stopped before confirmation commit");
   expect(firstJournal.operationResult("operation-one")?.receipt.status).toBe("delivering");
@@ -1257,10 +1268,18 @@ test("a delivering entry left by a dead executor settles unverified instead of b
      durable row is the fence instead (#1131): the recovered queue hands the
      engine nothing and terminalizes the receipt unverified, so recovery after
      an outage of any length produces one terminal answer and zero late
-     deliveries. */
+     deliveries.
+
+     The host is re-adopted on the way back, so the claim the dead executor
+     stamped is explicitly no longer the current one. That is what ends the row
+     HERE rather than at the receipt deadline: the successor can prove the
+     writer lost the host, not merely that it went quiet. */
   const reopenedJournal = new RuntimeJournal(filename, { structuredHosts: true });
   const recoveredHost = new FakeEngineHost(ledger);
-  const recoveredQueue = new StructuredDeliveryQueue(journalPort(reopenedJournal), () => recoveredHost);
+  const recoveredQueue = new StructuredDeliveryQueue(
+    journalPort(reopenedJournal, false, () => "claim-recovered:2"),
+    () => recoveredHost,
+  );
   await recoveredQueue.drain();
 
   expect(reopenedJournal.operationResult("operation-one")?.receipt).toMatchObject({
@@ -1270,6 +1289,66 @@ test("a delivering entry left by a dead executor settles unverified instead of b
   expect(reopenedJournal.effectBatch()).toEqual([]);
   expect(ledger.writes).toMatchObject([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   reopenedJournal.close();
+});
+
+test("a delivering entry whose claim was unreadable when it was written is not stolen from its executor", async () => {
+  /* The same crash, one condition different: the claim projection was down at
+     the moment the first executor wrote its `delivering` row. That used to
+     produce a row with no ownership on it at all, and the next executor read
+     the absence as a handover — terminalizing a send that a live executor was
+     actuating during exactly the projection gap this fence exists for.
+
+     The row records the executor either way now and records the claim as
+     unknown, so a successor whose own claim read works perfectly still cannot
+     prove anything: it writes nothing, sends nothing, and leaves the effect for
+     the owner. The receipt deadline is what ends a send whose owner never comes
+     back, and it needs none of this to be healthy. */
+  const filename = path.join(sandbox, "unreadable-claim.sqlite");
+  const ledger = createFakeDeliveryLedger();
+  const firstJournal = new RuntimeJournal(filename, { structuredHosts: true });
+  firstJournal.append({
+    scope: { type: "session", id: "conversation-unreadable-claim" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-unreadable-claim",
+      sessionKey: { engine: "codex", sessionId: "session-unreadable-claim" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/unreadable-claim.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  firstJournal.executeOperation({
+    kind: "send",
+    operationId: "operation-unreadable-claim",
+    idempotencyKey: "message-unreadable-claim",
+    conversationId: "conversation-unreadable-claim",
+    text: "hold the cutover until I say go",
+    policy: "queue",
+  });
+  const firstQueue = new StructuredDeliveryQueue(
+    journalPort(firstJournal, true, () => { throw new Error("claim projection is unavailable"); }),
+    () => new FakeEngineHost(ledger),
+  );
+
+  await expect(firstQueue.drain()).rejects.toThrow("runtime stopped before confirmation commit");
+  expect(firstJournal.operationResult("operation-unreadable-claim")?.receipt.status).toBe("delivering");
+  expect(ledger.writes).toMatchObject([{ id: "operation-unreadable-claim" }]);
+  firstJournal.close();
+
+  const reopened = new RuntimeJournal(filename, { structuredHosts: true });
+  const successorLedger = createFakeDeliveryLedger();
+  await new StructuredDeliveryQueue(
+    journalPort(reopened, false, () => "claim-successor:7"),
+    () => new FakeEngineHost(successorLedger),
+  ).drain();
+
+  expect(successorLedger.writes).toEqual([]);
+  expect(reopened.operationResult("operation-unreadable-claim")?.receipt.status).toBe("delivering");
+  expect(reopened.effectBatch()).toHaveLength(1);
+  reopened.close();
 });
 
 test("an applying reconfigure recovers before its queued message after journal restart", async () => {

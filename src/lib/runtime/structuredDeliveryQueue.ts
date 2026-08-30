@@ -2,6 +2,7 @@ import { parseSelectedContextRef, type SelectedContextRef } from "@/lib/selectio
 
 import { parseMessageOrigin, type MessageOrigin } from "./messageOrigin";
 import type { RuntimeSendSettings } from "./contracts";
+import { evidenceAgrees, readEvidence, type Evidence } from "./evidence";
 import type { CompactCapableHost, DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import { hostSupportsCompact, StructuredCompactError } from "./engineHost";
 import {
@@ -29,7 +30,11 @@ export interface StructuredDeliveryQueuePort {
   /** The durable receipt state, when the port can read it. The compact control
       needs it to tell a control it must issue from one an earlier executor
       already issued and never settled (#862), and the message path reads the
-      ownership its own `delivering` write recorded back off the reason. */
+      ownership its own `delivering` write recorded back off the reason.
+
+      Every one of the three reads below is FAILABLE, and none of them may be
+      converted into a definite answer when it fails. An unreadable fence is not
+      an open one: it blocks this pass instead of authorising it (#1131). */
   status?(operationId: string): Promise<{ status: string; reason?: string | null } | null>;
   /** Whether the durable DELIVERY RECORD has already ended this send (#1131).
       The journal cannot answer that during the outage in which it is written,
@@ -336,6 +341,16 @@ export const DELIVERY_FENCED_BY_SETTLEMENT =
  * differing claim proves abandonment now; unreadable evidence leaves the row
  * where it is.
  *
+ * That has to hold at the WRITE too, and it is where the rule was still
+ * escaping: the stamp used to be omitted whenever the claim could not be read,
+ * so a claim projection that was unavailable for the one moment this row was
+ * written produced a row carrying no ownership at all — and an unstamped row
+ * read as abandoned, which is the same unreadable evidence deciding the same
+ * question, one step earlier. The executor identity is always recorded now, and
+ * the claim beside it is recorded as UNKNOWN when it could not be read. An
+ * unknown recorded claim is nothing to compare against, so it leaves the row
+ * with its executor exactly as an unreadable current claim does.
+ *
  * The absorbing rule is untouched by any of it: no branch here sends anything
  * again and no branch returns the row to `queued`. Ownership only decides
  * whether this pass ends the send as unverified or leaves it to its owner —
@@ -345,13 +360,20 @@ export const DELIVERY_FENCED_BY_SETTLEMENT =
  */
 const DELIVERING_OWNERSHIP_PREFIX = "delivering-owner:";
 
+/** The recorded claim of a row whose writer could not read one. Not a claim any
+    projection can ever produce — claims are `<owner>:<epoch>` — so it can never
+    be mistaken for one that matches or one that differs. */
+const UNKNOWN_HOST_CLAIM = "?";
+
 interface DeliveringOwnership {
   executorId: string;
-  hostClaim: string;
+  /** The claim the row was written under, or null when it was unreadable then. */
+  hostClaim: string | null;
 }
 
-function deliveringOwnershipReason(executorId: string, hostClaim: string): string {
-  return `${DELIVERING_OWNERSHIP_PREFIX}${executorId}@${hostClaim}`;
+function deliveringOwnershipReason(executorId: string, hostClaim: Evidence<string | null>): string {
+  const recorded = hostClaim.readable ? hostClaim.value ?? UNKNOWN_HOST_CLAIM : UNKNOWN_HOST_CLAIM;
+  return `${DELIVERING_OWNERSHIP_PREFIX}${executorId}@${recorded}`;
 }
 
 /** Ownership off a durable reason, or null where the row carries none — a row
@@ -363,7 +385,10 @@ function deliveringOwnership(reason: string | null | undefined): DeliveringOwner
   if (separator < 1) return null;
   const hostClaim = recorded.slice(separator + 1);
   if (!hostClaim) return null;
-  return { executorId: recorded.slice(0, separator), hostClaim };
+  return {
+    executorId: recorded.slice(0, separator),
+    hostClaim: hostClaim === UNKNOWN_HOST_CLAIM ? null : hostClaim,
+  };
 }
 
 function failureReason(error: unknown): string {
@@ -575,10 +600,17 @@ export class StructuredDeliveryQueue {
          and cannot settle the row either, so this pass ends it unverified. And
          where the claim cannot be read at all the row is left alone too: a gap
          in the claim projection says nothing about who is delivering, and the
-         receipt deadline ends the send anyway if its owner never comes back. */
-      const durable = await this.port.status?.(effect.operationId).catch(() => null);
-      if (durable?.status === "delivering") {
-        if (await this.deliveringOwnerDisposition(effect.conversationId, durable.reason) !== "abandoned") continue;
+         receipt deadline ends the send anyway if its owner never comes back.
+
+         The fence itself is a failable read, and a fence that could not be read
+         is not an open one. It used to become `null` here and fall straight
+         through to the engine call, so a send an executor was already
+         delivering could be delivered a SECOND time by whichever pass caught
+         the journal at a bad moment. */
+      const durable = await this.readStatus(effect.operationId);
+      if (!durable.readable) return this.fenceUnavailable();
+      if (durable.value?.status === "delivering") {
+        if (await this.deliveringOwnerDisposition(effect.conversationId, durable.value.reason) !== "abandoned") continue;
         await this.terminalizeUnverified(effect.operationId, DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR);
         continue;
       }
@@ -588,8 +620,11 @@ export class StructuredDeliveryQueue {
          sender was told had not arrived (#1131). Asked under the effect's OWN
          operation id, which is what makes a deliberate retry a different send:
          it is admitted as a new operation, so the settled record of the attempt
-         it replaces does not fence it. */
-      if (await this.settledByRecord(effect.operationId)) {
+         it replaces does not fence it. Unreadable for the same reason as above:
+         a record that cannot be read has not said this send is unsettled. */
+      const settled = await this.readSettled(effect.operationId);
+      if (!settled.readable) return this.fenceUnavailable();
+      if (settled.value) {
         await this.terminalizeUnverified(effect.operationId, DELIVERY_FENCED_BY_SETTLEMENT);
         continue;
       }
@@ -633,17 +668,17 @@ export class StructuredDeliveryQueue {
         ...(effect.selectedContext ? { selectedContext: effect.selectedContext } : {}),
         ...(effect.origin ? { origin: effect.origin } : {}),
       };
-      /* Stamped only where there is a claim to stamp: ownership evidence exists
-         to be COMPARED, and a token no later pass could compare against would
-         be noise on the durable row rather than evidence on it. */
-      const claim = await this.hostClaim(effect.conversationId);
+      /* Always stamped, claim or no claim: the executor identity is what tells
+         a row this instance is actuating right now from one it dropped, and
+         omitting the whole stamp because the claim read failed produced an
+         unstamped row that a later pass read as abandonment. An unreadable
+         claim is recorded as unknown instead, which proves nothing to anybody
+         and is exactly what it should prove. */
+      const claim = await this.readHostClaim(effect.conversationId);
       await this.port.transition(
         effect.operationId,
         "delivering",
-        {
-          turnId: deliveryFence,
-          ...(claim ? { reason: deliveringOwnershipReason(this.executorId, claim) } : {}),
-        },
+        { turnId: deliveryFence, reason: deliveringOwnershipReason(this.executorId, claim) },
       );
       if (shouldInterrupt) {
         try {
@@ -755,10 +790,17 @@ export class StructuredDeliveryQueue {
        fired when the first settles brings this effect back. Holding it does not
        block the group: kill must still get through. */
     if (this.compactingConversations.has(effect.conversationId)) return { blocked: false, terminated: false };
-    /* An unreadable receipt is not evidence of anything. Treat it as unknown
-       and fall through to the host checks rather than aborting a drain pass
-       that other conversations share. */
-    const durable = await this.port.status?.(effect.operationId).catch(() => null);
+    /* An unreadable receipt is not evidence of anything, and this control is a
+       second COMPACTION if the row it cannot read is already `delivering` — the
+       same duplicate actuation the message path is fenced against. The pass
+       issues nothing and comes back; the group is not reported blocked, because
+       a kill sorted behind this effect must still run. */
+    const status = await this.readStatus(effect.operationId);
+    if (!status.readable) {
+      this.retrySoon();
+      return { blocked: false, terminated: false };
+    }
+    const durable = status.value;
     if (durable?.status === "delivering") {
       /* An earlier executor issued this control and never settled it — a Viewer
          restart, or a terminal transition that never landed. This process
@@ -853,26 +895,43 @@ export class StructuredDeliveryQueue {
    * before #862 rejects it; the operation must still settle rather than wedge
    * the conversation's queue behind a receipt no pass can ever clear.
    */
-  /** The durable delivery record's answer, or `false` when it cannot be read:
-      a fence that fails closed would strand every send behind an unreadable
-      registry, and this one only ever refuses to actuate. */
-  private async settledByRecord(operationId: string): Promise<boolean> {
-    try {
-      return (await this.port.settled?.(operationId)) ?? false;
-    } catch {
-      return false;
-    }
+  /**
+   * The three failable reads this queue fences on, each keeping whether it
+   * could be read at all.
+   *
+   * A port method that is not wired answers as a completed read: the fence does
+   * not exist in that deployment, which is a fact about the configuration. Only
+   * an attempted read that threw is unreadable, and the callers above never let
+   * one of those authorise anything.
+   */
+  private readStatus(operationId: string): Promise<Evidence<{ status: string; reason?: string | null } | null>> {
+    const read = this.port.status?.bind(this.port);
+    return readEvidence(read && (() => read(operationId)), null, "delivery journal status is unavailable");
   }
 
-  /** The writer claim currently owning a conversation's host, or null when the
-      port cannot say — an absent port, an absent claim, and a read that threw
-      are one answer, because none of them is evidence of anything. */
-  private async hostClaim(conversationId: string): Promise<string | null> {
-    try {
-      return (await this.port.hostClaim?.(conversationId)) ?? null;
-    } catch {
-      return null;
-    }
+  private readSettled(operationId: string): Promise<Evidence<boolean>> {
+    const read = this.port.settled?.bind(this.port);
+    return readEvidence(read && (() => read(operationId)), false, "durable delivery record is unavailable");
+  }
+
+  private readHostClaim(conversationId: string): Promise<Evidence<string | null>> {
+    const read = this.port.hostClaim?.bind(this.port);
+    return readEvidence(read && (() => read(conversationId)), null, "host claim projection is unavailable");
+  }
+
+  /**
+   * What the drain does with a fence it could not read: nothing, and again
+   * shortly.
+   *
+   * Reporting the group blocked leaves the effect exactly as it was — no
+   * transition, no engine write, nothing durable to undo — and the scheduled
+   * retry brings the pass back once the store answers. A send whose executor
+   * never returns is ended by the receipt deadline meanwhile, so a fence that
+   * stays unreadable delays an answer without ever withholding one.
+   */
+  private fenceUnavailable(): boolean {
+    this.retrySoon();
+    return true;
   }
 
   /**
@@ -888,26 +947,34 @@ export class StructuredDeliveryQueue {
    * - `abandoned`: the host is owned by a DIFFERENT, explicitly named claim, so
    *   the recorded executor can no longer write to the engine and nothing but
    *   this pass is left to end the row. A row this executor wrote itself is
-   *   abandoned too — no other pass of this instance can be actuating it, so
-   *   finding it here means an earlier pass of ours dropped it — as is a row
-   *   that recorded no ownership at all, which is what every row looked like
-   *   before this evidence existed.
-   * - `unproven`: the claim could not be read — no port, no claim recorded for
-   *   the conversation, or a read that threw. That is a gap in the projection
-   *   and not a handover, so the row stays with the executor that holds it.
-   *   Nothing is withheld by waiting: an owner that never comes back leaves the
-   *   send to the receipt deadline, which ends it from the durable record
-   *   alone, and no branch here sends anything again.
+   *   abandoned too: no other pass of this instance can be actuating it, so
+   *   finding it here means an earlier pass of ours dropped it.
+   * - `unproven`: the two claims could not be COMPARED — the row carries no
+   *   ownership at all, it was written under a claim its writer could not read,
+   *   or the claim now cannot be read. That is a gap in the evidence and not a
+   *   handover, so the row stays with the executor that holds it. Nothing is
+   *   withheld by waiting: an owner that never comes back leaves the send to
+   *   the receipt deadline, which ends it from the durable record alone, and no
+   *   branch here sends anything again.
+   *
+   * A row carrying no ownership used to be `abandoned` — every row looked like
+   * that before this evidence existed, and terminalizing them was how the
+   * evidence was rolled out. It is `unproven` now, because the only rows that
+   * can still look like that are ones whose writer could not read the claim,
+   * which is the projection gap this fence exists for.
    */
   private async deliveringOwnerDisposition(
     conversationId: string,
     reason: string | null | undefined,
   ): Promise<"live" | "abandoned" | "unproven"> {
     const owner = deliveringOwnership(reason);
-    if (!owner || owner.executorId === this.executorId) return "abandoned";
-    const claim = await this.hostClaim(conversationId);
-    if (claim === null) return "unproven";
-    return claim === owner.hostClaim ? "live" : "abandoned";
+    if (!owner) return "unproven";
+    if (owner.executorId === this.executorId) return "abandoned";
+    switch (evidenceAgrees(await this.readHostClaim(conversationId), owner.hostClaim)) {
+      case "matches": return "live";
+      case "differs": return "abandoned";
+      default: return "unproven";
+    }
   }
 
   private async terminalizeUnverified(operationId: string, reason: string): Promise<void> {

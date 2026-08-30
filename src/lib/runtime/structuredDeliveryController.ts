@@ -195,8 +195,9 @@ function hostResolver(
  * must still hold for its engine writes to be accepted — so "may this executor
  * still write to that host" is a fact the durable record already answers, and
  * the delivery queue reads it here rather than growing an ownership model of
- * its own. A conversation with no claimed structured host answers null: no
- * evidence of an owner, which the queue reads as no evidence of a live one.
+ * its own. A conversation with no claimed structured host answers null: nothing
+ * to compare against, which the queue reads as evidence of neither a live owner
+ * nor a departed one, and a read that throws says exactly as much.
  */
 function structuredHostClaim(
   registry: AgentRegistry,
