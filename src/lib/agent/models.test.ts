@@ -20,6 +20,8 @@ test("the model catalog exposes Opus 5 as the Claude default", () => {
   ]);
   expect(defaultModelFor("codex")).toBe(CODEX_SOL_MODEL);
   expect(defaultModelFor("claude")).toBe("opus");
+  expect(defaultModelFor("grok")).toBe("grok-4.6");
+  expect(validateLaunchModel("grok", "grok-4.6")).toEqual({ model: "grok-4.6" });
 });
 
 test("spawn model validation accepts CLI ids and rejects control characters", () => {

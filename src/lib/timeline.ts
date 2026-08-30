@@ -140,6 +140,32 @@ function openclawEvents(entry: FileEntry, actor: string, records: Record<string,
   return out;
 }
 
+function grokContent(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  return recs(value).map((part) => str(part.text)).join(" ").trim();
+}
+
+function grokEvents(entry: FileEntry, actor: string, records: Record<string, unknown>[]): ActionEvent[] {
+  const out: ActionEvent[] = [];
+  for (const obj of records) {
+    const ts = toTs(obj.timestamp);
+    if (ts === null) continue;
+    if (obj.type === "user") {
+      if (typeof obj.synthetic_reason === "string") continue;
+      const raw = grokContent(obj.content);
+      const query = raw.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/);
+      const text = (query?.[1] ?? raw).trim();
+      if (text && !text.startsWith("<")) out.push({ ts, file: entry.path, actor, kind: "user", label: label(text) });
+      continue;
+    }
+    if (obj.type === "assistant") {
+      const text = grokContent(obj.content);
+      if (text) out.push({ ts, file: entry.path, actor, kind: "turn", label: label(text) });
+    }
+  }
+  return out;
+}
+
 function fileEvents(entry: FileEntry): ActionEvent[] {
   const mtimeMs = entry.mtime * 1000;
   const cached = eventCache.get(entry.path);
@@ -152,7 +178,9 @@ function fileEvents(entry: FileEntry): ActionEvent[] {
       ? codexEvents(entry, actor, tail.records)
       : entry.fmt === "openclaw"
         ? openclawEvents(entry, actor, tail.records)
-        : [];
+        : entry.fmt === "grok"
+          ? grokEvents(entry, actor, tail.records)
+          : [];
   if (tail.complete) eventCache.set(entry.path, [entry.size, mtimeMs, events]);
   return events;
 }

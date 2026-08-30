@@ -260,6 +260,12 @@ describe("buildBranchGroups", () => {
     expect(isSubagent(entry({ path: "/openclaw/oc-session-alpha.jsonl", ...openclaw }))).toBe(false);
   });
 
+  test("a Grok chat history is a conversation root of its own", () => {
+    const grok = { root: "grok-sessions" as const, engine: "grok" as const, fmt: "grok" as const };
+    expect(isConversation(entry({ path: "/grok/chat_history.jsonl", ...grok }))).toBe(true);
+    expect(isSubagent(entry({ path: "/grok/chat_history.jsonl", ...grok }))).toBe(false);
+  });
+
   test("a standalone viewer-spawned conversation stays a root despite its spawner parent", () => {
     const lineage = {
       kind: "spawn" as const,

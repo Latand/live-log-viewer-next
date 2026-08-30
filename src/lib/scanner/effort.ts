@@ -1,7 +1,9 @@
+import path from "node:path";
+
 import type { FileEntry } from "../types";
 import { headRecordsResult, tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
-import { recordValue, recordsValue, stringValue } from "./json";
+import { readJson, recordValue, recordsValue, stringValue } from "./json";
 import { readArgv } from "./process";
 
 const effortCache = globalCache<[number, number, string | null]>("effort");
@@ -10,7 +12,7 @@ const effortCache = globalCache<[number, number, string | null]>("effort");
     OpenClaw's `--thinking`, which adds `off` at the bottom and `adaptive` —
     a request to let the model choose, which is a recorded setting rather than
     a rung on the ladder. */
-const TIERS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "adaptive"]);
+const TIERS = new Set(["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "adaptive"]);
 
 function normalizeEffort(value: string | null | undefined): string | null {
   const tier = value?.trim().toLowerCase() ?? "";
@@ -27,6 +29,9 @@ function pickEffort(entry: FileEntry, obj: Record<string, unknown>): string | nu
   }
   if (entry.root === "openclaw-sessions" && obj.type === "thinking_level_change") {
     return stringValue(obj.thinkingLevel);
+  }
+  if (entry.root === "grok-sessions") {
+    return stringValue(obj.reasoning_effort);
   }
   if (entry.root === "claude-projects" && obj.type === "assistant") {
     const message = recordValue(obj.message);
@@ -47,6 +52,7 @@ function argvEffort(entry: FileEntry): string | null {
       if (match) return match[1];
     }
     if (entry.engine === "claude" && argv[i] === "--effort") return argv[i + 1];
+    if (entry.engine === "grok" && (argv[i] === "--effort" || argv[i] === "--reasoning-effort")) return argv[i + 1];
   }
   return null;
 }
@@ -67,13 +73,18 @@ export interface EntryEffortResult {
 
 export function entryEffortResult(entry: FileEntry): EntryEffortResult {
   if (
-    (entry.root !== "claude-projects" && entry.root !== "codex-sessions" && entry.root !== "openclaw-sessions")
+    (entry.root !== "claude-projects" && entry.root !== "codex-sessions" && entry.root !== "openclaw-sessions" && entry.root !== "grok-sessions")
     || !entry.path.endsWith(".jsonl")
   ) {
     return { value: null, complete: true };
   }
   const argv = normalizeEffort(argvEffort(entry));
   if (entry.root === "claude-projects" && argv) return { value: argv, complete: true };
+  if (entry.root === "grok-sessions") {
+    const summary = readJson(path.join(path.dirname(entry.path), "summary.json"));
+    const fromSummary = normalizeEffort(stringValue(summary?.reasoning_effort));
+    if (fromSummary) return { value: fromSummary, complete: true };
+  }
   const mtimeMs = entry.mtime * 1000;
   const cached = effortCache.get(entry.path);
   if (cached?.[0] === entry.size && cached[1] === mtimeMs) return { value: cached[2] ?? argv, complete: true };

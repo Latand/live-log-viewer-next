@@ -9,17 +9,18 @@ export type RootKey =
   | "codex-sessions"
   | "claude-projects"
   | "claude-tasks"
-  | "openclaw-sessions";
+  | "openclaw-sessions"
+  | "grok-sessions";
 
-export type Engine = "codex" | "claude" | "shell" | "openclaw";
+export type Engine = "codex" | "claude" | "shell" | "openclaw" | "grok";
 export type Activity = "live" | "recent" | "stalled" | "idle";
-export type Fmt = "codex" | "claude" | "plain" | "openclaw";
+export type Fmt = "codex" | "claude" | "plain" | "openclaw" | "grok";
 
 /** The engines that write a structured transcript the Viewer parses — every
     `Engine` except `"shell"`, whose background tasks are plain output logs.
     Named once so the readers that must switch on the dialect (title and search
     text, turn state, model, effort, the feed) all agree on the same set. */
-export type TranscriptEngine = Extract<Engine, "codex" | "claude" | "openclaw">;
+export type TranscriptEngine = Extract<Engine, "codex" | "claude" | "openclaw" | "grok">;
 
 declare const epochSecondsBrand: unique symbol;
 /**

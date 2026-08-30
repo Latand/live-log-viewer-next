@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { grokHome } from "@/lib/accounts/grok";
 import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from "@/lib/accounts/codex";
 import { claudeSettingsPath, claudeTranscriptOwnership, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
 import { homeDirectory } from "@/lib/platformHome";
@@ -27,7 +28,7 @@ export { ENGINE_EFFORTS, isEngineEffort } from "./efforts";
  * else.
  */
 
-export type AgentEngine = "claude" | "codex";
+export type AgentEngine = "claude" | "codex" | "grok";
 
 /**
  * Candidate absolute paths for an agent CLI on Windows, in probe order.
@@ -63,6 +64,18 @@ export function resolveBinary(name: string): string {
     return name;
   }
   const home = os.homedir();
+  if (name === "grok") {
+    for (const candidate of grokBinaryCandidates()) {
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {
+        try {
+          if (fs.existsSync(candidate)) return candidate;
+        } catch { /* keep looking */ }
+      }
+    }
+  }
   if (process.env.LLV_DOCKER_NSENTER_SHIMS === "1" && (name === "claude" || name === "codex")) {
     const shim = "/usr/local/bin/" + name;
     try {
@@ -102,6 +115,13 @@ export function resolveBinary(name: string): string {
     container-owned and untrustworthy. Outside a container the system paths are
     probed too. When nothing matches, the bare name defers to the user's PATH. */
 export function resolveHostBinary(name: string): string {
+  if (name === "grok") {
+    for (const candidate of grokBinaryCandidates()) {
+      try {
+        if (fs.existsSync(candidate)) return candidate;
+      } catch { /* keep looking */ }
+    }
+  }
   const home = os.homedir();
   const homeCandidates = [
     path.join(home, ".bun", "bin", name),
@@ -120,6 +140,29 @@ export function resolveHostBinary(name: string): string {
     }
   }
   return name;
+}
+
+function grokBinaryCandidates(): string[] {
+  const home = grokHome();
+  return [
+    path.join(home, "bin", process.platform === "win32" ? "grok.exe" : "grok"),
+    path.join(home, "bin", "grok.exe"),
+    path.join(home, "bin", "grok"),
+  ];
+}
+
+export function grokTranscriptPath(cwd: string, sessionId: string): string {
+  return path.join(grokHome(), "sessions", encodeURIComponent(cwd), sessionId, "chat_history.jsonl");
+}
+
+function grokEnvPrefix(): string {
+  return `env -u LLV_TOKEN GROK_HOME=${shellQuote(grokHome())}`;
+}
+
+export function grokSessionIdFromTranscript(pathname: string): string | null {
+  if (path.basename(pathname) !== "chat_history.jsonl") return null;
+  const sessionId = path.basename(path.dirname(pathname));
+  return /^[0-9a-f-]{36}$/i.test(sessionId) ? sessionId.toLowerCase() : null;
 }
 
 export function shellQuote(value: string): string {
@@ -357,6 +400,39 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       },
     };
   }
+  if (engine === "grok") {
+    const sid = crypto.randomUUID();
+    const args = [resolveBinary("grok"), "--cwd", cwd, "-s", sid];
+    if (options.model) args.push("-m", options.model);
+    if (options.effort) args.push("--effort", options.effort);
+    if (options.readOnly) args.push("--sandbox", "read-only");
+    else args.push("--permission-mode", "bypassPermissions");
+    if (!options.allowSubagents) args.push("--disallowed-tools", "Agent");
+    return {
+      command: `( unset LLV_TELEGRAM_MCP_TOKEN; ${grokEnvPrefix()} ${args.map(shellQuote).join(" ")} )`,
+      cwd,
+      windowName: "grok-new",
+      engine: "grok",
+      transcript: grokTranscriptPath(cwd, sid),
+      launchProfile: {
+        cwd,
+        model: options.model ?? null,
+        effort: options.effort ?? null,
+        fast: null,
+        permissionMode: options.readOnly ? "default" : "bypassPermissions",
+        readOnly: options.readOnly ?? false,
+        allowSubagents: options.allowSubagents ?? false,
+        mcpServers: [],
+        plugins: [],
+        title: options.title?.trim() || null,
+        project: null,
+        parentConversationId: null,
+        role: "worker",
+        goal: null,
+        plan: null,
+      },
+    };
+  }
   const args = [resolveBinary("codex")];
   const home = options.codexHome ?? accountForSpawn().home;
   if (isManagedCodexHome(home)) args.push("-c", "cli_auth_credentials_store=file");
@@ -452,7 +528,7 @@ export function claudeSuccessorSpecFor(input: {
     happened reads {@link ResumeEligibility.reason}, so diagnosing a refusal
     never again means reading three files. */
 export type ResumeEligibility =
-  | { ok: true; engine: Extract<AgentEngine, "claude" | "codex">; sessionId: string; home: string; cwd: string }
+  | { ok: true; engine: AgentEngine; sessionId: string; home: string; cwd: string }
   | { ok: false; reason: string };
 
 /**
@@ -486,6 +562,11 @@ export function resumeEligibility(root: string, pathname: string, options: Resum
     const home = codexHomeOwningSessionPath(pathname);
     if (!home) return { ok: false, reason: "the transcript is outside every Codex account session root the viewer knows" };
     return { ok: true, engine: "codex", sessionId: id, home, cwd: cwd() };
+  }
+  if (root === "grok-sessions" && base === "chat_history.jsonl") {
+    const sid = grokSessionIdFromTranscript(pathname);
+    if (!sid) return { ok: false, reason: "the Grok session directory carries no session id" };
+    return { ok: true, engine: "grok", sessionId: sid, home: grokHome(), cwd: cwd() };
   }
   return { ok: false, reason: "this transcript belongs to no resumable agent session" };
 }
@@ -553,6 +634,7 @@ export function resumeSpecForSession(
       launchProfile: { ...emptyLaunchProfileForResume(cwd, launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode, allowSubagents: options.allowSubagents ?? false, mcpServers, plugins: grantedPlugins(options.plugins) },
     };
   }
+  if (engine === "codex") {
   let command = `${(options.hostTerminal ? resolveHostBinary : resolveBinary)("codex")}`;
   if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
   for (const override of codexMcpRuntimeOverrides(home, cwd, mcpServers)) command += ` -c ${shellQuote(override)}`;
@@ -572,6 +654,30 @@ export function resumeSpecForSession(
     engine: "codex",
     launchProfile: { ...emptyLaunchProfileForResume(cwd, options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false, mcpServers, plugins: grantedPlugins(options.plugins) },
   };
+  }
+  if (engine === "grok") {
+    const args = [(options.hostTerminal ? resolveHostBinary : resolveBinary)("grok"), "--cwd", cwd, "-r", sessionId];
+    if (options.model) args.push("-m", options.model);
+    if (options.effort) args.push("--effort", options.effort);
+    if (options.readOnly) args.push("--sandbox", "read-only");
+    else args.push("--permission-mode", "bypassPermissions");
+    return {
+      command: `( unset LLV_TELEGRAM_MCP_TOKEN; ${grokEnvPrefix()} ${args.map(shellQuote).join(" ")} )`,
+      cwd,
+      windowName: "grok-resume",
+      engine: "grok",
+      transcript: grokTranscriptPath(cwd, sessionId),
+      launchProfile: {
+        ...emptyLaunchProfileForResume(cwd, options.model ?? null, options.effort ?? null),
+        permissionMode: options.readOnly ? "default" : "bypassPermissions",
+        readOnly: options.readOnly ?? false,
+        allowSubagents: options.allowSubagents ?? false,
+        mcpServers: [],
+        plugins: [],
+      },
+    };
+  }
+  return null;
 }
 
 function emptyLaunchProfileForResume(cwd: string, model: string | null, effort: string | null): LaunchProfile {

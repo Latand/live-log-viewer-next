@@ -108,6 +108,10 @@ async function walkPaths(rootName: RootKey, root: string, dir: string, limit: Li
        backups). Filtering here rather than at hydration keeps them out of the
        resource-scope inventory too, which only checks the `.jsonl` suffix. */
     if (rootName === "openclaw-sessions" && !isOpenclawTranscript(entry.name)) return { paths: [], complete: true };
+    /* Grok stores multiple JSONL sidecars per session. The chat history is the
+       only conversation transcript; events and rewind journals must not become
+       phantom cards. */
+    if (rootName === "grok-sessions" && entry.name !== "chat_history.jsonl") return { paths: [], complete: true };
     return { paths: [{ rootName, root, path: path.join(dir, entry.name) }], complete: true };
   }));
   return {
@@ -196,7 +200,7 @@ function transcriptIndexFeed(
        conversations stay searchable through the catalog's title and
        first-prompt text; full-text search over their bodies moves with the
        index's own schema migration. */
-    sources: catalog.flatMap((entry) => (entry.engine === "openclaw" ? [] : [{
+    sources: catalog.flatMap((entry) => (entry.engine === "openclaw" || entry.engine === "grok" ? [] : [{
       path: entry.path,
       project: projectByPath?.get(entry.path) ?? entry.project,
       engine: entry.engine,

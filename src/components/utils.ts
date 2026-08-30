@@ -47,6 +47,7 @@ const ENGINE_COLORS: Record<string, string> = {
   codex: "#2f6fd0",
   claude: "#d97757",
   openclaw: "#b3407a",
+  grok: "#3d5a80",
 };
 const NEUTRAL_COLOR = "#9a9aa4";
 const CLAUDE_MODEL_COLORS: [RegExp, string][] = [
@@ -94,7 +95,7 @@ function modelBaseHex(file: FileEntry): string {
   const model = (file.model ?? "").toLowerCase();
   /* OpenClaw runs other vendors' models through its own provider layer, so no
      model-family table applies: its cards keep the flat engine identity. */
-  if (file.engine === "openclaw") return base;
+  if (file.engine === "openclaw" || file.engine === "grok") return base;
   for (const [re, color] of file.engine === "codex" ? CODEX_MODEL_COLORS : CLAUDE_MODEL_COLORS) {
     if (re.test(model)) return color;
   }
@@ -183,7 +184,7 @@ export function engineEdge(file: FileEntry): { backgroundColor: string } {
 }
 
 export function engineBadgeFor(engine: string) {
-  const label = { codex: "Codex", claude: "Claude", shell: "Bash", openclaw: "OpenClaw" }[engine] ?? engine;
+  const label = { codex: "Codex", claude: "Claude", shell: "Bash", openclaw: "OpenClaw", grok: "Grok" }[engine] ?? engine;
   const tint = tintOf(ENGINE_COLORS[engine] ?? NEUTRAL_COLOR);
   return { label, style: { backgroundColor: tint.soft, color: tint.color } };
 }

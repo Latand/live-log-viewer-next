@@ -6,7 +6,7 @@ import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import { accountManager, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
+import { AccountAuthenticationRequiredError, accountManager, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
@@ -226,10 +226,10 @@ export async function executeSpawnRequest(
   if (role.value && isSpawnDeniedRole(role.value.role) && body.allowSubagents === true) {
     return NextResponse.json({ error: `${role.value.role} launches cannot enable subagents: reviewer and verifier sessions run every check in-session` }, { status: 400 });
   }
-  const engine = body.engine === "claude" || body.engine === "codex"
+  const engine = body.engine === "claude" || body.engine === "codex" || body.engine === "grok"
     ? (body.engine as AgentEngine)
     : (role.value?.config.engine ?? null);
-  if (!engine) return NextResponse.json({ error: "engine must be claude or codex" }, { status: 400 });
+  if (!engine) return NextResponse.json({ error: "engine must be claude, codex, or grok" }, { status: 400 });
   if (body.accountId !== undefined && typeof body.accountId !== "string") return NextResponse.json({ error: "accountId must be a string" }, { status: 400 });
   if (body.clientAttemptId !== undefined && (typeof body.clientAttemptId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(body.clientAttemptId))) return NextResponse.json({ error: "clientAttemptId must be 8-128 URL-safe characters" }, { status: 400 });
 
@@ -263,7 +263,7 @@ export async function executeSpawnRequest(
     : null;
   let transport;
   try {
-    transport = spawnTransport();
+    transport = engine === "grok" ? "tmux" : spawnTransport();
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
@@ -1024,6 +1024,7 @@ export async function executeSpawnRequest(
     if (error instanceof SpawnChildLimitError) return NextResponse.json({ error: error.message }, { status: 429 });
     if (error instanceof RuntimeImageStorageError) return NextResponse.json({ error: error.message }, { status: 503 });
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
+    if (error instanceof AccountAuthenticationRequiredError) return NextResponse.json({ error: error.message, retrySafe: true }, { status: 401 });
     const accountError = spawnAccountErrorResponse(error);
     if (accountError) return accountError;
     if (receipt?.pane) {

@@ -79,7 +79,7 @@ export function isConversation(file: FileEntry): boolean {
      transcript in an agent's sessions directory is a conversation in its own
      right (#1207). Without this arm an OpenClaw card is scanned and attributed
      and then belongs to no board tree at all. */
-  if (file.root === "openclaw-sessions") return !file.parent;
+  if (file.root === "openclaw-sessions" || file.root === "grok-sessions") return !file.parent;
   return false;
 }
 

@@ -42,7 +42,7 @@ export type LoginOperationSummary = {
 export type AccountCatalog = { claude: { active: string; accounts: AccountSummary[] }; codex: { active: string; accounts: AccountSummary[] } };
 
 export type AccountContext = {
-  engine: Extract<Engine, "claude" | "codex">;
+  engine: Extract<Engine, "claude" | "codex" | "grok">;
   accountId: string;
   kind: "legacy" | "managed";
   home: string;

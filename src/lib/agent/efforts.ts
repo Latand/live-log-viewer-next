@@ -7,11 +7,12 @@
  * codex: `-c model_reasoning_effort=<level>`; the tier list mirrors
  * `supported_reasoning_levels` in ~/.codex/models_cache.json for current models.
  */
-export type AgentEngineName = "claude" | "codex";
+export type AgentEngineName = "claude" | "codex" | "grok";
 
 export const ENGINE_EFFORTS: Record<AgentEngineName, readonly string[]> = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   codex: ["low", "medium", "high", "xhigh"],
+  grok: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
 };
 
 export function isEngineEffort(engine: AgentEngineName, value: string): boolean {
@@ -19,7 +20,7 @@ export function isEngineEffort(engine: AgentEngineName, value: string): boolean 
 }
 
 /** Canonical low→high ordering across every tier either CLI has ever recorded. */
-const EFFORT_ORDER: readonly string[] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+const EFFORT_ORDER: readonly string[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 /** Whether a token belongs to the canonical CLI tier vocabulary at all —
     engine/model fit is the engine's own verdict (a per-model scale like
@@ -46,6 +47,7 @@ const CODEX_MODEL_SCALES: readonly (readonly [RegExp, readonly string[]])[] = [
    the chip tooltip. */
 const OPENCLAW_EFFORTS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+
 /** Reasoning tiers a given engine+model pair can run at, lowest first; null
     for engines without a reasoning dial (shell). Model may be the viewer's
     display-shortened id — matching is prefix-based on the codex slug, and
@@ -53,6 +55,7 @@ const OPENCLAW_EFFORTS: readonly string[] = ["off", "minimal", "low", "medium", 
 export function effortScale(engine: string, model: string | null | undefined): readonly string[] | null {
   if (engine === "claude") return ENGINE_EFFORTS.claude;
   if (engine === "openclaw") return OPENCLAW_EFFORTS;
+  if (engine === "grok") return ENGINE_EFFORTS.grok;
   if (engine !== "codex") return null;
   const id = (model ?? "").trim().toLowerCase();
   for (const [re, scale] of CODEX_MODEL_SCALES) {

@@ -52,5 +52,8 @@ export function structuredSpawnGap(
   if (request.engine === "codex" && request.fast !== null) {
     return "structured Codex spawn does not support an explicit Codex service tier";
   }
+  if (request.engine === "grok") {
+    return "structured Grok spawn is not available; Grok launches through tmux";
+  }
   return null;
 }

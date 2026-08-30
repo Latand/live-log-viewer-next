@@ -70,7 +70,7 @@ export function isAwaitingUser(file: FileEntry, now = Date.now() / 1000): boolea
      counter. The attention queue owns that TTL judgement. */
   if (file.activity === "stalled") return attentionId(file, now) !== null;
   return file.activity === "recent"
-    && (file.engine === "claude" || file.engine === "codex" || file.engine === "openclaw")
+    && (file.engine === "claude" || file.engine === "codex" || file.engine === "openclaw" || file.engine === "grok")
     && isConversation(file)
     && !isSubagent(file);
 }

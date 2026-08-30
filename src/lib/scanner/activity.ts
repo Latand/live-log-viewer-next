@@ -157,6 +157,7 @@ function recoveryRelease(
 export function transcriptEngineForRoot(root: RootKey): TranscriptEngine {
   if (root === "codex-sessions") return "codex";
   if (root === "openclaw-sessions") return "openclaw";
+  if (root === "grok-sessions") return "grok";
   return "claude";
 }
 

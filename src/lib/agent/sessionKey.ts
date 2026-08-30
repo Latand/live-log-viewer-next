@@ -26,6 +26,10 @@ export function sessionKeyId(key: SessionKey): string {
 }
 
 export function sessionKeyFromTranscript(engine: AgentEngine, pathname: string): SessionKey | null {
+  if (engine === "grok") {
+    const sessionId = path.basename(path.dirname(pathname));
+    return sessionKey(engine, sessionId);
+  }
   const base = path.basename(pathname);
   const match = base.match(SESSION_ID);
   return match ? sessionKey(engine, match[0]) : null;

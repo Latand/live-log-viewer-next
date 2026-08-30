@@ -106,13 +106,13 @@ function isFileScanSnapshot(value: unknown): value is FileScanSnapshot {
   const filesValid = value.files.every((candidate) => {
     if (!isRecord(candidate)) return false;
     return typeof candidate.path === "string"
-      && (candidate.root === "codex-sessions" || candidate.root === "claude-projects" || candidate.root === "claude-tasks" || candidate.root === "openclaw-sessions")
+      && (candidate.root === "codex-sessions" || candidate.root === "claude-projects" || candidate.root === "claude-tasks" || candidate.root === "openclaw-sessions" || candidate.root === "grok-sessions")
       && typeof candidate.name === "string"
       && typeof candidate.project === "string"
       && typeof candidate.title === "string"
-      && (candidate.engine === "codex" || candidate.engine === "claude" || candidate.engine === "shell" || candidate.engine === "openclaw")
+      && (candidate.engine === "codex" || candidate.engine === "claude" || candidate.engine === "shell" || candidate.engine === "openclaw" || candidate.engine === "grok")
       && typeof candidate.kind === "string"
-      && (candidate.fmt === "codex" || candidate.fmt === "claude" || candidate.fmt === "plain" || candidate.fmt === "openclaw")
+      && (candidate.fmt === "codex" || candidate.fmt === "claude" || candidate.fmt === "plain" || candidate.fmt === "openclaw" || candidate.fmt === "grok")
       && (candidate.parent === null || typeof candidate.parent === "string")
       && typeof candidate.mtime === "number" && Number.isFinite(candidate.mtime)
       && typeof candidate.size === "number" && Number.isFinite(candidate.size)
@@ -138,7 +138,7 @@ function isFileScanSnapshot(value: unknown): value is FileScanSnapshot {
 /* The primed evidence above is only meaningful for an engine whose transcript
    the turn reader parses; background-task output logs carry no turn. */
 function isTranscriptEngine(engine: Engine): engine is TranscriptEngine {
-  return engine === "claude" || engine === "codex" || engine === "openclaw";
+  return engine === "claude" || engine === "codex" || engine === "openclaw" || engine === "grok";
 }
 
 function persistedTurnState(entry: FileEntry): TurnState | undefined {

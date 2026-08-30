@@ -223,7 +223,7 @@ export type CmdGroupItem = {
     changes: this kind exists only between the resolver and the card. */
 export type MandateItem = { kind: "mandate"; ts: unknown; text: string; mandate: MandateDelivery };
 export type Item =
-  | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude" | "openclaw"; sourceId?: string }
+  | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude" | "openclaw" | "grok"; sourceId?: string }
   | { kind: "user"; ts: unknown; text: string; selectedContext?: SelectedContextRef }
   | MandateItem
   | VoiceTurnItem
@@ -367,6 +367,7 @@ const OPENCLAW_SYNTHETIC_PROVIDER = "openclaw";
 function feedEngine(engine: string): FeedEngine {
   if (engine === "codex") return "codex";
   if (engine === "openclaw") return "openclaw";
+  if (engine === "grok") return "grok";
   return "claude";
 }
 
@@ -1166,7 +1167,7 @@ function sameCodexTextAtTime(leftTs: unknown, leftText: unknown, rightTs: unknow
  */
 export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const { showSvc, lineFilter } = cfg;
-  const jsonl = cfg.fmt === "claude" || cfg.fmt === "codex" || cfg.fmt === "openclaw";
+  const jsonl = cfg.fmt === "claude" || cfg.fmt === "codex" || cfg.fmt === "openclaw" || cfg.fmt === "grok";
 
   const entries: StoredEntry[] = [];
   const calls = new Map<string, CallRec>();
@@ -2140,6 +2141,36 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       }
     }
   };
+  /* Grok Build persists a compact JSONL conversation format: user/assistant
+     content is top-level, tool calls sit on an assistant row, and results are
+     separate tool_result rows. It is read-only support: no viewer controls
+     attempt to write into a Grok session. */
+  const renderGrok = (obj: Record<string, unknown>) => {
+    const ts = obj.timestamp ?? obj.ts ?? null;
+    const contentText = (value: unknown): string => typeof value === "string"
+      ? value
+      : arr(value).map((part) => textPart(part.text) || textPart(part.content)).filter(Boolean).join("\n");
+    if (obj.type === "user") return void addUserText(ts, contentText(obj.content));
+    if (obj.type === "reasoning") {
+      const text = contentText(obj.content).trim();
+      if (text) push({ kind: "think", text: text.replace(/\s+/g, " ") });
+      return;
+    }
+    if (obj.type === "tool_result") {
+      return void addOutput(textPart(obj.tool_call_id), contentText(obj.content), obj.is_error === true || obj.error === true);
+    }
+    if (obj.type !== "assistant") return void addSvc(textPart(obj.type) || tr("render.record"));
+    const text = contentText(obj.content);
+    if (text.trim()) addProse(ts, text, textPart(obj.id) || undefined);
+    for (const call of arr(obj.tool_calls)) {
+      const name = textPart(call.name) || "tool";
+      let args: Record<string, unknown> = {};
+      try { args = rec(JSON.parse(textPart(call.arguments) || "{}")); } catch { /* malformed args stay readable as a generic tool */ }
+      const id = textPart(call.id) || "grok-" + pushSeq + "-" + String(ts ?? "");
+      const command = familyOf(name) === "shell" ? textPart(args.command ?? args.cmd) : undefined;
+      registerCall(newToolEvent({ ts, id, tool: name, args, engine: "grok", command }));
+    }
+  };
   /* Job .output logs echo the final review/citation block as bare lines after the
      [codex] stream ends; collect that run so it renders as one structured card
      instead of per-line raw rows. Falls back to the old raw rows when the block
@@ -2218,6 +2249,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         if (obj && typeof obj === "object" && !Array.isArray(obj)) {
           if (cfg.fmt === "claude") renderClaude(obj);
           else if (cfg.fmt === "openclaw") renderOpenclaw(obj);
+          else if (cfg.fmt === "grok") renderGrok(obj);
           else renderCodex(obj);
         } else addRecord(null, "malformed_record", { value: obj });
       } catch {

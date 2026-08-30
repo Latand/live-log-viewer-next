@@ -697,6 +697,12 @@ export const uk: Record<keyof typeof en, Message> = {
   "qr.copy": "Копіювати посилання",
   "qr.scanHint": "скануй з телефона в тому ж tailnet",
 
+  "grok.title": "Grok",
+  "grok.rowAria": "Обліковий запис Grok",
+  "grok.signedIn": "Увійшов",
+  "grok.signedOut": "Не ввійшов",
+  "grok.statusLoading": "Перевіряю вхід…",
+
   "telegram.title": "Telegram",
   "telegram.rowAria": "Підключення Telegram",
   "telegram.close": "Закрити",
@@ -1807,9 +1813,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "overview.moreLive": "ще {count} live",
   "overview.quiet": "тихо · остання активність {age}",
   "overview.firstRunTitle": "Проєктів поки нема",
-  "overview.firstRunBody": "Сесії з ~/.claude/projects і ~/.codex/sessions з'являються тут одразу, як тільки стартують",
+  "overview.firstRunBody": "Сесії з ~/.claude/projects, ~/.codex/sessions і ~/.grok/sessions з'являються тут одразу, як тільки стартують",
   "overview.firstRunCreate": "Створити проєкт",
-  "overview.firstRunElsewhere": "…або просто запусти claude чи codex у будь-якому репозиторії.",
+  "overview.firstRunElsewhere": "…або просто запусти claude, codex чи grok у будь-якому репозиторії.",
 
   "catalog.unreachable": "каталог недоступний",
   "catalog.errorTitle": "Не вдалося завантажити каталог сесій",

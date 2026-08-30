@@ -4,7 +4,7 @@ import { memo } from "react";
 
 import type { MandateDelivery } from "@/lib/runtime/messageOrigin";
 
-import { Brain, ChevronUp, Command, Check, Mail, MessageCircle, Mic, Sparkle, X } from "../icons";
+import { Brain, ChevronUp, Command, Check, Mail, MessageCircle, Mic, Sparkle, X, Zap } from "../icons";
 import { hhmm } from "../utils";
 import { MESSAGE_ACTION } from "./actionStyles";
 import { SelectedContextBadge } from "../SelectedContextBadge";
@@ -103,8 +103,8 @@ export const FeedItem = memo(function FeedItem({ item: sourceItem, speakText }: 
   if (item.kind === "record") return <RecordCard item={item} />;
   if (item.kind === "mem-citation") return <MemCitationCard item={item} />;
   if (item.kind === "prose") {
-    const cls = item.engine === "codex" ? "bg-codex" : item.engine === "openclaw" ? "bg-openclaw" : "bg-claude";
-    const AvatarIcon = item.engine === "codex" ? Command : item.engine === "openclaw" ? MessageCircle : Sparkle;
+    const cls = item.engine === "codex" ? "bg-codex" : item.engine === "openclaw" ? "bg-openclaw" : item.engine === "grok" ? "bg-grok" : "bg-claude";
+    const AvatarIcon = item.engine === "codex" ? Command : item.engine === "openclaw" ? MessageCircle : item.engine === "grok" ? Zap : Sparkle;
     return (
       <div className="group/msg my-3 flex gap-2.5">
         <div className={`mt-1 flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-full text-white ${cls}`}>

@@ -34,6 +34,8 @@ function pickModel(entry: FileEntry, obj: Record<string, unknown>): string | nul
        no provider ever ran, and they are appended often enough to become the
        newest assistant record in an ordinary session. */
     return stringValue(openclawProviderAssistant(obj)?.model);
+  } else if (entry.root === "grok-sessions") {
+    return stringValue(obj.model_id);
   } else if (obj.type === "assistant") {
     const model = stringValue(recordValue(obj.message)?.model);
     if (model && model !== "<synthetic>") return model;
@@ -48,7 +50,7 @@ export function entryModelsResult(entry: FileEntry): EntryModelsResult {
     if (model) return { value: { display: shortModel(model), launch: model }, complete: true };
   }
   if (
-    (entry.root !== "claude-projects" && entry.root !== "codex-sessions" && entry.root !== "openclaw-sessions")
+    (entry.root !== "claude-projects" && entry.root !== "codex-sessions" && entry.root !== "openclaw-sessions" && entry.root !== "grok-sessions")
     || !entry.path.endsWith(".jsonl")
   ) {
     return { value: { display: null, launch: null }, complete: true };

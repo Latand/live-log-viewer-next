@@ -179,9 +179,10 @@ export const SHOTS: DemoShot[] = [
       "No projects yet",
       "~/.claude/projects",
       "~/.codex/sessions",
+      "~/.grok/sessions",
       "Create a project",
       "Create project",
-      "or run any claude / codex session inside a repo.",
+      "or run any claude / codex / grok session inside a repo.",
     ],
     frame: {
       visible: [

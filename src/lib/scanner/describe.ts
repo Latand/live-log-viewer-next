@@ -133,12 +133,31 @@ function subagentSidecarPath(rootName: RootKey, pathname: string): string | null
   return pathname.slice(0, -".jsonl".length) + ".meta.json";
 }
 
+function grokSummaryPath(rootName: RootKey, pathname: string): string | null {
+  if (rootName !== "grok-sessions" || path.basename(pathname) !== "chat_history.jsonl") return null;
+  return path.join(path.dirname(pathname), "summary.json");
+}
+
+function descriptionSidecarPath(rootName: RootKey, pathname: string): string | null {
+  return subagentSidecarPath(rootName, pathname) ?? grokSummaryPath(rootName, pathname);
+}
+
+/** Grok Build records a Windows cwd even when the Viewer is scanning from
+    WSL. Translate `C:\…` onto `/mnt/<drive>/…` so project grouping can see
+    the same repository Claude/Codex sessions already live in. */
+function grokHostCwd(cwd: string): string {
+  if (path.sep !== "/") return cwd;
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(cwd);
+  if (!match) return cwd;
+  return `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, "/")}`;
+}
+
 export function fileDescriptionIdentity(
   rootName: RootKey,
   pathname: string,
   st: fs.Stats,
 ): FileDescriptionIdentity {
-  const sidecarPath = subagentSidecarPath(rootName, pathname);
+  const sidecarPath = descriptionSidecarPath(rootName, pathname);
   if (!sidecarPath) {
     return { size: st.size, mtimeMs: st.mtimeMs, sidecarSize: null, sidecarMtimeMs: null, complete: true };
   }
@@ -757,7 +776,23 @@ function goodTitle(text: unknown): string | null {
   return val && !skipTitlePrefixes.some((prefix) => val.startsWith(prefix)) ? val : null;
 }
 
+function grokUserPrompt(obj: Record<string, unknown>): string | null {
+  if (obj.type !== "user") return null;
+  if (typeof obj.synthetic_reason === "string") return null;
+  const content = obj.content;
+  const text = typeof content === "string"
+    ? content
+    : recordsValue(content).map((part) => stringValue(part.text) ?? "").join(" ");
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const query = trimmed.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/);
+  if (query?.[1]) return query[1].trim();
+  if (trimmed.startsWith("<")) return null;
+  return trimmed;
+}
+
 function userPromptFromRecord(obj: Record<string, unknown>, engine: TranscriptEngine): string | null {
+  if (engine === "grok") return grokUserPrompt(obj);
   if (engine === "openclaw") {
     /* OpenClaw wraps every role, the operator's included, in a top-level
        `message` envelope, so the Claude arm's `type === "user"` never fires. */
@@ -821,6 +856,8 @@ function titleFromLines(lines: string[], engine: TranscriptEngine): string | nul
   }
   return null;
 }
+
+
 
 function conversationTextFromLines(lines: string[], engine: TranscriptEngine): ConversationSearchText {
   let title: string | null = null;
@@ -1090,6 +1127,31 @@ function deriveTranscriptMetadata(
       title = titleRead.value;
     }
     title ??= "OpenClaw session";
+  } else if (rootName === "grok-sessions") {
+    /* A Grok session directory is nested below a percent-encoded working
+       directory. It is the only durable cwd signal in its on-disk format. */
+    const encodedCwd = path.basename(path.dirname(path.dirname(pathname)));
+    try { cwd = decodeURIComponent(encodedCwd); } catch { cwd = undefined; }
+    if (cwd) cwd = grokHostCwd(cwd);
+    engine = "grok";
+    kind = "session";
+    fmt = "grok";
+    const sidecar = complete
+      ? identity.sidecarSize === null
+        ? { value: null, complete: identity.complete }
+        : readJsonResult(path.join(path.dirname(pathname), "summary.json"))
+      : { value: null, complete: false };
+    complete &&= sidecar.complete;
+    const meta = sidecar.value ?? {};
+    title = goodTitle(stringValue(meta.generated_title)) ?? goodTitle(stringValue(meta.session_summary));
+    const created = stringValue(meta.created_at);
+    if (created && Number.isFinite(Date.parse(created))) sessionStartedAt = new Date(created).toISOString();
+    if (!title && complete) {
+      const titleRead = scanJsonlTitle(pathname, st, "grok");
+      complete &&= titleRead.complete;
+      title = titleRead.value;
+    }
+    title ??= "Grok session";
   } else if (rootName === "claude-tasks") {
     engine = "shell";
     kind = "background";
@@ -1146,6 +1208,11 @@ function resolveProjectOverlay(
        OpenClaw session a stable project, and it only runs if this branch calls
        it: the overlay reaches `projectInfoFromCwd` from the Codex and Claude
        branches alone. */
+    info = (cwd ? projectInfoFromCwd(cwd, stateKey) : null) ?? projectInfoFromTranscript(pathname, stateKey);
+  } else if (rootName === "grok-sessions") {
+    /* Same recognizer Claude/Codex/OpenClaw use: a session running inside a
+       repository groups with that repository, including after a Windows cwd
+       has been mapped onto the host path. */
     info = (cwd ? projectInfoFromCwd(cwd, stateKey) : null) ?? projectInfoFromTranscript(pathname, stateKey);
   } else if (rootName === "claude-tasks") {
     const rel = path.relative(root, pathname);

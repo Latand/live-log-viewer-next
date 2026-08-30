@@ -58,7 +58,7 @@ function validateExplicitMembership(session: StoredViewSession, explicit: readon
     `SnapshotConversation` without a cast: a widened filter over a cast field is
     exactly how an OpenClaw entry would have been published as Claude. */
 function isTranscriptEntry(entry: FileEntry | undefined): entry is FileEntry & { engine: TranscriptEngine } {
-  return entry?.engine === "claude" || entry?.engine === "codex" || entry?.engine === "openclaw";
+  return entry?.engine === "claude" || entry?.engine === "codex" || entry?.engine === "openclaw" || entry?.engine === "grok";
 }
 
 function transcriptEntry(
