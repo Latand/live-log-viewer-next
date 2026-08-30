@@ -225,6 +225,62 @@ export function resolveContinuityAccount(
   return resolveProjectSpawnAccount(engine, project);
 }
 
+/**
+ * The same question one layer lower, for the resume-spec builder (#1279).
+ *
+ * `resumeSpecFor` needs an account ID rather than a resolved context, and the
+ * id it is handed is PROVENANCE — the registry's record of where this
+ * transcript ran — which can be absent (an adopted conversation the Viewer
+ * never launched) or name an account that has since been deleted. Neither case
+ * was a refusal: `claudeTranscriptOwnership` answered them from the SHARED
+ * transcript store, where every cut-over home resolves to one root and the
+ * path names no owner (#935), by falling back to the engine's ACTIVE account.
+ * That fallback is a pick — it decides which credentials the resumed turn runs
+ * under and whose quota it spends — and it read neither the project's pool nor
+ * any quota to make it.
+ *
+ * So the two cases are separated here, exactly as in
+ * {@link resolveContinuityAccount}:
+ *
+ * - **Provenance names an account the machine still has.** Continuity. The
+ *   session lives in that home; the pool does not re-seat it and capacity does
+ *   not veto it.
+ * - **It names none, or names one that is gone.** Nobody chose, so this is the
+ *   automatic rule's own case and it goes through the shared decision: the
+ *   project's pool first, capacity second, an exhausted pool reported and an
+ *   unreadable record refused before any spec is built.
+ *
+ * An UNBOUND project answers `null` — no preference is offered and the spec
+ * builder's own fallback stands, byte for byte what it always did.
+ */
+export function resolveResumeAccountId(
+  engine: "claude" | "codex",
+  recordedAccountId: string | null | undefined,
+  project: string | null,
+): string | null {
+  const accounts = engine === "claude" ? listClaudeAccounts() : listCodexAccounts();
+  const recorded = recordedAccountId?.trim() || null;
+  if (recorded !== null && accounts.some((account) => account.id === recorded)) return recorded;
+  const bindings = accountProjectBindings();
+  const allowed = allowedAccountIdsForProject(project, engine, bindings);
+  const registry = agentRegistry();
+  const selection = selectProjectAccount({
+    project,
+    engine,
+    accounts,
+    observations: registry.quotaObservations(engine),
+    bindings,
+    /* Offered only where it can order a candidate set. An unbound project has
+       none, and handing its routing account back here would replace the spec
+       builder's fallback with a different one on projects that opted into
+       nothing. */
+    preferredId: allowed === null ? null : registry.engineRouting(engine).activeAccountId,
+    unbound: "engine-default",
+  });
+  if (selection.kind !== "available") throw new ProjectAccountRefusedError(selection, engine, project);
+  return selection.accountId;
+}
+
 function summary(engine: "claude" | "codex", id: string): AccountSummary {
   const account = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).find((item) => item.id === id);
   if (!account) throw new Error(`unknown ${engine} account: ${id}`);

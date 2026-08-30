@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
-import { accountManager } from "@/lib/accounts/manager";
+import { accountManager, resolveResumeAccountId } from "@/lib/accounts/manager";
 import { projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
@@ -443,20 +443,25 @@ export async function sendToImplementer(
      the stable client-message id above; legacy pane delivery has no comparable
      receipt, so an automatic replay could duplicate the findings. */
   if (overrides.requireIdempotentDelivery) throw new UnsafeInterruptedRelayRetryError();
-  /* #1279: the account this resume runs under is the one the work already ran
-     on, read from the registry — the legacy twin of the structured resume's
-     continuity branch. Omitting it let `claudeTranscriptOwnership` fall back
-     to the engine's active account for a transcript inside the SHARED store,
-     where every account resolves to the same root and the path names no owner
-     (#935): a relay could therefore hand a round's verdict to the implementer
-     under an account the flow's project never allowed, having consulted
-     neither the pool nor any quota. Recorded ownership is continuity and asks
-     neither, exactly as `deliverConversationMessage` has always done. */
+  /* #1279: the account this resume runs under. Recorded ownership is
+     CONTINUITY and asks neither the pool nor any quota — the session lives in
+     that home. With nothing recorded nobody has chosen, and omitting the id let
+     `claudeTranscriptOwnership` answer from the engine's ACTIVE account for a
+     transcript inside the SHARED store, where every account resolves to the
+     same root and the path names no owner (#935): a relay could hand a round's
+     verdict to the implementer under an account the flow's project never
+     allowed. That half is a pick, so it goes through the shared automatic
+     decision — this project's pool, then capacity — and a fenced pool or an
+     unreadable record refuses here, before the relay delivers anything. */
   const spec = resumeSpecFor(entry.root, entry.path, {
     model: entry.launchModel ?? entry.model,
     effort: entry.effort,
     accountId: entry.engine === "claude" || entry.engine === "codex"
-      ? registry.transcriptAccountId(entry.engine, entry.path)
+      ? resolveResumeAccountId(
+        entry.engine,
+        registry.transcriptAccountId(entry.engine, entry.path),
+        flow.project,
+      )
       : null,
     allowSubagents: agentRegistry().launchProfileForPath(entry.path)?.allowSubagents,
     mcpServers: agentRegistry().launchProfileForPath(entry.path)?.mcpServers,

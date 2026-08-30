@@ -11,7 +11,7 @@ import {
  *
  * Four rounds each closed one account-selecting path and the next round found
  * another, so this file exists to make the SET the thing under review rather
- * than the next member of it. Nine places choose an account without being
+ * than the next member of it. Ten places choose an account without being
  * told which. Every one of them reaches one of the two functions below, or is
  * continuity that chooses nothing, and nothing here re-derives a pool or a
  * capacity bar of its own:
@@ -42,24 +42,36 @@ import {
  *    engine-wide target. It has no production caller at this commit, and its
  *    decision can only ever reach conversations through (5).
  * 9. **The legacy relay resume** — `sendToImplementer`'s tmux ladder, the
- *    pane-transport twin of (4). It named no account, so a transcript in the
- *    SHARED store — where every account resolves to the same root and the path
- *    names no owner (#935) — resolved to the engine's ACTIVE account, pool and
- *    quota both unread. It now passes the recorded owner, which makes it
- *    continuity like (4)'s first half and a choice no longer.
+ *    pane-transport twin of (4), and (10) below is the rule it now shares with
+ *    every other legacy resume.
+ * 10. **The resume-spec account fallback** — `resolveResumeAccountId`, behind
+ *    `resumeConversation`, `deliverConversationMessage`'s two rungs, the legacy
+ *    reconfigure relaunch and (9). These pass PROVENANCE, not a choice: the
+ *    registry's record of where the transcript ran. Recorded and still present,
+ *    that is continuity. Absent — an adopted conversation, which is most of the
+ *    live ones — or naming a deleted account, nobody has chosen, and
+ *    `claudeTranscriptOwnership` answered from the engine's ACTIVE account for
+ *    any transcript in the SHARED store, where every cut-over home resolves to
+ *    one root and the path names no owner (#935). That half → (2)'s rule, via
+ *    `selectProjectAccount`; the callers answer its refusal as a 409.
  *
  * Five neighbours are NOT on this list because they never choose an account for
  * any work: `selectHeadlessAccount` classifies capacity for a candidate set it
  * is handed, `selectHealthyClaudeAccount` narrows a candidate set and never
  * widens one, `contextForSpawn` resolves an id somebody already settled on into
  * a home, `claudeTranscriptOwnership` ATTRIBUTES a transcript that already
- * exists (its shared-store fallback to the active account is reached only
- * after the recorded owner comes back empty, and it opens the home the session
- * is already living in rather than routing new work), and `retireAccount`
- * resets the engine default after an operator DELETES the account it pointed
- * at — it refuses while anything is live there and moves no conversation, and
- * the engine default only ever ORDERS a bound project's candidates, so it
- * cannot carry work out of a pool.
+ * exists — every caller that ROUTES work through it now settles the account
+ * first at (10), and `claudeHomeOwningTranscript`, the other reader, accepts
+ * only path-derived ownership and never reaches the fallback at all — and
+ * `retireAccount` resets the engine default after an operator DELETES the
+ * account it pointed at: it refuses while anything is live there and moves no
+ * conversation, and the engine default only ever ORDERS a bound project's
+ * candidates, so it cannot carry work out of a pool.
+ *
+ * One surface deliberately stays outside the rule: `/api/attach-command`
+ * composes a resume command as TEXT for the operator's own terminal. It routes
+ * nothing and spends no quota — the operator does, by running it — and fencing
+ * it would close the dead-host escape hatch precisely when a pool is exhausted.
  *
  * A new automatic seam belongs on this list and behind one of the two functions
  * below. A new one that reads the pool itself is the defect coming back.

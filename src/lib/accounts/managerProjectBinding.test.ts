@@ -30,7 +30,7 @@ process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 
 const { createManagedCodexAccount, listCodexAccounts } = await import("./codex");
 const { createManagedClaudeAccount, listClaudeAccounts } = await import("./claude");
-const { accountManager, resolveContinuityAccount, resolveHealthySpawnAccount } = await import("./manager");
+const { accountManager, resolveContinuityAccount, resolveHealthySpawnAccount, resolveResumeAccountId } = await import("./manager");
 const { AccountProjectBindingsUnreadableError } = await import("./projectBindings");
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { resetProjectAliasesForTests } = await import("@/lib/projects/aliases");
@@ -353,4 +353,66 @@ test("a damaged binding record refuses a resume that has to pick, and only that 
   /* A record nobody can read never vetoes continuity: the conversation is
      already running there and no routing decision is being taken. */
   expect(resolveContinuityAccount("codex", spare, ATLAS).accountId).toBe(spare);
+});
+
+/**
+ * The same two halves one layer lower, for the LEGACY resume-spec builder.
+ *
+ * `resumeSpecFor` is handed PROVENANCE rather than a decision — the registry's
+ * record of where the transcript ran — and provenance can be empty (an adopted
+ * conversation) or name an account that has since been deleted. Neither was a
+ * refusal: inside the shared transcript store, where every cut-over home
+ * resolves to one root and the path names no owner (#935), the ownership
+ * fallback answered from the engine's ACTIVE account. That is a pick, and it
+ * read neither the pool nor any quota to make it.
+ */
+test("a resume-spec account that provenance still names is continuity, pool and capacity both silent (#1279)", () => {
+  /* Bound elsewhere AND out of capacity, and it still wins: the session lives
+     in that home, so nothing here is choosing anything. */
+  registryWith(reserved, [observation(spare, 100)]);
+  bind(reserved);
+
+  expect(resolveResumeAccountId("codex", spare, ATLAS)).toBe(spare);
+});
+
+test("a resume-spec account provenance cannot supply is drawn from the pool, not the engine's routing (#1279)", () => {
+  registryWith(spare, [observation(reserved, 5), observation(spare, 5)]);
+  bind(reserved);
+
+  /* Nothing recorded — the adopted conversation, which is most of the live
+     ones — and an id naming an account the machine no longer has. Both are
+     "nobody chose", and the fallback answered both from the routed account. */
+  expect(resolveResumeAccountId("codex", null, ATLAS)).toBe(reserved);
+  expect(resolveResumeAccountId("codex", "codex-account-that-was-deleted", ATLAS)).toBe(reserved);
+});
+
+test("a resume-spec pick reports an exhausted pool rather than the idle account beside it (#1279)", () => {
+  registryWith(spare, [observation(reserved, 100), observation(spare, 5)]);
+  bind(reserved);
+
+  const refused = (() => {
+    try { resolveResumeAccountId("codex", null, ATLAS); return null; } catch (error) { return error; }
+  })();
+  expect((refused as Error).name).toBe("ProjectAccountRefusedError");
+  expect((refused as Error).message).toContain("no allowed codex account has capacity");
+  expect((refused as Error).message).not.toContain(spare);
+});
+
+test("a damaged binding record refuses a resume-spec pick before any spec is built (#1279)", () => {
+  registryWith(spare, []);
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(RECORD, '{"schemaVersion":1,"bindings":[{"engine":"codex"', "utf8");
+
+  expect(() => resolveResumeAccountId("codex", null, ATLAS)).toThrow(AccountProjectBindingsUnreadableError);
+  /* Continuity is never vetoed by a record nobody can read. */
+  expect(resolveResumeAccountId("codex", spare, ATLAS)).toBe(spare);
+});
+
+test("an unbound project keeps the resume-spec builder's own fallback, offered nothing (#1279)", () => {
+  /* No record at all. Answering with the routing account here would REPLACE
+     the builder's fallback on a project that opted into nothing, so the answer
+     is null and the path below this one is byte for byte what it was. */
+  registryWith(spare, [observation(spare, 5)]);
+
+  expect(resolveResumeAccountId("codex", null, ATLAS)).toBeNull();
 });

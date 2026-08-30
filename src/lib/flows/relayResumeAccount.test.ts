@@ -23,7 +23,9 @@ import type { Flow } from "./types";
  */
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-relay-account-test-"));
-process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
+const STATE = path.join(SANDBOX, "state");
+const RECORD = path.join(STATE, "account-project-bindings.json");
+process.env.LLV_STATE_DIR = STATE;
 process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 
 const claude = await import("@/lib/accounts/claude");
@@ -48,6 +50,8 @@ function sharedStoreMachine(name: string): { transcript: string; homes: string[]
       ?? claude.createManagedClaudeAccount(label);
     fs.rmSync(path.join(account.home, "projects"), { recursive: true, force: true });
     if (!fs.existsSync(path.join(account.home, "projects"))) fs.symlinkSync(shared, path.join(account.home, "projects"));
+    /* Present enough to be a candidate the automatic rule may draw. */
+    fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
     homes.push(account.home);
   }
   const project = path.join(shared, "-repo");
@@ -76,11 +80,50 @@ function claudeEntry(pathname: string): FileEntry {
   } as unknown as FileEntry;
 }
 
-async function relaySpecFor(transcript: string): Promise<string> {
+const PROJECT = "project-atlas";
+
+/** The project's pool, as the accounts panel writes it. */
+function bind(accountId: string): void {
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(RECORD, JSON.stringify({
+    schemaVersion: 1,
+    bindings: [{ engine: "claude", accountId, project: PROJECT, createdAt: new Date(Date.now() - 60_000).toISOString() }],
+  }), "utf8");
+}
+
+/** A fresh, live, believed sample with `usedPercent` already burned. */
+function burn(accountId: string, usedPercent: number): void {
+  const now = Date.now();
+  agentRegistry().recordQuotaEvaluation({
+    engine: "claude",
+    observations: [{
+      engine: "claude",
+      accountId,
+      authenticated: true,
+      authCheckedAt: new Date(now - 1_000).toISOString(),
+      limits: {
+        session: { usedPercent, resetsAt: Math.floor(now / 1_000) + 3_600 },
+        weekly: null,
+        plan: "max",
+        capturedAt: Math.floor((now - 1_000) / 1_000),
+      },
+      provenance: { source: "live", reason: null, staleSince: null },
+      observedAt: new Date(now - 1_000).toISOString(),
+      bootId: "boot-flow-relay-account",
+    }],
+    signature: null,
+    bootId: "boot-flow-relay-account",
+    now: new Date(now).toISOString(),
+    minimumGapMs: 60_000,
+  });
+}
+
+async function relaySpecFor(transcript: string, project: string | null = null): Promise<string> {
   const conversation = agentRegistry().conversationForPath(transcript);
   const flow = {
     id: "flow-relay-account",
     cwd: "/repo",
+    project,
     implementerPath: transcript,
     implementerConversationId: conversation?.id ?? null,
     hostClaim: null,
@@ -124,4 +167,72 @@ test("a legacy relay for work recorded on the routed account is unchanged", asyn
   const command = await relaySpecFor(transcript);
 
   expect(command).toContain(routed.home);
+});
+
+/*
+ * The tenth path, and the half the ninth left open: a relay whose implementer
+ * records NO account. Passing provenance is only continuity when there IS
+ * provenance — an adopted thread has none, and the ownership fallback then
+ * answered from the engine's ACTIVE account for any transcript in the shared
+ * store. That is a pick, so it obeys the automatic rule like every other one.
+ */
+test("a legacy relay for work that records no account draws from the project's pool (#1279)", async () => {
+  const { transcript, homes } = sharedStoreMachine("cccccccccccc");
+  const accounts = claude.listClaudeAccounts().filter((item) => homes.includes(item.home));
+  const routed = accounts[0]!;
+  const pooled = accounts.at(-1)!;
+  expect(routed.id).not.toBe(pooled.id);
+  claude.setActiveClaudeAccount(routed.id);
+  agentRegistry().setEngineRouting("claude", routed.id);
+  /* Deliberately NOT recorded: this is the adopted conversation. */
+  bind(pooled.id);
+
+  const command = await relaySpecFor(transcript, PROJECT);
+
+  expect(command).toContain(pooled.home);
+  expect(command).not.toContain(routed.home);
+});
+
+test("a legacy relay on an unbound project keeps the fallback it always had (#1279)", async () => {
+  const { transcript, homes } = sharedStoreMachine("dddddddddddd");
+  const accounts = claude.listClaudeAccounts().filter((item) => homes.includes(item.home));
+  const routed = accounts[0]!;
+  claude.setActiveClaudeAccount(routed.id);
+  agentRegistry().setEngineRouting("claude", routed.id);
+  fs.rmSync(RECORD, { force: true });
+
+  const command = await relaySpecFor(transcript, PROJECT);
+
+  expect(command).toContain(routed.home);
+});
+
+test("a legacy relay refuses rather than deliver on a pooled account with no capacity (#1279)", async () => {
+  const { transcript, homes } = sharedStoreMachine("eeeeeeeeeeee");
+  const accounts = claude.listClaudeAccounts().filter((item) => homes.includes(item.home));
+  const routed = accounts[0]!;
+  const pooled = accounts.at(-1)!;
+  claude.setActiveClaudeAccount(routed.id);
+  agentRegistry().setEngineRouting("claude", routed.id);
+  bind(pooled.id);
+  /* The pool's one account is spent and the routed one is idle beside it.
+     Reaching for the idle one is the boundary crossing the pool prevents. */
+  burn(pooled.id, 100);
+
+  const refused = await relaySpecFor(transcript, PROJECT).then(() => null, (error: unknown) => error);
+  expect((refused as Error).name).toBe("ProjectAccountRefusedError");
+  expect((refused as Error).message).toContain("no allowed claude account has capacity");
+  expect((refused as Error).message).not.toContain(routed.id);
+});
+
+test("a damaged binding record refuses a legacy relay before it delivers anything (#1279)", async () => {
+  const { transcript, homes } = sharedStoreMachine("ffffffffffff");
+  const routed = claude.listClaudeAccounts().filter((item) => homes.includes(item.home))[0]!;
+  claude.setActiveClaudeAccount(routed.id);
+  agentRegistry().setEngineRouting("claude", routed.id);
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(RECORD, '{"schemaVersion":1,"bindings":[{"engine":"claude"', "utf8");
+
+  const refused = await relaySpecFor(transcript, PROJECT).then(() => null, (error: unknown) => error);
+  expect((refused as Error).name).toBe("AccountProjectBindingsUnreadableError");
+  fs.rmSync(RECORD, { force: true });
 });
