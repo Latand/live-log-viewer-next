@@ -66,6 +66,25 @@ describe("readSession", () => {
     expect(result.traces[0]?.name).toBe("turn_complete");
   });
 
+  test("excludes Codex token_count usage envelopes from traces", () => {
+    const pathname = writeJsonl("codex-token-count.jsonl", [
+      { type: "event_msg", timestamp: "t1", payload: { type: "token_count", info: { total_tokens: 128 } } },
+      { type: "event_msg", timestamp: "t2", payload: { type: "turn_complete" } },
+    ]);
+    const result = readSession(pathname, "codex");
+    expect(result.traces.map((item) => item.name)).toEqual(["turn_complete"]);
+  });
+
+  test("keeps legacy Codex reasoning events and recognizes agent reasoning events", () => {
+    const pathname = writeJsonl("codex-reasoning.jsonl", [
+      { type: "event_msg", timestamp: "t1", payload: { type: "reasoning", text: "legacy reasoning" } },
+      { type: "event_msg", timestamp: "t2", payload: { type: "agent_reasoning", text: "current reasoning" } },
+    ]);
+    const result = readSession(pathname, "codex");
+    expect(result.reasoning.map((item) => item.text)).toEqual(["legacy reasoning", "current reasoning"]);
+    expect(result.traces).toEqual([]);
+  });
+
   test("reads modern Codex response-item text and stops authorship scanning at the first user record", () => {
     const pathname = path.join(SANDBOX, "codex-modern-input-text.jsonl");
     const firstRows = [
