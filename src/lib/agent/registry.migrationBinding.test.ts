@@ -268,3 +268,144 @@ test("a project with no binding migrates exactly as it always did, on both paths
   lazy.store.requestConversationMigrationToActiveAccount(lazy.ids.get(ATLAS)! as never);
   expect(queuedTargets(lazy.store, lazy.ids)).toEqual({ [ATLAS]: TARGET });
 });
+
+/**
+ * The eleventh selector (#1279): SETTLEMENT-time enrollment.
+ *
+ * A spawn reserved on its birth account before a drain existed settles while
+ * that drain is running, and the settlement enrolls it. Nobody named an
+ * account for that enrollment, so for an automatic drain it is an automatic
+ * selection and asks what every other one asks — through the same admission.
+ * It used to ask nothing: an exhausted target, a pool that forbids the target
+ * and a record nobody can read all passed this point untouched.
+ *
+ * The drain has to still be ENROLLABLE when the spawn settles, so every case
+ * below commits it with one conversation it is allowed to move. A drain that
+ * moves nothing completes on the spot and enrolls nobody, which would prove
+ * nothing about the admission.
+ */
+
+const UNBOUND = "project-unbound";
+
+/** A spawn reserved on the birth account, settled as a fresh conversation. */
+function settleFreshSpawn(store: Registry, project: string): string {
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: `/checkouts/${project}`,
+    accountId: ORIGIN_ACCOUNT,
+    launchProfile: { cwd: `/checkouts/${project}`, project, title: `Settling ${project} worker` },
+  });
+  if (begun.kind !== "created") throw new Error(`expected a fresh spawn, got ${begun.kind}`);
+  const sessionId = crypto.randomUUID();
+  const settled = store.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId },
+    artifactPath: `/sessions/settled-${sessionId}.jsonl`,
+    cwd: `/checkouts/${project}`,
+    accountId: ORIGIN_ACCOUNT,
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  if (settled.kind !== "settled") throw new Error(`settlement conflict: ${settled.code}`);
+  return settled.conversation.id;
+}
+
+/** Where the settled conversation stands afterwards: the target it was
+    enrolled towards, or the birth account it is parked on. */
+function settlementOutcome(store: Registry, id: string): { enrolledTo: string | null; account: string | null } {
+  const conversation = store.conversation(id as never);
+  return {
+    enrolledTo: conversation?.migration?.targetId ?? null,
+    account: conversation?.generations.at(-1)?.accountId ?? null,
+  };
+}
+
+test("a settlement enrolls into an automatic drain when the project's own pool allows the target", () => {
+  const { store } = registryWith([ATLAS]);
+  bind([{ project: ATLAS, accountId: TARGET }]);
+  drain(store, "auto");
+
+  const settled = settleFreshSpawn(store, ATLAS);
+
+  expect(settlementOutcome(store, settled)).toEqual({ enrolledTo: TARGET, account: ORIGIN_ACCOUNT });
+});
+
+test("a settlement whose project forbids the drain's target parks on its birth account", () => {
+  /* The failure this replaces: the drain was committed for a target Atlas
+     allows, Orion's spawn settled a moment later, and the settlement carried
+     Orion's work onto an account only Atlas is bound to. */
+  const { store } = registryWith([ATLAS]);
+  bind([
+    { project: ATLAS, accountId: TARGET },
+    { project: ORION, accountId: "carrier-south" },
+  ]);
+  drain(store, "auto");
+
+  const settled = settleFreshSpawn(store, ORION);
+
+  expect(settlementOutcome(store, settled)).toEqual({ enrolledTo: null, account: ORIGIN_ACCOUNT });
+});
+
+test("a settlement onto an allowed target with no capacity left parks on its birth account", () => {
+  /* Being in the pool is not having room in it. The drain stays enrollable
+     because the conversation it moves belongs to an unbound project, where no
+     capacity arithmetic applies and never did. */
+  const exhausted = registryWith([UNBOUND]);
+  bind([{ project: ATLAS, accountId: TARGET }]);
+  quota(exhausted.store, TARGET, 100);
+  drain(exhausted.store, "auto");
+
+  const parked = settleFreshSpawn(exhausted.store, ATLAS);
+  expect(settlementOutcome(exhausted.store, parked)).toEqual({ enrolledTo: null, account: ORIGIN_ACCOUNT });
+
+  /* The identical binding with room left in the same account enrolls, so the
+     park above is the capacity reading and not the pool. */
+  const spare = registryWith([UNBOUND]);
+  quota(spare.store, TARGET, 5);
+  drain(spare.store, "auto");
+
+  expect(settlementOutcome(spare.store, settleFreshSpawn(spare.store, ATLAS)))
+    .toEqual({ enrolledTo: TARGET, account: ORIGIN_ACCOUNT });
+});
+
+test("a settlement parks when the binding record cannot be read", () => {
+  /* Read as "unbound" a damaged record means every account is allowed, which
+     is the fence disappearing at the one point that never had it. The spawn has
+     already happened, so this refuses the ROUTING change and keeps the
+     conversation: it settles, and it stays on the account it was born on. */
+  const { store } = registryWith([ATLAS]);
+  bind([{ project: ATLAS, accountId: TARGET }]);
+  drain(store, "auto");
+  damageRecord();
+
+  const settled = settleFreshSpawn(store, ATLAS);
+
+  expect(settlementOutcome(store, settled)).toEqual({ enrolledTo: null, account: ORIGIN_ACCOUNT });
+});
+
+test("a settlement on an unbound project enrolls exactly as it always did", () => {
+  const { store } = registryWith([UNBOUND]);
+  drain(store, "auto");
+
+  const settled = settleFreshSpawn(store, UNBOUND);
+
+  expect(settlementOutcome(store, settled)).toEqual({ enrolledTo: TARGET, account: ORIGIN_ACCOUNT });
+});
+
+test("a settlement enrolls into a MANUAL drain unrestricted, outside the pool and past a damaged record", () => {
+  /* A manual drain NAMED its target. It is a control, it is carried out, and
+     the settlement that joins it reads no binding at all. */
+  const disallowed = registryWith([ATLAS]);
+  bind([{ project: ORION, accountId: "carrier-south" }]);
+  drain(disallowed.store, "manual");
+  expect(settlementOutcome(disallowed.store, settleFreshSpawn(disallowed.store, ORION)))
+    .toEqual({ enrolledTo: TARGET, account: ORIGIN_ACCOUNT });
+
+  const damaged = registryWith([ATLAS]);
+  drain(damaged.store, "manual");
+  damageRecord();
+  expect(settlementOutcome(damaged.store, settleFreshSpawn(damaged.store, ORION)))
+    .toEqual({ enrolledTo: TARGET, account: ORIGIN_ACCOUNT });
+});
