@@ -8,7 +8,7 @@ import { sessionKeyId } from "@/lib/agent/sessionKey";
 import type { HeldDelivery, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
-import type { RuntimeReceiptStatus } from "./contracts";
+import type { RuntimeOperationReceipt, RuntimeReceiptStatus } from "./contracts";
 
 /**
  * Settlement of accepted sends (#1131).
@@ -148,6 +148,9 @@ export type SendResendGuidance =
 
 export interface SendReceipt {
   operationId: string;
+  /** What was accepted under this id. Read from the durable record, so it
+      survives the journal that admitted it. */
+  kind: "send" | "steer";
   conversationId: string | null;
   /** The idempotency key the send was admitted under, when the record kept it. */
   clientMessageId: string | null;
@@ -226,6 +229,7 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
   if (!owner && !delivery) return null;
   const conversationId = (delivery?.conversationId ?? owner?.conversationId) ?? null;
   const clientMessageId = (delivery?.clientMessageId ?? owner?.clientMessageId) ?? null;
+  const kind = (delivery?.command ?? owner?.command)?.kind ?? "send";
   const acceptedAt = delivery ? acceptedAtOf(delivery) : owner?.createdAt ?? null;
   /* The reservation wins when it is still present — it carries the reason and
      the delivery time — and the owner row answers once it has been compacted
@@ -237,6 +241,7 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
   if (terminalState === "delivered") {
     return {
       operationId,
+      kind,
       conversationId,
       clientMessageId,
       state: "delivered",
@@ -252,6 +257,7 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
     const reason = delivery?.error ?? owner?.terminalReason ?? null;
     return {
       operationId,
+      kind,
       conversationId,
       clientMessageId,
       state: "failed",
@@ -264,6 +270,7 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
   }
   return {
     operationId,
+    kind,
     conversationId,
     clientMessageId,
     state: "in-flight",
@@ -275,6 +282,30 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
     duplicateRisk: false,
     resend: null,
     evidence: "delivery-record",
+  };
+}
+
+/**
+ * The settlement's answer in the shape a runtime receipt reader expects.
+ *
+ * The operation API answers `{ operationId, receipt }`, and during an outage
+ * the journal that would have supplied the receipt is exactly what cannot be
+ * reached — which used to make an accepted send unqueryable for the length of
+ * the outage. Everything here comes off the durable record, so the endpoint can
+ * answer from it alone; the journal's own receipt is preferred wherever it can
+ * still be read, because it carries more than the record ever holds.
+ */
+export function runtimeReceiptForSend(receipt: SendReceipt): RuntimeOperationReceipt {
+  return {
+    operationId: receipt.operationId,
+    idempotencyKey: receipt.clientMessageId ?? "",
+    conversationId: receipt.conversationId ?? "",
+    kind: receipt.kind,
+    status: receipt.state === "in-flight" ? "queued" : receipt.state,
+    reason: receipt.reason,
+    at: receipt.settledAt ?? receipt.acceptedAt ?? new Date(0).toISOString(),
+    ...(receipt.acceptedAt ? { admittedAt: receipt.acceptedAt } : {}),
+    revision: 1,
   };
 }
 

@@ -1198,3 +1198,42 @@ test("runtime retry leaves an in-flight operation and its ownership unchanged", 
   expect(recoveries).toBe(0);
   expect(retries).toBe(0);
 });
+
+test("a send no structured delivery owns is refused rather than admitted without a reservation", async () => {
+  /* #1131: this was the last road by which `queued` could be a final answer.
+     The structured path declines the conversation, and the direct command below
+     used to admit the send straight into the runtime journal — an accepted
+     operation with no durable reservation behind it, so nothing could settle it
+     and a lasting outage left it neither executed nor queryable. A control on
+     the same road reserves nothing and still goes through. */
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "op_unowned", receipt: { operationId: "op_unowned", status: "queued" } };
+    },
+  } as unknown as RuntimeHostClient;
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => true,
+    client: () => client,
+    enqueue: async () => null,
+  };
+
+  const send = await handleRuntimeCommand(
+    request({ conversationId: "conversation_unowned", text: "continue", idempotencyKey: "unowned-send" }),
+    "send",
+    dependencies,
+  );
+  expect(send.status).toBe(503);
+  expect(await send.json()).toMatchObject({ error: "structured delivery ownership is unavailable for this conversation" });
+  expect(commands).toEqual([]);
+
+  const interrupt = await handleRuntimeCommand(
+    request({ conversationId: "conversation_unowned", operationId: "op_unowned_interrupt" }),
+    "interrupt",
+    dependencies,
+  );
+  expect(interrupt.status).toBe(202);
+  expect(commands).toHaveLength(1);
+});

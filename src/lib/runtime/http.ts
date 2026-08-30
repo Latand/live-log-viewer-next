@@ -233,9 +233,19 @@ async function dispatchRuntimeCommand(
         const status = admitted.receipt.status === "pending" || admitted.receipt.status === "queued" ? 202 : 200;
         return NextResponse.json({ operationId: admitted.operationId, receipt: admitted.receipt }, { status });
       }
-      /* No structured ownership: nothing was delivered here, and the direct
-         command below owns the fate from now on. */
+      /* No structured ownership. The direct command below used to own the fate
+         from here, and for a SEND that is `queued` as a final answer by another
+         road (#1131): the operation is admitted straight into the journal with
+         no durable reservation behind it, so no receipt query can settle it and
+         a lasting outage leaves it unqueryable as well as unexecuted. A send
+         nothing owns is refused instead — the caller learns now, rather than
+         holding an id that never becomes an answer. Controls are untouched:
+         they carry no message and reserve nothing. */
       attachments.outcome = "refused";
+      return NextResponse.json(
+        { error: "structured delivery ownership is unavailable for this conversation" },
+        { status: 503 },
+      );
     }
     if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
     /* Same fence as the queue above: the command is on the wire, so its fate is
