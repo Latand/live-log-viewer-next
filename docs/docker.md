@@ -68,6 +68,13 @@ serializes the request, verifies the candidate, and switches its listener
 target. Inspect the owner with
 `docker compose --profile runtime-host logs -f runtime-host`.
 
+Run that command from any checkout of the repository, a worktree included, with
+nothing wrapping it and no `git pull` before it: it posts a revision, and the
+runtime host builds that revision from its own canonical Git mirror rather than
+from the working tree (#1309). With no argument it resolves the canonical
+`refs/heads/main` tip and deploys that exact commit; a full lowercase commit SHA
+pins a redeploy or a rollback.
+
 ### Bootstrap the runtime host onto a new revision (#1216)
 
 `scripts/rebuild.sh` replaces the runtime-host generation only in the

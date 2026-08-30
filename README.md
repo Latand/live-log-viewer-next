@@ -277,6 +277,13 @@ scripts/rebuild.sh
 LLV_TEST_PORT=8901 docker compose --profile test up -d viewer-test
 ```
 
+`scripts/rebuild.sh` is the whole release command, run from any checkout of the
+repository — a worktree included — with nothing wrapping it and no `git pull`
+first. It posts a revision to the runtime host, which builds that revision from
+its own canonical Git mirror rather than from the working tree. With no argument
+it resolves the canonical `refs/heads/main` tip and deploys that exact commit; a
+full lowercase commit SHA pins a redeploy or a rollback.
+
 See [docs/docker.md](docs/docker.md) for the parity model, the nsenter shims,
 and volume/port details.
 

@@ -18,18 +18,23 @@ function fixture() {
   const capture = path.join(root, "request.json");
   const args = path.join(root, "request.args");
   const gitArgs = path.join(root, "git.args");
+  const binGit = path.join(root, "bin-git");
   fs.mkdirSync(bin);
   fs.mkdirSync(path.join(home, ".config", "agent-log-viewer"), { recursive: true });
   fs.writeFileSync(path.join(home, ".config", "agent-log-viewer", "service.env"), "");
   /* The canonical main tip is read machine-to-machine (#1033); the stub stands
      in for the network so the test asserts what the script posts. */
-  const git = path.join(bin, "git");
-  fs.writeFileSync(git, `#!/usr/bin/env bash
+  const gitStub = `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >> "$LLV_TEST_GIT_ARGS"
 if [ -n "\${LLV_TEST_LS_REMOTE_FAILS:-}" ]; then exit 128; fi
 printf '%s' "\${LLV_TEST_LS_REMOTE:-}"
-`, { mode: 0o755 });
+`;
+  fs.writeFileSync(path.join(bin, "git"), gitStub, { mode: 0o755 });
+  /* #1309 — the stub-server tests drive the real curl against a loopback
+     server of their own, so they need the git stub without the curl one. */
+  fs.mkdirSync(binGit);
+  fs.writeFileSync(path.join(binGit, "git"), gitStub, { mode: 0o755 });
   const curl = path.join(bin, "curl");
   fs.writeFileSync(curl, `#!/usr/bin/env bash
 set -euo pipefail
@@ -52,7 +57,7 @@ else
   printf '{"phase":"succeeded","terminal":true}'
 fi
 `, { mode: 0o755 });
-  return { root, bin, home, capture, args, gitArgs };
+  return { root, bin, binGit, home, capture, args, gitArgs };
 }
 
 const CANONICAL_REMOTE = "https://canonical.invalid/live-log-viewer-next.git";
@@ -102,6 +107,7 @@ for (const [name, revision] of [
   ["uppercase hex", "A".repeat(40)],
   ["embedded whitespace", `${"a".repeat(20)} ${"b".repeat(19)}`],
   ["a ref-like value", "refs/heads/main"],
+  ["the origin/main alias the endpoint refuses", "origin/main"],
   ["an embedded newline", `${"a".repeat(20)}\n${"b".repeat(20)}`],
   ["an embedded carriage return", `${"a".repeat(20)}\r${"b".repeat(20)}`],
 ] as const) {
@@ -111,6 +117,8 @@ for (const [name, revision] of [
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr.toString()).toContain("invalid revision");
+    expect(result.stdout.toString()).not.toContain("deployment key");
+    expect(result.stdout.toString()).not.toContain("deployment admitted");
     expect(fs.existsSync(setup.capture)).toBe(false);
   });
 }
@@ -145,15 +153,14 @@ test("a bare rebuild reads the canonical main tip itself and posts the resolved 
   expect(result.stdout.toString()).toContain(`resolved refs/heads/main at ${CANONICAL_REMOTE}: ${MAIN_TIP}`);
 });
 
-test("an explicit origin/main argument resolves the same way as a bare invocation", () => {
+test("a refused origin/main argument never reaches the remote or the endpoint", () => {
   const setup = fixture();
   const result = runRebuild("explicit-origin-main", setup, "origin/main");
 
-  expect(result.exitCode).toBe(0);
-  expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({
-    revision: MAIN_TIP,
-    idempotencyKey: "explicit-origin-main",
-  });
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain("full lowercase 40-character commit SHA");
+  expect(fs.existsSync(setup.gitArgs)).toBe(false);
+  expect(fs.existsSync(setup.capture)).toBe(false);
 });
 
 test("a pinned SHA deploy never consults the remote", () => {
@@ -203,4 +210,112 @@ test("rebuild keeps the Viewer credential out of loopback request arguments", ()
   expect(args).not.toContain("?k=");
   expect(args).toContain("http://127.0.0.1:18898/api/runtime/deployments");
   expect(args).toContain("http://127.0.0.1:18898/api/runtime/deployments/deploy_test");
+});
+
+/* #1309 — the two properties that decide whether the documented release command
+   works as written are properties of what the script says and posts, so these
+   run it against a stub deployment server of the test's own on an ephemeral
+   loopback port, with the real curl. The operator's endpoint is never touched.
+   The server has to answer while the script runs, so the script is spawned
+   asynchronously: a blocking spawn would hold the event loop that serves it. */
+interface StubDeploymentServer {
+  port: number;
+  posts: Array<{ path: string; body: string }>;
+  statusRequests: string[];
+  stop(): void;
+}
+
+function stubDeploymentServer(admission: { status: number; body: unknown }): StubDeploymentServer {
+  const posts: Array<{ path: string; body: string }> = [];
+  const statusRequests: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const { pathname } = new URL(request.url);
+      if (request.method === "POST") {
+        posts.push({ path: pathname, body: await request.text() });
+        return Response.json(admission.body, { status: admission.status });
+      }
+      statusRequests.push(pathname);
+      return Response.json({ phase: "succeeded", terminal: true });
+    },
+  });
+  const { port } = server;
+  if (port === undefined) throw new Error("the stub deployment server was not given a loopback port");
+  return { port, posts, statusRequests, stop: () => server.stop(true) };
+}
+
+async function runRebuildAgainstServer(
+  setup: ReturnType<typeof fixture>,
+  port: number,
+  idempotencyKey: string,
+) {
+  const child = Bun.spawn(["bash", rebuildScript], {
+    cwd: setup.root,
+    env: {
+      ...process.env,
+      HOME: setup.home,
+      XDG_CONFIG_HOME: path.join(setup.home, ".config"),
+      TMPDIR: setup.root,
+      PATH: `${setup.binGit}:${process.env.PATH ?? ""}`,
+      PORT: String(port),
+      LLV_DEPLOY_IDEMPOTENCY_KEY: idempotencyKey,
+      LLV_TEST_GIT_ARGS: setup.gitArgs,
+      LLV_VIEWER_CANONICAL_REMOTE: CANONICAL_REMOTE,
+      LLV_TEST_LS_REMOTE: `${MAIN_TIP}\trefs/heads/main\n`,
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}
+
+test("a bare rebuild sends the stub deployment server a full SHA and nothing else", async () => {
+  const setup = fixture();
+  const server = stubDeploymentServer({ status: 202, body: { state: "accepted", deploymentId: "deploy_stub" } });
+  try {
+    const result = await runRebuildAgainstServer(setup, server.port, "stub-accepted");
+
+    expect(result.exitCode).toBe(0);
+    expect(server.posts.map((post) => post.path)).toEqual(["/api/runtime/deployments"]);
+    const posted = JSON.parse(server.posts[0].body) as { revision: string; idempotencyKey: string };
+    expect(posted.revision).toMatch(/^[0-9a-f]{40}$/);
+    expect(posted).toEqual({ revision: MAIN_TIP, idempotencyKey: "stub-accepted" });
+    expect(result.stdout).toContain("deployment key: stub-accepted");
+    expect(result.stdout).toContain("deployment admitted: deploy_stub");
+    expect(result.stdout.indexOf("resolved refs/heads/main")).toBeLessThan(result.stdout.indexOf("deployment key:"));
+    expect(server.statusRequests).toEqual(["/api/runtime/deployments/deploy_stub"]);
+  } finally {
+    server.stop();
+  }
+});
+
+test("a request the deployment endpoint refuses prints no started-deployment line", async () => {
+  const setup = fixture();
+  const server = stubDeploymentServer({
+    status: 400,
+    body: { error: "revision must be a full 40-character commit SHA", reason: "revision_invalid" },
+  });
+  try {
+    const result = await runRebuildAgainstServer(setup, server.port, "stub-refused");
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("deployment request failed (HTTP 400)");
+    expect(result.stderr).toContain("revision_invalid");
+    expect(result.stdout).not.toContain("deployment key");
+    expect(result.stdout).not.toContain("deployment admitted");
+    /* Everything the refusal left on stdout: the commit it would have deployed. */
+    expect(result.stdout.trim().split("\n")).toEqual([
+      `resolved refs/heads/main at ${CANONICAL_REMOTE}: ${MAIN_TIP}`,
+    ]);
+    expect(server.statusRequests).toEqual([]);
+  } finally {
+    server.stop();
+  }
 });
