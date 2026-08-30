@@ -2055,6 +2055,41 @@ test("a stage with an unwritten transcript parks on its first-message drain fail
   expect(parked.runs[0]!.attempts[0]!.error).toBe(reason);
 });
 
+test("a runtime-host outage does not hide a terminal spawn receipt's drain cause (#1314)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  h.ports.spawnAgent = async (_input, onReserved) => {
+    onReserved({ launchId: "launch-drain-outage", conversationId: "conversation_drain_outage" });
+    return {
+      launchId: "launch-drain-outage",
+      conversationId: "conversation_drain_outage",
+      sessionId: "session-drain-outage",
+      "transcript": "/codex/unwritten-outage-stage.jsonl",
+      paneId: null,
+    };
+  };
+  await tickPipelines([], h.ports);
+  /* The runtime host is unreachable: liveness answers null, not false. */
+  h.setConversationActive(null);
+  const reason = "first message never drained: runtime host request timed out";
+  h.ports.spawnReceipt = () => ({
+    state: "failed",
+    launchId: "launch-drain-outage",
+    conversationId: "conversation_drain_outage",
+    sessionId: "session-drain-outage",
+    "transcript": "/codex/unwritten-outage-stage.jsonl",
+    paneId: null,
+    error: reason,
+  });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({ state: "needs_decision", stateDetail: reason });
+  expect(parked.runs[0]!.attempts[0]!.error).toBe(reason);
+});
+
 test("a worker that dies after transcript discovery enters bounded verdict recovery", async () => {
   const h = harness();
   await create(h.ports);

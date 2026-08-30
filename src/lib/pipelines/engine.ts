@@ -1790,7 +1790,11 @@ async function tickRunStage(
     && (spawnReceipt.state === "failed" || spawnReceipt.state === "conflicted")
     ? spawnReceipt.error ?? `stage spawn cannot recover from receipt state ${spawnReceipt.state}`
     : null;
-  if (structuredActive === false && terminalSpawnFailure) {
+  /* A terminal spawn receipt is durable evidence; only an affirmatively
+     active agent outranks it. A runtime-host outage answers null, and that
+     unknown must not hide the real drain cause behind a later
+     transcript-unreadable park (#1314). */
+  if (!attempt.paneId && attempt.conversationId && structuredActive !== true && terminalSpawnFailure) {
     park(pipeline, terminalSpawnFailure, attempt);
     return;
   }
