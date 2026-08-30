@@ -66,12 +66,12 @@ import { activeOrchestratorSeats, canonicalOrchestratorProject, orchestratorRevo
 import { ORCHESTRATOR_PROMPT_VERSION, ORCHESTRATOR_SYSTEM_PROMPT } from "@/lib/orchestrator/prompt";
 import { contextReading, readOrchestratorTranscriptFacts, rotationRecommendation } from "@/lib/orchestrator/health";
 import { contextWindowPolicyFor } from "@/lib/orchestrator/contextPolicy";
-import { createPipelineFromRequest, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
+import { createPipelineFromRequest, getPipeline as getPipelineRecord, getPipelines, patchPipeline } from "@/lib/pipelines/engine";
 import { latestOperationalPipelineAttempt } from "@/lib/pipelines/attemptSelection";
 import { requestPipelineTick } from "@/lib/pipelines/controllerSignal";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import { PIPELINE_LIST_DEFAULT_LIMIT, projectPipelineListRows } from "@/lib/pipelines/listProjection";
-import { findPipelineRecord, loadPipelinesForList } from "@/lib/pipelines/store";
+import { loadPipelinesForList } from "@/lib/pipelines/store";
 import type { CreatePipelineRequest, PatchPipelineRequest, Pipeline, PipelineAction } from "@/lib/pipelines/types";
 import type { PauseResumeActor } from "@/lib/pauseResumeActor";
 import { listFiles } from "@/lib/scanner";
@@ -2030,7 +2030,7 @@ async function rotateOrchestrator(args: McpToolArgs, control: ViewerControlDepen
 
 async function getPipeline(args: McpToolArgs): Promise<McpToolPayload> {
   const pipelineId = required(args, "pipelineId");
-  const pipeline = findPipelineRecord(pipelineId);
+  const pipeline = getPipelineRecord(pipelineId);
   if (!pipeline) throw new Error("pipeline not found");
   return redactPayload({ pipelineId, pipeline });
 }

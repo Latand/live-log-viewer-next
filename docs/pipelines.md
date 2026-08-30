@@ -6,6 +6,8 @@ Pipelines run a user-defined chain of two to four agent stages in one dedicated 
 
 `GET /api/pipelines` returns `{ "pipelines": [...] }`.
 
+`GET /api/pipelines/<id>` returns `{ "ok": true, "pipeline": {...} }` with the full record for one pipeline.
+
 `POST /api/pipelines` accepts:
 
 ```json
