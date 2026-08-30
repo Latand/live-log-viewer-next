@@ -8,7 +8,7 @@ import { procBackend } from "@/lib/proc";
 import { durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { conversationProjectKey } from "@/lib/accounts/conversationProject";
-import { accountProjectBindings } from "@/lib/accounts/projectBindings";
+import { accountProjectBindings, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
 import { admitAutomaticAccountTarget } from "@/lib/accounts/projectSelection";
 import {
   emptyLaunchProfile,
@@ -937,30 +937,44 @@ function conversationMigrationForIntent(
  * it reads no bindings at all — enrollment there is unrestricted, exactly as
  * it was.
  *
- * A refusal PARKS: the settlement stands and the conversation stays on the
- * account it was born on, which crosses nothing. That is also why no read
- * failure escapes this function — the spawn has already happened, and evidence
- * this process cannot turn into a pool must not be able to lose it. Every
- * failure answers "not admitted", the same direction the fence fails
- * everywhere else, and the conversation is visibly still on its birth account.
+ * A refusal PARKS the caller at its current safe state. Settlement keeps the
+ * conversation on its birth account. Retry keeps the migration failed and
+ * carries the admission reason. No read failure escapes this function: the
+ * spawn has already happened, and evidence this process cannot turn into a pool
+ * must not be able to lose it. Every failure answers "not admitted", the same
+ * direction the fence fails everywhere else.
  */
-function settlementEnrollmentAdmitted(
+type MigrationEnrollmentAdmission =
+  | { kind: "accepted" }
+  | { kind: "refused"; reason: string };
+
+function migrationEnrollmentAdmission(
   file: RegistryFile,
   conversation: RegistryConversation,
   source: NativeGeneration,
   intent: MigrationIntent,
-): boolean {
-  if (intent.origin !== "auto") return true;
+): MigrationEnrollmentAdmission {
+  if (intent.origin !== "auto") return { kind: "accepted" };
+  const project = conversationProjectKey(conversation.projectOwnership, source.launchProfile);
   try {
-    return admitAutomaticAccountTarget({
-      project: conversationProjectKey(conversation.projectOwnership, source.launchProfile),
+    const resolution = admitAutomaticAccountTarget({
+      project,
       engine: conversation.engine,
       targetId: intent.targetId,
       observations: Object.values(file.quotaObservations[conversation.engine]),
       bindings: accountProjectBindings(),
-    }).kind === "available";
-  } catch {
-    return false;
+    });
+    return resolution.kind === "available"
+      ? { kind: "accepted" }
+      : {
+          kind: "refused",
+          reason: projectAccountRefusalDetail(resolution, conversation.engine, project ?? ""),
+        };
+  } catch (error) {
+    return {
+      kind: "refused",
+      reason: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -4528,7 +4542,7 @@ export class AgentRegistry {
     const source = conversation.generations.at(-1);
     if (activeIntent && !conversation.pinnedAccountId && source
       && source.accountId !== activeIntent.targetId && !conversation.migration
-      && settlementEnrollmentAdmitted(file, conversation, source, activeIntent)) {
+      && migrationEnrollmentAdmission(file, conversation, source, activeIntent).kind === "accepted") {
       conversation.migration = conversationMigrationForIntent(
         conversation,
         source,
@@ -6226,12 +6240,19 @@ export class AgentRegistry {
       if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error("migration revision is stale");
       const intent = file.migrationIntents[current.intentId];
       if (!intent || intent.state === "stopped") throw new Error("migration intent is inactive");
+      const source = conversation.generations.at(-1);
+      if (!source) throw new Error("conversation has no source generation");
+      const admission = migrationEnrollmentAdmission(file, conversation, source, intent);
+      if (admission.kind === "refused") {
+        const changedAt = now();
+        conversation.migration = { ...current, error: admission.reason, updatedAt: changedAt };
+        conversation.updatedAt = changedAt;
+        return clone(conversation);
+      }
       if (intent.state === "complete" && current.phase === "failed-recoverable") {
         intent.state = "draining";
         intent.updatedAt = now();
       }
-      const source = conversation.generations.at(-1);
-      if (!source) throw new Error("conversation has no source generation");
       conversation.migration = {
         ...current,
         phase: migrationTurnIsBusy(file, conversation) ? "waiting-turn" : "requested",

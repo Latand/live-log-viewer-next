@@ -30,7 +30,7 @@ const PREVIOUS_STATE = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = STATE;
 
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
-const { AccountProjectBindingsUnreadableError } = await import("@/lib/accounts/projectBindings");
+const { accountProjectBindings, AccountProjectBindingsUnreadableError } = await import("@/lib/accounts/projectBindings");
 const { AgentRegistry } = await import("./registry");
 const { resetProjectAliasesForTests } = await import("@/lib/projects/aliases");
 
@@ -135,6 +135,29 @@ function drain(store: Registry, origin: "auto" | "manual") {
     requestId: `drain-${origin}-${crypto.randomUUID()}`,
     expectedRevision: store.engineRouting("codex").revision,
   });
+}
+
+function failAutomaticMigration(store: Registry, id: string) {
+  const intent = drain(store, "auto");
+  const armed = store.conversation(id as never)?.migration;
+  if (!armed) throw new Error("expected the automatic migration to enroll the conversation");
+  const failed = store.transitionConversationMigration(id as never, armed.revision, [armed.phase], {
+    phase: "failed-recoverable",
+    error: "successor provider failed a recoverable preflight",
+    errorCode: "provider-failed",
+  });
+  store.setMigrationIntentState(intent.id, "complete");
+  return { failed, intent };
+}
+
+function unreadableBindingReason(): string {
+  try {
+    accountProjectBindings();
+  } catch (error) {
+    if (error instanceof AccountProjectBindingsUnreadableError) return error.message;
+    throw error;
+  }
+  throw new Error("expected the binding record to be unreadable");
 }
 
 beforeEach(() => {
@@ -408,4 +431,74 @@ test("a settlement enrolls into a MANUAL drain unrestricted, outside the pool an
   damageRecord();
   expect(settlementOutcome(damaged.store, settleFreshSpawn(damaged.store, ORION)))
     .toEqual({ enrolledTo: TARGET, account: ORIGIN_ACCOUNT });
+});
+
+test("an automatic migration retry refuses a target outside the conversation project's pool", () => {
+  const { store, ids } = registryWith([ATLAS]);
+  bind([{ project: ATLAS, accountId: TARGET }]);
+  const id = ids.get(ATLAS)!;
+  const { failed, intent } = failAutomaticMigration(store, id);
+  bind([{ project: ATLAS, accountId: "carrier-south" }]);
+
+  const refused = store.retryConversationMigration(id as never, failed.migration!.revision);
+
+  expect(refused.migration).toMatchObject({
+    phase: "failed-recoverable",
+    error: "codex account carrier-north is not allowed on project project-atlas (allowed codex accounts: carrier-south)",
+    operationId: failed.migration!.operationId,
+  });
+  expect(store.readOnlySnapshot().migrationIntents[intent.id]?.state).toBe("complete");
+});
+
+test("an automatic migration retry refuses an allowed target whose capacity is exhausted", () => {
+  const { store, ids } = registryWith([ATLAS]);
+  bind([{ project: ATLAS, accountId: TARGET }]);
+  const id = ids.get(ATLAS)!;
+  const { failed, intent } = failAutomaticMigration(store, id);
+  quota(store, TARGET, 100);
+  const resetsAt = new Date((Math.floor(NOW / 1_000) + 3_600) * 1_000).toISOString();
+
+  const refused = store.retryConversationMigration(id as never, failed.migration!.revision);
+
+  expect(refused.migration).toMatchObject({
+    phase: "failed-recoverable",
+    error: `no allowed codex account has capacity for project project-atlas (allowed codex accounts: carrier-north); resetsAt=${resetsAt}`,
+    operationId: failed.migration!.operationId,
+  });
+  expect(store.readOnlySnapshot().migrationIntents[intent.id]?.state).toBe("complete");
+});
+
+test("an automatic migration retry refuses when the binding record cannot be read", () => {
+  const { store, ids } = registryWith([ATLAS]);
+  bind([{ project: ATLAS, accountId: TARGET }]);
+  const id = ids.get(ATLAS)!;
+  const { failed, intent } = failAutomaticMigration(store, id);
+  damageRecord();
+  const reason = unreadableBindingReason();
+
+  const refused = store.retryConversationMigration(id as never, failed.migration!.revision);
+
+  expect(refused.migration).toMatchObject({
+    phase: "failed-recoverable",
+    error: reason,
+    operationId: failed.migration!.operationId,
+  });
+  expect(store.readOnlySnapshot().migrationIntents[intent.id]?.state).toBe("complete");
+});
+
+test("an automatic migration retry re-arms an admitted target with its stable operation identity", () => {
+  const { store, ids } = registryWith([ATLAS]);
+  bind([{ project: ATLAS, accountId: TARGET }]);
+  const id = ids.get(ATLAS)!;
+  const { failed, intent } = failAutomaticMigration(store, id);
+
+  const retried = store.retryConversationMigration(id as never, failed.migration!.revision);
+
+  expect(retried.migration).toMatchObject({
+    phase: "requested",
+    error: null,
+    errorCode: null,
+    operationId: failed.migration!.operationId,
+  });
+  expect(store.readOnlySnapshot().migrationIntents[intent.id]?.state).toBe("draining");
 });
