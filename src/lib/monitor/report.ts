@@ -7,6 +7,7 @@ import type {
   MonitorCreation,
   MonitorRunRecord,
   RequestState,
+  SeatTickEvidenceGap,
   SeatTickItem,
   SeatTickSignalInput,
   SeatTickWakeReason,
@@ -182,6 +183,10 @@ export function seatTickWakeMessage(input: {
   items: readonly SeatTickItem[];
   deferred: number;
   signals: readonly SeatTickSignalInput[];
+  /** Evidence this check could not read (#1298). The reasons above stand
+      without it, and the seat is told what is missing from the picture rather
+      than left to act on a partial one it cannot see the edges of. */
+  gaps?: readonly SeatTickEvidenceGap[];
   /** The project's own monitor prompt (#1280), or nothing. */
   monitorPrompt?: string | null;
 }): string {
@@ -190,10 +195,15 @@ export function seatTickWakeMessage(input: {
     "",
     "Why you were woken:",
     ...input.reasons.map((reason) => `- ${reason.kind}: ${reason.detail}`),
-    "",
-    "Items:",
-    ...input.items.map(seatTickBullet),
   ];
+  /* Directly under the reasons, above the agenda, because it qualifies the
+     whole message and because the agenda is the half the length bound eats
+     into. A wake that dropped its own blind spot to fit one more item would be
+     the silence this section exists to end, one line smaller. */
+  if (input.gaps && input.gaps.length > 0) {
+    lines.push("", "Evidence unavailable:", ...input.gaps.map((gap) => `- ${gap.source}: ${gap.detail}.`));
+  }
+  lines.push("", "Items:", ...input.items.map(seatTickBullet));
   if (input.deferred > 0) {
     lines.push(`(${input.deferred} more item(s) held back for the next wake.)`);
   }
