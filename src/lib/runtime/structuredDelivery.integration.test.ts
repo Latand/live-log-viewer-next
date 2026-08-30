@@ -3931,3 +3931,95 @@ test("a send admitted while the runtime is unavailable settles without the runti
     journal.close();
   }
 });
+
+test("a real executor killed after the engine write leaves one actuation and an absorbing receipt", async () => {
+  /* #1131 at the boundary the incident happened on, rather than a stub of it.
+     "A delivering entry left by a dead executor settles unverified instead of
+     being written again" above proves the recovery logic with an injected
+     transition failure; the death it models is a process that handed the
+     message to the engine and was killed before the journal learned of it. Here
+     that process is real: a second interpreter runs the production queue over
+     the production journal, records its engine write in a file this one can
+     count, and is terminated in the gap. What must hold across the two is
+     arithmetic — ONE engine write in total, however many executors recover. */
+  const directory = path.join(sandbox, "crash-boundary");
+  fs.mkdirSync(directory, { recursive: true });
+  const journalPath = path.join(directory, "events.sqlite");
+  const ledgerPath = path.join(directory, "engine-writes.log");
+  fs.writeFileSync(ledgerPath, "");
+  const operationId = "operation-crash-boundary";
+
+  const journal = new RuntimeJournal(journalPath, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: "conversation-crash" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-crash",
+      sessionKey: { engine: "codex", sessionId: "session-crash" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: path.join(directory, "crash.jsonl"),
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId,
+    idempotencyKey: "crash-boundary-key",
+    conversationId: "conversation-crash",
+    text: "hold the cutover until I say go",
+    policy: "queue",
+  });
+  journal.close();
+
+  const child = Bun.spawn([
+    process.execPath,
+    path.join(import.meta.dir, "structuredDelivery.crashChild.ts"),
+    journalPath,
+    ledgerPath,
+    "claim-crashed:1",
+  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+
+  try {
+    const deadline = Date.now() + 30_000;
+    while (fs.readFileSync(ledgerPath, "utf8").trim() === "") {
+      if (Date.now() > deadline) throw new Error("the executor never reached the engine");
+      if (child.exitCode !== null) throw new Error(await new Response(child.stderr).text());
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    /* Killed with the send outstanding: no terminal transition, no unwinding,
+       nothing this process arranged inside the executor. */
+    child.kill("SIGKILL");
+    await child.exited;
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+
+  expect(fs.readFileSync(ledgerPath, "utf8").trim().split("\n")).toEqual([operationId]);
+
+  const reopened = new RuntimeJournal(journalPath, { structuredHosts: true });
+  try {
+    expect(reopened.operationResult(operationId)?.receipt.status).toBe("delivering");
+    /* The successor: a live executor, its own identity, and the writer claim
+       re-adopted after the crash — the ownership that says the row's writer can
+       no longer answer for it. */
+    const recoveredLedger = createFakeDeliveryLedger();
+    const recovered = new StructuredDeliveryQueue({
+      ...journalPort(reopened),
+      hostClaim: () => "claim-recovered:2",
+    }, () => observableFakeHost(new FakeEngineHost(recoveredLedger)));
+    await recovered.drain();
+    expect(recoveredLedger.writes).toEqual([]);
+
+    expect(reopened.operationResult(operationId)?.receipt).toMatchObject({
+      status: "uncertain",
+      reason: "delivery was started by an earlier executor; whether it reached the recipient is unverified",
+    });
+    expect(reopened.effectBatch()).toEqual([]);
+    expect(fs.readFileSync(ledgerPath, "utf8").trim().split("\n")).toEqual([operationId]);
+  } finally {
+    reopened.close();
+  }
+});
