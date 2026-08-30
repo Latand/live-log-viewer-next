@@ -2269,6 +2269,11 @@ export class CodexAppServerHost implements EngineHost {
         if (key) bufferedKeys.push(key);
         continue;
       }
+      /* The overlap is matched against what replay will actually emit, so a
+         sibling thread's buffered frames are skipped here for the same reason
+         `acceptNotification` rejects them — counting a key that never arrives
+         would break the prefix match and replay the whole buffer (#1284). */
+      if (this.foreignThreadNotification(params)) continue;
       const turnId = turnIdFromParams(params);
       if (method === "turn/started" && turnId) activeTurnId = turnId;
       if (method === "item/agentMessage/delta") {
@@ -2597,6 +2602,38 @@ export class CodexAppServerHost implements EngineHost {
     this.acceptNotification(method, params, reconcileBufferedLifecycle);
   }
 
+  /**
+   * True when a thread-scoped notification names a thread this host does not
+   * own (issue #1284).
+   *
+   * One app-server connection serves a whole tree of threads, not just the one
+   * this host started. A native sub-agent — `AgentControl` spawn, and the
+   * `review` / `compact` / `memory_consolidation` sources beside it — runs as a
+   * real child thread (`Thread.parentThreadId`) on this same stdio pipe, and
+   * every `turn/*` and `item/*` notification it produces carries the child's own
+   * `threadId`. Accepted here, those frames enter the parent's ledger with the
+   * child's turn id, so the live projection alternates between two turn ids and
+   * opens a fresh live item on every switch — the column of mid-sentence
+   * fragments the operator saw, and a `turn/completed` that idles the parent's
+   * session while its own answer is still streaming.
+   *
+   * Nothing the parent produced is lost by the rejection: the child's stream was
+   * never part of the parent's transcript, the parent's own record of the
+   * delegation arrives as its own `collabAgentToolCall` / `subAgentActivity`
+   * items on this thread, and the child's rollout is a transcript in its own
+   * right, so the child's stream still has the child's own view to render in.
+   *
+   * A frame carrying no `threadId` belongs to the owned thread by default. The
+   * field is required on every thread-scoped notification handled here, so its
+   * absence means a protocol shape older than the schema this was read from —
+   * and silently dropping the parent's own stream is a far worse failure than
+   * admitting a stray frame.
+   */
+  private foreignThreadNotification(params: JsonObject): boolean {
+    const threadId = stringField(params, "threadId");
+    return threadId !== null && threadId !== this.identity.threadId;
+  }
+
   private acceptNotification(method: string, params: JsonObject, reconcileBufferedLifecycle = false): void {
     if (method === "thread/realtime/started") {
       const pending = this.pendingRealtimeStart;
@@ -2651,6 +2688,13 @@ export class CodexAppServerHost implements EngineHost {
       this.emit({ kind: "attention-resolved", id: resolved[0], resolution: answer ? "answered" : "server-resolved" });
       return;
     }
+    /* Everything below this line projects into the owned thread's conversation,
+       so a frame belonging to another thread on this connection stops here.
+       The approval surface above is deliberately outside the gate: a child's
+       request arrives on this connection and has no other answerer, so refusing
+       it — or refusing only its `serverRequest/resolved` and stranding the
+       attention it opened — would strand work the parent delegated. */
+    if (this.foreignThreadNotification(params)) return;
     if (method === "turn/started" && turnId) {
       if (reconcileBufferedLifecycle) {
         const historicalStart = this.events.some((event) => event.kind === "turn-started" && event.turnId === turnId);
