@@ -6,7 +6,7 @@ import type { AccountContext, AccountManager, AccountSummary, ProjectSpawnResolu
 import { unavailableLimits } from "./contracts";
 import { withAccountMutationLockAsync } from "./accountMutation";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { accountProjectBindings, projectAccountRefusalDetail } from "./projectBindings";
+import { accountProjectBindings, allowedAccountIdsForProject, projectAccountRefusalDetail } from "./projectBindings";
 import { selectProjectAccount } from "./projectSelection";
 import { selectHealthyClaudeAccount } from "./spawnHealth";
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
@@ -23,25 +23,68 @@ export type HealthySpawnAccountResolution = AccountContext & {
   requestedAdmission?: SpawnAccountAdmission;
 };
 
+/**
+ * The direct-launch seam: `/api/spawn` and everything that reaches it — the
+ * board's spawn button, the orchestrator seat, the scheduled report launcher.
+ *
+ * It used to hold its own copy of the rule: the caller read the project's pool,
+ * handed it here as a list, and the account this function picked when nobody
+ * named one was the engine's routing account, or `allowedAccountIds[0]` when
+ * routing sat outside the pool. That first id was chosen for being FIRST — the
+ * pool was consulted and quota never was, so a launch could land on an allowed
+ * account with a fresh, confirmed, zero-capacity sample while an allowed
+ * account with room stood next to it in the same list.
+ *
+ * So the automatic pick is now the one every other automatic launch makes, from
+ * `selectProjectAccount`, which answers both halves of the question at once —
+ * the project's pool AND capacity — and the engine health probing stays here,
+ * behind it, narrowing what the shared rule already allowed. The caller passes
+ * the PROJECT and nothing else: the pool is read once, in one place, and a
+ * damaged record throws from that read rather than being re-derived by whoever
+ * called in.
+ *
+ * An account the caller NAMES is still checked against the pool alone and never
+ * against capacity — nobody may quietly substitute an account somebody asked
+ * for, and a pin is a decision, not a guess to improve on.
+ */
 export async function resolveHealthySpawnAccount(
   engine: "claude" | "codex",
   requested?: string | null,
-  /* #1279: the project's allowed set, or null for a project with no binding —
-     which is every project until someone configures one, and takes the
-     identical path this function always took. A bound project's health pass
-     runs over its allowed accounts only, so the fallback a failing probe picks
-     is drawn from the same set the pin would have been checked against. */
-  allowedAccountIds: readonly string[] | null = null,
+  /* The project the work belongs to; `null` is a project a caller genuinely
+     cannot name, and resolves exactly as an unbound one always did. */
+  project: string | null = null,
 ): Promise<HealthySpawnAccountResolution> {
-  if (allowedAccountIds !== null && allowedAccountIds.length === 0) {
-    throw new Error(`project allows no ${engine} account`);
-  }
+  const bindings = accountProjectBindings();
+  const allowedAccountIds = allowedAccountIdsForProject(project, engine, bindings);
   const allowed = allowedAccountIds === null ? null : new Set(allowedAccountIds);
-  const routing = agentRegistry().engineRouting(engine).activeAccountId ?? undefined;
-  const active = allowed === null || (routing !== undefined && allowed.has(routing))
-    ? routing
-    : allowedAccountIds![0];
-  const routed = requested ?? active;
+  const registry = agentRegistry();
+  const routing = registry.engineRouting(engine).activeAccountId ?? undefined;
+  const named = requested === undefined || requested === null ? null : requested;
+  const selectionInput = {
+    project,
+    engine,
+    accounts: engine === "claude" ? listClaudeAccounts() : listCodexAccounts(),
+    observations: registry.quotaObservations(engine),
+    bindings,
+    preferredId: routing ?? null,
+    /* An unbound project keeps the engine's active account with no capacity
+       arithmetic in front of it, which is what this seam has always done. */
+    unbound: "engine-default" as const,
+  };
+  /* The pick nobody named: the pool, then capacity, in that order. Computed
+     even when an account IS named, because it is also the fallback the branches
+     below reach for, and a fallback that skipped the rule would be the same
+     defect one level down. */
+  const automatic = selectProjectAccount(selectionInput);
+  if (named === null && automatic.kind !== "available") {
+    throw new ProjectAccountRefusedError(automatic, engine, project);
+  }
+  if (named !== null) {
+    const pinned = selectProjectAccount({ ...selectionInput, requestedId: named });
+    if (pinned.kind !== "available") throw new ProjectAccountRefusedError(pinned, engine, project);
+  }
+  const active = automatic.kind === "available" ? automatic.accountId ?? undefined : undefined;
+  const routed = named ?? active;
   const missingRequested = classifySpawnAccountAdmission({
     enabled: false,
     authentication: "unknown",
@@ -53,43 +96,70 @@ export async function resolveHealthySpawnAccount(
     try {
       return contextForSpawn(engine, routed);
     } catch (error) {
-      if (requested === undefined || requested === null || !(error instanceof UnknownAccountError)) throw error;
+      if (named === null || !(error instanceof UnknownAccountError)) throw error;
+      /* The named account does not exist, and the automatic rule produced no
+         account to fall back to either — so there is nothing left to launch on
+         that this project's binding permits, and the original failure stands
+         rather than being answered with an account outside the pool. */
+      if (automatic.kind !== "available") throw error;
       return { ...contextForSpawn(engine, active), requestedAdmission: missingRequested };
     }
   }
   const accounts = listClaudeAccounts().filter((account) => allowed === null || allowed.has(account.id));
-  const requestedExists = requested === undefined
-    || requested === null
-    || accounts.some((account) => account.id === requested);
-  const selected = await selectHealthyClaudeAccount(
-    accounts,
-    requestedExists ? routed : active,
-    undefined,
-    requested !== undefined && requested !== null && requestedExists,
-    active,
-  );
-  return {
-    ...contextForSpawn(engine, selected.account.id),
-    admission: selected.admission,
-    ...(requested !== undefined && requested !== null && !requestedExists
-      ? { requestedAdmission: missingRequested }
-      : selected.requestedAdmission ? { requestedAdmission: selected.requestedAdmission } : {}),
-  };
+  const requestedExists = named === null || accounts.some((account) => account.id === named);
+  try {
+    const selected = await selectHealthyClaudeAccount(
+      accounts,
+      requestedExists ? routed : active,
+      undefined,
+      named !== null && requestedExists,
+      active,
+    );
+    return {
+      ...contextForSpawn(engine, selected.account.id),
+      admission: selected.admission,
+      ...(named !== null && !requestedExists
+        ? { requestedAdmission: missingRequested }
+        : selected.requestedAdmission ? { requestedAdmission: selected.requestedAdmission } : {}),
+    };
+  } catch (error) {
+    /* A bound project whose pool produced no launchable account. Nothing was
+       named, so there is no pin to degrade and nothing outside the pool to
+       reach for — what is left is to REPORT, in the one wording every other
+       seam uses, with the health pass's own reason after it so the operator
+       learns which account to repair. An UNBOUND project keeps the failure it
+       always had: nobody drew a boundary, so the failure is about the machine's
+       accounts and is answered as such. */
+    if (named !== null || allowedAccountIds === null) throw error;
+    throw new ProjectAccountRefusedError(
+      { kind: "unavailable", allowedAccountIds },
+      engine,
+      project,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 /**
  * A launch the project's binding refused (#1279), carrying the resolution that
  * refused it so a caller can answer with the right status instead of reading a
- * message. Thrown only by {@link resolveProjectSpawnAccount}, which is the form
- * every launch path that names NO account of its own resolves through.
+ * message. Thrown by the two forms a launch resolves an account through —
+ * {@link resolveProjectSpawnAccount} for a project-owned launch and
+ * {@link resolveHealthySpawnAccount} for a direct one — so both answer a
+ * boundary with the same type and the same wording.
  */
 export class ProjectAccountRefusedError extends Error {
   constructor(
     readonly resolution: Exclude<ProjectSpawnResolution, { kind: "available" }>,
     engine: "claude" | "codex",
     project: string | null,
+    /** What the seam behind the rule said, when the rule reported a pool the
+        selection survived and something further in refused it anyway. Kept in
+        the message so the operator learns which account to repair. */
+    detail?: string,
   ) {
-    super(projectAccountRefusalDetail(resolution, engine, project ?? ""));
+    const refusal = projectAccountRefusalDetail(resolution, engine, project ?? "");
+    super(detail ? `${refusal}: ${detail}` : refusal);
     this.name = "ProjectAccountRefusedError";
   }
 }

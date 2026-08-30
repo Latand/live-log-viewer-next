@@ -6,7 +6,7 @@ import { after, NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import { accountManager, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
+import { accountManager, ProjectAccountRefusedError, resolveHealthySpawnAccount, type HealthySpawnAccountResolution } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, validExplicitProject } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError, type SpawnRequest } from "@/lib/agent/registry";
@@ -38,7 +38,7 @@ import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport
 import { adoptPipelineAttemptFromSource, pipelineAttemptTargetForSource } from "@/lib/pipelines/engine";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
-import { AccountProjectBindingsUnreadableError, allowedAccountIdsForProject, projectAccountRefusalDetail } from "@/lib/accounts/projectBindings";
+import { AccountProjectBindingsUnreadableError } from "@/lib/accounts/projectBindings";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { derivedSpawnTitle, durableSemanticTitle, firstPromptLine, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
@@ -606,57 +606,34 @@ export async function executeSpawnRequest(
       );
     }
     const requestedAccountId = typeof body.accountId === "string" ? body.accountId : null;
-    /* #1279: the project's binding fences a raw spawn the same way it fences a
-       pipeline stage. A project with no binding answers null here and every
-       branch below is byte-identical to what it always was; a bound one
-       refuses an account outside its set outright, rather than degrading the
-       pin to a fallback the project forbids. */
+    /* #1279: the project the launch belongs to, and nothing more. The rule
+       itself — which accounts this project allows, whether any of them has
+       capacity, and what a record nobody can read means — lives at the account
+       seam with every other automatic selection's copy of it, so this route
+       carries no second copy to drift from the first. */
     const spawnProject = explicitProject ?? projectForCwd(cwd);
-    let allowedAccountIds: string[] | null;
+    let account: HealthySpawnAccountResolution;
     try {
-      allowedAccountIds = allowedAccountIdsForProject(spawnProject, engine);
+      account = existingAttempt && existingAttempt.accountId !== null && !(existingAttempt.accountPin && requestedAccountId)
+        ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
+        : await dependencies.resolveHealthySpawnAccount(engine, body.accountId, spawnProject);
     } catch (error) {
-      if (!(error instanceof AccountProjectBindingsUnreadableError)) throw error;
       /* The record needs the operator, and until it gets them this launch
          selects nothing. A conflict, not a server fault: the request is well
          formed and the state it addresses is what is wrong — the same answer
          the reseat, the binding route and the task launch give for the same
          record, so one repair clears all of them. */
-      return NextResponse.json({ error: error.message }, { status: 409 });
-    }
-    if (requestedAccountId && allowedAccountIds !== null && !allowedAccountIds.includes(requestedAccountId)) {
-      return NextResponse.json({
-        error: allowedAccountIds.length
-          ? `${engine} account ${requestedAccountId} is not allowed on project ${spawnProject} (allowed: ${allowedAccountIds.join(", ")})`
-          : `project ${spawnProject} allows no ${engine} account`,
-      }, { status: 409 });
-    }
-    let account: HealthySpawnAccountResolution;
-    try {
-      account = existingAttempt && existingAttempt.accountId !== null && !(existingAttempt.accountPin && requestedAccountId)
-        ? dependencies.resolveSpawnAccount(existingAttempt.engine, existingAttempt.accountId)
-        : await dependencies.resolveHealthySpawnAccount(engine, body.accountId, allowedAccountIds);
-    } catch (error) {
-      if (body.accountId === undefined) {
-        /* #1279: a project whose pool produced no usable account. Nothing was
-           named, so there is no pin to degrade and nothing outside the pool to
-           reach for — what is left is to REPORT, in the one wording every
-           other seam uses, with the resolver's own reason after it so the
-           operator learns which account to repair. Thrown instead, it leaves
-           the request answering as a Viewer fault: a state the binding itself
-           created, reported as a crash. An UNBOUND project keeps the throw it
-           always had — its failure is about the machine's accounts, not about
-           a boundary anyone drew. */
-        if (allowedAccountIds === null) throw error;
-        const detail = projectAccountRefusalDetail(
-          { kind: "unavailable", allowedAccountIds },
-          engine,
-          spawnProject ?? "",
-        );
-        return NextResponse.json({
-          error: `${detail}: ${error instanceof Error ? error.message : String(error)}`,
-        }, { status: 409 });
+      if (error instanceof AccountProjectBindingsUnreadableError) {
+        return NextResponse.json({ error: error.message }, { status: 409 });
       }
+      /* A boundary somebody drew, answered as a boundary: the pin the project
+         forbids, and the pool with no account left to launch on. Answered
+         before any receipt exists, so there is nothing for a retry to replay
+         onto an account this project does not allow. */
+      if (error instanceof ProjectAccountRefusedError) {
+        return NextResponse.json({ error: error.message }, { status: 409 });
+      }
+      if (body.accountId === undefined) throw error;
       if (engine === "claude" && requestedAccountId) {
         try {
           const pinned = dependencies.resolveSpawnAccount(engine, requestedAccountId);

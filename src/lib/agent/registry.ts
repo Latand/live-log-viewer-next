@@ -7,6 +7,9 @@ import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 import { durableSemanticTitle, SPAWN_TITLE_REQUIRED_ERROR } from "@/lib/title";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
+import { conversationProjectKey } from "@/lib/accounts/conversationProject";
+import { accountProjectBindings } from "@/lib/accounts/projectBindings";
+import { admitAutomaticAccountTarget } from "@/lib/accounts/projectSelection";
 import {
   emptyLaunchProfile,
   normalizeProjectOwnership,
@@ -5734,6 +5737,20 @@ export class AgentRegistry {
     evidence?: MigrationIntent["evidence"];
     scope?: MigrationScope;
   }): MigrationIntent {
+    /* #1279. An AUTOMATIC engine-wide migration used to set one global target
+       and then queue every unpinned conversation without ever asking which
+       project each one belonged to. A target allowed for one project therefore
+       dragged another project's work onto an account its own pool forbids, and
+       a binding record nobody could read stopped none of it — the fence was
+       simply not on this path.
+       The pool is read HERE, before the transaction, so an unreadable record
+       refuses before the routing revision moves: the engine's default account
+       is what every later automatic pick starts from, and moving it on evidence
+       this process cannot read is the routing change the rule forbids.
+       A MANUAL migration names its target outright. It is a control, it is
+       carried out — outside the pool included — and an unreadable record does
+       not veto it, so it reads no bindings at all. */
+    const bindings = input.origin === "auto" ? accountProjectBindings() : null;
     return withAccountMutationLock(() => this.mutate((file) => {
       const repeated = Object.values(file.migrationIntents).find((intent) =>
         intent.engine === input.engine && intent.requestIds.includes(input.requestId));
@@ -5788,6 +5805,20 @@ export class AgentRegistry {
           }
           continue;
         }
+        /* The decision the engine-wide loop was missing, taken here at the
+           per-conversation boundary because that is the only place the project
+           is known: this conversation's own project's pool, and whether the
+           target has room in it. A conversation whose project forbids the
+           target, or whose target is out of capacity, is PARKED — left exactly
+           where it is running, on the account it is already on, while the rest
+           of the engine moves. */
+        if (bindings && admitAutomaticAccountTarget({
+          project: conversationProjectKey(conversation.projectOwnership, source.launchProfile),
+          engine: input.engine,
+          targetId: input.targetId,
+          observations: Object.values(file.quotaObservations[input.engine]),
+          bindings,
+        }).kind !== "available") continue;
         const readiness = migrationReadiness(file, conversation);
         if ((input.scope ?? "all") === "active" && readiness === "deferred") continue;
         scoped += 1;
@@ -5806,7 +5837,22 @@ export class AgentRegistry {
     }));
   }
 
+  /**
+   * The lazy half of the same automatic move (#1279): a send arrives, this
+   * conversation is still on the account it was launched on, the engine's
+   * routing has since moved, and the Viewer decides BY ITSELF that the work
+   * should follow. Nobody named this conversation and nobody named its project,
+   * so it is an automatic selection and obeys the automatic rule.
+   *
+   * Read the record before anything moves: an unreadable one throws, because
+   * "the boundary cannot be seen" must never arrive at this seam wearing the
+   * answer that means "there is none". Read and allowed, a target the project's
+   * pool forbids or that has a confirmed zero-capacity sample PARKS — the
+   * conversation is returned exactly as it stands and the send lands on the
+   * account it is already running on, which crosses nothing.
+   */
   requestConversationMigrationToActiveAccount(id: ViewerConversationId): RegistryConversation {
+    const bindings = accountProjectBindings();
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, id);
       const conversation = file.conversations[canonicalId];
@@ -5816,6 +5862,13 @@ export class AgentRegistry {
       const source = conversation.generations.at(-1);
       if (!targetId || !source || source.accountId === null || source.accountId === targetId) return clone(conversation);
       if (conversation.migrationOptOut?.targetId === targetId) return clone(conversation);
+      if (admitAutomaticAccountTarget({
+        project: conversationProjectKey(conversation.projectOwnership, source.launchProfile),
+        engine: conversation.engine,
+        targetId,
+        observations: Object.values(file.quotaObservations[conversation.engine]),
+        bindings,
+      }).kind !== "available") return clone(conversation);
       /* A failed-recoverable migration stays parked (#708). Re-arming it from a
          lazy active-account request minted a fresh operation identity on every
          later touch of the conversation, and a fresh identity means a fresh

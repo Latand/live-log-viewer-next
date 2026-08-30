@@ -84,3 +84,63 @@ export function selectProjectAccount(input: ProjectAccountSelectionInput): Proje
     ? { kind: "exhausted", resetsAt: selected.resetsAt, allowedAccountIds: consulted }
     : { kind: "unavailable", allowedAccountIds: consulted };
 }
+
+/**
+ * The other shape of the same question, for the automatic paths that do not
+ * get to CHOOSE an account: an engine-wide migration, and the lazy reseat onto
+ * the engine's active account, both arrive with a target already decided
+ * somewhere else and ask whether one particular piece of work may follow it.
+ *
+ * `selectProjectAccount` answers "which account may this work use"; this
+ * answers "may this work use THAT one" — and both answer the second half,
+ * capacity, from the same observations through the same classifier, so no
+ * caller can end up with a different definition of having room. Being in the
+ * pool is not the same as having capacity, and an automatic move onto a
+ * confirmed-exhausted account is the second one failing while the first holds.
+ *
+ * Never substituted: the caller's whole operation is defined by that target, so
+ * a target the project forbids or that has no room PARKS this work and leaves
+ * everything else about the operation alone.
+ */
+export interface AutomaticAccountTargetInput {
+  project: string | null;
+  engine: BindingEngine;
+  /** The account the machine already settled on, for everything at once. */
+  targetId: string;
+  observations: readonly DurableQuotaObservation[];
+  bindings: readonly AccountProjectBinding[];
+  now?: number;
+}
+
+export function admitAutomaticAccountTarget(input: AutomaticAccountTargetInput): ProjectAccountSelection {
+  const allowed = allowedAccountIdsForProject(input.project, input.engine, input.bindings);
+  const targetId = input.targetId.trim();
+  if (allowed === null) {
+    /* An UNBOUND project, which is every project until somebody configures one.
+       Nobody drew a boundary here, so nothing is fenced and — exactly as in
+       `selectProjectAccount`'s `engine-default` branch — no capacity
+       arithmetic is introduced either. Adding one here would change what every
+       migration on the machine does the day this ships, on projects that
+       opted into nothing. */
+    return { kind: "available", accountId: targetId };
+  }
+  if (!allowed.includes(targetId)) {
+    return { kind: "not_allowed", accountId: targetId, allowedAccountIds: allowed };
+  }
+  const selected = selectHeadlessAccount(
+    /* `authPresent` is asserted rather than read from a catalog on purpose:
+       this seam judges CAPACITY, and the observation itself reports a signed
+       out account as unavailable. Whether the target's home exists at all is
+       the migration's own question and it answers it where it resolves the
+       account, not here. */
+    [{ id: targetId, authPresent: true }],
+    [...input.observations],
+    targetId,
+    [],
+    input.now,
+  );
+  if (selected.kind === "available") return { kind: "available", accountId: targetId };
+  return selected.kind === "exhausted"
+    ? { kind: "exhausted", resetsAt: selected.resetsAt, allowedAccountIds: allowed }
+    : { kind: "unavailable", allowedAccountIds: allowed };
+}

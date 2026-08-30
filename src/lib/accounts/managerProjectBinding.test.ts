@@ -52,12 +52,18 @@ function seedAccounts(): void {
   }
   reserved = created.get("Reserved carrier")!;
   spare = created.get("Spare carrier")!;
-  /* No credentials written for these: the Claude health pass reads OAuth
-     metadata off each home, finds none, and refuses by NAMING the accounts it
+  /* Credentials with no OAuth expiry in them: the account is present enough to
+     be a candidate, and the Claude health pass then reads its metadata, finds
+     nothing current or refreshable, and refuses by NAMING every account it
      considered — which is how the tests below read the candidate set without a
      network probe or a fake dependency between them and the rule. */
-  claudeReserved = createManagedClaudeAccount("Reserved reviewer").id;
-  claudeSpare = createManagedClaudeAccount("Spare reviewer").id;
+  for (const label of ["Reserved reviewer", "Spare reviewer"]) {
+    const account = createManagedClaudeAccount(label);
+    fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
+    created.set(label, account.id);
+  }
+  claudeReserved = created.get("Reserved reviewer")!;
+  claudeSpare = created.get("Spare reviewer")!;
 }
 
 /** A live sample with `usedPercent` burned, fresh enough to be believed. */
@@ -100,11 +106,11 @@ function registryWith(
   setAgentRegistryForTests(registry);
 }
 
-function bind(accountId: string, project = ATLAS): void {
+function bind(accountId: string, project = ATLAS, engine: "codex" | "claude" = "codex"): void {
   fs.mkdirSync(STATE, { recursive: true });
   fs.writeFileSync(RECORD, JSON.stringify({
     schemaVersion: 1,
-    bindings: [{ engine: "codex", accountId, project, createdAt: new Date(NOW - 60_000).toISOString() }],
+    bindings: [{ engine, accountId, project, createdAt: new Date(NOW - 60_000).toISOString() }],
   }), "utf8");
 }
 
@@ -202,36 +208,96 @@ test("a project with no binding keeps the answer it always had", () => {
 /**
  * The third automatic seam, and the one no test reached: `/api/spawn` does not
  * resolve through `resolveProjectSpawn`. A raw launch that names no account
- * goes to `resolveHealthySpawnAccount`, which the route hands the project's
- * pool — and every spawn surface the Viewer has rides on it, the board's own
- * button, the orchestrator seat and the scheduled report launcher among them.
- * Each test below states what the seam answers WITHOUT the pool as well, so the
- * pool is visibly what decided, rather than the routing agreeing by accident.
+ * goes to `resolveHealthySpawnAccount`, and every spawn surface the Viewer has
+ * rides on it — the board's own button, the orchestrator seat and the scheduled
+ * report launcher among them. Each test below states what the seam answers on
+ * an UNBOUND project as well, so the pool is visibly what decided, rather than
+ * the routing agreeing by accident.
  */
 test("the direct launch seam draws its automatic pick from the pool, not the engine's routing (#1279)", async () => {
   registryWith(spare, []);
 
   /* Routed at the spare account and the project bound to the reserved one. */
-  expect((await resolveHealthySpawnAccount("codex", undefined, [reserved])).accountId).toBe(reserved);
+  bind(reserved);
+  expect((await resolveHealthySpawnAccount("codex", undefined, ATLAS)).accountId).toBe(reserved);
   /* Unbound, the same call answers with the routing, exactly as it always did
      — so the line above is the pool overriding it, not a coincidence. */
-  expect((await resolveHealthySpawnAccount("codex", undefined)).accountId).toBe(spare);
+  fs.rmSync(RECORD, { force: true });
+  expect((await resolveHealthySpawnAccount("codex", undefined, ATLAS)).accountId).toBe(spare);
+});
+
+test("the direct launch seam refuses an allowed account that is out of capacity, rather than launching on it (#1279)", async () => {
+  /* Being IN the pool is not the same as having room in it. The reserved
+     account is the project's only allowed account and carries a fresh,
+     confirmed, zero-capacity sample; the spare is idle and outside the pool.
+     The seam used to take the first allowed id and resolve it on the spot,
+     consulting the pool and never the quota — so this launch went onto an
+     account that could not serve it, and the idle account next door was never
+     the answer either. */
+  registryWith(spare, [observation(reserved, 100), observation(spare, 5)]);
+  bind(reserved);
+
+  const refused = await resolveHealthySpawnAccount("codex", undefined, ATLAS)
+    .then(() => null, (error: unknown) => error);
+  expect((refused as Error).name).toBe("ProjectAccountRefusedError");
+  expect((refused as Error).message).toContain("no allowed codex account has capacity");
+  expect((refused as Error).message).toContain(reserved);
+  /* And the idle account outside the pool is not offered as a way around it. */
+  expect((refused as Error).message).not.toContain(spare);
+
+  /* The same shortage on an UNBOUND project changes nothing: no boundary was
+     drawn, so the routing account is resolved exactly as it always was. */
+  fs.rmSync(RECORD, { force: true });
+  expect((await resolveHealthySpawnAccount("codex", undefined, ATLAS)).accountId).toBe(spare);
 });
 
 test("the direct launch's health pass considers the pool's accounts and no others (#1279)", async () => {
   registryWith(spare, [], claudeSpare);
   /* None of these homes carries an OAuth credential, so the pass admits none
-     and refuses by naming every account it looked at — the candidate set,
-     read out of the seam rather than asserted about its inputs. */
-  const fenced = await resolveHealthySpawnAccount("claude", undefined, [claudeReserved])
+     and refuses. Bound, that refusal is reported against the pool it drew
+     from, with the pass's own reason kept after it so the operator learns
+     which account to repair. */
+  bind(claudeReserved, ATLAS, "claude");
+  const fenced = await resolveHealthySpawnAccount("claude", undefined, ATLAS)
     .then(() => null, (error: unknown) => error);
-  expect((fenced as { accountIds?: string[] }).accountIds).toEqual([claudeReserved]);
+  expect((fenced as Error).name).toBe("ProjectAccountRefusedError");
+  expect((fenced as Error).message).toContain(`allowed claude accounts: ${claudeReserved}`);
+  expect((fenced as Error).message).toContain("Re-login");
+  /* The candidate set the pass actually looked at, read out of its own
+     message rather than asserted about the seam's inputs. */
+  expect((fenced as Error).message).not.toContain(claudeSpare);
 
-  const unbound = await resolveHealthySpawnAccount("claude", undefined)
+  fs.rmSync(RECORD, { force: true });
+  const unbound = await resolveHealthySpawnAccount("claude", undefined, ATLAS)
     .then(() => null, (error: unknown) => error);
-  /* Unbound, every Claude account in the catalogue is a candidate, which is
-     both the historical behaviour and the width the pool removed above. */
+  /* Unbound, every Claude account in the catalogue is a candidate, and the
+     failure is the seam's own — unwrapped and unqualified by any pool, which
+     is both the historical behaviour and the width the pool removed above. */
   expect((unbound as { accountIds?: string[] }).accountIds)
     .toEqual(listClaudeAccounts().map((account) => account.id).sort());
   expect((unbound as { accountIds?: string[] }).accountIds).toContain(claudeSpare);
+});
+
+test("a named account outside the pool is refused at the direct launch seam, and capacity never speaks for it (#1279)", async () => {
+  /* A launch that NAMES an account is checked against the pool alone: the
+     reserved account is allowed and exhausted, and naming it still resolves,
+     because nobody may quietly substitute an account somebody asked for. */
+  registryWith(spare, [observation(reserved, 100), observation(spare, 5)]);
+  bind(reserved);
+
+  expect((await resolveHealthySpawnAccount("codex", reserved, ATLAS)).accountId).toBe(reserved);
+
+  const refused = await resolveHealthySpawnAccount("codex", spare, ATLAS)
+    .then(() => null, (error: unknown) => error);
+  expect((refused as Error).name).toBe("ProjectAccountRefusedError");
+  expect((refused as Error).message).toContain(`account ${spare} is not allowed on project ${ATLAS}`);
+});
+
+test("a damaged binding record refuses the direct launch seam before it resolves anything (#1279)", () => {
+  registryWith(spare, []);
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(RECORD, '{"schemaVersion":1,"bindings":[{"engine":"codex"', "utf8");
+
+  expect(resolveHealthySpawnAccount("codex", undefined, ATLAS))
+    .rejects.toThrow(AccountProjectBindingsUnreadableError);
 });
