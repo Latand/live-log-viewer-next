@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +9,7 @@ import type { FileEntry } from "@/lib/types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-engine-test-"));
 const { createWorkflowFromRequest, patchWorkflow, tickWorkflows } = await import("./engine");
+const { accountManager } = await import("@/lib/accounts/manager");
 const { loadWorkflows, saveWorkflows } = await import("./store");
 
 type Workflow = import("./types").Workflow;
@@ -623,4 +624,61 @@ test("an orphaned flow from a restart is adopted instead of recreated", async ()
   const after = load(wf.id);
   expect(after.flowId).toBe("flowOld");
   expect(harness.calls.filter((call) => call.startsWith("createFlow")).length).toBe(0);
+});
+
+/* #1279: a workflow stage is a launch of the workflow's project's work, so the
+   project's account binding fences it like every other launch. Both tests spy
+   on the one seam that chooses, so nothing here reads or writes a real account
+   catalogue. */
+test("a workflow stage launches on the account the project's allowed set resolves to (#1279)", async () => {
+  const { ports, calls, state } = makeHarness();
+  const wf = createWf(ports);
+  await tickWorkflows([], ports);
+  /* Captured inside the mock: mockRestore() drops the recorded calls with it. */
+  const asked: unknown[] = [];
+  const resolve = spyOn(accountManager, "resolveProjectSpawn").mockImplementation((engine, request) => {
+    asked.push([engine, request]);
+    return {
+      kind: "available",
+      account: { engine: "codex", accountId: "acct-reserved", home: "/nowhere", transcriptRoot: "/nowhere" } as never,
+    };
+  });
+  try {
+    await tickWorkflows([], ports);
+  } finally {
+    resolve.mockRestore();
+  }
+  expect(asked).toEqual([["codex", { project: "repo" }]]);
+  const cur = load(wf.id);
+  expect(cur.state).toBe("implementing");
+  expect(cur.stageRuns[0]!.accountId).toBe("acct-reserved");
+  expect(calls.some((call) => call.startsWith("spawn:codex"))).toBe(true);
+  expect(state.spawnCount).toBe(1);
+});
+
+test("every allowed account out of capacity parks the workflow instead of crossing the boundary (#1279)", async () => {
+  const { ports, calls } = makeHarness();
+  const wf = createWf(ports);
+  await tickWorkflows([], ports);
+  const resetsAt = Math.floor(Date.parse("2026-08-30T11:00:00.000Z") / 1000);
+  const resolve = spyOn(accountManager, "resolveProjectSpawn").mockImplementation(() => ({
+    kind: "exhausted",
+    resetsAt,
+    allowedAccountIds: ["acct-reserved"],
+  }));
+  try {
+    await tickWorkflows([], ports);
+  } finally {
+    resolve.mockRestore();
+  }
+  const parked = load(wf.id);
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toBe(
+    "no allowed codex account has capacity for project repo (allowed codex accounts: acct-reserved); resetsAt=2026-08-30T11:00:00.000Z",
+  );
+  /* Nothing launched, and the stage kept no half-started record: the next tick
+     after the operator answers re-enters the same branch. */
+  expect(calls.some((call) => call.startsWith("spawn:"))).toBe(false);
+  expect(parked.stageRuns[0]!.startedAt).toBeNull();
+  expect(parked.stageRuns[0]!.accountId ?? null).toBeNull();
 });
