@@ -8,6 +8,40 @@ guarantees for the 1.x series.
 ## [Unreleased]
 
 ### Added
+- The Viewer installs and runs on native Windows, with the process backend,
+  paths, termination and CLI that requires (#1201, phase 1 of the merged
+  `docs/design/windows-support.md`). The `os` field no longer refuses a Windows
+  install. Process discovery gets a third backend beside `/proc` and
+  `ps`/`lsof`: one `Get-CimInstance Win32_Process` snapshot per five seconds for
+  pids, lineage, command lines and working set, and two values read from the
+  kernel through FFI — the process creation time, which is the identity token,
+  and each agent's working directory, read out of its own process parameters
+  because Windows has no other route to it and a process with no known working
+  directory is not shown at all. Identity is what pid reuse makes load-bearing
+  here, and Windows reuses a pid within seconds, so it comes from
+  `GetProcessTimes` rather than from anything that merely differs between two
+  processes. Termination replaces the process-group signal with a walk of the
+  parent tree, descendants first, each member's identity re-checked immediately
+  before it is killed; a parent link whose parent started after its own child is
+  dropped as the stale link it is. The runtime host listens on a named pipe
+  instead of a Unix socket, and its singleton fence keeps its file and its
+  kernel-released lock by way of `LockFileEx`. `HOME` is ignored on Windows,
+  where it is not a Windows variable and a Git Bash value resolves to nothing.
+  The CLI opens a browser through `rundll32` with no shell in the way.
+
+  Nobody working on this repository has a Windows machine, so none of the above
+  is a claim: a new `platform-tests.yml` runs the process backend, the endpoint,
+  the fence, the tree kill, the path handling and the launcher on
+  `windows-latest`, refuses a runner that is not Windows, and fails when any
+  kernel reader returns nothing — the same shape as the `macos-identity` job
+  that exists because nobody here has a Mac. Its Ubuntu leg runs the identical
+  file list, which is what makes "Linux is unchanged" witnessed rather than
+  asserted. What Windows does not get in this phase is written down in the
+  README, including the two grouping recognisers that stop resolving a
+  repository there and what they resolve to instead. The job earned its keep
+  immediately: it caught the fence refusing to create its own file on a fresh
+  machine, a process identity that outlived the process it named, and a CLI that
+  could not find its own server from a checkout.
 - The Viewer ticks the orchestrator seat, so a rotation stops dropping the
   monitor (#1245). The monitor that had been driving orchestrator sessions was
   never a feature: it was a schedule an agent armed inside its own session, so

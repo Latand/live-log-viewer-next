@@ -2,22 +2,21 @@
 
 import { useEffect, useState } from "react";
 
-import { subscribeTmuxTarget, type TmuxBusResult } from "./tmuxBus";
+import { subscribeHostTarget, type HostTargetResult } from "./hostTargetBus";
 
 /**
- * Resolves the tmux pane behind a conversation through the shared tmux target
- * bus: the pane its `pid` runs in, or the resume window previously spawned for
- * its transcript `path`.
+ * Resolves the host currently behind a conversation through the shared target
+ * bus — usually a structured host, or the legacy pane its `pid` runs in (#1301).
  */
-export function useTmuxTarget(pid: number | null, path?: string, enabled = true): string | null {
+export function useHostTarget(pid: number | null, path?: string, enabled = true): string | null {
   const [target, setTarget] = useState<string | null>(null);
 
   useEffect(() => {
     if (!enabled || (pid === null && !path)) return;
-    const unsubscribe = subscribeTmuxTarget({
+    const unsubscribe = subscribeHostTarget({
       pid,
       path: path ?? "",
-      onTarget(result: TmuxBusResult) {
+      onTarget(result: HostTargetResult) {
         if (typeof result === "object" && result !== null && "transportError" in result) return;
         setTarget(result);
       },

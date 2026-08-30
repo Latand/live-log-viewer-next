@@ -20,7 +20,8 @@
   },
   "os": [
     "linux",
-    "darwin"
+    "darwin",
+    "win32"
   ],
   "scripts": {
     "dev": "NODE_ENV=development bun --bun node_modules/.bin/next dev --webpack --hostname 127.0.0.1",

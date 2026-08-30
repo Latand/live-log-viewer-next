@@ -27,8 +27,9 @@ reclaims the idle seat, the tick declines to disturb it, and the board sits.
 
 **A seat tick wake resumes the seat's host when it is dead.** The delivery goes
 through `deliverConversationMessage` by durable conversation id — the same
-engine-agnostic path `POST /api/tmux` and `send_message_to_orchestrator` use —
-and its recovery of a dead structured conversation is a success, not a failure.
+engine-agnostic path `POST /api/conversation-host` (legacy alias `/api/tmux`)
+and `send_message_to_orchestrator` use — and its recovery of a dead structured
+conversation is a success, not a failure.
 
 Five limits travel with the decision and are not separable from it:
 

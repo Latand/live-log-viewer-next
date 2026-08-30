@@ -55,7 +55,8 @@ orchestrator across generations, while a path is a fact about one generation
 that stops being true the moment anything moves.
 
 Resolving the address is not enough — somebody has to be listening. The seat is
-followed by a read-only host probe (`GET /api/tmux?path=…`, using the path
+followed by a read-only host probe (`GET /api/conversation-host?path=…`, or
+the same handlers under the legacy path `/api/tmux`, using the path
 the seat itself names, not a path anyone typed). Two reasons this is not
 optional: the watchdog this replaces spent a day nudging a conversation with no
 live host, and a send into a hostless conversation would **resume** it, which is
