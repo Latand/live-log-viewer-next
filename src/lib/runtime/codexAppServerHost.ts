@@ -65,6 +65,7 @@ import {
 
 type JsonObject = Record<string, unknown>;
 type PendingRpc = {
+  method: string;
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
@@ -106,10 +107,19 @@ type PendingCompaction = {
   timer: ReturnType<typeof setTimeout> | undefined;
 };
 
+/**
+ * A receipt for a delivery that has actuated but not yet been observed in
+ * history. `turnId` is null only when the acknowledgement carrying it was too
+ * large to admit (issue #301); the persisted user item supplies it.
+ */
+type PendingDeliveryReceipt =
+  | { outcome: "steered"; turnId: string }
+  | { outcome: "turn-started"; turnId: string | null };
+
 type PendingDelivery = {
   text: string;
   contentDigest: string;
-  receipt: DeliveryReceipt;
+  receipt: PendingDeliveryReceipt;
   promise: Promise<DeliveryReceipt>;
   resolve(receipt: DeliveryReceipt): void;
   reject(error: Error): void;
@@ -282,10 +292,9 @@ const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 5 * 60_000;
     Compaction is a model call over the whole thread, so the budget is generous;
     past it the operation terminalizes visibly rather than hanging (#862). */
 const DEFAULT_COMPACT_EVIDENCE_TIMEOUT_MS = 5 * 60_000;
-const ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER = 3;
-const LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER = 3;
-const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
-const MAX_LATE_THREAD_READ_RESPONSES = 32;
+const LATE_HISTORY_RESPONSE_TTL_MULTIPLIER = 3;
+const MIN_LATE_HISTORY_RESPONSE_TTL_MS = 1_000;
+const MAX_LATE_HISTORY_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const REALTIME_START_TIMEOUT_MS = 90_000;
 /* First speech waits for the persona's durable insertion outcome. Keep that
@@ -309,17 +318,33 @@ const MAX_REALTIME_CONTEXT_ITEMS = 12;
 const MAX_REALTIME_CONTEXT_ITEM_BYTES = 8 * 1024;
 const MAX_REALTIME_CONTEXT_BYTES = 24 * 1024;
 const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
-const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
+/** The per-frame admission bound; exported so tests can pin the diagnostic contract. */
+export const MAX_APP_SERVER_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
+const MAX_LINE_BYTES = MAX_APP_SERVER_LINE_BYTES;
 /**
- * A `thread/resume` (or `thread/read`) response replays the whole thread
- * history as one JSONL frame, and history the operator legally accumulated can
- * dwarf `MAX_LINE_BYTES` (issue #794: a production resume envelope reached
- * ~55 MB, dominated by replayed MCP tool-result text). Only the response the
- * host is itself awaiting for one of these methods may pass the frame guard,
- * and it is admitted through `CodexReplayFrameReducer`, which bounds every
- * string token while it streams. Every other oversized frame stays fail-closed.
+ * An individually large paginated history frame can exceed `MAX_LINE_BYTES`.
+ * Awaited page responses and completion notifications may pass through
+ * `CodexReplayFrameReducer`, which bounds every string token while it streams.
+ * Every other oversized frame is skipped with a surfaced diagnostic, keeping
+ * the host reachable after degraded output (#301).
  */
-const REPLAY_ENVELOPE_METHODS = new Set(["thread/resume", "thread/read"]);
+const REPLAY_ENVELOPE_METHODS = new Set([
+  "thread/turns/list",
+  "thread/items/list",
+]);
+const REDUCIBLE_OVERSIZED_NOTIFICATION_METHODS = new Set(["item/completed", "turn/completed"]);
+/**
+ * Paginated history hydration (issue #301). `thread/resume` runs with
+ * `excludeTurns: true`; turn metadata arrives through `thread/turns/list`, then
+ * items arrive independently through `thread/items/list`. Both page sizes are
+ * bounded, and an individually large item is admitted through the reducer.
+ */
+const RESUME_TURNS_PAGE_LIMIT = 10;
+const MAX_RESUME_TURN_PAGES = 4096;
+const RESUME_ITEMS_PAGE_LIMIT = 10;
+const MAX_RESUME_ITEM_PAGES = 65_536;
+const MAX_OVERSIZED_FRAME_DIAGNOSTICS = 8;
+const OVERSIZED_FRAME_HEAD_CHARS = 2048;
 const REPLAY_REDUCTION_THRESHOLD_BYTES = MAX_REPLAY_ENVELOPE_BYTES;
 const REPLAY_STRING_UNITS = 16 * 1024;
 const MAX_REPLAY_RAW_UNITS = 512 * 1024 * 1024;
@@ -451,17 +476,102 @@ function modelSupportsImageInput(value: unknown, requestedModel: string | undefi
   return Array.isArray(selected?.inputModalities) && selected.inputModalities.includes("image");
 }
 
-function resumedTurns(value: unknown): JsonObject[] {
-  const outer = record(value);
-  const thread = record(outer?.thread) ?? outer;
-  if (Array.isArray(thread?.turns)) return thread.turns.map(record).filter((turn): turn is JsonObject => turn !== null);
-  const page = record(thread?.initialTurnsPage);
-  return Array.isArray(page?.data) ? page.data.map(record).filter((turn): turn is JsonObject => turn !== null) : [];
+function pagedTurns(value: unknown): JsonObject[] {
+  const data = record(value)?.data;
+  if (!Array.isArray(data)) throw new Error("thread/turns/list returned no data array");
+  return data.map(record).filter((turn): turn is JsonObject => turn !== null);
 }
 
-function resumedActiveTurnId(value: unknown): string | null {
-  const activeTurn = resumedTurns(value).findLast((turn) => stringField(turn, "status") === "inProgress");
+function pagedItemEntries(value: unknown): Array<{ turnId: string; item: unknown }> {
+  const data = record(value)?.data;
+  if (!Array.isArray(data)) throw new Error("thread/items/list returned no data array");
+  return data.map((value) => {
+    const entry = record(value);
+    const turnId = stringField(entry, "turnId");
+    const item = record(entry?.item);
+    if (!turnId || !item) throw new Error("thread/items/list returned a malformed item entry");
+    return { turnId, item };
+  });
+}
+
+/** Keeps the lifecycle and idempotency fields needed while adoption restores
+    its durable ledger. Persisted content can be recovered through paginated
+    history and delivery scans; retaining an oversized payload here would
+    defeat the separate pre-restore buffer bound. */
+function preRestoreCompletionProjection(message: JsonObject): JsonObject | null {
+  const method = stringField(message, "method");
+  if (!method || !REDUCIBLE_OVERSIZED_NOTIFICATION_METHODS.has(method)) return null;
+  const params = record(message.params) ?? {};
+  const projectedParams: JsonObject = {};
+  const threadId = stringField(params, "threadId");
+  const turnId = turnIdFromParams(params);
+  if (threadId) projectedParams.threadId = threadId;
+  if (turnId) projectedParams.turnId = turnId;
+  if (method === "turn/completed") {
+    const turn = record(params.turn);
+    projectedParams.turn = {
+      ...(turnId ? { id: turnId } : {}),
+      ...(typeof turn?.status === "string" ? { status: turn.status } : {}),
+    };
+  } else {
+    const item = record(params.item);
+    const projectedItem: JsonObject = {};
+    for (const key of ["id", "type", "status", "clientId"] as const) {
+      if (typeof item?.[key] === "string") projectedItem[key] = item[key];
+    }
+    if (stringField(item, "type") === "userMessage") {
+      for (const key of ["text", "content", "contentDigest"] as const) {
+        if (!(key in (item ?? {}))) continue;
+        const serialized = JSON.stringify(item![key]);
+        if (serialized !== undefined && Buffer.byteLength(serialized) <= 64 * 1024) {
+          projectedItem[key] = item![key];
+        }
+      }
+    }
+    if (item) projectedParams.item = projectedItem;
+  }
+  return { jsonrpc: "2.0", method, params: projectedParams };
+}
+
+function resumedActiveTurnId(turns: readonly JsonObject[]): string | null {
+  const activeTurn = turns.findLast((turn) => stringField(turn, "status") === "inProgress");
   return activeTurn ? stringField(activeTurn, "id") : null;
+}
+
+/**
+ * A response frame that could not be admitted because of its size (issue
+ * #301). Typed so a caller can tell "this frame cannot be admitted" from "the
+ * server failed": a history page loop narrows its request instead of failing
+ * adoption, and a delivery reconciles its outcome from the persisted user item
+ * instead of reporting a landed message as failed. `envelope` is read off the
+ * frame head, which reveals `result` or `error` before the payload begins; the
+ * observed size, bound, and message type are already in the message.
+ */
+class OversizedResponseError extends Error {
+  constructor(message: string, readonly envelope: "result" | "error" | "unknown") {
+    super(message);
+    this.name = "OversizedResponseError";
+  }
+}
+
+function settledReceipt(receipt: PendingDeliveryReceipt, turnId: string): DeliveryReceipt {
+  return receipt.outcome === "steered"
+    ? { outcome: "steered", turnId }
+    : { outcome: "turn-started", turnId };
+}
+
+function oversizedFrameDiagnostic(observedBytes: number, messageType: string): string {
+  return `Codex app-server emitted an oversized JSONL frame: observed ${observedBytes} bytes, bound ${MAX_LINE_BYTES} bytes, message type ${messageType}; the frame was skipped and the session may be missing its content`;
+}
+
+function isInvalidCursorError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /cursor/i.test(message);
+}
+
+function isThreadNotLoadedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /thread not loaded|not materialized yet.*before first user message/i.test(message);
 }
 
 function itemReplayKey(value: unknown): string {
@@ -637,9 +747,10 @@ export class CodexAppServerHost implements EngineHost {
      what the backend actually said ("You have reached your usage limit."). */
   private realtimeFailure: CodexRealtimeFailure | null = null;
   private realtimeSessionId: string | null = null;
-  private readonly lateThreadReadResponses = new Map<number, number>();
+  private readonly lateHistoryResponses = new Map<number, number>();
   private readonly replayEnvelopeRequestIds = new Set<number>();
   private replayReduction: CodexReplayFrameReducer | null = null;
+  private replayReductionBytes = 0;
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly confirmedDeliveries = new Map<string, {
@@ -688,6 +799,11 @@ export class CodexAppServerHost implements EngineHost {
   private releasing = false;
   private released = false;
   private dead = false;
+  private replayReductionRpcId: number | null = null;
+  private replayReductionMethod: string | null = null;
+  private oversizedCompletionReconciliation: Promise<void> | null = null;
+  private oversizedDiscard: { headText: string; bytes: number; reported: boolean } | null = null;
+  private oversizedFrameDiagnostics = 0;
   private reaped = false;
   private terminationStarted = false;
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
@@ -828,6 +944,7 @@ export class CodexAppServerHost implements EngineHost {
           threadId,
           ...(options.permissionProfile ? { permissions: options.permissionProfile } : {}),
           config,
+          excludeTurns: true,
         })
         : await provisional.rpc("thread/start", {
           cwd: options.cwd,
@@ -845,13 +962,14 @@ export class CodexAppServerHost implements EngineHost {
       provisional.identity.threadId = identity.threadId;
       provisional.identity.path = identity.path;
       if (granted.length > 0) await provisional.verifyPluginGrant(granted, config);
-      provisional.rememberConfirmedDeliveries(result);
+      const resumedHistory = threadId ? await provisional.collectResumedTurns(result) : [];
+      provisional.rememberConfirmedDeliveries(resumedHistory);
       provisional.restoreEvents();
       provisional.beginBufferedNotificationReconciliation();
       provisional.flushPreRestoreEvents();
-      provisional.flushPreRestoreMessages(threadId ? result : null);
-      if (threadId) provisional.reconcileThreadHistory(result);
-      provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(result));
+      provisional.flushPreRestoreMessages(threadId ? resumedHistory : null);
+      if (threadId) provisional.reconcileThreadHistory(resumedHistory);
+      provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(resumedHistory));
       provisional.endBufferedNotificationReconciliation();
       return provisional;
     } catch (error) {
@@ -888,6 +1006,164 @@ export class CodexAppServerHost implements EngineHost {
       .filter((name): name is string => name !== null && !configured.has(name) && !allowed.has(name));
     if (unexpected.length > 0) {
       throw new Error(`Codex plugin grant surfaced servers outside the allowlist: ${[...new Set(unexpected)].sort().join(", ")}`);
+    }
+  }
+
+  /**
+   * History for a metadata-only resume, hydrated through bounded
+   * `thread/turns/list` pages (issue #301). Current servers return a
+   * `turnsBackwardsCursor` that anchors the newest persisted turn. A stale
+   * anchor restarts once from the current newest turn; collection has no side
+   * effects, so a restart cannot duplicate history.
+   */
+  private async collectResumedTurns(result: unknown): Promise<JsonObject[]> {
+    const backwardsCursor = stringField(record(result), "turnsBackwardsCursor");
+    const itemsBackwardsCursor = stringField(record(result), "itemsBackwardsCursor");
+    /* A resume that hands out no anchor — an empty thread, or the metadata
+       re-read that recovers an oversized resume frame — pages once from the
+       current newest turn instead of skipping history. */
+    return this.retryOnceOnInvalidCursor((retry) =>
+      this.collectTurnPages(
+        retry ? null : backwardsCursor,
+        retry ? null : itemsBackwardsCursor,
+      ));
+  }
+
+  private async collectTurnPages(
+    initialCursor: string | null,
+    initialItemsCursor: string | null,
+  ): Promise<JsonObject[]> {
+    const turns = await this.collectTurnPagesByView(initialCursor);
+    await this.hydrateTurnItems(turns, initialItemsCursor);
+    return turns;
+  }
+
+  /**
+   * One descending history page loop (issue #301). A page whose bounded
+   * reduction does not fit the frame budget is re-requested one record at a
+   * time — a page is only as large as the records in it. A single record that
+   * is still over the budget sits outside the supported envelope: the descent
+   * stops there, with the diagnostic already in the transcript, so everything
+   * newer stays reconcilable and the session stays reachable.
+   */
+  private async *descendingHistoryPages(
+    method: "thread/turns/list" | "thread/items/list",
+    params: JsonObject,
+    initialCursor: string | null,
+    maxPages: number,
+    budget: string,
+  ): AsyncGenerator<unknown> {
+    let cursor = initialCursor;
+    for (let page = 0; page < maxPages; page += 1) {
+      let result: unknown;
+      try {
+        result = await this.rpc(method, this.historyPageParams(params, cursor, null));
+      } catch (error) {
+        if (!(error instanceof OversizedResponseError)) throw error;
+        try {
+          result = await this.rpc(method, this.historyPageParams(params, cursor, 1));
+        } catch (narrowedError) {
+          if (!(narrowedError instanceof OversizedResponseError)) throw narrowedError;
+          return;
+        }
+      }
+      yield result;
+      cursor = stringField(record(result), "nextCursor");
+      if (cursor === null) return;
+    }
+    throw new Error(`${method} paged past the bounded ${budget} budget`);
+  }
+
+  private historyPageParams(params: JsonObject, cursor: string | null, limit: number | null): JsonObject {
+    return {
+      threadId: this.identity.threadId,
+      ...params,
+      ...(limit !== null ? { limit } : {}),
+      ...(cursor !== null ? { cursor } : {}),
+    };
+  }
+
+  private turnPageParams(): JsonObject {
+    return { itemsView: "notLoaded", sortDirection: "desc", limit: RESUME_TURNS_PAGE_LIMIT };
+  }
+
+  private itemPageParams(): JsonObject {
+    return { sortDirection: "desc", limit: RESUME_ITEMS_PAGE_LIMIT };
+  }
+
+  private async collectTurnPagesByView(initialCursor: string | null): Promise<JsonObject[]> {
+    /* Pages arrive newest-first. The first copy of a repeated turn has its
+       freshest content; the last occurrence supplies its chronological
+       position before the collected ids are reversed for reconciliation. */
+    const newestFirst: string[] = [];
+    const byId = new Map<string, JsonObject>();
+    for await (const result of this.descendingHistoryPages(
+      "thread/turns/list",
+      this.turnPageParams(),
+      initialCursor,
+      MAX_RESUME_TURN_PAGES,
+      "resume",
+    )) {
+      for (const turn of pagedTurns(result)) {
+        const turnId = stringField(turn, "id");
+        if (!turnId) continue;
+        if (byId.has(turnId)) {
+          const prior = newestFirst.indexOf(turnId);
+          if (prior >= 0) newestFirst.splice(prior, 1);
+        } else {
+          byId.set(turnId, turn);
+        }
+        newestFirst.push(turnId);
+      }
+    }
+    return newestFirst.reverse().map((turnId) => byId.get(turnId)!);
+  }
+
+  private async hydrateTurnItems(turns: JsonObject[], initialCursor: string | null): Promise<void> {
+    const turnsById = new Map(turns.flatMap((turn) => {
+      const turnId = stringField(turn, "id");
+      if (!turnId) return [];
+      turn.items = [];
+      turn.itemsView = "full";
+      return [[turnId, turn] as const];
+    }));
+    /* No turns means no items to attach, and a thread with no persisted turn
+       may not have materialized its history at all. */
+    if (turnsById.size === 0) return;
+    const itemOrder = new Map<string, string[]>();
+    const itemsByTurn = new Map<string, Map<string, unknown>>();
+    for await (const result of this.descendingHistoryPages(
+      "thread/items/list",
+      this.itemPageParams(),
+      initialCursor,
+      MAX_RESUME_ITEM_PAGES,
+      "resume",
+    )) {
+      for (const entry of pagedItemEntries(result)) {
+        const turn = turnsById.get(entry.turnId);
+        if (!turn || !Array.isArray(turn.items)) continue;
+        const order = itemOrder.get(entry.turnId) ?? [];
+        const items = itemsByTurn.get(entry.turnId) ?? new Map<string, unknown>();
+        itemOrder.set(entry.turnId, order);
+        itemsByTurn.set(entry.turnId, items);
+        const key = itemReplayKey(entry.item);
+        if (items.has(key)) continue;
+        items.set(key, entry.item);
+        order.push(key);
+      }
+    }
+    for (const [turnId, turn] of turnsById) {
+      const items = itemsByTurn.get(turnId);
+      turn.items = (itemOrder.get(turnId) ?? []).reverse().map((key) => items!.get(key)!);
+    }
+  }
+
+  private async retryOnceOnInvalidCursor<T>(operation: (retry: boolean) => Promise<T>): Promise<T> {
+    try {
+      return await operation(false);
+    } catch (error) {
+      if (!isInvalidCursorError(error)) throw error;
+      return await operation(true);
     }
   }
 
@@ -1000,6 +1276,14 @@ export class CodexAppServerHost implements EngineHost {
           turnId: turnIdFromResult(result, "turn/steer"),
         });
       } catch (error) {
+        /* A `result` envelope too large to admit is a steer that landed with a
+           late acknowledgement (issue #301). The steer target was fixed before
+           the request, so the confirmation the delivery already waits for is
+           the whole outcome; an `error` envelope means the server refused and
+           falls through to the ordinary failure. */
+        if (error instanceof OversizedResponseError && error.envelope === "result") {
+          return this.awaitDeliveryConfirmation(entry, { outcome: "steered", turnId: currentTurn });
+        }
         if (/expectedTurnId|active turn|stale/i.test(safeError(error))) {
           return { outcome: "rejected", reason: "stale-turn" };
         }
@@ -1018,12 +1302,23 @@ export class CodexAppServerHost implements EngineHost {
       ? entry.runtime.effort
       : undefined;
     const effort = perTurnEffort ?? this.effort;
-    const result = await this.rpc("turn/start", {
-      threadId: this.identity.threadId,
-      ...(effort ? { effort } : {}),
-      input,
-      clientUserMessageId: entry.id,
-    });
+    let result: unknown;
+    try {
+      result = await this.rpc("turn/start", {
+        threadId: this.identity.threadId,
+        ...(effort ? { effort } : {}),
+        input,
+        clientUserMessageId: entry.id,
+      });
+    } catch (error) {
+      /* The turn started; only the frame naming it was too large to admit. The
+         turn id arrives with `turn/started` and the receipt's own id with the
+         persisted `userMessage` this delivery already waits for (issue #301). */
+      if (error instanceof OversizedResponseError && error.envelope === "result") {
+        return this.awaitDeliveryConfirmation(entry, { outcome: "turn-started", turnId: null });
+      }
+      throw error;
+    }
     const turnId = turnIdFromResult(result, "turn/start");
     this.activeTurnId = turnId;
     this.notifyStateListeners();
@@ -1355,20 +1650,31 @@ export class CodexAppServerHost implements EngineHost {
 
   private async ensureCanonicalTranscriptPath(): Promise<void> {
     if (this.identity.path) return;
+    await this.readThreadMetadata();
+    if (!this.identity.path) {
+      const error = new Error("canonical transcript path is unavailable") as NodeJS.ErrnoException;
+      error.code = "NO_TRANSCRIPT_PATH";
+      throw error;
+    }
+  }
+
+  /**
+   * The thread's own metadata — `path` and `status`, never history. Replaying
+   * turns here would couple the frame size to the whole session, which is the
+   * coupling this issue removes (#301), so the read is always metadata-only
+   * and it is the only `thread/read` the host issues.
+   */
+  private async readThreadMetadata(): Promise<unknown> {
     const result = await this.rpc("thread/read", {
       threadId: this.identity.threadId,
-      includeTurns: true,
+      includeTurns: false,
     });
     const recovered = threadFromResult(result, "thread/read");
     if (recovered.threadId !== this.identity.threadId) {
       throw new Error("thread/read returned a different thread id");
     }
-    if (!recovered.path) {
-      const error = new Error("canonical transcript path is unavailable") as NodeJS.ErrnoException;
-      error.code = "NO_TRANSCRIPT_PATH";
-      throw error;
-    }
-    this.identity.path = recovered.path;
+    if (recovered.path) this.identity.path = recovered.path;
+    return result;
   }
 
   private async insertVoicePersonaBootstrap(bootstrap: VoicePersonaBootstrap, itemId: string): Promise<void> {
@@ -2085,8 +2391,8 @@ export class CodexAppServerHost implements EngineHost {
       : resumedStatus);
   }
 
-  private reconcileThreadHistory(result: unknown): void {
-    for (const turn of resumedTurns(result)) this.reconcileTurnHistory(turn);
+  private reconcileThreadHistory(turns: readonly JsonObject[]): void {
+    for (const turn of turns) this.reconcileTurnHistory(turn);
   }
 
   private reconcileTurnHistory(turn: JsonObject): void {
@@ -2131,8 +2437,8 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
-  private rememberConfirmedDeliveries(result: unknown): void {
-    for (const turn of resumedTurns(result)) {
+  private rememberConfirmedDeliveries(turns: readonly JsonObject[]): void {
+    for (const turn of turns) {
       const turnId = stringField(turn, "id");
       if (!turnId || !Array.isArray(turn.items)) continue;
       for (const item of turn.items) this.rememberConfirmedDelivery(turnId, item);
@@ -2142,29 +2448,47 @@ export class CodexAppServerHost implements EngineHost {
   private async confirmedDelivery(entry: QueueEntry): Promise<DeliveryReceipt | null> {
     const known = this.confirmedDeliveries.get(entry.id);
     if (known) return this.confirmedReceipt(entry, known);
-    let thread: unknown;
-    try {
-      const timeoutMs = this.activeTurnId
-        ? this.requestTimeoutMs * ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER
-        : this.requestTimeoutMs;
-      thread = await this.rpc("thread/read", { threadId: this.identity.threadId, includeTurns: true }, timeoutMs);
-    } catch (error) {
-      const message = safeError(error);
-      if (/not materialized yet/i.test(message) && /before first user message/i.test(message)) return null;
-      throw error;
-    }
+    await this.scanPersistedDeliveries(entry.id);
     if (this.dead) throw new Error(safeError(this.failure ?? "Codex app-server host is unavailable"));
-    this.rememberConfirmedDeliveries(thread);
     const recovered = this.confirmedDeliveries.get(entry.id);
     return recovered ? this.confirmedReceipt(entry, recovered) : null;
   }
 
-  private awaitDeliveryConfirmation(entry: QueueEntry, receipt: DeliveryReceipt): Promise<DeliveryReceipt> {
+  /**
+   * Hydrates confirmed deliveries from persisted history in recent-first
+   * bounded item pages, stopping as soon as the entry is found (issue #301).
+   * An unloaded thread has no persisted history visible to this host yet.
+   */
+  private async scanPersistedDeliveries(entryId: string): Promise<void> {
+    try {
+      await this.retryOnceOnInvalidCursor(() => this.scanDeliveryItemPages(entryId));
+    } catch (error) {
+      if (!isThreadNotLoadedError(error)) throw error;
+    }
+  }
+
+  private async scanDeliveryItemPages(entryId: string): Promise<void> {
+    for await (const result of this.descendingHistoryPages(
+      "thread/items/list",
+      this.itemPageParams(),
+      null,
+      MAX_RESUME_ITEM_PAGES,
+      "delivery scan",
+    )) {
+      for (const entry of pagedItemEntries(result)) {
+        this.rememberConfirmedDelivery(entry.turnId, entry.item);
+      }
+      if (this.confirmedDeliveries.has(entryId)) return;
+    }
+  }
+
+  private awaitDeliveryConfirmation(entry: QueueEntry, receipt: PendingDeliveryReceipt): Promise<DeliveryReceipt> {
     const confirmed = this.confirmedDeliveries.get(entry.id);
     if (confirmed) {
       this.confirmedReceipt(entry, confirmed);
-      confirmed.receipt = receipt;
-      return Promise.resolve(receipt);
+      /* A receipt still waiting for its turn id keeps the observed one. */
+      if (receipt.turnId !== null) confirmed.receipt = settledReceipt(receipt, receipt.turnId);
+      return Promise.resolve(confirmed.receipt);
     }
     const existing = this.pendingDeliveries.get(entry.id);
     if (existing) {
@@ -2221,7 +2545,9 @@ export class CodexAppServerHost implements EngineHost {
     const previous = this.confirmedDeliveries.get(clientId);
     const pending = this.pendingDeliveries.get(clientId);
     const confirmed = {
-      receipt: previous?.receipt ?? pending?.receipt ?? { outcome: "turn-started" as const, turnId },
+      receipt: previous?.receipt
+        ?? (pending ? settledReceipt(pending.receipt, pending.receipt.turnId ?? turnId) : null)
+        ?? { outcome: "turn-started" as const, turnId },
       text: previous && (previous.text !== text || previous.contentDigest !== contentDigest) ? null : text,
       contentDigest: previous && (previous.text !== text || previous.contentDigest !== contentDigest) ? null : contentDigest,
     };
@@ -2313,8 +2639,8 @@ export class CodexAppServerHost implements EngineHost {
     this.bufferedTerminalTurnIds.clear();
   }
 
-  private flushPreRestoreMessages(resumeResult: unknown | null): void {
-    const turns = new Map(resumedTurns(resumeResult).flatMap((turn) => {
+  private flushPreRestoreMessages(resumedHistory: readonly JsonObject[] | null): void {
+    const turns = new Map((resumedHistory ?? []).flatMap((turn) => {
       const turnId = stringField(turn, "id");
       return turnId ? [[turnId, turn] as const] : [];
     }));
@@ -2379,34 +2705,38 @@ export class CodexAppServerHost implements EngineHost {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        if (method === "thread/read") this.rememberLateThreadReadResponse(id, timeoutMs);
+        /* History reads may legally answer after their timeout; remember the id
+           so the late response is consumed harmlessly. */
+        if (method === "thread/read" || method === "thread/turns/list" || method === "thread/items/list") {
+          this.rememberLateHistoryResponse(id, timeoutMs);
+        }
         const error = new Error(`${method} timed out${MUTATING_RPC_METHODS.has(method) ? "; outcome is uncertain" : ""}`);
         reject(error);
         if (MUTATING_RPC_METHODS.has(method)) this.fail(error);
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { method, resolve, reject, timer });
       this.write({ jsonrpc: "2.0", id, method, params });
     });
   }
 
-  private rememberLateThreadReadResponse(id: number, timeoutMs: number): void {
+  private rememberLateHistoryResponse(id: number, timeoutMs: number): void {
     const now = Date.now();
-    for (const [lateId, expiresAt] of this.lateThreadReadResponses) {
-      if (expiresAt <= now) this.lateThreadReadResponses.delete(lateId);
+    for (const [lateId, expiresAt] of this.lateHistoryResponses) {
+      if (expiresAt <= now) this.lateHistoryResponses.delete(lateId);
     }
-    const ttlMs = Math.max(timeoutMs * LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER, MIN_LATE_THREAD_READ_RESPONSE_TTL_MS);
-    this.lateThreadReadResponses.set(id, now + ttlMs);
-    while (this.lateThreadReadResponses.size > MAX_LATE_THREAD_READ_RESPONSES) {
-      const oldestId = this.lateThreadReadResponses.keys().next().value;
+    const ttlMs = Math.max(timeoutMs * LATE_HISTORY_RESPONSE_TTL_MULTIPLIER, MIN_LATE_HISTORY_RESPONSE_TTL_MS);
+    this.lateHistoryResponses.set(id, now + ttlMs);
+    while (this.lateHistoryResponses.size > MAX_LATE_HISTORY_RESPONSES) {
+      const oldestId = this.lateHistoryResponses.keys().next().value;
       if (oldestId === undefined) break;
-      this.lateThreadReadResponses.delete(oldestId);
+      this.lateHistoryResponses.delete(oldestId);
     }
   }
 
-  private consumeLateThreadReadResponse(id: number): boolean {
-    const expiresAt = this.lateThreadReadResponses.get(id);
+  private consumeLateHistoryResponse(id: number): boolean {
+    const expiresAt = this.lateHistoryResponses.get(id);
     if (expiresAt === undefined) return false;
-    this.lateThreadReadResponses.delete(id);
+    this.lateHistoryResponses.delete(id);
     return expiresAt > Date.now();
   }
 
@@ -2439,13 +2769,23 @@ export class CodexAppServerHost implements EngineHost {
       if (this.dead || this.releasing || this.released) {
         this.stdoutBuffer = "";
         this.replayReduction = null;
+        this.replayReductionBytes = 0;
+        this.replayReductionRpcId = null;
+        this.replayReductionMethod = null;
+        this.oversizedDiscard = null;
         return;
       }
-      rest = this.replayReduction ? this.feedReplayReduction(rest) : this.acceptPlainStdout(rest);
+      rest = this.oversizedDiscard ? this.feedOversizedDiscard(rest)
+        : this.replayReduction ? this.feedReplayReduction(rest)
+        : this.acceptPlainStdout(rest);
     }
     if (this.dead || this.releasing || this.released) {
       this.stdoutBuffer = "";
       this.replayReduction = null;
+      this.replayReductionBytes = 0;
+      this.replayReductionRpcId = null;
+      this.replayReductionMethod = null;
+      this.oversizedDiscard = null;
     }
   }
 
@@ -2456,19 +2796,29 @@ export class CodexAppServerHost implements EngineHost {
     while (newline >= 0) {
       const line = this.stdoutBuffer.slice(0, newline).trim();
       this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
-      if (Buffer.byteLength(line) > MAX_LINE_BYTES) {
-        if (this.awaitedReplayEnvelopeId(line) === null) {
-          this.fail(new Error("Codex app-server emitted an oversized JSONL frame"));
-          return "";
+      const lineBytes = Buffer.byteLength(line);
+      if (lineBytes > MAX_LINE_BYTES) {
+        const reduction = this.reducibleOversizedFrame(line);
+        if (reduction === null) {
+          /* Oversized and complete: skip it loudly while preserving a
+             reachable host with degraded output (#301). */
+          this.reportOversizedFrame(line, lineBytes);
+        } else {
+          const remainder = this.stdoutBuffer;
+          this.stdoutBuffer = "";
+          this.beginReplayReduction(reduction.rpcId, reduction.method);
+          if (!this.feedReplayFrame(line)) {
+            /* The frame ended with this line; an overflow skip needs no
+               discard window before the stream resumes. */
+            this.oversizedDiscard = null;
+            return this.dead || this.releasing || this.released ? "" : remainder;
+          }
+          this.finishReplayReduction();
+          return this.dead || this.releasing || this.released ? "" : remainder;
         }
-        const remainder = this.stdoutBuffer;
-        this.stdoutBuffer = "";
-        this.replayReduction = new CodexReplayFrameReducer(REPLAY_FRAME_BUDGETS);
-        if (!this.feedReplayFrame(line)) return "";
-        this.finishReplayReduction();
-        return this.dead || this.releasing || this.released ? "" : remainder;
+      } else if (line) {
+        this.acceptMessage(line);
       }
-      if (line) this.acceptMessage(line);
       if (this.dead || this.releasing || this.released) {
         this.stdoutBuffer = "";
         return "";
@@ -2476,42 +2826,85 @@ export class CodexAppServerHost implements EngineHost {
       newline = this.stdoutBuffer.indexOf("\n");
     }
     const bufferedBytes = Buffer.byteLength(this.stdoutBuffer);
-    if (bufferedBytes > REPLAY_REDUCTION_THRESHOLD_BYTES && this.awaitedReplayEnvelopeId(this.stdoutBuffer) !== null) {
-      const buffered = this.stdoutBuffer;
-      this.stdoutBuffer = "";
-      this.replayReduction = new CodexReplayFrameReducer(REPLAY_FRAME_BUDGETS);
-      return buffered;
-    }
-    if (bufferedBytes > MAX_LINE_BYTES) {
-      this.fail(new Error("Codex app-server emitted an oversized JSONL frame"));
-      this.stdoutBuffer = "";
+    if (bufferedBytes > REPLAY_REDUCTION_THRESHOLD_BYTES) {
+      const reduction = this.reducibleOversizedFrame(this.stdoutBuffer, bufferedBytes > MAX_LINE_BYTES);
+      if (reduction !== null) {
+        const buffered = this.stdoutBuffer;
+        this.stdoutBuffer = "";
+        this.beginReplayReduction(reduction.rpcId, reduction.method);
+        return buffered;
+      }
+      if (bufferedBytes > MAX_LINE_BYTES) {
+        /* An unterminated frame outgrew the bound: swallow it to its newline
+           and report what its head revealed, keeping the host alive. */
+        this.oversizedDiscard = {
+          headText: this.stdoutBuffer.slice(0, OVERSIZED_FRAME_HEAD_CHARS),
+          bytes: bufferedBytes,
+          reported: false,
+        };
+        this.stdoutBuffer = "";
+      }
     }
     return "";
   }
 
-  /** Streams the awaited replay envelope; returns bytes after the frame's newline. */
+  /** Swallows the rest of a skipped oversized frame; returns bytes after its newline. */
+  private feedOversizedDiscard(chunk: string): string {
+    const discard = this.oversizedDiscard!;
+    const newline = chunk.indexOf("\n");
+    if (newline === -1) {
+      discard.bytes += Buffer.byteLength(chunk);
+      return "";
+    }
+    discard.bytes += Buffer.byteLength(chunk.slice(0, newline));
+    this.oversizedDiscard = null;
+    if (!discard.reported) this.reportOversizedFrame(discard.headText, discard.bytes);
+    return chunk.slice(newline + 1);
+  }
+
+  /** Streams an admitted history or completion frame; returns bytes after its newline. */
   private feedReplayReduction(chunk: string): string {
     const newline = chunk.indexOf("\n");
-    if (!this.feedReplayFrame(newline === -1 ? chunk : chunk.slice(0, newline))) return "";
+    if (!this.feedReplayFrame(newline === -1 ? chunk : chunk.slice(0, newline))) {
+      if (this.dead || this.releasing || this.released) return "";
+      /* Overflow switched to discard mode; hand it the unconsumed tail so it
+         finds the frame's newline (a leading newline ends it immediately). */
+      return newline === -1 ? "" : chunk.slice(newline);
+    }
     if (newline === -1) return "";
     this.finishReplayReduction();
     return this.dead || this.releasing || this.released ? "" : chunk.slice(newline + 1);
   }
 
+  private beginReplayReduction(rpcId: number | null, method: string | null): void {
+    this.replayReduction = new CodexReplayFrameReducer(REPLAY_FRAME_BUDGETS);
+    this.replayReductionBytes = 0;
+    this.replayReductionRpcId = rpcId;
+    this.replayReductionMethod = method;
+  }
+
   private feedReplayFrame(text: string): boolean {
+    this.replayReductionBytes += Buffer.byteLength(text);
     try {
       this.replayReduction!.feed(text);
       return true;
     } catch (error) {
-      this.replayReduction = null;
-      this.fail(error instanceof ReplayFrameOverflowError ? error : new Error(safeError(error)));
+      if (error instanceof ReplayFrameOverflowError) this.skipOverflowedReducedFrame(false);
+      else {
+        this.replayReduction = null;
+        this.replayReductionBytes = 0;
+        this.replayReductionRpcId = null;
+        this.replayReductionMethod = null;
+        this.fail(new Error(safeError(error)));
+      }
       return false;
     }
   }
 
   private finishReplayReduction(): void {
     const reducer = this.replayReduction!;
-    this.replayReduction = null;
+    const observedBytes = this.replayReductionBytes;
+    const method = this.replayReductionMethod;
     let reduced: string;
     try {
       reduced = reducer.finish().trim();
@@ -2519,22 +2912,214 @@ export class CodexAppServerHost implements EngineHost {
         reduced = shrinkReducedReplayFrame(reduced, MAX_LINE_BYTES, REPLAY_FRAME_BUDGETS).trim();
       }
     } catch (error) {
-      this.fail(error instanceof ReplayFrameOverflowError ? error : new Error(safeError(error)));
+      if (error instanceof ReplayFrameOverflowError) this.skipOverflowedReducedFrame(true);
+      else {
+        this.replayReduction = null;
+        this.replayReductionBytes = 0;
+        this.replayReductionRpcId = null;
+        this.replayReductionMethod = null;
+        this.fail(new Error(safeError(error)));
+      }
       return;
     }
     if (Buffer.byteLength(reduced) > MAX_LINE_BYTES) {
-      this.fail(new Error("Codex app-server emitted an oversized JSONL frame"));
+      this.skipOverflowedReducedFrame(true);
       return;
+    }
+    this.replayReduction = null;
+    this.replayReductionBytes = 0;
+    this.replayReductionRpcId = null;
+    this.replayReductionMethod = null;
+    if (method && observedBytes > MAX_LINE_BYTES) {
+      const diagnostic = oversizedFrameDiagnostic(observedBytes, method);
+      this.warnOversizedFrame(observedBytes, method);
+      this.emitOversizedFrameDiagnostic(diagnostic);
     }
     if (reduced) this.acceptMessage(reduced);
   }
 
-  /** The numeric id when this frame opens as the response to an awaited replay read. */
-  private awaitedReplayEnvelopeId(text: string): number | null {
+  /**
+   * A frame the string-truncating reducer could not fit under the bound. An
+   * awaiting request fails with a typed oversized-response error so a page
+   * loop can narrow its request instead of failing adoption; a completion
+   * schedules paginated reconciliation. Mid-frame overflows discard through
+   * the newline. Reduction only ever begins on a `result` envelope or a
+   * completion notification, so an awaited frame here is always a result.
+   */
+  private skipOverflowedReducedFrame(frameComplete: boolean): void {
+    const rpcId = this.replayReductionRpcId;
+    const method = this.replayReductionMethod;
+    const observedBytes = this.replayReductionBytes;
+    this.replayReduction = null;
+    this.replayReductionBytes = 0;
+    this.replayReductionRpcId = null;
+    this.replayReductionMethod = null;
+    const pending = rpcId !== null ? this.pending.get(rpcId) : undefined;
+    const descriptor = method ?? (pending ? `response to ${pending.method}` : "awaited replay envelope");
+    const diagnostic = oversizedFrameDiagnostic(observedBytes, descriptor);
+    this.warnOversizedFrame(observedBytes, descriptor);
+    if (pending && rpcId !== null) {
+      this.pending.delete(rpcId);
+      this.replayEnvelopeRequestIds.delete(rpcId);
+      clearTimeout(pending.timer);
+      pending.reject(new OversizedResponseError(diagnostic, "result"));
+    }
+    this.emitOversizedFrameDiagnostic(diagnostic);
+    if (method) this.scheduleOversizedCompletionReconciliation();
+    if (!frameComplete) this.oversizedDiscard = { headText: "", bytes: observedBytes, reported: true };
+  }
+
+  /**
+   * Skips one complete oversized frame that nothing is streaming (issue #301).
+   * The frame's head names its message type or request id; a response rejects
+   * its awaiting request with the diagnostic, a server request is answered
+   * with a JSON-RPC error so the app-server does not wait forever, and the
+   * skip lands in the durable ledger so the degradation is visible. The writer
+   * stays open: a mutating call whose acknowledgement was merely too large has
+   * its outcome in the events the host already consumes (issue #301).
+   */
+  private reportOversizedFrame(headText: string, observedBytes: number): void {
+    const head = headText.slice(0, OVERSIZED_FRAME_HEAD_CHARS);
+    const envelopeMatch = /"(params|result|error)"\s*:/.exec(head);
+    const envelopeEnd = envelopeMatch?.index ?? -1;
+    const envelope = envelopeEnd === -1 ? head : head.slice(0, envelopeEnd);
+    const method = /"method"\s*:\s*"([^"]{1,128})"/.exec(envelope)?.[1] ?? null;
+    const idToken = /"id"\s*:\s*(\d+|"[^"\\]{1,128}")/.exec(envelope)?.[1] ?? null;
+    const numericId = idToken !== null && !idToken.startsWith("\"") ? Number(idToken) : null;
+    /* Mirrors acceptParsedMessage: a frame carrying a method is a server
+       request or notification even when its id equals a pending client rpc id
+       — the two counters are independent JSON-RPC id spaces. */
+    const pending = method === null && numericId !== null ? this.pending.get(numericId) : undefined;
+    const descriptor = method ?? (pending ? `response to ${pending.method}` : "unknown message type");
+    const diagnostic = oversizedFrameDiagnostic(observedBytes, descriptor);
+    this.warnOversizedFrame(observedBytes, descriptor);
+    if (pending && numericId !== null) {
+      this.pending.delete(numericId);
+      this.replayEnvelopeRequestIds.delete(numericId);
+      clearTimeout(pending.timer);
+      if (pending.method === "thread/resume") {
+        this.emitOversizedFrameDiagnostic(diagnostic);
+        this.recoverOversizedResume(pending, diagnostic);
+        return;
+      }
+      /* The head names the envelope before the payload begins: `result` is a
+         mutation that landed, `error` a server refusal. */
+      const envelopeKind = envelopeMatch?.[1] === "result" ? "result" as const
+        : envelopeMatch?.[1] === "error" ? "error" as const
+        : "unknown" as const;
+      const uncertain = MUTATING_RPC_METHODS.has(pending.method) && envelopeKind !== "error";
+      pending.reject(new OversizedResponseError(
+        `${diagnostic}${uncertain ? "; outcome is uncertain" : ""}`,
+        envelopeKind,
+      ));
+      this.emitOversizedFrameDiagnostic(diagnostic);
+    } else if (method !== null && idToken !== null) {
+      const requestId = idToken.startsWith("\"") ? idToken.slice(1, -1) : Number(idToken);
+      this.write({ jsonrpc: "2.0", id: requestId, error: { code: -32600, message: "oversized frame skipped by client" } });
+      this.emitOversizedFrameDiagnostic(diagnostic);
+    } else {
+      this.emitOversizedFrameDiagnostic(diagnostic);
+    }
+    if (method && REDUCIBLE_OVERSIZED_NOTIFICATION_METHODS.has(method)) {
+      this.scheduleOversizedCompletionReconciliation();
+    }
+  }
+
+  /**
+   * A server that replays turns despite `excludeTurns: true` can overflow the
+   * resume response before adoption has an identity envelope. Recover only its
+   * bounded metadata, then rebuild history through the installed descending
+   * page APIs so the dropped replay cannot make the thread unreachable.
+   */
+  private recoverOversizedResume(pending: PendingRpc, diagnostic: string): void {
+    void this.readThreadMetadata().then(
+      (result) => pending.resolve(result),
+      (error) => pending.reject(new Error(`${diagnostic}; metadata recovery failed: ${safeError(error)}`)),
+    );
+  }
+
+  private scheduleOversizedCompletionReconciliation(): void {
+    if (this.oversizedCompletionReconciliation || this.dead || this.releasing || this.released) return;
+    const task = (async () => {
+      try {
+        const activeTurnId = this.activeTurnId;
+        if (activeTurnId) await this.reconcilePersistedTurn(activeTurnId);
+        for (const entryId of [...this.pendingDeliveries.keys()]) {
+          if (!this.pendingDeliveries.has(entryId)) continue;
+          await this.scanPersistedDeliveries(entryId);
+        }
+      } catch (error) {
+        console.warn("[codex app-server host] oversized completion reconciliation failed", {
+          threadId: this.identity.threadId,
+          error: safeError(error),
+        });
+      }
+    })();
+    this.oversizedCompletionReconciliation = task;
+    void task.finally(() => {
+      if (this.oversizedCompletionReconciliation === task) this.oversizedCompletionReconciliation = null;
+    });
+  }
+
+  private async reconcilePersistedTurn(turnId: string): Promise<void> {
+    for await (const result of this.descendingHistoryPages(
+      "thread/turns/list",
+      this.turnPageParams(),
+      null,
+      MAX_RESUME_TURN_PAGES,
+      "completion reconciliation",
+    )) {
+      const turn = pagedTurns(result).find((candidate) => stringField(candidate, "id") === turnId);
+      if (turn) {
+        this.reconcileTurnHistory(turn);
+        return;
+      }
+    }
+  }
+
+  private warnOversizedFrame(observedBytes: number, messageType: string): void {
+    console.warn("[codex app-server host] skipped an oversized JSONL frame", {
+      threadId: this.identity.threadId,
+      observedBytes,
+      boundBytes: MAX_LINE_BYTES,
+      messageType,
+    });
+  }
+
+  private emitOversizedFrameDiagnostic(diagnostic: string): void {
+    if (this.oversizedFrameDiagnostics >= MAX_OVERSIZED_FRAME_DIAGNOSTICS) return;
+    this.oversizedFrameDiagnostics += 1;
+    this.emit({
+      kind: "item",
+      turnId: null,
+      phase: "completed",
+      item: {
+        type: "agentMessage",
+        id: `viewer-oversized-frame-${this.oversizedFrameDiagnostics}`,
+        text: `[viewer diagnostic] ${diagnostic}`,
+      },
+    });
+  }
+
+  /** Identifies an awaited history response or a completion notification whose
+      bounded projection preserves delivery and active-turn evidence. */
+  private reducibleOversizedFrame(
+    text: string,
+    includeCompletionNotifications = true,
+  ): { rpcId: number | null; method: string | null } | null {
     const match = REPLAY_RESPONSE_PREFIX.exec(text.slice(0, 64).trimStart());
-    if (!match) return null;
-    const id = Number(match[1]);
-    return this.replayEnvelopeRequestIds.has(id) ? id : null;
+    if (match) {
+      const id = Number(match[1]);
+      if (this.replayEnvelopeRequestIds.has(id)) return { rpcId: id, method: null };
+    }
+    if (!includeCompletionNotifications) return null;
+    const head = text.slice(0, OVERSIZED_FRAME_HEAD_CHARS);
+    const envelopeEnd = head.search(/"params"\s*:/);
+    const envelope = envelopeEnd === -1 ? head : head.slice(0, envelopeEnd);
+    const method = /"method"\s*:\s*"([^"]{1,128})"/.exec(envelope)?.[1] ?? null;
+    return method && REDUCIBLE_OVERSIZED_NOTIFICATION_METHODS.has(method)
+      ? { rpcId: null, method }
+      : null;
   }
 
   private trackReplayEnvelopeRequest(id: number): void {
@@ -2561,13 +3146,32 @@ export class CodexAppServerHost implements EngineHost {
       return;
     }
     if (typeof message.method === "string" && !this.eventLedgerRestored) {
-      const bytes = Buffer.byteLength(line);
+      let bufferedMessage = message;
+      let bytes = Buffer.byteLength(line);
+      if (this.preRestoreBytes + bytes > MAX_PRE_RESTORE_BYTES) {
+        const projection = preRestoreCompletionProjection(message);
+        if (projection) {
+          const method = stringField(message, "method") ?? "unknown message type";
+          const diagnostic = "Codex app-server pre-restore notification exceeded its bounded capacity: "
+            + `observed ${bytes} bytes, bound ${MAX_PRE_RESTORE_BYTES} bytes, message type ${method}; `
+            + "payload content was projected before bounded buffering";
+          console.warn("[codex app-server host] projected a pre-restore notification", {
+            threadId: this.identity.threadId,
+            observedBytes: bytes,
+            boundBytes: MAX_PRE_RESTORE_BYTES,
+            messageType: method,
+          });
+          this.emitOversizedFrameDiagnostic(diagnostic);
+          bufferedMessage = projection;
+          bytes = Buffer.byteLength(JSON.stringify(projection));
+        }
+      }
       if (this.preRestoreEvents.length + this.preRestoreMessages.length >= MAX_PRE_RESTORE_FRAMES
         || this.preRestoreBytes + bytes > MAX_PRE_RESTORE_BYTES) {
         this.fail(new Error("Codex app-server pre-restore notification buffer exceeded its bounded capacity"));
         return;
       }
-      this.preRestoreMessages.push({ message, bytes });
+      this.preRestoreMessages.push({ message: bufferedMessage, bytes });
       this.preRestoreBytes += bytes;
       return;
     }
@@ -2581,7 +3185,7 @@ export class CodexAppServerHost implements EngineHost {
       if (typeof id !== "number") return this.fail(new Error("Codex app-server response id is invalid"));
       this.replayEnvelopeRequestIds.delete(id);
       const pending = this.pending.get(id);
-      if (!pending && this.consumeLateThreadReadResponse(id)) return;
+      if (!pending && this.consumeLateHistoryResponse(id)) return;
       if (!pending) return this.fail(new Error("Codex app-server response has no matching request"));
       this.pending.delete(id);
       clearTimeout(pending.timer);
