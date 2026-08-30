@@ -4852,7 +4852,11 @@ export class AgentRegistry {
       launch still owns. External cleanup must act solely on this evidence: a
       completed receipt or a newer same-key operation wins the transaction and
       leaves its host untouched. */
-  failStructuredSpawn(launchId: string, error: string): StructuredSpawnFailureClaim {
+  failStructuredSpawn(
+    launchId: string,
+    error: string,
+    options: { retainRegisteredHost?: boolean } = {},
+  ): StructuredSpawnFailureClaim {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt) return { claimed: false, receipt: null, cleanup: null };
@@ -4894,6 +4898,18 @@ export class AgentRegistry {
         process: clone(entry.structuredHost?.process ?? null),
         releaseRegisteredHost,
       };
+      /* A foreground launch can prove its transcript will never materialize
+         while the host still refuses release. The receipt must settle so the
+         stage can retry, and the exact pid/start identity must remain listed
+         so the Viewer can finish the reap without an operator searching the
+         process table. Only this launch's registered live host qualifies. */
+      if (options.retainRegisteredHost === true
+        && releaseRegisteredHost
+        && entry.structuredHost?.process) {
+        entry.pendingAction = null;
+        entry.updatedAt = now();
+        return { claimed: true, receipt: clone(receipt), cleanup };
+      }
       const preservesResumeCursor = receipt.purpose === "resume-successor"
         && receipt.resumeSourcePath === receipt.artifactPath
         && (entry.structuredHost?.eventCursor ?? 0) > 0;

@@ -1777,7 +1777,9 @@ export async function spawnStructuredConversation(
     const terminalFreshLaunch = input.receipt.purpose === "launch";
     if (projectionSucceeded || terminalFreshLaunch) {
       if (key) {
-        input.registry.failStructuredSpawn(input.receipt.launchId, failureReason);
+        input.registry.failStructuredSpawn(input.receipt.launchId, failureReason, {
+          retainRegisteredHost: cleanupError !== null,
+        });
       } else {
         input.registry.failSpawn(input.receipt.launchId, failureReason);
       }

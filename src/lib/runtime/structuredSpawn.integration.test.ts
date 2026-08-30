@@ -21,6 +21,7 @@ import { StructuredHostAdoptionCleanupError, type DeliveryReceipt, type HostStat
 import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./structuredDeliveryController";
 import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
+import { readStructuredHostRecords, terminateStructuredHostTree } from "./structuredHostControl";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { INITIAL_MESSAGE_TIMEOUT_MS, STALE_STRUCTURED_SPAWN_TIMEOUT_MS, STRUCTURED_SPAWN_DURABLE_SETUP_TIMEOUT_MS, reconcileStructuredSpawnReplay, recoverPendingStructuredSpawns, spawnStructuredConversation, StructuredInitialMessageTimeoutError, structuredClaudeLaunchForm, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, waitForReadableStructuredTranscript, waitForStructuredInitialMessage, withRuntimeAdmissionRetry, type SpawnedStructuredHost } from "./structuredSpawn";
@@ -1198,11 +1199,12 @@ test.each(["codex", "claude"] as const)("%s stale-live recovery converges regist
   });
   expect(registry.snapshot().entries[`${engine}:${sessionId}`]).toMatchObject({
     status: "idle",
+    claimEpoch: 1,
     pendingAction: null,
     structuredHost: {
       process: owner,
       activeTurnRef: null,
-      writerClaimEpoch: 5,
+      writerClaimEpoch: 1,
     },
   });
   expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
@@ -1431,13 +1433,74 @@ test.each([
       state: "failed",
       error: expect.stringContaining("structured spawn transcript did not become readable"),
     });
+    expect(host.releaseCount).toBe(1);
+    if (!releaseResists) {
+      expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
+        status: "dead",
+        structuredHost: null,
+        claimOwner: null,
+        pendingAction: null,
+      });
+      return;
+    }
+
+    const processIdentity = { pid: process.pid, startIdentity: "missing-transcript-host" };
+    expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
+      status: "idle",
+      structuredHost: { process: processIdentity },
+      claimOwner: expect.any(String),
+      pendingAction: null,
+    });
+    const [record] = readStructuredHostRecords({
+      snapshot: () => registry.snapshot(),
+      owned: () => false,
+    });
+    if (!record || !record.startIdentity) throw new Error("unreaped host has no Viewer kill authority");
+    expect(record).toMatchObject({
+      engine,
+      sessionId: id,
+      pid: processIdentity.pid,
+      startIdentity: processIdentity.startIdentity,
+      path: artifactPath,
+      conversationId: begun.receipt.conversationId,
+    });
+
+    let alive = true;
+    const terminated = await terminateStructuredHostTree({
+      kind: "structured",
+      pid: record.pid,
+      startIdentity: record.startIdentity,
+      engine: record.engine,
+      sessionId: record.sessionId,
+      conversationId: record.conversationId,
+      seat: record.seat,
+      turnBusy: record.turnBusy,
+      owned: record.owned,
+      lastActiveAt: null,
+    }, {
+      processIdentity: () => alive ? processIdentity.startIdentity : null,
+      pidAlive: () => alive,
+      ppidMap: () => new Map(),
+      processGroupId: () => null,
+      protectedPids: () => new Set(),
+      terminateOwnedHost: async () => false,
+      signal: () => { alive = false; },
+      retireRegistryEntry: (key, expected) => { registry.terminateStructuredHost(key, expected); },
+      graceMs: 0,
+      deadlineMs: 0,
+      sleep: async () => {},
+    });
+
+    expect(terminated).toMatchObject({ ok: true, via: "process-group" });
     expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
       status: "dead",
       structuredHost: null,
       claimOwner: null,
-      pendingAction: null,
     });
-    expect(host.releaseCount).toBe(1);
+    expect(registry.claimFailedSpawnForRetry(
+      begun.receipt.launchId,
+      `pipeline-retry:${begun.receipt.launchId}`,
+    ).kind).toBe("claimed");
   } finally {
     journal.close();
   }
@@ -4936,7 +4999,7 @@ test("issue 367: a post-kill relaunch that exhausts admission never leaves a liv
   expect(admissionAttempts).toBe(3);
   const failed = registry.snapshot().receipts[begun.receipt.launchId];
   expect(failed).toMatchObject({ state: "failed", key: null, artifactPath: null });
-  expect(failed?.error).toContain("runtime host request timed out");
+  expect(failed?.error).toContain("structured spawn runtime host is unavailable");
   /* No placeholder session may survive for the failed launch: the admission
      command never landed, so the runtime snapshot must not show the
      conversation at all — and the replay reconciler reports the failure. */
