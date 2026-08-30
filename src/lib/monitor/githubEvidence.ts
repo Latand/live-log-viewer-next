@@ -133,10 +133,15 @@ function parseProposalIssues(raw: string): ProposalIssue[] {
  * produced it, so a lane that finished with its work unmerged can be named
  * rather than merely counted.
  *
- * Degradable exactly like the two above: a `gh` that is missing,
- * unauthenticated or rate-limited returns nothing and the tick simply has no
- * unmerged pull request to report, because a check that failed outright over an
- * optional evidence source would take the whole seat tick down with it.
+ * Unlike the two questions above, this one does NOT degrade to an empty list.
+ * An empty list here is a claim — every pull request those lanes opened has
+ * since been merged or closed — and a `gh` that is missing, unauthenticated,
+ * rate-limited, killed at the timeout or answering with something that is not
+ * a JSON array has established no such thing. Collapsing the two made a failed
+ * read indistinguishable from a finished merge, and the tick then reported
+ * `nothing owed` on the strength of it, which is the twelve-hour silence #1289
+ * exists to end returning by a slower route. So the failure is carried out as
+ * a failure and the caller decides what it costs.
  *
  * Read-only. Nothing here merges, closes, comments on or opens a pull request.
  * ------------------------------------------------------------------------- */
@@ -150,16 +155,40 @@ export interface OpenPullRequest {
   updatedAt: string | null;
 }
 
+/**
+ * Why the question could not be answered.
+ *
+ * Coarse on purpose: this token travels into a published journal line, so it
+ * names the class of the failure and never the command, the repository, the
+ * account or `gh`'s own stderr.
+ */
+export type OpenPullRequestsUnavailable = "timed-out" | "command-failed" | "malformed-output";
+
+/** Either the answer or the reason there is none — never both, and never an
+    empty list standing in for the second. */
+export type OpenPullRequestsResult =
+  | { ok: true; pullRequests: OpenPullRequest[] }
+  | { ok: false; unavailable: OpenPullRequestsUnavailable };
+
 const PULL_REQUEST_TITLE_LIMIT = 200;
 
-function parseOpenPullRequests(raw: string): OpenPullRequest[] {
+/**
+ * Null means the output was not a JSON array at all, which is a read that
+ * failed rather than a repository with nothing open.
+ *
+ * A row INSIDE a well-formed array that names no number or no head branch is
+ * still skipped rather than failing the read: that one row cannot be
+ * attributed to a lane, and `gh` answering the question it was asked is not
+ * put in doubt by it.
+ */
+function parseOpenPullRequests(raw: string): OpenPullRequest[] | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw) as unknown;
   } catch {
-    return [];
+    return null;
   }
-  if (!Array.isArray(parsed)) return [];
+  if (!Array.isArray(parsed)) return null;
   const rows: OpenPullRequest[] = [];
   for (const entry of parsed) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
@@ -178,19 +207,31 @@ function parseOpenPullRequests(raw: string): OpenPullRequest[] {
   return rows;
 }
 
+/** A command that failed and a command that was killed at the timeout are
+    different facts about the machine, and whoever reads the journal line is
+    telling an outage from a misconfiguration. `execFile` reports its own
+    timeout as a killed child. */
+function unavailableFromError(error: unknown): OpenPullRequestsUnavailable {
+  const detail = error as { killed?: unknown; code?: unknown; name?: unknown } | null | undefined;
+  if (detail?.killed === true || detail?.code === "ETIMEDOUT" || detail?.name === "TimeoutError") return "timed-out";
+  return "command-failed";
+}
+
 export async function openPullRequestsForRepo(options: {
   cwd: string;
   limit?: number;
   run?: GithubRunner;
   timeoutMs?: number;
-}): Promise<OpenPullRequest[]> {
+}): Promise<OpenPullRequestsResult> {
   const run = options.run ?? githubRunner(options.cwd, options.timeoutMs ?? 20_000);
+  let raw: string;
   try {
-    const raw = await run(["pr", "list", "--state", "open", "--limit", String(options.limit ?? 60), "--json", "number,title,headRefName,updatedAt"]);
-    return parseOpenPullRequests(raw);
-  } catch {
-    return [];
+    raw = await run(["pr", "list", "--state", "open", "--limit", String(options.limit ?? 60), "--json", "number,title,headRefName,updatedAt"]);
+  } catch (error) {
+    return { ok: false, unavailable: unavailableFromError(error) };
   }
+  const pullRequests = parseOpenPullRequests(raw);
+  return pullRequests ? { ok: true, pullRequests } : { ok: false, unavailable: "malformed-output" };
 }
 
 export async function openIssuesForProposal(options: {

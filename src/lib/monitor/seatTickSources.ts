@@ -6,7 +6,7 @@ import { statePath } from "@/lib/configDir";
 import { pageFromEvents, readLifecycleJournal } from "@/lib/lifecycle/journal";
 import { agentLivenessSnapshot, productionLivenessSources, type AgentLivenessRecord } from "@/lib/lifecycle/liveness";
 import { canonicalOrchestratorProject, activeOrchestratorSeats, orchestratorSeatFor } from "@/lib/orchestrator/seats";
-import { loadPipelinesForList } from "@/lib/pipelines/store";
+import { loadArchivedPipelines, loadPipelinesForList } from "@/lib/pipelines/store";
 import { projectTaskPipelineIds } from "@/lib/pipelines/taskBinding";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
@@ -16,7 +16,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import { evidenceFromPipelines, evidenceFromTasks } from "./evidence";
-import { openPullRequestsForRepo, type OpenPullRequest } from "./githubEvidence";
+import { openPullRequestsForRepo, type OpenPullRequestsResult } from "./githubEvidence";
 import { redactBounded } from "./redact";
 import { SEAT_TICK_WAKE_INTERVAL_MS, seatTickWakeDue, seatTurnProgressing } from "./seatTick";
 import { effectiveSeatTickSettings, readSeatTickSettings, type SeatTickSettings } from "./seatTickSettings";
@@ -29,6 +29,7 @@ import {
   type SeatTickPipelineInput,
   type SeatTickPolicy,
   type SeatTickProjectState,
+  type SeatTickPullRequestGap,
   type SeatTickPullRequestInput,
   type SeatTickSeatInput,
   type SeatTickSignalInput,
@@ -156,6 +157,11 @@ export interface SeatTickSources {
   /** Projects that currently hold an active seat. */
   activeSeats: () => string[];
   pipelines: () => readonly Pipeline[];
+  /** Settled lanes the hot store has already let go of (#1289). Cold storage,
+      so it is read only once a check has decided it would pay for a `gh`
+      subprocess anyway — and it has to be read at all because the obligation a
+      finished lane leaves behind outlives the lane's three days of residence. */
+  archivedPipelines: () => readonly Pipeline[];
   tasks: () => BoardTask[];
   registry: () => ReturnType<typeof agentRegistry>;
   /** The registry's own activity verdict — `agent_activity`'s answer, which is
@@ -177,8 +183,10 @@ export interface SeatTickSources {
       `gh` seam as the proposal source. Read at most once per wake interval, and
       only for a project that has a finished lane to attribute one to: a
       subprocess per project per five-minute check would be a cost the tick's
-      whole design is arranged to avoid. */
-  openPullRequests: (options: { cwd: string; limit: number }) => Promise<OpenPullRequest[]>;
+      whole design is arranged to avoid. Answers with a result rather than a
+      list, because "no pull request is open" and "nobody could be asked" are
+      the two facts this reason must never confuse. */
+  openPullRequests: (options: { cwd: string; limit: number }) => Promise<OpenPullRequestsResult>;
   /** Whether the layer holding a retained wake still has it, and whether the
       seat ever got it. The tick's stamps move on this answer and nothing else. */
   wakeState: (wake: SeatTickOutstandingWake) => Promise<SeatTickWakeState>;
@@ -193,6 +201,7 @@ export function defaultSeatTickSources(): SeatTickSources {
     seatFor: orchestratorSeatFor,
     activeSeats: () => activeOrchestratorSeats().map((seat) => seat.project),
     pipelines: () => loadPipelinesForList(),
+    archivedPipelines: () => loadArchivedPipelines(),
     tasks: () => loadTasks(),
     registry: () => agentRegistry(),
     liveness: async (request) => {
@@ -418,9 +427,18 @@ function seatStalled(activity: SeatTickActivity): boolean {
 
 /** The repository a project's `gh` reads run in: the newest pipeline that named
     one. Null when nothing ever did, and the proposal then ranks the board alone. */
-export function repoDirForProject(project: string, sources: SeatTickSources): string | null {
+export function repoDirForProject(
+  project: string,
+  sources: SeatTickSources,
+  /** Lanes the caller has already read out of cold storage. A project whose
+      every lane has been archived still has a repository, and asking `gh`
+      nothing because the hot store happens to be empty is the same silence
+      read off a different shelf (#1289). Never read here on its own: the
+      caller pays for the archive when it has already decided to. */
+  archived: readonly Pipeline[] = [],
+): string | null {
   const canonical = canonicalOrchestratorProject(project);
-  const named = sources.pipelines()
+  const named = [...sources.pipelines(), ...archived]
     .filter((pipeline) => pipeline.repoDir && canonicalOrchestratorProject(pipeline.project) === canonical)
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
   return named[0]?.repoDir ?? null;
@@ -534,44 +552,76 @@ function eventsSince(
  * is on for this project, the interval has elapsed, there is a seat to wake and
  * its turn is not already moving — only when the project has a finished lane to
  * attribute one to, and only when some pipeline named a repository to ask in.
- * Everything else answers with no pull requests at all, which is the same
- * answer a `gh` that cannot be reached gives.
+ * Each of those is an answer: this check would raise no wake from this reason
+ * whatever GitHub said. A read that FAILED is not an answer, and leaves with
+ * {@link SeatTickPullRequestGap} rather than an empty list.
  *
- * The lanes come from the hot store, so the reason decays with it: a lane
- * settled long enough to have been archived stops attributing a pull request.
- * That is deliberate rather than incidental. The reason is about the obligation
- * FINISHING created, and by then the retry guard has long since stopped
- * re-sending it anyway — a pull request nobody merged carried two fruitless
- * wakes and became one board card. A cold-storage read on every check to keep
- * naming it would buy nothing the guard has not already settled.
+ * The lanes come from the hot store AND the archive, because the obligation is
+ * the pull request still being open and that outlives the lane's three days of
+ * residence. Reading only the hot store made the reason decay on a timer: a
+ * tick switched off, a seat busy for days, or a `gh` unreachable until the lane
+ * settled out all arrive at the first eligible check with nothing to attribute
+ * a pull request to, and report quiet over one still sitting open — the same
+ * twelve-hour silence #1289 exists to end, taken slowly. The retry guard does
+ * not cover the gap either: it counts wakes that changed nothing, and a wake
+ * that was never sent has nothing to count. The archive is cold storage, so it
+ * is read only after every cheap gate above has passed, at which point the
+ * check has already committed to a `gh` subprocess and a snapshot read is the
+ * cheaper half of the pair.
  */
+interface PullRequestEvidence {
+  pullRequests: SeatTickPullRequestInput[];
+  /** Null means the question was answered — including answered with nothing
+      open, which is what the tick is entitled to go quiet on. */
+  unavailable: SeatTickPullRequestGap | null;
+}
+
+/** Asked, and nothing came back that is owed. A fresh row each time: this one
+    travels out on the check input and is never shared between two of them. */
+function none(): PullRequestEvidence {
+  return { pullRequests: [], unavailable: null };
+}
+
 async function unmergedPullRequests(context: {
   project: string;
   seat: SeatTickSeatInput | null;
   wakeDue: boolean;
   enabled: boolean;
   sources: SeatTickSources;
-}): Promise<SeatTickPullRequestInput[]> {
-  if (!context.wakeDue || !context.enabled) return [];
+}): Promise<PullRequestEvidence> {
+  if (!context.wakeDue || !context.enabled) return none();
   /* The other two ways a check can be unable to raise any reason at all: a
      project with nobody to wake ends in `no-seat`, and a seat whose turn is
      genuinely moving ends in `skipped`, both before a wake reason is composed.
      Without this clause a seat that stays busy for hours pays a `gh` subprocess
      every five minutes for the whole turn, to answer a question that check was
      never going to ask. */
-  if (!context.seat || seatTurnProgressing(context.seat)) return [];
-  const finished = context.sources.pipelines()
-    .filter((pipeline) => canonicalOrchestratorProject(pipeline.project) === context.project && isFinished(pipeline));
-  if (finished.length === 0) return [];
-  const cwd = repoDirForProject(context.project, context.sources);
-  if (!cwd) return [];
+  if (!context.seat || seatTurnProgressing(context.seat)) return none();
 
-  let open: OpenPullRequest[];
+  let archived: readonly Pipeline[];
   try {
-    open = await context.sources.openPullRequests({ cwd, limit: PULL_REQUEST_LIMIT });
+    archived = context.sources.archivedPipelines();
   } catch {
-    return [];
+    /* Lanes half-read are obligations half-seen, and an obligation that cannot
+       be seen is exactly what gets reported as quiet. */
+    return { pullRequests: [], unavailable: "lanes-unreadable" };
   }
+  const finished = [...context.sources.pipelines(), ...archived]
+    .filter((pipeline) => canonicalOrchestratorProject(pipeline.project) === context.project && isFinished(pipeline));
+  if (finished.length === 0) return none();
+  const cwd = repoDirForProject(context.project, context.sources, archived);
+  if (!cwd) return none();
+
+  let result: OpenPullRequestsResult;
+  try {
+    /* The seam answers with a result; a seam that throws instead is the same
+       fact arriving by exception, and neither is an empty list. */
+    result = await context.sources.openPullRequests({ cwd, limit: PULL_REQUEST_LIMIT });
+  } catch {
+    result = { ok: false, unavailable: "command-failed" };
+  }
+  if (!result.ok) return { pullRequests: [], unavailable: result.unavailable };
+  const open = result.pullRequests;
   const byBranch = new Map<string, Pipeline>();
   for (const pipeline of finished) {
     if (!pipeline.branch) continue;
@@ -592,7 +642,7 @@ async function unmergedPullRequests(context: {
       updatedAt: pullRequest.updatedAt,
     });
   }
-  return found.sort((left, right) => left.number - right.number);
+  return { pullRequests: found.sort((left, right) => left.number - right.number), unavailable: null };
 }
 
 export async function gatherSeatTickInput(
@@ -637,7 +687,7 @@ export async function gatherSeatTickInput(
      made about the wrong pipeline. */
   const openPipelineIds = new Set(sources.pipelines().filter(isOpen).map((pipeline) => pipeline.id));
   const { events, cursor } = eventsSince(canonical, state.eventsThrough, openPipelineIds, sources);
-  const pullRequests = await unmergedPullRequests({
+  const { pullRequests, unavailable: pullRequestsUnavailable } = await unmergedPullRequests({
     project: canonical,
     seat,
     /* The same clause the decision applies, asked here because the read behind
@@ -657,6 +707,7 @@ export async function gatherSeatTickInput(
     tasks,
     events,
     pullRequests,
+    pullRequestsUnavailable,
     signals: signals(canonical, seat, sources),
     changeFingerprint: changeFingerprint(pipelines, tasks, pullRequests),
     /* The sealed cursor travels on the state the decision carries forward, so a

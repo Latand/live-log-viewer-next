@@ -498,6 +498,28 @@ function decide(input: SeatTickCheckInput): SeatTickDecision {
     };
   }
 
+  /* Nothing left to wake on — and every outcome below this line is a statement
+     that nothing is owed. One of them rests on the pull requests this project's
+     finished lanes left open, and a `gh` that could not be reached establishes
+     none of it. So the check reports what happened and is retried at the next
+     one, rather than reporting a silence it never earned.
+
+     It is an error rather than a wake precisely so it stays incapable of
+     costing anything: no delivery, no wake stamp, no retry-guard count. The
+     hourly bound belongs to wakes that were actually sent, and a failed read
+     cannot spend it. The cards the guard raised above still travel — they
+     describe the board, not this check's conclusion about it. */
+  if (input.pullRequestsUnavailable) {
+    return {
+      verdict: {
+        kind: "error",
+        detail: `the open pull requests of this project's finished lanes could not be read (${input.pullRequestsUnavailable}), so nothing owed is not established`,
+      },
+      state,
+      cards,
+    };
+  }
+
   if (cards.length > 0) {
     return { verdict: { kind: "quiet", detail: "every wake reason is held by the retry guard" }, state: quiet(state, at), cards };
   }

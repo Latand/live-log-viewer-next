@@ -16,7 +16,7 @@ const { DEFAULT_SEAT_TICK_POLICY } = await import("./seatTick");
 const { defaultSeatTickSettings } = await import("./seatTickSettings");
 import type { SeatTickSettings } from "./seatTickSettings";
 import type { SeatTickControllerDependencies } from "./seatTickController";
-import type { OpenPullRequest } from "./githubEvidence";
+import type { OpenPullRequest, OpenPullRequestsUnavailable } from "./githubEvidence";
 import type { SeatTickWakeState, SeatTickWithdrawal } from "./seatTickSources";
 import {
   emptySeatTickState,
@@ -54,39 +54,10 @@ interface Harness {
   seat: { conversationId: string; seatEpoch: number; path: string | null } | null;
 }
 
-function harness(options: {
-  seat?: { conversationId: string; seatEpoch: number; path: string | null } | null;
-  turn?: "busy" | "idle";
-  seatActivity?: Partial<AgentLivenessRecord> | null;
-  pipelines?: { id: string; state: string; createdAt: string; movedAt: string | null; branch?: string; closedAt?: string | null }[];
-  tasks?: { id: string; status: "inbox" | "assigned" | "blocked" | "done" }[];
-  events?: LifecycleEvent[];
-  state?: Partial<SeatTickProjectState>;
-  delivery?: DeliveryOutcome;
-  deliveryThrows?: boolean;
-  /** Swaps the seat after the decision, the way a rotation lands mid-check. */
-  rotateBeforeSend?: { conversationId: string; seatEpoch: number; path: string | null } | null;
-  /** What the layer holding a retained wake says has become of it. */
-  wakeState?: SeatTickWakeState;
-  /** What taking that wake back out of the holder's queue achieves. */
-  withdrawal?: SeatTickWithdrawal;
-  /** The holder cannot be reached at all, for either question. */
-  holderThrows?: boolean;
-  /** The project's own tick settings (#1275); the default is the tick as it
-      shipped. */
-  settings?: SeatTickSettings;
-  /** What `gh` reports open in the project's repository (#1289). */
-  openPullRequests?: OpenPullRequest[];
-}): Harness {
-  const sent: ConversationMessage[] = [];
-  const journal: SeatTickRunRecord[] = [];
-  const cards: { project: string; card: SeatTickCard }[] = [];
-  const written: SeatTickProjectState[] = [];
-  const withdrawn: { wake: SeatTickOutstandingWake; reason: string }[] = [];
-  const result: Harness = { deps: {}, sent, journal, cards, written, withdrawn, seat: options.seat === undefined ? { conversationId: CONVERSATION, seatEpoch: 7, path: null } : options.seat };
-  let reads = 0;
+type PipelineFixture = { id: string; state: string; createdAt: string; movedAt: string | null; branch?: string; closedAt?: string | null };
 
-  const pipelines = (options.pipelines ?? []).map((entry) => ({
+function pipelineRecord(entry: PipelineFixture) {
+  return {
     id: entry.id,
     task: `lane ${entry.id}`,
     taskIds: [],
@@ -107,7 +78,49 @@ function harness(options: {
     srcConversationId: null,
     createdAt: entry.createdAt,
     closedAt: entry.closedAt ?? null,
-  }));
+  };
+}
+
+function harness(options: {
+  seat?: { conversationId: string; seatEpoch: number; path: string | null } | null;
+  turn?: "busy" | "idle";
+  seatActivity?: Partial<AgentLivenessRecord> | null;
+  pipelines?: PipelineFixture[];
+  tasks?: { id: string; status: "inbox" | "assigned" | "blocked" | "done" }[];
+  events?: LifecycleEvent[];
+  state?: Partial<SeatTickProjectState>;
+  delivery?: DeliveryOutcome;
+  deliveryThrows?: boolean;
+  /** Swaps the seat after the decision, the way a rotation lands mid-check. */
+  rotateBeforeSend?: { conversationId: string; seatEpoch: number; path: string | null } | null;
+  /** What the layer holding a retained wake says has become of it. */
+  wakeState?: SeatTickWakeState;
+  /** What taking that wake back out of the holder's queue achieves. */
+  withdrawal?: SeatTickWithdrawal;
+  /** The holder cannot be reached at all, for either question. */
+  holderThrows?: boolean;
+  /** The project's own tick settings (#1275); the default is the tick as it
+      shipped. */
+  settings?: SeatTickSettings;
+  /** What `gh` reports open in the project's repository (#1289). */
+  openPullRequests?: OpenPullRequest[];
+  /** The `gh` read failing rather than answering (#1289). Distinct from an
+      empty answer on purpose: that is what the check may go quiet on. */
+  pullRequestsUnavailable?: OpenPullRequestsUnavailable;
+  archivedPipelines?: PipelineFixture[];
+}): Harness {
+  const sent: ConversationMessage[] = [];
+  const journal: SeatTickRunRecord[] = [];
+  const cards: { project: string; card: SeatTickCard }[] = [];
+  const written: SeatTickProjectState[] = [];
+  const withdrawn: { wake: SeatTickOutstandingWake; reason: string }[] = [];
+  const result: Harness = { deps: {}, sent, journal, cards, written, withdrawn, seat: options.seat === undefined ? { conversationId: CONVERSATION, seatEpoch: 7, path: null } : options.seat };
+  let reads = 0;
+
+  const pipelines = (options.pipelines ?? []).map(pipelineRecord);
+  /* Lanes the hot store has already let go of: a settled record leaves after
+     three days and the pull request it left open does not (#1289). */
+  const archived = (options.archivedPipelines ?? []).map(pipelineRecord);
 
   const tasks = (options.tasks ?? []).map((entry) => ({
     id: entry.id,
@@ -143,6 +156,7 @@ function harness(options: {
       },
       activeSeats: () => [PROJECT],
       pipelines: () => pipelines as never,
+      archivedPipelines: () => archived as never,
       tasks: () => tasks as never,
       registry: () => ({
         conversation: () => ({ turn: { state: options.turn ?? "idle" } }),
@@ -155,7 +169,9 @@ function harness(options: {
       latestDeployment: () => ({ state: "unreadable", error: "no ledger" }) as never,
       retirementReport: () => null,
       settings: () => options.settings ?? defaultSeatTickSettings(PROJECT),
-      openPullRequests: async () => options.openPullRequests ?? [],
+      openPullRequests: async () => (options.pullRequestsUnavailable
+        ? { ok: false, unavailable: options.pullRequestsUnavailable }
+        : { ok: true, pullRequests: options.openPullRequests ?? [] }),
       wakeState: async () => {
         if (options.holderThrows) throw new Error("the layer holding the wake cannot be read");
         return options.wakeState ?? "retained";
@@ -734,6 +750,104 @@ test("once the pull request is merged the same project owes nothing again", asyn
   });
   expect(await runSeatTickCheck(PROJECT, bare.deps)).toMatchObject({ verdict: "quiet" });
   expect(bare.sent).toEqual([]);
+});
+
+/* The same lane five days on: out of the hot store, into the archive, and the
+   pull request it left open is still the seat's next obligation. Every route
+   into this case is a tick that was not able to say so earlier — ticking off,
+   a seat busy for days, a `gh` nobody could reach — so the first check that
+   CAN must not be the one that reports quiet. */
+const ARCHIVED_LANE = [{
+  id: "pipeline_z9",
+  state: "completed",
+  createdAt: "2026-08-22T09:00:00.000Z",
+  movedAt: "2026-08-22T22:00:00.000Z",
+  branch: "topic-merge-queue",
+  closedAt: "2026-08-22T22:00:00.000Z",
+}];
+
+test("a lane the archive has taken still wakes the seat over its open pull request", async () => {
+  const rig = harness({
+    pipelines: [],
+    archivedPipelines: ARCHIVED_LANE,
+    state: OVERDUE,
+    openPullRequests: [{
+      number: 1289,
+      title: "wake on a merge that is waiting",
+      headRefName: "topic-merge-queue",
+      updatedAt: "2026-08-28T11:30:00.000Z",
+    }],
+  });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(record).toMatchObject({ verdict: "wake", reasons: ["unmerged-pr"], items: 1 });
+  expect(rig.sent[0]!.text).toContain("pull request #1289 left open by a lane that finished");
+});
+
+test("and once that pull request merges the same project goes quiet", async () => {
+  const rig = harness({
+    pipelines: [],
+    archivedPipelines: ARCHIVED_LANE,
+    state: { ...OVERDUE, lastProposalAt: new Date(NOW - MINUTE).toISOString() },
+    openPullRequests: [],
+  });
+  expect(await runSeatTickCheck(PROJECT, rig.deps)).toMatchObject({ verdict: "quiet" });
+  expect(rig.sent).toEqual([]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * A `gh` that could not answer is journaled and retried, never spent.
+ * ------------------------------------------------------------------------- */
+
+test("a GitHub failure is journaled as an error rather than published as quiet", async () => {
+  const rig = harness({
+    pipelines: FINISHED_LANE,
+    tasks: [{ id: "task_b2", status: "inbox" }],
+    state: OVERDUE,
+    pullRequestsUnavailable: "command-failed",
+  });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(record).toMatchObject({ verdict: "error", reasons: [], items: 0 });
+  expect(record!.detail).toContain("command-failed");
+  expect(rig.sent).toEqual([]);
+  /* The stamp and the guard are exactly where the previous check left them, so
+     the hourly budget is intact and the next check asks again. */
+  expect(rig.written[0]!.lastWakeAt).toBe(OVERDUE.lastWakeAt);
+  expect(rig.written[0]!.wakesWithoutChange).toEqual({});
+  expect(rig.written[0]!.quietSince).toBeNull();
+});
+
+test("the check after the failure asks again, and wakes as soon as GitHub answers", async () => {
+  const failed = harness({ pipelines: FINISHED_LANE, state: OVERDUE, pullRequestsUnavailable: "timed-out" });
+  expect(await runSeatTickCheck(PROJECT, failed.deps)).toMatchObject({ verdict: "error" });
+
+  /* The next check reads the row the failed one wrote — the wake stamp it did
+     not move — and the wake is still due. */
+  const recovered = harness({
+    pipelines: FINISHED_LANE,
+    state: failed.written[0]!,
+    openPullRequests: [{
+      number: 1289,
+      title: "wake on a merge that is waiting",
+      headRefName: "topic-merge-queue",
+      updatedAt: "2026-08-28T11:30:00.000Z",
+    }],
+  });
+  expect(await runSeatTickCheck(PROJECT, recovered.deps)).toMatchObject({ verdict: "wake", reasons: ["unmerged-pr"] });
+});
+
+/* The failure costs this one reason and not the check: while `gh` is down a
+   lane event that IS established still reaches the seat, because a GitHub
+   outage silencing the tick is the failure this all exists to prevent. */
+test("a lane event still wakes the seat while GitHub is unreadable", async () => {
+  const rig = harness({
+    pipelines: [...OPEN_LANE, ...FINISHED_LANE],
+    state: { ...OVERDUE, eventsThrough: 12 },
+    events: [terminalEvent(44)],
+    pullRequestsUnavailable: "malformed-output",
+  });
+  const record = await runSeatTickCheck(PROJECT, rig.deps);
+  expect(record).toMatchObject({ verdict: "wake", reasons: ["lane-event"] });
+  expect(rig.sent).toHaveLength(1);
 });
 
 test("a failed delivery leaves the wake stamp where it was, so the next check retries", async () => {

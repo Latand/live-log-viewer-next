@@ -92,6 +92,7 @@ function input(over: Partial<SeatTickCheckInput> = {}): SeatTickCheckInput {
     tasks: [],
     events: [],
     pullRequests: [],
+    pullRequestsUnavailable: null,
     signals: [],
     changeFingerprint: "fp-1",
     state: emptySeatTickState(),
@@ -449,6 +450,92 @@ test("several unmerged pull requests are counted in the reason and named one by 
   expect(decision.verdict.kind === "wake" && decision.verdict.reasons[0]!.detail)
     .toBe("pull request #1289 and 1 more left open by a lane that finished");
   expect(decision.verdict.kind === "wake" && decision.verdict.items.map((item) => item.id)).toEqual(["#1289", "#1290"]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * A read that failed may not be spent as a silence.
+ *
+ * The empty list a failed `gh` used to return was indistinguishable from every
+ * pull request having merged, and the decision published `quiet — nothing
+ * owed` on the strength of it. Quiet is a conclusion; this is what happens
+ * when the evidence for it could not be read.
+ * ------------------------------------------------------------------------- */
+
+test("a check that could not read the open pull requests reports an error instead of quiet", () => {
+  const decision = seatTickDecision(input({
+    pullRequestsUnavailable: "command-failed",
+    tasks: [card({ status: "inbox" })],
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict).toEqual({
+    kind: "error",
+    detail: "the open pull requests of this project's finished lanes could not be read (command-failed), so nothing owed is not established",
+  });
+});
+
+/* Every way the read can fail, and none of them is a merge. */
+test("a timeout and a malformed answer are refused as quiet exactly like a failed command", () => {
+  for (const gap of ["timed-out", "malformed-output", "lanes-unreadable"] as const) {
+    const decision = seatTickDecision(input({
+      pullRequestsUnavailable: gap,
+      tasks: [card({ status: "inbox" })],
+      state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+    }));
+    expect(decision.verdict.kind).toBe("error");
+  }
+});
+
+/* The bound the fix must not become a way around: the error raises no wake, so
+   there is nothing for the stamp or the guard to record, and an hour of `gh`
+   failures leaves the next real wake exactly as due as it was. */
+test("a failed read spends neither the wake stamp nor the retry guard", () => {
+  const before = stateWith({
+    lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString(),
+    lastWakeFingerprint: "fp-1",
+    wakesWithoutChange: { "unmerged-pr": 1 },
+    quietSince: null,
+  });
+  const decision = seatTickDecision(input({ pullRequestsUnavailable: "timed-out", state: before }));
+  expect(decision.state.lastWakeAt).toBe(before.lastWakeAt);
+  expect(decision.state.wakesWithoutChange).toEqual({ "unmerged-pr": 1 });
+  expect(decision.state.lastWakeReasons).toEqual(before.lastWakeReasons);
+  /* And it does not record the project as having been quiet since now, which
+     is the same claim in the state row that the verdict just declined to
+     make. */
+  expect(decision.state.quietSince).toBeNull();
+});
+
+/* The failure costs this one reason, never the check: a lane event that IS
+   established still wakes the seat while `gh` is down, because a `gh` outage
+   silencing the tick is the failure this whole issue is about. */
+test("a wake reason that stands on its own still wakes while GitHub is unreadable", () => {
+  const decision = seatTickDecision(input({
+    pullRequestsUnavailable: "command-failed",
+    events: [event({ seq: 60, type: "stage_blocked", summary: "the review round is parked" })],
+    state: stateWith({ eventsThrough: 59, lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(reasonsOf(decision.verdict)).toEqual(["lane-event"]);
+});
+
+/* And the interval still bounds it from the other side: a check that was never
+   going to ask GitHub carries no gap, so it goes quiet as it always did. */
+test("a check inside the interval is quiet rather than an error", () => {
+  const decision = seatTickDecision(input({
+    tasks: [card({ status: "inbox" })],
+    state: stateWith({ lastWakeAt: new Date(NOW - MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict).toEqual({ kind: "quiet", detail: "nothing owed" });
+});
+
+/* A tick that is off is off; nothing was read, so there is nothing to report
+   as unreadable. */
+test("a project whose tick is off stays quiet rather than reporting an error", () => {
+  const decision = seatTickDecision(input({
+    pullRequestsUnavailable: "command-failed",
+    settings: settings({ enabled: false, reason: "nothing here for me" }),
+    state: stateWith({ lastWakeAt: new Date(NOW - 61 * MINUTE).toISOString() }),
+  }));
+  expect(decision.verdict.kind).toBe("quiet");
 });
 
 /* An unmerged pull request is open work, so a board with nothing else on it

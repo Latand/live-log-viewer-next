@@ -16,7 +16,7 @@ import type { SeatTickSources } from "./seatTickSources";
 const { DEFAULT_SEAT_TICK_POLICY, seatTickDecision } = await import("./seatTick");
 const { defaultSeatTickSettings } = await import("./seatTickSettings");
 import type { AgentLivenessRecord } from "@/lib/lifecycle/liveness";
-import type { OpenPullRequest } from "./githubEvidence";
+import type { OpenPullRequest, OpenPullRequestsUnavailable } from "./githubEvidence";
 import type { LifecycleEvent, LifecycleJournalFile } from "@/lib/lifecycle/journal";
 import { emptySeatTickState, type SeatTickProjectState } from "./types";
 
@@ -137,6 +137,10 @@ function sources(over: {
   openPullRequests?: OpenPullRequest[];
   pullRequestCalls?: { cwd: string; limit: number }[];
   pullRequestsThrow?: boolean;
+  pullRequestsUnavailable?: OpenPullRequestsUnavailable;
+  archivedPipelines?: Record<string, unknown>[];
+  archiveCalls?: number[];
+  archiveThrows?: boolean;
   noSeat?: boolean;
 }): SeatTickSources {
   return {
@@ -147,6 +151,11 @@ function sources(over: {
     }),
     activeSeats: () => [PROJECT],
     pipelines: () => (over.pipelines ?? [lane()]) as never,
+    archivedPipelines: () => {
+      over.archiveCalls?.push(1);
+      if (over.archiveThrows) throw new Error("the archive is unreadable");
+      return (over.archivedPipelines ?? []) as never;
+    },
     tasks: () => (over.tasks ?? []) as never,
     registry: () => ({
       conversation: () => ({ turn: { state: over.seatTurn ?? "idle" } }),
@@ -168,7 +177,8 @@ function sources(over: {
     openPullRequests: async (options) => {
       over.pullRequestCalls?.push(options);
       if (over.pullRequestsThrow) throw new Error("gh is not authenticated");
-      return over.openPullRequests ?? [];
+      if (over.pullRequestsUnavailable) return { ok: false, unavailable: over.pullRequestsUnavailable };
+      return { ok: true, pullRequests: over.openPullRequests ?? [] };
     },
     wakeState: async () => "retained",
     withdrawWake: async () => "withdrawn",
@@ -706,15 +716,158 @@ test("a project whose tick is off asks GitHub nothing", async () => {
   expect(input.pullRequests).toEqual([]);
 });
 
-/* Degradable like every other `gh` read here: a missing, unauthenticated or
-   rate-limited CLI costs the tick this one reason, never the check. */
-test("a gh that cannot answer leaves the check standing with no pull request reason", async () => {
+/* ------------------------------------------------------------------------- *
+ * The obligation outlives the lane's residence in the hot store.
+ *
+ * Settled lanes are archived after three days. Reading only the hot store put
+ * the reason on a timer nothing about the pull request knows: a tick switched
+ * off, a seat busy for days, or a `gh` unreachable until archival all reach
+ * their first eligible check with no lane to attribute anything to, and go
+ * quiet over a pull request still sitting open.
+ * ------------------------------------------------------------------------- */
+
+/** The same lane, three days later: out of the hot store, into cold storage,
+    and its pull request still unmerged. */
+function archivedLane(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return finishedLane({ closedAt: new Date(NOW - 5 * DAY_MS).toISOString(), ...over });
+}
+
+test("a lane that has been archived still owes its open pull request", async () => {
+  const input = await gather(
+    { pipelines: [], archivedPipelines: [archivedLane()], openPullRequests: [openPullRequest()] },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([{
+    number: 1289,
+    title: "wake on a merge that is waiting",
+    pipelineId: "pipeline_z9",
+    pipelineTitle: "publish the merge queue",
+    updatedAt: new Date(NOW - 30 * 60_000).toISOString(),
+  }]);
+  expect(reasonsOf(seatTickDecision(input))).toEqual(["unmerged-pr"]);
+});
+
+/* The repository is asked for in the archived record too, because a project
+   whose every lane has settled out still has one — and a `gh` never run is the
+   same silence read off a different shelf. */
+test("an archived lane names the repository the pull requests are read from", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  await gather(
+    { pipelines: [], archivedPipelines: [archivedLane()], openPullRequests: [openPullRequest()], pullRequestCalls: calls },
+    withCursor(0, OVERDUE),
+  );
+  expect(calls).toEqual([{ cwd: "/srv/repo", limit: 60 }]);
+});
+
+/* And it discharges itself the same way a hot lane's does: the source reads
+   OPEN pull requests, so a merge or a close simply stops returning the row. */
+test("once that pull request merges the same project is quiet again", async () => {
+  const input = await gather(
+    { pipelines: [], archivedPipelines: [archivedLane()], openPullRequests: [] },
+    withCursor(0, { ...OVERDUE, lastProposalAt: new Date(NOW - 60_000).toISOString() }),
+  );
+  expect(input.pullRequests).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBeNull();
+  expect(seatTickDecision(input).verdict).toEqual({
+    kind: "quiet",
+    detail: "the board is done and the proposal slot is not due",
+  });
+});
+
+/* Cold storage is read only where the check has already committed to a
+   subprocess, so the gates that skip `gh` skip the archive with it. */
+test("the archive is not read by a check that could raise no wake from it", async () => {
+  const early: number[] = [];
+  await gather(
+    { pipelines: [finishedLane()], archiveCalls: early },
+    withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString() }),
+  );
+  expect(early).toEqual([]);
+
+  const seated: number[] = [];
+  await gather({ pipelines: [finishedLane()], archiveCalls: seated, noSeat: true }, withCursor(0, OVERDUE));
+  expect(seated).toEqual([]);
+
+  const off: number[] = [];
+  await gather(
+    {
+      pipelines: [finishedLane()],
+      archiveCalls: off,
+      settings: { ...defaultSeatTickSettings(PROJECT), enabled: false, configured: true } as never,
+    },
+    withCursor(0, OVERDUE),
+  );
+  expect(off).toEqual([]);
+
+  const due: number[] = [];
+  await gather({ pipelines: [finishedLane()], archiveCalls: due }, withCursor(0, OVERDUE));
+  expect(due).toEqual([1]);
+});
+
+/* ------------------------------------------------------------------------- *
+ * A read that failed is not a pull request that merged.
+ *
+ * Every failure below used to arrive as an empty list, which the decision then
+ * read as "nothing open" — `quiet — nothing owed` published on the strength of
+ * a `gh` nobody could run. The gap travels out of the gather instead.
+ * ------------------------------------------------------------------------- */
+
+test("a gh that throws is carried out of the gather as a gap, not as no pull requests", async () => {
   const input = await gather(
     { pipelines: [finishedLane()], pullRequestsThrow: true },
     withCursor(0, OVERDUE),
   );
   expect(input.pullRequests).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBe("command-failed");
+  /* The rest of the check is untouched: one unreadable evidence source is not
+     a failed check. */
   expect(input.tasks).toEqual([]);
+});
+
+test("each way gh can fail keeps its own name", async () => {
+  for (const unavailable of ["command-failed", "timed-out", "malformed-output"] as const) {
+    const input = await gather(
+      { pipelines: [finishedLane()], pullRequestsUnavailable: unavailable },
+      withCursor(0, OVERDUE),
+    );
+    expect(input.pullRequestsUnavailable).toBe(unavailable);
+    expect(input.pullRequests).toEqual([]);
+  }
+});
+
+/* The lanes are half of the correlation, so lanes that cannot be read leave
+   the same question unanswered — and asking `gh` about lanes nobody could
+   enumerate would answer it wrongly rather than not at all. */
+test("lanes that cannot be read are a gap of their own, and gh is not asked", async () => {
+  const calls: { cwd: string; limit: number }[] = [];
+  const input = await gather(
+    { pipelines: [finishedLane()], archiveThrows: true, openPullRequests: [openPullRequest()], pullRequestCalls: calls },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequestsUnavailable).toBe("lanes-unreadable");
+  expect(input.pullRequests).toEqual([]);
+  expect(calls).toEqual([]);
+});
+
+/* The successful empty answer is what a gap must stay distinguishable from:
+   here GitHub was asked and said nothing is open, and quiet is earned. */
+test("a successful empty answer leaves no gap behind it", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], openPullRequests: [] },
+    withCursor(0, OVERDUE),
+  );
+  expect(input.pullRequests).toEqual([]);
+  expect(input.pullRequestsUnavailable).toBeNull();
+});
+
+/* A check that was never going to ask has no gap either — it reports nothing
+   because nothing was owed from this reason, not because something failed. */
+test("a check that asks GitHub nothing reports no gap", async () => {
+  const input = await gather(
+    { pipelines: [finishedLane()], pullRequestsThrow: true },
+    withCursor(0, { lastWakeAt: new Date(NOW - 60_000).toISOString() }),
+  );
+  expect(input.pullRequestsUnavailable).toBeNull();
 });
 
 /* The guard half, the same shape #1262 established for a card's movement: the

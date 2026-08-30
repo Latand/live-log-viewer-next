@@ -224,7 +224,18 @@ export type SeatTickVerdict =
   | { kind: "quiet"; detail: string }
   | { kind: "wake"; reasons: SeatTickWakeReason[]; items: SeatTickItem[]; deferred: number }
   /** No work, and the proposal slot is due. */
-  | { kind: "proactive"; detail: string };
+  | { kind: "proactive"; detail: string }
+  /**
+   * The check could not establish that nothing is owed.
+   *
+   * Quiet is a conclusion, and a conclusion drawn from evidence that could not
+   * be read is the failure this whole mechanism exists to prevent, so the
+   * check says so instead. It moves no stamp and holds no reason back: the
+   * wake interval and the retry guard are exactly where the previous check
+   * left them, and the next check asks again. A failure cannot spend the
+   * hourly budget.
+   */
+  | { kind: "error"; detail: string };
 
 /**
  * The registry's own answer about a turn: the durable activity verdict
@@ -344,6 +355,21 @@ export interface SeatTickPullRequestInput {
   pipelineTitle: string;
   updatedAt: string | null;
 }
+
+/**
+ * Why a check could not establish what this project's finished lanes left open.
+ *
+ * Machine tokens only, because the journal line carrying one is published:
+ * `gh` could not be run or exited non-zero (`command-failed`), was killed at
+ * its timeout (`timed-out`), answered with something that is not a JSON array
+ * (`malformed-output`), or the lane records the pull requests are correlated
+ * against could not be read (`lanes-unreadable`).
+ */
+export type SeatTickPullRequestGap =
+  | "timed-out"
+  | "command-failed"
+  | "malformed-output"
+  | "lanes-unreadable";
 
 /** A durable log line the Viewer already writes: a deploy outcome, the host
     retirement report, a seat whose own turn stopped progressing. */
@@ -487,9 +513,21 @@ export interface SeatTickCheckInput {
   /** Events after {@link SeatTickProjectState.eventsThrough}, oldest first. */
   events: readonly SeatTickEventInput[];
   /** Pull requests that finished lanes left open (#1289). Empty whenever the
-      project has no finished lane, no repository to ask, or `gh` could not
-      answer — the reason is degradable, never a failed check. */
+      project has no finished lane, no repository to ask, or the check could
+      not raise a wake at all — all of which are answers. A read that FAILED is
+      not one of them; it arrives below. */
   pullRequests: readonly SeatTickPullRequestInput[];
+  /**
+   * Set when the list above could not be established.
+   *
+   * A check that cannot see what its finished lanes left open has not shown
+   * that nothing is owed, so this turns an otherwise-quiet verdict into an
+   * `error` the controller journals and retries. Deliberately incapable of
+   * doing anything else: it raises no wake, so it can neither advance the wake
+   * stamp nor spend a retry-guard count, and a `gh` outage is therefore unable
+   * to buy the very silence it would otherwise be mistaken for.
+   */
+  pullRequestsUnavailable: SeatTickPullRequestGap | null;
   signals: readonly SeatTickSignalInput[];
   /** Digest of everything a wake could change. Compared against the previous
       wake's, never interpreted. */
@@ -533,14 +571,17 @@ export interface SeatTickDecision {
   cards: SeatTickCard[];
 }
 
-/** What one check recorded. Five kinds are journal-only: `error` is a check
-    that threw, `refused` a sweep or a second clock refused for want of
-    authority, and the other three are what became of a retained wake — it was
-    taken back from a seat that had already been replaced (`revoked`), the
-    layer holding it delivered it after all (`landed`), or that layer settled it
-    without ever delivering it (`dropped`). */
+/** What one check recorded. Four kinds are journal-only: `refused` is a sweep
+    or a second clock refused for want of authority, and the other three are
+    what became of a retained wake — it was taken back from a seat that had
+    already been replaced (`revoked`), the layer holding it delivered it after
+    all (`landed`), or that layer settled it without ever delivering it
+    (`dropped`). */
 export type SeatTickVerdictKind =
   | SeatTickVerdict["kind"]
+  /** A check that threw outright, which the decision never gets to see. The
+      decision has its own `error` above, for a check that ran and could not
+      establish what is owed; both are read the same way off the journal. */
   | "error"
   | "refused"
   | "revoked"
