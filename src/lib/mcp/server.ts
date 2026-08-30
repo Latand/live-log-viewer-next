@@ -1670,7 +1670,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
   list_conversations: "List scanned Viewer conversations with durable ids and transcript paths.",
   search_transcripts: "Search indexed user and assistant message bodies across every scanned transcript store. Returns match snippets with speaker, timestamp, transcript path and byte offset; project is optional, and empty pages include corpus statistics. Queries never read transcript files.",
   get_conversation: "Read a conversation summary and its recent messages and tools. With tailLines, conversationId or selectedContext uses the bounded identity path, while transcriptPath uses the validated pinned reader; both return a bounded raw tail without a corpus scan.",
-  deploy_exact_sha: "Deploy one full commit SHA. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
+  deploy_exact_sha: "Deploy one full commit SHA of the Agent Log Viewer application that serves this MCP; this tool never deploys the calling project's code. The designated orchestrator decides when to deploy and calls this directly; authority is the server-attributed designated seat, and nobody asks the operator for a confirmation, a phrase, or a SHA. Idempotent by clientRequestId; deployments serialize at the runtime host.",
   get_pipeline: "Read one pipeline by durable id.",
   board_snapshot: "Read a bounded, redacted snapshot of the Viewer board, durable placement, and the selected project's hidden conversation count.",
   list_flows: "List durable implement-review flows.",
