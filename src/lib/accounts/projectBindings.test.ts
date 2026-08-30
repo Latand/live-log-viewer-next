@@ -305,6 +305,76 @@ test("a project spelled by an alias source reads the binding its target holds", 
   resetProjectAliasesForTests();
 });
 
+test("an alias introduced AFTER the row was persisted holds the same fence", () => {
+  /* The alias may arrive at any time: two repository identities converge long
+     after a binding was written, and the row on record still carries the
+     pre-convergence spelling. Canonicalizing only the REQUESTED project and
+     comparing it against that raw spelling answers `null` for both spellings at
+     once — which is "nobody bound this project", which is every account allowed
+     on precisely the project a binding was written to reserve. The fence has to
+     survive its project being renamed under it, so the stored spelling is
+     canonicalized on the way out of the record too. */
+  const OLD = "project-atlas-preconvergence";
+  expect(bindAccountToProject("claude", RESERVED, OLD).ok).toBe(true);
+  expect(accountProjectBindings()).toMatchObject([{ project: OLD }]);
+
+  fs.writeFileSync(
+    path.join(STATE, "project-aliases.json"),
+    JSON.stringify({ schemaVersion: 1, aliases: { [OLD]: ATLAS }, displayNames: { [ATLAS]: "Atlas" } }),
+    "utf8",
+  );
+  resetProjectAliasesForTests();
+
+  /* Both spellings are the one project, and the account nobody bound is refused
+     on it — the assertion that fails the moment the fence reads as unbound. */
+  expect(allowedAccountIdsForProject(ATLAS, "claude")).toEqual([RESERVED]);
+  expect(allowedAccountIdsForProject(OLD, "claude")).toEqual([RESERVED]);
+  expect(projectAllowsAccount(ATLAS, "claude", SHARED)).toBe(false);
+  expect(projectAllowsAccount(OLD, "claude", SHARED)).toBe(false);
+  expect(projectsForAccount("claude", RESERVED)).toEqual([ATLAS]);
+  expect(accountProjectBindings()).toMatchObject([{ project: ATLAS }]);
+
+  /* And the row is removable under the spelling the project now has: an unbind
+     that reported `ok` while the fence stayed standing would be the same lie in
+     the other direction. */
+  expect(unbindAccountFromProject("claude", RESERVED, ATLAS)).toMatchObject({ ok: true, changed: true });
+  expect(accountProjectBindings()).toEqual([]);
+  expect(allowedAccountIdsForProject(ATLAS, "claude")).toBeNull();
+  expect(allowedAccountIdsForProject(OLD, "claude")).toBeNull();
+});
+
+test("rows for two spellings that have converged are one binding, and one unbind removes both", () => {
+  /* A record written across a convergence carries both spellings for what is
+     now one project. Counted separately they are a duplicate chip in the panel
+     and a binding that survives its own removal. */
+  const OLD = "project-atlas-preconvergence";
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(
+    path.join(STATE, "project-aliases.json"),
+    JSON.stringify({ schemaVersion: 1, aliases: { [OLD]: ATLAS }, displayNames: { [ATLAS]: "Atlas" } }),
+    "utf8",
+  );
+  resetProjectAliasesForTests();
+  damage(JSON.stringify({
+    schemaVersion: 1,
+    bindings: [
+      { engine: "claude", accountId: RESERVED, project: OLD, createdAt: "2026-08-01T00:00:00.000Z" },
+      { engine: "claude", accountId: RESERVED, project: ATLAS, createdAt: "2026-08-02T00:00:00.000Z" },
+    ],
+  }));
+
+  expect(accountProjectBindings()).toEqual([
+    { engine: "claude", accountId: RESERVED, project: ATLAS, createdAt: "2026-08-01T00:00:00.000Z" },
+  ]);
+  expect(allowedAccountIdsForProject(OLD, "claude")).toEqual([RESERVED]);
+  expect(projectsForAccount("claude", RESERVED)).toEqual([ATLAS]);
+
+  expect(unbindAccountFromProject("claude", RESERVED, OLD)).toMatchObject({ ok: true, changed: true });
+  expect(accountProjectBindings()).toEqual([]);
+  expect(allowedAccountIdsForProject(ATLAS, "claude")).toBeNull();
+  expect(allowedAccountIdsForProject(OLD, "claude")).toBeNull();
+});
+
 test("the refusal wording names capacity, the project and the accounts it may use", () => {
   expect(projectAccountRefusalDetail(
     { kind: "not_allowed", accountId: SHARED, allowedAccountIds: [RESERVED] },

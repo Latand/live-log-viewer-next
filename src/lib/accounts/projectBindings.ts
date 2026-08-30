@@ -28,7 +28,10 @@ import type { ProjectSpawnResolution } from "./contracts";
  * empty list would say "nobody bound anything", which allows every account on
  * exactly the projects a binding was written to reserve; the reservation would
  * disappear in the one condition where it matters most. Every read below throws
- * instead, and the throw parks the launch, the reseat and the switch.
+ * instead, and the throw parks what the Viewer selects BY ITSELF: a launch, the
+ * one-click reseat, the migration a limit fires. A choice that NAMES an account
+ * is a control and is never vetoed by this record — `explicitAccountChoice`
+ * classifies it instead, and the caller carries it out and attributes it.
  *
  * ABSENT is the narrow state, and only a CONFIRMED absence qualifies: nothing
  * at the record's pathname at all. Everything that merely resembles absence
@@ -168,13 +171,31 @@ function readBindings(): AccountProjectBinding[] {
   }
   const bindings = bindingList(record.bindings);
   if (!bindings) throw new AccountProjectBindingsUnreadableError("the record's bindings are malformed");
-  return bindings;
+  /* Canonicalized on the way OUT as well as in. A row keeps the spelling the
+     project had when it was written, and repository identities converge at any
+     time afterwards — so a row written before its own alias existed would be
+     compared, raw, against a canonicalized request and match neither spelling.
+     Both lookups then answer "unbound", which is every account allowed on the
+     one project a binding was written to reserve. The record is not rewritten
+     to say this: a read must not write, and the next mutation persists the
+     canonical spelling anyway because it writes back what it read. */
+  return bindings.map((binding) => ({ ...binding, project: bindingKey(binding.project) }));
 }
 
-/** Every binding on record, ordered by engine, project, then account. */
+/**
+ * Every binding on record, ordered by engine, project, then account, and one
+ * row per relation: two spellings of a project that have since converged are
+ * one binding, dated from the earlier of the two, rather than a duplicate chip
+ * on the panel and a binding that outlives its own removal.
+ */
 export function accountProjectBindings(): AccountProjectBinding[] {
-  return readBindings()
-    .map((binding) => ({ ...binding }))
+  const unique = new Map<string, AccountProjectBinding>();
+  for (const binding of readBindings()) {
+    const key = [binding.engine, binding.accountId, binding.project].join("\u0000");
+    const seen = unique.get(key);
+    if (!seen || binding.createdAt < seen.createdAt) unique.set(key, { ...binding });
+  }
+  return [...unique.values()]
     .sort((left, right) =>
       left.engine.localeCompare(right.engine)
       || left.project.localeCompare(right.project)
@@ -274,6 +295,12 @@ function refusalWithRecord(input: { ok: false; code: BindingMutationFailure; mes
  * and read under the alias target and the two spellings are one project; skip
  * this and a fence written from the accounts panel would silently not apply to
  * a pipeline whose cwd resolved to the pre-convergence id.
+ *
+ * Applied to the REQUEST and to every row read back, because the convergence
+ * can happen after the row was written: a binding stored under the spelling a
+ * project had last week must still be that project's fence once an alias
+ * renames it, and comparing a canonicalized request against a raw stored
+ * spelling matches neither name — which is the fence answering "unbound".
  */
 function bindingKey(project: string): string {
   return canonicalProject(project.trim());
