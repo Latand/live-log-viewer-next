@@ -10,7 +10,8 @@ import { seatIdentityResolver } from "@/lib/bridge/seatIdentity";
 import { recordBridgeDirectiveAnswer, recordManagerReport } from "@/lib/bridge/service";
 import { createManualProject, setProjectCrown } from "@/lib/projects/curation";
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
-import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
+import { globalCache } from "@/lib/scanner/caches";
+import { describe as describeTranscript, projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import { readStateCollectionRows } from "@/lib/state/sqliteStateStore";
 import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
@@ -2621,6 +2622,120 @@ test("deleted parent lineage projects a tombstone and leaves no missing tree pat
 
   expect(child?.parent).toBeNull();
   expect(child?.parentRemoved).toEqual({ conversationId: parent.id, path: parentPath });
+});
+
+test("a relocated Claude worktree transcript remains the readable parent card", async () => {
+  const registry = agentRegistry();
+  const repository = path.join(registryRoot, "repository");
+  const worktree = path.join(repository, ".claude", "worktrees", "topic");
+  const projectsRoot = path.join(registryRoot, "projects");
+  const parentSessionId = "11111111-1111-\x34111-8111-111111111111";
+  const childSessionId = "22222222-2222-\x34222-8222-222222222222";
+  const oldParentPath = path.join(projectsRoot, "-repository--claude-worktrees-topic", `${parentSessionId}.jsonl`);
+  const newParentPath = path.join(projectsRoot, "-repository", `${parentSessionId}.jsonl`);
+  const childPath = path.join(projectsRoot, "-repository", `${childSessionId}.jsonl`);
+  fs.mkdirSync(path.join(repository, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(repository, ".git", "HEAD"), "ref: refs/heads/main\n");
+  fs.writeFileSync(path.join(repository, ".git", "config"), [
+    '[remote "origin"]',
+    "\turl = https://example.invalid/team/repository.git",
+    "",
+  ].join("\n"));
+  fs.mkdirSync(worktree, { recursive: true });
+  fs.mkdirSync(path.dirname(oldParentPath), { recursive: true });
+  fs.mkdirSync(path.dirname(childPath), { recursive: true });
+  fs.writeFileSync(oldParentPath, `${JSON.stringify({
+    type: "user",
+    cwd: worktree,
+    message: { content: "Fixture parent prompt" },
+  })}\n`);
+  fs.writeFileSync(childPath, `${JSON.stringify({
+    type: "user",
+    cwd: worktree,
+    message: { content: "Fixture child prompt" },
+  })}\n`);
+  const observation = (pathname: string, observedAt: string) => ({
+    engine: "claude" as const,
+    path: pathname,
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: worktree }),
+    turn: { state: "idle" as const, source: "empty" as const, terminalAt: null },
+    observedAt,
+  });
+  registry.reconcileConversations([
+    observation(oldParentPath, "2026-08-29T10:00:00.000Z"),
+    {
+      ...observation(childPath, "2026-08-29T10:00:00.000Z"),
+      parentArtifactPath: oldParentPath,
+    },
+  ]);
+  const parent = registry.conversationForPath(oldParentPath)!;
+
+  const live = describeTranscript("claude-projects", projectsRoot, oldParentPath, fs.statSync(oldParentPath));
+  const project = projectInfoFromCwd(repository)!;
+  expect(live.project).toBe(project.project);
+  registry.recordConversationContinuityPath(parent.id, newParentPath);
+  fs.copyFileSync(oldParentPath, newParentPath);
+  registry.reconcileConversations([observation(newParentPath, "2026-08-29T10:00:30.000Z")]);
+  expect(registry.conversation(parent.id)?.generations.at(-1)?.path).toBe(oldParentPath);
+  fs.rmSync(oldParentPath);
+  fs.rmSync(worktree, { recursive: true, force: true });
+  globalCache("project-info-cwd-v2").clear();
+  globalCache("worktree-git").clear();
+  registry.reconcileConversations([observation(newParentPath, "2026-08-29T10:01:00.000Z")]);
+
+  const relocated = registry.conversation(parent.id)!;
+  expect(relocated.generations.at(-1)?.path).toBe(newParentPath);
+  expect(relocated.continuityPaths).toContain(oldParentPath);
+  expect(relocated.continuityPaths).not.toContain(newParentPath);
+  expect(registry.canonicalPath(oldParentPath)).toBe(newParentPath);
+  const archived = (realModules.get("@/lib/scanner") as {
+    archivedTranscriptPaths(): ReadonlySet<string>;
+  }).archivedTranscriptPaths();
+  expect(archived.has(newParentPath)).toBe(false);
+  expect(archived.has(oldParentPath)).toBe(true);
+
+  const removedStat = fs.statSync(newParentPath);
+  const removedMetadata = describeTranscript("claude-projects", projectsRoot, newParentPath, removedStat);
+  expect(removedMetadata.project).toBe(project.project);
+  expect(removedMetadata.project).toBe(live.project);
+  expect(removedMetadata.worktree).toBe("topic");
+  const removed = {
+    ...file(newParentPath),
+    ...removedMetadata,
+    path: newParentPath,
+    root: "claude-projects" as const,
+    name: path.relative(projectsRoot, newParentPath),
+    mtime: removedStat.mtimeMs / 1_000,
+    size: removedStat.size,
+  };
+  const childScan = {
+    ...file(childPath),
+    root: "claude-projects" as const,
+    engine: "claude" as const,
+    fmt: "claude" as const,
+    project: project.project,
+    cwd: worktree,
+    parent: oldParentPath,
+  };
+  scannedFiles = [removed, childScan];
+  scannedProjectCatalog = [{
+    project: project.project,
+    displayName: project.displayName,
+    projectRoot: repository,
+    smt: removed.mtime,
+    conversations: 2,
+  }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const parentCards = body.files.filter((entry) => entry.conversationId === parent.id);
+  const projectedChild = body.files.find((entry) => entry.path === childPath);
+  expect(parentCards).toHaveLength(1);
+  expect(parentCards[0]).toMatchObject({ path: newParentPath, project: project.project });
+  expect(fs.readFileSync(parentCards[0]!.path, "utf8")).toContain("Fixture parent prompt");
+  expect(projectedChild?.parent).toBe(newParentPath);
+  expect(projectedChild?.parentRemoved).toBeUndefined();
 });
 
 test("an existing durable parent omitted from the scan enters the response closure", async () => {

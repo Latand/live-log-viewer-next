@@ -7,10 +7,12 @@ import path from "node:path";
 import type { FileEntry } from "@/lib/types";
 import { procBackend } from "@/lib/proc";
 import { AgentRegistry, agentRegistry } from "@/lib/agent/registry";
-import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { emptyLaunchProfile, type DurableQuotaObservation } from "@/lib/accounts/migration/contracts";
+import { accountPark } from "@/lib/runtime/accountPark";
 import type { RuntimeHostClient } from "@/lib/runtime/client";
 import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
 import { TmuxDeliveryUncertainError } from "@/lib/tmux";
+import { LIMITS_RATE_LIMITED_REASON } from "@/lib/types";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { Flow } from "./types";
@@ -1760,6 +1762,341 @@ test("issue 1065: an optimistically accepted structured relay stays undelivered 
     expect(loadFlows()[0]).toMatchObject({
       state: "relaying",
       rounds: [{ relayedAt: null, relayRetryCount: 1, relayPendingSettlement: { path: implementer.path } }],
+    });
+  } finally {
+    restoreDelivery();
+  }
+});
+
+test("issue 611: a relay to a provider-parked host is held to the deadline, then delivered", async () => {
+  const registry = agentRegistry();
+  const implementer = writeCodexEntry("relay-parked-implementer.jsonl", {
+    id: ["119f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const conversation = registry.ensureConversation("codex", implementer.path, null);
+  const until = new Date(Date.now() + 3_600_000).toISOString();
+  const sends: string[] = [];
+  let parked = true;
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, entries, text, options) => sendToImplementer(flow, entries, text, {
+    ...options,
+    /* Exactly the shape of the incident: the host is process-alive and
+       claim-owned, so recovery hands it straight back — but the provider has
+       parked the account it runs under, so it cannot start the turn. */
+    recover: async () => ({
+      target: null,
+      path: implementer.path,
+      conversationId: conversation.id,
+      spawned: false,
+      ...(parked ? { hold: { reason: "quota_exhausted" as const, accountId: "parked-account", until, resetKnown: true } } : {}),
+    }),
+    enqueueStructured: async (request) => {
+      sends.push(request.clientMessageId!);
+      return { ok: true, structured: true, target: null, outcome: "queued", operationId: `op-parked-${sends.length}`, receipt: {} as never };
+    },
+  }));
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-parked-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nHold until the account can take a turn.\n");
+  saveFlows([raceFlow({
+    id: "flow-relay-parked",
+    implementerPath: implementer.path,
+    implementerConversationId: conversation.id,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-20T16:47:51.534Z",
+      terminalAt: "2026-08-20T16:47:51.534Z",
+    }],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+
+    /* Nothing is enqueued into a host that cannot accept it, and the wait is
+       on the record with what it waits on and until when. */
+    expect(sends).toEqual([]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relaying",
+      stateDetail: expect.stringContaining(until),
+      rounds: [{
+        relayHold: { reason: "quota_exhausted", accountId: "parked-account", until, resetKnown: true, since: expect.any(String) },
+        relayRetryAt: until,
+        relayStartedAt: null,
+        relayDelivery: null,
+        relayedAt: null,
+        /* A hold is not a delivery failure: the bounded retry budget and the
+           delivery identity are untouched, so a long park cannot exhaust the
+           round into needs_decision. */
+        relayRetryCount: 0,
+        relayDeliveryAttempt: 0,
+        error: null,
+      }],
+    });
+    expect(loadFlows()[0]!.stateDetail).toContain("parked account parked-account");
+    const heldSince = loadFlows()[0]!.rounds[0]!.relayHold!.since;
+
+    /* Inside the park the relay waits instead of re-sending or giving up, and
+       the wait keeps the instant it started rather than restarting each tick. */
+    await tickFlows([implementer]);
+    expect(sends).toEqual([]);
+    expect(loadFlows()[0]!.rounds[0]!.relayHold).toEqual({
+      reason: "quota_exhausted",
+      accountId: "parked-account",
+      until,
+      since: heldSince,
+      resetKnown: true,
+    });
+
+    /* The park lapses: the same relay, under the same client-message identity,
+       delivers without an operator touching anything. */
+    parked = false;
+    const lapsed = loadFlows()[0]!;
+    lapsed.rounds[0]!.relayRetryAt = "2026-08-20T16:48:00.000Z";
+    saveFlows([lapsed]);
+    await tickFlows([implementer]);
+
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatch(/^flow_relay_[0-9a-f]{32}$/);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relaying",
+      rounds: [{
+        relayHold: null,
+        relayDeliveryTransport: "structured",
+        relayPendingSettlement: { path: implementer.path },
+        relayRetryCount: 0,
+      }],
+    });
+  } finally {
+    restoreDelivery();
+  }
+});
+
+/** One live reading of the account behind the relay's implementer: spent, and
+    with no reset the provider ever named. */
+function spentQuotaObservation(observedAt: string, usedPercent = 100): DurableQuotaObservation {
+  return {
+    engine: "codex",
+    accountId: "spent-account",
+    authenticated: true,
+    authCheckedAt: observedAt,
+    limits: {
+      session: { usedPercent, resetsAt: null },
+      weekly: { usedPercent: 40, resetsAt: null },
+      plan: "pro",
+      capturedAt: Math.floor(Date.parse(observedAt) / 1_000),
+    },
+    provenance: { source: "live", reason: null, staleSince: null },
+    observedAt,
+    bootId: "boot-unknown-reset",
+  };
+}
+
+test("issue 611: a relay held on an exhaustion with no reset queues nothing, is rechecked, and delivers exactly once", async () => {
+  const registry = agentRegistry();
+  const implementer = writeCodexEntry("relay-unknown-reset-implementer.jsonl", {
+    id: ["129f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const conversation = registry.ensureConversation("codex", implementer.path, null);
+  const sends: string[] = [];
+  /* The account's own reading drives the hold, through the very predicate
+     publish-readiness asks: 100% used, and no reset anybody can name. */
+  let quota = spentQuotaObservation(new Date().toISOString());
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, entries, text, options) => sendToImplementer(flow, entries, text, {
+    ...options,
+    recover: async () => {
+      const hold = accountPark("codex", "spent-account", {
+        quotaObservation: () => quota,
+        limitsProvenance: () => null,
+      });
+      return {
+        target: null,
+        path: implementer.path,
+        conversationId: conversation.id,
+        spawned: false,
+        ...(hold ? { hold } : {}),
+      };
+    },
+    enqueueStructured: async (request) => {
+      sends.push(request.clientMessageId!);
+      return { ok: true, structured: true, target: null, outcome: "queued", operationId: `op-unknown-${sends.length}`, receipt: {} as never };
+    },
+  }));
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-unknown-reset-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nHold until the account can take a turn.\n");
+  saveFlows([raceFlow({
+    id: "flow-relay-unknown-reset",
+    implementerPath: implementer.path,
+    implementerConversationId: conversation.id,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-20T16:47:51.534Z",
+      terminalAt: "2026-08-20T16:47:51.534Z",
+    }],
+  })]);
+
+  try {
+    await tickFlows([implementer]);
+
+    /* Not publish-ready: nothing is enqueued into an account that cannot start
+       the turn. Not an open-ended hold either: the wait is on the record, says
+       the reset is unknown, and names the recheck it is bounded by. */
+    expect(sends).toEqual([]);
+    const held = loadFlows()[0]!;
+    /* Copied before any matcher runs: toMatchObject swaps matched fields on the
+       value it is handed, and this one is on its way back to the store. */
+    const firstHold = { ...held.rounds[0]!.relayHold! };
+    expect(held).toMatchObject({
+      state: "relaying",
+      rounds: [{
+        relayHold: { reason: "quota_exhausted", accountId: "spent-account", resetKnown: false },
+        relayStartedAt: null,
+        relayDelivery: null,
+        relayedAt: null,
+        /* A recheck is not a delivery failure: the bounded retry budget and the
+           delivery identity are untouched, so no number of rechecks can burn
+           the round into needs_decision. */
+        relayRetryCount: 0,
+        relayDeliveryAttempt: 0,
+        error: null,
+      }],
+    });
+    expect(typeof firstHold.since).toBe("string");
+    expect(held.stateDetail).toContain("the provider named no reset");
+    expect(held.stateDetail).toContain(firstHold.until);
+    expect(held.rounds[0]!.relayRetryAt).toBe(firstHold.until);
+    expect(Date.parse(firstHold.until)).toBeGreaterThan(Date.now());
+
+    /* The recheck comes round and the account still reads spent, on a fresher
+       reading: one wait that keeps its age and its clean budget, re-deadlined
+       against the new evidence, and still nothing queued. */
+    quota = spentQuotaObservation(new Date().toISOString());
+    const rechecking = loadFlows()[0]!;
+    rechecking.rounds[0]!.relayRetryAt = "2026-08-20T16:48:00.000Z";
+    saveFlows([rechecking]);
+    await tickFlows([implementer]);
+
+    expect(sends).toEqual([]);
+    const second = { ...loadFlows()[0]!.rounds[0]!.relayHold! };
+    expect(second.resetKnown).toBe(false);
+    expect(second.since).toBe(firstHold.since);
+    expect(Date.parse(second.until)).toBeGreaterThanOrEqual(Date.parse(firstHold.until));
+    expect(loadFlows()[0]!.rounds[0]!.relayRetryCount).toBe(0);
+
+    /* Usable state arrives: the same relay, under the same client-message
+       identity, delivers once and stops being held. */
+    quota = spentQuotaObservation(new Date().toISOString(), 12);
+    const usable = loadFlows()[0]!;
+    usable.rounds[0]!.relayRetryAt = "2026-08-20T16:48:00.000Z";
+    saveFlows([usable]);
+    await tickFlows([implementer]);
+
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatch(/^flow_relay_[0-9a-f]{32}$/);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relaying",
+      rounds: [{
+        relayHold: null,
+        relayDeliveryTransport: "structured",
+        relayPendingSettlement: { path: implementer.path },
+        relayRetryCount: 0,
+      }],
+    });
+
+    /* Exactly once: the tick after delivery adds no second copy. */
+    await tickFlows([implementer]);
+    expect(sends).toHaveLength(1);
+  } finally {
+    restoreDelivery();
+  }
+});
+
+test("issue 611: publish readiness resumes at the provider's own deadline, with no re-held minute after it", async () => {
+  const registry = agentRegistry();
+  const implementer = writeCodexEntry("relay-deadline-implementer.jsonl", {
+    id: ["139f421e", "02e1", "73e0", "9b77", "bebde063f529"].join("-"),
+    cwd: "/repo",
+  }, Date.now() / 1_000);
+  const conversation = registry.ensureConversation("codex", implementer.path, null);
+  /* The deadline is in the past in wall-clock time so the relay tick's own
+     wait gate is open; `clock` is what the readiness predicate is asked
+     about, which is the boundary under test. */
+  const retryAtMs = Date.now() - 5_000;
+  const retryAt = new Date(retryAtMs).toISOString();
+  let clock = retryAtMs - 1;
+  const sends: string[] = [];
+  const restoreDelivery = setRelayDeliveryForTest(async (flow, entries, text, options) => sendToImplementer(flow, entries, text, {
+    ...options,
+    recover: async () => {
+      const hold = accountPark("codex", "throttled-account", {
+        quotaObservation: () => undefined,
+        limitsProvenance: () => ({ source: "cache", reason: LIMITS_RATE_LIMITED_REASON, staleSince: null, retryAt }),
+        now: clock,
+      });
+      return {
+        target: null,
+        path: implementer.path,
+        conversationId: conversation.id,
+        spawned: false,
+        ...(hold ? { hold } : {}),
+      };
+    },
+    enqueueStructured: async (request) => {
+      sends.push(request.clientMessageId!);
+      return { ok: true, structured: true, target: null, outcome: "queued", operationId: `op-deadline-${sends.length}`, receipt: {} as never };
+    },
+  }));
+  const findingsPath = path.join(process.env.LLV_STATE_DIR!, "relay-deadline-findings.md");
+  fs.writeFileSync(findingsPath, "VERDICT: REQUEST_CHANGES\n\nDeliver when the provider says to retry.\n");
+  saveFlows([raceFlow({
+    id: "flow-relay-deadline",
+    implementerPath: implementer.path,
+    implementerConversationId: conversation.id,
+    state: "relaying",
+    rounds: [{
+      ...newRound(raceFlow({ rounds: [] }), "marker", "head ready"),
+      findingsPath,
+      verdict: "REQUEST_CHANGES",
+      findingsCount: 1,
+      reviewedAt: "2026-08-20T16:47:51.534Z",
+      terminalAt: "2026-08-20T16:47:51.534Z",
+    }],
+  })]);
+
+  try {
+    /* One millisecond before the deadline: held, on the provider's own instant. */
+    await tickFlows([implementer]);
+    expect(sends).toEqual([]);
+    expect(loadFlows()[0]!.rounds[0]!.relayHold).toMatchObject({
+      reason: "provider_throttled",
+      accountId: "throttled-account",
+      until: retryAt,
+      resetKnown: true,
+    });
+
+    /* At the deadline: delivered, once. The liveness grace used to keep this
+       held for another minute — and every tick of that minute re-held it
+       against a deadline already in the past. */
+    clock = retryAtMs;
+    await tickFlows([implementer]);
+
+    expect(sends).toHaveLength(1);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relaying",
+      rounds: [{
+        relayHold: null,
+        relayDeliveryTransport: "structured",
+        relayPendingSettlement: { path: implementer.path },
+        relayRetryCount: 0,
+        relayDeliveryAttempt: 0,
+      }],
     });
   } finally {
     restoreDelivery();

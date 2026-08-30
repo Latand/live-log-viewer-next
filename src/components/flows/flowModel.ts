@@ -346,11 +346,18 @@ export const PENDING_ACTIONS: Partial<Record<FlowState, { labelKey: MessageKey; 
 
 export function flowPresentation(t: TFunction, flow: Flow, locale: Locale) {
   if (flow.block?.reason === "rate_limited") {
+    /* A block the provider named no reset for says so, and names the recheck
+       it is bounded by (#611): presenting that instant as a reset time would
+       be a deadline nobody gave, and saying only "waiting" would hide that the
+       wait is bounded and being rechecked. */
+    const detail = flow.block.resetAt
+      ? t("flowState.rate_limit_until", { time: formatRateLimitTime(flow.block.resetAt, locale) })
+      : flow.block.recheckAt
+        ? t("flowState.rate_limit_reset_unknown", { time: formatRateLimitTime(flow.block.recheckAt, locale) })
+        : t("flowState.rate_limit_wait");
     return {
       label: t("flowState.blocked_rate_limited"),
-      detail: flow.block.resetAt
-        ? t("flowState.rate_limit_until", { time: formatRateLimitTime(flow.block.resetAt, locale) })
-        : t("flowState.rate_limit_wait"),
+      detail,
       attention: true,
       pending: null,
     };

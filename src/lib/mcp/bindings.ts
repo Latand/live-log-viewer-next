@@ -32,7 +32,7 @@ import { applyBoardCommand } from "@/lib/board/command";
 import { boardFor } from "@/lib/board/store";
 import { MAX_BOARD_MUTATIONS_PER_REQUEST, MAX_BOARD_PATH_LIST_ITEMS } from "@/lib/board/validation";
 import { applyConversationAction } from "@/lib/conversation/actions";
-import { DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
+import { backoffDelayMs, DeadlineExceededError, deadlineSignal } from "@/lib/deadline";
 import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
 import { getFlowsWithPresets } from "@/lib/flows/engine";
 import type { PatchFlowRequest } from "@/lib/flows/types";
@@ -130,14 +130,23 @@ const productionLinkTaskDependencies: LinkTaskToPipelineDependencies = {
 };
 
 export interface ViewerControlDependencies {
-  get?(pathname: string): Promise<Record<string, unknown>>;
-  post(pathname: string, body: Record<string, unknown>, headers?: Record<string, string>): Promise<Record<string, unknown>>;
+  get?(pathname: string, context?: McpToolCallContext): Promise<Record<string, unknown>>;
+  post(
+    pathname: string,
+    body: Record<string, unknown>,
+    headers?: Record<string, string>,
+    context?: McpToolCallContext,
+  ): Promise<Record<string, unknown>>;
 }
 
 const VIEWER_CONTROL_URL = "http://127.0.0.1:8898";
-/* Well under the MCP health probe's own budget, so a control surface that cannot
-   answer degrades to the ledger long before the probe gives up (#790). */
-const CONTROL_READ_TIMEOUT_MS = 5_000;
+const CONTROL_ATTEMPT_TIMEOUT_MS = 5_000;
+const CONTROL_RECOVERY_BUDGET_MS = 8_000;
+const CONTROL_UNSCOPED_RECOVERY_BUDGET_MS = 5_000;
+const CONTROL_DEADLINE_RESERVE_MS = 250;
+const CONTROL_RETRY_BASE_MS = 100;
+const CONTROL_RETRY_MAX_MS = 1_000;
+const TRANSIENT_CONTROL_STATUSES = new Set([502, 504]);
 
 class ViewerControlResponseError extends Error {
   constructor(message: string) {
@@ -146,31 +155,106 @@ class ViewerControlResponseError extends Error {
   }
 }
 
-async function getViewerControl(pathname: string): Promise<Record<string, unknown>> {
+function controlRetryDelay(attempt: number): number {
+  return backoffDelayMs(attempt, { baseMs: CONTROL_RETRY_BASE_MS, maxMs: CONTROL_RETRY_MAX_MS });
+}
+
+async function waitForControlRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw signal.reason;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(finish, delayMs);
+    const onAbort = () => finish(signal?.reason);
+    function finish(error?: unknown) {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (error !== undefined) reject(error);
+      else resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function requestViewerControl(
+  pathname: string,
+  init: RequestInit,
+  context: McpToolCallContext = {},
+): Promise<{ response: Response; parsed: unknown; unreadable: boolean }> {
   const baseUrl = process.env.LLV_VIEWER_CONTROL_URL?.trim() || VIEWER_CONTROL_URL;
-  let response: Response;
-  try {
-    response = await fetch(new URL(pathname, baseUrl), {
-      headers: {
-        accept: "application/json",
-      },
-      /* Unbounded here meant the post-promotion health probe hung for its whole
-         90-second budget instead of falling back: the promoted surface asks the
-         runtime host for a snapshot while that host is synchronously awaiting the
-         probe (#790). */
-      signal: AbortSignal.timeout(CONTROL_READ_TIMEOUT_MS),
+  const now = Date.now();
+  const deadlineAt = context.deadlineAt;
+  const retryable = deadlineAt !== undefined;
+  const callerBudget = deadlineAt === undefined
+    ? CONTROL_UNSCOPED_RECOVERY_BUDGET_MS
+    : Math.max(0, deadlineAt - now - CONTROL_DEADLINE_RESERVE_MS);
+  const expiresAt = now + Math.min(CONTROL_RECOVERY_BUDGET_MS, callerBudget);
+  let attempts = 0;
+  let lastFailure = "connection failed";
+  while (Date.now() < expiresAt) {
+    if (context.signal?.aborted) throw context.signal.reason;
+    attempts += 1;
+    const remainingMs = Math.max(1, expiresAt - Date.now());
+    const attempt = deadlineSignal(Math.min(CONTROL_ATTEMPT_TIMEOUT_MS, remainingMs), {
+      signal: context.signal,
+      reason: "Viewer control reconnect attempt timed out",
     });
-  } catch {
-    throw new Error("Viewer control is unreachable");
+    try {
+      const response = await fetch(new URL(pathname, baseUrl), { ...init, signal: attempt.signal });
+      if (TRANSIENT_CONTROL_STATUSES.has(response.status)) {
+        lastFailure = `status ${response.status}`;
+        await response.body?.cancel().catch(() => {});
+      } else {
+        try {
+          const parsed = await response.json() as unknown;
+          const answeredDomainFailure = response.status === 503
+            && objectRecord(parsed)
+            && Boolean(text(parsed.error) || text(parsed.code));
+          if (response.status !== 503 || answeredDomainFailure || !retryable) {
+            return { response, parsed, unreadable: false };
+          }
+          lastFailure = "status 503";
+        } catch {
+          if (context.signal?.aborted) throw context.signal.reason;
+          if (!retryable) {
+            return { response, parsed: null, unreadable: true };
+          } else if (attempt.signal.aborted) {
+            lastFailure = "response body timed out";
+          } else if (response.status === 503) {
+            lastFailure = "status 503";
+          } else {
+            lastFailure = "response body failed";
+          }
+        }
+      }
+    } catch {
+      if (context.signal?.aborted) throw context.signal.reason;
+      lastFailure = attempt.signal.aborted ? "attempt timed out" : "connection failed";
+    } finally {
+      attempt.release();
+    }
+    if (!retryable) break;
+    const delayMs = controlRetryDelay(attempts);
+    if (Date.now() + delayMs >= expiresAt) break;
+    await waitForControlRetry(delayMs, context.signal);
   }
+  if (!retryable) throw new Error("Viewer control is unreachable");
+  throw new Error(`Viewer control did not reconnect after ${attempts} attempt${attempts === 1 ? "" : "s"} (${lastFailure})`);
+}
+
+async function getViewerControl(
+  pathname: string,
+  context: McpToolCallContext = {},
+): Promise<Record<string, unknown>> {
+  const { response, parsed: controlPayload, unreadable } = await requestViewerControl(pathname, {
+    headers: {
+      accept: "application/json",
+    },
+  }, context);
   /* A body of literal `null` is valid JSON, so `.catch` never fires and every
      later `result.x` throws a TypeError before the status can be classified —
      which is how a 405 from a revision that does not serve the route arrived as
      an uncatchable crash instead of a refusal (#790). */
-  let parsed: unknown;
-  try {
-    parsed = await response.json() as unknown;
-  } catch {
+  let parsed = controlPayload;
+  if (unreadable) {
     if (response.ok) {
       throw new ViewerControlResponseError(
         `Viewer control returned an unreadable response with status ${response.status}`,
@@ -201,9 +285,13 @@ async function postViewerControl(
   pathname: string,
   body: Record<string, unknown>,
   headers: Record<string, string> = {},
+  context: McpToolCallContext = {},
 ): Promise<Record<string, unknown>> {
   const baseUrl = process.env.LLV_VIEWER_CONTROL_URL?.trim() || VIEWER_CONTROL_URL;
-  const response = await fetch(new URL(pathname, baseUrl), {
+  /* Every control mutation carries its endpoint's idempotency identity
+     (clientAttemptId, clientMessageId or clientRequestId). Repeating the same
+     request after a lost transport answer therefore asks for its receipt. */
+  const { response, parsed, unreadable } = await requestViewerControl(pathname, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -212,12 +300,16 @@ async function postViewerControl(
       ...headers,
     },
     body: JSON.stringify(body),
-  });
+  }, context);
   /* A body of literal `null` is valid JSON, so `.catch` never fires and every
      later `result.x` throws a TypeError before the status can be classified —
      which is how a 405 from a revision that does not serve the route arrived as
      an uncatchable crash instead of a refusal (#790). */
-  const parsed = await response.json().catch(() => null) as unknown;
+  if (unreadable && response.ok) {
+    throw new ViewerControlResponseError(
+      `Viewer control returned an unreadable response with status ${response.status}`,
+    );
+  }
   const result: Record<string, unknown> = parsed && typeof parsed === "object" && !Array.isArray(parsed)
     ? parsed as Record<string, unknown>
     : {};
@@ -238,6 +330,17 @@ function readViewerControl(
 ): Promise<Record<string, unknown>> {
   if (!control.get) throw new Error("Viewer control read is unavailable");
   return control.get(pathname);
+}
+
+function viewerControlForCall(
+  control: ViewerControlDependencies,
+  context?: McpToolCallContext,
+): ViewerControlDependencies {
+  if (!context) return control;
+  return {
+    ...(control.get ? { get: (pathname: string) => control.get!(pathname, context) } : {}),
+    post: (pathname, body, headers) => control.post(pathname, body, headers, context),
+  };
 }
 
 type RegistrySnapshot = ReturnType<ReturnType<typeof agentRegistry>["readOnlySnapshot"]>;
@@ -3047,17 +3150,17 @@ export function viewerMcpBindings(
   domainDependencies: ViewerMcpDomainDependencies = productionDomainDependencies,
 ): McpToolBindings {
   return {
-    spawn_agent: (args) => spawnAgent(args, controlDependencies),
-    send_message: (args) => sendMessage(args, controlDependencies, domainDependencies),
+    spawn_agent: (args, context) => spawnAgent(args, viewerControlForCall(controlDependencies, context)),
+    send_message: (args, context) => sendMessage(args, viewerControlForCall(controlDependencies, context), domainDependencies),
     create_task: createBoardTask,
     update_task: updateBoardTask,
     create_pipeline: createPipeline,
     pipeline_action: (args) => pipelineAction(args, domainDependencies),
     link_task_to_pipeline: (args) => linkTaskToPipeline(args, linkTaskDependencies),
-    list_conversations: (args) => listConversations(args, controlDependencies),
-    search_transcripts: (args) => searchTranscripts(args, controlDependencies),
+    list_conversations: (args, context) => listConversations(args, viewerControlForCall(controlDependencies, context)),
+    search_transcripts: (args, context) => searchTranscripts(args, viewerControlForCall(controlDependencies, context)),
     get_conversation: (args, context) => getConversation(args, domainDependencies, context),
-    deploy_exact_sha: (args) => deployExactSha(args, controlDependencies, domainDependencies),
+    deploy_exact_sha: (args, context) => deployExactSha(args, viewerControlForCall(controlDependencies, context), domainDependencies),
     get_pipeline: getPipeline,
     board_snapshot: (args) => boardSnapshot(args, domainDependencies),
     list_flows: (args) => Promise.resolve(listFlows(args, domainDependencies)),
@@ -3067,23 +3170,23 @@ export function viewerMcpBindings(
     list_tasks: (args) => Promise.resolve(listTasks(args, domainDependencies)),
     get_task: (args) => Promise.resolve(getTask(args, domainDependencies)),
     operator_snapshot: (args) => operatorSnapshot(args, domainDependencies),
-    deployment_status: (args) => deploymentStatus(args, controlDependencies),
+    deployment_status: (args, context) => deploymentStatus(args, viewerControlForCall(controlDependencies, context)),
     resources: (args) => resources(args, domainDependencies),
     conversation_action: (args, context) => conversationAction(args, domainDependencies, context),
     conversation_migration: (args) => conversationMigration(args, domainDependencies),
     agent_activity: (args, context) => agentActivity(args, domainDependencies, context),
-    lifecycle_events: (args) => lifecycleEvents(args, controlDependencies, domainDependencies),
+    lifecycle_events: (args, context) => lifecycleEvents(args, viewerControlForCall(controlDependencies, context), domainDependencies),
     request_attention: (args, context) => requestAttention(args, domainDependencies, context),
     suggest_replies: (args) => Promise.resolve(suggestReplies(args, domainDependencies)),
     bridge_report: (args) => Promise.resolve(bridgeReport(args, domainDependencies)),
-    bridge_directive: (args) => bridgeDirective(args, controlDependencies, domainDependencies),
+    bridge_directive: (args, context) => bridgeDirective(args, viewerControlForCall(controlDependencies, context), domainDependencies),
     get_orchestrator: (args) => getOrchestrator(args, domainDependencies),
     /* `async` rather than `Promise.resolve(...)`: this binding refuses by
        throwing, and a synchronous throw out of a binding call is not the
        rejected promise every caller here handles. */
     seat_tick_settings: async (args) => seatTickSettingsTool(args, domainDependencies),
-    create_orchestrator: (args) => createOrchestrator(args, controlDependencies),
-    send_message_to_orchestrator: (args) => sendMessageToOrchestrator(args, controlDependencies, domainDependencies),
-    rotate_orchestrator: (args) => rotateOrchestrator(args, controlDependencies),
+    create_orchestrator: (args, context) => createOrchestrator(args, viewerControlForCall(controlDependencies, context)),
+    send_message_to_orchestrator: (args, context) => sendMessageToOrchestrator(args, viewerControlForCall(controlDependencies, context), domainDependencies),
+    rotate_orchestrator: (args, context) => rotateOrchestrator(args, viewerControlForCall(controlDependencies, context)),
   };
 }
