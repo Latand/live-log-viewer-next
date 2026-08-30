@@ -321,6 +321,7 @@ function holdDuringRuntimeSynchronization(
       refs,
       contentDigest,
       commandInput(request),
+      { recoveryIntent: allowReclaimed ? "reclaimed-host" : null },
     );
     if (reservation.state === "delivered") {
       return deliveredReservationReplay(reservation, idempotencyKey, conversation.id, false);

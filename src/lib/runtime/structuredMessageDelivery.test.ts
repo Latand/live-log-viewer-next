@@ -5,7 +5,8 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
-import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { reconcileMigrations } from "@/lib/accounts/migration/coordinator";
+import { emptyLaunchProfile, type HeldDelivery } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot } from "./contracts";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, RuntimeImageStore, runtimeImageCapability } from "./runtimeImageStore";
@@ -1587,6 +1588,141 @@ test("a send resumes a reclaimed conversation after reserving the instruction an
     operationId: reservation.command.operationId,
     idempotencyKey: "reclaimed-host-message",
     text: "continue after the host was reclaimed",
+  });
+});
+
+test("a reclaimed admission survives the migration orphan sweep until recovery publishes its owner", async () => {
+  const { registry, conversation } = registryWithConversation();
+  let recovered = false;
+  const duringRecovery: {
+    state: HeldDelivery["state"] | null;
+    intent: HeldDelivery["recoveryIntent"];
+  } = { state: null, intent: null };
+  const commands: string[] = [];
+  const client = {
+    snapshot: async () => recovered
+      ? snapshot(conversation.id)
+      : { ...snapshot(conversation.id), sessions: [] },
+    command: async (command: { operationId: string; idempotencyKey: string }) => {
+      commands.push(command.idempotencyKey);
+      return {
+        operationId: command.operationId,
+        replayed: false,
+        receipt: {
+          operationId: command.operationId,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: conversation.id,
+          kind: "send" as const,
+          status: "delivered" as const,
+          queuePosition: null,
+          at: "2026-08-31T10:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+    operationStatus: async (operationId: string) => ({
+      operationId,
+      replayed: false,
+      receipt: {
+        operationId,
+        idempotencyKey: "reclaimed-orphan-sweep",
+        conversationId: conversation.id,
+        kind: "send" as const,
+        status: "delivered" as const,
+        queuePosition: null,
+        at: "2026-08-31T10:00:01.000Z",
+        revision: 2,
+      },
+    }),
+  } as unknown as RuntimeHostClient;
+  const delivery = {
+    async deliver({ delivery: held, path: heldPath, clientMessageId }: {
+      delivery: HeldDelivery;
+      path: string;
+      clientMessageId: string;
+    }) {
+      return await deliverHeldStructuredMessage({
+        conversationId: held.conversationId,
+        runtimeConversationId: held.runtimeConversationId,
+        path: heldPath,
+        deliveryId: held.id,
+        clientMessageId,
+        text: held.text,
+        command: held.command,
+      }, {
+        enabled: () => true,
+        client: () => client,
+        registry: () => registry,
+        kick: () => {},
+      }) ?? "delivery-uncertain";
+    },
+  };
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "reclaimed-orphan-sweep",
+    text: "continue after recovery owns the conversation",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+    recover: async () => {
+      const reconciling = new AgentRegistry(registry.filename);
+      await reconcileMigrations({} as never, delivery, reconciling);
+      duringRecovery.state = reconciling.pendingDeliveries(conversation.id)
+        .find((candidate) => candidate.clientMessageId === "reclaimed-orphan-sweep")?.state ?? null;
+      duringRecovery.intent = reconciling.pendingDeliveries(conversation.id)
+        .find((candidate) => candidate.clientMessageId === "reclaimed-orphan-sweep")?.recoveryIntent ?? null;
+      recordStructuredOwner(registry, conversation);
+      recovered = true;
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({ ok: true, outcome: "held", spawned: true });
+  expect(duringRecovery.state).toBe("assigned");
+  expect(duringRecovery.intent).toBe("reclaimed-host");
+  expect(commands).toEqual([]);
+
+  await reconcileMigrations({} as never, delivery, registry);
+
+  expect(commands).toEqual(["reclaimed-orphan-sweep"]);
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+});
+
+test("the migration orphan sweep still terminalizes upgrade-era residue without recovery intent", async () => {
+  const { registry, conversation } = registryWithConversation();
+  const orphan = registry.holdDelivery(
+    conversation.id,
+    "upgrade residue with no live admission",
+    "upgrade-orphan-without-recovery",
+  );
+  let deliveryCalls = 0;
+
+  expect(orphan).toMatchObject({
+    state: "assigned",
+    attempts: 0,
+    recoveryIntent: null,
+  });
+
+  await reconcileMigrations({} as never, {
+    async deliver() {
+      deliveryCalls += 1;
+      return "delivered";
+    },
+  }, registry);
+
+  expect(deliveryCalls).toBe(0);
+  expect(registry.snapshot().heldDeliveries[orphan.id]).toMatchObject({
+    state: "failed",
+    attempts: 0,
+    generationId: null,
+    recoveryIntent: null,
+    error: expect.stringContaining("upgrade-era reservation has no durable owner evidence"),
   });
 });
 

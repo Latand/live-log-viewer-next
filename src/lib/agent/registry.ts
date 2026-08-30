@@ -1580,6 +1580,7 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
       : [],
     command,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : legacyDigest,
+    recoveryIntent: value.recoveryIntent === "reclaimed-host" ? value.recoveryIntent : null,
     state,
     generationId: imagesCorrupt ? null : value.generationId ?? null,
     attempts: Number.isInteger(value.attempts) ? value.attempts : 0,
@@ -6477,6 +6478,7 @@ export class AgentRegistry {
     runtimeImages: readonly StructuredImageRef[] = [],
     contentDigest: string | null = null,
     commandInput: HeldDeliveryCommandInput = {},
+    admission: { recoveryIntent?: HeldDelivery["recoveryIntent"] } = {},
   ): HeldDelivery {
     if (payloadKind === "text" && !text) throw new Error("held delivery must contain at most 32000 characters");
     if (payloadKind === "runtime-images" && runtimeImages.length === 0) {
@@ -6484,6 +6486,7 @@ export class AgentRegistry {
     }
     /* One UTF-8 bound covers every payload kind, including image captions. */
     assertStructuredTextEnvelope(text);
+    const recoveryIntent = admission.recoveryIntent ?? null;
     return this.mutate((file) => {
       const inspection = inspectDeliveryReservation(
         file,
@@ -6514,6 +6517,7 @@ export class AgentRegistry {
         }
         delivery.deliveredAt = null;
         delivery.error = null;
+        if (recoveryIntent) delivery.recoveryIntent = recoveryIntent;
         if (migrationBlocksDelivery) {
           delivery.state = "held";
           delivery.generationId = null;
@@ -6561,6 +6565,7 @@ export class AgentRegistry {
         artifactPaths: [],
         command: canonicalHeldDeliveryCommand(commandInput, deliveryId),
         requestDigest,
+        recoveryIntent,
         state: "held",
         generationId: null,
         attempts: 0,
