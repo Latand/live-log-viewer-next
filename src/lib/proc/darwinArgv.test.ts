@@ -81,11 +81,22 @@ test("the reader answers null for a pid it cannot identify, and never guesses", 
 test.skipIf(process.platform !== "darwin")("on macOS the reader returns the exec-time argv of a live child", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-darwin-argv-"));
   const script = path.join(directory, "sleeper");
-  fs.writeFileSync(script, "#!/bin/sh\nwhile read -r _line; do :; done\n", { mode: 0o755 });
-  const child = spawn(script, ["first argument", "second"], { stdio: ["pipe", "ignore", "ignore"] });
+  /* The child announces itself before it blocks: a pid exists before the image
+     it will run does, and until the exec lands the kernel has no argument
+     record for that image to hand back — the same window claudeLogin's fence
+     polls through. Reading the moment `spawn` returns races that window, so
+     the read below waits for a byte only the executed script can have
+     written. */
+  fs.writeFileSync(script, "#!/bin/sh\necho executed\nwhile read -r _line; do :; done\n", { mode: 0o755 });
+  const child = spawn(script, ["first argument", "second"], { stdio: ["pipe", "pipe", "ignore"] });
   const pid = child.pid ?? 0;
   try {
     expect(pid).toBeGreaterThan(0);
+    await new Promise<void>((resolve, reject) => {
+      child.stdout!.once("data", () => resolve());
+      child.once("error", reject);
+      child.once("exit", () => reject(new Error("the child exited before it announced its exec")));
+    });
     // A #! script execs its interpreter, so argv[0] is the shell and argv[1]
     // the script — the same rewriting the Linux fence already matches.
     expect(darwinProcessArgv(pid)).toEqual(["/bin/sh", script, "first argument", "second"]);

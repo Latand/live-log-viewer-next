@@ -443,6 +443,12 @@ export class StructuredDeliveryQueue {
     private readonly reconfigure: StructuredReconfigureHandler = async () => {
       throw new Error("structured host reconfigure is unavailable");
     },
+    /** Why this conversation's turn is severed, when evidence says it is
+        (#1281). Null means "not shown to be severed", which is what every
+        caller here treats as a reason to keep waiting — and so is a read that
+        could not be made at all, which {@link readSeveredHostReason} keeps
+        separate rather than letting it out as a thrown drain pass (#1131). */
+    private readonly severedHostReason: (conversationId: string) => Promise<string | null> = async () => null,
   ) {}
 
   drain(): Promise<void> {
@@ -924,7 +930,7 @@ export class StructuredDeliveryQueue {
   }
 
   /**
-   * The four failable reads this queue decides on, each keeping whether it
+   * The five failable reads this queue decides on, each keeping whether it
    * could be read at all.
    *
    * A port method that is not wired answers as a completed read: the fence does
@@ -960,6 +966,26 @@ export class StructuredDeliveryQueue {
    */
   private readHealth(host: EngineHost): Promise<Evidence<HostState>> {
     return readEvidence(() => host.health(), "structured host state is unavailable");
+  }
+
+  /**
+   * Whether the evidence says this conversation's turn is severed, when a
+   * control has no host left to resolve (#1281).
+   *
+   * The liveness decision behind it already refuses to answer `severed` from
+   * anything it could not read — that is the whole of what it is for — so a
+   * null here means only "not shown to be severed". The read reaching it can
+   * still fail, though: it goes to the registry snapshot and to a transcript on
+   * disk, and letting that failure out would abort the drain pass for every
+   * other conversation sharing it. Unreadable joins `unknown` on the side that
+   * settles nothing, which is the same answer both this fence and the liveness
+   * decision give the question separately.
+   */
+  private readSeveredHostReason(conversationId: string): Promise<Evidence<string | null>> {
+    return readEvidence(
+      () => this.severedHostReason(conversationId),
+      "structured host liveness evidence is unavailable",
+    );
   }
 
   /**
@@ -1133,7 +1159,28 @@ export class StructuredDeliveryQueue {
         throw error;
       }
     }
-    if (!host) return { blocked: true, terminated: false };
+    if (!host) {
+      /* Holding the control was right while a host might still come back to
+         answer it, and wrong once nothing can: the effect stays pending, the
+         group never drains, and every message queued behind it waits on a turn
+         no process is running (#1281). Evidence of a severed turn settles it
+         instead — an interrupt has nothing left to interrupt, and an attention
+         nothing left to answer. Evidence is also all it is: `unknown` and a
+         read that could not be made both leave the control held, which is what
+         this queue does with every other unreadable fence (#1131). */
+      const severed = await this.readSeveredHostReason(effect.conversationId);
+      if (!severed.readable) {
+        this.retrySoon();
+        return { blocked: true, terminated: false };
+      }
+      if (!severed.value) return { blocked: true, terminated: false };
+      await this.port.transition(
+        effect.operationId,
+        effect.kind === "interrupt" ? "interrupted" : "failed",
+        { reason: `structured host is severed: ${severed.value}`.slice(0, 240) },
+      );
+      return { blocked: false, terminated: false };
+    }
     /* An answer and an interrupt are engine writes like a message, so the same
        rule holds one step earlier: a state that could not be read authorises
        neither the control nor the `dead-host` requeue that would reissue it. */

@@ -32,6 +32,7 @@ const { createFakeDeliveryLedger, FakeEngineHost } = await import("./fixtures/fa
 const { RuntimeHostUnavailableError } = await import("./client");
 const {
   bindStructuredDeliveryQueue,
+  completeStructuredDeliveryQueueStartup,
   hasStructuredDeliveryHost,
   publishStructuredDeliveryHost,
   releaseStructuredDeliveryHost,
@@ -89,7 +90,7 @@ function seedConversation(
     turn: { state: "idle", source: "assistant", terminalAt: null },
     observedAt: "2026-08-26T10:00:00.000Z",
   }]);
-  const conversation = Object.values(registry.snapshot().conversations)[0];
+  const conversation = registry.conversationForPath(artifactPath);
   const generation = conversation?.generations.at(-1);
   if (!conversation || !generation) throw new Error("seeded conversation is missing");
   const key: SessionKey = { engine: "codex", sessionId: generation.id };
@@ -313,6 +314,34 @@ test("a publication paused inside the predecessor lands on the controller that r
 
   await unregister();
   expect(hasStructuredDeliveryHost(key)).toBe(false);
+  await close();
+});
+
+test("a startup completion chained behind a retired generation registers through its successor (#1282)", async () => {
+  const { registry, directory, journal, client, close } = fixture("startup-completion-handover");
+  const gate = producerCursorGate(client, journal);
+  await bindStructuredDeliveryQueue([], { registry, client: gate.client, deferStartupWork: true });
+  const first = seedConversation(registry, directory, "completion-handover-first");
+  const second = seedConversation(registry, directory, "completion-handover-second");
+  const parked = structuredHost();
+  const behind = structuredHost();
+
+  /* Two startup completions, the second chained behind the first, with the
+     first parked mid-registration. The rebind lands in between, so the chained
+     one resumes inside a generation that no longer owns the publication. */
+  const firstCompletion = completeStructuredDeliveryQueueStartup([{ key: first.key, host: parked }]);
+  await gate.started;
+  const secondCompletion = completeStructuredDeliveryQueueStartup([{ key: second.key, host: behind }]);
+  await bindStructuredDeliveryQueue([], { registry, client });
+  gate.open();
+  await firstCompletion;
+  await secondCompletion;
+
+  /* Answering "done" while registering nothing is what leaves a launched host
+     with no owner able to write a turn into it. */
+  expect(hasStructuredDeliveryHost(first.key)).toBe(true);
+  expect(hasStructuredDeliveryHost(second.key)).toBe(true);
+
   await close();
 });
 

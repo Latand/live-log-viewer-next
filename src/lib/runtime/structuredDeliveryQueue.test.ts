@@ -1238,6 +1238,83 @@ test("interrupt actuates a deliberately held fake-host turn", async () => {
   ]);
 });
 
+test("an interrupt for a conversation with no host settles once the host is proven severed", async () => {
+  const transitions: Array<[string, string, string | undefined]> = [];
+  const effects = [
+    {
+      id: "interrupt-severed",
+      kind: "runtime.interrupt",
+      eventSeq: 3,
+      payload: { operationId: "interrupt-severed", conversationId: "conversation-one", turnId: "turn-inherited" },
+    },
+    {
+      id: "send-behind",
+      kind: "runtime.send",
+      eventSeq: 4,
+      payload: { operationId: "send-behind", conversationId: "conversation-one", text: "are you there", policy: "queue" },
+    },
+  ];
+  const settled = new Set<string>();
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => effects.filter((effect) => !settled.has(String(effect.payload.operationId))),
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason ?? undefined]);
+      if (status !== "queued" && status !== "delivering") settled.add(operationId);
+    },
+  }, () => null, undefined, undefined, async () => false, undefined,
+  async () => "it has written nothing since its own launch");
+
+  await queue.drain();
+
+  /* Holding the control forever is what parked every message behind a turn no
+     process was running (#1281): the group has to drain past it. */
+  expect(transitions[0]).toEqual([
+    "interrupt-severed",
+    "interrupted",
+    "structured host is severed: it has written nothing since its own launch",
+  ]);
+  expect(transitions.map(([operationId]) => operationId)).toContain("send-behind");
+});
+
+test("an interrupt for a conversation with no host waits when the severed evidence cannot be read", async () => {
+  const transitions: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "interrupt-unreadable",
+      kind: "runtime.interrupt",
+      eventSeq: 3,
+      payload: { operationId: "interrupt-unreadable", conversationId: "conversation-one", turnId: "turn-held" },
+    }],
+    transition: async (operationId) => { transitions.push(operationId); },
+  }, () => null, undefined, undefined, async () => false, undefined,
+  async () => { throw new Error("registry snapshot is unavailable"); });
+
+  await queue.drain();
+
+  /* The liveness decision answers `severed` from evidence and `unknown` from
+     anything it could not read (#1281); a read that never completed is the
+     same nothing one step earlier, and settles the control no more than
+     `unknown` does (#1131). */
+  expect(transitions).toEqual([]);
+});
+
+test("an interrupt for a conversation with no host keeps waiting while nothing proves it severed", async () => {
+  const transitions: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "interrupt-unknown",
+      kind: "runtime.interrupt",
+      eventSeq: 3,
+      payload: { operationId: "interrupt-unknown", conversationId: "conversation-one", turnId: "turn-held" },
+    }],
+    transition: async (operationId) => { transitions.push(operationId); },
+  }, () => null);
+
+  await queue.drain();
+
+  expect(transitions).toEqual([]);
+});
+
 test("a control operation behind a full message page still reaches the active host", async () => {
   const effects = [
     ...Array.from({ length: 100 }, (_, index) => ({
