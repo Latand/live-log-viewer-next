@@ -535,12 +535,37 @@ export function defaultPipelinePorts(): PipelinePorts {
   const registry = agentRegistry();
   let registrySnapshot: ReturnType<typeof registry.readOnlySnapshot> | null = null;
   let adoptionCandidatesByPipeline: Map<string, PipelineAdoptionCandidate[]> | null = null;
+  let unpublishedStructuredPaths: Set<string> | null = null;
   let flowSnapshot: Flow[] | null = null;
   const snapshot = () => registrySnapshot ??= registry.readOnlySnapshot();
+  /* The registry needs staged key/path data to bind the host. Pipeline read
+     projections publish that identity only after finalization proves the
+     transcript exists, so recovery cannot copy a phantom path into an attempt. */
+  const structuredIdentityPublished = (
+    receipt: ReturnType<typeof snapshot>["receipts"][string],
+    current = snapshot(),
+  ): boolean => {
+    const structured = receipt.transport === "structured"
+      || (receipt.transport === null
+        && Boolean(receipt.key && current.entries[sessionKeyId(receipt.key)]?.structuredHost));
+    return !structured || receipt.state === "completed";
+  };
+  const unpublishedIdentityPaths = (
+    current = snapshot(),
+  ): Set<string> => unpublishedStructuredPaths ??= new Set(Object.values(current.receipts).flatMap((receipt) =>
+    receipt.artifactPath && !structuredIdentityPublished(receipt, current) ? [receipt.artifactPath] : []));
+  const publishedPathForConversation = (conversationId: ViewerConversationId): string | null => {
+    const current = snapshot();
+    const conversation = current.conversations[conversationId];
+    if (!conversation) return null;
+    const unpublished = unpublishedIdentityPaths(current);
+    return conversation.generations.findLast((generation) => !unpublished.has(generation.path))?.path ?? null;
+  };
   const flows = () => flowSnapshot ??= loadFlows();
   const invalidateRegistryProjection = () => {
     registrySnapshot = null;
     adoptionCandidatesByPipeline = null;
+    unpublishedStructuredPaths = null;
   };
   const adoptionCandidates = () => {
     if (adoptionCandidatesByPipeline) return adoptionCandidatesByPipeline;
@@ -556,7 +581,13 @@ export function defaultPipelinePorts(): PipelinePorts {
         const receipt = receiptsByConversation.get(conversationId as ViewerConversationId) ?? null;
         const conversation = current.conversations[conversationId as ViewerConversationId] ?? null;
         const generation = conversation?.generations.at(-1) ?? null;
-        const agentPath = receipt?.artifactPath ?? generation?.path ?? null;
+        const receiptPublished = receipt ? structuredIdentityPublished(receipt, current) : false;
+        let agentPath = generation?.path ?? null;
+        let sessionId: string | null = null;
+        if (receipt) {
+          agentPath = receiptPublished ? receipt.artifactPath : null;
+          sessionId = receiptPublished ? receipt.key?.sessionId ?? null : null;
+        }
         if (!agentPath) continue;
         const runtime = membership.runtime ?? (receipt ? {
           engine: receipt.engine,
@@ -573,7 +604,7 @@ export function defaultPipelinePorts(): PipelinePorts {
           sourceConversationId: membership.parentConversationId,
           launchId: receipt?.launchId ?? null,
           conversationId,
-          sessionId: receipt?.key?.sessionId ?? null,
+          sessionId,
           agentPath,
           paneId: receipt?.verifiedHost?.paneId ?? receipt?.pane?.paneId ?? null,
           startedAt: receipt?.createdAt ?? membership.createdAt,
@@ -608,14 +639,16 @@ export function defaultPipelinePorts(): PipelinePorts {
       timer.unref?.();
     },
     spawnReceipt: (launchId) => {
-      const receipt = snapshot().receipts[launchId];
+      const current = snapshot();
+      const receipt = current.receipts[launchId];
       if (!receipt) return null;
+      const identityPublished = structuredIdentityPublished(receipt, current);
       return {
         state: receipt.state,
         launchId: receipt.launchId,
         conversationId: receipt.conversationId,
-        sessionId: receipt.key?.sessionId ?? null,
-        "transcript": receipt.artifactPath,
+        sessionId: identityPublished ? receipt.key?.sessionId ?? null : null,
+        "transcript": identityPublished ? receipt.artifactPath : null,
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
       };
     },
@@ -692,10 +725,11 @@ export function defaultPipelinePorts(): PipelinePorts {
     headCwd: (transcriptPath) => headCwd(transcriptPath),
     lastMessage: lastAssistantMessage,
     pathForConversation: (conversationId) => conversationId.startsWith("conversation_")
-      ? snapshot().conversations[conversationId as ViewerConversationId]?.generations.at(-1)?.path ?? null
+      ? publishedPathForConversation(conversationId as ViewerConversationId)
       : null,
     sourcePathAllowed: transcriptAllowed,
     conversationIdForPath: (pathname) => {
+      if (unpublishedIdentityPaths().has(pathname)) return null;
       for (const conversation of Object.values(snapshot().conversations)) {
         if (conversation.generations.some((generation) => generation.path === pathname)) return conversation.id;
       }
@@ -2598,14 +2632,21 @@ async function reconcileTerminalStageHosts(pipeline: Pipeline, ports: PipelinePo
   const settledAttempts = new Set(pipeline.terminalReap?.settledAttempts ?? []);
   const unconfirmedAttempts = new Set((pipeline.unconfirmedHosts ?? [])
     .map((host) => `${host.stageId}:${host.attempt}`));
+  const prior = pipeline.terminalReap;
   const candidates = launchedStageHosts(pipeline).filter(({ target, turnSettled }) => turnSettled
     && !(target.conversationId && target.conversationId === pipeline.srcConversationId)
     && !(target.agentPath && target.agentPath === pipeline.srcPath)
     && !settledAttempts.has(`${target.stageId}:${target.attempt}`)
     && !unconfirmedAttempts.has(`${target.stageId}:${target.attempt}`));
-  if (candidates.length === 0) return false;
+  if (candidates.length === 0) {
+    if (pipeline.state !== "completed" || prior?.settledAt) return false;
+    const settledAt = ports.now();
+    pipeline.terminalReap = prior
+      ? { ...prior, lastAt: settledAt, settledAttempts: [...settledAttempts], settledAt }
+      : { rounds: 0, stopped: 0, lastAt: settledAt, settledAttempts: [], settledAt };
+    return true;
+  }
 
-  const prior = pipeline.terminalReap;
   const reap: PipelineTerminalReap = prior
     ? {
         ...prior,

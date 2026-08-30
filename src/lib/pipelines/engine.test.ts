@@ -140,7 +140,7 @@ test("a pipeline stage keeps its reserved account through a routing change befor
   }
 });
 
-test("a concurrent pipeline replay withholds its staged session identity and transcript (#1123)", async () => {
+test("a concurrent pipeline replay and its recovery projections withhold staged identity (#1123)", async () => {
   const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "pipeline-phantom-replay-registry.json"));
   const cwd = process.env.LLV_STATE_DIR!;
   setAgentRegistryForTests(registry);
@@ -196,12 +196,33 @@ test("a concurrent pipeline replay withholds its staged session identity and tra
       cwd,
       accountId: "pipeline-account",
       launchProfile: receipt.launchProfile,
-      status: "starting",
+      status: "idle",
       host: null,
-      structuredHost: null,
-      claimEpoch: 0,
-      claimOwner: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:provisional-session",
+        process: { pid: process.pid, startIdentity: "provisional-session-host" },
+        eventCursor: 0,
+        protocolVersion: null,
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: "structured-host:provisional-session-host",
       pendingAction: "spawn",
+    });
+    const parent = registry.ensureConversation("codex", path.join(cwd, "parent.jsonl"), "pipeline-account");
+    registry.rememberMembership(receipt.conversationId, {
+      kind: "pipeline",
+      containerId: "pipeline-phantom-replay",
+      role: "builder",
+      slot: "adopt:build:1",
+      stageId: "build",
+      stageOrder: 0,
+      round: 1,
+      parentConversationId: parent.id,
     });
 
     const replay = await ports.spawnAgent(input, () => {});
@@ -211,6 +232,28 @@ test("a concurrent pipeline replay withholds its staged session identity and tra
       sessionId: null,
       "transcript": null,
     });
+    expect(ports.spawnReceipt(receipt.launchId)).toMatchObject({
+      sessionId: null,
+      "transcript": null,
+    });
+    expect(ports.pathForConversation(receipt.conversationId)).toBeNull();
+    expect(ports.conversationIdForPath(stagedPath)).toBeNull();
+    expect(ports.pipelineAdoptionCandidates("pipeline-phantom-replay")).toEqual([]);
+
+    registry.finalizeStructuredSpawn(receipt.launchId);
+    const completedPorts = defaultPipelinePorts();
+    expect(completedPorts.spawnReceipt(receipt.launchId)).toMatchObject({
+      sessionId: "provisional-session",
+      "transcript": stagedPath,
+    });
+    expect(completedPorts.pathForConversation(receipt.conversationId)).toBe(stagedPath);
+    expect(completedPorts.conversationIdForPath(stagedPath)).toBe(receipt.conversationId);
+    expect(completedPorts.pipelineAdoptionCandidates("pipeline-phantom-replay")).toEqual([
+      expect.objectContaining({
+        sessionId: "provisional-session",
+        agentPath: stagedPath,
+      }),
+    ]);
   } finally {
     resolveSpawn.mockRestore();
     setAgentRegistryForTests(null);

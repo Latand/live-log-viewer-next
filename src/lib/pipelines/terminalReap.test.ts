@@ -157,6 +157,25 @@ test("completion reaps its finished resident builder hosts exactly once", async 
   expect(h.stops).toHaveLength(2);
 });
 
+test("a completed pipeline with no launched host settles its empty reap", async () => {
+  const h = harness();
+  savePipelines([pipelineRecord({
+    id: "reap-empty",
+    state: "completed",
+    attempts: [],
+  })]);
+
+  await tickPipelines([], h.ports);
+
+  expect(h.stops).toEqual([]);
+  expect(loadPipelines()[0]!.terminalReap).toMatchObject({
+    rounds: 0,
+    stopped: 0,
+    settledAttempts: [],
+    settledAt: expect.any(String),
+  });
+});
+
 test("the creator, a mid-turn attempt, and a runtime-active session are preserved", async () => {
   const h = harness();
   savePipelines([pipelineRecord({
