@@ -73,12 +73,15 @@ function sandbox(withManager = true): void {
 function bindings(
   callerProject: string | null = "proj-voice",
   canonicalSeatConversationId?: (conversationId: string) => string,
+  /** What the delivery path answers. `delivered` is arrival; `queued` is
+      acceptance, and the two must not settle a decision request alike. */
+  deliveryOutcome: "delivered" | "queued" = "delivered",
 ) {
   posted = [];
   const control: ViewerControlDependencies = {
     async post(pathname, body, headers) {
       posted.push({ pathname, body, headers: headers ?? {} });
-      return { outcome: "delivered", operationId: "op-1" };
+      return { outcome: deliveryOutcome, operationId: "op-1" };
     },
   };
   /* The caller's canonical project as the production resolver would derive it
@@ -194,6 +197,37 @@ test("the trailer settles the ask of the seat this directive reached, and no oth
     ref: asked!.seq,
   });
   expect(bridgeAsksForSeats().size).toBe(0);
+});
+
+test("a directive that was only accepted leaves the ask standing, and says it is unsettled", async () => {
+  /* #1131: `queued` means the runtime admitted the operation, not that the
+     manager read anything. Recording the answer there cleared a pending
+     decision that a dropped delivery means nobody ever saw — the ask vanished
+     from the operator's card while the instruction behind it never arrived. */
+  sandbox();
+  const tools = bindings("proj-voice", undefined, "queued");
+  const asked = recordManagerReport({
+    key: "lane-9-blocked",
+    class: "blocked",
+    at: new Date().toISOString(),
+    project: "proj-voice",
+    targetSeatConversationId: "conversation_manager",
+    body: "cannot proceed: pick a base branch",
+  });
+  expect(bridgeAsksForSeats().size).toBe(1);
+
+  const receipt = await tools.bridge_directive({
+    clientRequestId: "d-unsettled",
+    rootTurnId: "turn_unsettled",
+    utterance: 0,
+    instruction: "cut it from main",
+    project: "proj-voice",
+    ref: asked!.seq,
+  });
+
+  expect(receipt).toMatchObject({ outcome: "queued", settled: false, operationId: "op-1" });
+  /* Still open, and answerable by the operation id the receipt just returned. */
+  expect(bridgeAsksForSeats().size).toBe(1);
 });
 
 test("a seat rekeyed since it asked is still the seat this directive settles (#1168 final review, HIGH 1)", async () => {

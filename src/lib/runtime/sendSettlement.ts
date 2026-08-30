@@ -2,12 +2,11 @@ import {
   agentRegistry,
   readOnlyConversationLookupFromSnapshot,
   type AgentRegistry,
+  type DeliveryTerminalDisposition,
   type RegistryFile,
 } from "@/lib/agent/registry";
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 import type { HeldDelivery, ViewerConversationId } from "@/lib/accounts/migration/contracts";
-import { appendLifecycleEvents } from "@/lib/lifecycle/journal";
-import { projectDeliveryEvents } from "@/lib/lifecycle/projector";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeReceiptStatus } from "./contracts";
@@ -24,23 +23,17 @@ import type { RuntimeReceiptStatus } from "./contracts";
  * A production deployer holding a paused cutover sat idle for forty minutes on
  * exactly this, and the only thing that noticed was the sender's own suspicion.
  *
- * Three things are needed, and this module owns all three:
+ * Two things are needed, and this module owns both:
  *
  * - **Every accepted send settles.** {@link settleUnsettledSends} sweeps the
  *   reservations that have not reached a terminal state and ends each one as
  *   `delivered` or `failed`, from the delivery journal's own answer.
- * - **The settlement is queryable by operation id.** {@link sendReceiptFor} is
- *   a pure read over the registry's durable delivery index, so a caller holding
- *   the id `send_message` returned learns what became of it — from the record,
- *   never from what the send call guessed at the time.
- * - **A loss surfaces without a watchdog.** A settled-as-failed reservation is
- *   rendered as a failed send on the recipient's card, and the settlement
- *   journals its `delivery_expired` event as it declares the loss rather than
- *   leaving it for whoever next polls — so it is in the lifecycle digest, which
- *   orchestrators already read, before anyone asks. No new surface, and nothing
- *   for the sender to watch.
+ * - **The settlement is queryable by operation id.** {@link resolveSendReceipt}
+ *   answers what became of the id `send_message` returned — from the durable
+ *   record, reconciled against the journal's CURRENT answer, never from what
+ *   the send call guessed at the time.
  *
- * ── WHY THIS CANNOT DELIVER THE SAME INSTRUCTION TWICE ────────────────────
+ * ── WHY THIS NEVER CALLS A DUPLICATE SAFE ─────────────────────────────────
  *
  * Declaring a send failed is only honest if the send can no longer happen, so
  * the settlement never merely relabels a reservation: it terminalizes the
@@ -56,32 +49,39 @@ import type { RuntimeReceiptStatus } from "./contracts";
  *   state — so an executor that had already batched the effect is stopped at
  *   the transition rather than at the send.
  *
- * That fence exists only for a send the journal still shows as unexecuted. A
- * send the executor already took (`delivering`) may have reached the recipient,
- * and nothing here can prove it did not, so it is terminalized as `uncertain`
- * and its receipt says so: the caller is told the fate is unknown and that
- * re-sending it may duplicate. This module never retries anything on its own —
- * a resend is the caller's decision, made against a receipt that states whether
- * it is safe.
+ * That fence proves non-execution only where the journal still shows the send
+ * as unexecuted, and that is the ONLY thing this module will call safe to send
+ * again. Everything else it settles is `unverified`: a send the executor took
+ * may have reached the recipient, and so may a send whose journal record cannot
+ * be found at all — an absent record is not a proof of absence. Being wrong in
+ * that direction costs a caller one verification; being wrong in the other
+ * direction delivers a deployment instruction twice. Nothing here retries
+ * anything on its own — a resend is the caller's decision, made against a
+ * receipt that states whether it is safe.
  */
 
-/** The two failure reasons this module writes, and the only two the receipt
-    reads back. `sendReceiptFor` derives duplicate risk from them, so they are a
-    contract between the sweep and the query rather than log prose. */
+/** The two failure reasons this module writes. The durable record also carries
+    a structured disposition beside them, so the receipt never has to read prose
+    to know whether a resend can duplicate. */
 export const SEND_LOST_REASON =
   "accepted for delivery but never executed; the delivery journal has fenced it, so it cannot arrive and may be sent again";
 export const SEND_UNVERIFIED_REASON =
   "delivery was started and never settled; whether it reached the recipient is unknown, so sending it again may deliver it twice";
+/** No journal operation was ever found for this send — the legacy delivery path
+    never creates one, and a record can also be pruned. Non-execution is
+    unproven either way, so it settles like any other unverified send. */
+export const SEND_UNRECORDED_REASON =
+  "delivery was accepted and the delivery journal holds no record of it; whether it reached the recipient is unknown, so sending it again may deliver it twice";
 
 /**
- * How long an accepted send may rest unsettled before it is declared lost.
+ * How long an accepted send may rest unsettled before it is settled.
  *
  * This is a settlement deadline, not a delivery timeout: nothing waits on it,
- * and widening it would only make a lost send take longer to become an answer.
- * It is generous enough that an ordinary drain, host recovery or reconnection
- * finishes well inside it.
+ * and widening it would only make a dropped send take longer to become an
+ * answer. It is generous enough that an ordinary drain, host recovery or
+ * reconnection finishes well inside it.
  */
-export const SEND_SETTLEMENT_WINDOW_MS = 10 * 60_000;
+const SEND_SETTLEMENT_WINDOW_MS = 10 * 60_000;
 
 /**
  * The ceiling on the in-turn exemption below.
@@ -91,10 +91,10 @@ export const SEND_SETTLEMENT_WINDOW_MS = 10 * 60_000;
  * that exemption permanent and put `queued` right back where this issue found
  * it, so the exemption ends here.
  */
-export const SEND_SETTLEMENT_IN_TURN_CEILING_MS = 60 * 60_000;
+const SEND_SETTLEMENT_IN_TURN_CEILING_MS = 60 * 60_000;
 
 /** How often the release that owns traffic sweeps. */
-export const SEND_SETTLEMENT_INTERVAL_MS = 60_000;
+const SEND_SETTLEMENT_INTERVAL_MS = 60_000;
 
 /** Settlements attempted per sweep. Each costs one journal round trip; the rest
     wait for the next tick rather than holding the event loop. */
@@ -137,8 +137,10 @@ export interface SendReceipt {
   /** True when re-sending this instruction could deliver it a second time. */
   duplicateRisk: boolean;
   resend: SendResendGuidance | null;
-  /** The record this answer was read from, never the send call's own guess. */
-  evidence: "delivery-journal";
+  /** Where THIS answer came from: `delivery-journal` when the runtime journal
+      was asked and answered during the query, `delivery-record` when the
+      durable reservation and its owner row were the whole evidence. */
+  evidence: "delivery-journal" | "delivery-record";
 }
 
 /** An accepted send the delivery record has not settled. */
@@ -158,8 +160,9 @@ export interface SendSettlementOutcome {
   deliveryId: string;
   conversationId: ViewerConversationId;
   state: "delivered" | "failed";
-  /** `lost` fenced an unexecuted send; `unverified` terminalized a started one;
-      `reconciled` copied a terminal journal answer the projection had missed. */
+  /** `lost` fenced an unexecuted send; `unverified` ended one whose fate the
+      journal could not prove; `reconciled` copied a terminal journal answer the
+      projection had missed. */
   disposition: "lost" | "unverified" | "reconciled";
   duplicateRisk: boolean;
 }
@@ -178,10 +181,6 @@ export interface SendSettlementPorts {
   now?: () => number;
   windowMs?: number;
   inTurnCeilingMs?: number;
-  batchCeiling?: number;
-  /** Where the declared loss is journaled. Swapped only by tests that assert
-      the event without writing a shared lifecycle file. */
-  journalLifecycle?: (deliveries: readonly HeldDelivery[]) => void;
 }
 
 function parseTime(value: string | null | undefined): number | null {
@@ -252,27 +251,53 @@ export function unsettledSends(
   return unsettled.sort((left, right) => right.unsettledForMs - left.unsettledForMs);
 }
 
-/**
- * What became of one operation id, from the durable delivery record.
- *
- * The answer is read from `deliveryOperationOwners` first, which is the index
- * that survives reservation compaction, and falls back to the reservation
- * itself for records that predate an owner row. A caller that asks about an id
- * nothing ever admitted gets `null` rather than an invented in-flight answer.
- */
-export function sendReceiptFor(file: RegistryFile, operationId: string): SendReceipt | null {
+function deliveryForOperation(file: RegistryFile, operationId: string): HeldDelivery | null {
   const owner = file.deliveryOperationOwners[operationId];
   const delivery = owner
     ? file.heldDeliveries[owner.deliveryId]
     : Object.values(file.heldDeliveries).find((candidate) => candidate.command.operationId === operationId);
+  return delivery ?? null;
+}
+
+/**
+ * What a caller may do next, from the durable disposition rather than prose.
+ *
+ * `safe` requires the record to POSITIVELY say the send was fenced before
+ * anything could execute it. A record that says nothing — one written before
+ * the disposition existed, one settled by a path that proved nothing — is not a
+ * fenced send, so it is answered as unverified. That is the whole difference
+ * between "we know this never ran" and "we never found out".
+ */
+function resendGuidance(
+  disposition: DeliveryTerminalDisposition | null,
+  reason: string | null,
+): { duplicateRisk: boolean; resend: SendResendGuidance } {
+  const fenced = disposition === "lost" || (disposition === null && reason === SEND_LOST_REASON);
+  return fenced
+    ? { duplicateRisk: false, resend: "safe" }
+    : { duplicateRisk: true, resend: "verify-first" };
+}
+
+/**
+ * What became of one operation id, from the durable delivery record.
+ *
+ * The answer reads `deliveryOperationOwners` for the settlement — that index
+ * survives reservation compaction, so a compacted unverified failure cannot
+ * come back as a safe one — and the reservation for what only it still holds. A
+ * caller that asks about an id nothing ever admitted gets `null` rather than an
+ * invented in-flight answer.
+ */
+export function sendReceiptFor(file: RegistryFile, operationId: string): SendReceipt | null {
+  const owner = file.deliveryOperationOwners[operationId];
+  const delivery = deliveryForOperation(file, operationId);
   if (!owner && !delivery) return null;
   const conversationId = (delivery?.conversationId ?? owner?.conversationId) ?? null;
   const clientMessageId = (delivery?.clientMessageId ?? owner?.clientMessageId) ?? null;
   const acceptedAt = delivery ? acceptedAtOf(delivery) : owner?.createdAt ?? null;
   /* The reservation wins when it is still present — it carries the reason and
-     the settlement time — and the owner row answers once it has been compacted
-     away. The two never disagree: the owner's terminal state is synchronized
-     from the reservation every time one settles. */
+     the delivery time — and the owner row answers once it has been compacted
+     away. The two never disagree: the owner is synchronized from the
+     reservation every time one settles. */
   const terminalState = delivery && (delivery.state === "delivered" || delivery.state === "failed")
     ? delivery.state
     : owner?.terminalState ?? null;
@@ -284,15 +309,14 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
       state: "delivered",
       reason: null,
       acceptedAt,
-      settledAt: delivery?.deliveredAt ?? null,
+      settledAt: delivery?.deliveredAt ?? owner?.settledAt ?? null,
       duplicateRisk: false,
       resend: "not-needed",
-      evidence: "delivery-journal",
+      evidence: "delivery-record",
     };
   }
   if (terminalState === "failed") {
-    const reason = delivery?.error ?? null;
-    const duplicateRisk = reason === SEND_UNVERIFIED_REASON;
+    const reason = delivery?.error ?? owner?.terminalReason ?? null;
     return {
       operationId,
       conversationId,
@@ -300,10 +324,9 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
       state: "failed",
       reason,
       acceptedAt,
-      settledAt: null,
-      duplicateRisk,
-      resend: duplicateRisk ? "verify-first" : "safe",
-      evidence: "delivery-journal",
+      settledAt: owner?.settledAt ?? null,
+      ...resendGuidance(owner?.terminalDisposition ?? null, reason),
+      evidence: "delivery-record",
     };
   }
   return {
@@ -318,44 +341,74 @@ export function sendReceiptFor(file: RegistryFile, operationId: string): SendRec
     settledAt: null,
     duplicateRisk: false,
     resend: null,
-    evidence: "delivery-journal",
+    evidence: "delivery-record",
   };
 }
 
-/** The same read against the live registry. */
-export function sendReceipt(operationId: string, registry: AgentRegistry = agentRegistry()): SendReceipt | null {
-  return sendReceiptFor(registry.readOnlySnapshot(), operationId);
+/** A terminal answer the journal has already reached, and what it proves. */
+export interface JournalVerdict {
+  state: "delivered" | "failed";
+  disposition: DeliveryTerminalDisposition;
+  reason: string | null;
 }
 
 /**
- * Terminalizes the journal operation, and answers whether the send can still
- * reach the recipient afterwards.
+ * The journal's own answer, read as a settlement.
  *
- * An unexecuted send is failed outright: that clears its outbox row in the same
- * transaction and makes the later `delivering` transition illegal, so the send
- * is fenced. A started one is terminalized as `uncertain`, which fences it just
- * as firmly against a SECOND execution but says nothing about the first — which
- * is the truth, and is what the receipt then reports.
+ * `failed` and `rejected` are written on a message effect only where the send
+ * never reached the engine, and `uncertain` wherever it may have — the delivery
+ * queue keeps that distinction exact, which is what lets a fenced send be
+ * called safe without guessing. An open or missing status is not a verdict and
+ * returns null; the caller decides what to do about it.
+ *
+ * The sweep and the controller's startup reconciliation both read the journal
+ * for the same question, so they read it through this — one classifier, rather
+ * than two that can drift into disagreeing about what a status proves.
+ */
+export function journalVerdict(status: RuntimeReceiptStatus | null): JournalVerdict | null {
+  if (status === null) return null;
+  if (DELIVERED_RECEIPT_STATUSES.has(status)) {
+    return { state: "delivered", disposition: "delivered", reason: null };
+  }
+  if (status === "failed" || status === "rejected") {
+    return { state: "failed", disposition: "lost", reason: SEND_LOST_REASON };
+  }
+  if (status === "uncertain") {
+    return { state: "failed", disposition: "unverified", reason: SEND_UNVERIFIED_REASON };
+  }
+  return null;
+}
+
+/**
+ * Terminalizes an operation the journal still shows as unexecuted.
+ *
+ * Failing it outright clears its outbox row in the same transaction and makes
+ * the later `delivering` transition illegal, so the send is fenced — and this
+ * is the one path that can prove non-execution, which is why it is the one that
+ * may report `lost`.
  */
 async function fenceOperation(
   client: RuntimeHostClient,
   operationId: string,
   status: RuntimeReceiptStatus,
-): Promise<{ disposition: "lost" | "unverified"; duplicateRisk: boolean }> {
-  if (OPEN_RECEIPT_STATUSES.has(status)) {
-    await client.transitionOperation(operationId, "failed", { reason: SEND_LOST_REASON });
-    return { disposition: "lost", duplicateRisk: false };
+): Promise<JournalVerdict> {
+  if (!OPEN_RECEIPT_STATUSES.has(status)) {
+    /* Not open, not terminal: a send in `delivering` or `applying` is already
+       in an executor's hands. It cannot be proved undelivered, so it is
+       terminalized as `uncertain` — which fences it just as firmly against a
+       SECOND execution while saying nothing about the first. A runtime host
+       from before that transition rejects the word; the operation must stop
+       being open either way, so the fallback keeps the fence and the record
+       keeps the unverified disposition it is read back by. */
+    try {
+      await client.transitionOperation(operationId, "uncertain", { reason: SEND_UNVERIFIED_REASON });
+    } catch {
+      await client.transitionOperation(operationId, "failed", { reason: SEND_UNVERIFIED_REASON });
+    }
+    return { state: "failed", disposition: "unverified", reason: SEND_UNVERIFIED_REASON };
   }
-  /* `uncertain` is a newer transition than the rest of this channel; a runtime
-     host from before it rejects the word. The operation must still stop being
-     open either way, so the fallback keeps the fence and the receipt keeps the
-     unverified reason it is read back by. */
-  try {
-    await client.transitionOperation(operationId, "uncertain", { reason: SEND_UNVERIFIED_REASON });
-  } catch {
-    await client.transitionOperation(operationId, "failed", { reason: SEND_UNVERIFIED_REASON });
-  }
-  return { disposition: "unverified", duplicateRisk: true };
+  await client.transitionOperation(operationId, "failed", { reason: SEND_LOST_REASON });
+  return { state: "failed", disposition: "lost", reason: SEND_LOST_REASON };
 }
 
 /**
@@ -375,87 +428,26 @@ async function settleOne(
      reading the ancestor would report a live attempt as a settled loss — and
      would then try to fence an operation that is already terminal. */
   const current = await client.operationStatus(send.operationId, { currentRetryLeaf: true });
-  const operationId = current?.operationId ?? send.operationId;
   const status = current?.receipt.status ?? null;
-  if (status !== null && DELIVERED_RECEIPT_STATUSES.has(status)) {
-    registry.recordDeliveryOutcome(send.deliveryId, "delivered");
-    return {
-      operationId: send.operationId,
-      deliveryId: send.deliveryId,
-      conversationId: send.conversationId,
-      state: "delivered",
-      disposition: "reconciled",
-      duplicateRisk: false,
-    };
-  }
-  if (status === "failed" || status === "rejected") {
-    registry.recordDeliveryOutcome(send.deliveryId, "failed", SEND_LOST_REASON);
-    return {
-      operationId: send.operationId,
-      deliveryId: send.deliveryId,
-      conversationId: send.conversationId,
-      state: "failed",
-      disposition: "reconciled",
-      duplicateRisk: false,
-    };
-  }
-  if (status === "uncertain") {
-    registry.recordDeliveryOutcome(send.deliveryId, "failed", SEND_UNVERIFIED_REASON);
-    return {
-      operationId: send.operationId,
-      deliveryId: send.deliveryId,
-      conversationId: send.conversationId,
-      state: "failed",
-      disposition: "reconciled",
-      duplicateRisk: true,
-    };
-  }
-  /* No journal record at all means the send never reached admission, so nothing
-     can execute it and there is nothing to fence — the same terminal answer as
-     a fenced one, reached without a transition. */
-  const fenced = status === null
-    ? { disposition: "lost" as const, duplicateRisk: false }
-    : await fenceOperation(client, operationId, status);
-  registry.recordDeliveryOutcome(
-    send.deliveryId,
-    "failed",
-    fenced.duplicateRisk ? SEND_UNVERIFIED_REASON : SEND_LOST_REASON,
-  );
+  const settled = journalVerdict(status);
+  const verdict = settled
+    ? settled
+    /* No journal record at all. The legacy delivery path never creates one, and
+       a record can also be pruned — so this says the fate is unknown, never
+       that the send is provably lost. Claiming the latter is what would let a
+       caller resend an instruction the recipient already has. */
+    : status === null || current === null
+      ? { state: "failed" as const, disposition: "unverified" as const, reason: SEND_UNRECORDED_REASON }
+      : await fenceOperation(client, current.operationId, status);
+  registry.recordDeliveryOutcome(send.deliveryId, verdict.state, verdict.reason, verdict.disposition);
   return {
     operationId: send.operationId,
     deliveryId: send.deliveryId,
     conversationId: send.conversationId,
-    state: "failed",
-    disposition: fenced.disposition,
-    duplicateRisk: fenced.duplicateRisk,
+    state: verdict.state,
+    disposition: settled ? "reconciled" : verdict.disposition === "lost" ? "lost" : "unverified",
+    duplicateRisk: verdict.disposition === "unverified",
   };
-}
-
-/**
- * Journals the loss the moment it is declared.
- *
- * `delivery_expired` is the event a failed reservation already projects; what
- * changes here is WHEN, and that is the whole difference between a loss the
- * lifecycle digest carries and one that waits for a poll that may never come.
- * A journal that cannot be written must not undo a settlement that already
- * happened, so this reports and moves on.
- */
-function journalSettledLosses(
-  registry: AgentRegistry,
-  deliveryIds: readonly string[],
-  journal: (deliveries: readonly HeldDelivery[]) => void,
-): void {
-  if (deliveryIds.length === 0) return;
-  const snapshot = registry.readOnlySnapshot();
-  const settled = deliveryIds
-    .map((id) => snapshot.heldDeliveries[id])
-    .filter((delivery): delivery is HeldDelivery => delivery?.state === "failed");
-  if (settled.length === 0) return;
-  try {
-    journal(settled);
-  } catch (error) {
-    console.error("[send settlement] journaling a settled loss failed", error instanceof Error ? error.message : "unknown");
-  }
 }
 
 /**
@@ -463,7 +455,10 @@ function journalSettledLosses(
  *
  * A send whose journal answer cannot be read is DEFERRED, never settled: an
  * unreachable runtime host is a reason to know less, not a licence to declare a
- * message lost while it may still be sitting in a live outbox.
+ * message lost while it may still be sitting in a live outbox. Nothing depends
+ * on this pass for terminality — the executor fences what it actuated, at the
+ * moment it actuates it — so a deferral costs an answer's timeliness and never
+ * its correctness.
  */
 export async function settleUnsettledSends(ports: SendSettlementPorts = {}): Promise<SendSettlementReport> {
   const registry = ports.registry ?? agentRegistry();
@@ -479,7 +474,7 @@ export async function settleUnsettledSends(ports: SendSettlementPorts = {}): Pro
     for (const send of candidates) report.deferred.push({ operationId: send.operationId, reason: "runtime host is unavailable" });
     return report;
   }
-  for (const send of candidates.slice(0, ports.batchCeiling ?? SETTLEMENT_BATCH_CEILING)) {
+  for (const send of candidates.slice(0, SETTLEMENT_BATCH_CEILING)) {
     try {
       report.settled.push(await settleOne(send, registry, client));
     } catch (error) {
@@ -489,13 +484,52 @@ export async function settleUnsettledSends(ports: SendSettlementPorts = {}): Pro
       });
     }
   }
-  journalSettledLosses(
-    registry,
-    report.settled.filter((outcome) => outcome.state === "failed").map((outcome) => outcome.deliveryId),
-    ports.journalLifecycle
-      ?? ((deliveries) => { appendLifecycleEvents(projectDeliveryEvents([...deliveries])); }),
-  );
   return report;
+}
+
+/**
+ * What became of one accepted send, reconciled before it is answered.
+ *
+ * The registry projection can lag the journal by a whole sweep — the queue
+ * terminalizes the operation and the reservation learns about it later — and a
+ * caller holding an operation id is asking what is true NOW. So a projection
+ * that is still in flight is checked against the journal's current retry leaf,
+ * and a terminal answer there settles the reservation on the spot rather than
+ * reporting `in-flight` until some sweep gets to it.
+ */
+export async function resolveSendReceipt(
+  operationId: string,
+  ports: Pick<SendSettlementPorts, "registry" | "client"> = {},
+): Promise<SendReceipt | null> {
+  const registry = ports.registry ?? agentRegistry();
+  const projected = sendReceiptFor(registry.readOnlySnapshot(), operationId);
+  if (!projected || projected.state !== "in-flight") return projected;
+  const client = ports.client === undefined ? runtimeHostClient() : ports.client;
+  if (!client) return projected;
+  const current = await client
+    .operationStatus(operationId, { currentRetryLeaf: true })
+    .catch(() => null);
+  const verdict = journalVerdict(current?.receipt.status ?? null);
+  if (!verdict) return projected;
+  /* A reservation still in flight is settled from the journal's answer; one
+     that is already gone leaves the journal's answer to speak for itself. A
+     `held` reservation is the migration coordinator's, and is left alone. */
+  const delivery = deliveryForOperation(registry.readOnlySnapshot(), operationId);
+  if (delivery?.state === "delivery-uncertain") {
+    registry.recordDeliveryOutcome(delivery.id, verdict.state, verdict.reason, verdict.disposition);
+    const reconciled = sendReceiptFor(registry.readOnlySnapshot(), operationId);
+    if (reconciled) return { ...reconciled, evidence: "delivery-journal" };
+  }
+  if (verdict.state === "delivered") {
+    return { ...projected, state: "delivered", reason: null, duplicateRisk: false, resend: "not-needed", evidence: "delivery-journal" };
+  }
+  return {
+    ...projected,
+    state: "failed",
+    reason: verdict.reason,
+    ...resendGuidance(verdict.disposition, verdict.reason),
+    evidence: "delivery-journal",
+  };
 }
 
 const settlementHost = globalThis as typeof globalThis & {
@@ -506,30 +540,16 @@ const settlementHost = globalThis as typeof globalThis & {
  * Starts the sweep in the release that owns traffic.
  *
  * Idempotent per process, and unref'd so it never holds a Viewer open. The
- * sweep is what makes terminality a property of the system rather than of
- * whoever happens to ask; `message_receipt` reads the same record it writes.
+ * sweep is what turns a send nobody ever executed into an answer without the
+ * sender running a watchdog; `message_receipt` reads the same record it writes.
  */
-export function startSendSettlement(ports: {
-  scheduleInterval?: (callback: () => void, delayMs: number) => ReturnType<typeof setInterval>;
-  sweep?: () => Promise<unknown>;
-  intervalMs?: number;
-} = {}): void {
+export function startSendSettlement(): void {
   if (settlementHost.__llvSendSettlementTimer) return;
-  const schedule = ports.scheduleInterval ?? ((callback, delayMs) => setInterval(callback, delayMs));
-  const sweep = ports.sweep ?? (() => settleUnsettledSends());
-  const timer = schedule(() => {
-    void sweep().catch((error) => {
+  const timer = setInterval(() => {
+    void settleUnsettledSends().catch((error) => {
       console.error("[send settlement] sweep failed", error instanceof Error ? error.message : "unknown");
     });
-  }, ports.intervalMs ?? SEND_SETTLEMENT_INTERVAL_MS);
+  }, SEND_SETTLEMENT_INTERVAL_MS);
   timer.unref?.();
   settlementHost.__llvSendSettlementTimer = timer;
-}
-
-/** Test seam: the timer is process-global, so a suite must be able to start
-    from an unstarted one without reaching into module internals. */
-export function stopSendSettlement(): void {
-  const timer = settlementHost.__llvSendSettlementTimer;
-  if (timer) clearInterval(timer);
-  settlementHost.__llvSendSettlementTimer = undefined;
 }

@@ -382,6 +382,7 @@ test("direct runtime send reaches durable admission while the runtime socket syn
           structured: true,
           target: "conversation_sync_window",
           outcome: "held",
+          operationId: "op_sync_window_send",
         };
       },
     },

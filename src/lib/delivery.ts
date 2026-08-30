@@ -606,6 +606,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
             outcome: "held",
             spawned: recovered.spawned,
             structured: true,
+            operationId: structured.operationId,
           };
         }
         return {
@@ -665,7 +666,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
         return failure("request-local delivery waits for migration completion", 409);
       }
       requestAccountMigrationTick();
-      return { ok: true, target: conversation.id, outcome: "held" };
+      return { ok: true, target: conversation.id, outcome: "held", operationId: queued.command.operationId };
     }
     if (queued.state !== "assigned" || !queued.generationId) {
       if (requestLocalPayload) registry.discardDelivery(queued.id);
@@ -679,7 +680,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       }
       registry.requeueHeldDelivery(queued.id);
       requestAccountMigrationTick();
-      return { ok: true, target: conversation.id, outcome: "held" };
+      return { ok: true, target: conversation.id, outcome: "held", operationId: queued.command.operationId };
     }
     deliveryId = claimed.id;
     const claimedConversation = registry.conversation(conversation.id);
@@ -689,7 +690,14 @@ export async function deliverConversationMessage(message: ConversationMessage, o
   const settle = (outcome: DeliveryOutcome): DeliveryOutcome => {
     try {
       if (deliveryId) {
-        if (outcome.ok) registry.recordDeliveryOutcome(deliveryId, "delivered");
+        /* An actuated write stays `delivery-uncertain` on purpose: the client
+           may retry it under the same key and reuse the payload it already
+           uploaded. What must NOT happen is that state resting there forever
+           and then reading as a send that never executed — the settlement sweep
+           ends it as an unverified failure once the retry window has passed,
+           because a legacy write has no journal operation that could ever prove
+           it did not arrive (#1131). */
+        if (outcome.ok) registry.recordDeliveryOutcome(deliveryId, "delivered", null, "delivered");
         else if (outcome.actuation !== "started") registry.discardDelivery(deliveryId);
       }
       return outcome;

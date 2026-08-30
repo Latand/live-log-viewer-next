@@ -27,11 +27,12 @@ for (const [name, directory] of Object.entries(isolatedEnvironment)) {
 const { AgentRegistry } = await import("@/lib/agent/registry");
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 const { RuntimeJournal } = await import("@/runtime-host/journal");
-const { projectDeliveryEvents } = await import("@/lib/lifecycle/projector");
 const { StructuredDeliveryQueue } = await import("./structuredDeliveryQueue");
 const {
   SEND_LOST_REASON,
+  SEND_UNRECORDED_REASON,
   SEND_UNVERIFIED_REASON,
+  resolveSendReceipt,
   sendReceiptFor,
   settleUnsettledSends,
   unsettledSends,
@@ -123,9 +124,14 @@ interface Fixture {
   close(): void;
 }
 
-function fixture(name: string): Fixture {
+function fixture(name: string, options: { now?: () => number } = {}): Fixture {
   const directory = fs.mkdtempSync(path.join(isolated, `${name}-`));
-  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const registry = new AgentRegistry(
+    path.join(directory, "agent-registry.json"),
+    undefined,
+    undefined,
+    ...(options.now ? [{ now: options.now }] as const : []),
+  );
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const transcriptPath = path.join(directory, `${name}.jsonl`);
   const launchProfile = emptyLaunchProfile({ cwd: directory });
@@ -252,6 +258,9 @@ function stalePortFor(
     transition: async (id, status, details) => {
       await active.client.transitionOperation(id, status, details);
     },
+    /* Wired exactly as the controller wires it, so the pre-actuation check
+       these tests depend on is the production one and not a stub. */
+    status: async (id) => (await active.client.operationStatus(id))?.receipt ?? null,
   };
 }
 
@@ -287,7 +296,7 @@ test("an accepted send that the journal delivered reconciles rather than being r
     expect(receipt?.state).toBe("delivered");
     expect(receipt?.resend).toBe("not-needed");
     expect(receipt?.duplicateRisk).toBe(false);
-    expect(receipt?.evidence).toBe("delivery-journal");
+    expect(receipt?.evidence).toBe("delivery-record");
   } finally {
     active.close();
   }
@@ -489,33 +498,6 @@ test("an unreadable delivery journal defers the send instead of declaring it los
   }
 });
 
-test("a settled loss is journaled as it is declared, so nobody has to run a silence monitor", async () => {
-  const active = fixture("visible");
-  try {
-    const { operationId, deliveryId } = acceptSend(active, { clientMessageId: "visible-key" });
-    const journaled: unknown[] = [];
-    await settleUnsettledSends({
-      registry: active.registry,
-      client: active.client,
-      now: AFTER_THE_WINDOW,
-      /* The shared lifecycle file is not this fixture's to write; what matters
-         is that the loss is handed to it inside the settlement rather than left
-         for whichever poll happens next. */
-      journalLifecycle: (deliveries) => journaled.push(...projectDeliveryEvents([...deliveries])),
-    });
-
-    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("failed");
-    expect(journaled).toMatchObject([{
-      key: `delivery:${deliveryId}:failed`,
-      type: "delivery_expired",
-      conversationId: active.conversationId,
-    }]);
-    expect(receiptOf(active, operationId)?.state).toBe("failed");
-  } finally {
-    active.close();
-  }
-});
-
 test("an operation id nothing ever admitted is answered with nothing, not an invented in-flight state", () => {
   const active = fixture("unknown");
   try {
@@ -565,6 +547,274 @@ test("the caller's own replay of a settled loss is answered with the settlement,
       () => host,
     ).drain().catch(() => undefined);
     expect(received).toEqual([]);
+  } finally {
+    active.close();
+  }
+});
+
+/* ── The regressions this successor lane exists for ──────────────────────── */
+
+/** A host that takes the instruction and then dies without answering — the
+    crash the lane's own fixture showed happening BEFORE the queue moved the
+    send back to `queued` and called it safe to send again. */
+function crashingHost(sessionKey: string): { host: EngineHost; received: string[] } {
+  const received: string[] = [];
+  let dead = false;
+  return {
+    received,
+    host: {
+      attach: () => ({ async *[Symbol.asyncIterator]() {} }),
+      send: async (entry: QueueEntry): Promise<DeliveryReceipt> => {
+        received.push(entry.text ?? "");
+        dead = true;
+        throw new Error("engine child exited");
+      },
+      interrupt: async () => {},
+      answer: async () => {},
+      health: async () => ({ ...idleState(sessionKey), status: dead ? "dead" : "idle" }),
+      release: async () => {},
+    },
+  };
+}
+
+test("a send the host took before it died stays uncertain, and no fresh request delivers it twice", async () => {
+  /* The whole point of this lane. The queue used to move this exact case back
+     to `queued`, which settlement read as "never executed" and reported as
+     `resend: "safe"` — on a channel that carries deployment control. */
+  const active = fixture("crashed");
+  try {
+    const { operationId, deliveryId } = acceptSend(active, {
+      clientMessageId: "crashed-key",
+      text: "hold the cutover until I say go",
+    });
+    const crashed = crashingHost(active.generationId);
+
+    /* The real crash path, over the real journal: no stub stands in for the
+       transition, the outbox, or the host that dies mid-send. */
+    await new StructuredDeliveryQueue(
+      stalePortFor(active, operationId, "crashed-key", "hold the cutover until I say go"),
+      () => crashed.host,
+    ).drain();
+
+    expect(crashed.received).toEqual(["hold the cutover until I say go"]);
+    /* Absorbing and uncertain: never `queued`, which would say it was never
+       executed, and never `failed`, which the receipt reads as fenced. */
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("uncertain");
+    expect(await active.journal.effectBatch(100, ["runtime.send"])).toEqual([]);
+
+    const report = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(report.settled).toEqual([{
+      operationId,
+      deliveryId,
+      conversationId: active.conversationId,
+      state: "failed",
+      disposition: "reconciled",
+      duplicateRisk: true,
+    }]);
+    const receipt = receiptOf(active, operationId);
+    expect(receipt?.state).toBe("failed");
+    expect(receipt?.duplicateRisk).toBe(true);
+    expect(receipt?.resend).toBe("verify-first");
+
+    /* A fresh request cannot produce a second delivery: the settled operation
+       still owns the idempotency key, so admission replays the uncertain
+       receipt and admits no effect, and a queue handed the stale effect
+       delivers nothing. */
+    const replay = active.journal.executeOperation({
+      kind: "send",
+      operationId,
+      conversationId: active.conversationId,
+      idempotencyKey: "crashed-key",
+      text: "hold the cutover until I say go",
+      policy: "queue",
+    });
+    expect(replay.receipt.status).toBe("uncertain");
+    const survivor = recordingHost(active.generationId);
+    await new StructuredDeliveryQueue(
+      stalePortFor(active, operationId, "crashed-key", "hold the cutover until I say go"),
+      () => survivor.host,
+    ).drain().catch(() => undefined);
+    expect(survivor.received).toEqual([]);
+  } finally {
+    active.close();
+  }
+});
+
+test("permanent runtime loss then recovery ends in one terminal receipt and no late delivery", async () => {
+  /* The executor was killed after it handed the send to the engine, so the
+     journal is left holding `delivering` and the effect is still in the outbox.
+     Nothing can settle that while the socket is gone — and nothing has to: the
+     fence is the durable row itself, so the first drain after recovery reads it
+     and refuses to deliver rather than delivering it late. */
+  const active = fixture("recovered");
+  try {
+    const { operationId, deliveryId } = acceptSend(active, {
+      clientMessageId: "recovered-key",
+      text: "resume the cutover",
+    });
+    active.journal.transitionOperation(operationId, "delivering", { turnId: "turn-recovered" });
+
+    const duringOutage = await settleUnsettledSends({
+      registry: active.registry,
+      client: null,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(duringOutage.settled).toEqual([]);
+    expect(duringOutage.deferred).toEqual([{ operationId, reason: "runtime host is unavailable" }]);
+    expect(receiptOf(active, operationId)?.state).toBe("in-flight");
+
+    /* Recovery: the runtime is back and the queue drains the effect it left
+       behind. The recipient receives NOTHING. */
+    const afterRecovery = recordingHost(active.generationId);
+    await new StructuredDeliveryQueue(
+      stalePortFor(active, operationId, "recovered-key", "resume the cutover"),
+      () => afterRecovery.host,
+    ).drain();
+    expect(afterRecovery.received).toEqual([]);
+    expect(active.journal.operationResult(operationId)?.receipt.status).toBe("uncertain");
+    expect(await active.journal.effectBatch(100, ["runtime.send"])).toEqual([]);
+
+    const settled = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(settled.settled).toMatchObject([{ operationId, deliveryId, state: "failed", duplicateRisk: true }]);
+    const receipt = receiptOf(active, operationId);
+    expect(receipt?.state).toBe("failed");
+    expect(receipt?.resend).toBe("verify-first");
+
+    /* Exactly one: the send is settled, so the next sweep has nothing left to
+       examine and cannot write a second answer. */
+    const again = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(again).toEqual({ examined: 0, settled: [], deferred: [] });
+  } finally {
+    active.close();
+  }
+});
+
+test("a legacy send with no journal record settles unverified rather than provably lost", async () => {
+  /* The legacy delivery path writes to a transcript host and creates no runtime
+     operation at all, so the journal can never say what became of it. A missing
+     record used to be read as proof the send never executed — the same unsafe
+     classification, on the path with the least evidence of all. */
+  const active = fixture("legacy");
+  try {
+    const reservation = active.registry.holdDelivery(
+      active.conversationId,
+      "restart the deployment",
+      "legacy-key",
+      "text",
+      [],
+      null,
+      {},
+    );
+    const claimed = active.registry.beginDeliveryAttempt(reservation.id, active.generationId);
+    expect(claimed?.state).toBe("delivery-uncertain");
+    const operationId = reservation.command.operationId;
+    expect(active.journal.operationResult(operationId)).toBeNull();
+
+    const report = await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+
+    expect(report.settled).toEqual([{
+      operationId,
+      deliveryId: reservation.id,
+      conversationId: active.conversationId,
+      state: "failed",
+      disposition: "unverified",
+      duplicateRisk: true,
+    }]);
+    const receipt = receiptOf(active, operationId);
+    expect(receipt?.state).toBe("failed");
+    expect(receipt?.reason).toBe(SEND_UNRECORDED_REASON);
+    expect(receipt?.duplicateRisk).toBe(true);
+    expect(receipt?.resend).toBe("verify-first");
+  } finally {
+    active.close();
+  }
+});
+
+test("a delivered journal operation answers as delivered before any sweep runs", async () => {
+  /* The receipt is a question about now. The projection can lag the journal by
+     a whole sweep, and answering `in-flight` from it while the journal holds a
+     delivered operation is the send-time guess this issue set out to replace. */
+  const active = fixture("current");
+  try {
+    const { operationId, deliveryId } = acceptSend(active, { clientMessageId: "current-key" });
+    active.journal.transitionOperation(operationId, "delivering");
+    active.journal.transitionOperation(operationId, "delivered", { turnId: "turn-current" });
+    expect(receiptOf(active, operationId)?.state).toBe("in-flight");
+
+    const receipt = await resolveSendReceipt(operationId, {
+      registry: active.registry,
+      client: active.client,
+    });
+
+    expect(receipt?.state).toBe("delivered");
+    expect(receipt?.resend).toBe("not-needed");
+    expect(receipt?.evidence).toBe("delivery-journal");
+    /* Reconciled on the spot, so the record and the answer agree afterwards. */
+    expect(active.registry.readOnlySnapshot().heldDeliveries[deliveryId]?.state).toBe("delivered");
+    expect(receiptOf(active, operationId)?.state).toBe("delivered");
+  } finally {
+    active.close();
+  }
+});
+
+test("compaction retires the reservation and keeps what it proved about the send", async () => {
+  /* The reservation carries the reason; the owner row is what outlives it. When
+     only `terminalState` survived, both answers collapsed into one — an
+     unverified failure came back `resend: "safe"`, and a fenced one lost the
+     evidence that earned it. Both directions are pinned here, because a record
+     that cannot tell them apart is the duplicate hazard either way. */
+  let clock = Date.parse("2026-08-30T10:00:00.000Z");
+  const active = fixture("compacted", { now: () => clock });
+  try {
+    const unverified = acceptSend(active, { clientMessageId: "compacted-uncertain-key", operationId: "op_compacted_uncertain" });
+    active.journal.transitionOperation(unverified.operationId, "delivering", { turnId: "turn-compacted" });
+    const fenced = acceptSend(active, { clientMessageId: "compacted-dropped-key", operationId: "op_compacted_dropped" });
+    await settleUnsettledSends({
+      registry: active.registry,
+      client: active.client,
+      now: AFTER_THE_WINDOW,
+    });
+    expect(receiptOf(active, unverified.operationId)?.resend).toBe("verify-first");
+    expect(receiptOf(active, fenced.operationId)?.resend).toBe("safe");
+
+    /* Forced: terminal reservations are retired a week after they settle, and
+       any later settlement on the conversation runs that compaction. */
+    clock += 8 * 24 * 60 * 60 * 1000;
+    const later = acceptSend(active, { clientMessageId: "compacting-key", operationId: "op_compacting_key" });
+    active.registry.recordDeliveryOutcome(later.deliveryId, "delivered", null, "delivered");
+    const remaining = active.registry.readOnlySnapshot().heldDeliveries;
+    expect(remaining[unverified.deliveryId]).toBeUndefined();
+    expect(remaining[fenced.deliveryId]).toBeUndefined();
+
+    const afterCompaction = receiptOf(active, unverified.operationId);
+    expect(afterCompaction?.state).toBe("failed");
+    expect(afterCompaction?.duplicateRisk).toBe(true);
+    expect(afterCompaction?.resend).toBe("verify-first");
+    expect(afterCompaction?.reason).toBe(SEND_UNVERIFIED_REASON);
+    expect(afterCompaction?.settledAt).not.toBeNull();
+    /* And the send that was genuinely fenced still says so, so the durable
+       disposition is doing work in both directions rather than answering
+       "verify first" to everything. */
+    const fencedAfterCompaction = receiptOf(active, fenced.operationId);
+    expect(fencedAfterCompaction?.reason).toBe(SEND_LOST_REASON);
+    expect(fencedAfterCompaction?.duplicateRisk).toBe(false);
+    expect(fencedAfterCompaction?.resend).toBe("safe");
   } finally {
     active.close();
   }

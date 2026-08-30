@@ -85,7 +85,7 @@ import type { RoleDefinition, RoleParameter } from "@/lib/roles/types";
 import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 import { messageOriginRole, type MessageOrigin } from "@/lib/runtime/messageOrigin";
 import { ledgerDeployment, ledgerDeployments } from "@/lib/runtime/deploymentLedger";
-import { sendReceiptFor } from "@/lib/runtime/sendSettlement";
+import { resolveSendReceipt } from "@/lib/runtime/sendSettlement";
 import {
   SELECTED_TAIL_MAX_BYTES,
   SELECTED_TAIL_MAX_LINES,
@@ -839,15 +839,16 @@ async function sendMessage(
  *
  * The answer is read from the durable delivery record, so it survives the
  * process that made the send, the runtime host that took it, and the
- * reservation itself once compaction has retired it. An id nothing ever
- * admitted is refused rather than answered with an invented in-flight state.
+ * reservation itself once compaction has retired it — and a record that is
+ * still in flight is reconciled against the delivery journal's CURRENT answer
+ * before it is reported, because a caller asking what became of a send is
+ * asking about now, not about whichever sweep last updated the projection. An
+ * id nothing ever admitted is refused rather than answered with an invented
+ * in-flight state.
  */
-async function messageReceipt(
-  args: McpToolArgs,
-  dependencies: Pick<ViewerMcpDomainDependencies, "registrySnapshot">,
-): Promise<McpToolPayload> {
+async function messageReceipt(args: McpToolArgs): Promise<McpToolPayload> {
   const operationId = required(args, "operationId");
-  const receipt = sendReceiptFor(dependencies.registrySnapshot(), operationId);
+  const receipt = await resolveSendReceipt(operationId);
   if (!receipt) {
     throw new McpToolRefusal(
       "no accepted send is recorded under that operationId",
@@ -1611,9 +1612,14 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
        names the gateway (or attributed caller role), never the operator. */
     origin: mcpSenderOrigin(dependencies),
   }, callerCapabilityHeaders());
+  const settledOutcome = outcome.outcome ?? "delivered";
   /* The trailer is the ONLY thing that says a report was answered — the drain
      cursor says only that it was read aloud — so it is recorded the moment the
-     answer actually reaches the manager (#1168). Scoped by the project and seat
+     answer actually reaches the manager (#1168), and NOT before: an accepted
+     directive that is still `queued` has not reached anyone, and recording it
+     then would clear a pending decision that a dropped delivery means nobody
+     ever saw (#1131). A directive that cannot be delivered now leaves the ask
+     standing, which is the safe end of that trade. Scoped by the project and seat
      this directive was just routed to, because a report seq is log-global: the
      store settles the ref only if it names a decision request THIS seat filed,
      so a ref that names nothing yet cannot pre-answer a later report and a
@@ -1624,7 +1630,7 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
      recorded id the same way, so anything less here leaves a rekeyed seat's ask
      visible and unanswerable. Idempotent, so a directive retry under the same
      derived id settles the same seq once. */
-  if (trailer) {
+  if (trailer && settledOutcome === "delivered") {
     recordBridgeDirectiveAnswer(
       trailer.ref,
       { project, seatConversationId: manager.conversationId },
@@ -1635,7 +1641,10 @@ async function bridgeDirective(args: McpToolArgs, control: ViewerControlDependen
     directiveId: deliveryId,
     managerConversationId: manager.conversationId,
     operationId: outcome.operationId ?? null,
-    outcome: outcome.outcome ?? "delivered",
+    outcome: settledOutcome,
+    /* #1131: the same contract `send_message` answers with — acceptance is not
+       arrival, and `message_receipt` over the operation id is what says which. */
+    settled: settledOutcome === "delivered",
   };
 }
 
@@ -3186,7 +3195,7 @@ export function viewerMcpBindings(
   return {
     spawn_agent: (args, context) => spawnAgent(args, viewerControlForCall(controlDependencies, context)),
     send_message: (args, context) => sendMessage(args, viewerControlForCall(controlDependencies, context), domainDependencies),
-    message_receipt: (args) => messageReceipt(args, domainDependencies),
+    message_receipt: (args) => messageReceipt(args),
     create_task: createBoardTask,
     update_task: updateBoardTask,
     create_pipeline: createPipeline,

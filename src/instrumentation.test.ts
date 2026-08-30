@@ -541,8 +541,46 @@ test("send settlement starts with the release that owns traffic, and a failure t
       loadSendSettlement: async () => { throw new Error("runtime state unavailable"); },
       loadSeatTick: async () => ({ startSeatTick: () => { withoutSettlement.push("seat-tick"); return true; } }),
     },
+    { scheduleRetry: () => ({}) },
   );
   expect(withoutSettlement).toEqual(["pipelines", "seat-tick"]);
+});
+
+test("a settlement sweep that cannot start keeps trying instead of being logged once", async () => {
+  /* #1131: a sweep that never started is the same silence this issue is about,
+     so a failed start is not a log line and an end — it is retried until it
+     takes. The retries back off, so a genuinely broken import stays cheap. */
+  const started: string[] = [];
+  const delays: number[] = [];
+  const retries: Array<() => void> = [];
+  let attempts = 0;
+  await startCurrentReleaseControllers(
+    { LLV_ACCOUNT_CONTROLLER_DISABLED: "1" },
+    {
+      loadFlowPipelineController: async () => ({ startFlowPipelineController: () => { started.push("pipelines"); } }),
+      loadAccountMigrationController: async () => ({ startAccountMigrationController: async () => { started.push("account"); } }),
+      loadSendSettlement: async () => {
+        attempts += 1;
+        if (attempts < 3) throw new Error("runtime state unavailable");
+        return { startSendSettlement: () => { started.push("send-settlement"); } };
+      },
+    },
+    { scheduleRetry: (callback, delayMs) => { delays.push(delayMs); retries.push(callback); return {}; } },
+  );
+
+  expect(started).toEqual(["pipelines"]);
+  expect(retries).toHaveLength(1);
+  for (let fired = 0; fired < 2 && retries.length > 0; fired += 1) {
+    const next = retries.shift()!;
+    next();
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+  expect(attempts).toBe(3);
+  expect(started).toEqual(["pipelines", "send-settlement"]);
+  /* Backed off rather than hammering, and no retry is scheduled once it took. */
+  expect(delays).toEqual([30_000, 60_000]);
+  expect(retries).toEqual([]);
 });
 
 test("the seat tick starts with the release that owns traffic — one clock, one process", async () => {

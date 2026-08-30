@@ -472,6 +472,17 @@ export interface RegistryConversation {
   updatedAt: string;
 }
 
+/**
+ * What the durable record PROVES about a settled send (#1131).
+ *
+ * `lost` is the only disposition that permits a safe resend, and it is written
+ * only where the send was fenced before anything could execute it. A failure
+ * whose disposition is unknown is not a proof of non-delivery, so it is never
+ * read as one: absence of evidence is the `unverified` answer, not the `lost`
+ * one.
+ */
+export type DeliveryTerminalDisposition = "delivered" | "lost" | "unverified";
+
 export interface DeliveryOperationOwner {
   conversationId: ViewerConversationId;
   runtimeConversationId: ViewerConversationId;
@@ -482,6 +493,12 @@ export interface DeliveryOperationOwner {
   contentDigest: string | null;
   createdAt: string;
   terminalState: Extract<HeldDelivery["state"], "delivered" | "failed"> | null;
+  /** Kept on the owner rather than only on the reservation, because the
+      reservation is compacted away and the duplicate-send risk it recorded must
+      not be compacted away with it. */
+  terminalDisposition: DeliveryTerminalDisposition | null;
+  terminalReason: string | null;
+  settledAt: string | null;
 }
 
 export interface RegistryFile {
@@ -950,7 +967,8 @@ function terminalizeHeldDelivery(
   delivery: HeldDelivery,
   reason: string,
 ): void {
-  const terminalReason = delivery.state === "delivery-uncertain"
+  const uncertain = delivery.state === "delivery-uncertain";
+  const terminalReason = uncertain
     ? `${reason}; a prior delivery attempt may have been delivered because its journal outcome is unknown`
     : reason;
   delivery.state = "failed";
@@ -960,7 +978,7 @@ function terminalizeHeldDelivery(
   delivery.deliveredAt = null;
   delivery.error = terminalReason.slice(0, 240);
   failInitialSpawnReceiptForDelivery(file, delivery);
-  syncDeliveryOperationOwnerState(file, delivery);
+  syncDeliveryOperationOwnerState(file, delivery, uncertain ? "unverified" : "lost");
 }
 
 function terminalizeRolledBackMigrationDelivery(
@@ -1569,9 +1587,33 @@ function migrationDeliveryCancellationIsAbsorbing(delivery: HeldDelivery): boole
     && delivery.error?.startsWith(MIGRATION_DELIVERY_CANCELLATION_PREFIX) === true;
 }
 
-function syncDeliveryOperationOwnerState(file: RegistryFile, delivery: HeldDelivery): void {
+/**
+ * Copies a reservation's settlement onto the durable owner row.
+ *
+ * The disposition is written by whoever settled the reservation and knows what
+ * it proved; a later sync that passes none (reservation compaction runs one on
+ * every pass) keeps the recorded answer rather than blanking it.
+ */
+function syncDeliveryOperationOwnerState(
+  file: RegistryFile,
+  delivery: HeldDelivery,
+  disposition?: DeliveryTerminalDisposition,
+): void {
   const owner = file.deliveryOperationOwners[delivery.command.operationId];
-  if (owner?.deliveryId === delivery.id) owner.terminalState = terminalDeliveryState(delivery);
+  if (owner?.deliveryId !== delivery.id) return;
+  const terminalState = terminalDeliveryState(delivery);
+  owner.terminalState = terminalState;
+  if (terminalState === null) {
+    owner.terminalDisposition = null;
+    owner.terminalReason = null;
+    owner.settledAt = null;
+    return;
+  }
+  owner.terminalDisposition = terminalState === "delivered"
+    ? "delivered"
+    : disposition ?? owner.terminalDisposition ?? null;
+  owner.terminalReason = delivery.error ?? owner.terminalReason ?? null;
+  owner.settledAt = delivery.deliveredAt ?? owner.settledAt ?? now();
 }
 
 /** Strict initial-message ownership. The idempotency key, operation id, and
@@ -1740,6 +1782,10 @@ function terminalDeliveryReplay(
   };
 }
 
+function normalizedDisposition(value: unknown): DeliveryTerminalDisposition | null {
+  return value === "delivered" || value === "lost" || value === "unverified" ? value : null;
+}
+
 function normalizeDeliveryOperationOwners(
   value: unknown,
   heldDeliveries: RegistryFile["heldDeliveries"],
@@ -1788,6 +1834,17 @@ function normalizeDeliveryOperationOwners(
           ? owner.createdAt
           : referencedDelivery?.createdAt ?? settledDelivery?.createdAt ?? LEGACY_POLICY_RESTARTED_AT,
         terminalState,
+        /* A row written before the disposition existed keeps `null`, which is
+           read as "unproven" — never as a fenced send that may be resent. */
+        terminalDisposition: terminalState === "delivered"
+          ? "delivered"
+          : normalizedDisposition(owner.terminalDisposition),
+        terminalReason: typeof owner.terminalReason === "string"
+          ? owner.terminalReason
+          : referencedDelivery?.error ?? settledDelivery?.error ?? null,
+        settledAt: typeof owner.settledAt === "string"
+          ? owner.settledAt
+          : referencedDelivery?.deliveredAt ?? settledDelivery?.deliveredAt ?? null,
       };
     }
   }
@@ -1803,6 +1860,9 @@ function normalizeDeliveryOperationOwners(
       contentDigest: delivery.contentDigest,
       createdAt: delivery.createdAt,
       terminalState: terminalDeliveryState(delivery),
+      terminalDisposition: terminalDeliveryState(delivery) === "delivered" ? "delivered" : null,
+      terminalReason: delivery.error,
+      settledAt: delivery.deliveredAt,
     };
   }
   return owners;
@@ -1853,6 +1913,9 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
       contentDigest: delivery.contentDigest,
       createdAt: delivery.createdAt,
       terminalState: null,
+      terminalDisposition: null,
+      terminalReason: null,
+      settledAt: null,
     };
     syncDeliveryOperationOwnerState(file, delivery);
   }
@@ -6470,6 +6533,9 @@ export class AgentRegistry {
           contentDigest: held.contentDigest,
           createdAt: held.createdAt,
           terminalState: null,
+          terminalDisposition: null,
+          terminalReason: null,
+          settledAt: null,
         };
       }
       return place(held);
@@ -6586,6 +6652,9 @@ export class AgentRegistry {
     id: string,
     state: Extract<HeldDelivery["state"], "delivered" | "failed" | "delivery-uncertain">,
     error: string | null = null,
+    /** What the settling caller PROVED. Omitted where it proved nothing, which
+        the receipt reads as an unverified fate rather than a safe resend. */
+    disposition?: DeliveryTerminalDisposition,
   ): HeldDelivery {
     return this.mutate((file) => {
       const delivery = file.heldDeliveries[id];
@@ -6602,6 +6671,7 @@ export class AgentRegistry {
       if (state === "delivered") delivery.text = "";
       if (state === "failed") failInitialSpawnReceiptForDelivery(file, delivery);
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+      syncDeliveryOperationOwnerState(file, delivery, disposition);
       const settled = clone(delivery);
       if (state === "delivered" || state === "failed") compactDeliveryReservations(file, delivery.conversationId, this.now());
       return settled;
@@ -6613,12 +6683,14 @@ export class AgentRegistry {
     operationId: string,
     state: Extract<HeldDelivery["state"], "delivered" | "failed">,
     error: string | null = null,
+    disposition?: DeliveryTerminalDisposition,
   ): HeldDelivery | null {
     return this.recordDeliveryOutcomesForOperations([{
       conversationId,
       operationId,
       state,
       error,
+      ...(disposition ? { disposition } : {}),
     }])[0] ?? null;
   }
 
@@ -6631,6 +6703,7 @@ export class AgentRegistry {
       operationId: string;
       state: Extract<HeldDelivery["state"], "delivered" | "failed">;
       error?: string | null;
+      disposition?: DeliveryTerminalDisposition;
     }[],
   ): (HeldDelivery | null)[] {
     return this.mutate((file) => {
@@ -6659,6 +6732,7 @@ export class AgentRegistry {
         if (outcome.state === "delivered") delivery.text = "";
         if (outcome.state === "failed") failInitialSpawnReceiptForDelivery(file, delivery);
         if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+        syncDeliveryOperationOwnerState(file, delivery, outcome.disposition);
         compactConversations.add(delivery.conversationId);
         return clone(delivery);
       });

@@ -2347,7 +2347,7 @@ test("send_message reports acceptance as unsettled, and message_receipt answers 
   );
   registry.beginDeliveryAttempt(reservation.id, generationId);
   expect(await bindings.message_receipt({ clientRequestId: "receipt-read-1", operationId }))
-    .toMatchObject({ operationId, state: "in-flight", resend: null, evidence: "delivery-journal" });
+    .toMatchObject({ operationId, state: "in-flight", resend: null, evidence: "delivery-record" });
 
   registry.recordDeliveryOutcome(reservation.id, "failed", SEND_LOST_REASON);
   expect(await bindings.message_receipt({ clientRequestId: "receipt-read-2", operationId })).toMatchObject({

@@ -12,6 +12,7 @@ import { applyStructuredReconfigure } from "./structuredReconfigure";
 import { projectEngineHostEvent } from "./engineHostEvents";
 import { publishFilesRevision } from "./filesRevision";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
+import { journalVerdict } from "./sendSettlement";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 
@@ -208,8 +209,13 @@ async function reconcileTerminalDeliveries(
       try {
         const result = await client.operationStatus(delivery.command.operationId, { currentRetryLeaf: true });
         if (!result) return null;
-        const status = result.receipt.status;
-        if (status !== "delivered" && status !== "failed" && status !== "rejected") return null;
+        /* The same classifier the settlement sweep reads the journal through:
+           what a status PROVES about a send is one question with one answer,
+           and `uncertain` — the send was handed to the engine and never
+           answered for — is the one whose disposition stops a later receipt
+           from calling a resend safe (#1131). */
+        const verdict = journalVerdict(result.receipt.status);
+        if (!verdict) return null;
         const receiptConversationId = result.receipt.conversationId;
         if (!receiptConversationId.startsWith("conversation_")
           || registry.canonicalConversationId(receiptConversationId as `conversation_${string}`)
@@ -221,13 +227,15 @@ async function reconcileTerminalDeliveries(
           });
           return null;
         }
-        const state = status === "delivered" ? "delivered" as const : "failed" as const;
-        if (delivery.state === "failed" && state === "failed") return null;
+        if (delivery.state === "failed" && verdict.state === "failed") return null;
         return {
           conversationId: receiptConversationId as `conversation_${string}`,
           operationId: result.receipt.presentationOperationId ?? delivery.command.operationId,
-          state,
-          error: result.receipt.reason ?? null,
+          state: verdict.state,
+          /* The journal's own words where it has them, and the settlement's
+             where the status IS the reason. */
+          error: verdict.disposition === "unverified" ? verdict.reason : result.receipt.reason ?? null,
+          disposition: verdict.disposition,
         };
       } catch (error) {
         console.error("[structured delivery] terminal receipt reconciliation failed", {

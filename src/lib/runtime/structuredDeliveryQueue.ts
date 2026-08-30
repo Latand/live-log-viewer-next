@@ -280,6 +280,23 @@ function successfulKillBoundary(effect: StructuredDeliveryEffect): SuccessfulKil
   return { operationId, conversationId, eventSeq: effect.eventSeq };
 }
 
+/**
+ * Written when a send was handed to the engine and the executor could not learn
+ * what became of it. Both say the same thing to a reader and to the receipt:
+ * actuation started, the outcome is unknown, and re-sending the same
+ * instruction may deliver it twice.
+ *
+ * They are also what makes the journal's own words exact for a message effect:
+ * `failed` is written only where the send never reached the engine, and
+ * `uncertain` wherever it may have. Settlement reads that distinction back —
+ * it is the difference between telling a caller a resend is safe and telling
+ * them to verify the recipient first.
+ */
+export const DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR =
+  "delivery was started by an earlier executor; whether it reached the recipient is unverified";
+export const DELIVERY_UNVERIFIED_AFTER_ACTUATION =
+  "delivery was started and the structured host did not answer; whether it reached the recipient is unverified";
+
 function failureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return (message.trim() || "structured host delivery failed").slice(0, 240);
@@ -472,6 +489,20 @@ export class StructuredDeliveryQueue {
         });
         continue;
       }
+      /* An earlier executor already handed this effect to the engine and never
+         settled it — its process died, or the terminal transition never reached
+         the journal. Nothing in this process can know whether the recipient got
+         it, and delivering it again would be a SECOND instruction on a channel
+         that carries deployment control, so the receipt terminalizes unverified
+         instead. This is the guard `drainCompact` already applies to a control,
+         applied to the effect that carries messages: the durable `delivering`
+         row IS the fence, so it holds across a Viewer restart, a runtime-host
+         restart, and a socket that was gone for hours. */
+      const durable = await this.port.status?.(effect.operationId).catch(() => null);
+      if (durable?.status === "delivering") {
+        await this.terminalizeUnverified(effect.operationId, DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR);
+        continue;
+      }
       const host = this.resolveHost(effect.conversationId);
       if (!host) {
         await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
@@ -552,10 +583,27 @@ export class StructuredDeliveryQueue {
         const reason = failureReason(error);
         const afterFailure = await host.health().catch(() => null);
         if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
-          await this.port.transition(effect.operationId, "queued", { reason });
+          /* The message was handed to the engine and the engine is GONE. It may
+             have been taken, and the one thing that could say — the host's own
+             confirmed-delivery record — died with it, so this must not go back
+             to `queued`: that says the send was never executed, which is what
+             let a later resend look safe on a send the recipient had already
+             received (#1131). `uncertain` is absorbing — the journal refuses
+             every transition out of it — so no drain and no fresh request can
+             produce a second delivery, and the receipt says the fate is unknown
+             instead of inventing one.
+             A LIVE host that throws is a different answer: it refused the
+             message at a precondition, or the engine answered with an error,
+             and it is still there to dedupe a retry. That stays `failed`, which
+             is what keeps `failed` meaning "never reached the engine" — the
+             distinction settlement reads to decide whether a resend is safe. */
+          await this.terminalizeUnverified(effect.operationId, `${DELIVERY_UNVERIFIED_AFTER_ACTUATION}: ${reason}`);
           return true;
         }
         if (isThreadReadTimeout(error)) {
+          /* The one resend this path issues, and the host dedupes it by
+             queue-entry id: it reads the thread back and returns the confirmed
+             receipt rather than writing a second message. */
           await this.port.transition(effect.operationId, "queued", { reason: "delivery-auto-retry" });
           this.retrySoon();
           return true;

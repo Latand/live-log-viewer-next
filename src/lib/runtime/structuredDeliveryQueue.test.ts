@@ -509,7 +509,7 @@ test("an exhausted thread/read budget stays queued for automatic delivery", asyn
   ]);
 });
 
-test("a host crash leaves the conversation head queued for recovery", async () => {
+test("a host crash leaves the message it took unverified, never queued as unexecuted", async () => {
   const sent: string[] = [];
   const transitions: Array<[string, string, string | null | undefined]> = [];
   let dead = false;
@@ -541,10 +541,14 @@ test("a host crash leaves the conversation head queued for recovery", async () =
 
   await queue.drain();
 
+  /* The host HAD the instruction before it died — that is what `sent` records —
+     so putting the operation back to `queued` said it was never executed, and a
+     receipt read from that called a resend safe. It is absorbing and uncertain
+     instead (#1131); the effect behind it still waits for recovery. */
   expect(sent).toEqual(["op-crash"]);
   expect(transitions).toEqual([
     ["op-crash", "delivering", undefined],
-    ["op-crash", "queued", "engine child exited"],
+    ["op-crash", "uncertain", "delivery was started and the structured host did not answer; whether it reached the recipient is unverified: engine child exited"],
   ]);
 });
 
@@ -588,7 +592,10 @@ test("a bounded stalled target still delivers another ready conversation", async
   await drain;
 
   expect(transitions).toContainEqual(["op-ready", "delivered"]);
-  expect(transitions).toContainEqual(["op-stalled", "queued"]);
+  /* The stalled target's own send was already in the host's hands when the
+     confirmation timed out and the host died, so it settles as unverified
+     rather than going back to `queued`. */
+  expect(transitions).toContainEqual(["op-stalled", "uncertain"]);
 });
 
 test("an unavailable host keeps the conversation head queued", async () => {
@@ -983,7 +990,40 @@ test("a stale steer never retries as a fresh turn after the host becomes idle", 
   ]);
 });
 
-test("an ambiguous steered send keeps its original turn fence after host recovery", async () => {
+test("a send an earlier executor already took is settled, not delivered a second time", async () => {
+  /* The durable receipt is the fence. A process that died between `delivering`
+     and its terminal transition leaves the effect in the outbox, and whoever
+     drains next — this process after a runtime-host restart, a successor
+     release, a Viewer that came back — would otherwise deliver an instruction
+     the recipient may already have. The same guard `drainCompact` applies to a
+     control (#1131). */
+  const sent: string[] = [];
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-stranded",
+      kind: "runtime.send",
+      eventSeq: 40,
+      payload: { kind: "send", operationId: "op-stranded", conversationId: "conversation-one", text: "roll the release forward", policy: "queue" },
+    }],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+    status: async () => ({ status: "delivering" }),
+  }, () => host(async (entry) => {
+    sent.push(entry.text ?? "");
+    return { outcome: "turn-started", turnId: "turn-stranded" };
+  }));
+
+  await queue.drain();
+
+  expect(sent).toEqual([]);
+  expect(transitions).toEqual([
+    ["op-stranded", "uncertain", "delivery was started by an earlier executor; whether it reached the recipient is unverified"],
+  ]);
+});
+
+test("a steered send the dying host took is not delivered again when the host returns", async () => {
   const expectedTurns: Array<string | null | undefined> = [];
   const transitions: Array<[string, string, string | null | undefined]> = [];
   const effect = {
@@ -1016,7 +1056,7 @@ test("an ambiguous steered send keeps its original turn fence after host recover
     transition: async (operationId, status, details) => {
       transitions.push([operationId, status, details?.turnId]);
       if (status === "delivering" && details?.turnId !== undefined) effect.payload.turnId = details.turnId;
-      if (status === "failed") pending = false;
+      if (status === "failed" || status === "uncertain") pending = false;
     },
   }, () => recoveredHost);
 
@@ -1024,12 +1064,15 @@ test("an ambiguous steered send keeps its original turn fence after host recover
   recovered = true;
   await queue.drain();
 
-  expect(expectedTurns).toEqual(["turn-old", "turn-old"]);
+  /* The host took this steer under `turn-old` and then died. Re-delivering it
+     when the host came back was a SECOND actuation of an instruction that may
+     already have landed, so the recovered host is handed nothing at all and the
+     receipt says the fate is unknown. The turn fence a live host preserves
+     across attempts is covered by the stale-steer test above. */
+  expect(expectedTurns).toEqual(["turn-old"]);
   expect(transitions.map(([operationId, status]) => [operationId, status])).toEqual([
     ["op-ambiguous-steer", "delivering"],
-    ["op-ambiguous-steer", "queued"],
-    ["op-ambiguous-steer", "delivering"],
-    ["op-ambiguous-steer", "failed"],
+    ["op-ambiguous-steer", "uncertain"],
   ]);
 });
 

@@ -300,6 +300,9 @@ function seedProductionRegistry(
       contentDigest: "c".repeat(64),
       createdAt: "2026-07-31T00:00:00.000Z",
       terminalState: null,
+      terminalDisposition: null,
+      terminalReason: null,
+      settledAt: null,
     };
   }
 
