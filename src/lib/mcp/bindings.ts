@@ -315,7 +315,22 @@ async function postViewerControl(
     ? parsed as Record<string, unknown>
     : {};
   if (result.error || (!response.ok && result.state !== "busy")) {
-    throw new Error(text(result.error) || `Viewer control request failed with status ${response.status}`);
+    const message = text(result.error) || `Viewer control request failed with status ${response.status}`;
+    /* #1131: a refusal that names an ACCEPTED send is not just prose. The send
+       began actuating and nothing could confirm it, so the caller needs the id
+       it was accepted under — `message_receipt` answers what became of it — and
+       the guidance that repeating the instruction may deliver it twice.
+       Flattening those into a message is what left an ambiguous legacy send
+       with nothing to ask about and no warning against sending it again. */
+    const operationId = text(result.operationId);
+    if (operationId) {
+      throw new McpToolRefusal(message, {
+        operationId,
+        ...(text(result.resend) ? { resend: text(result.resend) } : {}),
+        ...(result.actuation === "started" ? { actuation: "started" } : {}),
+      });
+    }
+    throw new Error(message);
   }
   return result;
 }

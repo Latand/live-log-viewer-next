@@ -1684,6 +1684,24 @@ interface DeliveryReservationInspection {
   supersededFailed: HeldDelivery | null;
 }
 
+/**
+ * Whether a reservation's own record says the message may already have reached
+ * the recipient (#1131).
+ *
+ * `delivery-uncertain` says it outright: an attempt started and nothing came
+ * back. A terminal failure says it too when the settlement that wrote it could
+ * not prove otherwise — that is exactly what the `unverified` disposition is —
+ * and the two must behave the same, because an answer that says "verify before
+ * sending again" cannot be followed by an exact replay that quietly sends
+ * again. Every other failure is an ordinary recoverable one whose retry
+ * contract is the same-key replay it has always had.
+ */
+export function deliveryMayHaveArrived(file: RegistryFile, delivery: HeldDelivery): boolean {
+  if (delivery.state === "delivery-uncertain") return true;
+  if (delivery.state !== "failed") return false;
+  return file.deliveryOperationOwners[delivery.command.operationId]?.terminalDisposition === "unverified";
+}
+
 function inspectDeliveryReservation(
   file: RegistryFile,
   conversationId: ViewerConversationId,
@@ -1902,7 +1920,14 @@ function terminalDeliveryExpired(delivery: HeldDelivery, nowMs: number | undefin
 
 function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: ViewerConversationId, nowMs?: number): number {
   for (const delivery of Object.values(file.heldDeliveries)) {
-    if (delivery.command.operationId === delivery.id || !delivery.requestDigest) continue;
+    /* Every accepted send gets its row, including the ordinary one whose
+       operation id the reservation generated for itself (#1131). The exception
+       used to be free — the reservation IS the record under that id — and it
+       stopped being free once a caller could ask what became of an operation
+       id: after the reservation is compacted away, a send that carried the
+       common shape was the one nobody could ask about, and its duplicate-send
+       evidence was the one that vanished. */
+    if (!delivery.requestDigest) continue;
     file.deliveryOperationOwners[delivery.command.operationId] ??= {
       conversationId: delivery.conversationId,
       runtimeConversationId: delivery.runtimeConversationId,
@@ -6456,7 +6481,7 @@ export class AgentRegistry {
         && ["waiting-turn", "requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
       const current = conversation?.generations.at(-1);
       const place = (delivery: HeldDelivery): HeldDelivery => {
-        if (delivery.state === "delivered" || delivery.state === "delivery-uncertain") {
+        if (delivery.state === "delivered" || deliveryMayHaveArrived(file, delivery)) {
           syncDeliveryOperationOwnerState(file, delivery);
           return clone(delivery);
         }
@@ -6522,22 +6547,20 @@ export class AgentRegistry {
         && ["held", "assigned", "delivery-uncertain"].includes(item.state)).length;
       if (count >= 100) throw new Error("held delivery limit reached for conversation");
       file.heldDeliveries[held.id] = held;
-      if (commandInput.operationId) {
-        file.deliveryOperationOwners[held.command.operationId] ??= {
-          conversationId: canonicalId,
-          runtimeConversationId: held.runtimeConversationId,
-          clientMessageId,
-          deliveryId: held.id,
-          command: held.command,
-          requestDigest: held.requestDigest!,
-          contentDigest: held.contentDigest,
-          createdAt: held.createdAt,
-          terminalState: null,
-          terminalDisposition: null,
-          terminalReason: null,
-          settledAt: null,
-        };
-      }
+      file.deliveryOperationOwners[held.command.operationId] ??= {
+        conversationId: canonicalId,
+        runtimeConversationId: held.runtimeConversationId,
+        clientMessageId,
+        deliveryId: held.id,
+        command: held.command,
+        requestDigest: held.requestDigest!,
+        contentDigest: held.contentDigest,
+        createdAt: held.createdAt,
+        terminalState: null,
+        terminalDisposition: null,
+        terminalReason: null,
+        settledAt: null,
+      };
       return place(held);
     });
   }

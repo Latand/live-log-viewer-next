@@ -11,6 +11,7 @@ import { cleanupFailedImageDelivery, deliverConversationMessage, killConversatio
 import type { RuntimeHostClient } from "./runtime/client";
 import { heldDeliveryOccurrences } from "./runtime/deliveredMessageOccurrences";
 import { messageTextDigest } from "./runtime/messageTextDigest";
+import { resolveSendReceipt, sendReceiptFor } from "./runtime/sendSettlement";
 import { recoverDeadStructuredConversation } from "./runtime/structuredRecovery";
 import type { FileEntry } from "./types";
 import { TmuxDeliveryUncertainError } from "./tmux";
@@ -936,14 +937,30 @@ test("ambiguous actuation is absorbing: the same client request is answered, nev
     sendText: async () => { sends += 1; throw new TmuxDeliveryUncertainError(new Error("transport lost")); },
   });
 
-  expect(outcome).toMatchObject({ ok: false, error: "transport lost" });
+  /* Captured off the FIRST answer, which is all a caller ever holds: reading it
+     out of registry state is something no caller can do, and an id it cannot
+     see is an id it cannot ask `message_receipt` about. */
+  const operationId = (outcome as { operationId?: string }).operationId ?? "";
+  expect(outcome).toMatchObject({
+    ok: false,
+    error: "transport lost",
+    actuation: "started",
+    resend: "verify-first",
+  });
+  expect(operationId).not.toBe("");
   /* The bytes stay: a message that may have been delivered keeps the paths it
      named, so the agent can still open what it was handed. */
   expect(fs.existsSync(imagePath)).toBe(true);
   expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "delivery-uncertain" }]);
   expect(() => registry.requeueHeldDelivery(registry.pendingDeliveries(conversation.id)[0]!.id)).toThrow("explicit client retry");
-
-  const operationId = registry.pendingDeliveries(conversation.id)[0]!.command.operationId;
+  /* And that id answers: no journal ever held this send, so past the deadline
+     the receipt ends it unverified rather than leaving the caller at "failed,
+     and now what". */
+  expect(await resolveSendReceipt(operationId, {
+    registry,
+    client: null,
+    now: () => Date.now() + 11 * 60_000,
+  })).toMatchObject({ operationId, state: "failed", duplicateRisk: true, resend: "verify-first" });
   for (let replayed = 0; replayed < 2; replayed += 1) {
     const replay = await deliverConversationMessage(message, {
       targetForKnownPid: async () => "%1",
@@ -961,9 +978,14 @@ test("ambiguous actuation is absorbing: the same client request is answered, nev
        nothing was typed on either replay. */
     expect(sends).toBe(1);
   }
-  /* And the send is still queryable rather than discarded — the reservation is
-     what a receipt reads to say the fate is unknown. */
-  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "delivery-uncertain" }]);
+  /* And the send is still queryable rather than discarded — the settled record
+     is what a receipt reads to say the fate is unknown, and what keeps every
+     later replay of this request absorbing rather than reviving it. */
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "failed" }]);
+  expect(sendReceiptFor(registry.readOnlySnapshot(), operationId)).toMatchObject({
+    state: "failed",
+    resend: "verify-first",
+  });
 });
 
 test("reserved delivery reports uncertainty when direct tmux send fails after actuation starts", async () => {
