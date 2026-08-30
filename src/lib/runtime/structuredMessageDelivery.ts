@@ -13,6 +13,11 @@ import { requestAccountMigrationTick } from "@/lib/accounts/migration/controller
 import type { HeldDelivery, HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import type { SelectedContextRef } from "@/lib/selection/selectedContext";
+import {
+  conversationDeliverabilityFromRecord,
+  deliverabilityFailureMessage,
+  type ConversationDeliverabilityCondition,
+} from "@/lib/conversation/deliverability";
 
 import type { MessageOrigin } from "./messageOrigin";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "./client";
@@ -127,12 +132,12 @@ export interface HeldStructuredMessageDependencies {
 
 export type HeldStructuredMessageOutcome = "delivered" | "failed" | "delivery-uncertain" | "held" | null;
 
-function ownershipUnavailable(): StructuredMessageResult {
+function ownershipUnavailable(condition: ConversationDeliverabilityCondition = "synchronizing"): StructuredMessageResult {
   return {
     ok: false,
     structured: true,
     outcome: "failed",
-    error: "structured host ownership is unavailable; retry after runtime synchronization",
+    error: deliverabilityFailureMessage({ condition }),
     status: 503,
   };
 }
@@ -239,6 +244,7 @@ function holdDuringRuntimeSynchronization(
   request: StructuredMessageRequest,
   registry: AgentRegistry,
   requestTick: () => void,
+  allowReclaimed = false,
 ): StructuredMessageResult | null {
   const owner = persistedCurrentOwner(request, registry);
   const unresolvedConversation = request.conversationId?.startsWith("conversation_")
@@ -255,7 +261,13 @@ function holdDuringRuntimeSynchronization(
     && unresolvedGeneration?.accountId !== undefined
     && activeAccountId !== null
     && unresolvedGeneration.accountId !== activeAccountId;
-  if (!owner && !accountReseatWithoutOwner) return ownershipUnavailable();
+  if (!owner && !accountReseatWithoutOwner && !allowReclaimed) {
+    const deliverability = conversationDeliverabilityFromRecord(registry.readOnlySnapshot(), {
+      conversationId: request.conversationId,
+      transcriptPath: request.path,
+    });
+    return ownershipUnavailable(deliverability.condition);
+  }
   const persistedConversation = owner?.conversation ?? unresolvedConversation!;
   const rejectedHold = supersededRejection(registry, persistedConversation);
   if (rejectedHold) return rejectedHold;
@@ -441,6 +453,97 @@ function deliveredReservationReplay(
   };
 }
 
+function requestDeliveryDrain(kick: () => void | Promise<void>): void {
+  try {
+    void Promise.resolve(kick()).catch((error) => {
+      console.error("[structured delivery] reclaimed host drain request failed", error);
+    });
+  } catch (error) {
+    console.error("[structured delivery] reclaimed host drain request failed", error);
+  }
+}
+
+/**
+ * A reclaimed current generation has no runtime session to inspect. Admission
+ * therefore starts from the durable conversation, reserves the instruction,
+ * and only then asks the existing recovery path to publish a host. The durable
+ * delivery queue remains the reserved operation's sole actuator after recovery.
+ * A resume still waiting for a process leaves that same operation held there.
+ */
+async function recoverReclaimedMessage(
+  request: StructuredMessageRequest,
+  registry: AgentRegistry,
+  client: RuntimeHostClient,
+  dependencies: StructuredMessageDependencies,
+): Promise<StructuredMessageResult> {
+  const conversation = request.conversationId?.startsWith("conversation_")
+    ? registry.conversation(request.conversationId as ViewerConversationId)
+    : registry.conversationForPath(request.path);
+  if (!conversation) return ownershipUnavailable("unknown");
+  const admitted = holdDuringRuntimeSynchronization(
+    request,
+    registry,
+    dependencies.requestMigrationTick ?? requestAccountMigrationTick,
+    true,
+  );
+  if (!admitted) return ownershipUnavailable("unknown");
+  if (!admitted.ok || admitted.outcome === "delivered") return admitted;
+  const reservation = Object.values(registry.readOnlySnapshot().heldDeliveries)
+    .find((candidate) => candidate.command.operationId === admitted.operationId);
+  if (reservation?.state === "delivery-uncertain") {
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: reservation.error || "the previous delivery outcome is unknown; verify its receipt before sending again",
+      status: 409,
+      operationId: reservation.command.operationId,
+      transportUncertain: true,
+    };
+  }
+  if (!reservation || reservation.state === "held") return admitted;
+
+  let recovered: Awaited<ReturnType<typeof recoverDeadStructuredConversation>>;
+  try {
+    recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({
+      path: request.path || conversation.generations.at(-1)?.path || "",
+      conversationId: conversation.id,
+    }, {
+      registry,
+      client,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: `${deliverabilityFailureMessage({ condition: "reclaimed" })}: ${error instanceof Error ? error.message : String(error)}`,
+      status: 503,
+      operationId: admitted.operationId,
+    };
+  }
+  if (!recovered) {
+    return {
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: deliverabilityFailureMessage({ condition: "reclaimed" }),
+      status: 503,
+      operationId: admitted.operationId,
+    };
+  }
+
+  requestDeliveryDrain(dependencies.kick ?? kickStructuredDeliveryQueue);
+  return {
+    ok: true,
+    structured: true,
+    target: null,
+    outcome: "held",
+    operationId: admitted.operationId,
+    ...(recovered.spawned ? { spawned: true } : {}),
+  };
+}
+
 export async function deliverHeldStructuredMessage(
   request: HeldStructuredMessageRequest,
   dependencies: HeldStructuredMessageDependencies = {},
@@ -462,9 +565,21 @@ export async function deliverHeldStructuredMessage(
   let session = snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
   if (!session) {
-    if (persistedCurrentOwner(request, registry)?.kind !== "structured") {
+    const owner = persistedCurrentOwner(request, registry);
+    if (owner?.kind === "legacy") {
       return heldOutcomeDuringRuntimeSynchronization(request, registry);
     }
+    const deliverability = conversationDeliverabilityFromRecord(registry.readOnlySnapshot(), {
+      conversationId: request.conversationId,
+      transcriptPath: request.path,
+    });
+    /* A resume already publishing ownership keeps this reservation held. A
+       second recovery would race the first host before either one could own
+       the operation. Only the durable reclaimed condition starts recovery. */
+    if (deliverability.condition === "synchronizing" || deliverability.condition === "deliverable") {
+      return "held";
+    }
+    if (deliverability.condition !== "reclaimed") return "delivery-uncertain";
     try {
       const recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({
         path: request.path,
@@ -543,11 +658,12 @@ export async function enqueueStructuredMessage(
     return { ok: false, structured: true, outcome: "failed", error: imageAdmission.error.error, status: imageAdmission.error.status };
   }
   const rawImages = imageAdmission.images;
+  const registry = (dependencies.registry ?? agentRegistry)();
   const client = (dependencies.client ?? runtimeHostClient)();
   if (!client) {
     return holdDuringRuntimeSynchronization(
       request,
-      (dependencies.registry ?? agentRegistry)(),
+      registry,
       dependencies.requestMigrationTick ?? requestAccountMigrationTick,
     );
   }
@@ -558,7 +674,7 @@ export async function enqueueStructuredMessage(
     console.error("[structured delivery] runtime snapshot failed", error);
     return holdDuringRuntimeSynchronization(
       request,
-      (dependencies.registry ?? agentRegistry)(),
+      registry,
       dependencies.requestMigrationTick ?? requestAccountMigrationTick,
     );
   }
@@ -568,13 +684,19 @@ export async function enqueueStructuredMessage(
     : undefined)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
   if (!session) {
+    const deliverability = conversationDeliverabilityFromRecord(registry.readOnlySnapshot(), {
+      conversationId: request.conversationId,
+      transcriptPath: request.path,
+    });
+    if (deliverability.condition === "reclaimed") {
+      return recoverReclaimedMessage(request, registry, client, dependencies);
+    }
     return holdDuringRuntimeSynchronization(
       request,
-      (dependencies.registry ?? agentRegistry)(),
+      registry,
       dependencies.requestMigrationTick ?? requestAccountMigrationTick,
     );
   }
-  const registry = (dependencies.registry ?? agentRegistry)();
   if (session.hostKind === "tmux-legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return ownershipUnavailable();
   try {

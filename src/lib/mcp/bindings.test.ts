@@ -190,6 +190,120 @@ test("MCP message delivery always presents authenticated service provenance with
   }
 });
 
+test("conversation deliverability is read from the durable host record through the resume publication window", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-mcp-deliverability-"));
+  sandboxes.push(sandbox);
+  const transcriptPath = "/fixtures/conversations/deliverability.jsonl";
+  const registry = new AgentRegistry(path.join(sandbox, "agent-registry.json"));
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: transcriptPath,
+    accountId: "fixture-account",
+    launchProfile: emptyLaunchProfile({ cwd: "/fixtures/project", project: "fixture-project" }),
+    turn: { state: "terminal", source: "assistant", terminalAt: "2026-08-29T09:00:00.000Z" },
+    observedAt: "2026-08-30T09:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(transcriptPath)!;
+  const generation = conversation.generations.at(-1)!;
+  const key = { engine: "codex" as const, sessionId: generation.id };
+  const baseEntry = {
+    key,
+    artifactPath: transcriptPath,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    host: null,
+    claimEpoch: 3,
+    claimOwner: null,
+  };
+  const bindings = viewerMcpBindings(undefined, undefined, {
+    registrySnapshot: () => registry.readOnlySnapshot(),
+  } as never) as unknown as {
+    conversation_deliverability(args: Record<string, unknown>): Promise<Record<string, unknown>>;
+  };
+  let queryNumber = 0;
+  const query = () => bindings.conversation_deliverability({
+    clientRequestId: `deliverability-${queryNumber += 1}`,
+    conversationId: conversation.id,
+  });
+
+  registry.upsert({
+    ...baseEntry,
+    status: "idle",
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 9,
+      protocolVersion: "v2",
+      writerClaimEpoch: 3,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimOwner: "structured-host:stale-owner",
+    pendingAction: null,
+  });
+  await expect(query()).resolves.toMatchObject({
+    conversationId: conversation.id,
+    deliverable: false,
+    condition: "reclaimed",
+    resumeRequired: true,
+    processRecorded: false,
+  });
+
+  registry.upsert({
+    ...baseEntry,
+    status: "starting",
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:publishing",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "v2",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    pendingAction: "resume",
+  });
+  await expect(query()).resolves.toMatchObject({
+    conversationId: conversation.id,
+    deliverable: false,
+    condition: "synchronizing",
+    resumeRequired: false,
+    processRecorded: false,
+  });
+
+  registry.upsert({
+    ...baseEntry,
+    status: "idle",
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:published",
+      process: { pid: 4100, startIdentity: "fixture-process" },
+      eventCursor: 1,
+      protocolVersion: "v2",
+      writerClaimEpoch: 5,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 5,
+    claimOwner: "structured-host:fixture",
+    pendingAction: null,
+  });
+  await expect(query()).resolves.toMatchObject({
+    conversationId: conversation.id,
+    deliverable: true,
+    condition: "deliverable",
+    resumeRequired: false,
+    processRecorded: true,
+  });
+});
+
 test("spawn_agent derives required role params from the prompt and preserves supplied params", async () => {
   const bodies: Record<string, unknown>[] = [];
   const spawn = viewerMcpBindings(undefined, {
