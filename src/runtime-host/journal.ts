@@ -1114,7 +1114,21 @@ export class RuntimeJournal {
       : "state = 'pending'";
     const kindFilter = kinds ? ` AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
     const rows = this.db.query<{ id: string; kind: string; payload_json: string; event_seq: number }, Array<string | number>>(
-      `SELECT id, kind, payload_json, event_seq FROM outbox WHERE ${stateFilter}${kindFilter} AND event_seq > ? ORDER BY event_seq LIMIT ?`,
+      `SELECT id, kind, payload_json, event_seq
+       FROM outbox
+       WHERE ${stateFilter}${kindFilter}
+         AND event_seq > ?
+         AND (
+           id NOT LIKE 'effect:%'
+           OR NOT EXISTS (
+             SELECT 1
+             FROM operations
+             WHERE operations.operation_id = substr(outbox.id, 8)
+               AND json_extract(operations.receipt_json, '$.status') NOT IN ('pending', 'queued', 'delivering', 'applying')
+           )
+         )
+       ORDER BY event_seq
+       LIMIT ?`,
     ).all(...(kinds ?? []), afterEventSeq, limit);
     return rows.map((row) => {
       const payload = JSON.parse(row.payload_json) as Record<string, unknown>;

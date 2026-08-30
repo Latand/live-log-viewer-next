@@ -56,6 +56,17 @@ export type StructuredHostRecovery = (conversationId: string) => Promise<boolean
 
 const STRUCTURED_DELIVERY_BATCH_SIZE = 100;
 const THREAD_READ_ATTEMPTS = 2;
+const TERMINAL_DELIVERY_STATUSES = new Set([
+  "turn-started",
+  "steered",
+  "delivered",
+  "applied",
+  "interrupted",
+  "answered",
+  "rejected",
+  "failed",
+  "uncertain",
+]);
 
 interface SendEffect {
   operationId: string;
@@ -415,6 +426,8 @@ async function sendWithReadRetry(host: EngineHost, entry: QueueEntry): Promise<D
 export class StructuredDeliveryQueue {
   private activeDrain: Promise<void> | null = null;
   private rerun = false;
+  private readonly targetErrors = new Map<string, string>();
+  private lastPassError: string | null = null;
   /** This executor's identity, minted per instance and never persisted beyond
       the `delivering` rows it writes. A successor instance — in this process or
       in the one that replaced it — is a different executor by construction,
@@ -462,6 +475,10 @@ export class StructuredDeliveryQueue {
     return this.activeDrain;
   }
 
+  lastTargetError(conversationId: string): string | null {
+    return this.targetErrors.get(conversationId) ?? this.lastPassError;
+  }
+
   /** Guarantees a drain pass whose journal read starts after this request. */
   async drainAfterAdmission(): Promise<void> {
     const precedingDrain = this.activeDrain;
@@ -474,7 +491,12 @@ export class StructuredDeliveryQueue {
   private async drainUntilSettled(): Promise<void> {
     do {
       this.rerun = false;
-      await this.drainPass();
+      try {
+        await this.drainPass();
+      } catch (error) {
+        this.lastPassError = failureReason(error);
+        throw error;
+      }
     } while (this.rerun);
   }
 
@@ -497,11 +519,20 @@ export class StructuredDeliveryQueue {
     }
     if (rawEffects.length === 0) return;
     const grouped = new Map<string, DeliveryEffect[]>();
+    const isolatedTargets: Array<[string, () => Promise<boolean>]> = [];
     const effects: DeliveryEffect[] = [];
     for (const rawEffect of rawEffects) {
       if (rawEffect.kind === "runtime.kill-boundary") {
         const boundary = successfulKillBoundary(rawEffect);
-        if (!boundary) throw new Error(`structured kill boundary ${rawEffect.eventSeq} is invalid`);
+        if (!boundary) {
+          const conversationId = typeof rawEffect.payload.conversationId === "string"
+            ? rawEffect.payload.conversationId
+            : `effect-${rawEffect.eventSeq}`;
+          isolatedTargets.push([conversationId, async () => {
+            throw new Error(`structured kill boundary ${rawEffect.eventSeq} is invalid`);
+          }]);
+          continue;
+        }
         const current = this.successfulKillBoundaries.get(boundary.conversationId);
         if (!current || boundary.eventSeq > current.eventSeq) {
           this.successfulKillBoundaries.set(boundary.conversationId, boundary);
@@ -514,8 +545,14 @@ export class StructuredDeliveryQueue {
         continue;
       }
       const operationId = typeof rawEffect.payload.operationId === "string" ? rawEffect.payload.operationId : "";
-      if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
-      await this.port.transition(operationId, "failed", { reason: "structured delivery effect is invalid" });
+      const conversationId = typeof rawEffect.payload.conversationId === "string"
+        ? rawEffect.payload.conversationId
+        : `effect-${rawEffect.eventSeq}`;
+      isolatedTargets.push([conversationId, async () => {
+        if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
+        await this.transitionUnlessSettled(operationId, "failed", { reason: "structured delivery effect is invalid" });
+        return false;
+      }]);
     }
     effects.sort((left, right) => {
       const leftControl = isControlEffect(left);
@@ -533,10 +570,54 @@ export class StructuredDeliveryQueue {
       target.push(effect);
       grouped.set(effect.conversationId, target);
     }
-    await Promise.all([...grouped.values()].map((target) => this.drainTarget(target)));
+    const targets: Array<[string, () => Promise<boolean>]> = [
+      ...[...grouped.entries()].map(([conversationId, target]) => [
+        conversationId,
+        () => this.drainTarget(target),
+      ] as [string, () => Promise<boolean>]),
+      ...isolatedTargets,
+    ];
+    const outcomes = await Promise.allSettled(
+      targets.map(async ([conversationId, drain]) => {
+        try {
+          return await drain();
+        } catch (error) {
+          this.targetErrors.set(conversationId, failureReason(error));
+          this.retrySoon();
+          console.error("[structured delivery] conversation drain failed", {
+            conversationId,
+            error: failureReason(error),
+          });
+          throw error;
+        }
+      }),
+    );
+    outcomes.forEach((outcome, index) => {
+      if (outcome.status === "fulfilled" && outcome.value === false) {
+        this.targetErrors.delete(targets[index]![0]);
+      }
+    });
+    const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+    if (failures.length === outcomes.length && failures.length > 0) {
+      const reason = failures.at(-1)!.reason;
+      throw new AggregateError(
+        failures.map((failure) => failure.reason),
+        `structured delivery failed for every target: ${failureReason(reason)}`,
+      );
+    }
   }
 
   private async drainTarget(effects: DeliveryEffect[]): Promise<boolean> {
+    const openEffects: DeliveryEffect[] = [];
+    const durableStatuses = new Map<string, { status: string; reason?: string | null } | null>();
+    for (const effect of effects) {
+      const durable = await this.readStatus(effect.operationId);
+      if (!durable.readable) return this.fenceUnavailable();
+      if (durable.value && TERMINAL_DELIVERY_STATUSES.has(durable.value.status)) continue;
+      durableStatuses.set(effect.operationId, durable.value);
+      openEffects.push(effect);
+    }
+    effects = openEffects;
     const killedGenerations = new Set<string>();
     const reconfigures = effects.filter(isReconfigureEffect);
     const currentReconfigure = reconfigures.reduce<StructuredReconfigureEffect | null>(
@@ -545,7 +626,7 @@ export class StructuredDeliveryQueue {
     );
     for (const effect of reconfigures) {
       if (effect !== currentReconfigure) {
-        await this.port.transition(effect.operationId, "failed", { reason: "superseded" });
+        await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "superseded" });
       }
     }
     for (const effect of effects) {
@@ -561,7 +642,7 @@ export class StructuredDeliveryQueue {
         if (effect.sessionKey
           ? killedGenerations.has(`${effect.sessionKey.engine}:${effect.sessionKey.sessionId}`)
           : killedGenerations.size > 0) {
-          await this.port.transition(effect.operationId, "failed", { reason: "conversation-killed" });
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "conversation-killed" });
           continue;
         }
         const blocked = await this.drainReconfigure(effect);
@@ -590,7 +671,7 @@ export class StructuredDeliveryQueue {
       }
       const killBoundary = this.successfulKillBoundaries.get(effect.conversationId);
       if (killBoundary && effect.eventSeq <= killBoundary.eventSeq) {
-        await this.port.transition(effect.operationId, "failed", {
+        await this.transitionUnlessSettled(effect.operationId, "failed", {
           reason: "structured host was intentionally terminated; retry the operation",
         });
         continue;
@@ -614,10 +695,9 @@ export class StructuredDeliveryQueue {
          through to the engine call, so a send an executor was already
          delivering could be delivered a SECOND time by whichever pass caught
          the journal at a bad moment. */
-      const durable = await this.readStatus(effect.operationId);
-      if (!durable.readable) return this.fenceUnavailable();
-      if (durable.value?.status === "delivering") {
-        if (await this.deliveringOwnerDisposition(effect.conversationId, durable.value.reason) !== "abandoned") continue;
+      const durable = durableStatuses.get(effect.operationId) ?? null;
+      if (durable?.status === "delivering") {
+        if (await this.deliveringOwnerDisposition(effect.conversationId, durable.reason) !== "abandoned") continue;
         await this.terminalizeUnverified(effect.operationId, DELIVERY_UNVERIFIED_BY_EARLIER_EXECUTOR);
         continue;
       }
@@ -637,7 +717,7 @@ export class StructuredDeliveryQueue {
       }
       const host = this.resolveHost(effect.conversationId);
       if (!host) {
-        await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+        if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) continue;
         await this.recoverUnavailableHost(effect);
         return true;
       }
@@ -649,7 +729,7 @@ export class StructuredDeliveryQueue {
       if (!state.readable) return this.fenceUnavailable();
       const health = state.value;
       if (health.status === "dead" || health.status === "unhosted") {
-        await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+        if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) continue;
         await this.recoverUnavailableHost(effect);
         return true;
       }
@@ -688,11 +768,11 @@ export class StructuredDeliveryQueue {
          claim is recorded as unknown instead, which proves nothing to anybody
          and is exactly what it should prove. */
       const claim = await this.readHostClaim(effect.conversationId);
-      await this.port.transition(
+      if (!await this.transitionUnlessSettled(
         effect.operationId,
         "delivering",
         { turnId: deliveryFence, reason: deliveringOwnershipReason(this.executorId, claim) },
-      );
+      )) continue;
       if (shouldInterrupt) {
         try {
           await host.interrupt(health.activeTurnRef!);
@@ -709,10 +789,10 @@ export class StructuredDeliveryQueue {
           if (!afterFailure.readable
             || afterFailure.value.status === "dead"
             || afterFailure.value.status === "unhosted") {
-            await this.port.transition(effect.operationId, "queued", { reason });
+            await this.transitionUnlessSettled(effect.operationId, "queued", { reason });
             return true;
           }
-          await this.port.transition(effect.operationId, "queued", { reason: "interrupt-auto-retry" });
+          await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "interrupt-auto-retry" });
           this.retrySoon();
           return true;
         }
@@ -726,11 +806,11 @@ export class StructuredDeliveryQueue {
         const afterInterrupt = afterInterruptState.value;
         if (afterInterrupt.status === "dead" || afterInterrupt.status === "unhosted") {
           this.interruptAcknowledged.delete(effect.operationId);
-          await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+          if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) continue;
           return true;
         }
         if (afterInterrupt.status !== "idle") {
-          await this.port.transition(effect.operationId, "queued", { reason: "interrupt-requested" });
+          await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "interrupt-requested" });
           return true;
         }
         this.interruptAcknowledged.delete(effect.operationId);
@@ -755,7 +835,7 @@ export class StructuredDeliveryQueue {
              receipt rather than writing a second message. Its own operation is
              retried, so this is the one failure after actuation that may go
              back to `queued`. */
-          await this.port.transition(effect.operationId, "queued", { reason: "delivery-auto-retry" });
+          await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "delivery-auto-retry" });
           this.retrySoon();
           return true;
         }
@@ -785,16 +865,16 @@ export class StructuredDeliveryQueue {
       if (receipt.outcome === "rejected") {
         if (receipt.reason === "stale-turn") {
           if (effect.kind === "send" && effect.policy !== "steer-if-active") {
-            await this.port.transition(effect.operationId, "queued", { reason: receipt.reason });
+            await this.transitionUnlessSettled(effect.operationId, "queued", { reason: receipt.reason });
             return true;
           }
-          await this.port.transition(effect.operationId, "failed", { reason: receipt.reason });
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: receipt.reason });
           continue;
         }
-        await this.port.transition(effect.operationId, "queued", { reason: receipt.reason });
+        await this.transitionUnlessSettled(effect.operationId, "queued", { reason: receipt.reason });
         return true;
       }
-      await this.port.transition(effect.operationId, "delivered", { turnId: receipt.turnId });
+      await this.transitionUnlessSettled(effect.operationId, "delivered", { turnId: receipt.turnId });
     }
     return false;
   }
@@ -851,7 +931,7 @@ export class StructuredDeliveryQueue {
        host purely to run this control. Sends are fenced the same way. */
     const killBoundary = this.successfulKillBoundaries.get(effect.conversationId);
     if (killBoundary && effect.eventSeq <= killBoundary.eventSeq) {
-      await this.port.transition(effect.operationId, "failed", {
+      await this.transitionUnlessSettled(effect.operationId, "failed", {
         reason: "structured host was intentionally terminated; retry the operation",
       });
       return { blocked: false, terminated: false };
@@ -864,12 +944,14 @@ export class StructuredDeliveryQueue {
        asynchronous, and a kill behind this effect must not wait a whole pass
        for it. */
     if (!host) {
-      await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+      if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) {
+        return { blocked: false, terminated: false };
+      }
       await this.recoverUnavailableHost(effect);
       return { blocked: false, terminated: false };
     }
     if (!hostSupportsCompact(host)) {
-      await this.port.transition(effect.operationId, "failed", { reason: "unsupported-capability" });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "unsupported-capability" });
       return { blocked: false, terminated: false };
     }
     /* Same fence as the message path, and the same answer to an unreadable
@@ -882,20 +964,24 @@ export class StructuredDeliveryQueue {
     }
     const health = state.value;
     if (health.status === "dead" || health.status === "unhosted") {
-      await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+      if (!await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" })) {
+        return { blocked: false, terminated: false };
+      }
       await this.recoverUnavailableHost(effect);
       return { blocked: false, terminated: false };
     }
     /* Admission fenced the durable turn axis; this re-reads the live host, so a
        turn that started in between fails the control instead of racing it. */
     if (health.status !== "idle" || health.activeTurnRef) {
-      await this.port.transition(effect.operationId, "failed", { reason: "busy-turn" });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "busy-turn" });
       return { blocked: false, terminated: false };
     }
     /* Durable marker first: a restart that finds the receipt in `delivering`
        knows the control may already have reached the engine and terminalizes it
        as unverified instead of compacting the thread a second time. */
-    await this.port.transition(effect.operationId, "delivering");
+    if (!await this.transitionUnlessSettled(effect.operationId, "delivering")) {
+      return { blocked: false, terminated: false };
+    }
     /* Marked before the run exists: a compaction that settles immediately would
        otherwise clear the barrier before it was ever raised. */
     this.compactingConversations.add(effect.conversationId);
@@ -917,7 +1003,7 @@ export class StructuredDeliveryQueue {
       });
       /* The receipt records which compaction closed it: the only durable place
          the lifecycle evidence survives alongside the operation. */
-      await this.port.transition(effect.operationId, "delivered", {
+      await this.transitionUnlessSettled(effect.operationId, "delivered", {
         reason: outcome.compactionId ? `compaction:${outcome.compactionId}` : null,
       });
     } catch (error) {
@@ -925,7 +1011,7 @@ export class StructuredDeliveryQueue {
         await this.terminalizeUnverified(effect.operationId, failureReason(error));
         return;
       }
-      await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: failureReason(error) });
     }
   }
 
@@ -946,6 +1032,23 @@ export class StructuredDeliveryQueue {
   private readSettled(operationId: string): Promise<Evidence<boolean>> {
     const read = this.port.settled?.bind(this.port);
     return readOptionalEvidence(read && (() => read(operationId)), false, "durable delivery record is unavailable");
+  }
+
+  private async transitionUnlessSettled(
+    operationId: string,
+    status: StructuredDeliveryTransition,
+    details?: { turnId?: string | null; reason?: string | null },
+  ): Promise<boolean> {
+    try {
+      await this.port.transition(operationId, status, details);
+      return true;
+    } catch (error) {
+      const durable = await this.readStatus(operationId);
+      if (durable.readable && durable.value && TERMINAL_DELIVERY_STATUSES.has(durable.value.status)) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   private readHostClaim(conversationId: string): Promise<Evidence<string | null>> {
@@ -1055,9 +1158,9 @@ export class StructuredDeliveryQueue {
    */
   private async terminalizeUnverified(operationId: string, reason: string): Promise<void> {
     try {
-      await this.port.transition(operationId, "uncertain", { reason });
+      await this.transitionUnlessSettled(operationId, "uncertain", { reason });
     } catch {
-      await this.port.transition(operationId, "failed", { reason });
+      await this.transitionUnlessSettled(operationId, "failed", { reason });
     }
   }
 
@@ -1072,19 +1175,19 @@ export class StructuredDeliveryQueue {
       const health = state.value;
       if (health.status === "active" || health.status === "attention" || health.activeTurnRef) return true;
     }
-    await this.port.transition(effect.operationId, "applying");
+    if (!await this.transitionUnlessSettled(effect.operationId, "applying")) return false;
     try {
       const outcome = await this.reconfigure(effect, {
         isCurrent: () => this.isCurrentReconfigure(effect),
       });
       if (outcome === "pending") {
-        await this.port.transition(effect.operationId, "queued", { reason: "turn-boundary" });
+        await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "turn-boundary" });
         this.retrySoon();
         return true;
       }
-      await this.port.transition(effect.operationId, "applied");
+      await this.transitionUnlessSettled(effect.operationId, "applied");
     } catch (error) {
-      await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason: failureReason(error) });
     }
     return false;
   }
@@ -1117,12 +1220,12 @@ export class StructuredDeliveryQueue {
         this.rerun = true;
         return;
       }
-      await this.port.transition(effect.operationId, "failed", {
+      await this.transitionUnlessSettled(effect.operationId, "failed", {
         reason: "structured host recovery did not start; retry the operation",
       });
     } catch (error) {
       const reason = `structured host recovery failed: ${failureReason(error)}`.slice(0, 240);
-      await this.port.transition(effect.operationId, "failed", { reason });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason });
     }
   }
 
@@ -1130,7 +1233,7 @@ export class StructuredDeliveryQueue {
     const host = this.resolveHost(effect.conversationId);
     if (effect.kind === "kill") {
       if (!effect.sessionKey) {
-        await this.port.transition(effect.operationId, "failed", { reason: "structured host termination target is unavailable" });
+        await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "structured host termination target is unavailable" });
         return { blocked: false, terminated: false };
       }
       if (!host) {
@@ -1138,24 +1241,28 @@ export class StructuredDeliveryQueue {
           if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) {
             return { blocked: true, terminated: false };
           }
-          await this.port.transition(effect.operationId, "delivering");
-          await this.port.transition(effect.operationId, "delivered");
+          if (!await this.transitionUnlessSettled(effect.operationId, "delivering")) {
+            return { blocked: false, terminated: true };
+          }
+          await this.transitionUnlessSettled(effect.operationId, "delivered");
           return { blocked: false, terminated: true };
         } catch (error) {
-          await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
+          await this.transitionUnlessSettled(effect.operationId, "queued", { reason: failureReason(error) });
           throw error;
         }
       }
-      await this.port.transition(effect.operationId, "delivering");
+      if (!await this.transitionUnlessSettled(effect.operationId, "delivering")) {
+        return { blocked: false, terminated: false };
+      }
       try {
         if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) {
-          await this.port.transition(effect.operationId, "failed", { reason: "structured host termination is unavailable" });
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "structured host termination is unavailable" });
           return { blocked: false, terminated: false };
         }
-        await this.port.transition(effect.operationId, "delivered");
+        await this.transitionUnlessSettled(effect.operationId, "delivered");
         return { blocked: false, terminated: true };
       } catch (error) {
-        await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
+        await this.transitionUnlessSettled(effect.operationId, "queued", { reason: failureReason(error) });
         throw error;
       }
     }
@@ -1174,7 +1281,7 @@ export class StructuredDeliveryQueue {
         return { blocked: true, terminated: false };
       }
       if (!severed.value) return { blocked: true, terminated: false };
-      await this.port.transition(
+      await this.transitionUnlessSettled(
         effect.operationId,
         effect.kind === "interrupt" ? "interrupted" : "failed",
         { reason: `structured host is severed: ${severed.value}`.slice(0, 240) },
@@ -1191,24 +1298,24 @@ export class StructuredDeliveryQueue {
     }
     const health = state.value;
     if (health.status === "dead" || health.status === "unhosted") {
-      await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+      await this.transitionUnlessSettled(effect.operationId, "queued", { reason: "dead-host" });
       return { blocked: true, terminated: false };
     }
-    await this.port.transition(effect.operationId, "delivering", {
+    if (!await this.transitionUnlessSettled(effect.operationId, "delivering", {
       ...(effect.kind === "interrupt" ? { turnId: effect.turnId ?? health.activeTurnRef } : {}),
-    });
+    })) return { blocked: false, terminated: false };
     try {
       if (effect.kind === "answer") {
         await host.answer(effect.attentionId!, effect.resolution);
-        await this.port.transition(effect.operationId, "answered");
+        await this.transitionUnlessSettled(effect.operationId, "answered");
       } else {
         const turnId = effect.turnId ?? health.activeTurnRef;
         if (!turnId || (health.activeTurnRef && health.activeTurnRef !== turnId)) {
-          await this.port.transition(effect.operationId, "failed", { reason: "stale-turn" });
+          await this.transitionUnlessSettled(effect.operationId, "failed", { reason: "stale-turn" });
           return { blocked: false, terminated: false };
         }
         await host.interrupt(turnId);
-        await this.port.transition(effect.operationId, "interrupted", { turnId });
+        await this.transitionUnlessSettled(effect.operationId, "interrupted", { turnId });
       }
       return { blocked: false, terminated: false };
     } catch (error) {
@@ -1223,10 +1330,10 @@ export class StructuredDeliveryQueue {
       const afterFailure = await this.readHealth(host);
       if (afterFailure.readable
         && (afterFailure.value.status === "dead" || afterFailure.value.status === "unhosted")) {
-        await this.port.transition(effect.operationId, "queued", { reason });
+        await this.transitionUnlessSettled(effect.operationId, "queued", { reason });
         return { blocked: true, terminated: false };
       }
-      await this.port.transition(effect.operationId, "failed", { reason });
+      await this.transitionUnlessSettled(effect.operationId, "failed", { reason });
       return { blocked: false, terminated: false };
     }
   }

@@ -33,7 +33,7 @@ import { StructuredHostAdoptionCleanupError, type EngineHost, type HostState } f
 import { messageOriginRole, type MessageOrigin } from "./messageOrigin";
 import { runtimeSettingsCapability, type RuntimeOperationResult, type RuntimeSession } from "./contracts";
 import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
-import { publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "./structuredDeliveryController";
+import { publishStructuredDeliveryHost, releaseStructuredDeliveryHost, structuredDeliveryLastError } from "./structuredDeliveryController";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { runtimeImageCapability, runtimeImageStore } from "./runtimeImageStore";
 import { publishFilesRevision } from "./filesRevision";
@@ -324,6 +324,7 @@ export async function reconcileStructuredSpawnReplay(
     timeoutMs?: number;
     releaseHost?: (key: SessionKey) => Promise<boolean>;
     terminateHostProcess?: (expected: ProcessIdentity) => Promise<boolean>;
+    drainError?: (conversationId: string) => string | null;
   } = {},
 ): Promise<SpawnReceipt & { initialMessage: "pending" | "queued" | "delivered" | "failed" }> {
   const current = registry.readOnlySnapshot().receipts[launchId];
@@ -449,7 +450,12 @@ export async function reconcileStructuredSpawnReplay(
   let terminalReason = failedOperationReason(operation, "structured initial message")
     ?? failedOperationReason(spawnOperation, "structured spawn");
   if (!terminalReason && ageMs >= timeoutMs) {
-    if (liveRuntimeSession) {
+    if (liveRuntimeSession && messageStatus === "queued") {
+      const drainError = (options.drainError ?? structuredDeliveryLastError)(current.conversationId)
+        ?? operation?.receipt.reason
+        ?? `no delivery drain error was recorded before the ${timeoutMs}ms deadline`;
+      terminalReason = `first message never drained: ${drainError}`;
+    } else if (liveRuntimeSession) {
       terminalReason = `structured spawn durable setup remained incomplete for ${timeoutMs}ms`;
     } else if (effectHistoryUnavailable) {
       terminalReason = `structured spawn runtime effect history remained unavailable for ${timeoutMs}ms`;

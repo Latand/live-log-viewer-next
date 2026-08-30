@@ -127,6 +127,7 @@ export type PipelineCloseReport = {
 export type PipelineStageLaunchReservation = Pick<PipelineStageSpawn, "launchId" | "conversationId">;
 export type PipelineSpawnReceipt = PipelineStageSpawn & {
   state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
+  error?: string | null;
 };
 
 export interface PipelinePorts {
@@ -618,6 +619,7 @@ export function defaultPipelinePorts(): PipelinePorts {
         sessionId: receipt.key?.sessionId ?? null,
         "transcript": receipt.artifactPath,
         paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
+        error: receipt.error,
       };
     },
     claimSpawnRetry: (launchId, claimId) => {
@@ -1772,7 +1774,7 @@ async function tickRunStage(
       attempt.agentPath = receipt.transcript;
       attempt.paneId = receipt.paneId;
       if (receipt.state === "failed" || receipt.state === "conflicted" || (receipt.state === "starting" && !receipt.paneId && !receipt.transcript)) {
-        park(pipeline, `stage spawn cannot recover from receipt state ${receipt.state}`, attempt);
+        park(pipeline, receipt.error ?? `stage spawn cannot recover from receipt state ${receipt.state}`, attempt);
         return;
       }
     }
@@ -1784,7 +1786,14 @@ async function tickRunStage(
     ? await ports.conversationAgentActive(attempt.conversationId)
     : null;
   if (!attempt.agentPath) {
-    if (structuredActive === false) park(pipeline, "structured stage ended before its session was discovered", attempt);
+    const spawnReceipt = attempt.launchId ? ports.spawnReceipt(attempt.launchId) : null;
+    const spawnError = spawnReceipt
+      && (spawnReceipt.state === "failed" || spawnReceipt.state === "conflicted")
+      ? spawnReceipt.error
+      : null;
+    if (structuredActive === false) {
+      park(pipeline, spawnError ?? "structured stage ended before its session was discovered", attempt);
+    }
     else if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited before its session was discovered", attempt);
     return;
   }

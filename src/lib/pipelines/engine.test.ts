@@ -2021,6 +2021,40 @@ test("durable conversation identity never adopts a competing cwd session", async
   expect(loadPipelines()[0]!.cursor?.stageId).toBe("plan");
 });
 
+test("a stage with no transcript parks on its first-message drain failure", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  h.ports.spawnAgent = async (_input, onReserved) => {
+    onReserved({ launchId: "launch-drain-timeout", conversationId: "conversation_drain_timeout" });
+    return {
+      launchId: "launch-drain-timeout",
+      conversationId: "conversation_drain_timeout",
+      sessionId: "session-drain-timeout",
+      "transcript": null,
+      paneId: null,
+    };
+  };
+  await tickPipelines([], h.ports);
+  h.setConversationActive(false);
+  const reason = "first message never drained: runtime host request timed out";
+  h.ports.spawnReceipt = () => ({
+    state: "failed",
+    launchId: "launch-drain-timeout",
+    conversationId: "conversation_drain_timeout",
+    sessionId: "session-drain-timeout",
+    "transcript": null,
+    paneId: null,
+    error: reason,
+  });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({ state: "needs_decision", stateDetail: reason });
+  expect(parked.runs[0]!.attempts[0]!.error).toBe(reason);
+});
+
 test("a worker that dies after transcript discovery enters bounded verdict recovery", async () => {
   const h = harness();
   await create(h.ports);
