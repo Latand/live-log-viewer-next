@@ -6,6 +6,54 @@ import {
   type BindingEngine,
 } from "./projectBindings";
 
+/**
+ * #1279's automatic rule, and the inventory of everything that obeys it.
+ *
+ * Four rounds each closed one account-selecting path and the next round found
+ * another, so this file exists to make the SET the thing under review rather
+ * than the next member of it. Eight places choose an account without being
+ * told which. Every one of them reaches one of the two functions below, and
+ * nothing here re-derives a pool or a capacity bar of its own:
+ *
+ * 1. **The direct launch** — `resolveHealthySpawnAccount`, which is `/api/spawn`
+ *    and everything riding on it: the board's spawn button, the MCP spawn tool,
+ *    the orchestrator seat, the scheduled launchers. → `selectProjectAccount`,
+ *    with the Claude health pass narrowing what the rule already allowed.
+ * 2. **The project-owned launch** — `AccountManager.resolveProjectSpawn`, reached
+ *    by the task launch, the pipeline stage, the workflow stage and the flow's
+ *    pane reviewer. → `selectProjectAccount`.
+ * 3. **The capacity-rotating launch** — `AccountManager.resolveHeadlessSpawn`,
+ *    reached by the flow's headless reviewer rotation (which excludes the
+ *    accounts this round already tried) and the orchestrator handoff digest.
+ *    → `selectProjectAccount`, whose UNBOUND branch stays rate-limit aware here.
+ * 4. **The resume** — `resolveContinuityAccount`. Work that records an account
+ *    continues on it, which is continuity and not a choice; work that records
+ *    none was silently taking the engine's routing account and now → (2).
+ * 5. **The engine-wide automatic migration** — `commitMigrationIntent` with an
+ *    automatic origin. → `admitAutomaticAccountTarget`, per conversation.
+ * 6. **The lazy active-account migration** on the delivery path —
+ *    `requestConversationMigrationToActiveAccount`. → same, for one conversation.
+ * 7. **The one-click reseat** — `chooseProjectReseatTarget`. Drawn from the pool;
+ *    it keeps its own STRICTER capacity bar (real headroom, not merely "not
+ *    exhausted"), because a successor seat picked on a nearly spent account is
+ *    the failure it exists to avoid, and a stricter bar cannot escape this one.
+ * 8. **Auto-balance** — `chooseAutoBalance`, the only producer of an automatic
+ *    engine-wide target. It has no production caller at this commit, and its
+ *    decision can only ever reach conversations through (5).
+ *
+ * Four neighbours are NOT on this list because they never choose an account for
+ * any work: `selectHeadlessAccount` classifies capacity for a candidate set it
+ * is handed, `selectHealthyClaudeAccount` narrows a candidate set and never
+ * widens one, `contextForSpawn` resolves an id somebody already settled on into
+ * a home, and `retireAccount` resets the engine default after an operator
+ * DELETES the account it pointed at — it refuses while anything is live there
+ * and moves no conversation, and the engine default only ever ORDERS a bound
+ * project's candidates, so it cannot carry work out of a pool.
+ *
+ * A new automatic seam belongs on this list and behind one of the two functions
+ * below. A new one that reads the pool itself is the defect coming back.
+ */
+
 /** What #1279's rule decides for one launch, before any home or env is resolved. */
 export type ProjectAccountSelection =
   /** `accountId: null` means nothing constrained or preferred the choice, so the

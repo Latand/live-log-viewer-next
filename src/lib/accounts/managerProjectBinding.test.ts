@@ -30,7 +30,7 @@ process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 
 const { createManagedCodexAccount, listCodexAccounts } = await import("./codex");
 const { createManagedClaudeAccount, listClaudeAccounts } = await import("./claude");
-const { accountManager, resolveHealthySpawnAccount } = await import("./manager");
+const { accountManager, resolveContinuityAccount, resolveHealthySpawnAccount } = await import("./manager");
 const { AccountProjectBindingsUnreadableError } = await import("./projectBindings");
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { resetProjectAliasesForTests } = await import("@/lib/projects/aliases");
@@ -300,4 +300,57 @@ test("a damaged binding record refuses the direct launch seam before it resolves
 
   expect(resolveHealthySpawnAccount("codex", undefined, ATLAS))
     .rejects.toThrow(AccountProjectBindingsUnreadableError);
+});
+
+/**
+ * The last seam that could still choose an account without being asked: the
+ * RESUME of an existing conversation. It resolved through `resolveSpawn`,
+ * whose second argument is nullable — and a null there silently answered with
+ * the engine's routing account, reading neither the pool nor any quota. The
+ * two halves are separated below because they are different questions.
+ */
+test("a resume of work that records an account continues on it, pool or no pool (#1279)", () => {
+  /* The conversation's session lives in that account's home. Nobody is
+     choosing here, so neither the pool nor a spent quota may re-seat it —
+     resuming anywhere else would resume nothing. */
+  registryWith(spare, [observation(spare, 100)]);
+  bind(reserved);
+
+  expect(resolveContinuityAccount("codex", spare, ATLAS).accountId).toBe(spare);
+});
+
+test("a resume of work that records no account draws from the pool, not the engine's routing (#1279)", () => {
+  /* Routed at the spare account, bound to the reserved one, and the
+     conversation names neither — an adopted thread whose account was never
+     recorded. That makes this resume a PICK, and a pick draws from the pool.
+     Both accounts carry room, so the pool is the only thing left deciding. */
+  registryWith(spare, [observation(reserved, 5), observation(spare, 5)]);
+  bind(reserved);
+  expect(resolveContinuityAccount("codex", null, ATLAS).accountId).toBe(reserved);
+
+  /* Unbound, the same call answers with the routing account exactly as it
+     always did, so the line above is the pool deciding rather than agreeing. */
+  fs.rmSync(RECORD, { force: true });
+  expect(resolveContinuityAccount("codex", null, ATLAS).accountId).toBe(spare);
+});
+
+test("a resume that has to pick reports an exhausted pool instead of the idle account beside it (#1279)", () => {
+  registryWith(spare, [observation(reserved, 100), observation(spare, 5)]);
+  bind(reserved);
+
+  const refused = (() => { try { resolveContinuityAccount("codex", null, ATLAS); return null; } catch (error) { return error; } })();
+  expect((refused as Error).name).toBe("ProjectAccountRefusedError");
+  expect((refused as Error).message).toContain("no allowed codex account has capacity");
+  expect((refused as Error).message).not.toContain(spare);
+});
+
+test("a damaged binding record refuses a resume that has to pick, and only that one (#1279)", () => {
+  registryWith(spare, []);
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(RECORD, '{"schemaVersion":1,"bindings":[{"engine":"codex"', "utf8");
+
+  expect(() => resolveContinuityAccount("codex", null, ATLAS)).toThrow(AccountProjectBindingsUnreadableError);
+  /* A record nobody can read never vetoes continuity: the conversation is
+     already running there and no routing decision is being taken. */
+  expect(resolveContinuityAccount("codex", spare, ATLAS).accountId).toBe(spare);
 });

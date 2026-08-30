@@ -195,6 +195,36 @@ export function resolveProjectSpawnAccount(
   return resolution.account;
 }
 
+/**
+ * The account a RESUME of existing work runs on — the last seam where an
+ * account could still be chosen without anybody being asked (#1279).
+ *
+ * The two halves are deliberately not the same question:
+ *
+ * - **The work records an account.** That is CONTINUITY, not a selection.
+ *   The session already lives in that account's home, so resuming anywhere
+ *   else resumes nothing; the pool does not get to re-seat it and capacity
+ *   does not get to veto it. Byte for byte `resolveSpawn` with an id.
+ * - **The work records none.** Nobody named an account, so this call is
+ *   picking one — and `resolveSpawn(engine, null)` picked the engine's
+ *   routing account, reading neither the project's pool nor any quota. That
+ *   is the automatic rule's own case, so it goes where every other automatic
+ *   pick goes: the pool first, capacity second, an exhausted pool reported
+ *   and an unreadable record refused before anything is started. An UNBOUND
+ *   project resolves to the engine's active account exactly as it always did.
+ */
+export function resolveContinuityAccount(
+  engine: "claude" | "codex",
+  accountId: string | null,
+  /* Required, with no default: a caller that cannot name the project does not
+     get to decide there is no pool. `null` is the project a caller genuinely
+     has none of, and resolves exactly as an unbound one always did. */
+  project: string | null,
+): AccountContext {
+  if (accountId !== null) return accountManager.resolveSpawn(engine, accountId);
+  return resolveProjectSpawnAccount(engine, project);
+}
+
 function summary(engine: "claude" | "codex", id: string): AccountSummary {
   const account = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).find((item) => item.id === id);
   if (!account) throw new Error(`unknown ${engine} account: ${id}`);
