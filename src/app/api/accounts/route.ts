@@ -5,7 +5,11 @@ import { activeClaudeAccountId, claudeAccountsMutationLocked, listClaudeAccounts
 import { claudeLoginSupervisor, LIVE_CLAUDE_LOGIN_PHASES } from "@/lib/accounts/claudeLogin";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { accountProjectRows } from "@/lib/accounts/projectAccountsView";
-import { accountProjectBindings } from "@/lib/accounts/projectBindings";
+import {
+  AccountProjectBindingsUnreadableError,
+  accountProjectBindings,
+  type AccountProjectBinding,
+} from "@/lib/accounts/projectBindings";
 import { agentRegistry } from "@/lib/agent/registry";
 import { projectAliasSnapshot } from "@/lib/projects/aliases";
 import { AUTO_BALANCE_FRESH_MS, AUTO_BALANCE_THRESHOLD, effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
@@ -131,8 +135,26 @@ export async function GET() {
   const codexObservations = snapshot.quotaObservations.codex;
   /* #1279's accounts side: which projects each account is bound to. Read once
      for the whole response — the record is one small file, and both engine
-     lists project from the same read. */
-  const bindings = accountProjectBindings();
+     lists project from the same read.
+
+     The read throws on a damaged record, because nothing may SELECT an account
+     from a record it could not read. This response selects nothing: it is the
+     panel an operator opens to see their accounts, and it is also how they get
+     to the record that needs repairing, so a damaged record must not answer it
+     as a server fault. It answers with the accounts and names what is wrong.
+
+     The bound-projects rows are then OMITTED rather than sent empty. Empty is a
+     claim — "this account is bound to no project" — and a claim about what is
+     bound is the one thing a record this process could not read cannot support;
+     the panel already renders an absent list as no chips at all. */
+  let bindings: AccountProjectBinding[] | null = null;
+  let bindingsUnreadable: string | null = null;
+  try {
+    bindings = accountProjectBindings();
+  } catch (error) {
+    if (!(error instanceof AccountProjectBindingsUnreadableError)) throw error;
+    bindingsUnreadable = error.message;
+  }
   const projectDisplayNames = projectAliasSnapshot().displayNames;
   const codexAccountList = listCodexAccounts();
   const codexLogins = managedCodexRuntime().peekLogins(codexAccountList);
@@ -149,7 +171,7 @@ export async function GET() {
       loginState: authenticated ? "authenticated" : compatibilityPending ? "pending" : login.state,
       attemptState: compatibilityPending ? "pending" : login.attemptState,
       deviceAuth: login.deviceAuth,
-      projects: accountProjectRows("codex", account.id, bindings, projectDisplayNames),
+      ...(bindings ? { projects: accountProjectRows("codex", account.id, bindings, projectDisplayNames) } : {}),
       ...accountProjection(codexObservations[account.id], account.authPresent, now),
     };
   });
@@ -166,7 +188,7 @@ export async function GET() {
       loginState: account.authPresent ? "authenticated" : "idle",
       attemptState: null,
       deviceAuth: null,
-      projects: accountProjectRows("claude", account.id, bindings, projectDisplayNames),
+      ...(bindings ? { projects: accountProjectRows("claude", account.id, bindings, projectDisplayNames) } : {}),
       ...accountProjection(claudeObservations[account.id], account.authPresent, now),
       login,
     };
@@ -192,5 +214,8 @@ export async function GET() {
     mutationLocked: { codex: codexAccountsMutationLocked(), claude: claudeAccountsMutationLocked() },
     migration: { codex: codexMigration, claude: claudeMigration },
     autoBalance: { codex: codexAuto, claude: claudeAuto },
+    /* Present only when the binding record could not be read, so the answer
+       says why the accounts carry no bound projects. */
+    ...(bindingsUnreadable ? { bindingsUnreadable } : {}),
   });
 }
