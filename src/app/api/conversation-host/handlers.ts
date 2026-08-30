@@ -187,7 +187,11 @@ export async function conversationHostGET(req: NextRequest): Promise<NextRespons
       if (resolution.reason === "server-restarted") {
         return attachJson({ reason: resolution.reason, error: "The tmux server restarted. Refresh and try again." }, 409);
       }
-      return attachJson({ reason: resolution.reason, error: "The tmux endpoint is unavailable. Refresh and try again." }, 503);
+      /* `AttachTerminalDialog` renders this server copy in preference to its own
+         `attach.unavailable`, so the correction had to reach here too: what is
+         unavailable is the tmux SERVER this attach needs, not an HTTP endpoint —
+         the route answered, which is how the operator got this string (#1301). */
+      return attachJson({ reason: resolution.reason, error: "The tmux server is unavailable. Refresh and try again." }, 503);
     }
     return attachJson({
       attach: { target: resolution.target, command: resolution.command, readOnlyCommand: resolution.readOnlyCommand },

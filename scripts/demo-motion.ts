@@ -238,7 +238,7 @@ export const STORYBOARDS: Storyboard[] = [
       { do: "click", target: { selector: 'section[aria-label="Draft of a new agent conversation"] textarea' }, ms: 600 },
       { do: "type", target: { selector: 'section[aria-label="Draft of a new agent conversation"] textarea' }, text: "Add a retry pass to the capture pipeline." },
       { do: "pause", ms: 400 },
-      { do: "caption", text: "Pick an engine, model and effort — it launches in tmux" },
+      { do: "caption", text: "Pick an engine, model and effort — and it starts" },
       { do: "hover", target: { selector: 'section[aria-label="Draft of a new agent conversation"] button[aria-label="Launch the agent"]' }, ms: 650, holdMs: 900 },
       { do: "pause", ms: 600 },
     ],
