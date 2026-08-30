@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import { redactSecrets } from "@/lib/review";
+import { openclawMessage } from "@/lib/scanner/openclawNative";
 import type { FileEntry } from "@/lib/types";
 
 import type { SnapshotConversation } from "./types";
@@ -46,6 +47,19 @@ function tailMessages(entry: FileEntry): { messages: CompactMessage[]; scannedBy
       if (entry.engine === "claude") {
         const role = row.type === "user" ? "user" : row.type === "assistant" ? "assistant" : null;
         const value = contentText(object(row.message).content);
+        if (role && value.trim()) messages.push({ role, at, text: value });
+      } else if (entry.engine === "openclaw") {
+        /* OpenClaw wraps every role in a top-level `message` envelope, so the
+           Codex arm below reads nothing off one of its records. Since #1207
+           widened the snapshot's transcript filter, an OpenClaw path resolves
+           into the snapshot; without this arm it resolves and then reports no
+           messages, which reads to an agent as an empty conversation.
+           `toolResult` is a role of its own here rather than a content block
+           inside a user record, and is dropped like the tool records of both
+           other engines. */
+        const message = openclawMessage(row) ?? {};
+        const role = message.role === "user" ? "user" : message.role === "assistant" ? "assistant" : null;
+        const value = contentText(message.content);
         if (role && value.trim()) messages.push({ role, at, text: value });
       } else {
         const payload = object(row.payload); const type = text(payload.type);
