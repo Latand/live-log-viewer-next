@@ -3571,4 +3571,29 @@ describe("mergeBoundaryReview", () => {
     expect(review.notices[0]).not.toContain("committer");
     expect(review.notices[0]).not.toContain(personal);
   });
+
+  test("the exemption names the forge's address, and reads the name beside it", () => {
+    /* An identity is a name as well as a mailbox, and the mailbox is the only
+       part of it the forge decides. A commit committed under the forge's
+       address carries whatever name it was committed with — so the exemption
+       drops that one address out of what the composed trailer publishes, and
+       everything else on the trailer is read as it always was. */
+    const repo = gitRepo();
+    const personal = ["someone", "personal.dev"].join("@");
+    commit(repo, "feat: something", canonicalIdentity);
+    runGit(repo, [
+      "-c", `user.name=${personal}`,
+      "-c", `user.email=${forgeWebFlowIdentity.email}`,
+      "commit", "--quiet", "--amend", "--no-edit",
+    ]);
+
+    expect(identityField(repo, "%ce")).toBe(forgeWebFlowIdentity.email);
+    expect(identityField(repo, "%cn")).toBe(personal);
+    const review = mergeBoundaryReview(repo, "main");
+
+    expect(review.findings.get("email_address")).toBe(1);
+    expect(review.notices).toHaveLength(1);
+    expect(review.notices[0]).toContain("committer");
+    expect(review.notices[0]).not.toContain(personal);
+  });
 });

@@ -1526,11 +1526,17 @@ function isForgeAccountAddress(address: string): boolean {
    through the trailer the review composes below, so the gate's verdict on a
    forge-composed merge is what it was — but it was reached by a rule about
    MESSAGES, and narrowing that rule would have silently taken the forge's own
-   merges with it. */
+   merges with it.
+   Like every exemption here, this one names an ADDRESS the scan already found
+   and never skips a read: an identity is a name as well as a mailbox, and a
+   commit can be committed under this mailbox with anything at all in the name
+   beside it. That name is scanned, and a person in it is reported. */
 const FORGE_COMPOSER_ADDRESS = ["noreply", FORGE_DOMAIN].join("@");
 
-function isForgeComposerIdentity(identity: CommitIdentity): boolean {
-  return identity.field === "committer" && identity.address.toLowerCase() === FORGE_COMPOSER_ADDRESS;
+function isForgeComposerAddress(address: string, identity: CommitIdentity): boolean {
+  return identity.field === "committer"
+    && identity.address.toLowerCase() === FORGE_COMPOSER_ADDRESS
+    && address.toLowerCase() === FORGE_COMPOSER_ADDRESS;
 }
 
 /** Every identity git recorded on the commits the merge will squash. */
@@ -1599,9 +1605,10 @@ export function mergeBoundaryReview(repository: string, base: string): MergeBoun
     return { findings, notices };
   }
   for (const identity of identities) {
-    if (isForgeComposerIdentity(identity)) continue;
     const { attributable } = commitMessageAddressReview(composedAttributionMessage(identity));
-    const publishes = attributable.some((address) => !isForgeAccountAddress(address));
+    const publishes = attributable.some((address) => {
+      return !isForgeAccountAddress(address) && !isForgeComposerAddress(address, identity);
+    });
     if (!publishes) continue;
     addFinding(findings, "email_address");
     /* The notice names the commit, the field and the trailer, and never the
