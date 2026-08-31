@@ -5722,6 +5722,7 @@ export class AgentRegistry {
           fast: generation.launchProfile.fast ?? observation.launchProfile.fast,
           permissionMode: generation.launchProfile.permissionMode ?? observation.launchProfile.permissionMode,
           readOnly: generation.launchProfile.readOnly ?? observation.launchProfile.readOnly,
+          sandbox: generation.launchProfile.sandbox ?? observation.launchProfile.sandbox ?? null,
           mcpServers: generation.launchProfile.mcpServers,
           title: durableSemanticTitle(generation.launchProfile.title) ?? durableSemanticTitle(observation.launchProfile.title),
           project: observation.launchProfile.project ?? generation.launchProfile.project,

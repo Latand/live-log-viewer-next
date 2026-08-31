@@ -212,6 +212,7 @@ function spawnInput(account: string | null) {
       access: "read-write" as const,
       promptScaffold: "Builder guidance",
     },
+    runtimeProfile: { access: "read-write" as const, sandbox: "full" as const },
     cwd: sandbox,
     project: ATLAS,
     requestedAccountId: account,

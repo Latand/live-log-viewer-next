@@ -1674,7 +1674,7 @@ const TOOL_DESCRIPTIONS: Record<McpToolName, string> = {
     "Create a Viewer pipeline through the pipeline engine: a stage graph of agent conversations run in one worktree.",
     "Stages are a graph, not a list: each stage names its pass successor with `next` (a stage id, or null to end the chain), and a run stage may name a fail successor with `onFail`. `next` defaults to null, so a plan whose stages never set it is a set of disconnected stages, not a chain.",
     "A review-loop stage reviews the session of the run stage that reaches it, so it must be pass-reachable from a run stage through `next` edges — array order alone reaches nothing. review-loop stages are always read-only, may not define `onFail`, and take their engine/model/effort from their role (the registry reviewer preset runs on Codex) unless the stage overrides them.",
-    "Runtime overrides (engine, model, effort, access) belong on the stage; `role` carries only `roleId` and its `params`. Host access defaults to full independently of access; set sandbox to restricted only when the stage must run inside the engine sandbox.",
+    "Runtime overrides (engine, model, effort, access) belong on the stage; `role` carries only `roleId` and its `params`. access is the repository-mutation policy enforced at settlement. sandbox is the independent tool/network boundary, defaults to full, and never changes the repository policy.",
     "A read-only stage may name repository-relative outputs. It can write those paths, while the controller refuses undeclared worktree changes and agent-created commits and records only the declared outputs.",
     "autoStart:false creates a draft the operator starts from the board; a draft that pins `baseBranch` must also pass `baseRef` (a draft is not provisioned, so the caller resolves the SHA).",
     "`src` is the creator's transcript path: a native ~/.claude/projects path is normalized to the shared Claude transcript store when the mirrored file exists there.",
@@ -1819,9 +1819,9 @@ const pipelineStageSchema = z.object({
   effort: z.string().nullable().optional()
     .describe("Stage-level effort override, or null to inherit the role default. Must be an effort the stage engine supports."),
   access: z.enum(["read-only", "read-write"]).optional()
-    .describe("Repository/production mutation policy. A review-loop stage is always read-only. This does not remove network, SSH, gh, or read tools."),
+    .describe("Repository mutation policy enforced at settlement. A review-loop stage is always read-only. This does not select the sandbox or remove network, SSH, gh, or read tools."),
   sandbox: z.enum(["full", "restricted"]).optional()
-    .describe("Tool/network boundary. Defaults to full host access. restricted explicitly enables the engine sandbox for this stage."),
+    .describe("Tool/network boundary, independent from access. Defaults to full host access. restricted enables the engine sandbox without changing the repository mutation policy."),
   outputs: z.array(z.string().min(1).max(MAX_STAGE_OUTPUT_PATH_LENGTH)).min(1).max(MAX_STAGE_OUTPUTS).optional()
     .describe("Repository-relative files or directories a run stage may produce. For read-only run stages, the controller records only these paths and refuses every other worktree change or agent-created commit. Review-loop stages cannot declare outputs."),
   account: z.string().nullable().optional()
