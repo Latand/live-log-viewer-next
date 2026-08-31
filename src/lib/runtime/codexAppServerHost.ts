@@ -460,6 +460,18 @@ function resumedTurns(value: unknown): JsonObject[] {
   return Array.isArray(page?.data) ? page.data.map(record).filter((turn): turn is JsonObject => turn !== null) : [];
 }
 
+/** Codex 0.151+ deprecates `ThreadReadParams.includeTurns`: a paginated thread
+    refuses full-history hydration with "list_turns is not supported yet" and
+    expects `thread/turns/list` paging instead (#1332). */
+function hydrationUnsupported(reason: string): boolean {
+  return reason.startsWith("Codex app-server request failed:") && /not supported/i.test(reason);
+}
+
+function pagedTurns(value: unknown): JsonObject[] {
+  const outer = record(value);
+  return Array.isArray(outer?.data) ? outer.data.map(record).filter((turn): turn is JsonObject => turn !== null) : [];
+}
+
 function resumedActiveTurnId(value: unknown): string | null {
   const activeTurn = resumedTurns(value).findLast((turn) => stringField(turn, "status") === "inProgress");
   return activeTurn ? stringField(activeTurn, "id") : null;
@@ -1031,13 +1043,36 @@ export class CodexAppServerHost implements EngineHost {
     return this.awaitDeliveryConfirmation(entry, { outcome: "turn-started", turnId });
   }
 
-  async sessionMaterializationEvidence(clientMessageId: string): Promise<SessionMaterializationEvidence> {
-    let result: unknown;
+  /** Persisted-thread snapshot for materialization evidence: full-history
+      hydration first; a paginated thread that refuses it yields the same
+      evidence through a metadata-only read plus one ascending full-items
+      turns page (#1332). Every other error propagates unchanged so the
+      caller's evidence classification stays intact. */
+  private async readPersistedThreadSnapshot(): Promise<{ result: unknown; turns: JsonObject[] }> {
     try {
-      result = await this.rpc("thread/read", {
+      const result = await this.rpc("thread/read", {
         threadId: this.identity.threadId,
         includeTurns: true,
       });
+      return { result, turns: resumedTurns(result) };
+    } catch (error) {
+      if (!hydrationUnsupported(safeError(error))) throw error;
+      const result = await this.rpc("thread/read", { threadId: this.identity.threadId });
+      const page = await this.rpc("thread/turns/list", {
+        threadId: this.identity.threadId,
+        itemsView: "full",
+        sortDirection: "asc",
+        limit: 16,
+      });
+      return { result, turns: pagedTurns(page) };
+    }
+  }
+
+  async sessionMaterializationEvidence(clientMessageId: string): Promise<SessionMaterializationEvidence> {
+    let result: unknown;
+    let persistedTurns: JsonObject[];
+    try {
+      ({ result, turns: persistedTurns } = await this.readPersistedThreadSnapshot());
     } catch (error) {
       const reason = safeError(error);
       if (/not materialized yet/i.test(reason) && /before first user message/i.test(reason)) {
@@ -1089,7 +1124,7 @@ export class CodexAppServerHost implements EngineHost {
     if (!persistedIdentity.path || persistedIdentity.path !== this.identity.path) {
       return { state: "failed", reason: "Codex app-server did not confirm the canonical transcript path" };
     }
-    const persistedFirstMessage = resumedTurns(result).some((turn) =>
+    const persistedFirstMessage = persistedTurns.some((turn) =>
       Array.isArray(turn.items)
       && turn.items.some((item) => stringField(item, "clientId") === clientMessageId));
     return persistedFirstMessage
@@ -1422,9 +1457,10 @@ export class CodexAppServerHost implements EngineHost {
 
   private async ensureCanonicalTranscriptPath(): Promise<void> {
     if (this.identity.path) return;
+    /* Metadata-only on purpose: this reader consumes nothing but the thread
+       identity and path, and hydration is refused on paginated threads (#1332). */
     const result = await this.rpc("thread/read", {
       threadId: this.identity.threadId,
-      includeTurns: true,
     });
     const recovered = threadFromResult(result, "thread/read");
     if (recovered.threadId !== this.identity.threadId) {
