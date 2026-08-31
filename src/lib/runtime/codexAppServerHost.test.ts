@@ -1892,6 +1892,40 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("a successful hydrated read with no turns defers to the rollout on disk (#1332)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-empty-hydration-"));
+    const rollout = path.join(directory, "empty-hydration-thread.jsonl");
+    const server = new FakeAppServer("empty-hydration-thread");
+    server.threadPath = rollout;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-empty-hydration", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "turn-1",
+    });
+    await expect(host.sessionMaterializationEvidence("operation-empty-hydration")).resolves.toEqual({
+      state: "absent",
+      reason: "Codex app-server did not read back the confirmed first message",
+    });
+    fs.writeFileSync(rollout, `${JSON.stringify({
+      timestamp: "t1",
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        turn_id: "turn-1",
+        item: { type: "UserMessage", id: "item-1", client_id: "operation-empty-hydration", content: [{ type: "text", text: "hello" }] },
+      },
+    })}\n`);
+    await expect(host.sessionMaterializationEvidence("operation-empty-hydration")).resolves.toEqual({
+      state: "materialized",
+    });
+    await host.release();
+  });
+
   test("a rollout on disk outranks the engine's not-materialized answer (#1332)", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-disk-outranks-"));
     const rollout = path.join(directory, "disk-outranks-thread.jsonl");
