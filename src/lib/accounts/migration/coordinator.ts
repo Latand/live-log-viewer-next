@@ -266,6 +266,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
         fast: currentProfile?.fast ?? null,
         permissionMode: currentProfile?.permissionMode ?? null,
         readOnly: currentProfile?.readOnly ?? null,
+        sandbox: currentProfile?.sandbox ?? null,
         title: durableSemanticTitle(entry.title) ?? durableSemanticTitle(currentProfile?.title),
         project: entry.project || currentProfile?.project || null,
         parentConversationId: parentConversation?.id ?? currentProfile?.parentConversationId ?? null,
