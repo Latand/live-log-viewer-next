@@ -1892,6 +1892,41 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("a rollout on disk outranks the engine's not-materialized answer (#1332)", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-disk-outranks-"));
+    const rollout = path.join(directory, "disk-outranks-thread.jsonl");
+    const server = new FakeAppServer("disk-outranks-thread");
+    server.threadPath = rollout;
+    server.readError = "thread disk-outranks-thread is not materialized yet; includeTurns is unavailable before first user message";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-disk-outranks", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "turn-1",
+    });
+    await expect(host.sessionMaterializationEvidence("operation-disk-outranks")).resolves.toEqual({
+      state: "absent",
+      reason: "Codex app-server has not materialized the confirmed first message yet",
+    });
+    fs.writeFileSync(rollout, `${JSON.stringify({
+      timestamp: "t1",
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        turn_id: "turn-1",
+        item: { type: "UserMessage", id: "item-1", client_id: "operation-disk-outranks", content: [{ type: "text", text: "hello" }] },
+      },
+    })}\n`);
+    await expect(host.sessionMaterializationEvidence("operation-disk-outranks")).resolves.toEqual({
+      state: "materialized",
+    });
+    await host.release();
+  });
+
   test("fails materialization only after the confirmed first turn ends without a session", async () => {
     const server = new FakeAppServer("failed-materialization-thread");
     server.readError = "thread failed-materialization-thread is not materialized yet; includeTurns is unavailable before first user message";
