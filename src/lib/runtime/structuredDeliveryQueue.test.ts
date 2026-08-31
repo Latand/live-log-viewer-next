@@ -283,6 +283,7 @@ test("a dead-host requeue refused after terminal settlement does not fail the pa
 test("a busy structured turn keeps reconfigure queued and applies it before later messages", async () => {
   const actions: string[] = [];
   const terminal = new Set<string>();
+  let retries = 0;
   let active = true;
   const currentHost = host(async (entry) => {
     actions.push(`send:${entry.id}`);
@@ -312,19 +313,24 @@ test("a busy structured turn keeps reconfigure queued and applies it before late
   ];
   const queue = new StructuredDeliveryQueue({
     effects: async () => effects.filter((effect) => !terminal.has(String(effect.payload.operationId))),
+    status: async () => ({ status: "queued", admittedAt: new Date().toISOString() }),
     transition: async (operationId, status) => {
       actions.push(`${status}:${operationId}`);
       if (status === "applied" || status === "failed" || status === "delivered") terminal.add(operationId);
     },
-  }, () => currentHost, undefined, undefined, undefined, async (effect) => {
+  }, () => currentHost, undefined, () => {
+    retries += 1;
+  }, undefined, async (effect) => {
     actions.push(`reconfigure:${effect.model}:${effect.effort}`);
   });
 
   await queue.drain();
   expect(actions).toEqual([]);
+  expect(retries).toBe(1);
 
   active = false;
   await queue.drain();
+  expect(retries).toBe(1);
   expect(actions).toEqual([
     "applying:switch-model",
     "reconfigure:gpt-5.6-sol:high",

@@ -705,7 +705,10 @@ export class StructuredDeliveryQueue {
           continue;
         }
         const blocked = await this.drainReconfigure(effect);
-        if (blocked) return true;
+        if (blocked) {
+          this.scheduleControlSettlementCheck(durableStatuses.get(effect.operationId) ?? null);
+          return true;
+        }
         continue;
       }
       if (isControlEffect(effect)) {
@@ -713,12 +716,7 @@ export class StructuredDeliveryQueue {
           ? await this.drainCompact(effect)
           : await this.drainControl(effect);
         if (result.blocked) {
-          /* A blocked hostless control may produce no journal or host event of
-             its own. Keep one bounded retry alive so a later pass observes the
-             deadline; a control settled in this pass schedules nothing. */
-          if (controlSettlementDeadlineAt(durableStatuses.get(effect.operationId) ?? null) !== null) {
-            this.retrySoon();
-          }
+          this.scheduleControlSettlementCheck(durableStatuses.get(effect.operationId) ?? null);
           return true;
         }
         if (result.terminated && effect.kind === "kill") {
@@ -1156,6 +1154,13 @@ export class StructuredDeliveryQueue {
       () => this.severedHostReason(conversationId),
       "structured host liveness evidence is unavailable",
     );
+  }
+
+  /** A blocked control may produce no journal or host event of its own. Keep
+      one bounded retry alive so a later pass observes its settlement deadline;
+      a control settled in this pass never reaches this helper. */
+  private scheduleControlSettlementCheck(receipt: StructuredOperationStatus | null): void {
+    if (controlSettlementDeadlineAt(receipt) !== null) this.retrySoon();
   }
 
   /**
