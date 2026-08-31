@@ -95,7 +95,7 @@ test("legacy transport with a failed probe, live recorded host, and running turn
     activeTurnRef: null,
     pendingAttention: [],
     activeFlags: [],
-    account: "default",
+    account: null,
   }), { onStateChange: () => () => {} });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
 
