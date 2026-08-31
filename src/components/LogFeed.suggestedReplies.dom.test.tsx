@@ -29,10 +29,15 @@ const dom = new HappyWindow({ width: 1280, height: 800 });
   dispatchEvent: () => false,
 });
 
+const resizeCallbacks = new Set<ResizeObserverCallback>();
+
 class TestResizeObserver {
+  constructor(private readonly callback: ResizeObserverCallback) {
+    resizeCallbacks.add(callback);
+  }
   observe() {}
   unobserve() {}
-  disconnect() {}
+  disconnect() { resizeCallbacks.delete(this.callback); }
 }
 
 Object.assign(globalThis, {
@@ -195,19 +200,23 @@ function render(
 }
 
 function setScrollerGeometry(element: HTMLElement, height: number, viewport: number, initialTop: number) {
+  let scrollHeight = height;
   let top = initialTop;
   Object.defineProperties(element, {
-    scrollHeight: { configurable: true, get: () => height },
+    scrollHeight: { configurable: true, get: () => scrollHeight },
     clientHeight: { configurable: true, get: () => viewport },
     scrollTop: {
       configurable: true,
       get: () => top,
       set: (value: number) => {
-        top = Math.max(0, Math.min(Number(value), height - viewport));
+        top = Math.max(0, Math.min(Number(value), scrollHeight - viewport));
       },
     },
   });
-  return { setTop: (value: number) => { element.scrollTop = value; } };
+  return {
+    setHeight: (value: number) => { scrollHeight = value; },
+    setTop: (value: number) => { element.scrollTop = value; },
+  };
 }
 
 async function settle(host: HTMLElement, selector: string, timeoutMs = 4_000): Promise<void> {
@@ -268,7 +277,7 @@ test("a floating pill row with no vertical range forwards vertical wheel movemen
   expect(scroller.scrollTop).toBe(480);
 });
 
-test("a user wheel during the glue window releases the scroll magnet on the first gesture", () => {
+test("an upward wheel survives a concurrent glue and releases the scroll magnet on the first gesture", () => {
   const originalNow = Date.now;
   const fixedNow = originalNow();
   Date.now = () => fixedNow;
@@ -280,11 +289,14 @@ test("a user wheel during the glue window releases the scroll magnet on the firs
 
     flushSync(() => {
       scroller.dispatchEvent(new dom.WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: -20 }) as unknown as Event);
-      geometry.setTop(780);
+      geometry.setHeight(1_100);
+      for (const callback of resizeCallbacks) callback([], {} as ResizeObserver);
+      scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
+      geometry.setTop(880);
       scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event);
     });
 
-    expect(scroller.scrollTop).toBe(780);
+    expect(scroller.scrollTop).toBe(880);
     expect(followChanges).toEqual([false]);
   } finally {
     Date.now = originalNow;

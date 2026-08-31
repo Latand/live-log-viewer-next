@@ -73,7 +73,7 @@ const GLUE_SETTLE_MS = 300;
 
 type ScrollCause =
   | { kind: "programmatic" }
-  | { kind: "user"; scrollTop: number; direction: -1 | 1 | null };
+  | { kind: "user"; fromBottom: number; direction: -1 | 1 | null };
 
 /* Scroll state per stable conversation, surviving pane remounts and native
    generation changes during account migration. */
@@ -120,6 +120,10 @@ function canScrollVertically(element: HTMLElement, deltaY: number): boolean {
   if (deltaY < 0) return element.scrollTop > 0;
   if (deltaY > 0) return element.scrollTop + element.clientHeight < element.scrollHeight;
   return false;
+}
+
+function distanceFromBottom(element: HTMLElement): number {
+  return Math.max(0, element.scrollHeight - element.clientHeight - element.scrollTop);
 }
 
 /** Wall-clock read hoisted out of the component so the React Compiler's purity
@@ -282,14 +286,20 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     }
   };
 
+  const markProgrammaticScroll = () => {
+    if (scrollCauseRef.current?.kind !== "user") {
+      scrollCauseRef.current = { kind: "programmatic" };
+    }
+    glueAtRef.current = nowMs();
+  };
+
   /* Programmatic glue: the scroll event it triggers must never read as the
      user releasing the magnet, so the moment is stamped and the handler
      treats near-in-time off-bottom positions as layout still settling. */
   const glue = () => {
     const el = scroller.current;
     if (!el) return;
-    scrollCauseRef.current = { kind: "programmatic" };
-    glueAtRef.current = nowMs();
+    markProgrammaticScroll();
     el.scrollTop = el.scrollHeight;
   };
 
@@ -309,16 +319,14 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       const row = rowForAnchor(el, anchor.key);
       if (row) {
         const currentOffset = row.getBoundingClientRect().top - el.getBoundingClientRect().top;
-        scrollCauseRef.current = { kind: "programmatic" };
-        glueAtRef.current = nowMs();
+        markProgrammaticScroll();
         el.scrollTop += currentOffset - anchor.offset;
         pending.applied = true;
         return true;
       }
     }
     const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
-    scrollCauseRef.current = { kind: "programmatic" };
-    glueAtRef.current = nowMs();
+    markProgrammaticScroll();
     el.scrollTop = Math.max(0, maxScroll - pending.fromBottom);
     if (maxScroll < pending.fromBottom) return false;
     pending.applied = true;
@@ -696,7 +704,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     if (!el) return;
     scrollCauseRef.current = {
       kind: "user",
-      scrollTop: el.scrollTop,
+      fromBottom: distanceFromBottom(el),
       direction: direction === null || direction === 0 ? null : direction < 0 ? -1 : 1,
     };
   };
@@ -798,14 +806,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
         }}
         onScroll={(event) => {
           const el = event.currentTarget;
+          const fromBottom = distanceFromBottom(el);
+          const atBottom = fromBottom <= 50;
           const cause = scrollCauseRef.current;
-          const userDelta = cause?.kind === "user" ? el.scrollTop - cause.scrollTop : 0;
+          const userDelta = cause?.kind === "user" ? fromBottom - cause.fromBottom : 0;
           const userInitiated = cause?.kind === "user"
             && userDelta !== 0
-            && (cause.direction === null || Math.sign(userDelta) === cause.direction);
-          const userReleasedMagnet = userInitiated && userDelta < 0;
-          scrollCauseRef.current = null;
-          const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 50;
+            && (cause.direction === null || Math.sign(userDelta) === -cause.direction);
+          const userReleasedMagnet = userInitiated && userDelta > 0;
+          /* A concurrent glue can emit its own scroll at the bottom before the
+             wheel's upward scroll. Keep a zero-movement user tag for that next
+             event; an opposite movement proves the tag did not cause it. */
+          if (cause?.kind !== "user" || userDelta !== 0) scrollCauseRef.current = null;
           const settling = nowMs() - glueAtRef.current < GLUE_SETTLE_MS;
           if (!settling || userInitiated) pendingRestoreRef.current = null;
           if (atBottom && !magnetRef.current && !userReleasedMagnet) setMagnet(true, true);
@@ -820,7 +832,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
           if (memoryKey && file && (!settling || userInitiated)) {
             rememberScroll(memoryKey, {
               magnet: magnetRef.current,
-              fromBottom: Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop),
+              fromBottom,
               anchor: magnetRef.current ? null : viewportAnchor(el, tailPath ?? file.path),
             });
           }
