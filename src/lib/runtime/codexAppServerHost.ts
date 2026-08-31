@@ -486,12 +486,31 @@ const ROLLOUT_TERMINAL_TURN_STATUS: Record<string, string> = {
     session store file is the one version-independent source of persisted
     turns (#1332). Items are normalized to the wire shape the replay and
     confirmation consumers expect (`clientId`, `userMessage`). */
+/* The fallback runs inside delivery-confirmation and materialization POLL
+   loops, so an uncached implementation re-reads and re-parses megabytes per
+   tick across every active lane — enough to storm the viewer process
+   (observed 2026-08-31: 380% CPU, data routes timing out). One entry per
+   rollout, invalidated by size+mtime, bounds that to one parse per change. */
+const ROLLOUT_TURNS_CACHE_LIMIT = 32;
+const rolloutTurnsCache = new Map<string, { size: number; mtimeMs: number; turns: JsonObject[] }>();
+
 export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonObject[] {
   if (!pathname) return [];
   let raw: string;
+  let statSize = 0;
+  let statMtimeMs = 0;
   try {
     const stat = fs.statSync(pathname);
+    statSize = stat.size;
+    statMtimeMs = stat.mtimeMs;
     if (!stat.isFile()) return [];
+    const cached = rolloutTurnsCache.get(pathname);
+    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+      /* Refresh recency so hot rollouts survive the LRU trim. */
+      rolloutTurnsCache.delete(pathname);
+      rolloutTurnsCache.set(pathname, cached);
+      return [...cached.turns];
+    }
     if (stat.size > ROLLOUT_FALLBACK_READ_BYTES) {
       const descriptor = fs.openSync(pathname, "r");
       try {
@@ -544,10 +563,17 @@ export function rolloutTurnsFromDisk(pathname: string | null | undefined): JsonO
       ...(clientId ? { clientId } : {}),
     });
   }
-  return order.map((id) => {
+  const result = order.map((id) => {
     const turn = turns.get(id)!;
     return { id: turn.id, status: turn.status ?? "inProgress", items: turn.items } as JsonObject;
   });
+  rolloutTurnsCache.set(pathname, { size: statSize, mtimeMs: statMtimeMs, turns: result });
+  while (rolloutTurnsCache.size > ROLLOUT_TURNS_CACHE_LIMIT) {
+    const oldest = rolloutTurnsCache.keys().next().value;
+    if (oldest === undefined) break;
+    rolloutTurnsCache.delete(oldest);
+  }
+  return [...result];
 }
 
 function resumedActiveTurnId(value: unknown): string | null {

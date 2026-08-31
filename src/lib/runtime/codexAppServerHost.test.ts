@@ -11,7 +11,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { STRUCTURED_HOST_STAMP_ENV, structuredHostStamp } from "@/lib/scanner/process";
 import { saveTelegramSession, TELEGRAM_CONNECTOR_TOKEN_ENV } from "@/lib/telegram/sessionStore";
 
-import { CodexAppServerHost, redactCodexHostDiagnostic } from "./codexAppServerHost";
+import { CodexAppServerHost, redactCodexHostDiagnostic, rolloutTurnsFromDisk } from "./codexAppServerHost";
 import { encodeCodexStructuredUserText } from "./codexStructuredUserText";
 import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import type { HostState, RuntimeEvent } from "./engineHost";
@@ -1924,6 +1924,26 @@ describe("CodexAppServerHost", () => {
       state: "materialized",
     });
     await host.release();
+  });
+
+  test("rolloutTurnsFromDisk parses once per file change and refreshes on append", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-rollout-cache-"));
+    const rollout = path.join(directory, "cached-thread.jsonl");
+    const record = (turn: string, clientId: string) => `${JSON.stringify({
+      timestamp: "t",
+      type: "event_msg",
+      payload: { type: "item_completed", turn_id: turn, item: { type: "UserMessage", id: clientId, client_id: clientId, content: [] } },
+    })}\n`;
+    fs.writeFileSync(rollout, record("turn-1", "first"));
+    const initial = rolloutTurnsFromDisk(rollout);
+    expect(initial.length).toBe(1);
+    /* A caller mutating its returned page must not poison later reads. */
+    initial.pop();
+    expect(rolloutTurnsFromDisk(rollout).length).toBe(1);
+    fs.appendFileSync(rollout, record("turn-2", "second"));
+    const refreshed = rolloutTurnsFromDisk(rollout);
+    expect(refreshed.length).toBe(2);
+    expect((refreshed[1] as { id?: string }).id).toBe("turn-2");
   });
 
   test("a rollout on disk outranks the engine's not-materialized answer (#1332)", async () => {
