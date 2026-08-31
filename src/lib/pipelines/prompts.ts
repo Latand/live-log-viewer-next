@@ -1,4 +1,5 @@
 import type { EffectivePipelineRole, Pipeline, PipelineStage } from "./types";
+import { pipelineStageSandbox } from "./stageAccess";
 
 function replaceAll(source: string, token: string, value: string): string {
   return source.split(token).join(value);
@@ -20,7 +21,7 @@ export function renderStagePrompt(
       ? `Access: read-only. Inspect and validate freely. You may write only these declared worktree outputs: ${declaredOutputs}. Do not commit, stage, push, edit any other repository path, or mutate production.`
       : "Access: read-only. Inspect and validate freely. Do not edit, stage, commit, push, or otherwise mutate the repository or production."
     : "Access: read-write. Work only inside this pipeline's dedicated worktree and commit-ready scope.";
-  const hostAccess = stage.sandbox === "restricted"
+  const hostAccess = pipelineStageSandbox(stage) === "restricted"
     ? "Host access: restricted. This stage runs inside the engine sandbox."
     : "Host access: full. Network, SSH, GitHub CLI, and the pipeline worktree are available.";
   const roleContext = role.roleId

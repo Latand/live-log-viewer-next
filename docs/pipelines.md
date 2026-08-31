@@ -80,7 +80,7 @@ A review-loop stage attaches the latest passed run session to a regular review F
 
 ## Worktree, lineage, and recovery
 
-Creation provisions a sibling worktree on `pipeline/<task-slug>-<id>`. Passed read-write stages commit pending work. Passed read-only stages may commit only controller-verified declared outputs. Both advance the saved `lastPassedCommit`. Retry closes an embedded flow, runs `git reset --hard <lastPassedCommit>` plus `git clean -fd` inside the pipeline-owned worktree, and appends a fresh attempt.
+Creation provisions a sibling worktree on `pipeline/<task-slug>-<id>`. Passed read-write stages commit pending work. For passed read-only stages, the controller commits only verified declared outputs. Both advance the saved `lastPassedCommit`. Retry closes an embedded flow, runs `git reset --hard <lastPassedCommit>` plus `git clean -fd` inside the pipeline-owned worktree, and appends a fresh attempt.
 
 The stage transcript artifact is the completion authority. When a durable read of the attempt's transcript shows a native terminal turn whose final assistant message ends with a valid fenced verdict, the attempt settles once: the controller records the verdict, commits any pending work, advances `lastPassedCommit` to the actual stage HEAD, and schedules the next stage — even when the runtime session ledger is still reporting the turn as running, the scanner projection has transiently lost the transcript, or the host is already gone. A transcript whose turn is still open is mid-work: its messages are never verdict candidates, so a recovered idle host cannot terminalize the attempt.
 

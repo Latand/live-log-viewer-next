@@ -236,6 +236,7 @@ function isStage(value: unknown): value is PipelineStage {
   )) return false;
   const effective = stage.effectiveRole;
   const referencedRoleId = role === undefined ? null : (role as { roleId: EffectivePipelineRole["roleId"] }).roleId;
+  if (stage.outputs !== undefined && effective.access !== "read-only") return false;
   if (effective.roleId !== referencedRoleId) return false;
   if (stage.kind === "review-loop" && effective.access !== "read-only") return false;
   if (stage.engine !== undefined && stage.engine !== effective.engine) return false;

@@ -1,6 +1,17 @@
 import path from "node:path";
 
 import { MAX_STAGE_OUTPUT_PATH_LENGTH } from "./limits";
+import type { EffectivePipelineRole, PipelineSandbox } from "./types";
+
+/** Resolve the host/tool boundary independently from the stage's repository
+    mutation policy. Requiring both fields at this seam makes that separation
+    explicit: a read-only role still defaults to full host access. */
+export function pipelineStageSandbox(stage: {
+  sandbox?: PipelineSandbox;
+  effectiveRole: Pick<EffectivePipelineRole, "access">;
+}): PipelineSandbox {
+  return stage.sandbox ?? "full";
+}
 
 /** One exact repository-relative Git path. Globs and traversal are excluded so
     a read-only stage cannot widen its declared-output exception. */

@@ -681,10 +681,10 @@ test("create_pipeline admits the stage shapes the engine accepts", () => {
     { id: "build", kind: "run", "prompt": "Implement." },
     { id: "build", kind: "run", "prompt": "Implement.", next: null, onFail: null, role: { roleId: "builder" } },
     {
-      id: "review-1", kind: "review-loop", "prompt": "Review.", next: null,
-      role: { roleId: "reviewer", params: { diffSource: "branch", rounds: 3 } },
-      engine: "codex", model: null, effort: null, access: "read-only",
-      sandbox: "restricted", outputs: ["reports/review.md"],
+      id: "audit", kind: "run", "prompt": "Audit.", next: null,
+      role: { roleId: "architect", params: { mode: "architecture-audit" } },
+      access: "read-only",
+      sandbox: "restricted", outputs: ["reports/audit.md"],
     },
     { id: "build", kind: "run", "prompt": "Implement.", next: "review-1", onFail: { to: "build", maxRounds: 3 }, engine: "claude", model: "opus", effort: "high" },
     /* The engine trims before it checks, so padding it accepts must not be

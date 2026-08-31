@@ -51,7 +51,7 @@ import {
 import { pipelineRepoPreflightError, pipelineRepoPreflightStatus, preflightPipelineRepo } from "./preflight";
 import { renderStagePrompt } from "./prompts";
 import { PIPELINE_ROLE_IDS, pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
-import { normalizeStageOutputPath } from "./stageAccess";
+import { normalizeStageOutputPath, pipelineStageSandbox } from "./stageAccess";
 import { pipelineValidationError, type PipelineValidationViolation } from "./validation";
 import { buildPipeline, findPipelineRecord, isEffectiveRole, loadPipelines, pipelineGraphError, pipelineIdentity, pipelineTaskLinkError, PipelineStoreError, withPipelineControllerMutation, withPipelineMutation } from "./store";
 import { ensurePipelineForTask, isTaskSpawnPipelineParams, type TaskPipelineSpawnParams, type TaskSpawnPipelineParams } from "./taskBinding";
@@ -1817,7 +1817,7 @@ async function tickRunStage(
       const priorAttempt = runFor(pipeline, stage.id)?.attempts.filter((candidate) => !candidate.historical).at(-2) ?? null;
       const spawnInput: Parameters<PipelinePorts["spawnAgent"]>[0] = {
         role: attempt.effectiveRole,
-        sandbox: stage.sandbox ?? "full",
+        sandbox: pipelineStageSandbox(stage),
         cwd: pipeline.worktreeDir,
         project: pipeline.project,
         requestedAccountId: stage.account ?? null,
@@ -2298,7 +2298,7 @@ async function tickReviewStage(
       spec: pipeline.spec ?? pipeline.task,
       mode: "auto",
       reviewerMode: "headless",
-      reviewerSandbox: stage.sandbox ?? "full",
+      reviewerSandbox: pipelineStageSandbox(stage),
       roundLimit: 5,
     }, entries);
     if (!created.flow) {
@@ -3165,6 +3165,14 @@ function normalizeStages(
         field: at(field),
         message: "error" in resolved && resolved.error ? resolved.error : "invalid stage role",
         expected: field === "model" ? "model id from the selected engine's curated catalog" : STAGE_RUNTIME_SHAPE,
+      });
+      continue;
+    }
+    if (outputs !== undefined && resolved.role.access !== "read-only") {
+      violations.push({
+        field: at("outputs"),
+        message: `stage ${id} outputs require read-only access`,
+        expected: "outputs belong to read-only run stages",
       });
       continue;
     }

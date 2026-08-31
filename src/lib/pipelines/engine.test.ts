@@ -622,6 +622,24 @@ test("declared outputs reject traversal, Git metadata, and duplicate normalized 
     field: "stages[1].outputs",
     message: "review-loop stage review cannot declare worktree outputs",
   }));
+
+  const readWriteOutput = await createPipelineFromRequest({
+    task: "Build",
+    repoDir: "/repo",
+    src: "/codex/creator.jsonl",
+    stages: [{
+      id: "build",
+      kind: "run",
+      access: "read-write",
+      outputs: ["reports/build.md"],
+      "prompt": "Build",
+      next: null,
+    }],
+  }, h.ports);
+  expect(readWriteOutput.violations).toContainEqual(expect.objectContaining({
+    field: "stages[0].outputs",
+    message: "stage build outputs require read-only access",
+  }));
 });
 
 test("review-loop sandbox restriction reaches its reviewer flow", async () => {
