@@ -29,7 +29,10 @@ export function systemBootEpoch(): string | null {
   if (process.platform === "linux") {
     try {
       const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-      cachedBootEpoch = bootId ? `linux:${bootId}` : null;
+      const pidNamespace = fs.readlinkSync("/proc/self/ns/pid");
+      cachedBootEpoch = bootId && pidNamespace
+        ? `linux:${bootId}:pidns:${pidNamespace}`
+        : null;
     } catch {
       cachedBootEpoch = null;
     }
@@ -101,11 +104,11 @@ export function processIdentityMayOwn(
   return processIdentityStatus(identity, probe) !== "dead";
 }
 
-export function processIdentityVerifiedAlive(
+export function processIdentityProvenDead(
   identity: Readonly<ProcessIdentity>,
   probe: ProcessIdentityProbe = defaultProbe,
 ): boolean {
-  return processIdentityStatus(identity, probe) === "alive";
+  return processIdentityStatus(identity, probe) === "dead";
 }
 
 /** CAS comparison for a recorded process. A boot-aware expectation also pins

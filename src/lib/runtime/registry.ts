@@ -10,8 +10,8 @@ import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import {
   captureProcessIdentity,
   processIdentityMayOwn,
+  processIdentityProvenDead,
   processIdentityStatus,
-  processIdentityVerifiedAlive,
 } from "@/lib/processIdentity";
 
 import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppServerHost";
@@ -351,10 +351,10 @@ export function reconcileDeadStructuredRegistryHosts(
 
 async function waitForVerifiedProcessExit(processIdentity: ProcessIdentity, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  while (processIdentityVerifiedAlive(processIdentity) && Date.now() < deadline) {
+  while (!processIdentityProvenDead(processIdentity) && Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
-  return !processIdentityVerifiedAlive(processIdentity);
+  return processIdentityProvenDead(processIdentity);
 }
 
 /** Ends one process the registry recorded, fenced on its full identity. A

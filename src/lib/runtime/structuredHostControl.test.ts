@@ -263,16 +263,14 @@ test("a runtime-confirmed exit receives no fallback group signal", async () => {
   expect(signals).toEqual([]);
 });
 
-test("a replacement host holding the seat is left to the runtime, and the row is retired on the killed pid", async () => {
+test("a disowned structured session with a live recorded process falls back to its process group (#1324)", async () => {
   const tree = spawnFixtureTree();
   const retired: Array<{ key: SessionKey; expected: ProcessIdentity }> = [];
 
   const outcome = await terminateStructuredHostTree(
     ref({ pid: tree.pid, startIdentity: tree.startIdentity, sessionId: CLAUDE_SESSION, owned: true }),
     {
-      /* A successor claimed this session key since the snapshot: the runtime
-         refuses to end a host that is not the one the caller authorized, so
-         only the stale tree is taken down, by group. */
+      /* No current runtime host matches the recorded process. */
       terminateOwnedHost: async () => false,
       retireRegistryEntry: (key, expected) => { retired.push({ key, expected }); },
     },

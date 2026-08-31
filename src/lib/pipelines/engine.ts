@@ -1027,7 +1027,7 @@ async function unregisteredStageHostDeathEvidence(
   const evidence = durable === undefined
     ? await ports.durableTurnEvidence(attempt.effectiveRole.engine, target.agentPath)
     : durable;
-  return evidence?.recordCount === 1 && evidence.message === null
+  return evidence?.launchOnly === true && evidence.message === null
     ? UNREGISTERED_STAGE_HOST_DIED_REASON
     : null;
 }
@@ -1922,11 +1922,10 @@ async function tickRunStage(
     && (spawnReceipt.state === "failed" || spawnReceipt.state === "conflicted")
     ? spawnReceipt.error ?? `stage spawn cannot recover from receipt state ${spawnReceipt.state}`
     : null;
-  /* A terminal spawn receipt is durable evidence; only an affirmatively
-     active agent outranks it. A runtime-host outage answers null, and that
-     unknown must not hide the real drain cause behind a later
-     transcript-unreadable park (#1314). */
-  if (!attempt.paneId && attempt.conversationId && structuredActive !== true && terminalSpawnFailure) {
+  /* A terminal spawn receipt is durable launch evidence. Runtime liveness can
+     lag behind receipt settlement or fail to answer, so it has no authority to
+     hide the recorded drain cause behind a later transcript park (#1326). */
+  if (terminalSpawnFailure) {
     park(pipeline, terminalSpawnFailure, attempt);
     return;
   }
@@ -1964,14 +1963,16 @@ async function tickRunStage(
      scan projection transiently lost the transcript, or the host is already
      gone. A busy turn is mid-work: its messages are never verdict candidates. */
   const durable = await ports.durableTurnEvidence(attempt.effectiveRole.engine, attempt.agentPath);
-  const unregisteredHostDeath = await unregisteredStageHostDeathEvidence(attempt, {
-    stageId: stage.id,
-    attempt: attempt.n,
-    conversationId: attempt.conversationId,
-    agentPath: attempt.agentPath,
-    paneId: attempt.paneId,
-    ...(attempt.historical ? { adopted: true as const } : {}),
-  }, ports, durable);
+  const unregisteredHostDeath = structuredActive === true
+    ? null
+    : await unregisteredStageHostDeathEvidence(attempt, {
+      stageId: stage.id,
+      attempt: attempt.n,
+      conversationId: attempt.conversationId,
+      agentPath: attempt.agentPath,
+      paneId: attempt.paneId,
+      ...(attempt.historical ? { adopted: true as const } : {}),
+    }, ports, durable);
   if (unregisteredHostDeath && canSpendRecoveryCheck()) {
     recordVerdictRecoveryMiss(pipeline, attempt, ports, unregisteredHostDeath, null);
     return;

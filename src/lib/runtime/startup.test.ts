@@ -1055,6 +1055,7 @@ function addStructuredRestartConversation(
     status: "live" | "idle" | "dead" | "unhosted";
     turn: "busy" | "terminal" | "unknown";
     activeTurnRef?: string | null;
+    endpoint?: string;
     transcriptRecords?: Record<string, unknown>[];
     transcriptSuffix?: string;
     alignFirstRecordToTailBoundary?: boolean;
@@ -1090,7 +1091,7 @@ function addStructuredRestartConversation(
     host: null,
     structuredHost: {
       kind: engine === "codex" ? "codex-app-server" : "claude-broker",
-      endpoint: "stdio:retained",
+      endpoint: input.endpoint ?? "stdio:retained",
       process: null,
       eventCursor: 8,
       protocolVersion: "test",
@@ -1296,8 +1297,9 @@ test("startup durably drains held work addressed to a dead superseded session", 
   const client = runtimeClient(journal);
   const predecessor = addStructuredRestartConversation(registry, directory, {
     sessionId: "aaaaaaaa-4444-0444-0444-aaaaaaaaaaaa",
-    status: "dead",
+    status: "unhosted",
     turn: "terminal",
+    endpoint: "stdio:released",
   }).conversation;
   const successor = addStructuredRestartConversation(registry, directory, {
     sessionId: "aaaaaaaa-5555-0555-0555-aaaaaaaaaaaa",
@@ -1316,6 +1318,10 @@ test("startup durably drains held work addressed to a dead superseded session", 
   registry.recordSupersedence(predecessor.id, successor.id, "stage-retry");
   const beforeStartup = registry.snapshot();
   expect(beforeStartup.heldDeliveries[delivery.id]).toMatchObject({ state: "held", error: null });
+  expect(beforeStartup.entries["codex:aaaaaaaa-4444-0444-0444-aaaaaaaaaaaa"]).toMatchObject({
+    status: "unhosted",
+    structuredHost: { endpoint: "stdio:released", process: null },
+  });
 
   const dependencies: StructuredStartupDependencies = {
     registry,

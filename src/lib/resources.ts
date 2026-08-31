@@ -1343,7 +1343,13 @@ async function collectResourcesInWorker(
     if (inputTimer) clearTimeout(inputTimer);
   });
   const hosts = await hostsTask;
-  const request = JSON.stringify({ type: "collect", fresh, files, hosts }) + "\n";
+  const request = JSON.stringify({
+    type: "collect",
+    fresh,
+    files,
+    identityEpoch: systemBootEpoch(),
+    hosts,
+  }) + "\n";
   const outputMaxBytes = limits.outputMaxBytes ?? RESOURCE_WORKER_OUTPUT_MAX_BYTES;
   if (Buffer.byteLength(request) > RESOURCE_WORKER_OUTPUT_MAX_BYTES) {
     throw new ResourceCollectorFailureError(

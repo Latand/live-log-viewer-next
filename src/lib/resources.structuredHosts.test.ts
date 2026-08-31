@@ -389,17 +389,19 @@ test("the collector worker turns a host record into a listed row with kill autho
   const pid = child.pid;
   if (pid === undefined) throw new Error("fixture tree did not start");
   const startIdentity = procBackend.processIdentity(pid);
+  const identityEpoch = "linux:synthetic-boot:pidns:parent";
   const request = JSON.stringify({
     type: "collect",
     fresh: false,
     files: [],
+    identityEpoch,
     hosts: [{
       id: "claude:worker-host",
       engine: "claude",
       sessionId: "worker-host",
       pid,
       startIdentity,
-      bootEpoch: systemBootEpoch(),
+      bootEpoch: identityEpoch,
       cwd: workerHome,
       path: null,
       conversationId: null,
@@ -457,7 +459,7 @@ test("the collector worker turns a host record into a listed row with kill autho
     kind: "structured",
     pid,
     startIdentity,
-    bootEpoch: systemBootEpoch(),
+    bootEpoch: identityEpoch,
     engine: "claude",
     sessionId: "worker-host",
     owned: false,

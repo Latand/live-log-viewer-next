@@ -2281,6 +2281,40 @@ test("a runtime-host outage does not hide a terminal spawn receipt's drain cause
   expect(parked.runs[0]!.attempts[0]!.error).toBe(reason);
 });
 
+test("a terminal spawn receipt parks while runtime liveness still reports active (#1326)", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  h.ports.spawnAgent = async (_input, onReserved) => {
+    onReserved({ launchId: "launch-drain-stale-live", conversationId: "conversation_drain_stale_live" });
+    return {
+      launchId: "launch-drain-stale-live",
+      conversationId: "conversation_drain_stale_live",
+      sessionId: "session-drain-stale-live",
+      "transcript": "/codex/unwritten-stale-live-stage.jsonl",
+      paneId: null,
+    };
+  };
+  await tickPipelines([], h.ports);
+  h.setConversationActive(true);
+  const reason = "first message never drained: runtime host request timed out";
+  h.ports.spawnReceipt = () => ({
+    state: "failed",
+    launchId: "launch-drain-stale-live",
+    conversationId: "conversation_drain_stale_live",
+    sessionId: "session-drain-stale-live",
+    "transcript": "/codex/unwritten-stale-live-stage.jsonl",
+    paneId: null,
+    error: reason,
+  });
+
+  await tickPipelines([], h.ports);
+
+  const parked = loadPipelines()[0]!;
+  expect(parked).toMatchObject({ state: "needs_decision", stateDetail: reason });
+  expect(parked.runs[0]!.attempts[0]!.error).toBe(reason);
+});
+
 test("an unregistered stage with only its launch record parks and the lane closes (#1325)", async () => {
   const h = harness();
   const pipeline = await runningStructuredStage(h);
@@ -2289,7 +2323,7 @@ test("an unregistered stage with only its launch record parks and the lane close
   h.durableTurns.set("/codex/stage-1.jsonl", {
     turn: "busy",
     message: null,
-    recordCount: 1,
+    launchOnly: true,
   });
 
   for (let check = 0; check < 3; check += 1) {
@@ -2334,7 +2368,29 @@ test("an unregistered stage with agent transcript progress keeps running (#1325)
   h.durableTurns.set("/codex/stage-1.jsonl", {
     turn: "busy",
     message: { text: "working through the stage", ts: 5_000_000 },
-    recordCount: 2,
+    launchOnly: false,
+  });
+
+  for (let check = 0; check < 4; check += 1) {
+    if (check > 0) h.advanceWallClock(30_000);
+    await tickPipelines([], h.ports);
+  }
+
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(current.runs[0]!.attempts[0]).toMatchObject({ state: "running", completedAt: null });
+  expect(current.runs[0]!.attempts[0]!.verdictRecovery).toBeUndefined();
+});
+
+test("an unregistered launch-only stage stays running with affirmative runtime activity (#1325)", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(true);
+  h.ports.conversationRegistered = () => false;
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "unknown",
+    message: null,
+    launchOnly: true,
   });
 
   for (let check = 0; check < 4; check += 1) {
