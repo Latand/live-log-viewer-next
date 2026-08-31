@@ -1463,6 +1463,361 @@ describe("Codex payload audit fixture", () => {
   });
 });
 
+describe("Codex 0.151 thread items", () => {
+  const fixture = fixtureLines("codex-thread-items-0.151.jsonl");
+
+  test("renders a PascalCase item_completed FileChange as the existing file-edit card", () => {
+    const item = buildFeed(codexFile, [fixture[0]], false, "").items[0];
+
+    expect(item).toMatchObject({
+      kind: "tool",
+      id: "file-change-pascal",
+      family: "edit",
+      status: "ok",
+      body: {
+        type: "diff",
+        files: [{
+          path: "src/widget.ts",
+          op: "update",
+          added: 1,
+          removed: 1,
+        }],
+      },
+    });
+  });
+
+  test("renders a camelCase paginated fileChange as the same file-edit card", () => {
+    const item = buildFeed(codexFile, [fixture[1]], false, "").items[0];
+
+    expect(item).toMatchObject({
+      kind: "tool",
+      id: "file-change-camel",
+      family: "edit",
+      status: "ok",
+      body: {
+        type: "diff",
+        files: [{
+          path: "src/new-widget.ts",
+          op: "add",
+          added: 1,
+          removed: 0,
+        }, {
+          path: "src/empty-widget.ts",
+          op: "add",
+          added: 0,
+          removed: 0,
+          hunks: [],
+        }],
+      },
+    });
+  });
+
+  test("renders real-shaped PascalCase add and delete content as signed diff lines", () => {
+    const lines = [
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-31T10:00:20Z",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "FileChange",
+            id: "file-add-pascal",
+            status: "Completed",
+            changes: {
+              "src/new-widget.ts": {
+                type: "add",
+                content: "export const ready = true;\nexport const count = 1;",
+              },
+            },
+          },
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-31T10:00:21Z",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "FileChange",
+            id: "file-delete-pascal",
+            status: "Completed",
+            changes: {
+              "src/retired-widget.ts": {
+                type: "delete",
+                content: "export const retired = true;\nexport const legacy = true;",
+              },
+            },
+          },
+        },
+      }),
+    ];
+    const items = buildFeed(codexFile, lines, false, "").items;
+    const tools = items.flatMap((item) => item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : []);
+
+    expect(tools).toHaveLength(2);
+    expect(tools[0]).toMatchObject({
+      kind: "tool",
+      id: "file-add-pascal",
+      family: "edit",
+      body: {
+        type: "diff",
+        files: [{
+          path: "src/new-widget.ts",
+          op: "add",
+          added: 2,
+          removed: 0,
+          hunks: [{
+            lines: [
+              { t: "+", text: "export const ready = true;" },
+              { t: "+", text: "export const count = 1;" },
+            ],
+          }],
+        }],
+      },
+    });
+    expect(tools[1]).toMatchObject({
+      kind: "tool",
+      id: "file-delete-pascal",
+      family: "edit",
+      body: {
+        type: "diff",
+        files: [{
+          path: "src/retired-widget.ts",
+          op: "delete",
+          added: 0,
+          removed: 2,
+          hunks: [{
+            lines: [
+              { t: "-", text: "export const retired = true;" },
+              { t: "-", text: "export const legacy = true;" },
+            ],
+          }],
+        }],
+      },
+    });
+  });
+
+  test("keeps PascalCase move changes on the diff-backed path", () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-31T10:00:22Z",
+      payload: {
+        type: "item_completed",
+        item: {
+          type: "FileChange",
+          id: "file-move-pascal",
+          status: "Completed",
+          changes: {
+            "src/old-widget.ts": {
+              type: "update",
+              move_path: "src/new-widget.ts",
+              unified_diff: "@@ -1 +1 @@\n-old\n+new",
+            },
+          },
+        },
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+
+    expect(item).toMatchObject({
+      kind: "tool",
+      id: "file-move-pascal",
+      body: {
+        type: "diff",
+        files: [{ path: "src/new-widget.ts", op: "move", added: 1, removed: 1 }],
+      },
+    });
+  });
+
+  test("renders commandExecution as the existing shell command card", () => {
+    const item = buildFeed(codexFile, [fixture[2]], false, "").items[0];
+
+    expect(item).toMatchObject({
+      kind: "tool",
+      id: "command-camel",
+      family: "shell",
+      command: "bun test src/widget.test.ts",
+      cwd: "repo",
+      status: "ok",
+      outputPreview: "3 tests passed",
+      exitCode: 0,
+      durationMs: 1250,
+    });
+  });
+
+  test("coalesces real-shaped PascalCase command lifecycle records into one shell card", () => {
+    const lines = [
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-31T10:00:20Z",
+        payload: {
+          type: "item_started",
+          item: {
+            type: "CommandExecution",
+            id: "command-pascal",
+            command: ["bun", "test", "src/widget.test.ts"],
+            cwd: "repo",
+            status: "InProgress",
+          },
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-31T10:00:21Z",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id: "command-pascal",
+            command: ["bun", "test", "src/widget.test.ts"],
+            cwd: "repo",
+            status: "Completed",
+            aggregated_output: "3 tests passed",
+            exit_code: 0,
+            duration: { secs: 1, nanos: 250_000_000 },
+          },
+        },
+      }),
+    ];
+    const items = buildFeed(codexFile, lines, false, "").items;
+    const tools = items.flatMap((item) => item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : []);
+
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({
+      kind: "tool",
+      id: "command-pascal",
+      family: "shell",
+      command: "bun test src/widget.test.ts",
+      cwd: "repo",
+      status: "ok",
+      outputPreview: "3 tests passed",
+      exitCode: 0,
+      durationMs: 1250,
+    });
+  });
+
+  test("keeps an in-progress paginated command in the running state", () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-08-31T10:00:20Z",
+      payload: { type: "commandExecution", id: "command-running", command: "bun test", cwd: "repo", status: "inProgress", commandActions: [] },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+
+    expect(item).toMatchObject({ kind: "tool", id: "command-running", status: "run", statusLabel: "executing…" });
+  });
+
+  test("marks a completed MCP item with an error payload as failed", () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-08-31T10:00:21Z",
+      payload: {
+        type: "mcpToolCall",
+        id: "mcp-failed",
+        server: "sample",
+        tool: "lookup",
+        arguments: { query: "widget" },
+        status: "completed",
+        error: { message: "Widget unavailable" },
+        result: null,
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+
+    expect(item).toMatchObject({ kind: "tool", id: "mcp-failed", status: "err", outputPreview: expect.stringContaining("Widget unavailable") });
+  });
+
+  test("marks completed image generation with a failure payload as failed", () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      timestamp: "2026-08-31T10:00:22Z",
+      payload: {
+        type: "imageGeneration",
+        id: "image-failed",
+        status: "completed",
+        result: "",
+        revisedPrompt: "A compact widget",
+        savedPath: null,
+        transparentBackground: false,
+        failure: "Content policy",
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+
+    expect(item).toMatchObject({ kind: "tool", id: "image-failed", status: "err", outputPreview: "Content policy" });
+  });
+
+  test("maps every remaining 0.151 ThreadItem kind onto a semantic feed card", () => {
+    const expected: Item["kind"][] = [
+      "user",
+      "sysmsg",
+      "prose",
+      "tool",
+      "note",
+      "think",
+      "tool",
+      "tool",
+      "tool",
+      "note",
+      "tool",
+      "tool",
+      "note",
+      "tool",
+      "note",
+      "note",
+      "compact",
+    ];
+
+    expect(fixture.slice(3).map((line) => buildFeed(codexFile, [line], false, "").items[0]?.kind)).toEqual(expected);
+  });
+
+  test("summarizes an invented future item in one bounded fallback line", () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      timestamp: "2026-08-31T10:01:00Z",
+      payload: {
+        type: "item_completed",
+        item: { type: "FutureWidget", detail: "A future widget event " + "x".repeat(500) },
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0];
+    if (item?.kind !== "record") throw new Error("expected future-item fallback");
+
+    expect(item.recordType).toBe("FutureWidget");
+    expect(item.summary.startsWith("A future widget event ")).toBe(true);
+    expect(item.summary).toHaveLength(160);
+    expect(item.summary.endsWith("…")).toBe(true);
+  });
+
+  test("coalesces item_started and item_completed siblings onto one final card", () => {
+    const lines = [
+      JSON.stringify({ type: "event_msg", timestamp: "t1", payload: { type: "item_started", item: { type: "AgentMessage", id: "lifecycle-message", text: "Working…" } } }),
+      JSON.stringify({ type: "event_msg", timestamp: "t2", payload: { type: "item_completed", item: { type: "AgentMessage", id: "lifecycle-message", text: "Done." } } }),
+      JSON.stringify({ type: "event_msg", timestamp: "t3", payload: { type: "item_started", item: { type: "CommandExecution", id: "lifecycle-command", command: "bun test", cwd: "repo", status: "InProgress" } } }),
+      JSON.stringify({ type: "event_msg", timestamp: "t4", payload: { type: "item_completed", item: { type: "CommandExecution", id: "lifecycle-command", command: "bun test", cwd: "repo", status: "Completed", aggregatedOutput: "ok", exitCode: 0 } } }),
+    ];
+    const items = buildFeed(codexFile, lines, false, "").items;
+    const prose = items.filter((item) => item.kind === "prose");
+    const tools = items.flatMap((item) => item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : []);
+
+    expect(prose).toHaveLength(1);
+    expect(prose[0]).toMatchObject({ kind: "prose", text: "Done.", ts: "t2" });
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({ id: "lifecycle-command", status: "ok", outputPreview: "ok" });
+  });
+
+  test("keeps command and file-change delta siblings off the raw-record path", () => {
+    const lines = [
+      JSON.stringify({ type: "event_msg", timestamp: "t1", payload: { type: "command_execution_output_delta", item_id: "command-item", delta: "partial output" } }),
+      JSON.stringify({ type: "event_msg", timestamp: "t2", payload: { type: "file_change_patch_updated", item_id: "file-item", changes: [] } }),
+    ];
+    const feed = buildFeed(codexFile, lines, false, "");
+
+    expect(feed.items.some((item) => item.kind === "record" || item.kind === "raw")).toBe(false);
+    expect(feed.hiddenServiceCount).toBe(2);
+  });
+});
+
 describe("Codex orchestration over a real rollout fixture (issue #83)", () => {
   const fixture = readFileSync(join(import.meta.dir, "__fixtures__", "codex-orchestration.jsonl"), "utf8").split("\n").filter(Boolean);
   /* Consecutive tool events fold into cmd-groups (§3.4), so read every native

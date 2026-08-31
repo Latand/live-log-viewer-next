@@ -217,6 +217,7 @@ test("a fallback transcript record renders a typed chip with bounded collapsible
         kind: "record",
         ts: "2026-07-14T10:00:00Z",
         recordType: "future_payload",
+        summary: "A future payload summary",
         body: '{\n  "detail": "synthetic"\n}',
         truncated: true,
       }}
@@ -224,6 +225,7 @@ test("a fallback transcript record renders a typed chip with bounded collapsible
   );
   expect(html).toContain(en("render.transcriptRecord"));
   expect(html).toContain("future_payload");
+  expect(html).toContain("A future payload summary");
   expect(html).toContain("synthetic");
   expect(html).toContain(en("render.truncated"));
   expect(html).toContain("<details");
