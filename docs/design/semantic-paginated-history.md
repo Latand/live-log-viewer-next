@@ -246,7 +246,7 @@ GET /api/history?conversation=...&before=...&limit=150
 The endpoint returns entries in chronological order. This lets the client prepend the returned array directly. The SQL query walks ordinals in descending order to apply the limits, then reverses the chosen rows before serialization.
 
 ```ts
-interface FeedEntrySummary {
+interface FeedEntrySummaryBase {
   id: string;
   anchorKey: string;
   ordinal: number;
@@ -258,10 +258,21 @@ interface FeedEntrySummary {
   timestamp: string | null;
   preview: string;
   bodySize: number;
-  bodyRef: string | null;
   byteRange: { start: number; end: number };
   summary: Record<string, unknown>;
 }
+
+type Phase1FeedEntrySummary = FeedEntrySummaryBase & {
+  inlineBody: { contentType: string; text: string } | null;
+  bodyRef: null;
+};
+
+type LazyFeedEntrySummary = FeedEntrySummaryBase & {
+  inlineBody?: never;
+  bodyRef: string | null;
+};
+
+type FeedEntrySummary = Phase1FeedEntrySummary | LazyFeedEntrySummary;
 
 interface SemanticPosition {
   ordinal: number;
@@ -271,6 +282,7 @@ interface SemanticPosition {
 type PageBoundary = SemanticPosition | { endAtByte: number };
 
 interface HistoryPage {
+  bodyMode: "inline" | "on-demand";
   entries: FeedEntrySummary[];
   beforeCursor: string | null;
   hasMore: boolean;
@@ -297,6 +309,10 @@ interface HistoryPage {
   edge: PageEdgeState;
 }
 ```
+
+Phase 1 returns `bodyMode: "inline"`. For every selected row, the route reads its source range and includes the complete redacted logical body in `inlineBody`; cards expand from that field with no second request. `bodyRef` is `null`. Inline body bytes count toward the 64 KiB entries budget. If the first row's complete body exceeds that budget, the single-oversized-row exception returns it alone and advances the cursor, so Phase 1 remains usable at the known cost of one potentially large response.
+
+Phase 2 changes the response version to `bodyMode: "on-demand"`: `inlineBody` disappears, `bodyRef` identifies omitted content, and the body route serves expansion. The semantic row, cursor, ordering, preview, and body-size fields stay unchanged across that transition.
 
 The row and byte limits select the longest contiguous newest-to-oldest consumed prefix. Filtered service rows accumulate in a pending segment. For each visible candidate, the server trials that candidate, constructs every derived page field, and UTF-8 encodes the complete envelope. A fitting trial commits its visible row and the newer pending filtered rows. A trial that exceeds the row, 64 KiB entries, or 80 KiB envelope limit commits the pending filtered segment, then stops with the visible candidate and every older row unconsumed. If the first visible candidate alone exceeds 64 KiB, the server consumes and returns that one row together with any newer filtered segment under the single-oversized-row exception while fixed metadata remains capped. At source start, a trailing filtered-only segment may commit by itself.
 
@@ -385,11 +401,11 @@ When an older page is prepended, the client reconciles the two edge states and t
 | Boundary case | Resolution |
 | --- | --- |
 | A JSONL record crosses indexer read buffers | Keep raw byte carry until a complete newline arrives. Commit no partial record. The live lane owns the unfinished tail. |
-| The bounded tail contains over 150 entries while the newest semantic page is capped at 150 | Commit the caught-up logical fence, render the loaded summaries, and remove every unmatched pre-fence tail row. Older rows return only through `beforeCursor`. |
-| A released viewport anchor falls in an unloaded pre-fence row | Freeze that one row and follow semantic cursors until its twin loads. Replace it under the same presentation key before committing the fence. |
+| The bounded tail contains over 150 entries while the newest semantic page is capped at 150 | Capture every current feed key as bootstrap history, render matched summaries, and remove unmatched bootstrap rows. Older rows return only through `beforeCursor`. |
+| A released viewport anchor belongs to an unmatched bootstrap row | Freeze that one row and follow semantic cursors until ordered reconciliation finds its twin. Replace it under the same presentation key before retiring the bridge. |
 | One source record emits several cards | Assign deterministic `source_part` values and consecutive ordinals. Every card keeps the same source range and a distinct `entry_id`. |
 | A tool call and result fall in different pages | Index the call once at its original ordinal. The result updates that row by `item_id`, extends its source range, settles it, and increments `projectionRevision`. The call's loaded page remains non-cacheable and is conditionally refetched after the newest page observes that revision. |
-| A tool call is below `liveFenceLine` and settles after it | Keep the unmatched result hidden until `resultOwnership` confirms the indexed call. Patch a loaded summary in place or suppress the unloaded history-owned result. |
+| A bootstrap tool call settles after handoff | Its existing feed key remains bootstrap-owned. Patch a loaded summary in place or suppress the unloaded history-owned result. |
 | A result has no indexed call | Preserve current parser behavior: expose a bounded service or malformed-record summary only when service rows are enabled. Never invent a tool card. |
 | A command run crosses a page edge | Mark the older page's trailing run and the newer page's leading run with the same run identity. Prepend reconciliation replaces the two partial presentations with one group keyed by the first member. |
 | Adjacent Codex assistant representations cross a page edge | Carry the previous representation, normalized-text digest, timestamp, and shape. Apply the adjacency and time rule used by `sameCodexTextAtTime`; retain one semantic entry and attach the native response identity when it arrives. |
@@ -409,49 +425,17 @@ When an older page is prepended, the client reconciles the two edge states and t
 2. the bounded `FeedSession` output produced from `useLogTail`;
 3. the outbox and runtime live-turn overlay already rendered at the tail.
 
-### Lane ownership watermark
+### LogFeed-only handoff
 
-`historyWatermark = indexedThroughByte` remains the server's body and cursor boundary. `readTailChunk` adds nullable `lastCompleteLineEnd`, computed from the last raw `0x0a` in its `Buffer` before UTF-8 decoding. All existing log transports carry that scalar beside the unchanged text and offsets. `useLogTail` stores it atomically with the line window and exposes it as read-only `completeRecordOffset`; bytes retained in `tailRef` do not advance it. This adds no fetch, decoding, cap, polling, or SSE scheduling behavior.
+The live path stays exactly as it is. `readTailChunk`, `LogChunk`, logBus, SSE, polling, `useLogTail`, `TailSnapshot`, and the active `FeedSession` receive no new fields, reset methods, framing rules, or cache keys.
 
-`TailSnapshot` persists `sourceGeneration` and the full bounded reconciliation sidecar atomically with its lines: epoch start byte, last requested and acknowledged offsets, complete physical-line count, aligned physical ordinals, `completeRecordOffset`, partial start, and partial disposition. The cache key is `[path, FileEntry.sourceGeneration]`, so synchronous hook initialization cannot restore a predecessor generation. A legacy cache entry without the token and sidecar is unmappable and ignored before render. The next transport chunk starts a fresh mapped epoch.
+`FeedSession` already gives each retained entry a session-stable `key`, preserves that key when a later record updates the item, and allocates larger keys for appended entries. The parser adds one pure `reconciliationKey` to `FeedEntry`: native `identityKey` when available, or a domain-separated digest of engine, semantic kind, canonical raw-record facts, and per-record emission part. Identical fallback keys reconcile as an ordered multiset, newest first, so duplicate content consumes one durable twin per live row.
 
-The hook subscription generation also captures its expected `sourceGeneration`; callbacks from a prior subscription are ignored. A different `fileGeneration` with the same source token invalidates only semantic page caches and leaves the live reader untouched. A history response with a newer `sourceGeneration` updates the binding and calls additive `useLogTail.rebaseSourceGeneration()`: delete the prior token's tail cache, clear lines, `tailRef`, reconciliation metadata, and parser snapshot, reset the acknowledged offset to zero, advance the hook generation, and reconnect through the existing logBus for an immediate read. The rebuilt semantic page waits for the first chunk accepted under that expected token before handoff. This reset handles same-size rewrites and pathname replacements that produce no file-size event; a projection-only rebuild causes no live jump.
+When the first semantic page arrives, `LogFeed` captures the current `feed.items` keys as `bootstrapKeys` and the viewport anchor. Page summaries replace matching bootstrap rows under their existing presentation keys. Every unmatched bootstrap row becomes unloaded history and leaves the rendered live lane. The same `FeedSession` continues running; any later append receives a new key outside `bootstrapKeys` and renders in the live lane. A tool result or dedupe update that mutates an existing bootstrap key stays history-owned without resetting parser state.
 
-For reconciliation only, `useLogTail` captures the requested offset before each chunk. `chunk.start !== requestedOffset` starts a new `reconciliationEpoch`, clears `tailRef` and partial decoder ownership, and enters `discardUntilNewline`. Bytes through the next raw newline are discarded because their missing prefix makes the record unparseable; complete lines after that newline can enter the new epoch. The history controller drops provisional rows from earlier epochs with viewport compensation and never maps them into source coordinates.
+Raw “show earlier” is disabled once semantic paging is available. Older pages prepend summaries directly into the history list and never enter `FeedSession`, so the backward-window reset at `src/components/feed/parse.ts:2382-2394` cannot run. If history is rebuilding, `LogFeed` keeps the existing bounded raw tail as provisional content until the first page arrives.
 
-Within the current epoch, every decoded newline increments a physical-line counter before whitespace filtering. Each retained nonblank line carries its epoch-local physical-line ordinal in a sidecar aligned with `tail.lines`. Blank lines therefore affect coordinate math even though they never enter the parser. The hook exposes read-only epoch id, complete physical-line count, first byte start, aligned physical ordinals, and partial disposition beside the existing window.
-
-Before handoff, the existing bounded `FeedSession` tail is a provisional fallback. “Show earlier” cannot call raw history while this fallback is active. The ordinary fence requires `useLogTail.completeRecordOffset === indexedThroughByte` for a caught-up newest response. A complete-record offset below the watermark still owes history lines; an offset above it proves newer complete data already entered the logical window and triggers another semantic catch-up before handoff. At equality, the controller records `liveFenceLine = tail.linesStart + tail.lines.length` in the same render commit that installs the page.
-
-There is one cold oversized-partial case: the current reconciliation epoch contains zero complete physical lines, its first byte start is at or after `indexedThroughByte`, and the caught-up history page proves that no later newline exists. The fence may install while `discardUntilNewline` remains active. A future newline discards that incomplete record from the live parser; the semantic index owns it after catch-up. Every complete line admitted by either fence belongs to semantic history, and only later logical lines feed the live parser.
-
-This fence retires the whole pre-handoff raw window, including rows older than the newest 150 summaries. Loaded semantic twins replace matching rows by native item id or exact source-record coordinate. Unmatched rows disappear into unloaded history and can return only through `beforeCursor`. Bytes appended after the fence continue through the unchanged live parser. A later caught-up newest page can advance both `historyWatermark` and `liveFenceLine` through the same transaction.
-
-At handoff, `completeLineCount` and the current epoch's complete physical-line count map every retained birth line to the index: `sourceLineNumber = completeLineCount - (epochCompleteLines - bornEpochPhysicalLine)`. `FeedSession` exposes immutable `bornEpochPhysicalLine` plus stable birth emission order `sourcePart`; later dedupe or echo updates can move its current source pointer without changing identity. The pair `(sourceLineNumber, sourcePart)` matches the durable summary without relying on preview text or timestamp. Native `itemId` remains the first choice for tool and response ownership.
-
-If `/api/history` remains rebuilding or behind the current tail, `LogFeed` keeps rendering the bounded raw tail as explicitly provisional content. This fallback provides availability during cold rebuilds and sustained catch-up; it never enters the semantic page cache or claims `hasMore: false`. The eventual caught-up page exits fallback through the fence transaction below.
-
-### Watermark transition
-
-Advancing the fence is one feed-store transaction:
-
-1. Capture the current viewport anchor and every live presentation key.
-2. Match every loaded semantic page against live entries, beginning with the newest page, by native `itemId`; tool groups compare every member call id. Entries without a native id use mapped birth `sourceLineNumber` plus `sourcePart`.
-3. Replace matched pre-fence live rows under their existing presentation keys. Remove every other pre-fence live row from the renderable live lane. Those removed rows become ordinary unloaded history and can return only through semantic cursor navigation.
-4. Start a fresh live parser at `liveFenceLine`, seed it from the newest page's trailing `PageEdgeState`, and feed it only later logical lines. Publish the merged durable list to assistant claims and transcript echo reconciliation once.
-5. Restore the captured anchor, then commit the semantic watermark and logical fence. A glued pane uses the existing bottom glue.
-
-A released viewport can be anchored to a pre-fence live row that the newest page does not contain. The controller freezes that one presentation row and follows `beforeCursor` page by page for its exact source-record coordinate. Its twin replaces it under the same key. Other pre-fence rows cannot be revealed through raw “show earlier” during this bridge. A missing or rewritten source restores the nearest surviving successor with the existing pixel-offset compensation.
-
-The live seed is `afterCheckpoint`, including compaction and OpenClaw model state as well as prose, command, user, turn, wakeup, and open-item state. It carries no body text. The first post-fence records can therefore finish a prose dedupe, continue one command group, complete a pending user pair, collapse a compaction twin, or emit a model switch against the correct baseline. `resultOwnership` remains the fallback for a call outside the bounded ownership subset.
-
-An open item keeps the lane chosen by its call. `FeedSession` retains a result whose call is absent from its bounded window as a hidden reconciliation record carrying item id and bounded preview; it does not emit the service row yet. The controller submits that key through the separate ownership endpoint. `history` suppresses the live record and patches a loaded summary under its presentation key when available. `unmatched` after a caught-up response releases the record through the existing `showSvc` service-row behavior. Pending classification stays hidden and follows the bounded retry contract. A call behind the fence therefore remains history-owned when its result arrives later, even after both the call row and its page left memory.
-
-`anchorKey` becomes the durable `entry_id` after replacement. During that frame, the store retains an alias from the prior live anchor. The existing `viewportAnchor` lookup can restore either key, and the prepend height compensation at `src/components/LogFeed.tsx:412-420` keeps the reader's row at the same screen offset.
-
-Unified durable entries are passed to `publishCanonicalAssistantClaims`. Their response ids and tool-call ids already match the identities consumed by `visibleRuntimeLiveTurnItems`, so a runtime row yields as soon as its durable twin is visible. Unified user rows are passed once to `publishTranscriptEchoes`. The echo ledger rekeys a live anchor to the durable `entry_id` during replacement, preserving one occurrence. Repeated identical messages still retire outbox entries one at a time through the existing occurrence accounting. Runtime overlay and outbox rows keep their current tail order after the merged durable feed.
-
-The current `FeedSession` reset remains valid for a bounded live truncation or source replacement. Earlier-history navigation never moves its input window backward after this split, so loading a page cannot trigger the whole-history reset at `src/components/feed/parse.ts:2382-2394`.
+A matched viewport row keeps its DOM key and pixel offset. An unmatched anchor row remains as one frozen bridge while `beforeCursor` pages load; ordered reconciliation replaces it when its summary appears, then retires the bridge. Runtime overlay claims and outbox echo observations consume the unified history-plus-live list exactly as they do today. Projection and source-generation changes invalidate semantic page caches only; the live hook follows its existing path-based lifecycle.
 
 ## Rollout
 
@@ -462,15 +446,14 @@ The rollout order follows the originating priority exactly. Each phase has its o
 - Add the locale-neutral projector, the minimal `history_files`/`history_entries`/checkpoint schema, process-local append checkpointing, cursor codec, and `GET /api/history`.
 - On initial open, request one newest page with `limit=150`; request no older raw chunks.
 - Keep `useLogTail` subscribed through the existing live path.
-- Add the `LogFeed` history controller, logical handoff fence, and semantic-entry merge. “Show earlier” consumes `beforeCursor`.
-- Persist and return the bounded inline newest-page `afterCheckpoint` and seed common post-fence live state. A checkpoint that needs out-of-line resolution keeps the provisional raw fallback until Phase 3 support is enabled.
+- Add the `LogFeed` history controller, bootstrap-key handoff, and semantic-entry merge. “Show earlier” consumes `beforeCursor`.
 - Treat validation and rebuilding as explicit temporary states. Continue showing the bounded live lane.
 
-Exit proof: a normal initial open returns at most one semantic page, page walking has no gaps or repeats, append catch-up reads and parses only the suffix plus fixed overlap, rebuilding deletes only disposable projection state, and loading older history never calls `useLogTail.loadOlder()`. After handoff, every live parser input has a logical line index at or above `liveFenceLine`.
+Exit proof: a normal initial open returns at most one semantic page, page walking has no gaps or repeats, append catch-up reads and parses only the suffix plus fixed overlap, rebuilding deletes only disposable projection state, and loading older history never calls `useLogTail.loadOlder()`. Existing bootstrap keys retire or reconcile; later FeedSession keys remain live.
 
 ### Phase 2: body on demand
 
-- Replace any remaining inline page body with `preview`, `bodySize`, and `bodyRef`.
+- Switch `/api/history` from `bodyMode: "inline"` to `bodyMode: "on-demand"`, remove `inlineBody`, and mint `bodyRef` for omitted content.
 - Add the body route and expansion states.
 - Keep raw source lookup for the bounded live lane until each live row receives its durable twin.
 
@@ -523,6 +506,7 @@ The Phase 1 blocking gate is intentionally small:
 - one initial semantic page replacing the bounded provisional tail without calling `useLogTail.loadOlder()`;
 - projection-only rebuild preserving `sourceGeneration` and live-tail state;
 - row, entry-byte, and fixed-metadata limits including one oversized row.
+- Phase 1 inline expansion returning the full redacted body, including a single body larger than 64 KiB returned alone with cursor progress.
 
 The cumulative verification catalog below activates with the phase that owns each mechanism; it does not block the Phase 1 slice:
 
@@ -555,11 +539,8 @@ The cumulative verification catalog below activates with the phase that owns eac
 - call and result pairing across a page edge;
 - command grouping and Codex prose dedupe across a page edge;
 - a pending user representation that completes on the next page;
-- a caught-up fence followed by one live Codex prose twin, command-run continuation, and pending-user echo each reconciling through the seeded trailing `PageEdgeState`;
-- a fence between `compacted` and `context_compacted`, an OpenClaw model switch, and a filtered service tail each resuming from the exact unfiltered `afterCheckpoint`;
 - many pending users and one open multiline plain block keeping inline `afterCheckpoint` at or below 8 KiB, resolving only matching out-of-line state, and keeping fixed metadata within 16 KiB;
 - multibyte checkpoint text enforcing limits through `length(CAST(... AS BLOB))` and final UTF-8 response encoding staying within the 80 KiB envelope;
-- Phase 1 handoff receiving and applying `afterCheckpoint` before Phase 3 prepend-edge caching is enabled;
 - a turn larger than the row and byte budgets;
 - row and byte limits together, including the single-oversized-row progress case;
 - two pages split between entries with the same source byte range receiving distinct cache identities;
@@ -569,22 +550,10 @@ The cumulative verification catalog below activates with the phase that owns eac
 - a visible row rejected after the byte budget remaining eligible on the next page while filtered service rows advance the cursor;
 - a retained visible row, an envelope-rejected visible row, and filtered rows on both sides committing one contiguous prefix and recomputing every derived page field from it;
 - over 2,000 filtered service rows before the next visible row producing bounded empty progress pages that the client drains to the visible row without gaps;
-- a raw tail containing over 150 pre-fence semantic entries rendering only the newest semantic page and no unmatched raw-history rows after handoff;
-- a cold mount with an empty tail cache rendering provisional bounded rows until a caught-up page atomically fences the existing logical line window;
-- a zero-budget or lagging-offset chunk with a current file size failing handoff until `completeRecordOffset === indexedThroughByte`, with over 150 provisional semantic entries retiring only after an exact later fence;
-- complete lines appended between semantic response creation and handoff making `completeRecordOffset > indexedThroughByte`, deferring the fence until a newer caught-up page covers them;
-- a permanently unterminated final record leaving transport offset ahead while `completeRecordOffset === indexedThroughByte`, allowing handoff without treating the partial suffix as a live row;
-- a UTF-8 code point split across chunks preserving raw-buffer `lastCompleteLineEnd`, atomically caching `completeRecordOffset`, and reaching the exact fence despite a partial EOF;
-- two id-less rows with identical kind, preview, and timestamp reconciling collision-free by `sourceLineNumber` plus `sourcePart`;
-- a forward jump where `chunk.start` differs from the requested offset starting a new reconciliation epoch and dropping pre-gap provisional coordinates;
-- a cold bounded chunk containing only the suffix of one oversized incomplete line installing the fence from the caught-up page's preceding newline;
-- a missing-prefix record completing after a forward gap being discarded through its newline while the following complete record enters the new epoch;
-- blank physical lines filtered from `tail.lines` still advancing epoch physical ordinals and preserving source-line mapping;
-- a warm-cache remount restoring epoch counters, blank-line ordinals, complete offset, and partial disposition atomically for id-less reconciliation;
-- id-less Codex assistant dedupe and pending-user echo moving current source pointers across the fence while immutable birth line plus part preserve identity;
-- a cold rebuild that exceeds the request deadline rendering a bounded provisional raw tail, disabling raw “show earlier,” and reconciling through the first caught-up logical fence;
-- a fence advancing across over 150 live entries while a released unloaded anchor keeps its position until semantic replacement;
-- a tool call below the fence and result after it retaining one history-owned presentation with no live duplicate;
+- a raw tail containing over 150 bootstrap entries rendering only the newest semantic page plus later FeedSession keys after handoff;
+- a bootstrap item updated by a later tool result retaining its key and history ownership while a newly appended item receives a live key;
+- duplicate id-less bootstrap rows reconciling one-for-one through ordered `reconciliationKey` multiset consumption;
+- a cold rebuild exceeding the request deadline preserving the unchanged bounded raw tail until bootstrap-key handoff;
 - a call evicted from the live window and all loaded pages before its result arrives, with bounded `resultOwnership` classification suppressing the unmatched live service row;
 - over 64 hidden unmatched results draining through immediate bounded ownership follow-ups after writes have stopped;
 - a static source returning ownership status `0` during validation and resolving the same pending key to `history` or `unmatched` through bounded ownership backoff after ready;
@@ -595,9 +564,7 @@ The cumulative verification catalog below activates with the phase that owns eac
 - a writer commit attempted between conditional ETag evaluation and response construction remaining outside the read transaction's acknowledged revision;
 - a late update that changes a page's byte-budget boundary invalidating and restarting its older cursor chain without gaps or duplicates;
 - index corruption producing a rebuilding response while the JSONL source remains intact;
-- deleting and rebuilding only the SQLite projection changing `fileGeneration` while preserving `sourceGeneration`, tail offsets, partial decoder, and viewport;
-- rewriting the source while the pane is unmounted, then remounting a warm tail snapshot with the old or absent `sourceGeneration` and resetting it before cached rows render;
-- a same-size `sourceGeneration` rotation with changed newline layout clearing the tail cache, partial decoder, and reconciliation sidecar before a later append enters the new epoch;
+- deleting and rebuilding only the SQLite projection changing `fileGeneration` while preserving the unchanged live hook, tail cache, parser session, and viewport;
 - one live row replaced by one durable twin with the same DOM presentation key;
 - stable viewport offset during prepend and live-to-durable replacement;
 - one outbox retirement for one echo before and after replacement;
@@ -609,7 +576,7 @@ Instrumentation should report validation bytes, semantic-parse bytes, validation
 
 ## Non-goals
 
-- Replacing or rewriting `useLogTail`, `logBus`, SSE, the polling fallback, `readTailChunk`, or `/api/log`. Raw-buffer `lastCompleteLineEnd`, read-only reconciliation metadata, and the generation-reset method are the sole additive live reconciliation surface.
+- Changing `useLogTail`, `TailSnapshot`, logBus, SSE, the polling fallback, `readTailChunk`, `LogChunk`, or `/api/log`.
 - Treating SQLite as a source of record, a recovery source, or evidence that missing JSONL content never existed.
 - Loading full bodies during page fetch.
 - Guaranteeing that one whole turn fits in one page.
