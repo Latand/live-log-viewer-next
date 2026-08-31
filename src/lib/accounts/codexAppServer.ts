@@ -329,7 +329,7 @@ export class CodexAppServerClient {
       ...headlessCodexThreadConfig(effectiveConfig),
       ...(options.effort ? { model_reasoning_effort: options.effort } : {}),
     };
-    const response = await this.request("thread/resume", {
+    const resumeParams = {
       threadId,
       ...(options.path ? { path: options.path } : {}),
       ...(options.cwd ? { cwd: options.cwd } : {}),
@@ -338,7 +338,16 @@ export class CodexAppServerClient {
       ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
       ...(options.sandbox ? { sandbox: options.sandbox } : {}),
       config,
-    });
+    };
+    let response: unknown;
+    try {
+      response = await this.request("thread/resume", resumeParams);
+    } catch (error) {
+      /* Paginated threads refuse full-history resume (#1332); this consumer
+         only reads id and path, so metadata plus live state is enough. */
+      if (!(error instanceof Error && /not supported/i.test(error.message))) throw error;
+      response = await this.request("thread/resume", { ...resumeParams, excludeTurns: true });
+    }
     const thread = isRecord(response) && isRecord(response.thread) ? response.thread : response;
     if (!isRecord(thread)) throw protocolError("thread/resume response is malformed");
     return { id: requiredString(thread, "id", "thread/resume"), path: typeof thread.path === "string" ? thread.path : null };

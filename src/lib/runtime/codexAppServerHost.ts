@@ -837,7 +837,7 @@ export class CodexAppServerHost implements EngineHost {
         granted,
       );
       const result = threadId
-        ? await provisional.rpc("thread/resume", {
+        ? await provisional.resumeThreadTolerantly({
           threadId,
           ...(options.permissionProfile ? { permissions: options.permissionProfile } : {}),
           config,
@@ -1048,6 +1048,30 @@ export class CodexAppServerHost implements EngineHost {
       evidence through a metadata-only read plus one ascending full-items
       turns page (#1332). Every other error propagates unchanged so the
       caller's evidence classification stays intact. */
+  /** thread/resume with the #1332 pagination fallback: a paginated thread
+      refuses full-history resume, so retry with excludeTurns (metadata plus
+      live-resume state) and synthesize the latest turns page into the
+      hydrated response shape every replay consumer expects, oldest-first. */
+  private async resumeThreadTolerantly(params: Record<string, unknown>): Promise<unknown> {
+    try {
+      return await this.rpc("thread/resume", params);
+    } catch (error) {
+      if (!hydrationUnsupported(safeError(error))) throw error;
+      const resumed = await this.rpc("thread/resume", { ...params, excludeTurns: true });
+      const page = await this.rpc("thread/turns/list", {
+        threadId: params.threadId,
+        itemsView: "full",
+        sortDirection: "desc",
+        limit: 16,
+      });
+      const turns = pagedTurns(page);
+      turns.reverse();
+      const outer = record(resumed) ?? {};
+      const thread = record(outer.thread) ?? {};
+      return { ...outer, thread: { ...thread, turns } };
+    }
+  }
+
   /** Hydrated thread read with the #1332 pagination fallback, returning the
       hydrated response shape either way so every consumer of `thread.turns`
       keeps working. `window` picks which end of a paginated thread the single
