@@ -340,7 +340,7 @@ test("a refused runtime-host rehearsal carries its reason and the failing genera
       socket: { polls: 0, answered: 0, abandoned: 0 },
       ok: false,
       detail: "the stable listener stopped answering 6.0s into the hold window",
-      log: ["error: write EPIPE", "      at failWrite (node:net)"],
+      log: ["error: write EPIPE", "at failWrite (node:net)"],
     },
     ok: false,
     detail: "the stable listener stopped answering 6.0s into the hold window",
@@ -356,6 +356,43 @@ test("a refused runtime-host rehearsal carries its reason and the failing genera
   ));
 
   expect(await adapter.verifyCandidate(candidate)).toEqual(failing);
+});
+
+test("issue 1272: runtime-host output is bounded and printable before it reaches the durable record", async () => {
+  const candidate = {
+    image: "viewer:test",
+    container: "viewer-candidate",
+    endpoint: "http://127.0.0.1:19311",
+    revision: "a".repeat(40),
+  };
+  const adapter = new HostCommandViewerDeploymentAdapter(async () => ({
+    checkedAt: "2026-08-28T18:11:40.000Z",
+    endpoint: candidate.endpoint,
+    processReady: true,
+    rootStatus: 200,
+    authenticatedStatus: 200,
+    unauthorizedStatus: 403,
+    assets: [],
+    runtimeHost: {
+      checkedAt: "2026-08-28T18:12:31.000Z",
+      runtime: "bun 1.4.0",
+      succession: { predecessorReadyMs: 1_390, successorTookOverMs: 0, completed: false },
+      listener: { windowMs: 15_000, polls: 24, answered: 12, abandoned: 12 },
+      socket: { polls: 0, answered: 0, abandoned: 0 },
+      ok: false,
+      detail: "the stable listener stopped answering 6.0s into the hold window",
+      log: Array.from({ length: 25 }, (_, index) => `${index}:${"x".repeat(250)}\u0007`),
+    },
+    ok: false,
+    detail: "candidate runtime-host gate failed",
+  }));
+
+  const evidence = await adapter.verifyCandidate(candidate);
+
+  expect(evidence.runtimeHost?.log).toHaveLength(20);
+  expect(evidence.runtimeHost?.log?.[0]).toStartWith("5:");
+  expect(evidence.runtimeHost?.log?.at(-1)).toHaveLength(203);
+  expect(evidence.runtimeHost?.log?.some((line) => line.includes("\u0007"))).toBe(false);
 });
 
 test("runtime-host evidence missing its poll counts is refused rather than recorded half-read", async () => {

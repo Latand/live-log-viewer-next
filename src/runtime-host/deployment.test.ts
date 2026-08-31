@@ -70,6 +70,7 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   candidateHealth = healthy("http://127.0.0.1/candidate");
   promotedHealth = healthy("http://127.0.0.1:8898");
   stageHostFailure: Error | null = null;
+  verifyHostFailure: Error | null = null;
   promoteFailure: Error | null = null;
   hotStateHandOver: string | null = null;
   calls: string[] = [];
@@ -77,6 +78,7 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   async reconcile(): Promise<void> { this.calls.push("reconcile"); }
   async verifyRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<ViewerRuntimeHostHandoffEvidence> {
     this.calls.push(`verify-host-successor:${candidate.image}:${candidate.revision}`);
+    if (this.verifyHostFailure) throw this.verifyHostFailure;
     const generation = {
       image: candidate.image,
       revision: candidate.revision,
@@ -526,6 +528,30 @@ test("issue 1268: the predecessor leaves success non-terminal until the staged r
   });
   expect(adapter.calls).toContain(
     `verify-host-successor:${handedOff?.candidate?.image}:${handedOff?.candidate?.revision}`,
+  );
+  store.close();
+});
+
+test("issue 1268: terminal success requires runtime-host hand-off evidence even when generation tracking is unavailable", async () => {
+  const store = journal("host-successor-proof-required");
+  const adapter = new FakeDeploymentAdapter();
+  adapter.verifyHostFailure = new Error("runtime-host startup evidence is unavailable");
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+
+  const receipt = await coordinator.requestViewerDeployment({
+    idempotencyKey: "deploy-host-successor-proof-required",
+    revision: "b".repeat(40),
+  });
+  if (receipt.state !== "accepted") throw new Error("deployment was not accepted");
+  await coordinator.waitForDeployment(receipt.deploymentId);
+
+  expect(store.viewerDeployment(receipt.deploymentId)).toMatchObject({
+    phase: "host-handoff",
+    terminal: false,
+    error: "runtime-host startup evidence is unavailable",
+  });
+  expect(adapter.calls).toContain(
+    `verify-host-successor:${store.viewerDeployment(receipt.deploymentId)?.candidate?.image}:${"b".repeat(40)}`,
   );
   store.close();
 });

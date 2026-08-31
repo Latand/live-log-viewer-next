@@ -393,17 +393,16 @@ export class ViewerDeploymentCoordinator {
             this.onHostHandoff?.(handoff);
             return;
           }
-          const running = this.hostGeneration?.();
-          const runtimeHostHandoff = running
-            && running.revision === status.candidate.revision
-            && running.image === status.candidate.image
-            ? await this.adapter.verifyRuntimeHostSuccessor(status.candidate)
-            : undefined;
+          /* The adapter's framed probe is the completion authority. A local
+             generation hint decides whether this process must stage and
+             release a successor. Completion still requires durable startup
+             evidence from the generation that actually owns the listener. */
+          const runtimeHostHandoff = await this.adapter.verifyRuntimeHostSuccessor(status.candidate);
           status = this.journal.updateViewerDeployment(status.deploymentId, {
             error: null,
             phase: "succeeded",
             terminal: true,
-            ...(runtimeHostHandoff ? { runtimeHostHandoff } : {}),
+            runtimeHostHandoff,
           });
           continue;
         }

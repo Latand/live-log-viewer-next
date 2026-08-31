@@ -22,6 +22,7 @@ import type {
 import { withoutWakatimeCredential } from "@/lib/wakatime/credential";
 
 import type { ViewerDeploymentAdapter } from "./deployment";
+import { candidateLogExcerpt } from "./deploymentHealth";
 import { PROMOTE_ACTION_TIMEOUT_MS } from "./deploymentHotState";
 import type { McpHealthProbeAdmissions } from "./mcpHealthProbeAdmission";
 import {
@@ -406,6 +407,9 @@ function runtimeHostEvidence(value: unknown): ViewerRuntimeHostHealthEvidence {
     || (item.log !== undefined && (!Array.isArray(item.log) || item.log.some((line) => typeof line !== "string")))) {
     throw new Error("deployment adapter returned invalid runtime-host health evidence");
   }
+  const log = item.log === undefined
+    ? undefined
+    : candidateLogExcerpt((item.log as string[]).join("\n"));
   return {
     checkedAt: item.checkedAt,
     runtime: item.runtime,
@@ -418,7 +422,7 @@ function runtimeHostEvidence(value: unknown): ViewerRuntimeHostHealthEvidence {
     socket: runtimeHostProbeCounts(item.socket),
     ok: item.ok,
     ...(typeof item.detail === "string" ? { detail: item.detail } : {}),
-    ...(item.log === undefined ? {} : { log: item.log as string[] }),
+    ...(log === undefined ? {} : { log }),
   };
 }
 
