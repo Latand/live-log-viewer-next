@@ -562,7 +562,7 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
             turnId,
             p.item,
             phase,
-            env.occurredAt ?? env.recordedAt ?? null,
+            null,
           ),
           voiceDeliveries: phase === "completed"
             && typeof voiceResponse?.responseId === "string"

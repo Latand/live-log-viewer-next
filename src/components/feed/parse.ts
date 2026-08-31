@@ -1251,7 +1251,6 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   let turnFailed = false;
   let failedResponseSeq: number | null = null;
   let latestTurnTimestamp: number | null = null;
-  const completedTurnEvidence: Array<{ startedSrc: number; responseSeq: number }> = [];
 
   const entryIndex = (seq: number): number => (entries.length ? seq - entries[0].seq : -1);
 
@@ -1279,7 +1278,6 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (turnOpen && turnStartedAt !== null && turnResponseSeq !== null) {
       const endedAt = Math.max(latestTurnTimestamp ?? turnStartedAt, turnStartedAt);
       setResponseDuration(turnResponseSeq, endedAt - turnStartedAt);
-      if (turnStartedSrc !== null) completedTurnEvidence.push({ startedSrc: turnStartedSrc, responseSeq: turnResponseSeq });
       failedResponseSeq = failed ? turnResponseSeq : null;
     } else {
       failedResponseSeq = null;
@@ -1303,8 +1301,6 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (!turnFailed) return;
     if (failedResponseSeq !== null) {
       setResponseDuration(failedResponseSeq, undefined);
-      const evidence = completedTurnEvidence.findLastIndex((turn) => turn.responseSeq === failedResponseSeq);
-      if (evidence >= 0) completedTurnEvidence.splice(evidence, 1);
       turnResponseSeq = failedResponseSeq;
     }
     failedResponseSeq = null;
@@ -2686,7 +2682,6 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     turnFailed = false;
     failedResponseSeq = null;
     latestTurnTimestamp = null;
-    completedTurnEvidence.length = 0;
     snapshot = null;
     /* pushSeq keeps counting across resets so React keys never collide. */
   };
@@ -2697,10 +2692,6 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const dropBefore = (start: number): boolean => {
     const crossedEchoSeam = entries.some((entry) => entry.bornSrc < start && entry.src >= start);
     const crossedOpenTurn = turnOpen && turnStartedSrc !== null && turnStartedSrc < start;
-    const crossedCompletedTurn = completedTurnEvidence.some(({ startedSrc, responseSeq }) => {
-      const idx = entryIndex(responseSeq);
-      return startedSrc < start && idx >= 0 && entries[idx]?.src >= start;
-    });
     while (entries.length && entries[0].src < start) {
       const gone = entries.shift()!;
       snapshot = null;
@@ -2737,7 +2728,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (entryIndex(wakeupCalls[i].seq) < 0) { wakeupCalls.splice(i, 1); wakeupsEvicted = true; }
     }
     if (wakeupsEvicted) recomputeWakeupStates();
-    return crossedEchoSeam || crossedOpenTurn || crossedCompletedTurn || openclawBoundaryEvicted || (plainBlock !== null && plainBlock.src < start);
+    return crossedEchoSeam || crossedOpenTurn || openclawBoundaryEvicted || (plainBlock !== null && plainBlock.src < start);
   };
 
   /* Collapses a run of >=2 consecutive foldable tool entries into one cmd-group

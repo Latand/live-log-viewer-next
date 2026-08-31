@@ -202,6 +202,31 @@ describe("live turn delta buffering", () => {
     expect(store.sessions["conv_a"]?.liveTurn?.text).toBe("Tests pass.");
   });
 
+  test("runtime envelope timestamps do not become live tool timestamps", () => {
+    let store = installSnapshot(snapshot());
+    store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, { conversationId: "conv_a", turnId: "t1" }));
+    store = apply(store, {
+      ...env("item", { type: "session", id: "conv_a" }, 5, {
+        conversationId: "conv_a", turnId: "t1", phase: "started",
+        item: { type: "commandExecution", id: "call_skewed", command: "bun test", cwd: "/repo", status: "inProgress" },
+      }),
+      occurredAt: "2040-01-01T00:00:00.000Z",
+    });
+    store = apply(store, {
+      ...env("item", { type: "session", id: "conv_a" }, 6, {
+        conversationId: "conv_a", turnId: "t1", phase: "completed",
+        item: { type: "commandExecution", id: "call_skewed", command: "bun test", cwd: "/repo", status: "completed", exitCode: 0 },
+      }),
+      recordedAt: "2040-01-01T12:00:00.000Z",
+    });
+
+    expect(store.sessions["conv_a"]?.liveTurn?.items?.[0]).toMatchObject({
+      startedAt: null,
+      completedAt: null,
+      tool: { status: "ok" },
+    });
+  });
+
   test("issue 1100: a Claude assistant item's tool_use blocks become running rows; its tool_result settles them", () => {
     let store = installSnapshot(snapshot());
     store = apply(store, env("turn-started", { type: "session", id: "conv_a" }, 4, { conversationId: "conv_a", turnId: "t1" }));

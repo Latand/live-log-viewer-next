@@ -5,6 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 
 import { setLocale } from "@/lib/i18n";
 import type { RuntimeLiveTurnItem } from "@/lib/runtime/liveTurn";
+import { hhmm } from "@/components/utils";
+import { formatDuration } from "@/components/feed/duration";
 
 import { LiveTurnRows } from "./LiveTurnRows";
 
@@ -12,7 +14,7 @@ import { LiveTurnRows } from "./LiveTurnRows";
  * Issue #1100: tool calls projected from the structured host render as compact
  * rows inside the live turn, interleaved with prose in response order, in the
  * same quiet ToolLine grammar the canonical transcript row uses (glyph ·
- * summary · non-ok status · time) — so the row does not change appearance when
+ * summary · non-ok status) — so the row does not change appearance when
  * the transcript echo replaces it.
  */
 
@@ -47,6 +49,7 @@ function mount(items: RuntimeLiveTurnItem[]): HTMLElement {
 }
 
 const AT = "2026-08-23T08:30:01.000Z";
+const SKEWED_END = "2026-08-23T20:30:01.000Z";
 
 test("tool rows interleave with prose in response order and carry the call's status", () => {
   const host = mount([
@@ -60,7 +63,7 @@ test("tool rows interleave with prose in response order and carry the call's sta
       tool: { name: "Read", engine: "claude", status: "err", args: { file_path: "/repo/src/missing.ts" } },
     },
     {
-      itemId: "call_ls", text: "", phase: "awaiting-echo", startedAt: AT, completedAt: "2026-08-23T08:30:01.750Z",
+      itemId: "call_ls", text: "", phase: "awaiting-echo", startedAt: AT, completedAt: SKEWED_END,
       tool: { name: "shell", engine: "codex", status: "ok", args: { cmd: "ls -la", workdir: "/repo" } },
     },
     { itemId: null, text: "Now the fix", phase: "streaming", startedAt: AT, completedAt: null },
@@ -81,13 +84,14 @@ test("tool rows interleave with prose in response order and carry the call's sta
   expect(failed.textContent).toContain("error");
   expect(failed.className).toContain("border-danger");
 
-  /* A settled call reads quietly: summary and time, no status label. */
+  /* A settled call reads quietly: summary and no status label or envelope time. */
   const settled = rows[3]!;
   expect(settled.dataset.liveToolStatus).toBe("ok");
   expect(settled.textContent).toContain("ls -la");
   expect(settled.textContent).not.toContain("executing");
   expect(settled.textContent).not.toContain("error");
-  expect(settled.textContent).toContain("750ms");
+  expect(settled.textContent).not.toContain(formatDuration(12 * 60 * 60 * 1000));
+  expect(settled.textContent).not.toContain(hhmm(AT));
 
   /* Prose still streams with its caret at the very end of the turn. */
   expect(rows[4]!.textContent).toContain("Now the fix");

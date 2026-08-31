@@ -124,6 +124,22 @@ describe("feed session parity with one-shot parse", () => {
     expect(retained?.responseDurationMs).toBe(272_000);
   });
 
+  test("a completed response keeps its receipt-to-completion total after its receipt leaves the window", () => {
+    const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
+    const lines = [
+      JSON.stringify({ type: "user", timestamp: "2026-08-31T10:01:00.000Z", message: { role: "user", content: "delivered after a hold" } }),
+      JSON.stringify({ type: "assistant", timestamp: "2026-08-31T10:05:32.000Z", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "Completed response." }] } }),
+    ];
+
+    const completed = session.feed(lines, 0, false);
+    const completedResponse = completed.items.find((entry) => entry.item.kind === "prose");
+    expect(completedResponse?.responseDurationMs).toBe(272_000);
+
+    const slid = session.feed(lines.slice(1), 1, false);
+    const retainedResponse = slid.items.find((entry) => entry.item.kind === "prose");
+    expect(retainedResponse?.responseDurationMs).toBe(272_000);
+  });
+
   test("a Codex structured delivery keeps its receipt-to-completion total", () => {
     const session = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
     const lines = [
