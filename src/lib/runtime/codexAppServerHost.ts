@@ -1048,31 +1048,37 @@ export class CodexAppServerHost implements EngineHost {
       evidence through a metadata-only read plus one ascending full-items
       turns page (#1332). Every other error propagates unchanged so the
       caller's evidence classification stays intact. */
-  private async readPersistedThreadSnapshot(): Promise<{ result: unknown; turns: JsonObject[] }> {
+  /** Hydrated thread read with the #1332 pagination fallback, returning the
+      hydrated response shape either way so every consumer of `thread.turns`
+      keeps working. `window` picks which end of a paginated thread the single
+      full-items page covers — "first" for materialization evidence, "latest"
+      for delivery confirmation; turns are always returned oldest-first. */
+  private async readThreadWithTurns(window: "first" | "latest", timeoutMs?: number): Promise<unknown> {
     try {
-      const result = await this.rpc("thread/read", {
+      return await this.rpc("thread/read", {
         threadId: this.identity.threadId,
         includeTurns: true,
-      });
-      return { result, turns: resumedTurns(result) };
+      }, timeoutMs);
     } catch (error) {
       if (!hydrationUnsupported(safeError(error))) throw error;
-      const result = await this.rpc("thread/read", { threadId: this.identity.threadId });
+      const result = await this.rpc("thread/read", { threadId: this.identity.threadId }, timeoutMs);
       const page = await this.rpc("thread/turns/list", {
         threadId: this.identity.threadId,
         itemsView: "full",
-        sortDirection: "asc",
+        sortDirection: window === "first" ? "asc" : "desc",
         limit: 16,
-      });
-      return { result, turns: pagedTurns(page) };
+      }, timeoutMs);
+      const turns = pagedTurns(page);
+      if (window === "latest") turns.reverse();
+      const thread = record(record(result)?.thread) ?? {};
+      return { thread: { ...thread, turns } };
     }
   }
 
   async sessionMaterializationEvidence(clientMessageId: string): Promise<SessionMaterializationEvidence> {
     let result: unknown;
-    let persistedTurns: JsonObject[];
     try {
-      ({ result, turns: persistedTurns } = await this.readPersistedThreadSnapshot());
+      result = await this.readThreadWithTurns("first");
     } catch (error) {
       const reason = safeError(error);
       if (/not materialized yet/i.test(reason) && /before first user message/i.test(reason)) {
@@ -1124,7 +1130,7 @@ export class CodexAppServerHost implements EngineHost {
     if (!persistedIdentity.path || persistedIdentity.path !== this.identity.path) {
       return { state: "failed", reason: "Codex app-server did not confirm the canonical transcript path" };
     }
-    const persistedFirstMessage = persistedTurns.some((turn) =>
+    const persistedFirstMessage = resumedTurns(result).some((turn) =>
       Array.isArray(turn.items)
       && turn.items.some((item) => stringField(item, "clientId") === clientMessageId));
     return persistedFirstMessage
@@ -2250,7 +2256,7 @@ export class CodexAppServerHost implements EngineHost {
       const timeoutMs = this.activeTurnId
         ? this.requestTimeoutMs * ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER
         : this.requestTimeoutMs;
-      thread = await this.rpc("thread/read", { threadId: this.identity.threadId, includeTurns: true }, timeoutMs);
+      thread = await this.readThreadWithTurns("latest", timeoutMs);
     } catch (error) {
       const message = safeError(error);
       if (/not materialized yet/i.test(message) && /before first user message/i.test(message)) return null;

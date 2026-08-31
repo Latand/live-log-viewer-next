@@ -243,8 +243,10 @@ class FakeAppServer extends EventEmitter {
     }
     if (method === "thread/turns/list") {
       if (this.readError) return this.respondError(message.id, this.readError);
+      const turns = [...(this.readTurns ?? this.turns)];
+      if ((message.params as { sortDirection?: string } | undefined)?.sortDirection === "desc") turns.reverse();
       return this.respond(message.id, {
-        data: this.readTurns ?? this.turns,
+        data: turns,
         nextCursor: null,
         backwardsCursor: null,
       });
@@ -1615,6 +1617,32 @@ describe("CodexAppServerHost", () => {
       turnId: "persisted-turn",
     });
     expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
+    expect((await host.health()).status).not.toBe("dead");
+    await host.release();
+  });
+
+  test("delivery confirmation survives a paginated thread that refuses hydration (#1332)", async () => {
+    const threadId = "paginated-confirmation-thread";
+    const server = new FakeAppServer(threadId, threadId);
+    server.hydratedReadError = "list_turns is not supported yet";
+    server.readTurns = [{
+      id: "persisted-turn",
+      status: "completed",
+      items: [{ type: "userMessage", clientId: "operation-paginated-confirm", content: [{ type: "text", text: "hello" }] }],
+    }];
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-paginated-confirm", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "persisted-turn",
+    });
+    expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
+    const turnsList = server.requests.findLast((request) => request.method === "thread/turns/list");
+    expect(turnsList?.params).toMatchObject({ sortDirection: "desc", itemsView: "full" });
     expect((await host.health()).status).not.toBe("dead");
     await host.release();
   });
