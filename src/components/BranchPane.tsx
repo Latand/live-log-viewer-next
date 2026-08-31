@@ -35,6 +35,7 @@ import { TmuxComposer } from "./TmuxComposer";
 import { RateLimitBadge } from "./RateLimitBadge";
 import { TaskRelationStrip } from "./tasks/TaskRelationStrip";
 import type { TaskRelation } from "./tasks/taskRelations";
+import { turnIsRunning } from "./turnDuration";
 import { WakeupChip, wakeupChipKey } from "./WakeupChip";
 import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge, fmtAge } from "./utils";
 
@@ -222,7 +223,14 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      conversation is never messaged through the legacy pane-bound delivery
      path (finding 1). */
   const { caps, runtime } = useAgentCapabilities(file);
-  const deadHost = caps.surface === "dead";
+  /* Recovery is destructive: Respawn can replace the process serving this
+     conversation. A dead runtime projection therefore authorizes the banner
+     only after the same card carries no positive live process or open-turn
+     evidence. While those authorities disagree, the running card stays
+     running and the operator gets no control that could kill it. */
+  const deadHost = caps.surface === "dead"
+    && file.proc !== "running"
+    && !turnIsRunning(file);
   /* A terminally superseded round (issue #383): the banner replaces recovery
      with navigation to the live successor, and the composer unmounts — the
      retired round takes no input unless the operator explicitly forks it. */
