@@ -193,24 +193,23 @@ test("dead structured send recovery delivers through the new host with zero tmux
   });
 });
 
-test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback ownership and creates one structured successor after termination", async (engine) => {
-  const sessionId = engine === "codex"
-    ? "019f4e76-66b4-\x37f87-94b2-cfa9bf766661"
-    : "019f4e76-66b4-\x37f87-94b2-cfa9bf766662";
+test.each(["codex", "claude"] as const)("%s send creates one structured successor with verified ownership after termination and no duplicate delivery", async (engine) => {
+  const sessionId = crypto.randomUUID();
   const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
-  const accountId = `${engine}-rollback-account`;
+  const accountId = `${engine}-successor-account`;
   const profile = emptyLaunchProfile({
     cwd: SANDBOX,
     model: `${engine}-retained-model`,
     effort: "high",
+    title: `Continue ${engine} delivery ownership`,
     readOnly: engine === "codex",
     permissionMode: engine === "codex" ? "never" : "default",
     allowSubagents: true,
   });
   const key = { engine, sessionId } as const;
-  const registry = new AgentRegistry(path.join(SANDBOX, `${engine}-rollback-registry.json`), undefined, undefined, { sqliteMode: "off" });
+  const registry = new AgentRegistry(path.join(SANDBOX, `${engine}-successor-registry.json`), undefined, undefined, { sqliteMode: "off" });
   setAgentRegistryForTests(registry);
-  fs.writeFileSync(pathname, "");
+  fs.writeFileSync(pathname, `${JSON.stringify({ type: "session_meta" })}\n`);
   const begun = registry.beginSpawnRequest({
     engine,
     cwd: SANDBOX,
@@ -221,6 +220,7 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
   });
   if (begun.kind !== "created") throw new Error("structured receipt was unavailable");
   const structuredKind = engine === "codex" ? "codex-app-server" : "claude-broker";
+  const initialProcess = { pid: process.pid, startIdentity: null };
   const settled = registry.settleSpawn(begun.receipt.launchId, {
     key,
     artifactPath: pathname,
@@ -231,8 +231,8 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
     host: null,
     structuredHost: {
       kind: structuredKind,
-      endpoint: `stdio:${engine}-completed`,
-      process: { pid: process.pid, startIdentity: `${engine}-completed` },
+      endpoint: `stdio:${engine}-initial`,
+      process: initialProcess,
       eventCursor: 1,
       protocolVersion: "v2",
       writerClaimEpoch: 1,
@@ -241,30 +241,10 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
       activeFlags: [],
     },
     claimEpoch: 1,
-    claimOwner: `structured-host:${engine}-completed`,
+    claimOwner: `structured-host:${engine}-initial`,
     pendingAction: null,
   });
   if (settled.kind !== "settled") throw new Error("structured receipt did not settle");
-  registry.terminateStructuredHost(key);
-  const tmuxHost: TmuxHostEvidence = {
-    kind: "tmux",
-    endpoint: `/run/user/1000/${engine}-rollback`,
-    server: { pid: 910, startIdentity: `${engine}-server` },
-    paneId: engine === "codex" ? "%61" : "%62",
-    panePid: { pid: 911, startIdentity: `${engine}-pane` },
-    windowName: `${engine}-rollback`,
-    agent: { pid: 912, startIdentity: `${engine}-agent` },
-    argv: [engine, "resume", sessionId],
-  };
-  registry.upsert({
-    ...settled.entry,
-    status: "idle",
-    host: tmuxHost,
-    structuredHost: null,
-    claimEpoch: 2,
-    claimOwner: null,
-    pendingAction: null,
-  });
   const account: AccountContext = {
     engine,
     accountId,
@@ -273,31 +253,8 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
     transcriptRoot: SANDBOX,
     env: { NODE_ENV: "test" },
   };
-  const entry: FileEntry = {
-    path: pathname,
-    root: engine === "codex" ? "codex-sessions" : "claude-projects",
-    name: path.basename(pathname),
-    project: "viewer",
-    title: `${engine} rollback owner`,
-    engine,
-    kind: "session",
-    fmt: engine,
-    parent: null,
-    mtime: 1,
-    size: 0,
-    activity: "idle",
-    proc: "running",
-    pid: tmuxHost.agent.pid,
-    model: profile.model,
-    effort: profile.effort,
-    fast: false,
-    pendingQuestion: null,
-    waitingInput: null,
-  };
-  const tmuxSends: string[] = [];
-  const structuredSends: string[] = [];
+  const structuredSends: Array<{ clientMessageId: string | null; text: string }> = [];
   let structuredSpawns = 0;
-  let terminatedTmuxOwners = 0;
   const recover = (request: Parameters<typeof recoverDeadStructuredConversation>[0]) => recoverDeadStructuredConversation(request, {
     registry,
     client: {} as RuntimeHostClient,
@@ -332,15 +289,15 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
         structuredHost: {
           kind: structuredKind,
           endpoint: `stdio:${engine}-successor`,
-          process: { pid: process.pid, startIdentity: `${engine}-successor` },
+          process: { pid: process.pid, startIdentity: null },
           eventCursor: 2,
           protocolVersion: "v2",
-          writerClaimEpoch: 3,
+          writerClaimEpoch: 2,
           activeTurnRef: null,
           pendingAttention: [],
           activeFlags: [],
         },
-        claimEpoch: 3,
+        claimEpoch: 2,
         claimOwner: `structured-host:${engine}-successor`,
         pendingAction: null,
       });
@@ -360,31 +317,19 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
   });
   const deliveryOverrides = {
     recover,
-    pathAllowed: () => true,
-    listFiles: async () => [entry],
-    resumeSpecFor: () => ({
-      command: `${engine} resume`,
-      cwd: SANDBOX,
-      windowName: `${engine}-resume`,
-      engine,
-      "transcript": pathname,
-      launchProfile: profile,
-    }),
-    deliver: async ({ payload }: { payload: string }) => {
-      tmuxSends.push(payload);
-      return { ok: true, outcome: "delivered-to-live", target: tmuxHost.paneId } as const;
-    },
     enqueueStructured: async (request: { text: string; clientMessageId?: string | null }) => {
-      structuredSends.push(request.text);
+      structuredSends.push({ clientMessageId: request.clientMessageId ?? null, text: request.text });
+      const idempotencyKey = request.clientMessageId ?? `${engine}-successor-message`;
+      const operationId = `${idempotencyKey}-operation`;
       return {
         ok: true,
         structured: true,
         target: begun.receipt.conversationId,
         outcome: "delivered",
-        operationId: `${engine}-successor-send`,
+        operationId,
         receipt: {
-          operationId: `${engine}-successor-send`,
-          idempotencyKey: request.clientMessageId ?? `${engine}-successor-message`,
+          operationId,
+          idempotencyKey,
           conversationId: begun.receipt.conversationId,
           kind: "send",
           status: "delivered",
@@ -395,31 +340,40 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
     },
   };
 
-  const tmuxDelivery = await deliverConversationMessage({
-    pid: tmuxHost.agent.pid,
+  const initialDelivery = await deliverConversationMessage({
+    pid: null,
     path: pathname,
     conversationId: begun.receipt.conversationId,
-    clientMessageId: `${engine}-tmux-message`,
-    text: "deliver to the rollback owner",
+    clientMessageId: `${engine}-initial-message`,
+    text: "deliver to the initial structured owner",
     images: [],
   }, deliveryOverrides as never);
 
-  expect(tmuxDelivery).toMatchObject({ ok: true, outcome: "delivered-to-live", target: tmuxHost.paneId });
-  expect(tmuxSends).toEqual(["deliver to the rollback owner"]);
-  expect(structuredSends).toEqual([]);
+  expect(initialDelivery).toMatchObject({
+    ok: true,
+    outcome: "delivered",
+    target: begun.receipt.conversationId,
+    structured: true,
+    spawned: false,
+    receipt: { status: "delivered" },
+  });
+  expect(structuredSends).toEqual([{
+    clientMessageId: `${engine}-initial-message`,
+    text: "deliver to the initial structured owner",
+  }]);
   expect(structuredSpawns).toBe(0);
 
-  const killed = await killConversation(pathname, {
-    pathAllowed: () => true,
-    listFiles: async () => [entry],
-    registry,
-    killHost: async (host) => {
-      expect(host).toEqual(tmuxHost);
-      terminatedTmuxOwners += 1;
-      return true;
-    },
+  expect(registry.terminateStructuredHost(key, { ...initialProcess, startIdentity: "replacement" })).toBe(false);
+  expect(registry.readOnlySnapshot().entries[`${engine}:${sessionId}`]).toMatchObject({
+    structuredHost: { process: initialProcess },
+    claimOwner: `structured-host:${engine}-initial`,
   });
-  expect(killed).toEqual({ ok: true, target: tmuxHost.paneId });
+  expect(registry.terminateStructuredHost(key, initialProcess)).toBe(true);
+  expect(registry.readOnlySnapshot().entries[`${engine}:${sessionId}`]).toMatchObject({
+    status: "dead",
+    structuredHost: null,
+    claimOwner: null,
+  });
 
   const structuredDelivery = await deliverConversationMessage({
     pid: null,
@@ -438,10 +392,31 @@ test.each(["codex", "claude"] as const)("%s send follows verified tmux rollback 
     spawned: true,
     receipt: { status: "delivered" },
   });
-  expect(tmuxSends).toEqual(["deliver to the rollback owner"]);
-  expect(structuredSends).toEqual(["deliver to the structured successor"]);
+  expect(structuredSends).toEqual([
+    {
+      clientMessageId: `${engine}-initial-message`,
+      text: "deliver to the initial structured owner",
+    },
+    {
+      clientMessageId: `${engine}-structured-message`,
+      text: "deliver to the structured successor",
+    },
+  ]);
   expect(structuredSpawns).toBe(1);
-  expect(terminatedTmuxOwners).toBe(1);
+  const snapshot = registry.readOnlySnapshot();
+  expect(snapshot.entries[`${engine}:${sessionId}`]).toMatchObject({
+    key,
+    structuredHost: {
+      endpoint: `stdio:${engine}-successor`,
+      process: { pid: process.pid, startIdentity: null },
+      writerClaimEpoch: 2,
+    },
+    claimEpoch: 2,
+    claimOwner: `structured-host:${engine}-successor`,
+  });
+  expect(Object.values(snapshot.receipts).filter((receipt) => (
+    receipt.conversationId === begun.receipt.conversationId && receipt.purpose === "resume-successor"
+  ))).toHaveLength(1);
 });
 
 test("idle reconfiguration survives a transient host miss and resumes after verified termination", async () => {
