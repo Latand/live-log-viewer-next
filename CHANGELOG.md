@@ -85,6 +85,24 @@ guarantees for the 1.x series.
   questions still have to be answered, the queue still has to drain.
 
 ### Fixed
+- Card activity now uses the structured turn-liveness evidence that governs
+  recovery (#1296). A verified process with an open turn stays `live` only while
+  transcript writes or recent CPU movement show progress; the measured flat
+  100-second window projects `stalled`, and a recorded pid that has exited no
+  longer projects `running`. The hand-over now releases registered structured
+  engines before the incumbent Viewer exits. The target switch activates the
+  candidate first; its adopter refuses the still-live engine process before it
+  examines the separate Viewer writer claim. The incumbent previously reached
+  its demotion poll, checkpointed state, and exited without calling the engine
+  lifecycle, leaving the detached child alive in the host namespace. Demotion
+  now records an exact PID/start-identity handoff, releases all registered hosts
+  in one bounded window, and leaves the candidate's startup retry to publish one
+  replacement. The hand-off marker carries its writer epoch, so a delayed
+  incumbent state update cannot acknowledge its own release. A sliding CPU
+  window also keeps recent work live across ordinary polls until a later full
+  window supersedes that evidence. A CPU-flat stage is likewise terminated and
+  retired through its exact structured identity before the pipeline marks it
+  retryable.
 - The documented release path works as written (#1309). The deploy protocol
   named a wrapper command that is not installed on this machine and a
   fast-forward-only pull before the release, and the pull was wrong in its own

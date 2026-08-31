@@ -19,7 +19,7 @@ import type { CreateFlowRequest, Flow, FlowEngine, RoleConfig } from "@/lib/flow
 import { OPERATOR_PAUSE_RESUME_ACTOR, pauseResumeDetail, type PauseResumeActor } from "@/lib/pauseResumeActor";
 import { isRuntimeHostTransportFailure, runtimeHostClient, type RuntimeHostClient } from "@/lib/runtime/client";
 import { structuredHostsEnabled, supervisedRuntimeHostUnavailableReason } from "@/lib/runtime/flags";
-import { conversationTurnLiveness } from "@/lib/runtime/liveness";
+import { conversationTurnLiveness, type TurnLivenessDependencies } from "@/lib/runtime/liveness";
 import { structuredDeliveryPublicationState } from "@/lib/runtime/structuredDeliveryController";
 import { redactBounded } from "@/lib/monitor/redact";
 import { parseReview, type ReviewFinding } from "@/lib/review";
@@ -444,6 +444,11 @@ const KILL_REFUSED_STATES = new Set(["failed", "rejected"]);
 
 export type StageStopProbes = {
   client?: RuntimeHostClient | null;
+  action?: (request: {
+    conversationId: string;
+    transcriptPath: string;
+    action: "kill";
+  }) => Promise<{ status: number; body: unknown }>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   budgetMs?: number;
@@ -571,8 +576,11 @@ export async function stopPipelineStageAgent(
     if (!probe || !probe.resident()) return { outcome: "not-running" };
     const { conversationId, transcriptPath, resident } = probe;
 
-    const { applyConversationAction } = await import("@/lib/conversation/actions");
-    const result = await applyConversationAction({ conversationId, transcriptPath, action: "kill" });
+    const applyAction = probes.action ?? (async (request) => {
+      const { applyConversationAction } = await import("@/lib/conversation/actions");
+      return applyConversationAction(request);
+    });
+    const result = await applyAction({ conversationId, transcriptPath, action: "kill" });
     const body = result.body as { ok?: boolean; error?: string; operationId?: string; receipt?: { status?: string } };
     if (result.status >= 400 || body.ok !== true) {
       return { outcome: "failed", error: body.error ?? `stage host kill was refused with status ${result.status}` };
@@ -615,7 +623,9 @@ export async function stopPipelineStageAgent(
   }
 }
 
-export function defaultPipelinePorts(): PipelinePorts {
+export function defaultPipelinePorts(
+  dependencies: { liveness?: TurnLivenessDependencies } = {},
+): PipelinePorts {
   let runtimeSnapshot: ReturnType<NonNullable<ReturnType<typeof runtimeHostClient>>["snapshot"]> | null = null;
   const registry = agentRegistry();
   let registrySnapshot: ReturnType<typeof registry.readOnlySnapshot> | null = null;
@@ -808,7 +818,10 @@ export function defaultPipelinePorts(): PipelinePorts {
          evidence decides instead — and only `severed` counts, so a host writing
          to its transcript or burning CPU keeps the attempt alive however long
          its current step takes. */
-      const liveness = await conversationTurnLiveness(registry, conversation.id, { snapshot: current });
+      const liveness = await conversationTurnLiveness(registry, conversation.id, {
+        ...dependencies.liveness,
+        snapshot: current,
+      });
       return liveness?.state === "severed" && liveness.since !== null
         ? new Date(liveness.since).toISOString()
         : null;
@@ -1979,6 +1992,26 @@ async function tickRunStage(
     }
   }
   if (hostUnavailablePastGrace) {
+    /* A CPU-flat structured process is still a real process. Retire it through
+       the same identity-fenced control path as an operator kill before making
+       the attempt retryable; otherwise pane-less retry admission can launch a
+       replacement while the recorded engine still exists (#1296). */
+    const stopped = await ports.stopStageAgent({
+      stageId: stage.id,
+      attempt: attempt.n,
+      conversationId: attempt.conversationId,
+      agentPath: attempt.agentPath,
+      paneId: attempt.paneId,
+      ...(attempt.historical ? { adopted: true as const } : {}),
+    });
+    if (stopped.outcome === "failed" || stopped.outcome === "unconfirmed") {
+      pipeline.stateDetail = stopped.outcome === "failed"
+        ? `automatic recovery could not retire the unavailable stage host: ${stopped.error}`
+        : "automatic recovery is waiting for the unavailable stage host to terminate";
+      ports.scheduleTick?.(1_000);
+      return;
+    }
+    pipeline.stateDetail = null;
     attempt.state = "failed";
     attempt.completedAt = ports.now();
     attempt.error = HISTORICAL_MISSING_STAGE_VERDICT;

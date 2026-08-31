@@ -7,10 +7,13 @@ import { expect, test } from "bun:test";
 import {
   conversationTurnLiveness,
   decideTurnLiveness,
+  LIVENESS_CPU_PROGRESS_WINDOW_MS,
   LIVENESS_OBSERVATION_WINDOW_MS,
+  observeHostCpuProgress,
   processLaunchedAt,
   readHostProcessEvidence,
   readTranscriptEvidence,
+  resetHostCpuProgressForTests,
   transcriptEvidenceFromRecords,
   type TurnLivenessEvidence,
 } from "./liveness";
@@ -37,6 +40,7 @@ function evidence(overrides: {
       present: true,
       observedIdentity: "4242:900",
       cpuMs: 4_700,
+      cpuProgress: null,
       launchedAt: NOW - 30 * MINUTE,
       ...overrides.host,
     },
@@ -86,6 +90,62 @@ test("the #1281 specimen — nothing written and no CPU since its own launch —
   expect(decision.lastEvent).toEqual({ kind: "tool-result", at: NOW - 38 * MINUTE });
   /* Stable, so a consumer's grace period does not restart on every read. */
   expect(decision.since).toBe(NOW - 34 * MINUTE);
+});
+
+test("the #1296 measured CPU-flat window is severed despite one-time launch CPU", () => {
+  const decision = decideTurnLiveness(evidence({
+    transcriptTail: { lastEventAt: NOW - 5 * MINUTE, lastWriteAt: NOW - 5 * MINUTE, kind: "tool-result", turn: "busy" },
+    host: {
+      launchedAt: NOW - 4 * MINUTE,
+      cpuMs: 1_700,
+      cpuProgress: { consumedMs: 200, observedMs: 100_000 },
+    },
+  }));
+
+  expect(decision.state).toBe("severed");
+  expect(decision.reason).toContain("only 200ms");
+  expect(decision.reason).toContain("latest 100s");
+});
+
+test("CPU progress sampling keeps the oldest sample that spans the observation window", () => {
+  resetHostCpuProgressForTests();
+  const processIdentity = { pid: 77, startIdentity: "77:6000" };
+  const sample = (now: number, cpuMs: number) => observeHostCpuProgress({
+    process: processIdentity,
+    observedIdentity: processIdentity.startIdentity,
+    cpuMs,
+    transcriptLastWriteAt: NOW - 5 * MINUTE,
+    now,
+  });
+
+  expect(sample(NOW, 1_500)).toBeNull();
+  expect(sample(NOW + LIVENESS_CPU_PROGRESS_WINDOW_MS - 1, 1_620)).toBeNull();
+  expect(sample(NOW + LIVENESS_CPU_PROGRESS_WINDOW_MS, 1_630)).toEqual({
+    consumedMs: 130,
+    observedMs: LIVENESS_CPU_PROGRESS_WINDOW_MS,
+  });
+});
+
+test("a working CPU window remains evidence on the next ordinary poll", () => {
+  resetHostCpuProgressForTests();
+  const processIdentity = { pid: 78, startIdentity: "78:6000" };
+  const sample = (now: number, cpuMs: number) => observeHostCpuProgress({
+    process: processIdentity,
+    observedIdentity: processIdentity.startIdentity,
+    cpuMs,
+    transcriptLastWriteAt: NOW - 5 * MINUTE,
+    now,
+  });
+
+  expect(sample(NOW, 4_700)).toBeNull();
+  expect(sample(NOW + LIVENESS_CPU_PROGRESS_WINDOW_MS, 5_000)).toEqual({
+    consumedMs: 300,
+    observedMs: LIVENESS_CPU_PROGRESS_WINDOW_MS,
+  });
+  expect(sample(NOW + LIVENESS_CPU_PROGRESS_WINDOW_MS + 10_000, 5_050)).toEqual({
+    consumedMs: 350,
+    observedMs: LIVENESS_CPU_PROGRESS_WINDOW_MS + 10_000,
+  });
 });
 
 test("an inherited turn whose host is burning CPU is working", () => {

@@ -21,16 +21,26 @@ function view(over: Partial<ProjectAccountsView["engines"][number]> = {}): Proje
 
 const render = (value: ProjectAccountsView | null) => renderToStaticMarkup(<ProjectAccountsStrip view={value} />);
 
-test("a fenced project names the accounts it may use", () => {
+test("a fenced project collapses its account row into one engine switch", () => {
   const html = render(view());
-  expect(html).toContain("Reserved");
   expect(html).toContain(`data-project-accounts="${ATLAS}"`);
+  expect(html.match(/aria-haspopup="dialog"/g)?.length).toBe(1);
+  expect(html).toContain("Claude");
+  expect(html).not.toContain("Reserved");
 });
 
-test("the account carrying the project's work is marked as carrying", () => {
-  const html = render(view({ carrying: [{ accountId: "acct-reserved", label: "Reserved" }] }));
-  expect(html).toContain('data-project-account-carrying="acct-reserved"');
-  expect(html).toContain("carrying");
+test("many project accounts still paint one collapsed control for their engine", () => {
+  const html = render(view({
+    allowed: [
+      { accountId: "account-north", label: "North star" },
+      { accountId: "account-harbor", label: "Harbor light" },
+    ],
+    carrying: [{ accountId: "account-harbor", label: "Harbor light" }],
+  }));
+  expect(html.match(/aria-haspopup="dialog"/g)?.length).toBe(1);
+  expect(html).not.toContain("North star");
+  expect(html).not.toContain("Harbor light");
+  expect(html).not.toContain("truncate rounded-full");
 });
 
 test("a project that is neither fenced nor busy renders nothing", () => {
@@ -38,16 +48,24 @@ test("a project that is neither fenced nor busy renders nothing", () => {
   expect(render(null)).toBe("");
 });
 
-test("an unfenced project that IS busy shows who is carrying it, and says any account may", () => {
+test("an unfenced busy project still gets one on-demand engine control", () => {
   const html = render(view({ restricted: false, allowed: [], carrying: [{ accountId: "acct-spare", label: "Spare" }] }));
-  expect(html).toContain("any account");
-  expect(html).toContain('data-project-account-carrying="acct-spare"');
+  expect(html.match(/aria-haspopup="dialog"/g)?.length).toBe(1);
+  expect(html).not.toContain("any account");
+  expect(html).not.toContain("Spare");
 });
 
-test("a carrier outside the allowed set is still shown, and still marked", () => {
-  const html = render(view({ carrying: [{ accountId: "acct-legacy", label: "Legacy" }] }));
-  expect(html).toContain("Reserved");
-  expect(html).toContain('data-project-account-carrying="acct-legacy"');
+test("two relevant engines render at most one control each", () => {
+  const html = render({
+    project: ATLAS,
+    engines: [
+      view().engines[0],
+      { engine: "codex", restricted: false, allowed: [], carrying: [{ accountId: "account-south", label: "South ridge" }], outsidePool: [] },
+    ],
+  });
+  expect(html.match(/aria-haspopup="dialog"/g)?.length).toBe(2);
+  expect(html.match(/data-account-switch-engine="claude"/g)?.length).toBe(1);
+  expect(html.match(/data-account-switch-engine="codex"/g)?.length).toBe(1);
 });
 
 test("a malformed payload parses to nothing rather than throwing", () => {
@@ -59,35 +77,11 @@ test("a malformed payload parses to nothing rather than throwing", () => {
   });
 });
 
-test("an account chosen from outside the pool is shown, dated and attributed", () => {
+test("an account chosen outside the pool stays collapsed at rest", () => {
   const html = render(view({
     outsidePool: [{ accountId: "acct-outside", label: "Outside", at: "2026-08-30T09:00:00.000Z", actor: "operator" }],
   }));
-  /* The pool still reads as the pool, and the deliberate choice reads as a
-     choice: shown beside it, marked, and naming who made it. */
-  expect(html).toContain("Reserved");
-  expect(html).toContain('data-project-account-outside-pool="acct-outside"');
-  expect(html).toContain("outside the pool");
-  expect(html).toContain("by you");
-  expect(html).toContain("2026-08-30T09:00:00.000Z");
-});
-
-test("an agent's choice is attributed to the agent", () => {
-  const html = render(view({
-    outsidePool: [{ accountId: "acct-outside", label: "Outside", at: "2026-08-30T09:00:00.000Z", actor: "agent" }],
-  }));
-  expect(html).toContain('data-project-account-outside-pool="acct-outside"');
-  expect(html).toContain("by an agent");
-});
-
-test("a choice of an account that is also carrying reads as both, on one chip", () => {
-  const html = render(view({
-    carrying: [{ accountId: "acct-outside", label: "Outside" }],
-    outsidePool: [{ accountId: "acct-outside", label: "Outside", at: "2026-08-30T09:00:00.000Z", actor: "operator" }],
-  }));
-  expect(html.match(/acct-outside/g)?.length).toBeGreaterThan(0);
-  expect(html).toContain('data-project-account-carrying="acct-outside"');
-  expect(html).toContain('data-project-account-outside-pool="acct-outside"');
-  expect(html).toContain("carrying");
-  expect(html).toContain("outside the pool");
+  expect(html.match(/aria-haspopup="dialog"/g)?.length).toBe(1);
+  expect(html).not.toContain("Outside");
+  expect(html).not.toContain("2026-08-30T09:00:00.000Z");
 });
