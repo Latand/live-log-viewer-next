@@ -916,7 +916,7 @@ class RoundTripHost implements SpawnedStructuredHost {
     this.materializationFailure = options.materializationFailure ?? null;
   }
 
-  async sessionMaterializationEvidence(): Promise<
+  async sessionMaterializationEvidence(_clientMessageId: string): Promise<
     | { state: "materialized" }
     | { state: "absent"; reason: string }
     | { state: "unavailable"; reason: string }
