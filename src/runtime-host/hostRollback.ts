@@ -32,6 +32,32 @@ function matches(
     && generation.container === release.container;
 }
 
+function sameRelease(
+  left: RuntimeHostReleaseRecord,
+  right: RuntimeHostReleaseRecord,
+): boolean {
+  return left.image === right.image
+    && left.revision === right.revision
+    && left.container === right.container
+    && left.endpoint === right.endpoint
+    && left.stagedAt === right.stagedAt;
+}
+
+function matchesHandoff(
+  handoff: RuntimeHostHandoffIntent,
+  rollback: RuntimeHostRollbackIntent,
+): boolean {
+  return handoff.image === rollback.active.image
+    && handoff.revision === rollback.active.revision
+    && handoff.successorContainer === rollback.active.container
+    && handoff.predecessorId === rollback.predecessorId
+    && handoff.recordedAt === rollback.recordedAt
+    && handoff.previousRelease !== undefined
+    && handoff.successorRelease !== undefined
+    && sameRelease(handoff.previousRelease, rollback.previous)
+    && sameRelease(handoff.successorRelease, rollback.active);
+}
+
 export function runtimeHostRollbackDeploymentUpdate(
   status: ViewerDeploymentStatus,
   target: RuntimeHostRollbackTarget,
@@ -96,8 +122,10 @@ export async function completeRuntimeHostRollback(
   generation: RuntimeHostGenerationIdentity,
   ports: {
     readIntent(): RuntimeHostRollbackIntent | null;
+    readHandoffIntent(): RuntimeHostHandoffIntent | null;
     removeFailed(container: string): Promise<void>;
     clearTarget?(): void;
+    clearHandoffIntent(intent: RuntimeHostHandoffIntent): void;
     clearIntent(): void;
   },
 ): Promise<boolean> {
@@ -108,6 +136,10 @@ export async function completeRuntimeHostRollback(
   }
   await ports.removeFailed(intent.active.container);
   ports.clearTarget?.();
+  const handoff = ports.readHandoffIntent();
+  if (handoff && matchesHandoff(handoff, intent)) {
+    ports.clearHandoffIntent(handoff);
+  }
   ports.clearIntent();
   return true;
 }

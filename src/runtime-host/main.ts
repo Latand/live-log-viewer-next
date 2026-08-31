@@ -24,13 +24,16 @@ const {
   spawnRuntimeJournalVacuum,
 } = await import("./journalVacuum");
 const {
+  clearRuntimeHostHandoffIntentIfMatches,
   clearRuntimeHostRollbackIntent,
   clearRuntimeHostRollbackTarget,
   currentRuntimeHostGeneration,
+  readRuntimeHostHandoffIntent,
   readRuntimeHostRollbackIntent,
   RUNTIME_HOST_CONTAINER_ENV,
   RUNTIME_HOST_IMAGE_ENV,
   RUNTIME_HOST_REVISION_ENV,
+  runtimeHostHandoffIntentFile,
   runtimeHostRollbackIntentFile,
   runtimeHostRollbackTargetFile,
 } = await import("./hostRelease");
@@ -148,8 +151,13 @@ if (journal.isWritable() && rollbackResumed && rollbackIntent) {
 if (rollbackResumed && rollbackGeneration) {
   await completeRuntimeHostRollback(rollbackGeneration, {
     readIntent: () => readRuntimeHostRollbackIntent(runtimeHostRollbackIntentFile()),
+    readHandoffIntent: () => readRuntimeHostHandoffIntent(runtimeHostHandoffIntentFile()),
     removeFailed: (container) => dockerAbsentOkay(["container", "rm", "-f", container]),
     clearTarget: () => clearRuntimeHostRollbackTarget(runtimeHostRollbackTargetFile()),
+    clearHandoffIntent: (intent) => clearRuntimeHostHandoffIntentIfMatches(
+      intent,
+      runtimeHostHandoffIntentFile(),
+    ),
     clearIntent: () => clearRuntimeHostRollbackIntent(runtimeHostRollbackIntentFile()),
   });
 }

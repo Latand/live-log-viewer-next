@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  clearRuntimeHostHandoffIntentIfMatches,
   clearRuntimeHostRollbackIntent,
   clearRuntimeHostHandoffIntent,
   currentRuntimeHostGeneration,
@@ -86,6 +87,54 @@ test("issue 1270: rollback target and intent survive the requesting executor", (
     expect(readRuntimeHostRollbackIntent(intentFile)).toEqual(intent);
     clearRuntimeHostRollbackIntent(intentFile);
     expect(readRuntimeHostRollbackIntent(intentFile)).toBeNull();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue 1270: rollback cleanup clears only its exact durable handoff intent", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-rollback-handoff-clear-"));
+  try {
+    const filename = path.join(dir, "runtime-host-handoff-intent.json");
+    const previous = {
+      ...record,
+      image: "agent-log-viewer:previous",
+      revision: "a".repeat(40),
+      container: "runtime-host-previous",
+    };
+    const expected: RuntimeHostHandoffIntent = {
+      revision: record.revision,
+      image: record.image,
+      successorContainer: record.container,
+      predecessorId: "retained-predecessor-id",
+      previousRelease: previous,
+      successorRelease: record,
+      recordedAt: "2026-08-31T14:00:10.000Z",
+    };
+    const later: RuntimeHostHandoffIntent = {
+      ...expected,
+      revision: "c".repeat(40),
+      image: "agent-log-viewer:later",
+      successorContainer: "runtime-host-later",
+      successorRelease: {
+        ...record,
+        revision: "c".repeat(40),
+        image: "agent-log-viewer:later",
+        container: "runtime-host-later",
+      },
+      recordedAt: "2026-08-31T14:01:00.000Z",
+    };
+
+    writeRuntimeHostHandoffIntent(expected, filename);
+    expect(() => writeRuntimeHostHandoffIntent(later, filename))
+      .toThrow("runtime-host handoff intent is already owned by another generation");
+    expect(readRuntimeHostHandoffIntent(filename)).toEqual(expected);
+    expect(clearRuntimeHostHandoffIntentIfMatches(expected, filename)).toBe(true);
+    expect(readRuntimeHostHandoffIntent(filename)).toBeNull();
+
+    writeRuntimeHostHandoffIntent(later, filename);
+    expect(clearRuntimeHostHandoffIntentIfMatches(expected, filename)).toBe(false);
+    expect(readRuntimeHostHandoffIntent(filename)).toEqual(later);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

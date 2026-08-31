@@ -169,8 +169,7 @@ function writeDurableJson(filename: string, value: unknown): void {
     fs.closeSync(fd);
   }
   fs.renameSync(temporary, filename);
-  const directory = fs.openSync(path.dirname(filename), "r");
-  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+  fsyncDirectory(path.dirname(filename));
 }
 
 export function writeRuntimeHostRelease(record: RuntimeHostReleaseRecord, filename = runtimeHostReleaseFile()): void {
@@ -230,18 +229,80 @@ export function readRuntimeHostHandoffIntent(filename = runtimeHostHandoffIntent
 }
 
 export function writeRuntimeHostHandoffIntent(intent: RuntimeHostHandoffIntent, filename = runtimeHostHandoffIntentFile()): void {
-  writeDurableJson(filename, intent);
+  fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+  const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
+  const fd = fs.openSync(temporary, "wx", 0o600);
+  try {
+    fs.writeFileSync(fd, JSON.stringify(intent));
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  try {
+    fs.linkSync(temporary, filename);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error("runtime-host handoff intent is already owned by another generation", { cause: error });
+    }
+    throw error;
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+  fsyncDirectory(path.dirname(filename));
 }
 
 export function clearRuntimeHostHandoffIntent(filename = runtimeHostHandoffIntentFile()): void {
   clearDurableFile(filename);
 }
 
+function sameRuntimeHostRelease(
+  left: RuntimeHostReleaseRecord,
+  right: RuntimeHostReleaseRecord,
+): boolean {
+  return left.image === right.image
+    && left.revision === right.revision
+    && left.container === right.container
+    && left.endpoint === right.endpoint
+    && left.stagedAt === right.stagedAt;
+}
+
+function sameRuntimeHostHandoffIntent(
+  left: RuntimeHostHandoffIntent,
+  right: RuntimeHostHandoffIntent,
+): boolean {
+  return left.image === right.image
+    && left.revision === right.revision
+    && left.successorContainer === right.successorContainer
+    && left.predecessorId === right.predecessorId
+    && left.recordedAt === right.recordedAt
+    && (left.previousRelease === undefined) === (right.previousRelease === undefined)
+    && (left.successorRelease === undefined) === (right.successorRelease === undefined)
+    && (!left.previousRelease || !right.previousRelease || sameRuntimeHostRelease(left.previousRelease, right.previousRelease))
+    && (!left.successorRelease || !right.successorRelease || sameRuntimeHostRelease(left.successorRelease, right.successorRelease));
+}
+
+/** Handoff publication is no-clobber, so the identity read here cannot be
+    replaced before this synchronous unlink. A writer that publishes after the
+    unlink creates a new canonical file and survives this cleanup. */
+export function clearRuntimeHostHandoffIntentIfMatches(
+  expected: RuntimeHostHandoffIntent,
+  filename = runtimeHostHandoffIntentFile(),
+): boolean {
+  const current = readRuntimeHostHandoffIntent(filename);
+  if (!current || !sameRuntimeHostHandoffIntent(current, expected)) return false;
+  clearDurableFile(filename);
+  return true;
+}
+
 function clearDurableFile(filename: string): void {
   fs.rmSync(filename, { force: true });
+  fsyncDirectory(path.dirname(filename));
+}
+
+function fsyncDirectory(directoryPath: string): void {
   let directory: number;
   try {
-    directory = fs.openSync(path.dirname(filename), "r");
+    directory = fs.openSync(directoryPath, "r");
   } catch {
     return;
   }
