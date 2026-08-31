@@ -9,7 +9,10 @@ import {
   launchProfileCodexSandbox,
   launchProfileEngineReadOnly,
 } from "@/lib/accounts/migration/contracts";
+import { reconcileMigrationInventory } from "@/lib/accounts/migration/coordinator";
 import { claudeSuccessorSpecFor } from "@/lib/agent/cli";
+import { AgentRegistry } from "@/lib/agent/registry";
+import type { FileEntry } from "@/lib/types";
 
 import {
   materializeStructuredHostAccess,
@@ -59,6 +62,102 @@ test("legacy read-only launch profiles retain their pre-axis engine sandbox on a
   expect(structuredHostAccessPolicy({ readOnly: true, sandbox: null })).toBeTrue();
   expect(launchProfileEngineReadOnly({ readOnly: true, sandbox: null })).toBeTrue();
   expect(launchProfileCodexSandbox({ readOnly: true, sandbox: null })).toBe("read-only");
+});
+
+test("resume successors preserve both explicit pipeline access axes", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-stage-access-resume-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "registry.json"), undefined, undefined, {
+      sqliteMode: "off",
+    });
+    const sourcePath = path.join(directory, "source.jsonl");
+    const snapshot = registry.reconcileConversations([{
+      engine: "codex",
+      path: sourcePath,
+      accountId: "account-a",
+      launchProfile: emptyLaunchProfile({
+        cwd: directory,
+        title: "Preserve pipeline runtime profile",
+        readOnly: true,
+        sandbox: "restricted",
+      }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-08-31T00:00:00.000Z",
+    }]);
+    const conversation = Object.values(snapshot.conversations)[0];
+    if (!conversation) throw new Error("source conversation was not reconciled");
+
+    const resumed = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+      origin: { kind: "successor" },
+      launchProfile: {},
+    });
+    if (resumed.kind !== "created") throw new Error("resume successor was not created");
+    expect(resumed.receipt.launchProfile).toMatchObject({
+      readOnly: true,
+      sandbox: "restricted",
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("inventory preserves both access axes from a pending structured launch receipt", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-stage-access-inventory-"));
+  try {
+    const registry = new AgentRegistry(path.join(directory, "registry.json"), undefined, undefined, {
+      sqliteMode: "off",
+    });
+    const pathname = path.join(directory, "pending-stage.jsonl");
+    fs.writeFileSync(pathname, "{}\n");
+    const begun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      expectedArtifactPath: pathname,
+      launchProfile: emptyLaunchProfile({
+        cwd: directory,
+        title: "Recover pending pipeline stage",
+        readOnly: false,
+        sandbox: "restricted",
+      }),
+    });
+    if (begun.kind !== "created") throw new Error("pending stage receipt was not created");
+    const stat = fs.statSync(pathname);
+    const entry: FileEntry = {
+      path: pathname,
+      root: "codex-sessions",
+      name: path.basename(pathname),
+      project: "repo",
+      title: "Pending pipeline stage",
+      engine: "codex",
+      kind: "session",
+      fmt: "codex",
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "recent",
+      activityReason: "jsonl_turn_completed",
+      derivationComplete: true,
+      proc: null,
+      pid: null,
+      model: "gpt-5.6-sol",
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+
+    await reconcileMigrationInventory(registry, [entry], { deferBoardRepair: true });
+
+    expect(registry.conversationForPath(pathname)?.generations.at(-1)?.launchProfile).toMatchObject({
+      readOnly: false,
+      sandbox: "restricted",
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test.each([

@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { readSession } from "@/lib/session/reader";
 import { RuntimeHost } from "@/runtime-host/host";
 import { RuntimeJournal } from "@/runtime-host/journal";
 import { serveRuntimeHost } from "@/runtime-host/socket";
@@ -152,7 +153,12 @@ test("real pipeline launch keeps access and sandbox independent through settleme
       "ssh-keyscan -T 10 -p 443 ssh.github.com >/dev/null 2>&1",
       "gh api rate_limit --silent",
     ];
-    const fullAccessCommand = [...capabilityProbes, "printf 'full-write\\n' > full-write.txt"].join(" && ");
+    const capabilityProbeMarker = "capability-probes-ok";
+    const fullAccessCommand = [
+      ...capabilityProbes,
+      "printf '%s-%s\\n' capability probes-ok",
+      "printf 'full-write\\n' > full-write.txt",
+    ].join(" && ");
 
     const created = await createPipelineFromRequest({
       task: "Exercise independent pipeline access axes",
@@ -222,8 +228,10 @@ test("real pipeline launch keeps access and sandbox independent through settleme
       .toBe("full-write");
     const fullAttempt = attemptFor(afterFull, "full-write");
     if (!fullAttempt?.agentPath) throw new Error("full-access stage transcript is unavailable");
-    const fullTranscript = fs.readFileSync(fullAttempt.agentPath, "utf8");
-    for (const probe of capabilityProbes) expect(fullTranscript).toContain(probe);
+    const fullTools = readSession(fullAttempt.agentPath, "codex").tools;
+    expect(fullTools.some((record) => record.kind === "tool_call"
+      && capabilityProbes.every((probe) => record.text.includes(probe)))).toBeTrue();
+    expect(fullTools.some((record) => record.text.includes(capabilityProbeMarker))).toBeTrue();
 
     const afterRestricted = await advanceToStage(pipelineId, "restricted-report");
     expect(fs.readFileSync(path.join(afterRestricted.worktreeDir, "restricted-write.txt"), "utf8"))
