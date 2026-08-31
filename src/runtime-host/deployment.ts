@@ -255,8 +255,8 @@ export class ViewerDeploymentCoordinator {
       After the blue-green promotion is healthy, a generation
       mismatch stages the freshly built candidate image as the successor
       runtime-host release. The deployment remains active in its durable
-      host-handoff phase until staging succeeds. Only then does it become
-      terminal and signal the predecessor to release the singleton fence. */
+      host-handoff phase through predecessor exit. The successor writes
+      terminal success after acquiring the fence and proving readiness. */
   private async stageDriftedHostSuccessor(status: ViewerDeploymentStatus): Promise<RuntimeHostHandoffContext | null> {
     const trace = (line: string) => this.log(`[viewer deployment] ${status.deploymentId} host-handoff ${line}`);
     if (!this.hostGeneration || !status.candidate) {
