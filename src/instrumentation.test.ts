@@ -10,6 +10,7 @@ import {
   activateViewerRuntimeWhenCurrent,
   completeViewerRuntimeActivation,
   completeViewerReleaseDemotion,
+  classifyStructuredHostStartupError,
   establishHotStateCutoverBoundary,
   initializeHotStateStoresAtStartup,
   initializeOperatorSpawnCapabilityAtStartup,
@@ -677,6 +678,84 @@ test("server startup mints the operator capability and rotates it on request", a
   }
 });
 
+test("controller startup classifies every recoverable incident class and terminal state data", () => {
+  const transientIo = Object.assign(new Error("state read failed"), { code: "EIO" });
+  const registryContention = Object.assign(new Error("registry transaction is busy"), {
+    name: "FileTransactionBusyError",
+  });
+  const instrumentationRace = Object.assign(new Error("controller publication has not landed"), {
+    code: "structured-delivery-controller-unavailable",
+  });
+  const cases: Array<[unknown, string]> = [
+    [new RuntimeHostUnavailableError("runtime host is unavailable"), "runtime-host-unavailable"],
+    [new RuntimeHostUnavailableError("runtime host request timed out"), "timeout"],
+    [registryContention, "registry-contention"],
+    [transientIo, "transient-io"],
+    [instrumentationRace, "instrumentation-order"],
+  ];
+
+  for (const [error, category] of cases) {
+    expect(classifyStructuredHostStartupError(error)).toMatchObject({
+      disposition: "recoverable",
+      category,
+    });
+  }
+  expect(classifyStructuredHostStartupError(
+    new StructuredRuntimeRequirementError("structured hosts require Bun"),
+  )).toMatchObject({
+    disposition: "terminal",
+    category: "configuration",
+    action: expect.stringContaining("configuration"),
+  });
+  expect(classifyStructuredHostStartupError(
+    Object.assign(new Error("database image is malformed"), { code: "SQLITE_CORRUPT" }),
+  )).toMatchObject({
+    disposition: "terminal",
+    category: "data-corruption",
+    action: expect.stringContaining("state data"),
+  });
+});
+
+test("controller startup retries every recoverable incident class", async () => {
+  const failures = [
+    new RuntimeHostUnavailableError("runtime host is unavailable"),
+    new RuntimeHostUnavailableError("runtime host request timed out"),
+    Object.assign(new Error("registry transaction is busy"), { name: "FileTransactionBusyError" }),
+    Object.assign(new Error("state read failed"), { code: "EIO" }),
+    Object.assign(new Error("controller publication has not landed"), {
+      code: "structured-delivery-controller-unavailable",
+    }),
+  ];
+
+  try {
+    for (const failure of failures) {
+      const scheduled: Array<() => void> = [];
+      let attempts = 0;
+      await runStructuredHostStartup(
+        async () => {
+          attempts += 1;
+          if (attempts === 1) throw failure;
+        },
+        () => undefined,
+        {
+          random: () => 0.5,
+          schedule: (callback) => {
+            scheduled.push(callback);
+            return { unref() {} };
+          },
+        },
+      );
+      expect(scheduled).toHaveLength(1);
+      scheduled.shift()!();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(attempts).toBe(2);
+    }
+  } finally {
+    markStructuredHostStartupReady();
+  }
+});
+
 test("structured-host startup retries an arbitrary recoverable adoption error", async () => {
   const failure = new Error("container adoption failed");
   const logged: unknown[][] = [];
@@ -879,7 +958,14 @@ test("unsupported structured runtime aborts server startup", async () => {
       (...args) => { logged.push(args); },
     )).rejects.toBe(failure);
 
-    expect(logged).toEqual([["[structured hosts] startup adoption failed", failure]]);
+    expect(logged).toEqual([[
+      "[structured hosts] startup adoption failed",
+      failure,
+      {
+        category: "configuration",
+        action: "Correct the structured-host configuration and restart the Viewer.",
+      },
+    ]]);
     expect(didStructuredHostStartupFail()).toBe(true);
   } finally {
     markStructuredHostStartupReady();
