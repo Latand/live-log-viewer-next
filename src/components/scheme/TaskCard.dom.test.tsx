@@ -2,7 +2,6 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window as HappyWindow } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
-import { resetRuntimeBusForTests } from "@/hooks/runtimeBus";
 
 import type { AssignmentRef, BoardTask } from "@/lib/tasks/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -34,12 +33,8 @@ function bindDomGlobals() {
 
 bindDomGlobals();
 const roots = new Set<Root>();
-beforeEach(() => {
-  resetRuntimeBusForTests();
-  bindDomGlobals();
-});
+beforeEach(bindDomGlobals);
 afterEach(() => {
-  resetRuntimeBusForTests();
   for (const root of roots) flushSync(() => root.unmount());
   roots.clear();
   dom.document.body.replaceChildren();
