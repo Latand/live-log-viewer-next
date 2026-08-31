@@ -1745,9 +1745,9 @@ function ProjectDashboardView({
             held its 45vw and pushed «More actions» off a 390px screen instead).
             Desktop keeps its natural width. */}
         <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 max-w-[45vw]" : ""}`} title={projectName}>{projectName}</h1>
-        {/* #1279's project side: which accounts this project may use and which
-            are carrying its work. Desktop only, and silent unless the project
-            is fenced or busy, so it costs the phone header no slot at all. */}
+        {/* The project account surface is one compact switch per relevant engine
+            (#1331). Pool/carrier detail opens on demand; the phone remains
+            unchanged, and quiet projects still spend no header slot. */}
         {!isMobile ? <ProjectAccounts project={project} /> : null}
         {/* Desktop only. On the phone the whole history island — undo and redo
             together — rides the «⋯» menu, which is how search bought its 44px
