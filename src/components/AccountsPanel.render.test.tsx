@@ -5,6 +5,7 @@ import type { ClaudeLoginView, EngineAccountsState } from "@/hooks/useEngineAcco
 import { translate } from "@/lib/i18n";
 
 import { AccountsPanel, type ProjectAccountContext } from "./AccountsPanel";
+import { formatResetClock } from "./rateLimit";
 
 const base = (over: Partial<EngineAccountsState> = {}): EngineAccountsState => ({
   engine: "codex",
@@ -133,6 +134,32 @@ test("breaks out each account's session and weekly windows with reset times", ()
   expect(html).toContain("45%"); // session remaining (100 − 55)
   expect(html).toContain("92%"); // weekly remaining (100 − 8)
   expect(html).toContain("reset"); // both windows carry a reset time
+});
+
+test("an exhausted account names when it is rate limited until (#1371)", () => {
+  const nowS = Math.floor(Date.now() / 1_000);
+  const resetsAt = nowS + 6 * 86_400;
+  const html = render(base({
+    accounts: [{
+      id: "main",
+      label: "Main",
+      kind: "legacy",
+      authPresent: true,
+      loginPending: false,
+      loginState: "authenticated",
+      deviceAuth: null,
+      limits: {
+        freshness: "stale",
+        session: null,
+        weekly: { usedPercent: 100, resetsAt, windowMinutes: 10_080 },
+      },
+    }],
+    active: "main",
+  }));
+
+  expect(html).toContain(translate("en", "rateLimit.badgeUntil", {
+    time: formatResetClock(resetsAt, nowS),
+  }));
 });
 
 test("a weekly-only account labels its one window by the horizon it carries", () => {
