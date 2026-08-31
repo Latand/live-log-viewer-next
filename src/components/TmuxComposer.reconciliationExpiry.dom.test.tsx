@@ -41,11 +41,9 @@ let mobileViewport = false;
 });
 
 /* The local reconciliation window is a product-real 30s. These tests exercise
-   its EXPIRY, so the module is mocked to a few tens of milliseconds while every
-   reconciliation primitive stays the real implementation — the component reads
-   the window/poll constants and threads them through, so shrinking them here
-   drives the production code path. bun runs each test file in its own module
-   graph, so this override stays isolated from the 30s tests next door. */
+   its EXPIRY, so the lifecycle-owned timing seam shrinks it to a few tens of
+   milliseconds while every reconciliation primitive stays real. The seam is
+   cleared after every case, so neighboring files retain production timing. */
 /* A controllable durable-receipt stream stands in for the runtime bus (see the
    sibling reconciliation test for the rationale). */
 const receiptListeners = new Set<() => void>();

@@ -3146,7 +3146,7 @@ test("a stale synchronization-held steer fails safely across Codex and Claude re
   }
 });
 
-test("a published Codex successor preserves its migration-held input as cancelled evidence", async () => {
+test("a published Codex successor preserves its migration-held reservation as cancelled evidence", async () => {
   const sourceId = "11111111-1111-\x34111-8111-111111111111";
   const successorId = "22222222-2222-\x34222-8222-222222222222";
   const sourcePath = path.join(sandbox, `${sourceId}.jsonl`);
@@ -3301,7 +3301,7 @@ test("a published Codex successor preserves its migration-held input as cancelle
   journal.close();
 });
 
-test("a published Claude successor preserves its migration-held input as cancelled evidence", async () => {
+test("a published Claude successor preserves its migration-held reservation as cancelled evidence", async () => {
   const sourceId = "33333333-3333-\x34333-8333-333333333333";
   const successorId = "44444444-4444-\x34444-8444-444444444444";
   const accountRoot = path.join(sandbox, "claude-migration-accounts");

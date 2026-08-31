@@ -83,13 +83,17 @@ test("a queued id can be claimed once per durable requeue", () => {
   submit("conv", "k1", "one");
   submit("conv", "k2", "two");
 
-  expect(claimOutboxDispatch("conv", "k1")).toMatchObject({ id: "k1", state: "delivering" });
+  const firstClaim = claimOutboxDispatch("conv", "k1");
+  const firstClaimIdentity = firstClaim && { id: firstClaim.id, state: firstClaim.state };
+  expect(firstClaimIdentity).toEqual({ id: "k1", state: "delivering" });
   expect(claimOutboxDispatch("conv", "k1")).toBeNull();
   expect(claimOutboxDispatch("conv", "k2")).toBeNull();
 
   updateOutbox("conv", "k1", { state: "failed" });
   updateOutbox("conv", "k1", { state: "queued" });
-  expect(claimOutboxDispatch("conv", "k1")).toMatchObject({ id: "k1", state: "delivering" });
+  const retryClaim = claimOutboxDispatch("conv", "k1");
+  const retryClaimIdentity = retryClaim && { id: retryClaim.id, state: retryClaim.state };
+  expect(retryClaimIdentity).toEqual({ id: "k1", state: "delivering" });
   expect(claimOutboxDispatch("conv", "k1")).toBeNull();
 });
 

@@ -41,8 +41,7 @@ let mobileViewport = false;
 /* A controllable durable-receipt stream stands in for the runtime bus: the
    tests push admission receipts the way production does — through the
    receipts hook — while the send response is still in flight or after a
-   remount. The actual hooks are restored in afterAll (mock.module is
-   process-global). */
+   remount. The lifecycle-owned composer seam is cleared after every case. */
 const receiptListeners = new Set<() => void>();
 let busReceipts: RuntimeReceipt[] = [];
 let refreshRuntimeImpl: () => Promise<boolean> = async () => false;

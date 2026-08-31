@@ -37,7 +37,7 @@ Object.assign(globalThis, {
 /* A controllable durable-receipt stream stands in for the runtime bus: the
    test pushes the late `delivered` receipt the way production does — through
    the receipts hook — instead of smuggling it into a send response. The
-   actual hooks are restored in afterAll (mock.module is process-global). */
+   lifecycle-owned composer seam is cleared after every case. */
 const receiptListeners = new Set<() => void>();
 let busReceipts: RuntimeReceipt[] = [];
 function publishReceipts(next: RuntimeReceipt[]): void {

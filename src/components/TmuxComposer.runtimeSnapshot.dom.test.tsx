@@ -433,10 +433,10 @@ test("a remounted same-key retry restores the original runtime snapshot", async 
   await act(async () => root.unmount());
 });
 
-test("the delegating mock leaks nothing: another conversation resolves the REAL session and takes the legacy send path", async () => {
+test("the scoped runtime seam leaks nothing: another conversation resolves the real session and takes the legacy send path", async () => {
   /* Regression for the bun mock.module leak: an unconditional structured stub
      here flipped every later-loaded pane test (e.g. BranchPane.render) to the
-     "structured" surface. With the delegate in place, any conversation other
+     "structured" surface. With the scoped delegate in place, any conversation other
      than conv-snapshot must observe the real hook — a null session — and send
      via /api/tmux, never /api/runtime/send. */
   const urls: string[] = [];
