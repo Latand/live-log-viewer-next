@@ -122,6 +122,9 @@ class FakeAppServer extends EventEmitter {
   /* Rejects only hydrated reads (includeTurns), the way codex 0.151+ paginated
      threads do; metadata-only reads and thread/turns/list keep answering. */
   hydratedReadError: string | null = null;
+  /* Rejects full-history thread/resume the way paginated threads do; a resume
+     with excludeTurns succeeds and omits thread.turns. */
+  paginatedResume = false;
   mcpServers: Record<string, unknown> = {
     playwright: { command: "npx", enabled: true },
     "telegram-readonly": { command: "uv", enabled: true },
@@ -214,6 +217,10 @@ class FakeAppServer extends EventEmitter {
     });
     if (method === "thread/start" || method === "thread/resume") {
       const id = method === "thread/resume" ? this.resumedThreadId : this.threadId;
+      const excludeTurns = Boolean((message.params as { excludeTurns?: boolean } | undefined)?.excludeTurns);
+      if (method === "thread/resume" && this.paginatedResume && !excludeTurns) {
+        return this.respondError(message.id, "list_turns is not supported yet");
+      }
       if (method === "thread/resume" && this.resumeRequest) {
         for (const request of Array.isArray(this.resumeRequest) ? this.resumeRequest : [this.resumeRequest]) {
           if (request.id) this.request(request.id, request.method, request.params);
@@ -224,7 +231,7 @@ class FakeAppServer extends EventEmitter {
         thread: {
           id,
           ...(!this.omitThreadPath ? { path: this.threadPath ?? `/sessions/${id}.jsonl` } : {}),
-          turns: this.turns,
+          ...(excludeTurns ? {} : { turns: this.turns }),
           ...(this.resumeStatus ? { status: this.resumeStatus } : {}),
         },
       });
@@ -2056,6 +2063,45 @@ describe("CodexAppServerHost", () => {
       seq: 3,
     });
     expect((await replay.next()).value).toEqual({ kind: "session-status", status: "idle", seq: 4 });
+    expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+    await host.release();
+  });
+
+  test("adopts a paginated thread that refuses full-history resume (#1332)", async () => {
+    const eventStore = new MemoryEventStore();
+    eventStore.append("paginated-resume-thread", { kind: "turn-started", turnId: "crashed-turn", seq: 1 });
+    const persistedItem = { type: "agentMessage", id: "response-item", text: "persisted response" };
+    const server = new FakeAppServer("paginated-resume-thread", "paginated-resume-thread", false, [{
+      id: "crashed-turn",
+      status: "completed",
+      items: [persistedItem],
+    }], { type: "idle" });
+    server.paginatedResume = true;
+    const host = await CodexAppServerHost.adopt("paginated-resume-thread", {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 1,
+      spawnProcess: fakeSpawn(server),
+    });
+    const replay = host.attach(1)[Symbol.asyncIterator]();
+    expect((await replay.next()).value).toEqual({
+      kind: "item",
+      turnId: "crashed-turn",
+      item: persistedItem,
+      phase: "completed",
+      seq: 2,
+    });
+    expect((await replay.next()).value).toEqual({
+      kind: "turn-ended",
+      turnId: "crashed-turn",
+      status: "completed",
+      seq: 3,
+    });
+    const resumes = server.requests.filter((request) => request.method === "thread/resume");
+    expect(resumes.length).toBe(2);
+    expect((resumes[1]!.params as { excludeTurns?: boolean }).excludeTurns).toBeTrue();
+    const turnsList = server.requests.findLast((request) => request.method === "thread/turns/list");
+    expect(turnsList?.params).toMatchObject({ sortDirection: "desc", itemsView: "full" });
     expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
     await host.release();
   });
