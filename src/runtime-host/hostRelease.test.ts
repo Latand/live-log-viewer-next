@@ -4,14 +4,19 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  clearRuntimeHostRollbackIntent,
   clearRuntimeHostHandoffIntent,
   currentRuntimeHostGeneration,
   readRuntimeHostHandoffIntent,
   readRuntimeHostRelease,
+  readRuntimeHostRollbackIntent,
+  readRuntimeHostRollbackTarget,
   RUNTIME_HOST_CONTAINER_ENV,
   RUNTIME_HOST_IMAGE_ENV,
   RUNTIME_HOST_REVISION_ENV,
   writeRuntimeHostHandoffIntent,
+  writeRuntimeHostRollbackIntent,
+  writeRuntimeHostRollbackTarget,
   type RuntimeHostHandoffIntent,
   type RuntimeHostReleaseRecord,
 } from "./hostRelease";
@@ -54,6 +59,33 @@ test("issue 521: the handoff intent round-trips durably and clears idempotently"
     expect(readRuntimeHostHandoffIntent(filename)).toBeNull();
     clearRuntimeHostHandoffIntent(filename);
     expect(readRuntimeHostHandoffIntent(filename)).toBeNull();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("issue 1270: rollback target and intent survive the requesting executor", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-rollback-intent-"));
+  try {
+    const targetFile = path.join(dir, "runtime-host-rollback-target.json");
+    const intentFile = path.join(dir, "runtime-host-rollback-intent.json");
+    const previous = { ...record, image: "agent-log-viewer:previous", revision: "a".repeat(40), container: "runtime-host-previous" };
+    const target = {
+      version: 1 as const,
+      active: record,
+      previous,
+      predecessorId: "retained-predecessor-id",
+      recordedAt: "2026-08-31T14:00:10.000Z",
+    };
+    const intent = { ...target, phase: "requested" as const, requestedAt: "2026-08-31T14:00:20.000Z" };
+
+    writeRuntimeHostRollbackTarget(target, targetFile);
+    writeRuntimeHostRollbackIntent(intent, intentFile);
+
+    expect(readRuntimeHostRollbackTarget(targetFile)).toEqual(target);
+    expect(readRuntimeHostRollbackIntent(intentFile)).toEqual(intent);
+    clearRuntimeHostRollbackIntent(intentFile);
+    expect(readRuntimeHostRollbackIntent(intentFile)).toBeNull();
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

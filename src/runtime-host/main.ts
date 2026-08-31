@@ -5,6 +5,7 @@ discardWakatimeEnvironmentCredential();
 const { stateDir, statePath } = await import("@/lib/configDir");
 const { agentRegistry } = await import("@/lib/agent/registry");
 const { procBackend } = await import("@/lib/proc");
+const { once } = await import("node:events");
 const { createServerRuntimeConsumers } = await import("@/lib/runtime/serverConsumers");
 const { requestPipelineTick } = await import("@/lib/pipelines/controllerSignal");
 const { RuntimeHost, RuntimeHostFence } = await import("./host");
@@ -23,10 +24,26 @@ const {
   spawnRuntimeJournalVacuum,
 } = await import("./journalVacuum");
 const {
+  clearRuntimeHostRollbackIntent,
+  clearRuntimeHostRollbackTarget,
   currentRuntimeHostGeneration,
+  readRuntimeHostRollbackIntent,
   RUNTIME_HOST_CONTAINER_ENV,
+  RUNTIME_HOST_IMAGE_ENV,
+  RUNTIME_HOST_REVISION_ENV,
+  runtimeHostRollbackIntentFile,
+  runtimeHostRollbackTargetFile,
 } = await import("./hostRelease");
 const { acquireRuntimeHostFence, runtimeHostFenceWaitPlan } = await import("./fenceWait");
+const {
+  runtimeHostGenerationFromEnvironment,
+  RuntimeHostStartupStore,
+} = await import("./runtimeHostStartup");
+const {
+  completeRuntimeHostRollback,
+  resumeRuntimeHostRollback,
+  runtimeHostRollbackDeploymentUpdate,
+} = await import("./hostRollback");
 
 const { runtimeHostActivationRefusal } = await import("@/lib/runtime/flags");
 
@@ -49,6 +66,57 @@ if (process.env.LLV_RUNTIME_LEGACY_SCHEDULER === "1" && process.env.LLV_ACCOUNT_
 const fence = new RuntimeHostFence(
   process.env.LLV_RUNTIME_HOST_FENCE?.trim() || runtimeHostFencePath(socketPath, stateDir()),
 );
+const bootGeneration = currentRuntimeHostGeneration();
+const bootContainer = process.env[RUNTIME_HOST_CONTAINER_ENV];
+const processStartIdentity = procBackend.processIdentity(process.pid);
+if (!processStartIdentity) throw new Error("runtime-host process start identity is unavailable");
+const trackedStartupGeneration = process.env[RUNTIME_HOST_IMAGE_ENV]
+  && process.env[RUNTIME_HOST_REVISION_ENV]
+  && bootContainer
+  ? runtimeHostGenerationFromEnvironment(process.env)
+  : {
+    image: "legacy-untracked",
+    revision: "legacy-untracked",
+    container: `legacy-runtime-host-${process.pid}`,
+  };
+const startup = new RuntimeHostStartupStore(
+  process.env.LLV_RUNTIME_HOST_STARTUP_TARGET
+    || statePath("runtime-host-startup", `${trackedStartupGeneration.container}.json`),
+  {
+    generation: trackedStartupGeneration,
+    pid: process.pid,
+    startIdentity: processStartIdentity,
+  },
+);
+startup.begin();
+async function docker(argv: string[]): Promise<string> {
+  const child = Bun.spawn(["docker", ...argv], { stdout: "pipe", stderr: "pipe", env: process.env });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (code !== 0) throw new Error((stderr.trim() || "docker command failed").slice(0, 1_000));
+  return stdout.trim();
+}
+async function dockerAbsentOkay(argv: string[]): Promise<void> {
+  try { await docker(argv); }
+  catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (!/No such container|No such object/i.test(message)) throw error;
+  }
+}
+const rollbackIntent = readRuntimeHostRollbackIntent(runtimeHostRollbackIntentFile());
+const rollbackGeneration = rollbackIntent
+  ? runtimeHostGenerationFromEnvironment(process.env)
+  : null;
+const rollbackResumed = rollbackGeneration
+  ? await resumeRuntimeHostRollback(rollbackGeneration, {
+    readIntent: () => readRuntimeHostRollbackIntent(runtimeHostRollbackIntentFile()),
+    disableActiveRestart: (container) => dockerAbsentOkay(["container", "update", "--restart", "no", container]),
+    stopActive: (container) => dockerAbsentOkay(["container", "stop", "--time", "40", container]),
+  })
+  : false;
 /* #518: a staged successor generation boots while its predecessor still holds
    the singleton fence, and must wait for the predecessor's graceful exit
    instead of failing its container. Ordinary boots keep the immediate throw.
@@ -61,9 +129,30 @@ await acquireRuntimeHostFence({
   container: process.env[RUNTIME_HOST_CONTAINER_ENV],
   report: (line) => console.error(line),
 });
+startup.record("fence-acquired");
 const journalFilename = process.env.LLV_RUNTIME_JOURNAL || statePath("runtime-events.sqlite");
 const journal = new RuntimeJournal(journalFilename);
-if (journal.isWritable()) journal.claimHostEpoch();
+if (rollbackResumed && !journal.isWritable()) {
+  throw new Error("runtime-host rollback cannot complete while the deployment journal is read-only");
+}
+const hostEpoch = journal.isWritable() ? journal.claimHostEpoch() : journal.snapshot().runtime.hostEpoch;
+startup.bindHostEpoch(hostEpoch);
+startup.record("journal-open");
+if (journal.isWritable() && rollbackResumed && rollbackIntent) {
+  const activeDeployment = journal.activeViewerDeployment();
+  if (activeDeployment) {
+    const update = runtimeHostRollbackDeploymentUpdate(activeDeployment, rollbackIntent);
+    if (update) journal.updateViewerDeployment(activeDeployment.deploymentId, update);
+  }
+}
+if (rollbackResumed && rollbackGeneration) {
+  await completeRuntimeHostRollback(rollbackGeneration, {
+    readIntent: () => readRuntimeHostRollbackIntent(runtimeHostRollbackIntentFile()),
+    removeFailed: (container) => dockerAbsentOkay(["container", "rm", "-f", container]),
+    clearTarget: () => clearRuntimeHostRollbackTarget(runtimeHostRollbackTargetFile()),
+    clearIntent: () => clearRuntimeHostRollbackIntent(runtimeHostRollbackIntentFile()),
+  });
+}
 const deploymentsEnabled = process.env.LLV_VIEWER_DEPLOYMENTS === "1";
 const deploymentAdapterPath = deploymentsEnabled
   ? process.env.LLV_VIEWER_DEPLOY_ADAPTER?.trim() || "/app/scripts/runtime-host-viewer-adapter.ts"
@@ -75,12 +164,10 @@ if (deploymentsEnabled && !deploymentAdapterPath) {
    at boot. Bun loads modules exactly once, so a later deploy can only reach a
    successor process — a missing record is the legacy fixed-tag image and is
    never provably current. */
-const bootGeneration = currentRuntimeHostGeneration();
 const mcpHealthProbeAdmissions = new McpHealthProbeAdmissions();
 const deploymentAdapter = deploymentAdapterPath
   ? HostCommandViewerDeploymentAdapter.fromExecutable(deploymentAdapterPath, { mcpHealthProbeAdmissions })
   : undefined;
-const bootContainer = process.env[RUNTIME_HOST_CONTAINER_ENV];
 if (deploymentAdapter && bootGeneration.image && bootGeneration.revision && bootContainer) {
   await deploymentAdapter.completeRuntimeHostHandoff({
     image: bootGeneration.image,
@@ -88,6 +175,7 @@ if (deploymentAdapter && bootGeneration.image && bootGeneration.revision && boot
     container: bootContainer,
   });
 }
+startup.record("handoff-cleanup-complete");
 const deployments = deploymentAdapter
   ? new ViewerDeploymentCoordinator(
     journal,
@@ -106,6 +194,7 @@ const host = new RuntimeHost(
   undefined,
   requestPipelineTick,
   mcpHealthProbeAdmissions,
+  () => startup.readyEvidence(),
 );
 const deploymentProxy = deployments
   ? serveViewerDeploymentProxy(
@@ -114,8 +203,12 @@ const deploymentProxy = deployments
   )
   : null;
 if (journal.isWritable()) await host.recoverConsumers();
-if (journal.isWritable() && deployments) await deployments.recover();
+startup.record("consumers-recovered");
 const server = serveRuntimeHost(socketPath, host);
+await once(server, "listening");
+startup.record("socket-listening");
+startup.record("ready");
+if (journal.isWritable() && deployments) await deployments.recover();
 const legacyScheduler = process.env.LLV_RUNTIME_LEGACY_SCHEDULER === "1" ? createLegacyRuntimeScheduler(journal) : null;
 const legacyTimer = legacyScheduler ? setInterval(() => {
   void legacyScheduler.runDue().catch(() => console.error("[runtime scheduler] tick failed; next tick will retry"));

@@ -9,6 +9,7 @@ import {
   RUNTIME_HOST_REVISION_ENV,
   type RuntimeHostHandoffIntent,
   type RuntimeHostReleaseRecord,
+  type RuntimeHostRollbackTarget,
 } from "./hostRelease";
 import {
   completeRuntimeHostHandoff,
@@ -43,14 +44,29 @@ test("issue 521 review: separate deployments of the same revision receive distin
     .not.toBe(runtimeHostSuccessorName(repeatCandidate.revision, repeatCandidate.image));
 });
 
-test("issue 521 review: the fenced successor removes its durable predecessor and clears cleanup ownership", async () => {
+test("issue 1270: the fenced successor retains its predecessor as the durable rollback target", async () => {
   const successorContainer = runtimeHostSuccessorName(candidate.revision, candidate.image);
   const calls: string[][] = [];
+  const targets: RuntimeHostRollbackTarget[] = [];
+  const previousRelease: RuntimeHostReleaseRecord = {
+    image: "agent-log-viewer:deploy-previous",
+    revision: "a".repeat(40),
+    container: "runtime-host-previous",
+    endpoint: "http://127.0.0.1:8898",
+    stagedAt: "2026-07-20T09:00:00.000Z",
+  };
+  const successorRelease: RuntimeHostReleaseRecord = {
+    ...candidate,
+    container: successorContainer,
+    stagedAt: "2026-07-21T09:00:00.000Z",
+  };
   let intent: RuntimeHostHandoffIntent | null = {
     revision: candidate.revision,
     image: candidate.image,
     successorContainer,
     predecessorId: "predecessor-for-cleanup",
+    previousRelease,
+    successorRelease,
     recordedAt: "2026-07-21T09:00:00.000Z",
   };
 
@@ -64,14 +80,21 @@ test("issue 521 review: the fenced successor removes its durable predecessor and
       return argv[1] === "inspect" ? JSON.stringify([{ Id: "successor-id" }]) : "";
     },
     readHandoffIntent: () => intent,
+    writeRollbackTarget: (target) => { targets.push(target); },
     clearHandoffIntent: () => { intent = null; },
   });
 
   expect(completed).toBe(true);
   expect(calls).toEqual([
     ["container", "inspect", successorContainer],
-    ["container", "rm", "-f", "predecessor-for-cleanup"],
   ]);
+  expect(targets).toEqual([{
+    version: 1,
+    active: successorRelease,
+    previous: previousRelease,
+    predecessorId: "predecessor-for-cleanup",
+    recordedAt: "2026-07-21T09:00:00.000Z",
+  }]);
   expect(intent).toBeNull();
 });
 
@@ -94,6 +117,7 @@ test("issue 521 review: successor cleanup converges when the predecessor is alre
       predecessorId: "predecessor-already-gone",
       recordedAt: "2026-07-21T09:00:00.000Z",
     }),
+    writeRollbackTarget: () => {},
     clearHandoffIntent: () => { cleared = true; },
   });
 
@@ -238,6 +262,7 @@ function harness(overrides: {
       events.push("clear-handoff-intent");
       storedIntent = null;
     },
+    writeRollbackTarget: () => {},
     fenceOwnerPid: () => overrides.fenceOwnerPid === undefined ? 3970 : overrides.fenceOwnerPid,
     now: () => "2026-07-21T09:00:00.000Z",
     wait: overrides.wait ?? (async () => undefined),
@@ -412,6 +437,8 @@ test("issue 518: staging creates a dockerd-owned successor from the candidate im
   expect(run).toBeDefined();
   expect(run).toContain(candidate.image);
   expect(run?.join(" ")).toContain("--restart unless-stopped");
+  expect(run?.join(" ")).toContain("--health-cmd bun-container run scripts/runtime-host-healthcheck.ts");
+  expect(run?.join(" ")).toContain("--health-interval 10s --health-timeout 3s --health-retries 3");
   expect(run?.join(" ")).toContain(`-e ${RUNTIME_HOST_FENCE_WAIT_ENV}=`);
   expect(run?.filter((entry) => entry === `${AGENT_REGISTRY_SQLITE_ENV}=dual-write`)).toHaveLength(1);
   expect(run?.some((entry) => entry === `${AGENT_REGISTRY_SQLITE_ENV}=off`)).toBe(false);
@@ -498,6 +525,7 @@ test("issue 521 review: A to B to A stages each deployment generation and never 
   const starts: string[] = [];
   const releases: RuntimeHostReleaseRecord[] = [];
   let intent: RuntimeHostHandoffIntent | null = null;
+  let rollbackTarget: RuntimeHostRollbackTarget | null = null;
   let active = containers[0]!;
   let nextContainerId = 1;
 
@@ -585,6 +613,8 @@ test("issue 521 review: A to B to A stages each deployment generation and never 
     readHandoffIntent: () => intent,
     writeHandoffIntent: (next) => { intent = next; },
     clearHandoffIntent: () => { intent = null; },
+    readRollbackTarget: () => rollbackTarget,
+    writeRollbackTarget: (target) => { rollbackTarget = target; },
     fenceOwnerPid: () => active.pid,
     now: () => "2026-07-21T09:00:00.000Z",
     wait: async () => undefined,
@@ -605,7 +635,11 @@ test("issue 521 review: A to B to A stages each deployment generation and never 
   for (const key of [RUNTIME_HOST_FENCE_WAIT_ENV, RUNTIME_HOST_IMAGE_ENV, RUNTIME_HOST_REVISION_ENV, RUNTIME_HOST_CONTAINER_ENV]) {
     expect(active.env.filter((entry) => entry.startsWith(`${key}=`))).toHaveLength(1);
   }
-  expect(containers).toHaveLength(1);
+  expect(containers).toHaveLength(2);
+  expect(rollbackTarget).toMatchObject({
+    active: { container: successorNames[2] },
+    previous: { container: successorNames[1] },
+  });
   expect(intent).toBeNull();
 });
 

@@ -4,7 +4,27 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-import { probeRuntimeSocket } from "./hostRehearsalRun";
+import { probeRuntimeSocket, runtimeHostRehearsalEnvironment } from "./hostRehearsalRun";
+
+test("issue 1268: staged runtime-host generations keep NODE_ENV absent at the worker boundary", () => {
+  const stateDir = path.join(os.tmpdir(), "llv-rehearsal-isolated-state");
+  const environment = runtimeHostRehearsalEnvironment({
+    runtimeBin: process.execPath,
+    root: path.resolve(import.meta.dir, "../.."),
+    stateDir,
+    port: 19480,
+  }, "successor");
+
+  expect(environment.NODE_ENV).toBeUndefined();
+  expect(Object.hasOwn(environment, "NODE_ENV")).toBe(false);
+  expect(environment).toMatchObject({
+    HOME: stateDir,
+    LLV_STATE_DIR: stateDir,
+    LLV_RUNTIME_HOST_SOCKET: path.join(stateDir, "runtime-host.sock"),
+    LLV_RUNTIME_JOURNAL: path.join(stateDir, "runtime-events.sqlite"),
+    LLV_VIEWER_PORT: "19480",
+  });
+});
 
 /** A newline-framed stand-in for the runtime socket, driven per connection. */
 async function serve(answer: (socket: net.Socket) => void): Promise<{ socketPath: string; close: () => Promise<void> }> {

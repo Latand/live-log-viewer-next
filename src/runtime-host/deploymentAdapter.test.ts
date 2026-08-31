@@ -4,11 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import type { ViewerHealthEvidence } from "@/lib/runtime/contracts";
+import type {
+  ViewerHealthEvidence,
+  ViewerRuntimeHostHandoffEvidence,
+  ViewerRuntimeHostStartupPhase,
+} from "@/lib/runtime/contracts";
 
 import { HostCommandViewerDeploymentAdapter } from "./deploymentAdapter";
 import { promotedViewerReadinessPhase } from "./deploymentHealth";
 import { PROMOTE_ACTION_TIMEOUT_MS } from "./deploymentHotState";
+import { runtimeHostSuccessorName } from "./hostSuccessor";
 
 const sandboxes: string[] = [];
 afterEach(() => {
@@ -76,6 +81,31 @@ test("host adapter exposes fixed actions and carries structured release data", a
       ok: true,
     },
   };
+  const hostGeneration = {
+    image: release.image,
+    revision: release.revision,
+    container: runtimeHostSuccessorName(release.revision, release.image),
+  };
+  const hostIdentity = { generation: hostGeneration, pid: 4242, startIdentity: "4242:successor", hostEpoch: 7 };
+  const startupPhases: ViewerRuntimeHostStartupPhase[] = [
+    "fence-waiting",
+    "fence-acquired",
+    "journal-open",
+    "handoff-cleanup-complete",
+    "consumers-recovered",
+    "socket-listening",
+    "ready",
+  ];
+  const runtimeHostHandoff: ViewerRuntimeHostHandoffEvidence = {
+    ...hostIdentity,
+    phases: startupPhases.map((phase, index) => ({ ...hostIdentity, phase, recordedAt: `2026-08-31T14:00:0${index}.000Z` })),
+    probe: {
+      checkedAt: "2026-08-31T14:00:08.000Z",
+      requestId: "runtime-host-health-probe",
+      responseId: "runtime-host-health-probe",
+      elapsedMs: 12,
+    },
+  };
   const adapter = new HostCommandViewerDeploymentAdapter(async (action, input) => {
     calls.push({ action, input });
     if (action === "resolve-revision") return { revision: "a".repeat(40) };
@@ -84,6 +114,7 @@ test("host adapter exposes fixed actions and carries structured release data", a
     if (action === "reconcile-mcp-runtime") return reconciliation;
     if (action === "promote") return publication;
     if (action === "rollback") return { ...publication, action: "restore" };
+    if (action === "verify-host-successor") return runtimeHostHandoff;
     if (action.startsWith("verify-")) return {
       checkedAt: "2026-07-11T00:00:00.000Z",
       endpoint: release.endpoint,
@@ -107,10 +138,11 @@ test("host adapter exposes fixed actions and carries structured release data", a
   await adapter.verifyPromoted(candidate);
   expect(await adapter.rollback(release, candidate, mcpRuntime)).toEqual({ ...publication, action: "restore" });
   await adapter.stageRuntimeHostSuccessor(candidate);
+  expect(await adapter.verifyRuntimeHostSuccessor(candidate)).toEqual(runtimeHostHandoff);
   await adapter.completeRuntimeHostHandoff({ image: candidate.image, revision: candidate.revision, container: "runtime-host-successor" });
 
   expect(calls.map((call) => call.action)).toEqual([
-    "resolve-revision", "build-candidate", "start-candidate", "verify-candidate", "current-mcp-runtime", "reconcile-mcp-runtime", "promote", "verify-promoted", "rollback", "stage-host-successor", "complete-host-handoff",
+    "resolve-revision", "build-candidate", "start-candidate", "verify-candidate", "current-mcp-runtime", "reconcile-mcp-runtime", "promote", "verify-promoted", "rollback", "stage-host-successor", "verify-host-successor", "complete-host-handoff",
   ]);
   expect(calls[1]?.input).toEqual({ deploymentId: "deploy-1", revision: "a".repeat(40) });
   expect(calls.at(-1)?.input).toEqual({ generation: { image: candidate.image, revision: candidate.revision, container: "runtime-host-successor" } });

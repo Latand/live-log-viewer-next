@@ -15,6 +15,7 @@ import type {
   ViewerMcpRuntimePublicationEvidence,
   ViewerMcpRuntimeReconciliation,
   ViewerReleaseIdentity,
+  ViewerRuntimeHostHandoffEvidence,
   ViewerRuntimeHostHealthEvidence,
   ViewerRuntimeHostProbeEvidence,
 } from "@/lib/runtime/contracts";
@@ -27,9 +28,11 @@ import {
   createMcpHealthProbeAdmissionChannel,
   serveMcpHealthProbeAdmissionChannel,
 } from "./mcpHealthProbeAdmissionChannel";
+import { runtimeHostSuccessorName } from "./hostSuccessor";
+import { parseRuntimeHostHandoffEvidence } from "./runtimeHostStartup";
 
 type CommandRunner = (action: string, input: Record<string, unknown>) => Promise<unknown>;
-type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "current-mcp-runtime" | "reconcile-mcp-runtime" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "complete-host-handoff";
+type AdapterAction = "resolve-revision" | "build-candidate" | "start-candidate" | "current-release" | "current-mcp-runtime" | "reconcile-mcp-runtime" | "verify-candidate" | "promote" | "verify-promoted" | "rollback" | "retire" | "retain-only" | "stage-host-successor" | "verify-host-successor" | "complete-host-handoff";
 
 const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   "resolve-revision": 110_000,
@@ -51,6 +54,7 @@ const ACTION_TIMEOUTS: Record<AdapterAction, number> = {
   retire: 60_000,
   "retain-only": 60_000,
   "stage-host-successor": 60_000,
+  "verify-host-successor": 5_000,
   "complete-host-handoff": 60_000,
 };
 
@@ -643,6 +647,18 @@ export class HostCommandViewerDeploymentAdapter implements ViewerDeploymentAdapt
 
   async stageRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<void> {
     await this.run("stage-host-successor", { candidate });
+  }
+
+  async verifyRuntimeHostSuccessor(candidate: ViewerReleaseIdentity): Promise<ViewerRuntimeHostHandoffEvidence> {
+    const expected = {
+      image: candidate.image,
+      revision: candidate.revision,
+      container: runtimeHostSuccessorName(candidate.revision, candidate.image),
+    };
+    return parseRuntimeHostHandoffEvidence(
+      await this.run("verify-host-successor", { candidate }),
+      expected,
+    );
   }
 
   async completeRuntimeHostHandoff(generation: { image: string; revision: string; container: string }): Promise<void> {
