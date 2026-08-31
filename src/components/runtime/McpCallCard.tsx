@@ -30,6 +30,7 @@ import {
 } from "@/lib/mcp/presentation";
 
 import type { ToolEvent } from "../feed/parse";
+import { formatDuration, toolDurationMs } from "../feed/toolBlocks";
 import { hhmm } from "../utils";
 
 const ICONS: Record<McpCallIcon, LucideIcon> = {
@@ -139,6 +140,8 @@ export function McpCallCard({
   const retryable = record(result).retryable === true;
   const error = state === "error" ? resultError(result, event.outputPreview) : "";
   const payload = useMemo(() => prettyPayload(mcp?.args ?? {}, result), [mcp?.args, result]);
+  const durationMs = toolDurationMs(event);
+  const duration = durationMs === undefined ? "" : formatDuration(durationMs);
 
   /* Compact contract: one dense row — action meaning first, chrome last.
      The title (which already carries the useful payload, e.g. the message text
@@ -179,6 +182,7 @@ export function McpCallCard({
           >
             {state === "pending" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden /> : state === "success" ? <CheckCircle2 className="h-3.5 w-3.5" aria-hidden /> : <CircleAlert className="h-3.5 w-3.5" aria-hidden />}
           </span>
+          {duration ? <span className="shrink-0 text-caption tabular-nums text-muted">{duration}</span> : null}
           {hhmm(event.ts) ? <span className="shrink-0 text-caption tabular-nums text-muted">{hhmm(event.ts)}</span> : null}
         </summary>
         <div className="ml-5 mt-1 text-[10.5px] text-muted">

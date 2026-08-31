@@ -5,7 +5,6 @@ import { useMemo } from "react";
 import type { RuntimeLiveTurnItem, RuntimeLiveTurnTool } from "@/lib/runtime/liveTurn";
 import { useLocale } from "@/lib/i18n";
 import { GlyphIcon } from "@/components/icons";
-import { hhmm } from "@/components/utils";
 import { StatusIcon } from "@/components/feed/cards/shared";
 import { StreamingMd } from "@/components/feed/markdown";
 import { summarizeTool } from "@/components/feed/tools";
@@ -27,7 +26,7 @@ function patchFileNames(input: unknown): string {
 
 /* A live tool row is the same call its transcript echo will carry a moment
    later, so it reads through the same summarizer and the same quiet ToolLine
-   grammar (glyph · summary · non-ok status · time) — the row must not change
+   grammar (glyph · summary · non-ok status) — the row must not change
    appearance when the canonical card replaces it. It has no body: the call's
    output lives in the transcript, and this row only says the call happened,
    is running, or failed. */
@@ -48,7 +47,6 @@ function LiveToolRow({ item, tool }: { item: RuntimeLiveTurnItem; tool: RuntimeL
   const files = tool.name === "apply_patch" && !summary.chips.length ? patchFileNames(tool.args.input) : "";
   const base = files ? `${summary.summary} · ${files}` : summary.summary;
   const detail = tool.argsOmitted ? `${base} · ${t("feed.liveToolArgsOmitted")}` : base;
-  const time = hhmm(item.completedAt ?? item.startedAt ?? undefined);
   return (
     <div
       data-live-turn
@@ -69,7 +67,6 @@ function LiveToolRow({ item, tool }: { item: RuntimeLiveTurnItem; tool: RuntimeL
           {label}
         </span>
       ) : null}
-      {time ? <span className="shrink-0 text-caption tabular-nums text-muted">{time}</span> : null}
     </div>
   );
 }

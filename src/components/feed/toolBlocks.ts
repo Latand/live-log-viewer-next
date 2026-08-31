@@ -1,6 +1,7 @@
-import { getLocale, translate } from "@/lib/i18n";
-
 import { hasSameSessionOwner, type ToolEvent } from "./parse";
+import { elapsedDurationMs, formatDuration } from "./duration";
+
+export { formatDuration } from "./duration";
 
 /* Pure helpers behind the readable expanded tool block (issue #475): the
    parent/child nesting of Codex interactive-shell follow-ups, and the duration
@@ -98,19 +99,6 @@ export function coalesceFollowUps(children: readonly ToolEvent[]): ToolChild[] {
   return out;
 }
 
-/** Human wall-clock duration: sub-second in ms, then `N.Ns`, then `Mm Ss`. */
-export function formatDuration(ms: number): string {
-  const locale = getLocale();
-  const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate(locale, key, params);
-  if (!Number.isFinite(ms) || ms < 0) return "";
-  if (ms < 1000) return t("tools.durationMs", { n: Math.round(ms) });
-  const totalSec = ms / 1000;
-  if (totalSec < 60) {
-    const n = totalSec < 10 ? Math.round(totalSec * 10) / 10 : Math.round(totalSec);
-    return t("tools.durationSec", { n });
-  }
-  const roundedSec = Math.round(totalSec);
-  const m = Math.floor(roundedSec / 60);
-  const s = roundedSec % 60;
-  return t("tools.durationMin", { m, s });
+export function toolDurationMs(event: Pick<ToolEvent, "ts" | "endTs" | "durationMs">): number | undefined {
+  return elapsedDurationMs(event.ts, event.endTs) ?? event.durationMs;
 }

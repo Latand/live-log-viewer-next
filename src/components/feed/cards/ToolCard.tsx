@@ -2,13 +2,13 @@
 
 import { useState } from "react";
 
-import { AlarmClock, GlyphIcon } from "../../icons";
+import { GlyphIcon } from "../../icons";
 import { hhmm } from "../../utils";
 import { ACTION_GUTTER, MESSAGE_ACTION } from "../actionStyles";
 import { CopyButton } from "../CopyButton";
 import { tr, type ToolEvent } from "../parse";
 import type { ArgChip } from "../tools";
-import { formatDuration, isFollowUpCall } from "../toolBlocks";
+import { formatDuration, isFollowUpCall, toolDurationMs } from "../toolBlocks";
 import { DiffCard } from "./DiffCard";
 import { OrchestrationCard } from "./OrchestrationCard";
 import { OutputPreview } from "./OutputPreview";
@@ -42,29 +42,22 @@ function exitLabel(event: ToolEvent): string | null {
   return null;
 }
 
-/* One quiet metadata row over the command: exit status, duration, wall-clock
-   span, and cwd — the auditable header a terminal client shows, folded into a
+/* One quiet metadata row over the command: exit status, wall-clock span, and
+   cwd — the auditable header a terminal client shows, folded into a
    single wrapping line so it never stacks into its own multi-row card. Renders
    nothing when a call carries none of them (a plain non-shell tool). */
 function ToolMeta({ event }: { event: ToolEvent }) {
   const start = hhmm(event.ts);
   const end = event.endTs !== undefined ? hhmm(event.endTs) : "";
   const span = end && start ? tr("tools.ranAt", { start, end }) : "";
-  const duration = event.durationMs !== undefined ? formatDuration(event.durationMs) : "";
   const exit = exitLabel(event);
-  if (!event.cwd && !span && !duration && !exit) return null;
+  if (!event.cwd && !span && !exit) return null;
   return (
     <div className="mb-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted">
       {exit ? (
         <span className={`inline-flex items-center gap-1 font-semibold ${statusClass(event.status)}`}>
           <StatusIcon status={event.status} className="h-3 w-3" />
           {exit}
-        </span>
-      ) : null}
-      {duration ? (
-        <span className="inline-flex items-center gap-1 tabular-nums">
-          <AlarmClock className="h-3 w-3" aria-hidden />
-          {duration}
         </span>
       ) : null}
       {span ? <span className="tabular-nums">{span}</span> : null}
@@ -168,6 +161,8 @@ export function PollRow({ events, session, elapsedMs }: { events: ToolEvent[]; s
     under its parent exec while keeping its own state. */
 export function ToolBlockRow({ event, index, nested = false }: { event: ToolEvent; index?: number; nested?: boolean }) {
   const isErr = event.status === "err";
+  const durationMs = toolDurationMs(event);
+  const duration = durationMs === undefined ? "" : formatDuration(durationMs);
   return (
     <div className="min-w-0">
       <div
@@ -189,6 +184,7 @@ export function ToolBlockRow({ event, index, nested = false }: { event: ToolEven
             {event.statusLabel}
           </span>
         ) : null}
+        {duration ? <span className="shrink-0 text-caption tabular-nums text-muted">{duration}</span> : null}
       </div>
       <ToolBody event={event} />
     </div>
@@ -197,7 +193,7 @@ export function ToolBlockRow({ event, index, nested = false }: { event: ToolEven
 
 /** One normalized tool event rendered as a quiet ToolLine (design doc §3.4):
     a borderless, tile-less single row — glyph + summary + (non-ok status) +
-    time — that reads as chrome between messages. The body mounts only after the
+    duration + time — that reads as chrome between messages. The body mounts only after the
     first expand into a sunken readable block (issue #475), keeping a long
     transcript's collapsed DOM small (issue #9 §7/§8) — the same lazy contract
     holds when the line renders inside a cmd-group. An error is never quiet: it
@@ -223,6 +219,8 @@ export function ToolLine({
 }) {
   const [mounted, setMounted] = useState(event.open);
   const time = hhmm(event.ts);
+  const durationMs = toolDurationMs(event);
+  const duration = durationMs === undefined ? "" : formatDuration(durationMs);
   const isErr = event.status === "err";
   return (
     <details
@@ -251,6 +249,7 @@ export function ToolLine({
             {event.statusLabel}
           </span>
         ) : null}
+        {duration ? <span className="shrink-0 text-caption tabular-nums text-muted">{duration}</span> : null}
         {showTime && time ? <span className="shrink-0 text-caption tabular-nums text-muted">{time}</span> : null}
       </summary>
       {mounted ? <ToolBody event={event} /> : null}

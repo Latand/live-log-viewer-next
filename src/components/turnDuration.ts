@@ -58,7 +58,11 @@ export function turnDurationSeconds(file: Pick<FileEntry, "lastTurn">): number |
 export function workedCaption(file: Pick<FileEntry, "lastTurn">, locale: Locale = getLocale()): string | null {
   const seconds = turnDurationSeconds(file);
   if (seconds === null) return null;
-  return translate(locale, "turn.worked", { d: humanizeDuration(seconds, locale) });
+  return workedDurationCaption(seconds * 1000, locale);
+}
+
+export function workedDurationCaption(durationMs: number, locale: Locale = getLocale()): string {
+  return translate(locale, "turn.worked", { d: humanizeDuration(durationMs / 1000, locale) });
 }
 
 /** Recency-slot text plus optional tooltip for a card meta row. While the agent

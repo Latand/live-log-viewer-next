@@ -39,6 +39,7 @@ import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/p
 import { FeedItem } from "./feed/FeedItem";
 import { MessageProvenanceProvider, useDeliveredMessageProvenance } from "./feed/messageProvenance";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
+import { ResponseDuration } from "./feed/ResponseDuration";
 import { SuggestedReplies } from "./feed/SuggestedReplies";
 import { BoundedLru } from "./feed/scrollMemory";
 import { ConversationAttention } from "./runtime/ConversationAttention";
@@ -879,7 +880,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             ) : null}
             {compact ? null : <TaskHeader file={file} />}
             {feed.items.length ? (
-              visibleItems.map(({ anchorKey, key, item }, visibleIndex) => {
+              visibleItems.map(({ anchorKey, key, item, responseDurationMs }, visibleIndex) => {
                 const answer = speakableAnswer(feed.items, visibleStartIndex + visibleIndex);
                 const speakText = answer?.firstIndex === visibleStartIndex + visibleIndex ? answer.text : undefined;
                 return (
@@ -894,6 +895,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                     className={compact ? "feed-cv" : undefined}
                   >
                     <FeedItem item={item} speakText={speakText} />
+                    {responseDurationMs !== undefined ? <ResponseDuration durationMs={responseDurationMs} /> : null}
                   </div>
                 );
               })
@@ -989,9 +991,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
         </div>
       </div>
     </div>
-    {/* Bottom working-status slot (issue #268): live «працює · 4:32» ticking
-        from the initiating prompt, or the frozen «Працював N» total after the
-        turn ends. Pinned below the scroller in every pane variant. */}
+    {/* Bottom working-status slot: live elapsed from the transcript receipt.
+        Completed totals stay beside their response rows in the scroller. */}
     {file ? (
       <TurnStatusBar file={file} workingLabel={working.label} workingIcon={working.icon} compact={compact} />
     ) : null}

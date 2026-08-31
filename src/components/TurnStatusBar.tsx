@@ -6,21 +6,22 @@ import { useEffect, useState } from "react";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { clockDuration, turnIsRunning, workedCaption } from "./turnDuration";
+import { clockDuration, humanizeDuration, turnIsRunning } from "./turnDuration";
 
 /** Live elapsed readout for the current turn, ticking once a second. The value
     derives from `startedAt` against the wall clock on every tick, so a new
     turn's changed `startedAt` resets the display without a remount, and a
     stalled poll cannot freeze it mid-run. */
-function ElapsedTimer({ startedAt, label }: { startedAt: number; label: string }) {
+function ElapsedTimer({ startedAt, label, human = false }: { startedAt: number; label: string; human?: boolean }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
   return (
     <span role="timer" aria-label={label} className="tabular-nums">
-      {clockDuration((now - startedAt) / 1000)}
+      {human ? humanizeDuration(seconds) : clockDuration(seconds)}
     </span>
   );
 }
@@ -44,15 +45,16 @@ function waitingStartedAt(file: Props["file"]): number | null {
 }
 
 /**
- * Pinned bottom working-status slot of a conversation pane (issue #268). One
- * of two mutually exclusive states, both centered on the pane's vertical axis:
+ * Pinned bottom status slot of a conversation pane, centered on its vertical
+ * axis. It shows an open turn or an operator wait:
  *
- *  - running («працює · 4:32»): the agent is live and the turn is open — the
- *    working label plus a 1 Hz timer from the initiating prompt to now. The
- *    timer keeps counting across long tool calls because it tracks the wall
- *    clock, not transcript writes.
- *  - finished («Працював 12 хв 30 с»): the frozen total from the initiating
- *    prompt to the agent's last activity, never a single action's own span.
+ *  - running («працює · 4 хв 32 с»): the agent is live and the turn is open;
+ *    the working label carries a 1 Hz wall-clock timer from receipt to now.
+ *  - waiting: the agent is blocked on operator input and keeps that wait's
+ *    existing clock display.
+ *
+ * Completed totals live with their response rows and remain in transcript
+ * history when later turns replace the card's current boundary.
  *
  * The bar lives OUTSIDE the transcript scroller, so the floating live-tail
  * pill (anchored inside the scroller) can never collide with it at any width.
@@ -106,27 +108,12 @@ export function TurnStatusBar({ file, workingLabel, workingIcon: Icon, compact =
         {turn ? (
           <>
             <span aria-hidden>·</span>
-            <ElapsedTimer startedAt={turn.startedAt} label={t("turn.timer")} />
+            <ElapsedTimer startedAt={turn.startedAt} label={t("turn.timer")} human />
           </>
         ) : null}
       </div>
     );
   }
 
-  const caption = workedCaption(file);
-  if (!caption) return null;
-  return (
-    <div
-      role="note"
-      data-turn-status="finished"
-      className={`flex shrink-0 items-center gap-2 border-t border-border ${pad} text-[11px] font-semibold text-muted`}
-    >
-      <span className="h-px flex-1 bg-border" aria-hidden />
-      {/* No aria-label here: this role-less span's accessible output must be
-          the caption itself — the localized visible duration text — not a
-          generic timer name that would override it (issue #268 review). */}
-      <span className="tabular-nums">{caption}</span>
-      <span className="h-px flex-1 bg-border" aria-hidden />
-    </div>
-  );
+  return null;
 }
