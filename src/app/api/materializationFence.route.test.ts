@@ -30,6 +30,7 @@ fs.chmodSync(binary, 0o755);
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 const { AgentRegistry, identityMaterializationFence, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { beginLegacySpawnFixture } = await import("@/lib/agent/registryTestFixtures");
+const { spawnResponseForReceipt } = await import("@/lib/agent/spawnResponse");
 const realScanCache = await import("@/lib/scanner/scanCache");
 let scannedFiles: FileEntry[] = [];
 mock.module("@/lib/scanner/scanCache", () => ({
@@ -253,9 +254,13 @@ test("failure cleanup keeps a transport-null structured identity private by conv
     structuredHostOperationId: begun.receipt.launchId,
   });
   const fence = identityMaterializationFence(snapshot);
+  expect(fence.isStructured(receipt)).toBeTrue();
   expect(fence.allowsReceipt(receipt)).toBeFalse();
   expect(fence.allowsPath(artifactPath)).toBeFalse();
   expect(fence.pathForConversation(begun.receipt.conversationId)).toBeNull();
+  expect(spawnResponseForReceipt(receipt, artifactPath, {
+    structured: fence.isStructured(receipt),
+  })).toMatchObject({ path: null, transport: "structured" });
 
   setAgentRegistryForTests(cleanupRegistry);
   try {

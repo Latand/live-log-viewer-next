@@ -885,9 +885,7 @@ export async function executeSpawnRequest(
       });
     };
     if (begun.kind === "replay") {
-      const structured = queuedReceipt.transport === "structured"
-        || (queuedReceipt.transport === null
-          && Boolean(queuedReceipt.key && registry.readOnlySnapshot().entries[sessionKeyId(queuedReceipt.key)]?.structuredHost));
+      const structured = identityMaterializationFence(registry.readOnlySnapshot()).isStructured(queuedReceipt);
       let receipt = queuedReceipt;
       let initialMessage: SpawnResponse["initialMessage"] | undefined;
       const runtimeClient = structured ? dependencies.runtimeHostClient() : null;

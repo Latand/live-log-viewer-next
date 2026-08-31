@@ -17,6 +17,7 @@ type IdentityMaterializationOptions = {
 };
 
 export interface IdentityMaterializationFence {
+  isStructured: (receipt: IdentityMaterializationReceipt, options?: IdentityMaterializationOptions) => boolean;
   allowsReceipt: (receipt: IdentityMaterializationReceipt, options?: IdentityMaterializationOptions) => boolean;
   allowsPath: (artifactPath: string) => boolean;
   pathForConversation: (conversationId: `conversation_${string}`) => string | null;
@@ -30,15 +31,16 @@ export interface IdentityMaterializationFence {
  * receipt stays private.
  */
 export function identityMaterializationFence(snapshot?: IdentityMaterializationSnapshot): IdentityMaterializationFence {
-  const allowsReceipt = (receipt: IdentityMaterializationReceipt, options: IdentityMaterializationOptions = {}): boolean => {
+  const isStructured = (receipt: IdentityMaterializationReceipt, options: IdentityMaterializationOptions = {}): boolean => {
     const entry = options.entry ?? (receipt.key ? snapshot?.entries[sessionKeyId(receipt.key)] : undefined);
-    const structured = receipt.transport === "structured"
+    return receipt.transport === "structured"
       || (receipt.transport === null
         && (options.structured === true
           || Boolean(entry?.structuredHost)
           || typeof entry?.structuredHostOperationId === "string"));
-    return !structured || receipt.state === "completed";
   };
+  const allowsReceipt = (receipt: IdentityMaterializationReceipt, options: IdentityMaterializationOptions = {}): boolean =>
+    !isStructured(receipt, options) || receipt.state === "completed";
   const withheldPaths = new Set<string>();
   if (snapshot) {
     for (const receipt of Object.values(snapshot.receipts)) {
@@ -48,6 +50,7 @@ export function identityMaterializationFence(snapshot?: IdentityMaterializationS
     }
   }
   return {
+    isStructured,
     allowsReceipt,
     allowsPath: (artifactPath) => !withheldPaths.has(artifactPath),
     pathForConversation: (conversationId) => {
