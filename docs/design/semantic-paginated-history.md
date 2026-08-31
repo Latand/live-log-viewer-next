@@ -201,7 +201,7 @@ The common rebuild triggers are:
 
 A replacement or rewrite marks the old generation invalid, deletes its rows and checkpoints in one transaction, creates a new random `file_generation`, and starts at byte zero. Database corruption closes the database, removes the disposable database plus its WAL and shared-memory files, and rebuilds every projection from JSONL. No repair path copies rows out of a suspect projection.
 
-The append fast path verifies the prior suffix before consuming new bytes. A low-priority audit checks stored source-chunk hashes across older regions. If an in-place writer changed an earlier region and then appended, that audit rotates the generation and rebuilds. Cursor rebinding has a stronger rule: after any `file_generation` mismatch, the server accepts the cursor only after the rebuilt chunk manifest reproduces the cursor's complete source continuity identity. The local coordinate digest alone can never authorize a rebind. Until the rebuild or validation finishes, the route reports rebuilding and the live byte lane remains available.
+The append fast path verifies the file identity and prior suffix before consuming new bytes. It carries forward the already verified full-chunk leaves below the previous `indexed_through`, extends or replaces only the final partial leaf, and hashes the appended suffix. A low-priority audit checks stored source-chunk hashes across older regions. If an in-place writer changed an earlier region and then appended, that audit rotates the generation and rebuilds. Cursor rebinding has a stronger rule: after any `file_generation` mismatch, the server accepts the cursor only after the rebuilt chunk manifest reproduces the cursor's complete source continuity identity. The local coordinate digest alone can never authorize a rebind. Until the rebuild or validation finishes, the route reports rebuilding and the live byte lane remains available.
 
 ## Page contract
 
@@ -295,7 +295,7 @@ Ordering uses `ordinal`, never timestamp. Timestamps can be absent, duplicated, 
 
 The opaque token carries a version, `queryScope`, the normalizer version, the last consumed ordinal and `sourcePart`, the corresponding source coordinate, a local coordinate digest, and the complete source continuity identity frozen by the first page in this cursor chain. Every descendant cursor inherits the same `continuity_length` and root even when the source appends. It carries no path and no SQLite row id. The decoder limits token size, validates every integer, and rejects a scope mismatch.
 
-Validation opens the current source descriptor and requires its size to reach `continuity_length`. A manifest already verified against that exact source stat revision can supply its fixed-chunk leaves. Any source stat change removes that verification; the server recomputes the frozen prefix root from current JSONL bytes or reports rebuilding before it serves the cursor. The same recomputation is mandatory after a projection rebuild or generation mismatch. For a cursor length inside a later full chunk, the validator hashes that chunk's prefix and combines it with the preceding complete leaves. The result can be cached by source stat revision plus continuity identity, so one cursor chain does not repeat the read. A missing byte, changed leaf, changed covered length, or changed root makes the cursor stale.
+Validation opens the current source descriptor and requires its size to reach `continuity_length`. A same-generation append keeps the verified leaves below the prior `indexed_through`; the validator combines those leaves with at most one re-read partial chunk to reconstruct the frozen prefix root. Its work is bounded by one source chunk plus the Merkle path and does not grow with transcript size. Full-prefix verification is reserved for projection rebuilds, `file_generation` mismatches, explicit audits, and source changes that fail the append checks. A missing byte, changed leaf, changed covered length, or changed root makes the cursor stale.
 
 Cursor behavior is:
 
@@ -329,8 +329,11 @@ When an older page is prepended, the client reconciles the two edge states and t
 | Boundary case | Resolution |
 | --- | --- |
 | A JSONL record crosses indexer read buffers | Keep raw byte carry until a complete newline arrives. Commit no partial record. The live lane owns the unfinished tail. |
+| The bounded tail contains over 150 entries while the newest semantic page is capped at 150 | Commit the caught-up `indexedThroughByte` watermark, render the loaded summaries below it, and remove every unmatched pre-watermark tail row from the live lane. Older rows return only through `beforeCursor`. |
+| A released viewport anchor falls in an unloaded pre-watermark row | Freeze that one row and follow semantic cursors until its twin loads. Replace it under the same presentation key before committing the watermark. |
 | One source record emits several cards | Assign deterministic `source_part` values and consecutive ordinals. Every card keeps the same source range and a distinct `entry_id`. |
 | A tool call and result fall in different pages | Index the call once at its original ordinal. The result updates that row by `item_id`, extends its source range, settles it, and increments `projectionRevision`. The call's loaded page remains non-cacheable and is conditionally refetched after the newest page observes that revision. |
+| A tool call starts below the watermark and settles above it | Keep history ownership from the call's immutable `originByteStart`. Patch a loaded summary in place until its durable revision arrives. Keep an unloaded call hidden. |
 | A result has no indexed call | Preserve current parser behavior: expose a bounded service or malformed-record summary only when service rows are enabled. Never invent a tool card. |
 | A command run crosses a page edge | Mark the older page's trailing run and the newer page's leading run with the same run identity. Prepend reconciliation replaces the two partial presentations with one group keyed by the first member. |
 | Adjacent Codex assistant representations cross a page edge | Carry the previous representation, normalized-text digest, timestamp, and shape. Apply the adjacency and time rule used by `sameCodexTextAtTime`; retain one semantic entry and attach the native response identity when it arrives. |
@@ -350,16 +353,39 @@ When an older page is prepended, the client reconciles the two edge states and t
 2. the bounded `FeedSession` output produced from `useLogTail`;
 3. the outbox and runtime live-turn overlay already rendered at the tail.
 
-The history controller records the source byte watermark returned by the first page. The live parser keeps processing the existing byte stream. A small adapter attaches source spans and a reconciliation identity to live entries as chunks are decoded. This is an additive output detail; the subscription, reconnect offsets, LRU, cap, pause behavior, and SSE-to-poll fallback in `useLogTail` remain unchanged.
+### Lane ownership watermark
 
-The merge rules are:
+A caught-up newest page establishes `historyWatermark = indexedThroughByte`. This offset is immediately after the final complete JSONL record covered by that page snapshot. The watermark is monotonic within one `fileGeneration` and resets when that generation changes.
 
-- A history row and live row with the same native `itemId` are twins. Tool groups compare every member call id. Rows without a native id use the projector's source-span identity.
-- The first visible twin owns a presentation key. When its durable indexed twin arrives, the feed store replaces the item under that same key. React keeps the DOM node, disclosure state, and measured height.
-- `anchorKey` becomes the durable `entry_id` after replacement. During that frame, the store retains an alias from the prior live anchor. The existing `viewportAnchor` lookup can restore either key, and the prepend height compensation at `src/components/LogFeed.tsx:412-420` keeps the reader's row at the same screen offset.
-- Unified durable entries are passed to `publishCanonicalAssistantClaims`. Their response ids and tool-call ids already match the identities consumed by `visibleRuntimeLiveTurnItems`, so a runtime row yields as soon as its durable twin is visible.
-- Unified user rows are passed once to `publishTranscriptEchoes`. The echo ledger rekeys a live anchor to the durable `entry_id` during replacement, preserving one occurrence. Repeated identical messages still retire outbox entries one at a time through the existing occurrence accounting.
-- Runtime overlay and outbox rows keep their current tail order. History pages are inserted before that tail. A live item that becomes durable changes ownership in place and never appears in both sections.
+Every semantic entry has an immutable `originByteStart`, taken from the first source record that emitted it, plus a `sourceByteEnd` that can extend when a later record settles it. Lane ownership uses `originByteStart`:
+
+- history owns every entry with `originByteStart < historyWatermark`, including entries whose result or dedupe twin arrives after the watermark;
+- live owns every entry with `originByteStart >= historyWatermark`;
+- an unfinished JSONL record emits no entry and stays in the byte decoder until its newline arrives.
+
+The history lane renders only summaries present in loaded semantic pages. A history-owned entry absent from those pages stays absent until cursor navigation loads its page. The live lane filters it out even when the bounded raw tail still contains its source line. This keeps raw tail depth from bypassing the 150-entry semantic page.
+
+`useLogTail` keeps its transport and window behavior. Its decoder adds source-span metadata beside each complete line before trimming text, and the cache and cap move each line with its span. `FeedSession` carries the first and last source spans into each live `FeedEntry`. This is an additive output detail; reconnect offsets, LRU policy, cap, pause behavior, and SSE-to-poll fallback remain unchanged.
+
+Before the first caught-up page arrives, the first observed `useLogTail.size` becomes `provisionalLiveStart`. Decoded rows below that offset form a private bootstrap buffer. Rows whose `originByteStart` is at or above it may render as new live activity; the runtime overlay and outbox also remain visible. Raw bootstrap history stays withheld. When the caught-up page arrives, its durable watermark replaces the provisional value through the same transition transaction. A normal glued open therefore fetches and renders one newest semantic page plus bytes written after the open began.
+
+### Watermark transition
+
+Advancing the watermark is one feed-store transaction:
+
+1. Capture the current viewport anchor and every live presentation key.
+2. Match every loaded semantic page against live entries, beginning with the newest page, by native `itemId`; tool groups compare every member call id. Entries without a native id use the projector's source-span identity.
+3. Replace matched pre-watermark live rows under their existing presentation keys. Remove every other pre-watermark live row from the renderable live lane. Those removed rows become ordinary unloaded history and can return only through semantic cursor navigation.
+4. Keep entries at or above the watermark in source order as the live lane. Publish the merged durable list to assistant claims and transcript echo reconciliation once.
+5. Restore the captured anchor, then commit the new watermark. A glued pane uses the existing bottom glue.
+
+A released viewport can be anchored to a pre-watermark live row that the newest page does not contain, for example when one catch-up covers more than 150 semantic entries. The controller holds the prior watermark, freezes that anchor row, and follows `beforeCursor` page by page until the semantic twin is loaded. It then replaces the frozen row under the same presentation key and commits the watermark. Other pre-watermark rows are unavailable through “show earlier” during this short bridge. A missing or rewritten source cancels the bridge and restores the nearest surviving successor with the existing pixel-offset compensation.
+
+An open item keeps the lane chosen by its first source record. A tool call below the watermark remains history-owned when a result arrives above it. A loaded summary receives the live result as a temporary patch under the same presentation key, then `projectionRevision` replaces that patch with the durable updated summary. An unloaded call remains hidden until its semantic page loads. The result cannot recreate a separate live row.
+
+`anchorKey` becomes the durable `entry_id` after replacement. During that frame, the store retains an alias from the prior live anchor. The existing `viewportAnchor` lookup can restore either key, and the prepend height compensation at `src/components/LogFeed.tsx:412-420` keeps the reader's row at the same screen offset.
+
+Unified durable entries are passed to `publishCanonicalAssistantClaims`. Their response ids and tool-call ids already match the identities consumed by `visibleRuntimeLiveTurnItems`, so a runtime row yields as soon as its durable twin is visible. Unified user rows are passed once to `publishTranscriptEchoes`. The echo ledger rekeys a live anchor to the durable `entry_id` during replacement, preserving one occurrence. Repeated identical messages still retire outbox entries one at a time through the existing occurrence accounting. Runtime overlay and outbox rows keep their current tail order after the merged durable feed.
 
 The current `FeedSession` reset remains valid for a bounded live truncation or source replacement. Earlier-history navigation never moves its input window backward after this split, so loading a page cannot trigger the whole-history reset at `src/components/feed/parse.ts:2382-2394`.
 
@@ -372,10 +398,10 @@ The rollout order follows the originating priority exactly. Each phase has its o
 - Add the locale-neutral projector, schema, incremental indexer, cursor codec, and `GET /api/history`.
 - On initial open, request one newest page with `limit=150`; request no older raw chunks.
 - Keep `useLogTail` subscribed through the existing live path.
-- Add the `LogFeed` history controller and semantic-entry merge. “Show earlier” consumes `beforeCursor`.
+- Add the `LogFeed` history controller, source-span sidecar, ownership watermark, and semantic-entry merge. “Show earlier” consumes `beforeCursor`.
 - Treat rebuilding as an explicit temporary state. Continue showing the bounded live lane.
 
-Exit proof: initial open returns at most one semantic page, page walking has no gaps or repeats, append catch-up reads only the suffix, and loading older history never calls `useLogTail.loadOlder()`.
+Exit proof: a normal initial open returns at most one semantic page, page walking has no gaps or repeats, append catch-up reads only the suffix, and loading older history never calls `useLogTail.loadOlder()`. Every rendered live entry starts at or above the committed watermark.
 
 ### Phase 2: body on demand
 
@@ -427,6 +453,7 @@ Required tests include:
 
 - deterministic ordinals and entry ids across a projection rebuild;
 - cursor stability after append and after a clean rebuild;
+- same-generation append followed by older cursor navigation reading at most one source hash chunk, with source bytes read independent of frozen-prefix length;
 - stale-cursor rejection after truncation, replacement, earlier-byte rewrite, or normalizer-version change;
 - stale-cursor rejection when a projection rebuild follows a rewrite outside the cursor's local coordinate-digest range;
 - byte-accurate indexing across UTF-8 and read-buffer splits;
@@ -438,6 +465,9 @@ Required tests include:
 - two pages split between entries with the same source byte range receiving distinct cache identities;
 - `showSvc` variants with the same byte range receiving distinct cache identities;
 - a visible row rejected after the byte budget remaining eligible on the next page while filtered service rows advance the cursor;
+- a raw tail containing more than 150 pre-watermark semantic entries rendering only the newest semantic page and no unmatched raw-history rows;
+- a watermark advancing across more than 150 live entries while a released unloaded anchor keeps its position until semantic replacement;
+- a tool call below the watermark and result above it retaining one history-owned presentation with no live duplicate;
 - a tool result more than 150 semantic entries after its call incrementing `projectionRevision` and refreshing the loaded non-tail call page after live-window eviction;
 - a late update that changes a page's byte-budget boundary invalidating and restarting its older cursor chain without gaps or duplicates;
 - index corruption producing a rebuilding response while the JSONL source remains intact;
